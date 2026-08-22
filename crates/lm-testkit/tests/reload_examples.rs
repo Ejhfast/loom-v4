@@ -172,3 +172,18 @@ fn identity_separates_shape_from_body() {
          \"same identity=true same module=false keys=alpha.rate and beta.rate\"])"
     );
 }
+
+#[test]
+fn a_snapshot_accepts_an_exporter_after_the_fact() {
+    // The shipped world discarded its total and answered 0. The same
+    // capture, restored and given an exporter that did not exist when
+    // it was taken, answered the 5 + 6 + 7 it had been holding. The
+    // first answer was already in flight at the capture.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/11-recover-a-snapshot-after-the-fact.lm",
+            &["Vm", "Io.ReadLine"],
+        ),
+        "Done(Ok((0, 18)))"
+    );
+}

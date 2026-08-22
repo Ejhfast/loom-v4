@@ -1,0 +1,123 @@
+# Add an exporter to a world that shipped without one.
+#
+# Run with `--allow Vm,Io.ReadLine`.
+#
+# A snapshot is not a sealed box. Restoring one gives a stopped run
+# inside a VM, and a VM accepts new code. So a world captured with
+# no way to read its state out can still be read, by installing that
+# way afterwards.
+#
+# The seam does not have to be planned. Every definition installed
+# by name is reached through its binding, so any of them can be
+# bound to something else later. Here the shipped `report` throws
+# its argument away, and the `exporter` written after the capture
+# takes its place.
+#
+# The new code runs inside the restored machine, so it sees the
+# state that was in flight. The total below already held the first
+# answer when the snapshot was taken, and the exporter reports the
+# whole sum.
+#
+# The limit is that this is resumption and not fresh activation. A
+# machine owns its heap, so a separate run cannot read it. The new
+# definition runs because the restored world was still going to call
+# it. A world captured at its end has nothing left to reach.
+
+# The shipped world. It gathers answers and then discards them.
+def report(total: Int): Int
+  0
+end
+
+def gather(): Int with Io.ReadLine
+  total = 0
+  count = 0
+  while count < 3
+    line = case sys.io.read_line()
+    in Ok(Some(text)) then text
+    in _ then "0"
+    end
+    total = total + case line.parse_int(10)
+    in Ok(value) then value
+    in Err(_) then 0
+    end
+    count = count + 1
+  end
+  report(total)
+end
+
+# Written after the capture, by someone holding the snapshot.
+def exporter(total: Int): Int
+  total
+end
+
+# Answer each request, and report what the world returns.
+def feed(run: Run[Int], answers: [String]): Result[Int, String] with Vm
+  next = 0
+  loop do
+    case run.drive()
+    in Asked(question)
+      case question
+      in Call(Io.ReadLine, call, ())
+        if next >= answers.len()
+          run.answer(call, Ok(None))
+        else
+          run.answer(call, Ok(Some(answers.at(next))))
+          next = next + 1
+        end
+      in _
+        run.dispatch(question)
+      end
+    in Done(value)
+      return Ok(value)
+    in Fault(problem)
+      return Err(problem.code())
+    end
+  end
+end
+
+def go(): Result[(Int, Int), String] with Vm, Io.ReadLine
+  image = sys.vm.Vm()
+  seam = image.install(report).map_error() { |e: CodeError| e.message }?
+  entry = image.install(gather).map_error() { |e: CodeError| e.message }?
+  run = image.activate(entry, args: ()).map_error() {
+    |e: CodeError| e.message
+  }?
+
+  # Answer once, so the capture holds a total in flight.
+  case run.drive()
+  in Asked(question)
+    case question
+    in Call(Io.ReadLine, call, ())
+      run.answer(call, Ok(Some("5")))
+    in _
+      run.dispatch(question)
+    end
+  in _
+    ()
+  end
+  snapshot = case run.snapshot()
+  in Ok(image_of_world) then image_of_world
+  in Err(_) then return Err("the world did not capture")
+  end
+
+  # Let the shipped world finish, for comparison.
+  rest: [String] = ["6", "7"]
+  shipped = feed(run, rest)?
+
+  # A new VM, restored from that capture. The exporter goes in after
+  # the restore and takes the place of the shipped `report`.
+  later = sys.vm.Vm()
+  restored = case later.restore(snapshot)
+  in Ok(value) then value
+  in Err(_) then return Err("the world did not restore")
+  end
+  old = later.install(report).map_error() { |e: CodeError| e.message }?
+  new = later.install(exporter).map_error() { |e: CodeError| e.message }?
+  later.replace(old, new).map_error() { |e: CodeError| e.message }?
+  recovered = feed(restored, rest)?
+  Ok((shipped, recovered))
+end
+
+# The shipped world answered nothing. The same world, restored and
+# given an exporter, answered the sum it had been holding all along.
+go()
