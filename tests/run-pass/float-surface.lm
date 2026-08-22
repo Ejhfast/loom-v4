@@ -1,0 +1,37 @@
+nan_a = Float.from_bits(0x7ff0000000000001)
+nan_b = Float.from_bits(0x7fffffffffffffff)
+positive_zero = 0.0
+negative_zero = -0.0
+
+values = {nan_a: "not a number", negative_zero: "zero"}
+converted = case 42.75.to_int()
+in Ok(value) then value
+in Err(_) then -1
+end
+nonfinite = case (1.0 / 0.0).to_int()
+in Err(NonFinite) then true
+in _ then false
+end
+out_of_range = case 9223372036854775808.0.to_int()
+in Err(OutOfRange) then true
+in _ then false
+end
+
+(
+  1.5 + 2.25,
+  1.25e2,
+  6.0 / 4.0,
+  nan_a == nan_b,
+  nan_a < 1.0,
+  nan_a > 1.0,
+  nan_a.compare(1.0) == Greater,
+  positive_zero == negative_zero,
+  negative_zero.bits(),
+  nan_a.bits(),
+  values.at(nan_b),
+  values.at(positive_zero),
+  9007199254740993.to_float(),
+  converted,
+  (nonfinite, out_of_range),
+  "value=#{1.5}"
+)

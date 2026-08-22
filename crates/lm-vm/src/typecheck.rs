@@ -109,6 +109,7 @@ pub(crate) fn check_boundary_value(
     match (value, &module.types[reply_ty as usize]) {
         (Value::Unit, BcType::Unit)
         | (Value::Int(_), BcType::Int)
+        | (Value::Float(_), BcType::Float)
         | (Value::Bool(_), BcType::Bool) => return Ok(()),
         _ => {}
     }
@@ -133,6 +134,7 @@ enum Scalar {
     Unit,
     Bool,
     Int,
+    Float,
     Char,
     Op(u32),
 }
@@ -209,6 +211,7 @@ fn check_one(
                 (Value::Unit, Scalar::Unit) => true,
                 (Value::Bool(_), Scalar::Bool) => true,
                 (Value::Int(_), Scalar::Int) => true,
+                (Value::Float(_), Scalar::Float) => true,
                 (Value::Char(_), Scalar::Char) => true,
                 (Value::Op(slot), Scalar::Op(op)) => slot == op,
                 _ => false,
@@ -279,6 +282,7 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         ClosedType::Unit => Node::Scalar(Scalar::Unit),
         ClosedType::Bool => Node::Scalar(Scalar::Bool),
         ClosedType::Int => Node::Scalar(Scalar::Int),
+        ClosedType::Float => Node::Scalar(Scalar::Float),
         ClosedType::Op(op, _) => Node::Scalar(Scalar::Op(*op)),
         ClosedType::Str => Node::Heap(Kind::Str),
         ClosedType::Bytes => Node::Heap(Kind::Bytes),
@@ -730,6 +734,7 @@ mod tests {
     fn module(types: Vec<BcType>, classes: Vec<BcClass>, funcs: Vec<Func>) -> Module {
         Module {
             strings: vec!["Io.Print".to_string()],
+            bytes: vec![],
             types,
             selectors: Vec::new(),
             apps: Vec::new(),

@@ -32,7 +32,7 @@ end
 flipped = span.swap()
 
 # Interpolation reads a tuple through `Display`.
-shown = "span {span} flipped {flipped}"
+shown = "span #{span} flipped #{flipped}"
 
 # `compare` orders tuples by their elements, left to right.
 ordering = (1, "one").compare((1, "two"))

@@ -20,7 +20,7 @@ final class Quiet implements Labeled, Formats[Int]
   end
 
   def format(self, value: Int): String
-    "n={value}"
+    "n=#{value}"
   end
 end
 
@@ -32,19 +32,19 @@ final class Logged implements Labeled with Io.Print, Formats[Int] with Io.Print
   end
 
   def format(self, value: Int): String with Io.Print
-    sys.io.print("format {value}\n")
-    "n={value}"
+    sys.io.print("format #{value}\n")
+    "n=#{value}"
   end
 end
 
 # No `with` means that `P` must have a pure conformance.
 def describe_pure[P: Labeled](item: P): String
-  "it is {item.label()}"
+  "it is #{item.label()}"
 end
 
 # The call infers `e` from the selected conformance.
 def describe[effect e, P: Labeled with e](item: P): String with e
-  "it is {item.label()}"
+  "it is #{item.label()}"
 end
 
 # One row variable can constrain several interface applications.
@@ -53,7 +53,7 @@ def summary[
   effect e,
   P: Labeled with e + Formats[Int] with e
 ](item: P, value: Int): String with e
-  "{item.label()}: {item.format(value)}"
+  "#{item.label()}: #{item.format(value)}"
 end
 
 def go(): (String, String, String, String) with Io.Print

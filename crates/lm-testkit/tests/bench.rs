@@ -251,7 +251,7 @@ fn bench_language_operations() {
     report(
         "string_interp",
         200_000,
-        "s = \"\"\ni = 0\nwhile i < 200000\n  s = \"v{i}\"\n  i = i + 1\nend\ns\n",
+        "s = \"\"\ni = 0\nwhile i < 200000\n  s = \"v#{i}\"\n  i = i + 1\nend\ns\n",
         base,
     );
 
@@ -260,6 +260,32 @@ fn bench_language_operations() {
         "arith_mix",
         1_000_000,
         "i = 1\ns = 0\nwhile i < 1000001\n  s = s + i * 3 / 2 % 7\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // One integer bitwise operation in a hot loop.
+    report(
+        "int_bitwise",
+        1_000_000,
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s ^ i\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // One binary64 addition in a hot loop.
+    report(
+        "float_add",
+        1_000_000,
+        "i = 0\ns = 0.0\nwhile i < 1000000\n  s = s + 1.25\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // Bytewise XOR allocates one frozen 32-byte result.
+    report(
+        "bytes_xor_32",
+        20_000,
+        "left = b\"0123456789abcdef0123456789abcdef\"\n\
+         right = b\"ffffffffffffffffffffffffffffffff\"\n\
+         value = left\ni = 0\nwhile i < 20000\n  value = left ^ right\n  i = i + 1\nend\nvalue.len()\n",
         base,
     );
 
@@ -392,7 +418,7 @@ fn bench_language_operations() {
     report(
         "map_str_lookup",
         500_000,
-        "m: {String: Int} = {}\ni = 0\nwhile i < 1000\n  m.put(\"k{i}\", i)\n  i = i + 1\nend\n\
+        "m: {String: Int} = {}\ni = 0\nwhile i < 1000\n  m.put(\"k#{i}\", i)\n  i = i + 1\nend\n\
          j = 0\ns = 0\nwhile j < 500000\n  s = s + m.at(\"k500\")\n  j = j + 1\nend\ns\n",
         base,
     );

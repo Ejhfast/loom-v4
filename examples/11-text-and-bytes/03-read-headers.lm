@@ -72,6 +72,6 @@ in Some(at)
   in Ok(text) then read_head(text)
   in Err(_)   then ("/", 0)
   end
-  "{request[0]} declares {request[1]} and carries {body.len()}"
+  "#{request[0]} declares #{request[1]} and carries #{body.len()}"
 in None then "no header end"
 end

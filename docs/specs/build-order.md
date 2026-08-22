@@ -306,7 +306,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 
 ```lm
 def greet(name: String) with Io.Print
-  sys.io.print("Hello {name}!\n")
+  sys.io.print("Hello #{name}!\n")
 end
 
 greet("Ada")

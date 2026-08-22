@@ -7,8 +7,8 @@ use mathlib.matrix
 def run() with Io.Print
   m = matrix.Matrix(2, 3)
   hello = greeting.greet("Ada")
-  print("{hello}\n")
-  print("{greeting.report(m)}\n")
+  print("#{hello}\n")
+  print("#{greeting.report(m)}\n")
 end
 
 run()

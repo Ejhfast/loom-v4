@@ -146,9 +146,9 @@ Interpolation accepts any Text. Every narrowing method gives a
 Substring, so the earlier String-only rule made a program copy for the
 most common use of a piece.
 
-`examples/11-text-and-bytes` holds five programs: a configuration
+`examples/11-text-and-bytes` holds six programs: a configuration
 parser, an untrusted decode, a request head reader, a report builder,
-and the view-against-durable-value contrast.
+the view-against-durable-value contrast, and a binary frame.
 
 ## 4. What fell out of using it
 

@@ -30,7 +30,7 @@ while i < lines.len()
 end
 
 report.append("total      ")
-report.append("{total}")
+report.append("#{total}")
 
 # `finish` transfers the buffer. The builder reports its own end.
 report.finish()

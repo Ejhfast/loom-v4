@@ -1332,6 +1332,7 @@ fn regenerate_fuzz_corpus() {
         "callvirtualg-app-forgery.lmbc",
         &Module {
             strings: vec![],
+            bytes: vec![],
             types,
             selectors: vec!["f".to_string()],
             apps: vec![],
@@ -1390,6 +1391,7 @@ fn regenerate_fuzz_corpus() {
         "casttype-argument-forgery.lmbc",
         &Module {
             strings: vec![],
+            bytes: vec![],
             types,
             selectors: vec![],
             apps: vec![lm_bytecode::TypeApp {
@@ -1466,6 +1468,7 @@ fn regenerate_fuzz_corpus() {
     {
         let module = Module {
             strings: vec![],
+            bytes: vec![],
             types: base_types(),
             selectors: vec![],
             apps: vec![],

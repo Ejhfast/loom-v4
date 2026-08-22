@@ -414,6 +414,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             BcType::Unit
             | BcType::Bool
             | BcType::Int
+            | BcType::Float
             | BcType::Str
             | BcType::Fault
             | BcType::Request
@@ -791,11 +792,14 @@ fn preflight_instr(
 ) -> Result<(), IdentityError> {
     let bad = |what: &str| fail(format!("function {fidx}: {what} out of range"));
     let strings = module.strings.len();
+    let bytes = module.bytes.len();
     let selectors = module.selectors.len();
     match instr {
         Instr::ConstUnit
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
+        | Instr::ConstFloat(_)
+        | Instr::Numeric(_)
         | Instr::Pop
         | Instr::Add
         | Instr::Sub
@@ -920,6 +924,12 @@ fn preflight_instr(
         Instr::ConstStr(idx) => {
             if *idx as usize >= strings {
                 return Err(bad("string index"));
+            }
+            Ok(())
+        }
+        Instr::ConstBytes(idx) => {
+            if *idx as usize >= bytes {
+                return Err(bad("byte literal index"));
             }
             Ok(())
         }
@@ -1794,6 +1804,7 @@ impl<'a> Resolver<'a> {
             BcType::Unit => out.push(0),
             BcType::Bool => out.push(1),
             BcType::Int => out.push(2),
+            BcType::Float => out.push(31),
             BcType::Str => out.push(3),
             BcType::Class(c) => {
                 out.push(4);
@@ -2045,6 +2056,9 @@ impl<'a> Resolver<'a> {
             Instr::ConstBool(..) => 0x01,
             Instr::ConstInt(..) => 0x02,
             Instr::ConstStr(..) => 0x03,
+            Instr::Numeric(..) => 0xfb,
+            Instr::ConstFloat(..) => 0xfc,
+            Instr::ConstBytes(..) => 0xfd,
             Instr::LoadLocal(..) => 0x04,
             Instr::StoreLocal(..) => 0x05,
             Instr::Pop => 0x06,
@@ -2291,8 +2305,19 @@ impl<'a> Resolver<'a> {
             Instr::ConstInt(v) => {
                 out.extend_from_slice(&v.to_le_bytes());
             }
+            Instr::ConstFloat(bits) => {
+                out.extend_from_slice(&bits.to_le_bytes());
+            }
             Instr::ConstStr(idx) => {
                 write_str(out, &self.module.strings[*idx as usize]);
+            }
+            Instr::ConstBytes(idx) => {
+                let value = &self.module.bytes[*idx as usize];
+                out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                out.extend_from_slice(value);
+            }
+            Instr::Numeric(instr) => {
+                out.push(*instr as u8);
             }
             Instr::LoadLocal(slot) => {
                 u(out, *slot);
@@ -3573,6 +3598,7 @@ mod slot_tests {
     fn module() -> Module {
         Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],

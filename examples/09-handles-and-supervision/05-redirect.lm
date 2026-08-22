@@ -48,9 +48,9 @@ in Ok(approved)
 
   # The child closed the shared entry, so this alias is closed too.
   case approved.read(1)
-  in Err(Closed) then "{text} (the shared entry is closed)"
+  in Err(Closed) then "#{text} (the shared entry is closed)"
   in Err(error)  then display(error)
-  in Ok(_)       then "{text} (the entry is still open)"
+  in Ok(_)       then "#{text} (the entry is still open)"
   end
 in Err(error) then display(error)
 end

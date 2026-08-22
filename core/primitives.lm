@@ -71,6 +71,86 @@ final class Int implements Display, Hashable, Comparable
     intrinsic("int.rem", self, other)
   end
 
+  def bit_and(self, other: Int): Int
+    intrinsic("int.bit_and", self, other)
+  end
+
+  def bit_or(self, other: Int): Int
+    intrinsic("int.bit_or", self, other)
+  end
+
+  def bit_xor(self, other: Int): Int
+    intrinsic("int.bit_xor", self, other)
+  end
+
+  def bit_not(self): Int
+    intrinsic("int.bit_not", self)
+  end
+
+  def shl(self, amount: Int): Int
+    intrinsic("int.shl", self, amount)
+  end
+
+  def shr(self, amount: Int): Int
+    intrinsic("int.shr", self, amount)
+  end
+
+  def ushr(self, amount: Int): Int
+    intrinsic("int.ushr", self, amount)
+  end
+
+  def wrapping_add(self, other: Int): Int
+    intrinsic("int.wrapping_add", self, other)
+  end
+
+  def wrapping_sub(self, other: Int): Int
+    intrinsic("int.wrapping_sub", self, other)
+  end
+
+  def wrapping_mul(self, other: Int): Int
+    intrinsic("int.wrapping_mul", self, other)
+  end
+
+  def rotate_left(self, amount: Int): Int
+    intrinsic("int.rotate_left", self, amount)
+  end
+
+  def rotate_right(self, amount: Int): Int
+    intrinsic("int.rotate_right", self, amount)
+  end
+
+  def to_float(self): Float
+    intrinsic("int.to_float", self)
+  end
+
+  def __and__(self, other: Int): Int
+    self.bit_and(other)
+  end
+
+  def __or__(self, other: Int): Int
+    self.bit_or(other)
+  end
+
+  def __xor__(self, other: Int): Int
+    self.bit_xor(other)
+  end
+
+  def __invert__(self): Int
+    self.bit_not()
+  end
+
+  def __shl__(self, amount: Int): Int
+    self.shl(amount)
+  end
+
+  def __shr__(self, amount: Int): Int
+    self.shr(amount)
+  end
+
+  def __ushr__(self, amount: Int): Int
+    self.ushr(amount)
+  end
+
   def __eq__(self, other: Int): Bool
     intrinsic("int.eq", self, other)
   end
@@ -103,6 +183,90 @@ final class Int implements Display, Hashable, Comparable
 
   def __ge__(self, other: Int): Bool
     intrinsic("int.ge", self, other)
+  end
+end
+
+final class Float implements Display, Hashable, Comparable
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_float(self)
+    ()
+  end
+
+  def __neg__(self): Float
+    intrinsic("float.neg", self)
+  end
+
+  def __add__(self, other: Float): Float
+    intrinsic("float.add", self, other)
+  end
+
+  def __sub__(self, other: Float): Float
+    intrinsic("float.sub", self, other)
+  end
+
+  def __mul__(self, other: Float): Float
+    intrinsic("float.mul", self, other)
+  end
+
+  def __div__(self, other: Float): Float
+    intrinsic("float.div", self, other)
+  end
+
+  def __eq__(self, other: Float): Bool
+    intrinsic("float.eq", self, other)
+  end
+
+  def __hash__(self): Int
+    intrinsic("float.hash", self)
+  end
+
+  def __lt__(self, other: Float): Bool
+    intrinsic("float.lt", self, other)
+  end
+
+  def __le__(self, other: Float): Bool
+    intrinsic("float.le", self, other)
+  end
+
+  def __gt__(self, other: Float): Bool
+    intrinsic("float.gt", self, other)
+  end
+
+  def __ge__(self, other: Float): Bool
+    intrinsic("float.ge", self, other)
+  end
+
+  def is_nan(self): Bool
+    intrinsic("float.is_nan", self)
+  end
+
+  def bits(self): Int
+    intrinsic("float.bits", self)
+  end
+
+  def to_int(self): Result[Int, FloatToIntError]
+    status = intrinsic("float.to_int_status", self)
+    if status == 1
+      Err(FloatToIntError.NonFinite)
+    elsif status == 2
+      Err(FloatToIntError.OutOfRange)
+    else
+      Ok(intrinsic("float.to_int_value", self))
+    end
+  end
+
+  def compare(self, other: Float): Ordering
+    if self == other
+      Equal
+    elsif self.is_nan()
+      Greater
+    elsif other.is_nan()
+      Less
+    elsif self < other
+      Less
+    else
+      Greater
+    end
   end
 end
 

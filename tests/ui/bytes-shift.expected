@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found Bytes
+  --> tests/ui/bytes-shift.lm:1:1

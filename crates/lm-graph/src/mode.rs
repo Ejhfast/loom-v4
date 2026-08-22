@@ -197,6 +197,7 @@ fn copy_value(
         Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
+        | Value::Float(_)
         | Value::Char(_)
         | Value::Op(_)
         | Value::EmptyCase { .. } => return Ok(value),
@@ -246,6 +247,7 @@ pub fn copy_within(
         Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
+        | Value::Float(_)
         | Value::Char(_)
         | Value::Op(_)
         | Value::EmptyCase { .. } => return Ok(value),
@@ -1008,6 +1010,28 @@ mod tests {
         let d2 =
             digest_value(&mut heap, Value::Obj(two), &mut Slots, &limits()).expect("two digests");
         assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn float_digests_follow_float_equality() {
+        let mut heap = Heap::new(1 << 20);
+        let tuple = |heap: &mut Heap, bits| {
+            heap.alloc(Object::Tuple {
+                items: vec![Value::Float(bits)],
+            })
+        };
+        let positive_zero = tuple(&mut heap, 0.0f64.to_bits());
+        let negative_zero = tuple(&mut heap, (-0.0f64).to_bits());
+        let nan_a = tuple(&mut heap, 0x7ff0_0000_0000_0001);
+        let nan_b = tuple(&mut heap, 0x7fff_ffff_ffff_ffff);
+        let digest = |heap: &mut Heap, root| {
+            digest_value(heap, Value::Obj(root), &mut Slots, &limits()).expect("digests")
+        };
+        assert_eq!(
+            digest(&mut heap, positive_zero),
+            digest(&mut heap, negative_zero)
+        );
+        assert_eq!(digest(&mut heap, nan_a), digest(&mut heap, nan_b));
     }
 
     #[test]

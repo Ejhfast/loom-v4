@@ -30,9 +30,9 @@ in Ok(file)
   end
 
   result = case job.done()
-  in Done(size) then "indexed {size} bytes"
+  in Done(size) then "indexed #{size} bytes"
   in Fault(_)   then "the index failed"
   end
-  "{checkpoint}; {result}"
+  "#{checkpoint}; #{result}"
 in Err(error) then display(error)
 end

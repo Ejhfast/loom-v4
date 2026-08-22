@@ -232,11 +232,11 @@ final class SyntaxBuilder
   end
 
   def left_brace(self): SyntaxToken
-    self.token(108, "{{")
+    self.token(108, "{")
   end
 
   def right_brace(self): SyntaxToken
-    self.token(109, "}}")
+    self.token(109, "}")
   end
 
   def comma(self): SyntaxToken

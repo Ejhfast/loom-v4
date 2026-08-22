@@ -646,6 +646,7 @@ mod tests {
     fn int_module(blocks: Vec<Vec<lm_bytecode::Instr>>) -> LoadedModule {
         load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -746,6 +747,7 @@ mod tests {
     fn load_rejects_invalid_module() {
         let module = Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -783,6 +785,7 @@ mod tests {
         // checker prevents this in source programs; the VM faults.
         let module = Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![
                 BcType::Unit,
                 BcType::Bool,

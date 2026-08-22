@@ -23,10 +23,20 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Int(*v),
             }),
+            ExprKind::Float(v) => Ok(HExpr {
+                ty: lm_types::FLOAT,
+                mutable: true,
+                kind: HExprKind::Float(*v),
+            }),
             ExprKind::Str(v) => Ok(HExpr {
                 ty: STRING,
                 mutable: true,
                 kind: HExprKind::Str(v.clone()),
+            }),
+            ExprKind::Bytes(v) => Ok(HExpr {
+                ty: lm_types::BYTES,
+                mutable: true,
+                kind: HExprKind::Bytes(v.clone()),
             }),
             ExprKind::Bool(v) => Ok(HExpr {
                 ty: BOOL,
@@ -161,6 +171,30 @@ impl<'o> FnChecker<'o> {
                 }
                 let value = self.expect_compatible(ctx, INT, value, inner.span)?;
                 Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![value]))
+            }
+            ExprKind::Invert(inner) => {
+                let value = self.synth_expr(ctx, inner)?;
+                if let Some((class, cargs, found)) =
+                    Self::find_operator_hook(ctx, value.ty, "__invert__")
+                {
+                    return self.operator_hook(
+                        ctx,
+                        value,
+                        class,
+                        cargs,
+                        found,
+                        "__invert__",
+                        &[],
+                        expr.span,
+                    );
+                }
+                let value = self.expect_compatible(ctx, INT, value, inner.span)?;
+                Ok(Self::primitive_operator(
+                    ctx,
+                    "Int",
+                    "__invert__",
+                    vec![value],
+                ))
             }
             ExprKind::Binary { op, left, right } => self.synth_binary(ctx, *op, left, right),
             ExprKind::And(left, right) => {
@@ -567,6 +601,8 @@ impl<'o> FnChecker<'o> {
                     let h = self.synth_expr(ctx, e)?;
                     let native = if h.ty == INT {
                         Some(HInterpNative::Int)
+                    } else if h.ty == lm_types::FLOAT {
+                        Some(HInterpNative::Float)
                     } else if h.ty == BOOL {
                         Some(HInterpNative::Bool)
                     } else if h.ty == char_value {

@@ -89,6 +89,9 @@ impl World {
             HostValue::Int(v) if matches!(self.envs.ty(expected), Some(ClosedType::Int)) => {
                 Ok(Value::Int(*v))
             }
+            HostValue::Float(bits) if matches!(self.envs.ty(expected), Some(ClosedType::Float)) => {
+                Ok(Value::Float(lm_value::canonical_float_bits(*bits)))
+            }
             HostValue::Str(s) if matches!(self.envs.ty(expected), Some(ClosedType::Str)) => {
                 self.machines[vm as usize].alloc(Object::Str(s.clone()))
             }

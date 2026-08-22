@@ -9,7 +9,7 @@ class Window < Range
   end
 
   def describe(self): String
-    "{self.label} {self.len()}"
+    "#{self.label} #{self.len()}"
   end
 end
 

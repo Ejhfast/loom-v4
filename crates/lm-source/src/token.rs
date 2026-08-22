@@ -17,10 +17,14 @@ pub enum StrPiece {
 pub enum Tok {
     /// Decimal, hexadecimal, octal, or binary integer literal.
     Int(i64),
+    /// IEEE 754 binary64 literal, stored as raw bits.
+    Float(u64),
     /// String literal after escape processing, without interpolation.
     Str(String),
     /// String literal with interpolated expressions.
     StrInterp(Vec<StrPiece>),
+    /// Immutable byte literal after escape processing.
+    Bytes(Vec<u8>),
     /// Identifier that is not a keyword.
     Ident(String),
 
@@ -98,6 +102,12 @@ pub enum Tok {
     Star,
     Slash,
     Percent,
+    Amp,
+    Caret,
+    Shl,
+    Shr,
+    Ushr,
+    Tilde,
 
     /// Statement terminator: a newline or a semicolon.
     Newline,
@@ -109,7 +119,9 @@ impl fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             Tok::Int(v) => return write!(f, "integer literal `{v}`"),
+            Tok::Float(v) => return write!(f, "float literal `{}`", f64::from_bits(*v)),
             Tok::Str(_) | Tok::StrInterp(_) => return write!(f, "string literal"),
+            Tok::Bytes(_) => return write!(f, "byte string literal"),
             Tok::Ident(name) => return write!(f, "`{name}`"),
             Tok::KwAnd => "`and`",
             Tok::KwOr => "`or`",
@@ -176,6 +188,12 @@ impl fmt::Display for Tok {
             Tok::Star => "`*`",
             Tok::Slash => "`/`",
             Tok::Percent => "`%`",
+            Tok::Amp => "`&`",
+            Tok::Caret => "`^`",
+            Tok::Shl => "`<<`",
+            Tok::Shr => "`>>`",
+            Tok::Ushr => "`>>>`",
+            Tok::Tilde => "`~`",
             Tok::Newline => "end of line",
             Tok::Eof => "end of file",
         };

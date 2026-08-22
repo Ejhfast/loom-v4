@@ -32,6 +32,8 @@ const PINNED: &str = include_str!("../../../core/pinned-core-defs.txt");
 pub struct CoreLayout {
     /// The core method table of immediate integer values.
     pub int: Option<u32>,
+    /// The core method table of immediate floating-point values.
+    pub float: Option<u32>,
     /// The core method table of immediate Boolean values.
     pub boolean: Option<u32>,
     /// The core method table of immutable String values.
@@ -205,7 +207,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 171] = [
+pub const PINNED_LABELS: [&str; 172] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -377,6 +379,7 @@ pub const PINNED_LABELS: [&str; 171] = [
     "Tuple15",
     "Tuple16",
     "Unit",
+    "Float",
 ];
 
 /// The core role of immediate integer values.
@@ -519,6 +522,9 @@ pub const ROLE_TUPLE15: usize = 168;
 pub const ROLE_TUPLE16: usize = 169;
 pub const ROLE_UNIT: usize = 170;
 
+/// The core role of immediate floating-point values.
+pub const ROLE_FLOAT: usize = 171;
+
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
     match arity {
@@ -585,6 +591,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
     }
     match label {
         "Int" => &mut layout.int,
+        "Float" => &mut layout.float,
         "Bool" => &mut layout.boolean,
         "String" => &mut layout.string,
         "Text" => &mut layout.text,

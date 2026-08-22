@@ -949,7 +949,7 @@ fn a_proc_fault_publishes_as_a_terminal_value() {
                   \x20 end\n\
                   end\n\
                   case Bad.spawn().done()\n\
-                  in Done(v)  then \"{v}\"\n\
+                  in Done(v)  then \"#{v}\"\n\
                   in Fault(f) then f.code()\n\
                   end\n";
     assert_eq!(run(source), "Done(\"DivideByZero\")");
@@ -967,7 +967,7 @@ fn the_birth_grant_carries_the_declared_row() {
                    \x20 end\n\
                    end\n\
                    case Talker.spawn().done()\n\
-                   in Done(v)  then \"{v}\"\n\
+                   in Done(v)  then \"#{v}\"\n\
                    in Fault(f) then f.code()\n\
                    end\n";
     assert_eq!(
@@ -1000,7 +1000,7 @@ fn the_birth_grant_carries_the_declared_row() {
                     vm.table().pass(Io.Print)\n\
                     h = sys.proc.run(vm)\n\
                     case h.done()\n\
-                    in Done(v)  then \"{v}\"\n\
+                    in Done(v)  then \"#{v}\"\n\
                     in Fault(f) then f.code()\n\
                     end\n";
     assert_eq!(
@@ -1187,8 +1187,8 @@ fn a_proc_that_outlives_its_spawner_keeps_its_pass_through() {
                   \x20 first = h.send(3)\n\
                   \x20 second = h.close()\n\
                   \x20 case h.done()\n\
-                  \x20 in Done(v)  then \"done {v}\"\n\
-                  \x20 in Fault(f) then \"{f.code()} {first.is_sent()} {second.is_sent()}\"\n\
+                  \x20 in Done(v)  then \"done #{v}\"\n\
+                  \x20 in Fault(f) then \"#{f.code()} #{first.is_sent()} #{second.is_sent()}\"\n\
                   \x20 end\n\
                   in Fault(f)\n\
                   \x20 f.code()\n\
@@ -1242,7 +1242,7 @@ fn a_proc_runs_under_its_own_fuel_budget() {
                   \x20 end\n\
                   end\n\
                   case Spin.spawn().done()\n\
-                  in Done(v)  then \"{v}\"\n\
+                  in Done(v)  then \"#{v}\"\n\
                   in Fault(f) then f.code()\n\
                   end\n";
     let config = VmConfig {

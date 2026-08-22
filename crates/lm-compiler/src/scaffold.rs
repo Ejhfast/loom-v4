@@ -10,12 +10,12 @@ use std::path::Path;
 const MAIN: &str = "use sys.io.print\n\
                     \n\
                     def greeting(name: String): String\n\
-                    \x20 \"Hello {name}!\"\n\
+                    \x20 \"Hello #{name}!\"\n\
                     end\n\
                     \n\
                     def main() with Io.Print\n\
                     \x20 line = greeting(\"world\")\n\
-                    \x20 print(\"{line}\\n\")\n\
+                    \x20 print(\"#{line}\\n\")\n\
                     end\n\
                     \n\
                     main()\n";

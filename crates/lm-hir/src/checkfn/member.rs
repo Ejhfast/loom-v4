@@ -145,6 +145,37 @@ impl<'o> FnChecker<'o> {
                 }
             }
         }
+        // `Float.from_bits(bits)` is one fixed native class method.
+        if name == "from_bits" {
+            if let ExprKind::Name(class_name) = &recv.kind {
+                if class_name == "Float" && self.lookup_slot(class_name).is_none() {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`Float.from_bits` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    if args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("`Float.from_bits` expects 1 argument, found {}", args.len()),
+                            span,
+                        ));
+                    }
+                    let args = arrange_args(args, &["bits"], "Float.from_bits")?;
+                    let bits = self.check_expr(ctx, args[0], INT)?;
+                    return Ok(HExpr {
+                        ty: lm_types::FLOAT,
+                        mutable: true,
+                        kind: HExprKind::Intrinsic {
+                            intrinsic: lm_abi::INTRINSIC_FLOAT_FROM_BITS,
+                            args: vec![bits],
+                        },
+                    });
+                }
+            }
+        }
         // A call into a `use`-bound module: `matrix.det(x)` or the
         // constructor `matrix.Matrix(2, 3)`. The materialized import
         // carries the qualified key, so the ordinary call path

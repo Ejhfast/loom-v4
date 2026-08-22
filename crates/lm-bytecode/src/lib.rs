@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 171;
+pub const CORE_ROLE_COUNT: usize = 172;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -100,6 +100,7 @@ pub enum BcType {
     Unit,
     Bool,
     Int,
+    Float,
     Str,
     /// An instance type of a class without generic parameters.
     Class(u32),
@@ -327,8 +328,12 @@ pub enum Instr {
     ConstBool(bool),
     /// Push an Int constant.
     ConstInt(i64),
+    /// Push one canonical IEEE 754 binary64 constant.
+    ConstFloat(u64),
     /// Allocate the module string with this pool index and push it.
     ConstStr(u32),
+    /// Allocate the module byte literal with this pool index.
+    ConstBytes(u32),
     /// Push the value of a local slot.
     LoadLocal(u32),
     /// Pop one value into a local slot.
@@ -359,6 +364,8 @@ pub enum Instr {
     NeBool,
     /// Run one native value instruction.
     Native(NativeInstr),
+    /// Run one numeric or bitwise instruction from the extended family.
+    Numeric(NumericInstr),
     /// Reference identity equality for heap objects.
     EqRef,
     NeRef,
@@ -539,6 +546,90 @@ pub enum Instr {
     },
     /// Run one instruction from an added bytecode family.
     Extended(ExtendedInstr),
+}
+
+/// One numeric or bitwise instruction in the prefixed opcode family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NumericInstr {
+    IntBitAnd,
+    IntBitOr,
+    IntBitXor,
+    IntBitNot,
+    IntShl,
+    IntShr,
+    IntUshr,
+    IntWrappingAdd,
+    IntWrappingSub,
+    IntWrappingMul,
+    IntRotateLeft,
+    IntRotateRight,
+    IntToFloat,
+    FloatNeg,
+    FloatAdd,
+    FloatSub,
+    FloatMul,
+    FloatDiv,
+    FloatEq,
+    FloatNe,
+    FloatLt,
+    FloatLe,
+    FloatGt,
+    FloatGe,
+    FloatIsNan,
+    FloatHash,
+    FloatBits,
+    FloatFromBits,
+    FloatToIntStatus,
+    FloatToIntValue,
+    SbAppendFloat,
+    BytesBitAnd,
+    BytesBitOr,
+    BytesBitXor,
+    BytesBitNot,
+}
+
+impl NumericInstr {
+    fn from_tag(tag: u8) -> Option<NumericInstr> {
+        Some(match tag {
+            0 => NumericInstr::IntBitAnd,
+            1 => NumericInstr::IntBitOr,
+            2 => NumericInstr::IntBitXor,
+            3 => NumericInstr::IntBitNot,
+            4 => NumericInstr::IntShl,
+            5 => NumericInstr::IntShr,
+            6 => NumericInstr::IntUshr,
+            7 => NumericInstr::IntWrappingAdd,
+            8 => NumericInstr::IntWrappingSub,
+            9 => NumericInstr::IntWrappingMul,
+            10 => NumericInstr::IntRotateLeft,
+            11 => NumericInstr::IntRotateRight,
+            12 => NumericInstr::IntToFloat,
+            13 => NumericInstr::FloatNeg,
+            14 => NumericInstr::FloatAdd,
+            15 => NumericInstr::FloatSub,
+            16 => NumericInstr::FloatMul,
+            17 => NumericInstr::FloatDiv,
+            18 => NumericInstr::FloatEq,
+            19 => NumericInstr::FloatNe,
+            20 => NumericInstr::FloatLt,
+            21 => NumericInstr::FloatLe,
+            22 => NumericInstr::FloatGt,
+            23 => NumericInstr::FloatGe,
+            24 => NumericInstr::FloatIsNan,
+            25 => NumericInstr::FloatHash,
+            26 => NumericInstr::FloatBits,
+            27 => NumericInstr::FloatFromBits,
+            28 => NumericInstr::FloatToIntStatus,
+            29 => NumericInstr::FloatToIntValue,
+            30 => NumericInstr::SbAppendFloat,
+            31 => NumericInstr::BytesBitAnd,
+            32 => NumericInstr::BytesBitOr,
+            33 => NumericInstr::BytesBitXor,
+            34 => NumericInstr::BytesBitNot,
+            _ => return None,
+        })
+    }
 }
 
 /// One instruction added after the base dispatch contract.
@@ -1047,6 +1138,8 @@ pub struct Export {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub strings: Vec<String>,
+    /// Immutable raw byte literals.
+    pub bytes: Vec<Vec<u8>>,
     pub types: Vec<BcType>,
     /// Global selector names in first-encounter order.
     pub selectors: Vec<String>,
@@ -1167,7 +1260,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 47 stores conditional conformance premises.
 /// Version 48 adds ordered and unordered hash instructions.
 /// Version 49 adds tombstone-aware map traversal.
-pub const VERSION: u16 = 49;
+/// Version 50 adds Float, byte literals, and prefixed numeric instructions.
+pub const VERSION: u16 = 50;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1391,6 +1485,9 @@ const OP_HASH_COMBINE: u8 = 0xf7;
 const OP_HASH_UNORDERED_COMBINE: u8 = 0xf8;
 const OP_MAP_NEXT_INDEX: u8 = 0xf9;
 const OP_SEAL_INSTANCE: u8 = 0xfa;
+const OP_NUMERIC: u8 = 0xfb;
+const OP_CONST_FLOAT: u8 = 0xfc;
+const OP_CONST_BYTES: u8 = 0xfd;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1422,6 +1519,7 @@ const TY_WAIT: u8 = 27;
 const TY_PROJECTION: u8 = 28;
 const TY_CALLBACK: u8 = 29;
 const TY_HOST_RESOURCE: u8 = 30;
+const TY_FLOAT: u8 = 31;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1487,6 +1585,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.strings.len() as u32);
     for s in &module.strings {
         write_bytes(&mut out, s.as_bytes());
+    }
+    write_u32(&mut out, module.bytes.len() as u32);
+    for bytes in &module.bytes {
+        write_bytes(&mut out, bytes);
     }
     write_u32(&mut out, module.types.len() as u32);
     for ty in &module.types {
@@ -1790,6 +1892,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         BcType::Unit => out.push(TY_UNIT),
         BcType::Bool => out.push(TY_BOOL),
         BcType::Int => out.push(TY_INT),
+        BcType::Float => out.push(TY_FLOAT),
         BcType::Str => out.push(TY_STR),
         BcType::Class(c) => {
             out.push(TY_CLASS);
@@ -1921,9 +2024,21 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             out.push(OP_CONST_INT);
             out.extend_from_slice(&v.to_le_bytes());
         }
+        Instr::ConstFloat(bits) => {
+            out.push(OP_CONST_FLOAT);
+            out.extend_from_slice(&bits.to_le_bytes());
+        }
         Instr::ConstStr(idx) => {
             out.push(OP_CONST_STR);
             write_u32(out, *idx);
+        }
+        Instr::ConstBytes(idx) => {
+            out.push(OP_CONST_BYTES);
+            write_u32(out, *idx);
+        }
+        Instr::Numeric(instr) => {
+            out.push(OP_NUMERIC);
+            out.push(*instr as u8);
         }
         Instr::LoadLocal(slot) => {
             out.push(OP_LOAD_LOCAL);
@@ -2468,6 +2583,13 @@ impl<'a> Cursor<'a> {
         Ok(i64::from_le_bytes(buf))
     }
 
+    fn u64(&mut self) -> Result<u64, DecodeError> {
+        let b = self.take(8)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(b);
+        Ok(u64::from_le_bytes(buf))
+    }
+
     fn string(&mut self) -> Result<String, DecodeError> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
@@ -2756,6 +2878,15 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut strings = Vec::with_capacity(string_count);
     for _ in 0..string_count {
         strings.push(cur.string()?);
+    }
+    let byte_count = cur.len()?;
+    if byte_count > cur.remaining() / 4 {
+        return Err(DecodeError::BadLength);
+    }
+    let mut literal_bytes = Vec::with_capacity(byte_count);
+    for _ in 0..byte_count {
+        let len = cur.u32()? as usize;
+        literal_bytes.push(cur.take(len)?.to_vec());
     }
     let type_count = cur.len()?;
     let mut types = Vec::with_capacity(type_count);
@@ -3105,6 +3236,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     Ok(Module {
         strings,
+        bytes: literal_bytes,
         types,
         selectors,
         apps,
@@ -3130,6 +3262,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_UNIT => BcType::Unit,
         TY_BOOL => BcType::Bool,
         TY_INT => BcType::Int,
+        TY_FLOAT => BcType::Float,
         TY_STR => BcType::Str,
         TY_CLASS => BcType::Class(cur.u32()?),
         TY_INST => {
@@ -3220,7 +3353,12 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_CONST_UNIT => Instr::ConstUnit,
         OP_CONST_BOOL => Instr::ConstBool(cur.u8()? != 0),
         OP_CONST_INT => Instr::ConstInt(cur.i64()?),
+        OP_CONST_FLOAT => Instr::ConstFloat(cur.u64()?),
         OP_CONST_STR => Instr::ConstStr(cur.u32()?),
+        OP_CONST_BYTES => Instr::ConstBytes(cur.u32()?),
+        OP_NUMERIC => Instr::Numeric(
+            NumericInstr::from_tag(cur.u8()?).ok_or(DecodeError::BadOpcode(OP_NUMERIC))?,
+        ),
         OP_LOAD_LOCAL => Instr::LoadLocal(cur.u32()?),
         OP_STORE_LOCAL => Instr::StoreLocal(cur.u32()?),
         OP_POP => Instr::Pop,
@@ -3522,6 +3660,7 @@ mod tests {
     fn sample_module() -> Module {
         Module {
             strings: vec!["hello".to_string(), "Io.Print".to_string()],
+            bytes: vec![vec![0, 255]],
             types: vec![
                 BcType::Unit,
                 BcType::Int,
@@ -3785,7 +3924,9 @@ mod tests {
             Instr::ConstUnit,
             Instr::ConstBool(true),
             Instr::ConstInt(-5),
+            Instr::ConstFloat(1.5f64.to_bits()),
             Instr::ConstStr(0),
+            Instr::ConstBytes(0),
             Instr::LoadLocal(1),
             Instr::StoreLocal(1),
             Instr::Pop,
@@ -3936,6 +4077,41 @@ mod tests {
             Instr::Native(NativeInstr::BbBuild),
             Instr::Native(NativeInstr::HashCombine),
             Instr::Native(NativeInstr::HashUnorderedCombine),
+            Instr::Numeric(NumericInstr::IntBitAnd),
+            Instr::Numeric(NumericInstr::IntBitOr),
+            Instr::Numeric(NumericInstr::IntBitXor),
+            Instr::Numeric(NumericInstr::IntBitNot),
+            Instr::Numeric(NumericInstr::IntShl),
+            Instr::Numeric(NumericInstr::IntShr),
+            Instr::Numeric(NumericInstr::IntUshr),
+            Instr::Numeric(NumericInstr::IntWrappingAdd),
+            Instr::Numeric(NumericInstr::IntWrappingSub),
+            Instr::Numeric(NumericInstr::IntWrappingMul),
+            Instr::Numeric(NumericInstr::IntRotateLeft),
+            Instr::Numeric(NumericInstr::IntRotateRight),
+            Instr::Numeric(NumericInstr::IntToFloat),
+            Instr::Numeric(NumericInstr::FloatNeg),
+            Instr::Numeric(NumericInstr::FloatAdd),
+            Instr::Numeric(NumericInstr::FloatSub),
+            Instr::Numeric(NumericInstr::FloatMul),
+            Instr::Numeric(NumericInstr::FloatDiv),
+            Instr::Numeric(NumericInstr::FloatEq),
+            Instr::Numeric(NumericInstr::FloatNe),
+            Instr::Numeric(NumericInstr::FloatLt),
+            Instr::Numeric(NumericInstr::FloatLe),
+            Instr::Numeric(NumericInstr::FloatGt),
+            Instr::Numeric(NumericInstr::FloatGe),
+            Instr::Numeric(NumericInstr::FloatIsNan),
+            Instr::Numeric(NumericInstr::FloatHash),
+            Instr::Numeric(NumericInstr::FloatBits),
+            Instr::Numeric(NumericInstr::FloatFromBits),
+            Instr::Numeric(NumericInstr::FloatToIntStatus),
+            Instr::Numeric(NumericInstr::FloatToIntValue),
+            Instr::Numeric(NumericInstr::SbAppendFloat),
+            Instr::Numeric(NumericInstr::BytesBitAnd),
+            Instr::Numeric(NumericInstr::BytesBitOr),
+            Instr::Numeric(NumericInstr::BytesBitXor),
+            Instr::Numeric(NumericInstr::BytesBitNot),
             Instr::Freeze,
             Instr::FaultCode,
             Instr::FaultDenied,
@@ -4001,6 +4177,7 @@ mod tests {
     fn bad_type_tag_is_rejected() {
         let module = Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit],
             selectors: vec![],
             apps: vec![],
@@ -4019,9 +4196,8 @@ mod tests {
             debug: Vec::new(),
         };
         let mut bytes = encode(&module);
-        // The single type tag sits directly after the string count
-        // and the type count at the semantic region start.
-        let pos = HEADER_LEN + 4 + 4;
+        // The type tag follows the string, byte, and type counts.
+        let pos = HEADER_LEN + 4 + 4 + 4;
         assert_eq!(bytes[pos], TY_UNIT);
         bytes[pos] = 0xee;
         assert_eq!(decode(&bytes), Err(DecodeError::BadTypeTag(0xee)));

@@ -74,7 +74,7 @@ fn workspace(tree: &TempTree) {
          end\n\
          \n\
          def describe(m: Matrix): String\n\
-         \x20 \"{m.rows}x{m.cols}\"\n\
+         \x20 \"#{m.rows}x#{m.cols}\"\n\
          end\n",
     );
     tree.write(
@@ -87,11 +87,11 @@ fn workspace(tree: &TempTree) {
         "use mathlib.matrix\n\
          \n\
          def greet(name: String): String\n\
-         \x20 \"Hello {name}!\"\n\
+         \x20 \"Hello #{name}!\"\n\
          end\n\
          \n\
          def report(m: matrix.Matrix): String\n\
-         \x20 \"{matrix.describe(m)} has {m.area()} cells\"\n\
+         \x20 \"#{matrix.describe(m)} has #{m.area()} cells\"\n\
          end\n",
     );
     tree.write(
@@ -103,8 +103,8 @@ fn workspace(tree: &TempTree) {
          def run() with Io.Print\n\
          \x20 m = matrix.Matrix(2, 3)\n\
          \x20 line = greeting.greet(\"Ada\")\n\
-         \x20 print(\"{line}\\n\")\n\
-         \x20 print(\"{greeting.report(m)}\\n\")\n\
+         \x20 print(\"#{line}\\n\")\n\
+         \x20 print(\"#{greeting.report(m)}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -184,7 +184,7 @@ fn a_body_edit_rebuilds_only_the_edited_package() {
         "mathlib/src/matrix.lm",
         &std::fs::read_to_string(tree.path("mathlib/src/matrix.lm"))
             .unwrap()
-            .replace("\"{m.rows}x{m.cols}\"", "\"{m.rows} by {m.cols}\""),
+            .replace("\"#{m.rows}x#{m.cols}\"", "\"#{m.rows} by #{m.cols}\""),
     );
     let report = tree.build("app").expect("builds");
     assert!(!report_of(&report, "mathlib.matrix").cached);
@@ -312,14 +312,14 @@ fn the_linked_program_shares_one_core() {
          \n\
          def show(o: Option[Int]): String\n\
          \x20 case o\n\
-         \x20 in Some(v) then \"got {v}\"\n\
+         \x20 in Some(v) then \"got #{v}\"\n\
          \x20 in None then \"none\"\n\
          \x20 end\n\
          end\n\
          \n\
          def run() with Io.Print\n\
          \x20 line = show(find.first([7, 8]))\n\
-         \x20 print(\"{line}\\n\")\n\
+         \x20 print(\"#{line}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -370,14 +370,14 @@ fn an_imported_enum_constructs_and_matches() {
          def name(s: Shape): String\n\
          \x20 case s\n\
          \x20 in Dot then \"dot\"\n\
-         \x20 in Line(l) then \"line {l}\"\n\
+         \x20 in Line(l) then \"line #{l}\"\n\
          \x20 end\n\
          end\n\
          \n\
          def run() with Io.Print\n\
          \x20 a = name(Dot())\n\
          \x20 b = name(Line(4))\n\
-         \x20 print(\"{a} {b} {Line(7).size()}\\n\")\n\
+         \x20 print(\"#{a} #{b} #{Line(7).size()}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -428,7 +428,7 @@ fn imported_generics_keep_their_arity() {
          \x20 a = box.Box(7)\n\
          \x20 b = box.wrap(\"text\")\n\
          \x20 c: box.Box[Int] = a\n\
-         \x20 print(\"{c.get()} {b.get()}\\n\")\n\
+         \x20 print(\"#{c.get()} #{b.get()}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -479,7 +479,7 @@ fn an_imported_class_holds_its_mutable_methods() {
          def run() with Io.Print\n\
          \x20 p = Pair()\n\
          \x20 p.bump()\n\
-         \x20 print(\"{p.bump()}\\n\")\n\
+         \x20 print(\"#{p.bump()}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -505,7 +505,7 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
          \n\
          def run() with Io.Print\n\
          \x20 line = greeting.greet(\"Ada\")\n\
-         \x20 print(\"{line}\\n\")\n\
+         \x20 print(\"#{line}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -551,7 +551,7 @@ fn an_imported_effect_parameter_survives_the_interface() {
          \x20   print(\"tick\\n\")\n\
          \x20   3\n\
          \x20 end)\n\
-         \x20 print(\"{total}\\n\")\n\
+         \x20 print(\"#{total}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -648,7 +648,7 @@ fn an_import_grants_no_authority() {
         "use sys.io.print\n\
          \n\
          def shout(text: String) with Io.Print\n\
-         \x20 print(\"{text}\\n\")\n\
+         \x20 print(\"#{text}\\n\")\n\
          end\n",
     );
     tree.write(
@@ -843,7 +843,7 @@ fn a_directory_becomes_a_module_path() {
          \n\
          def run() with Io.Print\n\
          \x20 d = shapes.Dot()\n\
-         \x20 print(\"{d.area()}\\n\")\n\
+         \x20 print(\"#{d.area()}\\n\")\n\
          end\n\
          \n\
          run()\n",

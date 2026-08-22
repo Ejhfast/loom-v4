@@ -130,7 +130,109 @@ pub(crate) fn step(
         Instr::ConstUnit => push(state, TY_UNIT)?,
         Instr::ConstBool(_) => push(state, TY_BOOL)?,
         Instr::ConstInt(_) => push(state, TY_INT)?,
+        Instr::ConstFloat(bits) => {
+            if f64::from_bits(*bits).is_nan() && *bits != 0x7ff8_0000_0000_0000 {
+                return Err(fail("a Float constant has a noncanonical NaN".to_string()));
+            }
+            push(state, ctx.intern(BcType::Float))?;
+        }
         Instr::ConstStr(_) => push(state, TY_STR)?,
+        Instr::ConstBytes(index) => {
+            if *index as usize >= module.bytes.len() {
+                return Err(fail(
+                    "a byte literal index is outside its table".to_string(),
+                ));
+            }
+            push(state, ctx.intern(BcType::Bytes))?;
+        }
+        Instr::Numeric(instruction) => {
+            use lm_bytecode::NumericInstr;
+            let float = ctx.intern(BcType::Float);
+            let bytes = ctx.intern(BcType::Bytes);
+            match instruction {
+                NumericInstr::IntBitAnd
+                | NumericInstr::IntBitOr
+                | NumericInstr::IntBitXor
+                | NumericInstr::IntShl
+                | NumericInstr::IntShr
+                | NumericInstr::IntUshr
+                | NumericInstr::IntWrappingAdd
+                | NumericInstr::IntWrappingSub
+                | NumericInstr::IntWrappingMul
+                | NumericInstr::IntRotateLeft
+                | NumericInstr::IntRotateRight => {
+                    pop_expect(state, TY_INT)?;
+                    pop_expect(state, TY_INT)?;
+                    push(state, TY_INT)?;
+                }
+                NumericInstr::IntBitNot => {
+                    pop_expect(state, TY_INT)?;
+                    push(state, TY_INT)?;
+                }
+                NumericInstr::IntToFloat => {
+                    pop_expect(state, TY_INT)?;
+                    push(state, float)?;
+                }
+                NumericInstr::FloatNeg => {
+                    pop_expect(state, float)?;
+                    push(state, float)?;
+                }
+                NumericInstr::FloatAdd
+                | NumericInstr::FloatSub
+                | NumericInstr::FloatMul
+                | NumericInstr::FloatDiv => {
+                    pop_expect(state, float)?;
+                    pop_expect(state, float)?;
+                    push(state, float)?;
+                }
+                NumericInstr::FloatEq
+                | NumericInstr::FloatNe
+                | NumericInstr::FloatLt
+                | NumericInstr::FloatLe
+                | NumericInstr::FloatGt
+                | NumericInstr::FloatGe => {
+                    pop_expect(state, float)?;
+                    pop_expect(state, float)?;
+                    push(state, TY_BOOL)?;
+                }
+                NumericInstr::FloatIsNan => {
+                    pop_expect(state, float)?;
+                    push(state, TY_BOOL)?;
+                }
+                NumericInstr::FloatHash
+                | NumericInstr::FloatBits
+                | NumericInstr::FloatToIntStatus
+                | NumericInstr::FloatToIntValue => {
+                    pop_expect(state, float)?;
+                    push(state, TY_INT)?;
+                }
+                NumericInstr::FloatFromBits => {
+                    pop_expect(state, TY_INT)?;
+                    push(state, float)?;
+                }
+                NumericInstr::SbAppendFloat => {
+                    pop_expect(state, float)?;
+                    let class = ctx
+                        .core
+                        .string_builder
+                        .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+                    let builder = ctx.intern(BcType::Class(class));
+                    pop_expect(state, builder)?;
+                    push(state, builder)?;
+                }
+                NumericInstr::BytesBitAnd
+                | NumericInstr::BytesBitOr
+                | NumericInstr::BytesBitXor => {
+                    pop_expect(state, bytes)?;
+                    pop_expect(state, bytes)?;
+                    push(state, bytes)?;
+                }
+                NumericInstr::BytesBitNot => {
+                    pop_expect(state, bytes)?;
+                    push(state, bytes)?;
+                }
+            }
+        }
         Instr::LoadLocal(slot) => {
             let ty = state.locals[*slot as usize]
                 .ok_or_else(|| fail("load from a local without a value".to_string()))?;
@@ -435,6 +537,9 @@ pub(crate) fn step(
                 BcType::Class(c) => c,
                 BcType::Int => ctx.core.int.ok_or_else(|| {
                     fail("an Int method call needs the Int core role".to_string())
+                })?,
+                BcType::Float => ctx.core.float.ok_or_else(|| {
+                    fail("a Float method call needs the Float core role".to_string())
                 })?,
                 BcType::Bool => ctx.core.boolean.ok_or_else(|| {
                     fail("a Bool method call needs the Bool core role".to_string())

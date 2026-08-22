@@ -3,9 +3,9 @@
 use mathlib.matrix
 
 def greet(name: String): String
-  "Hello {name}!"
+  "Hello #{name}!"
 end
 
 def report(m: matrix.Matrix): String
-  "{matrix.describe(m)} has {m.area()} cells"
+  "#{matrix.describe(m)} has #{m.area()} cells"
 end

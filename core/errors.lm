@@ -98,3 +98,17 @@ enum ParseIntError implements Error
     ()
   end
 end
+
+enum FloatToIntError implements Error
+  NonFinite
+  OutOfRange
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in NonFinite  then "the float is not finite"
+    in OutOfRange then "the float is outside the Int range"
+    end
+    builder.append(text)
+    ()
+  end
+end

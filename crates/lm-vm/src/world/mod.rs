@@ -685,6 +685,7 @@ fn scalar_copy(value: Value) -> Option<Result<Value, FaultCode>> {
         Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
+        | Value::Float(_)
         | Value::Char(_)
         | Value::Op(_)
         | Value::EmptyCase { .. } => Some(Ok(value)),
@@ -753,6 +754,7 @@ mod tests {
     fn trivial_loaded() -> crate::LoadedModule {
         load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -796,6 +798,7 @@ mod tests {
         };
         lm_bytecode::encode(&Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -956,6 +959,7 @@ mod tests {
         };
         let loaded = load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -1029,6 +1033,7 @@ mod tests {
     fn a_value_slot_owns_a_frozen_copy_and_snapshots_it() {
         let loaded = load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
@@ -1118,6 +1123,7 @@ mod tests {
         };
         let loaded = load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![
                 BcType::Unit,
                 BcType::Bool,
@@ -1246,6 +1252,7 @@ mod tests {
         };
         let mut module = Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![
                 BcType::Unit,
                 BcType::Bool,
@@ -1361,6 +1368,7 @@ mod tests {
         };
         let loaded = load(Module {
             strings: vec![],
+            bytes: vec![],
             types: vec![
                 BcType::Unit,
                 BcType::Bool,

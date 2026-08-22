@@ -524,7 +524,7 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
   end
 
   def append_to(self, mut builder: StringBuilder) when K: Display, V: Display
-    builder.append("{{")
+    builder.append("{")
     index = 0
     for key, value in self
       if index > 0
@@ -536,7 +536,7 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
       value.append_to(builder)
       index = index + 1
     end
-    builder.append("}}")
+    builder.append("}")
     ()
   end
 

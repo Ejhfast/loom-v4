@@ -47,4 +47,4 @@ tax = Money(12)
 total = (price + tax) * 3
 refund = -total
 
-"{total} then {refund}"
+"#{total} then #{refund}"

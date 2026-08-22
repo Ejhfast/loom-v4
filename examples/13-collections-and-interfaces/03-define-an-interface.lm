@@ -33,7 +33,7 @@ final class Book implements Priced, Display
   end
 
   def label(self): String
-    "book {self.title}"
+    "book #{self.title}"
   end
 
   # Display writes into the active interpolation builder.
@@ -58,7 +58,7 @@ final class Ticket implements Priced, Discountable
   end
 
   def label(self): String
-    "seat {self.seat}"
+    "seat #{self.seat}"
   end
 
   def discount(self): Int
@@ -69,7 +69,7 @@ end
 # One bound. The body calls every method the bound promises, and it
 # names no concrete class.
 def describe[P: Priced](item: P): String
-  "{item.label()} costs {item.price()}"
+  "#{item.label()} costs #{item.price()}"
 end
 
 # Two bounds join with `+`. This function needs both contracts, so it
@@ -98,7 +98,7 @@ end
 
 # Interpolation accepts any type that implements Display.
 def rendered[D: Display](item: D): String
-  "item={item}"
+  "item=#{item}"
 end
 
 book = Book("loom")

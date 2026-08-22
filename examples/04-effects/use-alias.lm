@@ -6,7 +6,7 @@ use sys.io.print
 use sys.vm
 
 def greet(name: String) with Io.Print
-  print("Hello {name}!\n")
+  print("Hello #{name}!\n")
 end
 
 def run_child(): Int with Vm

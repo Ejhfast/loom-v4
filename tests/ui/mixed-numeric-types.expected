@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found Float
+  --> tests/ui/mixed-numeric-types.lm:1:5

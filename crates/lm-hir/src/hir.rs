@@ -165,6 +165,7 @@ pub enum CtorKind {
 pub enum NativeRepr {
     Unit,
     Int,
+    Float,
     Bool,
     Text,
     String,
@@ -391,6 +392,7 @@ pub enum HInterpPart {
 pub enum HInterpNative {
     Text,
     Int,
+    Float,
     Bool,
     Char,
 }
@@ -472,7 +474,9 @@ pub struct HArm {
 pub enum HExprKind {
     Unit,
     Int(i64),
+    Float(u64),
     Str(String),
+    Bytes(Vec<u8>),
     Bool(bool),
     Local(u32),
     /// One captured value of the enclosing closure.

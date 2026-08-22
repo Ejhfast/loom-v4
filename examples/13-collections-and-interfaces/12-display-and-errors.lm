@@ -46,12 +46,12 @@ def enter(badge: Badge, open: Bool): Result[String, GateError]
   if badge.level < 3
     return Err(GateError.TooLow(3))
   end
-  Ok("{badge} may pass")
+  Ok("#{badge} may pass")
 end
 
 # One bound reports every error that follows the contract.
 def report[E: Error](error: E): String
-  "rejected: {error}"
+  "rejected: #{error}"
 end
 
 granted = enter(Badge("crew", 5), true)

@@ -291,7 +291,9 @@ impl<'a> Builder<'a> {
 fn token_kind(token: &Tok) -> u16 {
     match token {
         Tok::Int(_) => KIND_INT,
+        Tok::Float(_) => KIND_FLOAT,
         Tok::Str(_) | Tok::StrInterp(_) => KIND_STRING,
+        Tok::Bytes(_) => KIND_BYTES,
         Tok::Ident(_) => KIND_IDENTIFIER,
         Tok::KwAnd
         | Tok::KwOr
@@ -356,6 +358,12 @@ fn token_kind(token: &Tok) -> u16 {
         Tok::Star => KIND_STAR,
         Tok::Slash => KIND_SLASH,
         Tok::Percent => KIND_PERCENT,
+        Tok::Amp => KIND_AMP,
+        Tok::Caret => KIND_CARET,
+        Tok::Shl => KIND_SHL,
+        Tok::Shr => KIND_SHR,
+        Tok::Ushr => KIND_USHR,
+        Tok::Tilde => KIND_TILDE,
         Tok::Newline => KIND_NEWLINE,
         Tok::Eof => unreachable!("the syntax builder skips the end marker"),
     }

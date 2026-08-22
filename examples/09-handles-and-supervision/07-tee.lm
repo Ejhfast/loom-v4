@@ -23,7 +23,7 @@ def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
     in Err(error) then display(error)
     end
     file.close()
-    "{first}+{second}"
+    "#{first}+#{second}"
   in Err(error) then display(error)
   end
 end
@@ -80,7 +80,7 @@ in Ok(backing)
       sizes: [Int] = []
       text = tee(child, mine, backing, sizes)
       backing.close()
-      "the child read {sizes.len()} times and saw {text}"
+      "the child read #{sizes.len()} times and saw #{text}"
     in _ then "the child asked for something else first"
     end
   in Done(_)  then "the child finished before it opened a file"

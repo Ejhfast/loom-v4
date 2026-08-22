@@ -359,7 +359,7 @@ a(20) + b(11)
     // tokens carry spans into the enclosing source.
     let interp = "\
 f = { |n: Int|: String
-  \"n is {n}\"
+  \"n is #{n}\"
 }
 
 f(42)

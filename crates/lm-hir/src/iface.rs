@@ -85,6 +85,7 @@ impl Naming<'_> {
             Type::Unit => IfaceType::Unit,
             Type::Bool => IfaceType::Bool,
             Type::Int => IfaceType::Int,
+            Type::Float => IfaceType::Float,
             Type::String => IfaceType::Str,
             // `Never` cannot appear in a declared signature; the
             // checker widens it to the declared result type.

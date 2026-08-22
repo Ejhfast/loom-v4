@@ -16,13 +16,13 @@ success = twice(2).map() do |value: Int|: Int
   value + 1
 end
 failure = twice(0).map_error() do |error: String|: String
-  "bad {error}"
+  "bad #{error}"
 end
 chained = divide(2).and_then() do |value: Int|: Result[Int, String]
   Ok(value + 1)
 end
 
 case (success, failure, chained)
-in (Ok(a), Err(b), Ok(c)) then "{a}:{b}:{c}"
+in (Ok(a), Err(b), Ok(c)) then "#{a}:#{b}:#{c}"
 in _ then "wrong"
 end

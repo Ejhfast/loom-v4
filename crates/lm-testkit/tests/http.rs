@@ -267,7 +267,7 @@ end
 
 #[test]
 fn stream_helpers_handle_split_headers_and_bodies() {
-    let source = r#"
+    let source = r##"
 def loopback(port: Int): Result[SocketAddress, NetError]
   bytes = ByteBuffer()
   bytes.append(127).append(0).append(0).append(1)
@@ -331,11 +331,11 @@ def exchange(): String with Tcp
   client.close()
   server.close()
   listener.close()
-  "{received.method} {received.target} {received.body.text()} {response.status} {response.body.text()}"
+  "#{received.method} #{received.target} #{received.body.text()} #{response.status} #{response.body.text()}"
 end
 
 exchange()
-"#;
+"##;
     let (outcome, resources) = run_network(source);
     assert_eq!(outcome, "Done(\"POST /echo hello 201 ok\")");
     assert_eq!(resources, 0);

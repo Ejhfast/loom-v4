@@ -23,7 +23,7 @@ response = case http.parse_response(
   request.method,
   limits
 )
-in Ok(value) then "{value.status} {value.body.text()}"
+in Ok(value) then "#{value.status} #{value.body.text()}"
 in Err(error) then display(error)
 end
 (request_bytes, response)

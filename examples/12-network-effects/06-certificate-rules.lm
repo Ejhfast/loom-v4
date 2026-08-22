@@ -24,11 +24,11 @@ def probe(host: String): String with Http.Client
     Tls().default_config(host),
     http.default_limits()
   )
-  in Ok(response) then "accepted, status {response.status}"
+  in Ok(response) then "accepted, status #{response.status}"
   in Err(HttpError.Tls(TlsError.Certificate(_))) then "refused: the certificate failed the check"
   in Err(HttpError.Tls(TlsError.Handshake(_)))   then "refused: the handshake failed"
   in Err(HttpError.Network(_))                   then "no answer: the host is unreachable"
-  in Err(error)                                  then "refused: {error}"
+  in Err(error)                                  then "refused: #{error}"
   end
 end
 

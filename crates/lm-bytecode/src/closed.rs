@@ -43,6 +43,7 @@ pub enum ClosedType {
     Unit,
     Bool,
     Int,
+    Float,
     Str,
     Fault,
     Request,
@@ -657,6 +658,7 @@ impl TypeEnvs {
             BcType::Unit => ClosedType::Unit,
             BcType::Bool => ClosedType::Bool,
             BcType::Int => ClosedType::Int,
+            BcType::Float => ClosedType::Float,
             BcType::Str => ClosedType::Str,
             BcType::Fault => ClosedType::Fault,
             BcType::Request => ClosedType::Request,
@@ -929,6 +931,10 @@ impl TypeEnvs {
                 Some(class) => (class, Vec::new()),
                 None => return Ok(None),
             },
+            Some(ClosedType::Float) => match role(crate::corepin::ROLE_FLOAT) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
             Some(ClosedType::Bool) => match role(crate::corepin::ROLE_BOOL) {
                 Some(class) => (class, Vec::new()),
                 None => return Ok(None),
@@ -988,6 +994,10 @@ impl TypeEnvs {
                 None => return Ok(None),
             },
             Some(BcType::Int) => match role(crate::corepin::ROLE_INT) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::Float) => match role(crate::corepin::ROLE_FLOAT) {
                 Some(owner) => owner,
                 None => return Ok(None),
             },
@@ -1068,6 +1078,7 @@ impl TypeEnvs {
             ClosedType::Inst(class, args) => Some((*class, args.clone())),
             ClosedType::Unit => Some((role(crate::corepin::ROLE_UNIT)?, Vec::new())),
             ClosedType::Int => Some((role(crate::corepin::ROLE_INT)?, Vec::new())),
+            ClosedType::Float => Some((role(crate::corepin::ROLE_FLOAT)?, Vec::new())),
             ClosedType::Bool => Some((role(crate::corepin::ROLE_BOOL)?, Vec::new())),
             ClosedType::Str => Some((role(crate::corepin::ROLE_STRING)?, Vec::new())),
             ClosedType::Bytes => Some((role(crate::corepin::ROLE_BYTES)?, Vec::new())),
@@ -1301,6 +1312,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::Unit => 0,
         ClosedType::Bool => 1,
         ClosedType::Int => 2,
+        ClosedType::Float => 29,
         ClosedType::Str => 3,
         ClosedType::Fault => 6,
         ClosedType::Request => 7,
@@ -1355,6 +1367,7 @@ mod tests {
     fn module() -> Module {
         Module {
             strings: vec!["Io".to_string(), "Fs".to_string()],
+            bytes: vec![],
             types: vec![
                 BcType::Unit,
                 BcType::Int,

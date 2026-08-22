@@ -8,7 +8,7 @@ def read_secret(): String with Fs.Open, Fs.Close
   in Ok(file)
     file.close()
     "the child opened the secret"
-  in Err(error) then "the child was refused: {error}"
+  in Err(error) then "the child was refused: #{error}"
   end
 end
 
@@ -21,7 +21,7 @@ def allow_only(child: Run[String], permitted: String): String with Vm
         if path == permitted
           child.dispatch(request)
         else
-          child.answer(call, Err(Failed("{path} is not permitted")))
+          child.answer(call, Err(Failed("#{path} is not permitted")))
         end
       in _
         child.dispatch(request)

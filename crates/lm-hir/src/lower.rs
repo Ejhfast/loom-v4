@@ -34,6 +34,8 @@ struct ModLowerer<'m> {
     inline_bodies: Vec<Option<HExpr>>,
     strings: Vec<String>,
     string_index: HashMap<String, u32>,
+    bytes: Vec<Vec<u8>>,
+    byte_index: HashMap<Vec<u8>, u32>,
     types: Vec<BcType>,
     type_index: HashMap<BcType, u32>,
     selectors: Vec<String>,
@@ -97,6 +99,17 @@ impl<'m> ModLowerer<'m> {
         let idx = self.strings.len() as u32;
         self.strings.push(value.to_string());
         self.string_index.insert(value.to_string(), idx);
+        idx
+    }
+
+    fn intern_bytes(&mut self, value: &[u8]) -> u32 {
+        if let Some(idx) = self.byte_index.get(value) {
+            return *idx;
+        }
+        let idx = self.bytes.len() as u32;
+        let owned = value.to_vec();
+        self.bytes.push(owned.clone());
+        self.byte_index.insert(owned, idx);
         idx
     }
 
@@ -190,6 +203,7 @@ impl<'m> ModLowerer<'m> {
             Type::Unit | Type::Never => self.intern_type(BcType::Unit),
             Type::Bool => self.intern_type(BcType::Bool),
             Type::Int => self.intern_type(BcType::Int),
+            Type::Float => self.intern_type(BcType::Float),
             Type::String => self.intern_type(BcType::Str),
             Type::Bytes => self.intern_type(BcType::Bytes),
             Type::FileHandle => self.intern_type(BcType::FileHandle),
@@ -331,6 +345,8 @@ pub fn lower_module_with_linkage(
         inline_bodies,
         strings: Vec::new(),
         string_index: HashMap::new(),
+        bytes: Vec::new(),
+        byte_index: HashMap::new(),
         types: Vec::new(),
         type_index: HashMap::new(),
         selectors: Vec::new(),
@@ -349,6 +365,7 @@ pub fn lower_module_with_linkage(
     m.intern_type(BcType::Bool);
     m.intern_type(BcType::Int);
     m.intern_type(BcType::Str);
+    m.intern_type(BcType::Float);
     // Selectors in interface and class declaration order.
     for interface in &hir.interfaces {
         for method in &interface.methods {
@@ -546,6 +563,7 @@ pub fn lower_module_with_linkage(
     }
     let mut module = Module {
         strings: m.strings,
+        bytes: m.bytes,
         types: m.types,
         selectors: m.selectors,
         apps: m.apps,
@@ -722,7 +740,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     /// Test whether the existing native map instructions support one key type.
     fn native_map_key(&self, ty: TypeId) -> bool {
         match self.m.store.get(ty) {
-            Type::Bool | Type::Int | Type::String | Type::Bytes => true,
+            Type::Bool | Type::Int | Type::Float | Type::String | Type::Bytes => true,
             Type::Class(class) | Type::Inst(class, _) => matches!(
                 self.m.classes[class.0 as usize].native_repr,
                 Some(
@@ -1348,10 +1366,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         match &expr.kind {
             HExprKind::Unit => self.emit(Instr::ConstUnit),
             HExprKind::Int(v) => self.emit(Instr::ConstInt(*v)),
+            HExprKind::Float(bits) => self.emit(Instr::ConstFloat(*bits)),
             HExprKind::Bool(v) => self.emit(Instr::ConstBool(*v)),
             HExprKind::Str(v) => {
                 let idx = self.m.intern_string(v);
                 self.emit(Instr::ConstStr(idx));
+            }
+            HExprKind::Bytes(v) => {
+                let idx = self.m.intern_bytes(v);
+                self.emit(Instr::ConstBytes(idx));
             }
             HExprKind::Local(slot) => self.emit(Instr::LoadLocal(*slot)),
             HExprKind::Capture(idx) => self.emit(Instr::LoadCapture(*idx)),
@@ -2042,6 +2065,65 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_INT_LE => Instr::LeInt,
             lm_abi::INTRINSIC_INT_GT => Instr::GtInt,
             lm_abi::INTRINSIC_INT_GE => Instr::GeInt,
+            lm_abi::INTRINSIC_INT_BIT_AND => Instr::Numeric(lm_bytecode::NumericInstr::IntBitAnd),
+            lm_abi::INTRINSIC_INT_BIT_OR => Instr::Numeric(lm_bytecode::NumericInstr::IntBitOr),
+            lm_abi::INTRINSIC_INT_BIT_XOR => Instr::Numeric(lm_bytecode::NumericInstr::IntBitXor),
+            lm_abi::INTRINSIC_INT_BIT_NOT => Instr::Numeric(lm_bytecode::NumericInstr::IntBitNot),
+            lm_abi::INTRINSIC_INT_SHL => Instr::Numeric(lm_bytecode::NumericInstr::IntShl),
+            lm_abi::INTRINSIC_INT_SHR => Instr::Numeric(lm_bytecode::NumericInstr::IntShr),
+            lm_abi::INTRINSIC_INT_USHR => Instr::Numeric(lm_bytecode::NumericInstr::IntUshr),
+            lm_abi::INTRINSIC_INT_WRAPPING_ADD => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntWrappingAdd)
+            }
+            lm_abi::INTRINSIC_INT_WRAPPING_SUB => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntWrappingSub)
+            }
+            lm_abi::INTRINSIC_INT_WRAPPING_MUL => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntWrappingMul)
+            }
+            lm_abi::INTRINSIC_INT_ROTATE_LEFT => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntRotateLeft)
+            }
+            lm_abi::INTRINSIC_INT_ROTATE_RIGHT => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntRotateRight)
+            }
+            lm_abi::INTRINSIC_INT_TO_FLOAT => Instr::Numeric(lm_bytecode::NumericInstr::IntToFloat),
+            lm_abi::INTRINSIC_FLOAT_NEG => Instr::Numeric(lm_bytecode::NumericInstr::FloatNeg),
+            lm_abi::INTRINSIC_FLOAT_ADD => Instr::Numeric(lm_bytecode::NumericInstr::FloatAdd),
+            lm_abi::INTRINSIC_FLOAT_SUB => Instr::Numeric(lm_bytecode::NumericInstr::FloatSub),
+            lm_abi::INTRINSIC_FLOAT_MUL => Instr::Numeric(lm_bytecode::NumericInstr::FloatMul),
+            lm_abi::INTRINSIC_FLOAT_DIV => Instr::Numeric(lm_bytecode::NumericInstr::FloatDiv),
+            lm_abi::INTRINSIC_FLOAT_EQ => Instr::Numeric(lm_bytecode::NumericInstr::FloatEq),
+            lm_abi::INTRINSIC_FLOAT_NE => Instr::Numeric(lm_bytecode::NumericInstr::FloatNe),
+            lm_abi::INTRINSIC_FLOAT_LT => Instr::Numeric(lm_bytecode::NumericInstr::FloatLt),
+            lm_abi::INTRINSIC_FLOAT_LE => Instr::Numeric(lm_bytecode::NumericInstr::FloatLe),
+            lm_abi::INTRINSIC_FLOAT_GT => Instr::Numeric(lm_bytecode::NumericInstr::FloatGt),
+            lm_abi::INTRINSIC_FLOAT_GE => Instr::Numeric(lm_bytecode::NumericInstr::FloatGe),
+            lm_abi::INTRINSIC_FLOAT_IS_NAN => Instr::Numeric(lm_bytecode::NumericInstr::FloatIsNan),
+            lm_abi::INTRINSIC_FLOAT_HASH => Instr::Numeric(lm_bytecode::NumericInstr::FloatHash),
+            lm_abi::INTRINSIC_FLOAT_BITS => Instr::Numeric(lm_bytecode::NumericInstr::FloatBits),
+            lm_abi::INTRINSIC_FLOAT_FROM_BITS => {
+                Instr::Numeric(lm_bytecode::NumericInstr::FloatFromBits)
+            }
+            lm_abi::INTRINSIC_FLOAT_TO_INT_STATUS => {
+                Instr::Numeric(lm_bytecode::NumericInstr::FloatToIntStatus)
+            }
+            lm_abi::INTRINSIC_FLOAT_TO_INT_VALUE => {
+                Instr::Numeric(lm_bytecode::NumericInstr::FloatToIntValue)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_APPEND_FLOAT => {
+                Instr::Numeric(lm_bytecode::NumericInstr::SbAppendFloat)
+            }
+            lm_abi::INTRINSIC_BYTES_BIT_AND => {
+                Instr::Numeric(lm_bytecode::NumericInstr::BytesBitAnd)
+            }
+            lm_abi::INTRINSIC_BYTES_BIT_OR => Instr::Numeric(lm_bytecode::NumericInstr::BytesBitOr),
+            lm_abi::INTRINSIC_BYTES_BIT_XOR => {
+                Instr::Numeric(lm_bytecode::NumericInstr::BytesBitXor)
+            }
+            lm_abi::INTRINSIC_BYTES_BIT_NOT => {
+                Instr::Numeric(lm_bytecode::NumericInstr::BytesBitNot)
+            }
             lm_abi::INTRINSIC_BOOL_NOT => Instr::Not,
             lm_abi::INTRINSIC_BOOL_EQ => Instr::EqBool,
             lm_abi::INTRINSIC_BOOL_NE => Instr::NeBool,
@@ -2475,7 +2557,12 @@ fn instantiate_inline_expr(
             *next += 1;
             return Some(args[index].clone());
         }
-        HExprKind::Unit | HExprKind::Int(_) | HExprKind::Str(_) | HExprKind::Bool(_) => {}
+        HExprKind::Unit
+        | HExprKind::Int(_)
+        | HExprKind::Float(_)
+        | HExprKind::Str(_)
+        | HExprKind::Bytes(_)
+        | HExprKind::Bool(_) => {}
         HExprKind::Not(inner) | HExprKind::Neg(inner) => {
             **inner = instantiate_inline_expr(inner, args, next, nodes, bodies, active)?;
         }
@@ -2543,7 +2630,9 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         HExprKind::Local(slot) => shift_slot(slot, base, max),
         HExprKind::Unit
         | HExprKind::Int(_)
+        | HExprKind::Float(_)
         | HExprKind::Str(_)
+        | HExprKind::Bytes(_)
         | HExprKind::Bool(_)
         | HExprKind::Capture(_)
         | HExprKind::FunctionCode { .. }
@@ -2790,6 +2879,12 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
         BinOp::Mul => Instr::Mul,
         BinOp::Div => Instr::Div,
         BinOp::Rem => Instr::Rem,
+        BinOp::BitAnd => Instr::Numeric(lm_bytecode::NumericInstr::IntBitAnd),
+        BinOp::BitOr => Instr::Numeric(lm_bytecode::NumericInstr::IntBitOr),
+        BinOp::BitXor => Instr::Numeric(lm_bytecode::NumericInstr::IntBitXor),
+        BinOp::Shl => Instr::Numeric(lm_bytecode::NumericInstr::IntShl),
+        BinOp::Shr => Instr::Numeric(lm_bytecode::NumericInstr::IntShr),
+        BinOp::Ushr => Instr::Numeric(lm_bytecode::NumericInstr::IntUshr),
         BinOp::Lt => Instr::LtInt,
         BinOp::Le => Instr::LeInt,
         BinOp::Gt => Instr::GtInt,
@@ -2812,13 +2907,13 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
 }
 
 fn interp_native_instr(kind: HInterpNative) -> Instr {
-    let native = match kind {
-        HInterpNative::Text => lm_bytecode::NativeInstr::SbAppendStr,
-        HInterpNative::Int => lm_bytecode::NativeInstr::SbAppendInt,
-        HInterpNative::Bool => lm_bytecode::NativeInstr::SbAppendBool,
-        HInterpNative::Char => lm_bytecode::NativeInstr::SbAppendChar,
-    };
-    Instr::Native(native)
+    match kind {
+        HInterpNative::Text => Instr::Native(lm_bytecode::NativeInstr::SbAppendStr),
+        HInterpNative::Int => Instr::Native(lm_bytecode::NativeInstr::SbAppendInt),
+        HInterpNative::Float => Instr::Numeric(lm_bytecode::NumericInstr::SbAppendFloat),
+        HInterpNative::Bool => Instr::Native(lm_bytecode::NativeInstr::SbAppendBool),
+        HInterpNative::Char => Instr::Native(lm_bytecode::NativeInstr::SbAppendChar),
+    }
 }
 
 fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
@@ -3013,6 +3108,21 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![Instr::ConstInt(0), Instr::Return]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Float) {
+        let float = m.intern_type(BcType::Float);
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: float,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstFloat(0), Instr::Return]],
         };
     }
     if class.native_repr == Some(NativeRepr::Bool) {
@@ -3344,7 +3454,9 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::ConstUnit
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
+        | Instr::ConstFloat(_)
         | Instr::ConstStr(_)
+        | Instr::ConstBytes(_)
         | Instr::LoadLocal(_)
         | Instr::LoadCapture(_)
         | Instr::New(_)
@@ -3513,7 +3625,49 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
                 .len();
             (argc + 1, 1)
         }
+        Instr::Numeric(instr) => numeric_stack_effect(*instr),
         Instr::Extended(instr) => extended_stack_effect(module, instr),
+    }
+}
+
+fn numeric_stack_effect(instr: lm_bytecode::NumericInstr) -> (usize, usize) {
+    use lm_bytecode::NumericInstr;
+    match instr {
+        NumericInstr::IntBitNot
+        | NumericInstr::IntToFloat
+        | NumericInstr::FloatNeg
+        | NumericInstr::FloatIsNan
+        | NumericInstr::FloatHash
+        | NumericInstr::FloatBits
+        | NumericInstr::FloatFromBits
+        | NumericInstr::FloatToIntStatus
+        | NumericInstr::FloatToIntValue
+        | NumericInstr::BytesBitNot => (1, 1),
+        NumericInstr::IntBitAnd
+        | NumericInstr::IntBitOr
+        | NumericInstr::IntBitXor
+        | NumericInstr::IntShl
+        | NumericInstr::IntShr
+        | NumericInstr::IntUshr
+        | NumericInstr::IntWrappingAdd
+        | NumericInstr::IntWrappingSub
+        | NumericInstr::IntWrappingMul
+        | NumericInstr::IntRotateLeft
+        | NumericInstr::IntRotateRight
+        | NumericInstr::FloatAdd
+        | NumericInstr::FloatSub
+        | NumericInstr::FloatMul
+        | NumericInstr::FloatDiv
+        | NumericInstr::FloatEq
+        | NumericInstr::FloatNe
+        | NumericInstr::FloatLt
+        | NumericInstr::FloatLe
+        | NumericInstr::FloatGt
+        | NumericInstr::FloatGe
+        | NumericInstr::SbAppendFloat
+        | NumericInstr::BytesBitAnd
+        | NumericInstr::BytesBitOr
+        | NumericInstr::BytesBitXor => (2, 1),
     }
 }
 
@@ -3606,7 +3760,10 @@ fn instr_text(instr: &Instr) -> String {
         Instr::ConstUnit => "ConstUnit".to_string(),
         Instr::ConstBool(v) => format!("ConstBool {v}"),
         Instr::ConstInt(v) => format!("ConstInt {v}"),
+        Instr::ConstFloat(bits) => format!("ConstFloat {bits:#018x}"),
         Instr::ConstStr(idx) => format!("ConstStr s{idx}"),
+        Instr::ConstBytes(idx) => format!("ConstBytes b{idx}"),
+        Instr::Numeric(instr) => format!("Numeric {instr:?}"),
         Instr::LoadLocal(slot) => format!("LoadLocal {slot}"),
         Instr::StoreLocal(slot) => format!("StoreLocal {slot}"),
         Instr::Pop => "Pop".to_string(),
@@ -3900,6 +4057,7 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Unit => "()".to_string(),
         BcType::Bool => "Bool".to_string(),
         BcType::Int => "Int".to_string(),
+        BcType::Float => "Float".to_string(),
         BcType::Str => "String".to_string(),
         BcType::Bytes => "Bytes".to_string(),
         BcType::FileHandle => "FileHandle".to_string(),

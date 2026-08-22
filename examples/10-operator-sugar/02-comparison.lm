@@ -50,4 +50,4 @@ if Version(2, 0) >= Version(1, 10)
   lines.push("2.0 is not older")
 end
 
-"{lines.at(0)}; {lines.at(1)}; {lines.at(2)}"
+"#{lines.at(0)}; #{lines.at(1)}; #{lines.at(2)}"

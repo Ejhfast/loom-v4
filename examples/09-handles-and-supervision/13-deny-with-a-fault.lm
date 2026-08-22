@@ -17,7 +17,7 @@
 def read_clock(): String with Clock.Now, Io.Print
   sys.io.print("the child asks for the time\n")
   t = sys.clock.now()
-  "the child read {t}"
+  "the child read #{t}"
 end
 
 def print_only(child: Run[String]): String with Vm, Io.Print
@@ -26,18 +26,18 @@ def print_only(child: Run[String]): String with Vm, Io.Print
     in Asked(request)
       case request
       in Call(Io.Print, call, (text,))
-        sys.io.print("child: {text}")
+        sys.io.print("child: #{text}")
         child.answer(call, ())
       in _
         # No `Int` here would be honest, so the driver refuses. The
         # reason names the operation it refused.
-        denied = "{request.op_name()} is not permitted for this child"
+        denied = "#{request.op_name()} is not permitted for this child"
         child.reject(request, Fault.denied(denied))
       end
     in Done(value)
       return value
     in Fault(fault)
-      return "the child stopped with {fault.code()}"
+      return "the child stopped with #{fault.code()}"
     end
   end
 end

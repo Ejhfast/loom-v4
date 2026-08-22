@@ -78,6 +78,7 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiPrimitive::Never => lm_types::NEVER,
                 lm_abi::AbiPrimitive::Bool => BOOL,
                 lm_abi::AbiPrimitive::Int => INT,
+                lm_abi::AbiPrimitive::Float => lm_types::FLOAT,
                 lm_abi::AbiPrimitive::String => STRING,
                 lm_abi::AbiPrimitive::Bytes => lm_types::BYTES,
                 lm_abi::AbiPrimitive::VmSnapshot => lm_types::VM_SNAPSHOT,

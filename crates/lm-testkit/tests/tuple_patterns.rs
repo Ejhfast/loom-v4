@@ -13,7 +13,7 @@ fn run(source: &str) -> String {
 #[test]
 fn a_tuple_pattern_binds_every_element() {
     assert_eq!(
-        run("case (7, \"hi\")\nin (n, s) then \"{n}-{s}\"\nend\n"),
+        run("case (7, \"hi\")\nin (n, s) then \"#{n}-#{s}\"\nend\n"),
         "Done(\"7-hi\")"
     );
 }

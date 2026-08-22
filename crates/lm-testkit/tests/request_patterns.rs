@@ -27,7 +27,7 @@ fn serve(body: &str) -> String {
          \x20   in Asked(request)\n\
          {body}\
          \x20   in Done(value)\n\
-         \x20     return \"{{value}}/{{seen.len()}}\"\n\
+         \x20     return \"#{{value}}/#{{seen.len()}}\"\n\
          \x20   in Fault(_)\n\
          \x20     return \"the child faulted\"\n\
          \x20   end\n\

@@ -653,6 +653,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
     }
     let native_roles = [
         (lm_bytecode::corepin::ROLE_INT, "Int"),
+        (lm_bytecode::corepin::ROLE_FLOAT, "Float"),
         (lm_bytecode::corepin::ROLE_BOOL, "Bool"),
         (lm_bytecode::corepin::ROLE_BYTES, "Bytes"),
         (lm_bytecode::corepin::ROLE_STRING_BUILDER, "StringBuilder"),

@@ -1,0 +1,13 @@
+# Build and inspect one small binary frame.
+#
+# A byte literal can contain every byte through a hexadecimal escape.
+# Bitwise operations run on Int or equal-length Bytes values.
+
+header = b"\x89PNG\r\n\x1a\n"
+mask = b"\xff\x00\x00\x00\x00\x00\x00\x00"
+masked = header ^ mask
+
+kind = (header.at(0) & 0x0f) << 4 | (header.at(1) & 0x0f)
+ratio = 3.to_float() / 2.0
+
+"frame {v1}: kind=#{kind} raw=#{header.hex()} masked=#{masked.hex()} ratio=#{ratio}"

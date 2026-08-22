@@ -19,8 +19,8 @@ def call_out(host: String): String with Http.CleartextClient
   http = Http()
   request = HttpRequest("GET", "/data", [], Bytes(""))
   case http.send(host, 80, request, http.default_limits())
-  in Ok(response) then "{host}: {response.status} {response.body.text()}"
-  in Err(error)   then "{host}: {error}"
+  in Ok(response) then "#{host}: #{response.status} #{response.body.text()}"
+  in Err(error)   then "#{host}: #{error}"
   end
 end
 
@@ -28,7 +28,7 @@ def worker(): String with Http.CleartextClient
   first = call_out("api.internal")
   second = call_out("data.example.com")
   third = call_out("metrics.vendor.net")
-  "{first} | {second} | {third}"
+  "#{first} | #{second} | #{third}"
 end
 
 # ---- the supervisor ------------------------------------------------
@@ -66,7 +66,7 @@ def guard(child: Run[String], list: [String], canned: Bytes): String with Vm
           # The refusal names no address, so the child never learns
           # one. The message travels back as a plain value.
           child.answer(call, Err(NetError.PermissionDenied(
-            "{host} is not on the egress list"
+            "#{host} is not on the egress list"
           )))
         end
       in Call(Tcp.Connect, call, (peer,))

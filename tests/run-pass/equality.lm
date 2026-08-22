@@ -5,5 +5,5 @@ s1 = "he"
 s2 = "hello"
 same_ref = a == c
 same_value = a == b
-str_eq = "{s1}llo" == s2
-"{same_ref} {same_value} {str_eq}"
+str_eq = "#{s1}llo" == s2
+"#{same_ref} #{same_value} #{str_eq}"

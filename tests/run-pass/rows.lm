@@ -2,6 +2,6 @@ def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e
   f(x)
 end
 def describe(o: Option[Int]): String with Io.Print
-  "{o.value_or(0)}"
+  "#{o.value_or(0)}"
 end
 apply(2, do |n: Int|: Int n + 40 end)

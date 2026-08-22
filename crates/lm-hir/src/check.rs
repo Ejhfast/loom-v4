@@ -803,6 +803,7 @@ impl Ctx {
             Type::Unit
             | Type::Bool
             | Type::Int
+            | Type::Float
             | Type::String
             | Type::Never
             | Type::Bytes
@@ -832,6 +833,7 @@ impl Ctx {
                 Some(
                     NativeRepr::Unit
                         | NativeRepr::Int
+                        | NativeRepr::Float
                         | NativeRepr::Bool
                         | NativeRepr::Text
                         | NativeRepr::String
@@ -1861,7 +1863,7 @@ pub(crate) fn check_key_type(
     let native = native_class
         || matches!(
             key,
-            lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
+            lm_types::BOOL | lm_types::INT | lm_types::FLOAT | lm_types::STRING | lm_types::BYTES
         );
     let unresolved = ctx.store.nominal_class(key).is_some_and(|(class, _)| {
         ctx.classes
@@ -3300,6 +3302,7 @@ fn register_type_names(
             let primitive = match class.name.as_str() {
                 "Unit" => Some(lm_types::UNIT),
                 "Int" => Some(lm_types::INT),
+                "Float" => Some(lm_types::FLOAT),
                 "Bool" => Some(lm_types::BOOL),
                 "String" => Some(lm_types::STRING),
                 "Bytes" => Some(lm_types::BYTES),
@@ -4185,6 +4188,7 @@ fn resolve_class(
     let native_repr = match (is_core, class.name.as_str()) {
         (true, "Unit") => Some(NativeRepr::Unit),
         (true, "Int") => Some(NativeRepr::Int),
+        (true, "Float") => Some(NativeRepr::Float),
         (true, "Bool") => Some(NativeRepr::Bool),
         (true, "Text") => Some(NativeRepr::Text),
         (true, "String") => Some(NativeRepr::String),
@@ -4257,6 +4261,7 @@ fn resolve_class(
     let self_ty = match native_repr {
         Some(NativeRepr::Unit) => lm_types::UNIT,
         Some(NativeRepr::Int) => lm_types::INT,
+        Some(NativeRepr::Float) => lm_types::FLOAT,
         Some(NativeRepr::Bool) => lm_types::BOOL,
         Some(NativeRepr::String) => lm_types::STRING,
         Some(NativeRepr::Bytes) => lm_types::BYTES,

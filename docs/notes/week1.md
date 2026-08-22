@@ -34,7 +34,8 @@ and the deferred work.
 - `%` with a zero divisor faults with `DivideByZero`. The one
   overflowing remainder case faults with `IntegerOverflow`.
 - String interpolation is rejected with `E0006`, as the plan permits
-  for week 1. Escapes and `{{`/`}}` work.
+  for week 1. That slice accepted doubled braces as escapes.
+  The current scanner uses `#{...}` and treats plain braces as text.
 - The bidirectional checker lives in `lm-hir` and uses the interned
   type store from `lm-types`. The build order lists checking under
   `lm-types`; the split keeps the crate graph acyclic.

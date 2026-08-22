@@ -51,20 +51,20 @@ def revise(label: String, source: String): String with Compiler, Vm
     options()
   )
   in Ok(value) then value
-  in Err(_) then return "{label}: the compiler refused the revision"
+  in Err(_) then return "#{label}: the compiler refused the revision"
   end
   module = case artifact.verify()
   in Ok(value) then value
-  in Err(problem) then return "{label}: {problem.message}"
+  in Err(problem) then return "#{label}: #{problem.message}"
   end
   code = case module.function_code[(Int,), Int]("rate")
   in Ok(value) then value
-  in Err(problem) then return "{label}: {problem.message}"
+  in Err(problem) then return "#{label}: #{problem.message}"
   end
   other = code.definition()
   shape = spec.identity.contract_hash == other.identity.contract_hash
   body = spec.identity.implementation_hash == other.identity.implementation_hash
-  "{label}: same shape={shape} same body={body}"
+  "#{label}: same shape=#{shape} same body=#{body}"
 end
 
 # Compile the same text under two module names and compare.
@@ -101,9 +101,9 @@ def two_modules(): String with Compiler, Vm
   end
   shape = a.identity.contract_hash == b.identity.contract_hash
   body = a.identity.implementation_hash == b.identity.implementation_hash
-  keys = "{a.identity.qualified_key} and {b.identity.qualified_key}"
+  keys = "#{a.identity.qualified_key} and #{b.identity.qualified_key}"
   same_module = a.module_hash == b.module_hash
-  "same identity={shape and body} same module={same_module} keys={keys}"
+  "same identity=#{shape and body} same module=#{same_module} keys=#{keys}"
 end
 
 def report(): [String] with Compiler, Vm

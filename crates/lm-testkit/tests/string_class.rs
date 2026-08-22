@@ -94,7 +94,7 @@ fn string_intrinsics_inline_to_canonical_instructions() {
 #[test]
 fn interpolation_finishes_its_private_builder() {
     let module =
-        compile_text("interpolation_finish.lm", "\"value={1}\"\n").expect("the program compiles");
+        compile_text("interpolation_finish.lm", "\"value=#{1}\"\n").expect("the program compiles");
     let instructions: Vec<Instr> = module.funcs[module.entry as usize]
         .blocks
         .iter()

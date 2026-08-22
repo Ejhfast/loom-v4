@@ -6,7 +6,7 @@ end
 
 class Child < Base
   def hello(self): String
-    "child+{super.hello()}"
+    "child+#{super.hello()}"
   end
 end
 

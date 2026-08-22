@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendReloc {
     pub strings: Vec<u32>,
+    pub bytes: Vec<u32>,
     pub types: Vec<u32>,
     pub selectors: Vec<u32>,
     pub apps: Vec<u32>,
@@ -85,6 +86,17 @@ pub fn append_resolved(
         .strings
         .iter()
         .map(|value| intern(&mut merged.strings, &mut string_index, value.clone()))
+        .collect();
+    let mut bytes_index: HashMap<Vec<u8>, u32> = merged
+        .bytes
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (value.clone(), index as u32))
+        .collect();
+    let bytes: Vec<u32> = addition
+        .bytes
+        .iter()
+        .map(|value| intern(&mut merged.bytes, &mut bytes_index, value.clone()))
         .collect();
     let selectors: Vec<u32> = addition
         .selectors
@@ -279,6 +291,7 @@ pub fn append_resolved(
         .collect();
     let mut reloc = AppendReloc {
         strings,
+        bytes,
         types,
         selectors,
         apps,
@@ -910,6 +923,7 @@ fn reloc_func(source: &Func, reloc: &AppendReloc) -> Func {
 fn reloc_instr(instruction: &Instr, reloc: &AppendReloc) -> Instr {
     match instruction {
         Instr::ConstStr(index) => Instr::ConstStr(reloc.strings[*index as usize]),
+        Instr::ConstBytes(index) => Instr::ConstBytes(reloc.bytes[*index as usize]),
         Instr::Call(function) => Instr::Call(reloc.funcs[*function as usize]),
         Instr::CallG { func, app } => Instr::CallG {
             func: reloc.funcs[*func as usize],
@@ -984,6 +998,8 @@ fn reloc_instr(instruction: &Instr, reloc: &AppendReloc) -> Instr {
         Instr::ConstUnit
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
+        | Instr::ConstFloat(_)
+        | Instr::Numeric(_)
         | Instr::LoadLocal(_)
         | Instr::StoreLocal(_)
         | Instr::Pop

@@ -48,7 +48,8 @@ pub use hash::{hash256, hash256_hex};
 /// entropy operations. Version 21 adds `Args.Get` and moves the
 /// current directory operation into `Fs`.
 /// Version 22 uses BLAKE3-256 for manifest identities.
-pub const ABI_VERSION: u32 = 22;
+/// Version 23 adds Float to the primitive manifest types.
+pub const ABI_VERSION: u32 = 23;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -150,6 +151,7 @@ pub enum AbiPrimitive {
     Never,
     Bool,
     Int,
+    Float,
     String,
     Bytes,
     VmSnapshot,
@@ -162,6 +164,7 @@ impl AbiPrimitive {
             AbiPrimitive::Never => "Never",
             AbiPrimitive::Bool => "Bool",
             AbiPrimitive::Int => "Int",
+            AbiPrimitive::Float => "Float",
             AbiPrimitive::String => "String",
             AbiPrimitive::Bytes => "Bytes",
             AbiPrimitive::VmSnapshot => "VmSnapshot",
@@ -307,6 +310,7 @@ impl AbiType {
     pub const NEVER: AbiType = AbiType::Primitive(AbiPrimitive::Never);
     pub const BOOL: AbiType = AbiType::Primitive(AbiPrimitive::Bool);
     pub const INT: AbiType = AbiType::Primitive(AbiPrimitive::Int);
+    pub const FLOAT: AbiType = AbiType::Primitive(AbiPrimitive::Float);
     pub const STR: AbiType = AbiType::Primitive(AbiPrimitive::String);
     pub const BYTES: AbiType = AbiType::Primitive(AbiPrimitive::Bytes);
     pub const VM_SNAPSHOT: AbiType = AbiType::Primitive(AbiPrimitive::VmSnapshot);
@@ -505,7 +509,8 @@ impl AbiType {
 /// Version 17 adds ordered and unordered hash mixing.
 /// Version 18 adds tombstone-aware map traversal.
 /// Version 19 uses BLAKE3-256 for intrinsic identities.
-pub const INTRINSIC_ABI_VERSION: u32 = 19;
+/// Version 20 adds Float and bitwise numeric operations.
+pub const INTRINSIC_ABI_VERSION: u32 = 20;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -661,9 +666,44 @@ pub const INTRINSIC_BYTES_HASH: IntrinsicSlot = 137;
 pub const INTRINSIC_HASH_COMBINE: IntrinsicSlot = 138;
 pub const INTRINSIC_HASH_UNORDERED_COMBINE: IntrinsicSlot = 139;
 pub const INTRINSIC_MAP_NEXT_INDEX: IntrinsicSlot = 140;
+pub const INTRINSIC_INT_BIT_AND: IntrinsicSlot = 141;
+pub const INTRINSIC_INT_BIT_OR: IntrinsicSlot = 142;
+pub const INTRINSIC_INT_BIT_XOR: IntrinsicSlot = 143;
+pub const INTRINSIC_INT_BIT_NOT: IntrinsicSlot = 144;
+pub const INTRINSIC_INT_SHL: IntrinsicSlot = 145;
+pub const INTRINSIC_INT_SHR: IntrinsicSlot = 146;
+pub const INTRINSIC_INT_USHR: IntrinsicSlot = 147;
+pub const INTRINSIC_INT_WRAPPING_ADD: IntrinsicSlot = 148;
+pub const INTRINSIC_INT_WRAPPING_SUB: IntrinsicSlot = 149;
+pub const INTRINSIC_INT_WRAPPING_MUL: IntrinsicSlot = 150;
+pub const INTRINSIC_INT_ROTATE_LEFT: IntrinsicSlot = 151;
+pub const INTRINSIC_INT_ROTATE_RIGHT: IntrinsicSlot = 152;
+pub const INTRINSIC_INT_TO_FLOAT: IntrinsicSlot = 153;
+pub const INTRINSIC_FLOAT_NEG: IntrinsicSlot = 154;
+pub const INTRINSIC_FLOAT_ADD: IntrinsicSlot = 155;
+pub const INTRINSIC_FLOAT_SUB: IntrinsicSlot = 156;
+pub const INTRINSIC_FLOAT_MUL: IntrinsicSlot = 157;
+pub const INTRINSIC_FLOAT_DIV: IntrinsicSlot = 158;
+pub const INTRINSIC_FLOAT_EQ: IntrinsicSlot = 159;
+pub const INTRINSIC_FLOAT_NE: IntrinsicSlot = 160;
+pub const INTRINSIC_FLOAT_LT: IntrinsicSlot = 161;
+pub const INTRINSIC_FLOAT_LE: IntrinsicSlot = 162;
+pub const INTRINSIC_FLOAT_GT: IntrinsicSlot = 163;
+pub const INTRINSIC_FLOAT_GE: IntrinsicSlot = 164;
+pub const INTRINSIC_FLOAT_IS_NAN: IntrinsicSlot = 165;
+pub const INTRINSIC_FLOAT_HASH: IntrinsicSlot = 166;
+pub const INTRINSIC_FLOAT_BITS: IntrinsicSlot = 167;
+pub const INTRINSIC_FLOAT_FROM_BITS: IntrinsicSlot = 168;
+pub const INTRINSIC_FLOAT_TO_INT_STATUS: IntrinsicSlot = 169;
+pub const INTRINSIC_FLOAT_TO_INT_VALUE: IntrinsicSlot = 170;
+pub const INTRINSIC_STRING_BUILDER_APPEND_FLOAT: IntrinsicSlot = 171;
+pub const INTRINSIC_BYTES_BIT_AND: IntrinsicSlot = 172;
+pub const INTRINSIC_BYTES_BIT_OR: IntrinsicSlot = 173;
+pub const INTRINSIC_BYTES_BIT_XOR: IntrinsicSlot = 174;
+pub const INTRINSIC_BYTES_BIT_NOT: IntrinsicSlot = 175;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 141] = [
+pub const INTRINSICS: [IntrinsicDef; 176] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1552,6 +1592,216 @@ pub const INTRINSICS: [IntrinsicDef; 141] = [
             AbiType::INT,
         ],
         reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.bit_and",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.bit_or",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.bit_xor",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.bit_not",
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.shl",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.shr",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.ushr",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.wrapping_add",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.wrapping_sub",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.wrapping_mul",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rotate_left",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rotate_right",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.to_float",
+        params: &[AbiType::INT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.neg",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.add",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.sub",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.mul",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.div",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.eq",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.ne",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.lt",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.le",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.gt",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.ge",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.is_nan",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.hash",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.bits",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.from_bits",
+        params: &[AbiType::INT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.to_int_status",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.to_int_value",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.append_float",
+        params: &[AbiType::STRING_BUILDER, AbiType::FLOAT],
+        reply: AbiType::STRING_BUILDER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.bit_and",
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BYTES,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.bit_or",
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BYTES,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.bit_xor",
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BYTES,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.bit_not",
+        params: &[AbiType::BYTES],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
 ];

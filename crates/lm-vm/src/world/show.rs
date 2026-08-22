@@ -248,6 +248,7 @@ impl World {
             (BcType::Unit, ClosedType::Unit)
             | (BcType::Bool, ClosedType::Bool)
             | (BcType::Int, ClosedType::Int)
+            | (BcType::Float, ClosedType::Float)
             | (BcType::Str, ClosedType::Str)
             | (BcType::Fault, ClosedType::Fault)
             | (BcType::Request, ClosedType::Request)
@@ -388,6 +389,7 @@ impl World {
             Value::Unit => "()".to_string(),
             Value::Bool(v) => v.to_string(),
             Value::Int(v) => v.to_string(),
+            Value::Float(bits) => f64::from_bits(bits).to_string(),
             Value::Char(value) => format!("{value:?}"),
             Value::Op(op) => format!(
                 "<op {}>",

@@ -131,3 +131,49 @@ This change removed the measured string-key lookup regression.
 | `list_hash` | 795.3 ns |
 | `tuple_hash` | 348.0 ns |
 | `list_sort` | 19,254 ns |
+
+## Numeric literals and bitwise operations
+
+The exact parent revision is `0e92df8`.
+
+The measurements use paired release runs from the parent and this branch.
+
+| Core measurement | Parent | Result | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 202 | 206 | +2.0% |
+| HIR functions | 477 | 519 | +8.8% |
+| Bytecode functions | 679 | 725 | +6.8% |
+| Artifact size | 218,077 bytes | 225,082 bytes | +3.2% |
+| Core checking | 1.745 ms | 1.822 ms | +4.4% |
+| Core lowering | 0.806 ms | 0.831 ms | +3.1% |
+| Core compilation | 2.920 ms | 2.886 ms | -1.2% |
+| Core decoding | 0.335 ms | 0.333 ms | -0.6% |
+| Core verification | 1.135 ms | 1.123 ms | -1.1% |
+| Structural verification | 0.397 ms | 0.403 ms | +1.5% |
+| Verification hash | 0.110 ms | 0.168 ms | +52.7% |
+| Semantic identity | 1.939 ms | 1.970 ms | +1.6% |
+| Decoded loading | 1.238 ms | 1.257 ms | +1.5% |
+| Core loading | 1.571 ms | 1.603 ms | +2.0% |
+| Warm workspace suite | 32.96 seconds | 33.90 seconds | +2.9% |
+
+Total compilation and loading remain within ordinary measurement noise.
+
+The suite comparison uses the existing worker count and identical warm commands.
+
+The artifact adds Float, byte literals, and the new core methods.
+
+| Operation | Parent | Result | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.8 ns | 31.2 ns | -1.9% |
+| `direct_call` | 30.6 ns | 30.2 ns | -1.3% |
+| `string_interp` | 261.3 ns | 265.8 ns | +1.7% |
+
+The new operations have these costs.
+
+| Operation | Loom | CPython 3.13.12 |
+| --- | ---: | ---: |
+| `int_bitwise` | 31.8 ns | 25.3 ns |
+| `float_add` | 31.4 ns | 22.2 ns |
+| `bytes_xor_32` | 109.2 ns | not available |
+
+CPython does not define a bitwise XOR operator for bytes.

@@ -34,13 +34,13 @@ end
 
 def describe(host: String, path: String): String with Http.Client
   case get(host, path)
-  in Err(error) then "{host}{path} failed: {error}"
+  in Err(error) then "#{host}#{path} failed: #{error}"
   in Ok(response)
     kind = case response.header("content-type")
     in Some(value) then value.text()
     in None        then "(no content type)"
     end
-    "{host}{path} -> {response.status} {kind} {response.body.len()} bytes"
+    "#{host}#{path} -> #{response.status} #{kind} #{response.body.len()} bytes"
   end
 end
 

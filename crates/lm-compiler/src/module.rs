@@ -491,6 +491,7 @@ fn encode_contract_type(
         Type::Unit => out.push(0),
         Type::Bool => out.push(1),
         Type::Int => out.push(2),
+        Type::Float => out.push(30),
         Type::String => out.push(3),
         Type::Never => out.push(4),
         Type::Bytes => out.push(5),
@@ -915,7 +916,9 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
     match &expr.kind {
         HExprKind::Unit
         | HExprKind::Int(_)
+        | HExprKind::Float(_)
         | HExprKind::Str(_)
+        | HExprKind::Bytes(_)
         | HExprKind::Bool(_)
         | HExprKind::Local(_)
         | HExprKind::Capture(_)

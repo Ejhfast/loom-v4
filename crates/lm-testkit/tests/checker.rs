@@ -51,12 +51,11 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("\"open\n"), "E0002");
     assert_eq!(code_of("\"\\q\"\n"), "E0003");
     assert_eq!(code_of("99999999999999999999\n"), "E0004");
-    assert_eq!(code_of("3.14\n"), "E0005");
-    assert_eq!(code_of("\"hi {\"\n"), "E0006");
-    assert_eq!(code_of("\"hi { }\"\n"), "E0006");
+    assert_eq!(code_of("\"hi #{\"\n"), "E0006");
+    assert_eq!(code_of("\"hi #{ }\"\n"), "E0006");
     assert_eq!(code_of("0x\n"), "E0007");
     assert_eq!(code_of("'c'\n"), "E0008");
-    assert_eq!(code_of("b\"x\"\n"), "E0009");
+    assert_eq!(code_of("b\"é\"\n"), "E0009");
     assert_eq!(code_of("\"\"\"x\"\"\"\n"), "E0010");
     // Parser rules.
     assert_eq!(code_of("x = 1 y = 2\n"), "E1001");
@@ -198,7 +197,7 @@ fn week_two_negative_cases_have_stable_codes() {
     assert_eq!(code_of("class A\nend\nm = {A(): 2}\nm\n"), "E1033");
     assert_eq!(code_of("class A\nend\nm: {A: Int} = {}\nm\n"), "E1033");
     // Interpolation of a type without Display.
-    assert_eq!(code_of("class Plain\nend\n\"{Plain()}\"\n"), "E1034");
+    assert_eq!(code_of("class Plain\nend\n\"#{Plain()}\"\n"), "E1034");
     // A write through a read-only reference.
     assert_eq!(
         code_of("def f(xs: [Int])\n  xs.push(1)\nend\nf([1])\n"),

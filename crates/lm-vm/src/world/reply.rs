@@ -11,6 +11,7 @@ fn extension_reply_matches(value: &HostValue, ty: lm_abi::AbiType) -> bool {
         (HostValue::Unit, AbiType::Primitive(AbiPrimitive::Unit))
         | (HostValue::Bool(_), AbiType::Primitive(AbiPrimitive::Bool))
         | (HostValue::Int(_), AbiType::Primitive(AbiPrimitive::Int))
+        | (HostValue::Float(_), AbiType::Primitive(AbiPrimitive::Float))
         | (HostValue::Str(_), AbiType::Primitive(AbiPrimitive::String))
         | (HostValue::Bytes(_), AbiType::Primitive(AbiPrimitive::Bytes)) => true,
         (HostValue::Resource(resource), AbiType::Resource(identity)) => resource.kind == identity,

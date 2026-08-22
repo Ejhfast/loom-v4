@@ -42,7 +42,7 @@ pub(crate) fn verify_tables(
             Ok(())
         };
         match ty {
-            BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
+            BcType::Unit | BcType::Bool | BcType::Int | BcType::Float | BcType::Str => {}
             BcType::Digest
             | BcType::Bytes
             | BcType::FileHandle

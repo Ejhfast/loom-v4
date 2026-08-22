@@ -29,8 +29,8 @@ pub use crate::ExportKind;
 const MAGIC: &[u8; 4] = b"LMIF";
 // Version 17 binds each interface to one immutable ABI bundle.
 // Version 18 adds interface inheritance and bare `Self` contracts.
-// Version 19 stores conditional conformance premises.
-const VERSION: u16 = 20;
+// Version 21 adds the binary64 Float type.
+const VERSION: u16 = 21;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -85,6 +85,7 @@ pub enum IfaceType {
     Unit,
     Bool,
     Int,
+    Float,
     Str,
     Bytes,
     FileHandle,
@@ -684,6 +685,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::FileHandle => out.push(24),
         IfaceType::ResourceHandle => out.push(25),
         IfaceType::HostResource => out.push(29),
+        IfaceType::Float => out.push(30),
     }
 }
 
@@ -1020,6 +1022,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         24 => IfaceType::FileHandle,
         25 => IfaceType::ResourceHandle,
         29 => IfaceType::HostResource,
+        30 => IfaceType::Float,
         other => return Err(DecodeError::BadTypeTag(other)),
     };
     Ok(ty)
@@ -1373,6 +1376,7 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Unit => "()".to_string(),
         IfaceType::Bool => "Bool".to_string(),
         IfaceType::Int => "Int".to_string(),
+        IfaceType::Float => "Float".to_string(),
         IfaceType::Str => "String".to_string(),
         IfaceType::Bytes => "Bytes".to_string(),
         IfaceType::FileHandle => "FileHandle".to_string(),

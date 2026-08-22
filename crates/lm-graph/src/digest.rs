@@ -14,11 +14,11 @@
 use crate::engine::{walk, GraphLimits, Visitor};
 use lm_abi::FaultCode;
 use lm_heap::{GraphScratch, Heap, Object};
-use lm_value::{ObjRef, Value};
+use lm_value::{canonical_float_bits, ObjRef, Value};
 
 /// The domain separator of the canonical value encoding. A change to
 /// the encoding must change this string.
-const DOMAIN: &[u8] = b"lm-value-digest-v3\0";
+const DOMAIN: &[u8] = b"lm-value-digest-v4\0";
 
 /// Value tags inside the canonical encoding.
 const V_UNIT: u8 = 0x00;
@@ -34,6 +34,7 @@ const V_CHAR: u8 = 0x05;
 const V_EMPTY_CASE: u8 = 0x06;
 const V_OPTION_SOME: u8 = 0x07;
 const V_OPTION_NONE: u8 = 0x08;
+const V_FLOAT: u8 = 0x09;
 
 /// The static case named by one native `Option` type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,12 @@ fn encode_value(
         Value::Int(v) => {
             out.push(V_INT);
             out.extend_from_slice(&v.to_le_bytes());
+        }
+        Value::Float(bits) => {
+            out.push(V_FLOAT);
+            let bits = canonical_float_bits(bits);
+            let bits = if bits << 1 == 0 { 0 } else { bits };
+            out.extend_from_slice(&bits.to_le_bytes());
         }
         Value::Char(value) => {
             out.push(V_CHAR);

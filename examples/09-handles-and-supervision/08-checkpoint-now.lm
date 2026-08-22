@@ -23,7 +23,7 @@ def read_with_recovery(): String with Fs.Open, Fs.Read, Fs.Close
         in Err(error) then display(error)
         end
         again.close()
-        "recovered {text}"
+        "recovered #{text}"
       in Err(error) then display(error)
       end
     in Err(error) then display(error)
@@ -74,7 +74,7 @@ def checkpoint_now(child: Run[String]): String with Vm, Fs
       child.dispatch(read_request)
       case child.snapshot()
       in Ok(image)
-        "live capture={live}, closed {closed}, restored: {resume(image)}"
+        "live capture=#{live}, closed #{closed}, restored: #{resume(image)}"
       in Err(_) then "the closed handle still blocked the capture"
       end
     in Done(value)

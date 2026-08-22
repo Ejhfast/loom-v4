@@ -131,12 +131,15 @@ A string is immutable UTF-8 text:
 ```lm
 "hello"
 "line one\nline two"
-"Hello {name}!"
+"braces {stay literal}"
+"Hello #{name}!"
 ```
 
-Escapes are `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{HEX}`.
+Plain braces do not start interpolation.
 
-`{ expression }` accepts a value that implements `Display`.
+The marker `#{ expression }` starts one interpolation.
+
+The expression must produce a value that implements `Display`.
 
 `Display.append_to` writes into one `StringBuilder` without an intermediate `String`.
 
@@ -144,15 +147,28 @@ Escapes are `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{HEX}`.
 
 The pure `display(value)` helper builds one standalone `String`.
 
-`{{` and `}}` encode literal braces.
+The escape `\#{` produces the literal text `#{`.
 
-Triple-quoted strings preserve line breaks and use the same escaping and interpolation rules. A byte string is immutable bytes:
+Double braces have no special meaning.
+
+String escapes are `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, `\xNN`, and `\u{HEX}`.
+
+A string `\xNN` escape must encode an ASCII byte from `00` through `7f`.
+
+A byte string is immutable bytes:
 
 ```lm
 b"LM\0\x01"
+b"\x00\xff"
 ```
 
-Byte strings accept `\xNN` and reject interpolation.
+Byte strings accept direct ASCII and the common one-byte escapes.
+
+Their `\xNN` escapes accept every byte from `00` through `ff`.
+
+Byte strings do not interpolate expressions.
+
+Version 0.2 reserves triple-quoted strings.
 
 ### 2.6 Punctuation and operators
 
@@ -165,12 +181,14 @@ Punctuation:
 Operators:
 
 ```text
-= == != < <= > >= + - * / %
+= == != < <= > >= + - * / % & | ^ << >> >>> ~
 ```
 
 A left brace followed by a pipe starts a brace closure. Every other left brace starts a map literal. The empty form `{}` remains an empty map.
 
-`and`, `or`, and `not` are short-circuit Boolean operators. User-defined operator overloading is absent.
+`and`, `or`, and `not` are short-circuit Boolean operators.
+
+Section 6.4 defines the sealed operator hooks.
 
 ---
 
@@ -183,7 +201,7 @@ A source module is a sequence of top-level definitions followed by at most one t
 ```lm
 class Greeter
   def greet(self, name: String): String
-    "Hello {name}!"
+    "Hello #{name}!"
   end
 end
 
@@ -912,18 +930,27 @@ A generic function name needs a direct call in this version.
 
 `receiver.field` is statically resolved. `self` exists only in methods. A mutating method declares `mut self`. `super.method(args)` calls the immediate superclass implementation with the same receiver and a compile-time selector.
 
-### 6.4 Arithmetic, comparison, and equality
+### 6.4 Arithmetic, bitwise operations, comparison, and equality
 
-`Int`, `Bool`, and `String` use final core method tables. The checker maps each supported source operator to one sealed method.
+Final core classes provide the built-in operator methods.
+
+The checker maps each supported source operator to one sealed method.
 
 ```text
 -a      -> a.__neg__()
+~a      -> a.__invert__()
 not a   -> a.__not__()
 a + b   -> a.__add__(b)
 a - b   -> a.__sub__(b)
 a * b   -> a.__mul__(b)
 a / b   -> a.__div__(b)
 a % b   -> a.__rem__(b)
+a & b   -> a.__and__(b)
+a | b   -> a.__or__(b)
+a ^ b   -> a.__xor__(b)
+a << b  -> a.__shl__(b)
+a >> b  -> a.__shr__(b)
+a >>> b -> a.__ushr__(b)
 a == b  -> a.__eq__(b), when the left type implements PartialEq
 a != b  -> not a.__eq__(b), through the same conformance
 a < b   -> a.__lt__(b)
@@ -936,7 +963,7 @@ Each core method body names one pure intrinsic manifest entry. Static resolution
 
 `Text + Text` uses `Text.__add__` and produces String.
 
-Any class may declare the arithmetic and ordering hooks.
+Any class may declare the arithmetic, bitwise, and ordering hooks.
 
 The operator reads the hook from the class of the left operand.
 
@@ -999,6 +1026,42 @@ Other classes use reference identity for direct equality unless they implement `
 
 For `Int`, `+`, `-`, and `*` are checked; `/` truncates toward zero; `%` has the dividend's sign; divide-by-zero and the one overflowing division case fault. For `Float`, `+`, `-`, `*`, and `/` follow the deterministic binary64 rules in section 2.4; division by zero produces the corresponding infinity or NaN and `%` is not defined. There is no implicit numeric conversion.
 
+The `Int` operators `&`, `|`, `^`, and `~` use all 64 payload bits.
+
+The operator `>>` shifts right with sign extension.
+
+The operator `>>>` shifts right with zero extension.
+
+All shift amounts must be from 0 through 63.
+
+An invalid shift amount faults with `IndexOutOfBounds`.
+
+`Int.wrapping_add`, `wrapping_sub`, and `wrapping_mul` use two's-complement wrapping arithmetic.
+
+`Int.rotate_left` and `rotate_right` rotate all 64 payload bits.
+
+`Bytes` implements elementwise `&`, `|`, `^`, and `~`.
+
+Both binary operands must have equal lengths.
+
+A length mismatch faults with `IndexOutOfBounds`.
+
+`Bytes` does not implement shift operators.
+
+`Bool` does not implement bitwise operators.
+
+`Int.to_float` rounds to binary64 with nearest-even rounding.
+
+Every `Int` with magnitude through 2^53 converts exactly.
+
+`Float.to_int` truncates toward zero.
+
+It returns `NonFinite` or `OutOfRange` when no `Int` result exists.
+
+`Float.bits` returns the signed `Int` view of the canonical binary64 bits.
+
+`Float.from_bits` accepts the same signed bit view and canonicalizes every NaN.
+
 Ordering requires equal numeric types. Float ordering follows ordered IEEE comparison and is false when either operand is NaN. Language equality for floats is total and hash-friendly: both signed zeros are equal and all canonical NaNs are equal. Strings compare lexicographically by Unicode scalar value; bytes lexicographically by unsigned byte.
 
 `==` and `!=` otherwise compare scalars, strings, bytes, and digests by value; class values, operation identities/groups, and zero-capture top-level functions by canonical hash; captured closures, ordinary instances, lists, maps, VMs, handles, and resource descriptors by VM-local reference identity.
@@ -1022,7 +1085,23 @@ List elements and map keys/values require a common non-`Any` type unless the lit
 
 ### 6.6 Precedence
 
-Strongest to weakest: postfix call, field, index, `?`, and trailing closure; unary `not`/`-`; multiplicative; additive; ordering; equality/`is`/`as`; `and`; `or`; assignment. Assignment is right-associative; other binary operators are left-associative.
+The operator groups use this order, from strongest to weakest:
+
+1. postfix call, field, index, `?`, and trailing closure;
+2. unary `not`, `-`, and `~`;
+3. multiplicative operators;
+4. additive operators;
+5. shifts;
+6. `&`;
+7. `^`;
+8. `|`;
+9. ordering operators;
+10. equality, `is`, and `as`;
+11. `and`;
+12. `or`;
+13. assignment.
+
+Assignment is right-associative. Other binary operators are left-associative.
 
 ---
 
@@ -1116,7 +1195,7 @@ class Hello
   end
 
   def say_name(self) with Io.Print
-    sys.io.print("Hello {self.name}!")
+    sys.io.print("Hello #{self.name}!")
   end
 end
 ```
@@ -2370,7 +2449,7 @@ The metaprogramming sidecar defines syntax inspection, construction, and compile
 src = """
 class Greeter
   def greet(self, name: String) with Io.Print
-    sys.io.print("Hello {name}!")
+    sys.io.print("Hello #{name}!")
   end
 end
 
@@ -2804,7 +2883,7 @@ Snapshots store each entry semantic hash. Restoration does not call guest code.
 
 Insertion order, equality, serialization, and digest do not depend on bucket order. Fuel charges use logical key size, not actual probe count.
 
-Bool, Int, Text, Char, and Bytes use native hash and equality instructions.
+Bool, Int, Float, Text, Char, and Bytes use native hash and equality instructions.
 
 String and Substring are the concrete Text key types.
 
@@ -3299,7 +3378,7 @@ Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
-Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, Bytes
+Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, FloatToIntError, Bytes
 StringBuilder, ByteBuffer
 Display, PartialEq, Hashable, Comparable, Copyable, Error
 identity, display, hash_of, hash_combine, assert, assert_message
@@ -3594,7 +3673,7 @@ __ge__(other: Char) -> Bool
 
 `Text.at` allocates no Char object. Its successful path allocates only the `Option.Some` result object.
 
-Core defines `Utf8Error` and `IndexError`. Float parsing remains deferred.
+Core defines `Utf8Error` and `IndexError`. Text-to-Float parsing remains deferred.
 
 The core Bytes surface follows.
 
@@ -3613,6 +3692,10 @@ utf8() -> Result[String,Utf8Error]
 utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
 __add__(other: Bytes) -> Bytes
+__and__(other: Bytes) -> Bytes
+__or__(other: Bytes) -> Bytes
+__xor__(other: Bytes) -> Bytes
+__invert__() -> Bytes
 __eq__(other: Bytes) -> Bool
 __lt__(other: Bytes) -> Bool
 __le__(other: Bytes) -> Bool
@@ -3634,7 +3717,11 @@ __ge__(other: Bytes) -> Bool
 
 `text` is a compatibility conversion that faults with `BadCast`. It returns a bounded String after successful validation.
 
-`+`, `==`, and the ordering operators use the paired-underscore `Bytes` methods.
+`+`, the bitwise operators, equality, and ordering use the paired-underscore `Bytes` methods.
+
+The binary bitwise methods require equal lengths.
+
+They fault with `IndexOutOfBounds` when the lengths differ.
 
 `!=` negates the `PartialEq` result.
 
@@ -3645,6 +3732,7 @@ The final nominal builders have the following surface.
 ```text
 StringBuilder.append(text: Text) -> StringBuilder
 StringBuilder.append_int(value: Int) -> StringBuilder
+StringBuilder.append_float(value: Float) -> StringBuilder
 StringBuilder.append_bool(value: Bool) -> StringBuilder
 StringBuilder.push_char(value: Char) -> StringBuilder
 StringBuilder.len() -> Int
@@ -3680,9 +3768,54 @@ File and network operations exchange Bytes. An in-process host boundary can shar
 
 `ByteBuffer.build` and `ByteBuffer.finish` never perform a text conversion.
 
-Interpolation lowers to `std/fmt` append operations. The core scalar/string/bytes/digest/fault set has pinned formatting implementations. Other types format only through explicit functions because version 0.2 has no traits.
+Interpolation calls `Display.append_to` on one shared builder.
+
+Core values provide pinned formatting implementations.
+
+User classes format through an explicit `Display` conformance.
 
 ### 24.7 Numeric and range utilities
+
+The core `Int` surface adds these explicit operations:
+
+```text
+bit_and(other: Int) -> Int
+bit_or(other: Int) -> Int
+bit_xor(other: Int) -> Int
+bit_not() -> Int
+shl(amount: Int) -> Int
+shr(amount: Int) -> Int
+ushr(amount: Int) -> Int
+wrapping_add(other: Int) -> Int
+wrapping_sub(other: Int) -> Int
+wrapping_mul(other: Int) -> Int
+rotate_left(amount: Int) -> Int
+rotate_right(amount: Int) -> Int
+to_float() -> Float
+```
+
+The core `Float` surface adds these explicit operations:
+
+```text
+is_nan() -> Bool
+bits() -> Int
+to_int() -> Result[Int,FloatToIntError]
+Float.from_bits(bits: Int) -> Float
+```
+
+`Float` implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
+
+Display uses the shortest decimal text that round-trips through binary64 parsing.
+
+Float equality treats all NaNs as equal. It also treats both signed zeros as equal.
+
+Float hashing follows those equality rules.
+
+Ordered operators use IEEE ordered comparisons. They return false when either value is NaN.
+
+`compare` defines a total order for collections.
+
+It treats both zeros as equal and places NaN after every number.
 
 `std/math` supplies type-specific pure integer/float `min`, `max`, and `clamp`; `abs`; checked/wrapping/saturating integer operations; `gcd`; `pow_int`; and float rounding, roots, exponentials, logarithms, and trigonometric functions with specified binary64 behavior. With no traits or overloads, these functions are explicitly typed rather than pretending to be universally generic.
 
@@ -4122,10 +4255,14 @@ logic_and       = equality, { "and", equality } ;
 equality        = comparison,
                   { ( "==" | "!=" ), comparison
                   | ( "is" | "as" ), type } ;
-comparison      = additive, { ( "<" | "<=" | ">" | ">=" ), additive } ;
+comparison      = bit_or, { ( "<" | "<=" | ">" | ">=" ), bit_or } ;
+bit_or          = bit_xor, { "|", bit_xor } ;
+bit_xor         = bit_and, { "^", bit_and } ;
+bit_and         = shift, { "&", shift } ;
+shift           = additive, { ( "<<" | ">>" | ">>>" ), additive } ;
 additive        = multiplicative, { ( "+" | "-" ), multiplicative } ;
 multiplicative  = unary, { ( "*" | "/" | "%" ), unary } ;
-unary           = ( "not" | "-" ), unary | postfix ;
+unary           = ( "not" | "-" | "~" ), unary | postfix ;
 
 postfix         = primary,
                   { generic_apply_suffix | call_suffix | field_suffix | index_suffix
@@ -4264,7 +4401,7 @@ def supervise(
         vm.reject(q, Fault.denied("the supervisor permits print and time only"))
       end
     in Done(value)
-      sys.io.print("captured {captured.len()} writes\n")
+      sys.io.print("captured #{captured.len()} writes\n")
       return Done(value)
     in Fault(fault)
       return Fault(fault)

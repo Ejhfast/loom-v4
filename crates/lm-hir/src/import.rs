@@ -936,6 +936,7 @@ impl<'a> Materializer<'a> {
             IfaceType::Unit => lm_types::UNIT,
             IfaceType::Bool => lm_types::BOOL,
             IfaceType::Int => lm_types::INT,
+            IfaceType::Float => lm_types::FLOAT,
             IfaceType::Str => lm_types::STRING,
             IfaceType::Bytes => lm_types::BYTES,
             IfaceType::FileHandle => lm_types::FILE_HANDLE,

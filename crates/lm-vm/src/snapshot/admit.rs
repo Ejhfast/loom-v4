@@ -2103,10 +2103,15 @@ impl Admit<'_> {
         for (idx, value) in m.mailbox.queue.iter().enumerate() {
             object_ref(value, &format!("mailbox message {idx}"))?;
         }
-        if m.literals.len() > self.module.strings.len() {
+        let literal_count = self
+            .module
+            .strings
+            .len()
+            .saturating_add(self.module.bytes.len());
+        if m.literals.len() > literal_count {
             return fail(
                 ImageReason::Reference,
-                at("the literal table is longer than the module string pool"),
+                at("the literal table is longer than the module literal pools"),
             );
         }
         for (idx, literal) in m.literals.iter().enumerate() {
@@ -2117,14 +2122,24 @@ impl Admit<'_> {
                     at(&format!("literal {idx} names no object")),
                 );
             }
-            match &m.objects[*ordinal as usize].object {
-                Object::Str(text) if text.as_str() == self.module.strings[idx] => {}
-                _ => {
-                    return fail(
-                        ImageReason::Reference,
-                        at(&format!("literal {idx} does not hold its pooled string")),
-                    )
+            let valid = match &m.objects[*ordinal as usize].object {
+                Object::Str(text) if idx < self.module.strings.len() => {
+                    text.as_str() == self.module.strings[idx]
                 }
+                Object::Bytes(bytes) if idx >= self.module.strings.len() => {
+                    let byte_index = idx - self.module.strings.len();
+                    self.module
+                        .bytes
+                        .get(byte_index)
+                        .is_some_and(|value| bytes.as_slice() == value)
+                }
+                _ => false,
+            };
+            if !valid {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!("literal {idx} does not hold its pooled value")),
+                );
             }
         }
         if let Some(body) = m.start_body {

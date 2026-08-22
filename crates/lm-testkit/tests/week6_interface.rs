@@ -73,6 +73,25 @@ fn the_interface_round_trips_and_dumps() {
     assert!(dump.contains("def sum(self)"), "{dump}");
 }
 
+#[test]
+fn float_types_round_trip_through_an_interface() {
+    let interface = compile(
+        "numbers",
+        "def half(value: Float): Float\n  value / 2.0\nend\n",
+    )
+    .interface;
+    let half = interface.find("half").expect("half is exported");
+    let IfaceItem::Func(signature) = &half.item else {
+        panic!("half must be a function");
+    };
+    assert_eq!(signature.params, vec![IfaceType::Float]);
+    assert_eq!(signature.ret, IfaceType::Float);
+    assert_eq!(
+        decode_interface(&encode_interface(&interface)),
+        Ok(interface)
+    );
+}
+
 /// The interface hash covers the surface and no body. The definition
 /// hash covers the implementation.
 #[test]

@@ -23,6 +23,7 @@ enum OV {
     Unit,
     Bool(bool),
     Int(i64),
+    Float(u64),
     Char(char),
     Str(Rc<String>),
     Substring(Rc<String>),
@@ -378,6 +379,13 @@ impl<'m> Oracle<'m> {
         }
     }
 
+    fn as_float(&self, value: &OV) -> Result<f64, Stop> {
+        match value {
+            OV::Float(bits) => Ok(f64::from_bits(*bits)),
+            _ => Err(Stop::Limit("expected a Float value")),
+        }
+    }
+
     fn as_char(&self, value: &OV) -> Result<char, Stop> {
         match value {
             OV::Char(value) => Ok(*value),
@@ -405,6 +413,7 @@ impl<'m> Oracle<'m> {
         match c.native_repr {
             Some(NativeRepr::Unit) => return Ok(OV::Unit),
             Some(NativeRepr::Int) => return Ok(OV::Int(0)),
+            Some(NativeRepr::Float) => return Ok(OV::Float(0)),
             Some(NativeRepr::Bool) => return Ok(OV::Bool(false)),
             Some(NativeRepr::String) => return Ok(OV::Str(Rc::new(String::new()))),
             Some(NativeRepr::Bytes) => return Ok(self.alloc(OKind::Bytes(Vec::new()))),
@@ -480,20 +489,26 @@ impl<'m> Oracle<'m> {
         match &expr.kind {
             HExprKind::Unit => Ok(OV::Unit),
             HExprKind::Int(v) => Ok(OV::Int(*v)),
+            HExprKind::Float(bits) => Ok(OV::Float(*bits)),
             HExprKind::Bool(v) => Ok(OV::Bool(*v)),
             HExprKind::Str(v) => Ok(OV::Str(Rc::new(v.clone()))),
+            HExprKind::Bytes(v) => Ok(self.alloc(OKind::Bytes(v.clone()))),
             HExprKind::Local(slot) => frame.get(*slot),
             HExprKind::Capture(idx) => Ok(frame.captures[*idx as usize].clone()),
             HExprKind::Not(inner) => match self.eval(inner, frame, depth)? {
                 OV::Bool(v) => Ok(OV::Bool(!v)),
                 _ => Err(Stop::Limit("non-Bool operand")),
             },
-            HExprKind::Neg(inner) => {
-                let v = self.as_int(&self.eval(inner, frame, depth)?)?;
-                v.checked_neg()
+            HExprKind::Neg(inner) => match self.eval(inner, frame, depth)? {
+                OV::Int(value) => value
+                    .checked_neg()
                     .map(OV::Int)
-                    .ok_or(Stop::Fault("IntegerOverflow"))
-            }
+                    .ok_or(Stop::Fault("IntegerOverflow")),
+                OV::Float(bits) => Ok(OV::Float(lm_value::canonical_float_bits(
+                    (-f64::from_bits(bits)).to_bits(),
+                ))),
+                _ => Err(Stop::Limit("invalid negation operand")),
+            },
             HExprKind::Binary {
                 op,
                 operand_ty,
@@ -662,6 +677,9 @@ impl<'m> Oracle<'m> {
                             let value = self.eval(value, frame, depth)?;
                             let text = match (kind, value) {
                                 (HInterpNative::Int, OV::Int(value)) => value.to_string(),
+                                (HInterpNative::Float, OV::Float(bits)) => {
+                                    f64::from_bits(bits).to_string()
+                                }
                                 (HInterpNative::Bool, OV::Bool(true)) => "true".to_string(),
                                 (HInterpNative::Bool, OV::Bool(false)) => "false".to_string(),
                                 (HInterpNative::Char, OV::Char(value)) => value.to_string(),
@@ -770,6 +788,7 @@ impl<'m> Oracle<'m> {
             OV::Unit => NativeRepr::Unit,
             OV::Bool(_) => NativeRepr::Bool,
             OV::Int(_) => NativeRepr::Int,
+            OV::Float(_) => NativeRepr::Float,
             OV::Str(_) => NativeRepr::String,
             OV::Substring(_) => NativeRepr::Substring,
             OV::Char(_) => NativeRepr::Char,
@@ -883,6 +902,7 @@ impl<'m> Oracle<'m> {
     fn key_eq(&self, a: &OV, b: &OV) -> bool {
         match (a, b) {
             (OV::Int(x), OV::Int(y)) => x == y,
+            (OV::Float(x), OV::Float(y)) => oracle_float_eq(*x, *y),
             (OV::Bool(x), OV::Bool(y)) => x == y,
             (OV::Str(x), OV::Str(y))
             | (OV::Str(x), OV::Substring(y))
@@ -924,6 +944,7 @@ impl<'m> Oracle<'m> {
             let equal = match (&left, &right) {
                 (OV::Unit, OV::Unit) => true,
                 (OV::Int(x), OV::Int(y)) => x == y,
+                (OV::Float(x), OV::Float(y)) => oracle_float_eq(*x, *y),
                 (OV::Bool(x), OV::Bool(y)) => x == y,
                 (OV::Char(x), OV::Char(y)) => x == y,
                 (OV::Str(x), OV::Str(y))
@@ -1012,6 +1033,7 @@ impl<'m> Oracle<'m> {
             }
             match (&ia[i], &ib[i]) {
                 (OV::Int(x), OV::Int(y)) => x == y,
+                (OV::Float(x), OV::Float(y)) => oracle_float_eq(*x, *y),
                 (OV::Bool(x), OV::Bool(y)) => x == y,
                 (OV::Str(x), OV::Str(y)) if *e == lm_types::STRING => x == y,
                 _ => self.ref_eq(&ia[i], &ib[i]),
@@ -1022,6 +1044,19 @@ impl<'m> Oracle<'m> {
     fn binary(&self, op: BinOp, operand_ty: lm_types::TypeId, l: OV, r: OV) -> EResult {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                if operand_ty == lm_types::FLOAT {
+                    let a = self.as_float(&l)?;
+                    let b = self.as_float(&r)?;
+                    let out = match op {
+                        BinOp::Add => a + b,
+                        BinOp::Sub => a - b,
+                        BinOp::Mul => a * b,
+                        BinOp::Div => a / b,
+                        BinOp::Rem => return Err(Stop::Limit("Float has no remainder")),
+                        _ => unreachable!(),
+                    };
+                    return Ok(OV::Float(lm_value::canonical_float_bits(out.to_bits())));
+                }
                 let a = self.as_int(&l)?;
                 let b = self.as_int(&r)?;
                 let out = match op {
@@ -1043,6 +1078,16 @@ impl<'m> Oracle<'m> {
                 out.map(OV::Int).ok_or(Stop::Fault("IntegerOverflow"))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                if operand_ty == lm_types::FLOAT {
+                    let a = self.as_float(&l)?;
+                    let b = self.as_float(&r)?;
+                    return Ok(OV::Bool(match op {
+                        BinOp::Lt => a < b,
+                        BinOp::Le => a <= b,
+                        BinOp::Gt => a > b,
+                        _ => a >= b,
+                    }));
+                }
                 let a = self.as_int(&l)?;
                 let b = self.as_int(&r)?;
                 Ok(OV::Bool(match op {
@@ -1061,12 +1106,32 @@ impl<'m> Oracle<'m> {
                 } else {
                     match (&l, &r) {
                         (OV::Int(a), OV::Int(b)) => a == b,
+                        (OV::Float(a), OV::Float(b)) => oracle_float_eq(*a, *b),
                         (OV::Bool(a), OV::Bool(b)) => a == b,
                         (OV::Str(a), OV::Str(b)) if operand_ty == lm_types::STRING => a == b,
                         _ => self.ref_eq(&l, &r),
                     }
                 };
                 Ok(OV::Bool(if op == BinOp::Eq { equal } else { !equal }))
+            }
+            BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr
+            | BinOp::Ushr => {
+                let left = self.as_int(&l)?;
+                let right = self.as_int(&r)?;
+                let value = match op {
+                    BinOp::BitAnd => left & right,
+                    BinOp::BitOr => left | right,
+                    BinOp::BitXor => left ^ right,
+                    BinOp::Shl => ((left as u64) << oracle_shift(right)?) as i64,
+                    BinOp::Shr => left >> oracle_shift(right)?,
+                    BinOp::Ushr => ((left as u64) >> oracle_shift(right)?) as i64,
+                    _ => unreachable!(),
+                };
+                Ok(OV::Int(value))
             }
         }
     }
@@ -1095,12 +1160,28 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_INT_MUL => Some((BinOp::Mul, lm_types::INT)),
             lm_abi::INTRINSIC_INT_DIV => Some((BinOp::Div, lm_types::INT)),
             lm_abi::INTRINSIC_INT_REM => Some((BinOp::Rem, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_BIT_AND => Some((BinOp::BitAnd, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_BIT_OR => Some((BinOp::BitOr, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_BIT_XOR => Some((BinOp::BitXor, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_SHL => Some((BinOp::Shl, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_SHR => Some((BinOp::Shr, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_USHR => Some((BinOp::Ushr, lm_types::INT)),
             lm_abi::INTRINSIC_INT_EQ => Some((BinOp::Eq, lm_types::INT)),
             lm_abi::INTRINSIC_INT_NE => Some((BinOp::Ne, lm_types::INT)),
             lm_abi::INTRINSIC_INT_LT => Some((BinOp::Lt, lm_types::INT)),
             lm_abi::INTRINSIC_INT_LE => Some((BinOp::Le, lm_types::INT)),
             lm_abi::INTRINSIC_INT_GT => Some((BinOp::Gt, lm_types::INT)),
             lm_abi::INTRINSIC_INT_GE => Some((BinOp::Ge, lm_types::INT)),
+            lm_abi::INTRINSIC_FLOAT_ADD => Some((BinOp::Add, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_SUB => Some((BinOp::Sub, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_MUL => Some((BinOp::Mul, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_DIV => Some((BinOp::Div, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_EQ => Some((BinOp::Eq, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_NE => Some((BinOp::Ne, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_LT => Some((BinOp::Lt, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_LE => Some((BinOp::Le, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_GT => Some((BinOp::Gt, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_GE => Some((BinOp::Ge, lm_types::FLOAT)),
             lm_abi::INTRINSIC_BOOL_EQ => Some((BinOp::Eq, lm_types::BOOL)),
             lm_abi::INTRINSIC_BOOL_NE => Some((BinOp::Ne, lm_types::BOOL)),
             _ => None,
@@ -1119,6 +1200,66 @@ impl<'m> Oracle<'m> {
                 .checked_neg()
                 .map(OV::Int)
                 .ok_or(Stop::Fault("IntegerOverflow")),
+            lm_abi::INTRINSIC_INT_BIT_NOT => Ok(OV::Int(!self.as_int(&values[0])?)),
+            lm_abi::INTRINSIC_INT_WRAPPING_ADD
+            | lm_abi::INTRINSIC_INT_WRAPPING_SUB
+            | lm_abi::INTRINSIC_INT_WRAPPING_MUL => {
+                let left = self.as_int(&values[0])?;
+                let right = self.as_int(&values[1])?;
+                Ok(OV::Int(match intrinsic {
+                    lm_abi::INTRINSIC_INT_WRAPPING_ADD => left.wrapping_add(right),
+                    lm_abi::INTRINSIC_INT_WRAPPING_SUB => left.wrapping_sub(right),
+                    _ => left.wrapping_mul(right),
+                }))
+            }
+            lm_abi::INTRINSIC_INT_ROTATE_LEFT | lm_abi::INTRINSIC_INT_ROTATE_RIGHT => {
+                let value = self.as_int(&values[0])? as u64;
+                let amount = oracle_shift(self.as_int(&values[1])?)?;
+                let result = if intrinsic == lm_abi::INTRINSIC_INT_ROTATE_LEFT {
+                    value.rotate_left(amount)
+                } else {
+                    value.rotate_right(amount)
+                };
+                Ok(OV::Int(result as i64))
+            }
+            lm_abi::INTRINSIC_INT_TO_FLOAT => {
+                Ok(OV::Float((self.as_int(&values[0])? as f64).to_bits()))
+            }
+            lm_abi::INTRINSIC_FLOAT_NEG => Ok(OV::Float(lm_value::canonical_float_bits(
+                (-self.as_float(&values[0])?).to_bits(),
+            ))),
+            lm_abi::INTRINSIC_FLOAT_IS_NAN => Ok(OV::Bool(self.as_float(&values[0])?.is_nan())),
+            lm_abi::INTRINSIC_FLOAT_HASH => Ok(OV::Int(oracle_float_hash(match values[0] {
+                OV::Float(bits) => bits,
+                _ => return Err(Stop::Limit("expected a Float value")),
+            }))),
+            lm_abi::INTRINSIC_FLOAT_BITS => match values[0] {
+                OV::Float(bits) => Ok(OV::Int(lm_value::canonical_float_bits(bits) as i64)),
+                _ => Err(Stop::Limit("expected a Float value")),
+            },
+            lm_abi::INTRINSIC_FLOAT_FROM_BITS => Ok(OV::Float(lm_value::canonical_float_bits(
+                self.as_int(&values[0])? as u64,
+            ))),
+            lm_abi::INTRINSIC_FLOAT_TO_INT_STATUS => {
+                let value = self.as_float(&values[0])?;
+                Ok(OV::Int(if !value.is_finite() {
+                    1
+                } else if !oracle_float_fits_int(value) {
+                    2
+                } else {
+                    0
+                }))
+            }
+            lm_abi::INTRINSIC_FLOAT_TO_INT_VALUE => {
+                let value = self.as_float(&values[0])?;
+                if !value.is_finite() {
+                    return Err(Stop::Fault("BadCast"));
+                }
+                if !oracle_float_fits_int(value) {
+                    return Err(Stop::Fault("IntegerOverflow"));
+                }
+                Ok(OV::Int(value.trunc() as i64))
+            }
             lm_abi::INTRINSIC_BOOL_NOT => match values[0] {
                 OV::Bool(value) => Ok(OV::Bool(!value)),
                 _ => Err(Stop::Limit("non-Bool operand")),
@@ -1504,6 +1645,41 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Bool(result))
             }
+            lm_abi::INTRINSIC_BYTES_BIT_AND
+            | lm_abi::INTRINSIC_BYTES_BIT_OR
+            | lm_abi::INTRINSIC_BYTES_BIT_XOR => {
+                let left = self.as_obj(&values[0])?;
+                let right = self.as_obj(&values[1])?;
+                let left = match &left.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                let right = match &right.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                if left.len() != right.len() {
+                    return Err(Stop::Fault("IndexOutOfBounds"));
+                }
+                let bytes = left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| match intrinsic {
+                        lm_abi::INTRINSIC_BYTES_BIT_AND => left & right,
+                        lm_abi::INTRINSIC_BYTES_BIT_OR => left | right,
+                        _ => left ^ right,
+                    })
+                    .collect();
+                Ok(self.alloc(OKind::Bytes(bytes)))
+            }
+            lm_abi::INTRINSIC_BYTES_BIT_NOT => {
+                let bytes = self.as_obj(&values[0])?;
+                let bytes = match &bytes.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.iter().map(|value| !value).collect(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(self.alloc(OKind::Bytes(bytes)))
+            }
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;
@@ -1516,17 +1692,20 @@ impl<'m> Oracle<'m> {
                 Ok(values[0].clone())
             }
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND_INT
-            | lm_abi::INTRINSIC_STRING_BUILDER_APPEND_BOOL => {
+            | lm_abi::INTRINSIC_STRING_BUILDER_APPEND_BOOL
+            | lm_abi::INTRINSIC_STRING_BUILDER_APPEND_FLOAT => {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;
                 let text = if intrinsic == lm_abi::INTRINSIC_STRING_BUILDER_APPEND_INT {
                     self.as_int(&values[1])?.to_string()
-                } else {
+                } else if intrinsic == lm_abi::INTRINSIC_STRING_BUILDER_APPEND_BOOL {
                     match &values[1] {
                         OV::Bool(true) => "true".to_string(),
                         OV::Bool(false) => "false".to_string(),
                         _ => return Err(Stop::Limit("expected a Bool value")),
                     }
+                } else {
+                    self.as_float(&values[1])?.to_string()
                 };
                 match &mut builder.borrow_mut().kind {
                     OKind::Sb(Some(buffer)) => buffer.push_str(&text),
@@ -2107,6 +2286,7 @@ impl<'m> Oracle<'m> {
             OV::Unit => "()".to_string(),
             OV::Bool(v) => v.to_string(),
             OV::Int(v) => v.to_string(),
+            OV::Float(bits) => f64::from_bits(*bits).to_string(),
             OV::Char(value) => format!("{value:?}"),
             OV::Str(s) => render_string(s),
             OV::Substring(s) => render_string(s),
@@ -2208,6 +2388,33 @@ impl<'m> Oracle<'m> {
             }
         }
     }
+}
+
+fn oracle_float_eq(left: u64, right: u64) -> bool {
+    let left = f64::from_bits(left);
+    let right = f64::from_bits(right);
+    left == right || (left.is_nan() && right.is_nan())
+}
+
+fn oracle_float_hash(bits: u64) -> i64 {
+    let bits = lm_value::canonical_float_bits(bits);
+    if bits << 1 == 0 {
+        0
+    } else {
+        bits as i64
+    }
+}
+
+fn oracle_float_fits_int(value: f64) -> bool {
+    value >= i64::MIN as f64 && value < 9_223_372_036_854_775_808.0
+}
+
+fn oracle_shift(value: i64) -> Result<u32, Stop> {
+    let value = u32::try_from(value).map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+    if value > 63 {
+        return Err(Stop::Fault("IndexOutOfBounds"));
+    }
+    Ok(value)
 }
 
 /// Render a string value with quotation marks and escapes, matching

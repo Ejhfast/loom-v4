@@ -88,9 +88,9 @@ fn definition_hashes_do_not_depend_on_source_order() {
         "class Box[T]\n  value: T\n  def init(mut self, value: T)\n    self.value = value\n  \
          end\nend\n",
         "def alpha(): String\n  b = Box(\"shared literal\")\n  i = Box(7)\n  \
-         \"{b.value} {i.value} first\"\nend\n",
+         \"#{b.value} #{i.value} first\"\nend\n",
         "def beta(): String\n  i = Box(9)\n  b = Box(\"shared literal\")\n  \
-         \"{b.value} {i.value} second\"\nend\n",
+         \"#{b.value} #{i.value} second\"\nend\n",
         // Mutual recursion: one strongly connected component.
         "def is_even(n: Int): Bool\n  if n == 0\n    true\n  else\n    is_odd(n - 1)\n  end\nend\n",
         "def is_odd(n: Int): Bool\n  if n == 0\n    false\n  else\n    is_even(n - 1)\n  end\nend\n",
@@ -226,6 +226,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
     });
     let module = Module {
         strings: vec![],
+        bytes: vec![],
         types: vec![
             lm_bytecode::BcType::Unit,
             lm_bytecode::BcType::Bool,

@@ -92,6 +92,22 @@ final class Bytes implements Hashable, Comparable
     intrinsic("bytes.concat", self, other)
   end
 
+  def __and__(self, other: Bytes): Bytes
+    intrinsic("bytes.bit_and", self, other)
+  end
+
+  def __or__(self, other: Bytes): Bytes
+    intrinsic("bytes.bit_or", self, other)
+  end
+
+  def __xor__(self, other: Bytes): Bytes
+    intrinsic("bytes.bit_xor", self, other)
+  end
+
+  def __invert__(self): Bytes
+    intrinsic("bytes.bit_not", self)
+  end
+
   def __eq__(self, other: Bytes): Bool
     intrinsic("bytes.eq", self, other)
   end
@@ -138,6 +154,10 @@ final class StringBuilder implements Copyable
 
   def append_bool(mut self, value: Bool): StringBuilder
     intrinsic("string_builder.append_bool", self, value)
+  end
+
+  def append_float(mut self, value: Float): StringBuilder
+    intrinsic("string_builder.append_float", self, value)
   end
 
   def push_char(mut self, value: Char): StringBuilder

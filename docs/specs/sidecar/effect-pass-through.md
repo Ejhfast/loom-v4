@@ -83,7 +83,7 @@ a.table().pass(Io.Print)
 
 seen: [String] = []
 out = drive_loop(a, seen)
-sys.io.print("intercepted={out[0].len()} result={out[1]}\n")
+sys.io.print("intercepted=#{out[0].len()} result=#{out[1]}\n")
 ```
 
 ### 3.1 Behavior before the fix

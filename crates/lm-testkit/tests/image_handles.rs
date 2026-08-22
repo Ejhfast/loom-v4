@@ -7,7 +7,8 @@
 
 use lm_heap::Object;
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, LoadedModule, RecordingHost, VmConfig, World};
+use lm_vm::snapshot::{codec, LoadLimits};
+use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, World};
 
 fn program(source: &str) -> LoadedModule {
     let bytes = compile_to_bytes("images.lm", source).expect("the program compiles");
@@ -123,4 +124,49 @@ vm.snapshot()
         Object::NativeSnapshot(bytes) => assert!(!bytes.is_empty()),
         other => panic!("a captured world states a container, got {other:?}"),
     }
+}
+
+#[test]
+fn a_snapshot_preserves_float_and_byte_values() {
+    let loaded = program("(Float.from_bits(0x7ff0000000000001), b\"\\x00\\xff\")\n");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    assert!(matches!(lm_proc::run_world(&mut world), Outcome::Done(_)));
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the capture succeeds");
+    let bytes = image.bytes().expect("the image encodes");
+    let admitted =
+        codec::load_external(bytes, &loaded, LoadLimits::default()).expect("the image admits");
+
+    let mut restored = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = restored.new_child(0).expect("the restore target exists");
+    let root = restored
+        .restore_image(0, target, &admitted)
+        .expect("the image restores");
+    let value = match restored.run_machine(root) {
+        RootEvent::Done(value) => value,
+        other => panic!("expected a terminal value, got {other:?}"),
+    };
+    let tuple = value.as_obj().expect("the result is a tuple");
+    let Object::Tuple { items } = restored.heap_of(root).get(tuple) else {
+        panic!("the result must stay a tuple");
+    };
+    assert_eq!(
+        items[0],
+        lm_value::Value::Float(lm_value::CANONICAL_NAN_BITS)
+    );
+    let bytes = items[1].as_obj().expect("the second item is Bytes");
+    let Object::Bytes(bytes) = restored.heap_of(root).get(bytes) else {
+        panic!("the second item must stay Bytes");
+    };
+    assert_eq!(bytes.as_slice(), &[0, 255]);
 }

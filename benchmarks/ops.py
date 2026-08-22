@@ -230,6 +230,24 @@ def string_interp():
     return s
 
 
+def int_bitwise():
+    i = 0
+    value = 0
+    while i < 1000000:
+        value = value ^ i
+        i = i + 1
+    return value
+
+
+def float_add():
+    i = 0
+    value = 0.0
+    while i < 1000000:
+        value = value + 1.25
+        i = i + 1
+    return value
+
+
 CASES = [
     ("int_loop", int_loop, 1000000),
     ("direct_call", direct_call, 1000000),
@@ -247,6 +265,8 @@ CASES = [
     ("tuple_hash", tuple_hash, 200000),
     ("list_sort", list_sort, 20000),
     ("string_interp", string_interp, 200000),
+    ("int_bitwise", int_bitwise, 1000000),
+    ("float_add", float_add, 1000000),
 ]
 
 

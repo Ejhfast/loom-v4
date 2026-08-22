@@ -30,12 +30,12 @@ end
 
 # A Substring interpolates without a copy.
 padded = "  x  "
-edges = "[{padded.trim_start()}][{padded.trim_end()}]"
+edges = "[#{padded.trim_start()}][#{padded.trim_end()}]"
 
 raw = "hello".bytes()
 suffix = "lo".bytes()
 middle = "ell".bytes()
-flags = "{raw.ends_with(suffix)} {raw.contains(middle)}"
+flags = "#{raw.ends_with(suffix)} #{raw.contains(middle)}"
 swapped = "a-b".replace("-", "+")
 
-"{name} {length} {route} {stem} {edges} {swapped} {flags}"
+"#{name} #{length} #{route} #{stem} #{edges} #{swapped} #{flags}"

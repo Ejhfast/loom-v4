@@ -15,5 +15,5 @@ class Matrix
 end
 
 def describe(m: Matrix): String
-  "{m.rows}x{m.cols}"
+  "#{m.rows}x#{m.cols}"
 end

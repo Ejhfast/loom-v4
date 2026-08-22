@@ -79,12 +79,63 @@ fn a_class_hook_serves_a_comparison() {
 fn a_hook_result_type_is_free() {
     let source = "final class Tag
   def __add__(self, other: Int): String
-    \"tag{other}\"
+    \"tag#{other}\"
   end
 end
 Tag() + 7
 ";
     assert_eq!(run(source), "Done(\"tag7\")");
+}
+
+#[test]
+fn bitwise_operators_use_class_hooks() {
+    let source = "final class Flags
+  bits: Int
+
+  def init(mut self, bits: Int)
+    self.bits = bits
+  end
+
+  def __and__(self, other: Flags): Flags
+    Flags(self.bits & other.bits)
+  end
+
+  def __or__(self, other: Flags): Flags
+    Flags(self.bits | other.bits)
+  end
+
+  def __xor__(self, other: Flags): Flags
+    Flags(self.bits ^ other.bits)
+  end
+
+  def __invert__(self): Flags
+    Flags(~self.bits)
+  end
+
+  def __shl__(self, amount: Int): Flags
+    Flags(self.bits << amount)
+  end
+
+  def __shr__(self, amount: Int): Flags
+    Flags(self.bits >> amount)
+  end
+
+  def __ushr__(self, amount: Int): Flags
+    Flags(self.bits >>> amount)
+  end
+end
+
+(
+  (Flags(12) & Flags(10)).bits,
+  (Flags(12) | Flags(10)).bits,
+  (Flags(12) ^ Flags(10)).bits,
+  (~Flags(0)).bits,
+  (Flags(1) << 4).bits,
+  (Flags(-8) >> 2).bits,
+  (Flags(-1) >>> 60).bits
+)
+";
+    assert_eq!(run(source), "Done((8, 14, 6, -1, 16, -2, 15))");
 }
 
 /// `==` reads `__eq__` only through a `PartialEq` conformance.

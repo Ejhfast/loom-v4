@@ -77,12 +77,27 @@ impl PartialEq for Witness {
     }
 }
 
-/// One runtime value. `Int` keeps its full 64-bit width.
+/// The canonical quiet NaN encoding.
+pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+/// Normalize every NaN encoding to one canonical value.
+pub fn canonical_float_bits(bits: u64) -> u64 {
+    let value = f64::from_bits(bits);
+    if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else {
+        bits
+    }
+}
+
+/// One runtime value. `Int` and `Float` keep their full 64-bit width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
+    /// One canonical IEEE 754 binary64 bit pattern.
+    Float(u64),
     /// One Unicode scalar value.
     Char(char),
     /// A reference to a heap object: string, instance, list, map,
@@ -136,6 +151,15 @@ mod tests {
     fn int_keeps_full_width() {
         let v = Value::Int(i64::MIN);
         assert_eq!(v, Value::Int(i64::MIN));
+    }
+
+    #[test]
+    fn float_keeps_bits_and_normalizes_nan() {
+        assert_eq!(Value::Float((-0.0f64).to_bits()), Value::Float(1u64 << 63));
+        assert_eq!(
+            canonical_float_bits(0x7ff0_0000_0000_0001),
+            CANONICAL_NAN_BITS
+        );
     }
 
     #[test]

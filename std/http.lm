@@ -417,12 +417,12 @@ final class Http
     wire.extend(target_bytes)
     wire.extend(Bytes(" HTTP/1.1\r\nHost: "))
     authority = if host.contains(":")
-      "[{host}]"
+      "[#{host}]"
     else
       host
     end
     if port != 80
-      authority = "{authority}:{port}"
+      authority = "#{authority}:#{port}"
     end
     authority_bytes = authority.bytes()
     if authority_bytes.len() > limits.max_header_bytes - wire.len()
@@ -465,7 +465,7 @@ final class Http
       end
       index = index + 1
     end
-    wire.extend(Bytes("Content-Length: {request.body.len()}\r\n\r\n"))
+    wire.extend(Bytes("Content-Length: #{request.body.len()}\r\n\r\n"))
     if wire.len() > limits.max_header_bytes
       return Err(HttpError.LimitExceeded("the request headers are too large"))
     end
@@ -504,7 +504,7 @@ final class Http
     if reason.bytes().len() > limits.max_header_bytes
       return Err(HttpError.LimitExceeded("the response headers are too large"))
     end
-    wire.extend(Bytes("HTTP/1.1 {response.status} {reason}\r\nConnection: close\r\n"))
+    wire.extend(Bytes("HTTP/1.1 #{response.status} #{reason}\r\nConnection: close\r\n"))
     if wire.len() > limits.max_header_bytes
       return Err(HttpError.LimitExceeded("the response headers are too large"))
     end
@@ -538,7 +538,7 @@ final class Http
       end
       index = index + 1
     end
-    wire.extend(Bytes("Content-Length: {response.body.len()}\r\n\r\n"))
+    wire.extend(Bytes("Content-Length: #{response.body.len()}\r\n\r\n"))
     if wire.len() > limits.max_header_bytes
       return Err(HttpError.LimitExceeded("the response headers are too large"))
     end

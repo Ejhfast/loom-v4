@@ -1647,7 +1647,7 @@ mod tests {
             .map(|byte| format!("root.append({byte})\n"))
             .collect();
         let source = format!(
-            r#"
+            r##"
 use std.tls.TlsClientConfig
 use std.tls.TlsRoots
 use std.tls.TlsVersion
@@ -1671,10 +1671,10 @@ case Http().send_secure(
   config,
   Http().default_limits()
 )
-in Ok(response) then "{{response.status}} {{response.body.text()}}"
+in Ok(response) then "#{{response.status}} #{{response.body.text()}}"
 in Err(error) then display(error)
 end
-"#
+"##
         );
         let bytes =
             compile_to_bytes("local_https.lm", &source).expect("the HTTPS program compiles");

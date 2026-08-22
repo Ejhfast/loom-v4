@@ -227,6 +227,7 @@ fn closed_types_match(
             (ClosedType::Unit, ClosedType::Unit)
             | (ClosedType::Bool, ClosedType::Bool)
             | (ClosedType::Int, ClosedType::Int)
+            | (ClosedType::Float, ClosedType::Float)
             | (ClosedType::Str, ClosedType::Str)
             | (ClosedType::Fault, ClosedType::Fault)
             | (ClosedType::Request, ClosedType::Request)

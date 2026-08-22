@@ -22,13 +22,13 @@ def fetch_status(): String with Http.CleartextClient
   http = Http()
   request = HttpRequest("GET", "/status", [], Bytes(""))
   case http.send("api.test", 80, request, http.default_limits())
-  in Err(error) then "failed: {error}"
+  in Err(error) then "failed: #{error}"
   in Ok(response)
     kind = case response.header("content-type")
     in Some(value) then value.text()
     in None        then "(none)"
     end
-    "{response.status} {kind} {response.body.text()}"
+    "#{response.status} #{kind} #{response.body.text()}"
   end
 end
 

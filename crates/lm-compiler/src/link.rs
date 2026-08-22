@@ -131,6 +131,8 @@ impl LinkedEntry<'_> {
 struct Merged {
     strings: Vec<String>,
     string_index: HashMap<String, u32>,
+    bytes: Vec<Vec<u8>>,
+    bytes_index: HashMap<Vec<u8>, u32>,
     types: Vec<BcType>,
     type_index: HashMap<BcType, u32>,
     selectors: Vec<String>,
@@ -189,6 +191,8 @@ impl Default for Merged {
         Merged {
             strings: Vec::new(),
             string_index: HashMap::new(),
+            bytes: Vec::new(),
+            bytes_index: HashMap::new(),
             types: Vec::new(),
             type_index: HashMap::new(),
             selectors: Vec::new(),
@@ -241,6 +245,17 @@ impl Merged {
         idx
     }
 
+    fn bytes(&mut self, value: &[u8]) -> u32 {
+        if let Some(idx) = self.bytes_index.get(value) {
+            return *idx;
+        }
+        let idx = self.bytes.len() as u32;
+        let value = value.to_vec();
+        self.bytes.push(value.clone());
+        self.bytes_index.insert(value, idx);
+        idx
+    }
+
     fn ty(&mut self, ty: BcType) -> u32 {
         if let Some(idx) = self.type_index.get(&ty) {
             return *idx;
@@ -265,6 +280,7 @@ impl Merged {
 /// One module's relocation maps.
 struct Reloc {
     strings: Vec<u32>,
+    bytes: Vec<u32>,
     types: Vec<u32>,
     selectors: Vec<u32>,
     apps: Vec<u32>,
@@ -310,6 +326,7 @@ pub fn link_with_bundle(
     let entry = entry.ok_or_else(|| fail("the root module is not bound"))?;
     let module = Module {
         strings: merged.strings,
+        bytes: merged.bytes,
         types: merged.types,
         selectors: merged.selectors,
         apps: merged.apps,
@@ -401,6 +418,11 @@ fn relocate(
 ) -> Result<Reloc, LinkError> {
     check_ctor_bindings(module, path)?;
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
+    let bytes: Vec<u32> = module
+        .bytes
+        .iter()
+        .map(|value| merged.bytes(value))
+        .collect();
     let selectors: Vec<u32> = module
         .selectors
         .iter()
@@ -569,6 +591,7 @@ fn relocate(
     }
     let mut reloc = Reloc {
         strings,
+        bytes,
         types,
         selectors,
         apps,
@@ -1386,6 +1409,7 @@ fn reloc_func(func: &Func, reloc: &Reloc) -> Func {
 fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
     match instr {
         Instr::ConstStr(idx) => Instr::ConstStr(reloc.strings[*idx as usize]),
+        Instr::ConstBytes(idx) => Instr::ConstBytes(reloc.bytes[*idx as usize]),
         Instr::Call(f) => Instr::Call(reloc.funcs[*f as usize]),
         Instr::CallG { func, app } => Instr::CallG {
             func: reloc.funcs[*func as usize],
@@ -1446,6 +1470,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         Instr::ConstUnit
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
+        | Instr::ConstFloat(_)
+        | Instr::Numeric(_)
         | Instr::LoadLocal(_)
         | Instr::StoreLocal(_)
         | Instr::Pop

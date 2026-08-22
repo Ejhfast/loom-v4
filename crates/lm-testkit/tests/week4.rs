@@ -208,7 +208,7 @@ fn a_label_must_name_a_parameter_of_the_target() {
 #[test]
 fn tuple_patterns_destructure_native_tuples() {
     assert_eq!(
-        runs("p = (2, \"x\")\ncase p\nin (a, b) then \"{b}{a}\"\nend\n"),
+        runs("p = (2, \"x\")\ncase p\nin (a, b) then \"#{b}#{a}\"\nend\n"),
         "Done(\"x2\")"
     );
     // Nested patterns inside a tuple pattern.
@@ -1108,7 +1108,7 @@ fn program_captures_and_arguments_copy_at_the_loader_boundary() {
     // Arguments transfer through the control envelope, strings
     // included.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate_or_fault(do |a: Int, b: String|: String\n    \"{b}{a}\"\n  end, args: (42, \"x\"))\n  \
+        vm = sys.vm.Vm().activate_or_fault(do |a: Int, b: String|: String\n    \"#{b}#{a}\"\n  end, args: (42, \"x\"))\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then \"fault\"\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"x42\")");
 }
@@ -1273,8 +1273,8 @@ fn op_name_reads_the_operation_of_a_wildcard_arm() {
         vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
         case vm.drive()\n  in Asked(request)\n    \
         name = request.op_name()\n    \
-        vm.reject(request, Fault.denied(\"{name} is not permitted\"))\n    \
-        case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then \"{name} {f.code()}\"\n    end\n  \
+        vm.reject(request, Fault.denied(\"#{name} is not permitted\"))\n    \
+        case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then \"#{name} #{f.code()}\"\n    end\n  \
         in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"Clock.Now PolicyDenied\")");
 }

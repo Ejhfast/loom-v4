@@ -47,9 +47,9 @@ and the deferred work.
   `Bool`, `Int`, or `String`.
 - `StringBuilder` with `append`/`build` and `ByteBuffer` with
   `append`/`len`/`build`.
-- String interpolation `"Hello {name}!"` for `Int`, `Bool`, and
-  `String` values. It lowers to builder instructions. `{{` and `}}`
-  escapes still work.
+- That slice used `"Hello {name}!"` interpolation for `Int`, `Bool`,
+  and `String` values. It lowered interpolation to builder instructions.
+  The current scanner uses `#{...}` and treats plain braces as text.
 - Equality per specification section 6.4 for the in-scope types:
   scalars and strings by value; instances, lists, maps, closures,
   and builders by reference identity.

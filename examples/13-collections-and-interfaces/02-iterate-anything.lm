@@ -19,7 +19,7 @@ def longest_key(table: Map[String, Int]): String
   best = ""
   for key, value in table
     if key.len() > best.len()
-      best = "{key}"
+      best = "#{key}"
     end
   end
   best
@@ -49,15 +49,15 @@ end
 def first_two(values: [Int]): (String, String, String)
   steps = values.iterator()
   one = case steps.next()
-  in Some(value) then "{value}"
+  in Some(value) then "#{value}"
   in None        then "end"
   end
   two = case steps.next()
-  in Some(value) then "{value}"
+  in Some(value) then "#{value}"
   in None        then "end"
   end
   three = case steps.next()
-  in Some(value) then "{value}"
+  in Some(value) then "#{value}"
   in None        then "end"
   end
   (one, two, three)

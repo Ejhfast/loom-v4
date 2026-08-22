@@ -75,7 +75,7 @@ fn workspace(tree: &TempTree) {
          end\n\
          \n\
          def describe(m: Matrix): String\n\
-         \x20 \"{m.rows}x{m.cols}\"\n\
+         \x20 \"#{m.rows}x#{m.cols}\"\n\
          end\n",
     );
     tree.write(
@@ -88,11 +88,11 @@ fn workspace(tree: &TempTree) {
         "use mathlib.matrix\n\
          \n\
          def greet(name: String): String\n\
-         \x20 \"Hello {name}!\"\n\
+         \x20 \"Hello #{name}!\"\n\
          end\n\
          \n\
          def report(m: matrix.Matrix): String\n\
-         \x20 \"{matrix.describe(m)} has {m.area()} cells\"\n\
+         \x20 \"#{matrix.describe(m)} has #{m.area()} cells\"\n\
          end\n",
     );
     tree.write(
@@ -104,8 +104,8 @@ fn workspace(tree: &TempTree) {
          def run() with Io.Print\n\
          \x20 m = matrix.Matrix(2, 3)\n\
          \x20 line = greeting.greet(\"Ada\")\n\
-         \x20 print(\"{line}\\n\")\n\
-         \x20 print(\"{greeting.report(m)}\\n\")\n\
+         \x20 print(\"#{line}\\n\")\n\
+         \x20 print(\"#{greeting.report(m)}\\n\")\n\
          end\n\
          \n\
          run()\n",
@@ -233,7 +233,7 @@ fn a_source_edit_misses_the_program_cache() {
         "mathlib/src/matrix.lm",
         &std::fs::read_to_string(tree.path("mathlib/src/matrix.lm"))
             .unwrap()
-            .replace("\"{m.rows}x{m.cols}\"", "\"{m.rows} by {m.cols}\""),
+            .replace("\"#{m.rows}x#{m.cols}\"", "\"#{m.rows} by #{m.cols}\""),
     );
     let second = tree.build("app").expect("builds");
     assert!(!second.program_cached, "the edit hit the program cache");
@@ -247,7 +247,7 @@ fn a_source_edit_misses_the_program_cache() {
         "mathlib/src/matrix.lm",
         &std::fs::read_to_string(tree.path("mathlib/src/matrix.lm"))
             .unwrap()
-            .replace("\"{m.rows} by {m.cols}\"", "\"{m.rows}x{m.cols}\""),
+            .replace("\"#{m.rows} by #{m.cols}\"", "\"#{m.rows}x#{m.cols}\""),
     );
     let third = tree.build("app").expect("builds");
     assert!(third.program_cached, "the restored set missed");

@@ -11,6 +11,7 @@ const PIN: [u8; 32] = [7u8; 32];
 fn importing_module(pin: [u8; 32]) -> Module {
     Module {
         strings: vec![],
+        bytes: vec![],
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],

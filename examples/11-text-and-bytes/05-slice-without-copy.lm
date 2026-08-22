@@ -34,4 +34,4 @@ raw = document.bytes()
 window = case raw.slice(0, 8) in Ok(part) then part in Err(_) then raw end
 owned = window.compact()
 
-"view={view} durable={durable} window={window.len()} owned={owned.len()} source={document.byte_len()}"
+"view=#{view} durable=#{durable} window=#{window.len()} owned=#{owned.len()} source=#{document.byte_len()}"

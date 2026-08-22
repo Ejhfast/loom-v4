@@ -576,6 +576,7 @@ fn extension_type_supported(ty: AbiType, resources: &BTreeSet<[u8; 32]>) -> bool
             AbiPrimitive::Unit
             | AbiPrimitive::Bool
             | AbiPrimitive::Int
+            | AbiPrimitive::Float
             | AbiPrimitive::String
             | AbiPrimitive::Bytes,
         ) => true,

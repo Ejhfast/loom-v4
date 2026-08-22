@@ -225,7 +225,7 @@ fn help_and_version_succeed() {
 fn args_effect_receives_exact_arguments() {
     let path = probe(
         "command-arguments",
-        "def go(): String with Args\n  args = sys.args()\n  \"{args.len()}:{args.at(0)}:{args.at(1)}\"\nend\ngo()\n",
+        "def go(): String with Args\n  args = sys.args()\n  \"#{args.len()}:#{args.at(0)}:#{args.at(1)}\"\nend\ngo()\n",
     );
     let out = lm(&[
         "run",
@@ -386,7 +386,7 @@ fn a_closed_output_pipe_does_not_panic() {
     let path = repo_root().join("target/test-closed-pipe.lm");
     std::fs::write(
         &path,
-        "def go() with Io.Print\n  for n in Range(0, 100)\n    sys.io.print(\"line {n}\\n\")\n  end\nend\ngo()\n",
+        "def go() with Io.Print\n  for n in Range(0, 100)\n    sys.io.print(\"line #{n}\\n\")\n  end\nend\ngo()\n",
     )
     .expect("the probe source writes");
     let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
@@ -543,7 +543,7 @@ fn a_package_command_receives_its_arguments() {
     .expect("the manifest writes");
     std::fs::write(
         root.join("src/main.lm"),
-        "def go(): String with Args\n  args = sys.args()\n  \"{args.at(0)}:{args.at(1)}\"\nend\ngo()\n",
+        "def go(): String with Args\n  args = sys.args()\n  \"#{args.at(0)}:#{args.at(1)}\"\nend\ngo()\n",
     )
     .expect("the source writes");
     let path = root.display().to_string();

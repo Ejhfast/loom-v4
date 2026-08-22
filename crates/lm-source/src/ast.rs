@@ -296,6 +296,12 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Ushr,
 }
 
 impl BinOp {
@@ -312,6 +318,12 @@ impl BinOp {
             BinOp::Le => "<=",
             BinOp::Gt => ">",
             BinOp::Ge => ">=",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::Ushr => ">>>",
         }
     }
 }
@@ -376,7 +388,10 @@ pub enum PatternKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Int(i64),
+    /// IEEE 754 binary64 value, stored as raw bits.
+    Float(u64),
     Str(String),
+    Bytes(Vec<u8>),
     /// An interpolated string literal.
     Interp(Vec<InterpPart>),
     Bool(bool),
@@ -388,6 +403,7 @@ pub enum ExprKind {
     /// `not value` or `- value`.
     Not(Box<Expr>),
     Neg(Box<Expr>),
+    Invert(Box<Expr>),
     Binary {
         op: BinOp,
         left: Box<Expr>,
@@ -769,8 +785,14 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
         ExprKind::Int(v) => {
             let _ = writeln!(out, "int {v}");
         }
+        ExprKind::Float(bits) => {
+            let _ = writeln!(out, "float {:?}", f64::from_bits(*bits));
+        }
         ExprKind::Str(v) => {
             let _ = writeln!(out, "str {v:?}");
+        }
+        ExprKind::Bytes(v) => {
+            let _ = writeln!(out, "bytes {v:?}");
         }
         ExprKind::Interp(parts) => {
             out.push_str("interp\n");
@@ -798,6 +820,10 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
         }
         ExprKind::Neg(inner) => {
             out.push_str("neg\n");
+            dump_expr(out, inner, depth + 1);
+        }
+        ExprKind::Invert(inner) => {
+            out.push_str("invert\n");
             dump_expr(out, inner, depth + 1);
         }
         ExprKind::Binary { op, left, right } => {

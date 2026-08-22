@@ -1,2 +1,2 @@
 error[E1005]: cannot find `name` in this scope
-  --> tests/ui/interpolation.lm:1:9
+  --> tests/ui/interpolation.lm:1:10

@@ -1,0 +1,2 @@
+error[E0003]: a string byte escape must be in the ASCII range
+  --> tests/ui/string-non-ascii-byte-escape.lm:1:2

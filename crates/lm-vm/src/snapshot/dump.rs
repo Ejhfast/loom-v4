@@ -396,6 +396,7 @@ fn show(value: Value) -> String {
         Value::Unit => "()".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Int(v) => v.to_string(),
+        Value::Float(bits) => f64::from_bits(bits).to_string(),
         Value::Char(value) => format!("{value:?}"),
         Value::Op(op) => format!("<op {}>", op_text(op)),
         Value::EmptyCase { ty, arm } => format!("<empty type {ty} arm {arm}>"),

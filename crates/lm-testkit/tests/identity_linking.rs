@@ -697,6 +697,7 @@ fn chain_cycle(n: usize) -> Module {
     }
     Module {
         strings: vec![],
+        bytes: vec![],
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
@@ -824,6 +825,7 @@ fn many_chains(count: usize, per: usize, repeats: usize) -> Module {
     }
     Module {
         strings: vec![],
+        bytes: vec![],
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],

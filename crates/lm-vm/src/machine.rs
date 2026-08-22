@@ -9,12 +9,12 @@
 use crate::resource::{ResourceBudget, ResourceRegistry};
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
-use lm_bytecode::{ExtendedInstr, Instr, Module};
+use lm_bytecode::{ExtendedInstr, Instr, Module, NumericInstr};
 use lm_heap::{
     process_lookup_hash, FaultSite, Heap, HeapBudget, MapEntry, MapIndex, NativeByteBuffer,
     NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
 };
-use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
+use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 
 /// The largest typed wait table of one machine.
 pub const MAX_LIVE_WAITS: usize = 1_024;
@@ -744,6 +744,14 @@ impl Machine {
                     Ok(class)
                 }
             }
+            Value::Float(_) => {
+                let class = module.core_roles[lm_bytecode::corepin::ROLE_FLOAT];
+                if class == lm_bytecode::NO_ROLE {
+                    Err(BAD_TYPE)
+                } else {
+                    Ok(class)
+                }
+            }
             Value::Bool(_) => {
                 let class = module.core_roles[lm_bytecode::corepin::ROLE_BOOL];
                 if class == lm_bytecode::NO_ROLE {
@@ -1382,6 +1390,7 @@ impl Machine {
     fn key_eq(&self, a: Value, b: Value) -> bool {
         match (a, b) {
             (Value::Int(x), Value::Int(y)) => x == y,
+            (Value::Float(x), Value::Float(y)) => float_eq(x, y),
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Char(x), Value::Char(y)) => x == y,
             (Value::Obj(x), Value::Obj(y)) => {
@@ -1406,6 +1415,7 @@ impl Machine {
         match key {
             Value::Bool(value) => Ok(i64::from(value)),
             Value::Int(value) => Ok(value),
+            Value::Float(bits) => Ok(float_hash(bits)),
             Value::Char(value) => Ok(i64::from(u32::from(value))),
             Value::Obj(r) => match self.vm.heap.get(r) {
                 Object::Str(text) | Object::Substring(text) => Ok(text.semantic_hash() as i64),
@@ -1436,6 +1446,7 @@ impl Machine {
         match key {
             Value::Bool(value) => Ok(Self::map_index_hash(i64::from(value))),
             Value::Int(value) => Ok(Self::map_index_hash(value)),
+            Value::Float(bits) => Ok(Self::map_index_hash(float_hash(bits))),
             Value::Char(value) => Ok(Self::map_index_hash(i64::from(u32::from(value)))),
             Value::Obj(r) => match self.vm.heap.get(r) {
                 Object::Str(text) | Object::Substring(text) => Ok(text.lookup_hash()),
@@ -4418,6 +4429,7 @@ impl Machine {
             Instr::ConstUnit => self.push(Value::Unit)?,
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
             Instr::ConstInt(v) => self.push(Value::Int(v))?,
+            Instr::ConstFloat(bits) => self.push(Value::Float(canonical_float_bits(bits)))?,
             Instr::ConstStr(idx) => {
                 // Literal strings intern per machine: the first load
                 // allocates one frozen object, and every later load
@@ -4439,6 +4451,27 @@ impl Machine {
                 };
                 self.push(value)?;
             }
+            Instr::ConstBytes(idx) => {
+                let cache = module.strings.len() + idx as usize;
+                if self.vm.literals.len() <= cache {
+                    self.vm.literals.resize(cache + 1, None);
+                }
+                let value = match self.vm.literals[cache] {
+                    Some(reference) => Value::Obj(reference),
+                    None => {
+                        let bytes = module.bytes.get(idx as usize).ok_or(BAD_STATE)?;
+                        let bytes =
+                            SharedBytes::try_from_slice(bytes).map_err(|_| FaultCode::HeapLimit)?;
+                        let value = self.alloc(Object::Bytes(bytes))?;
+                        if let Value::Obj(reference) = value {
+                            self.vm.literals[cache] = Some(reference);
+                        }
+                        value
+                    }
+                };
+                self.push(value)?;
+            }
+            Instr::Numeric(instruction) => self.exec_numeric_instr(instruction)?,
             Instr::LoadLocal(slot) => {
                 let at = self.local_at(slot)?;
                 let value = *self.vm.locals.get(at).ok_or(BAD_STATE)?;
@@ -4970,6 +5003,187 @@ impl Machine {
         Ok(ExecOutcome::Continue)
     }
 
+    /// Execute one numeric or bitwise instruction.
+    #[inline(never)]
+    fn exec_numeric_instr(&mut self, instr: NumericInstr) -> Result<(), FaultCode> {
+        match instr {
+            NumericInstr::IntBitAnd
+            | NumericInstr::IntBitOr
+            | NumericInstr::IntBitXor
+            | NumericInstr::IntShl
+            | NumericInstr::IntShr
+            | NumericInstr::IntUshr
+            | NumericInstr::IntWrappingAdd
+            | NumericInstr::IntWrappingSub
+            | NumericInstr::IntWrappingMul
+            | NumericInstr::IntRotateLeft
+            | NumericInstr::IntRotateRight => {
+                let right = self.pop_int()?;
+                let left = self.pop_int()?;
+                let result = match instr {
+                    NumericInstr::IntBitAnd => left & right,
+                    NumericInstr::IntBitOr => left | right,
+                    NumericInstr::IntBitXor => left ^ right,
+                    NumericInstr::IntShl => {
+                        let amount = shift_amount(right)?;
+                        ((left as u64) << amount) as i64
+                    }
+                    NumericInstr::IntShr => {
+                        let amount = shift_amount(right)?;
+                        left >> amount
+                    }
+                    NumericInstr::IntUshr => {
+                        let amount = shift_amount(right)?;
+                        ((left as u64) >> amount) as i64
+                    }
+                    NumericInstr::IntWrappingAdd => left.wrapping_add(right),
+                    NumericInstr::IntWrappingSub => left.wrapping_sub(right),
+                    NumericInstr::IntWrappingMul => left.wrapping_mul(right),
+                    NumericInstr::IntRotateLeft => {
+                        (left as u64).rotate_left(shift_amount(right)?) as i64
+                    }
+                    NumericInstr::IntRotateRight => {
+                        (left as u64).rotate_right(shift_amount(right)?) as i64
+                    }
+                    _ => unreachable!(),
+                };
+                self.push(Value::Int(result))?;
+            }
+            NumericInstr::IntBitNot => {
+                let value = self.pop_int()?;
+                self.push(Value::Int(!value))?;
+            }
+            NumericInstr::IntToFloat => {
+                let value = self.pop_int()?;
+                self.push(Value::Float((value as f64).to_bits()))?;
+            }
+            NumericInstr::FloatNeg => {
+                let value = self.pop_float()?;
+                self.push_float(-value)?;
+            }
+            NumericInstr::FloatAdd
+            | NumericInstr::FloatSub
+            | NumericInstr::FloatMul
+            | NumericInstr::FloatDiv => {
+                let right = self.pop_float()?;
+                let left = self.pop_float()?;
+                let value = match instr {
+                    NumericInstr::FloatAdd => left + right,
+                    NumericInstr::FloatSub => left - right,
+                    NumericInstr::FloatMul => left * right,
+                    NumericInstr::FloatDiv => left / right,
+                    _ => unreachable!(),
+                };
+                self.push_float(value)?;
+            }
+            NumericInstr::FloatEq
+            | NumericInstr::FloatNe
+            | NumericInstr::FloatLt
+            | NumericInstr::FloatLe
+            | NumericInstr::FloatGt
+            | NumericInstr::FloatGe => {
+                let right = self.pop_float_bits()?;
+                let left = self.pop_float_bits()?;
+                let a = f64::from_bits(left);
+                let b = f64::from_bits(right);
+                let value = match instr {
+                    NumericInstr::FloatEq => float_eq(left, right),
+                    NumericInstr::FloatNe => !float_eq(left, right),
+                    NumericInstr::FloatLt => a < b,
+                    NumericInstr::FloatLe => a <= b,
+                    NumericInstr::FloatGt => a > b,
+                    NumericInstr::FloatGe => a >= b,
+                    _ => unreachable!(),
+                };
+                self.push(Value::Bool(value))?;
+            }
+            NumericInstr::FloatIsNan => {
+                let value = self.pop_float()?;
+                self.push(Value::Bool(value.is_nan()))?;
+            }
+            NumericInstr::FloatHash => {
+                let value = self.pop_float_bits()?;
+                self.push(Value::Int(float_hash(value)))?;
+            }
+            NumericInstr::FloatBits => {
+                let value = self.pop_float_bits()?;
+                self.push(Value::Int(canonical_float_bits(value) as i64))?;
+            }
+            NumericInstr::FloatFromBits => {
+                let value = self.pop_int()? as u64;
+                self.push(Value::Float(canonical_float_bits(value)))?;
+            }
+            NumericInstr::FloatToIntStatus => {
+                let value = self.pop_float()?;
+                let status = if !value.is_finite() {
+                    1
+                } else if !float_fits_int(value) {
+                    2
+                } else {
+                    0
+                };
+                self.push(Value::Int(status))?;
+            }
+            NumericInstr::FloatToIntValue => {
+                let value = self.pop_float()?;
+                if !value.is_finite() {
+                    return Err(FaultCode::BadCast);
+                }
+                if !float_fits_int(value) {
+                    return Err(FaultCode::IntegerOverflow);
+                }
+                self.push(Value::Int(value.trunc() as i64))?;
+            }
+            NumericInstr::SbAppendFloat => {
+                let value = self.pop_float()?;
+                let builder = self.pop_obj()?;
+                self.frozen_guard(builder)?;
+                self.sb_append(builder, &float_text(value))?;
+            }
+            NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor => {
+                let right_ref = self.pop_obj()?;
+                let left_ref = self.pop_obj()?;
+                let (left, right) = match (self.vm.heap.get(left_ref), self.vm.heap.get(right_ref))
+                {
+                    (Object::Bytes(left), Object::Bytes(right)) => {
+                        (left.as_slice(), right.as_slice())
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                if left.len() != right.len() {
+                    return Err(FaultCode::IndexOutOfBounds);
+                }
+                let mut result = Vec::new();
+                result
+                    .try_reserve_exact(left.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                result.extend(left.iter().zip(right).map(|(left, right)| match instr {
+                    NumericInstr::BytesBitAnd => left & right,
+                    NumericInstr::BytesBitOr => left | right,
+                    NumericInstr::BytesBitXor => left ^ right,
+                    _ => unreachable!(),
+                }));
+                let value = self.alloc(Object::Bytes(SharedBytes::from(result)))?;
+                self.push(value)?;
+            }
+            NumericInstr::BytesBitNot => {
+                let reference = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(reference) {
+                    Object::Bytes(bytes) => bytes.as_slice(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let mut result = Vec::new();
+                result
+                    .try_reserve_exact(bytes.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                result.extend(bytes.iter().map(|value| !value));
+                let value = self.alloc(Object::Bytes(SharedBytes::from(result)))?;
+                self.push(value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Execute until a boundary or an instruction count expires.
     ///
     /// `None` means the count expired after `retired` instructions.
@@ -5383,6 +5597,24 @@ impl Machine {
     }
 
     #[inline]
+    fn pop_float_bits(&mut self) -> Result<u64, FaultCode> {
+        match self.pop()? {
+            Value::Float(bits) => Ok(bits),
+            _ => Err(BAD_TYPE),
+        }
+    }
+
+    #[inline]
+    fn pop_float(&mut self) -> Result<f64, FaultCode> {
+        self.pop_float_bits().map(f64::from_bits)
+    }
+
+    #[inline]
+    fn push_float(&mut self, value: f64) -> Result<(), FaultCode> {
+        self.push(Value::Float(canonical_float_bits(value.to_bits())))
+    }
+
+    #[inline]
     fn pop_bool(&mut self) -> Result<bool, FaultCode> {
         match self.pop()? {
             Value::Bool(v) => Ok(v),
@@ -5614,6 +5846,37 @@ fn integer_text_len(value: i64) -> usize {
         len += 1;
     }
     len
+}
+
+fn shift_amount(value: i64) -> Result<u32, FaultCode> {
+    let amount = u32::try_from(value).map_err(|_| FaultCode::IndexOutOfBounds)?;
+    if amount > 63 {
+        return Err(FaultCode::IndexOutOfBounds);
+    }
+    Ok(amount)
+}
+
+fn float_eq(left: u64, right: u64) -> bool {
+    let left = f64::from_bits(left);
+    let right = f64::from_bits(right);
+    left == right || (left.is_nan() && right.is_nan())
+}
+
+fn float_hash(bits: u64) -> i64 {
+    let bits = canonical_float_bits(bits);
+    if bits << 1 == 0 {
+        0
+    } else {
+        bits as i64
+    }
+}
+
+fn float_fits_int(value: f64) -> bool {
+    value >= i64::MIN as f64 && value < 9_223_372_036_854_775_808.0
+}
+
+fn float_text(value: f64) -> String {
+    value.to_string()
 }
 
 #[cfg(test)]

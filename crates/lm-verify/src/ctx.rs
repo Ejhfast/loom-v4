@@ -37,6 +37,7 @@ impl<'m> Ctx<'m> {
             BcType::Unit
             | BcType::Bool
             | BcType::Int
+            | BcType::Float
             | BcType::Str
             | BcType::Bytes
             | BcType::Digest
@@ -65,6 +66,7 @@ impl<'m> Ctx<'m> {
             || [
                 self.core.unit,
                 self.core.int,
+                self.core.float,
                 self.core.boolean,
                 self.core.text,
                 self.core.string,
@@ -87,7 +89,7 @@ impl<'m> Ctx<'m> {
     /// Test whether native map instructions support one key type.
     pub(crate) fn native_map_key(&self, ty: u32) -> bool {
         match self.ty(ty) {
-            BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes => true,
+            BcType::Bool | BcType::Int | BcType::Float | BcType::Str | BcType::Bytes => true,
             BcType::Class(class) | BcType::Inst(class, _) => [
                 self.core.text,
                 self.core.string,
@@ -118,6 +120,7 @@ impl<'m> Ctx<'m> {
     pub(crate) fn is_native_core_class(&self, class: u32) -> bool {
         [
             self.core.int,
+            self.core.float,
             self.core.boolean,
             self.core.string,
             self.core.substring,
@@ -153,6 +156,9 @@ impl<'m> Ctx<'m> {
         }
         if self.core.int == Some(class) {
             return Some(TY_INT);
+        }
+        if self.core.float == Some(class) {
+            return Some(self.intern(BcType::Float));
         }
         if self.core.boolean == Some(class) {
             return Some(TY_BOOL);
@@ -923,6 +929,8 @@ impl<'m> Ctx<'m> {
         let joined = if self.module.classes[common as usize].type_params == 0 {
             if Some(common) == self.core.int {
                 BcType::Int
+            } else if Some(common) == self.core.float {
+                BcType::Float
             } else if Some(common) == self.core.boolean {
                 BcType::Bool
             } else if Some(common) == self.core.string {
@@ -996,6 +1004,7 @@ impl<'m> Ctx<'m> {
         match self.ty(ty) {
             BcType::Unit => self.core.unit.map(|class| (class, vec![])),
             BcType::Int => self.core.int.map(|class| (class, vec![])),
+            BcType::Float => self.core.float.map(|class| (class, vec![])),
             BcType::Bool => self.core.boolean.map(|class| (class, vec![])),
             BcType::Str => self.core.string.map(|class| (class, vec![])),
             BcType::Bytes => self.core.bytes.map(|class| (class, vec![])),
@@ -1099,6 +1108,7 @@ impl<'m> Ctx<'m> {
                 lm_abi::AbiPrimitive::Never => Err("Never has no runtime value".to_string()),
                 lm_abi::AbiPrimitive::Bool => Ok(TY_BOOL),
                 lm_abi::AbiPrimitive::Int => Ok(TY_INT),
+                lm_abi::AbiPrimitive::Float => Ok(self.intern(BcType::Float)),
                 lm_abi::AbiPrimitive::String => Ok(TY_STR),
                 lm_abi::AbiPrimitive::Bytes => Ok(self.intern(BcType::Bytes)),
                 lm_abi::AbiPrimitive::VmSnapshot => Ok(self.intern(BcType::VmSnapshot)),

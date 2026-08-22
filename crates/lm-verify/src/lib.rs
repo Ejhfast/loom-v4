@@ -344,7 +344,7 @@ fn verify_structure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lm_bytecode::{BcClass, Func, Instr::*, Module, TypeApp, NO_PARENT};
+    use lm_bytecode::{BcClass, Func, Instr::*, Module, NumericInstr, TypeApp, NO_PARENT};
 
     /// Add empty interface bounds required by one test fixture.
     fn complete_bounds(module: &mut Module) {
@@ -392,6 +392,7 @@ mod tests {
     fn module_with(blocks: Vec<Vec<Instr>>) -> Module {
         Module {
             strings: vec!["s".to_string()],
+            bytes: vec![],
             types: base_types(),
             selectors: vec![],
             apps: vec![],
@@ -426,6 +427,7 @@ mod tests {
         types.push(BcType::Class(0)); // type 4
         Module {
             strings: vec![],
+            bytes: vec![],
             types,
             selectors: vec!["bump".to_string()],
             apps: vec![],
@@ -473,6 +475,7 @@ mod tests {
         types.push(BcType::Inst(0, vec![TY_INT])); // 6 Box[Int]
         Module {
             strings: vec![],
+            bytes: vec![],
             types,
             selectors: vec![],
             apps: vec![
@@ -538,6 +541,49 @@ mod tests {
     fn accepts_simple_function() {
         let m = module_with(vec![vec![ConstInt(1), ConstInt(2), Add, Return]]);
         assert!(verify_module(&m).is_ok());
+    }
+
+    #[test]
+    fn accepts_float_and_byte_instructions() {
+        let mut module = module_with(vec![vec![
+            ConstFloat(1.5f64.to_bits()),
+            Instr::Numeric(NumericInstr::FloatBits),
+            ConstBytes(0),
+            Instr::Numeric(NumericInstr::BytesBitNot),
+            Pop,
+            Return,
+        ]]);
+        module.bytes.push(vec![0, 255]);
+        assert!(verify_module(&module).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_noncanonical_float_constant() {
+        let module = module_with(vec![vec![
+            ConstFloat(0x7ff0_0000_0000_0001),
+            Instr::Numeric(NumericInstr::FloatBits),
+            Return,
+        ]]);
+        let error = verify_module(&module).expect_err("the NaN must reject");
+        assert!(error.message.contains("noncanonical NaN"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_byte_literal_outside_its_pool() {
+        let module = module_with(vec![vec![ConstBytes(0), Pop, ConstInt(0), Return]]);
+        let error = verify_module(&module).expect_err("the byte index must reject");
+        assert!(error.message.contains("byte literal index"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_numeric_instruction_type_mismatch() {
+        let module = module_with(vec![vec![
+            ConstBool(true),
+            Instr::Numeric(NumericInstr::IntBitNot),
+            Return,
+        ]]);
+        let error = verify_module(&module).expect_err("the operand type must reject");
+        assert!(error.message.contains("expected type"), "{error}");
     }
 
     #[test]
@@ -1302,6 +1348,7 @@ mod tests {
         };
         let m = Module {
             strings: vec![],
+            bytes: vec![],
             types,
             selectors: vec![],
             apps: vec![],

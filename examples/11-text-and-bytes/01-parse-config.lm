@@ -35,4 +35,4 @@ end
 
 name = case settings.get("name") in Some(text) then text in None then "unnamed" end
 
-"{name} on {port} with {settings.len()} settings"
+"#{name} on #{port} with #{settings.len()} settings"

@@ -1,0 +1,2 @@
+error[E0003]: a byte escape needs two hexadecimal digits
+  --> tests/ui/byte-literal-bad-escape.lm:1:3

@@ -108,6 +108,11 @@ impl<'o> FnChecker<'o> {
         let repr = ctx.classes[class as usize].native_repr?;
         let (equal, not_equal, operand) = match repr {
             NativeRepr::Int => (lm_abi::INTRINSIC_INT_EQ, lm_abi::INTRINSIC_INT_NE, INT),
+            NativeRepr::Float => (
+                lm_abi::INTRINSIC_FLOAT_EQ,
+                lm_abi::INTRINSIC_FLOAT_NE,
+                lm_types::FLOAT,
+            ),
             NativeRepr::Bool => (lm_abi::INTRINSIC_BOOL_EQ, lm_abi::INTRINSIC_BOOL_NE, BOOL),
             NativeRepr::Text | NativeRepr::String | NativeRepr::Substring => (
                 lm_abi::INTRINSIC_STRING_EQ,
@@ -271,6 +276,38 @@ impl<'o> FnChecker<'o> {
                 let r = self.check_expr(ctx, right, INT)?;
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
+            BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr
+            | BinOp::Ushr => {
+                let name = match op {
+                    BinOp::BitAnd => "__and__",
+                    BinOp::BitOr => "__or__",
+                    BinOp::BitXor => "__xor__",
+                    BinOp::Shl => "__shl__",
+                    BinOp::Shr => "__shr__",
+                    BinOp::Ushr => "__ushr__",
+                    _ => unreachable!(),
+                };
+                let l = self.synth_expr(ctx, left)?;
+                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, name) {
+                    return self.operator_hook(
+                        ctx,
+                        l,
+                        class,
+                        cargs,
+                        found,
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
+                let l = self.expect_compatible(ctx, INT, l, left.span)?;
+                let r = self.check_expr(ctx, right, INT)?;
+                Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
+            }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let name = match op {
                     BinOp::Lt => "__lt__",
@@ -361,8 +398,8 @@ impl<'o> FnChecker<'o> {
                         },
                     });
                 }
-                let comparable =
-                    matches!(operand_ty, INT | BOOL | STRING) || ctx.store.is_heap(operand_ty);
+                let comparable = matches!(operand_ty, INT | BOOL | STRING | lm_types::FLOAT)
+                    || ctx.store.is_heap(operand_ty);
                 if !comparable {
                     return Err(Diagnostic::new(
                         "E1017",
@@ -374,9 +411,12 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     ));
                 }
-                if matches!(operand_ty, INT | BOOL | STRING) || operand_ty == lm_types::BYTES {
+                if matches!(operand_ty, INT | BOOL | STRING | lm_types::FLOAT)
+                    || operand_ty == lm_types::BYTES
+                {
                     let class = match operand_ty {
                         BOOL => "Bool",
+                        lm_types::FLOAT => "Float",
                         STRING => "String",
                         lm_types::BYTES => "Bytes",
                         _ => "Int",

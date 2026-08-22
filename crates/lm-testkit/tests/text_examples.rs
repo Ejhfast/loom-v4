@@ -33,4 +33,8 @@ fn the_text_examples_run() {
         run_example("examples/11-text-and-bytes/05-slice-without-copy.lm"),
         "Done(\"view=loom durable=loom window=8 owned=8 source=2011\")"
     );
+    assert_eq!(
+        run_example("examples/11-text-and-bytes/06-binary-literals.lm"),
+        "Done(\"frame {v1}: kind=144 raw=89504e470d0a1a0a masked=76504e470d0a1a0a ratio=1.5\")"
+    );
 }

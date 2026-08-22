@@ -290,8 +290,7 @@ this language slice. `Bytes("hello")` works.
 The diagnostic states that the scanner holds the syntax already. The
 same shape covers float literals, which give `E0005`.
 
-An interpolation carries no marker. `"{x}"` interpolates, and `f"{x}"`
-fails to parse. A marker is a separate decision beside this one.
+Interpolation now uses the `#{x}` marker. Plain strings keep all other braces as text.
 
 *Checked: probe.*
 

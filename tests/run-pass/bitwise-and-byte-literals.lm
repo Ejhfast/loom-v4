@@ -1,0 +1,16 @@
+left = b"\x00\xff\x0f"
+right = b"\xff\x0f\xf0"
+precedence = 1 | 2 ^ 3 & 1 << 2 == 3
+
+(
+  (left & right).hex(),
+  (left | right).hex(),
+  (left ^ right).hex(),
+  (~left).hex(),
+  ~0,
+  -1 >>> 60,
+  1.rotate_left(63),
+  9223372036854775807.wrapping_add(1),
+  precedence,
+  "plain {x}; escaped \#{x}; value=#{left.at(1)}"
+)

@@ -55,7 +55,7 @@ fn a_subclass_adds_fields_after_the_core_layout() {
                   \x20   super.init(start, stop)\n\
                   \x20 end\n\
                   \x20 def show(self): String\n\
-                  \x20   \"{self.label}:{self.start}-{self.stop}\"\n\
+                  \x20   \"#{self.label}:#{self.start}-#{self.stop}\"\n\
                   \x20 end\n\
                   end\n\
                   Named(1, 3).show()\n";

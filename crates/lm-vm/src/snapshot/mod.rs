@@ -80,7 +80,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 26 stores slot versions and pending slot changes.
 /// Version 27 stores the exact ABI bundle digest.
 /// Version 28 stores each map entry semantic hash.
-pub const FORMAT_VERSION: u32 = 28;
+pub const FORMAT_VERSION: u32 = 29;
 
 /// The section kinds, in canonical order.
 ///

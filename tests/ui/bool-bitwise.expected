@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found Bool
+  --> tests/ui/bool-bitwise.lm:1:1

@@ -11,7 +11,7 @@ fn run(source: &str) -> Result<String, String> {
 
 #[test]
 fn a_conditional_conformance_uses_its_premise() {
-    let source = r#"
+    let source = r##"
 interface Labeled
   def label(self): String
 end
@@ -30,7 +30,7 @@ final class Box[T] implements Labeled when T: Labeled
   end
 
   def label(self): String when T: Labeled
-    "box {self.value.label()}"
+    "box #{self.value.label()}"
   end
 end
 
@@ -39,7 +39,7 @@ def label[T: Labeled](value: T): String
 end
 
 label(Box(Word()))
-"#;
+"##;
     assert_eq!(run(source).unwrap(), "Done(\"box word\")");
 }
 
@@ -382,7 +382,7 @@ end
 
 #[test]
 fn conditional_conformances_cross_module_boundaries() {
-    let library_source = r#"
+    let library_source = r##"
 interface Labeled
   def label(self): String
 end
@@ -401,10 +401,10 @@ final class Box[T] implements Labeled when T: Labeled
   end
 
   def label(self): String when T: Labeled
-    "box {self.value.label()}"
+    "box #{self.value.label()}"
   end
 end
-"#;
+"##;
     let library = compile_module(
         "lib.labels",
         &SourceFile::new("labels.lm", library_source),

@@ -612,6 +612,7 @@ impl World {
             .iter()
             .map(|value| match value {
                 Value::Int(v) => Ok(HostArg::Int(*v)),
+                Value::Float(bits) => Ok(HostArg::Float(*bits)),
                 Value::Obj(r) => match m.vm.heap.get(*r) {
                     Object::Str(text) => Ok(HostArg::Str(text.clone())),
                     Object::Bytes(bytes) => bytes
@@ -785,6 +786,10 @@ impl World {
             },
             AbiType::Primitive(AbiPrimitive::Int) => match value {
                 Value::Int(value) => Ok(HostArg::Int(value)),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Primitive(AbiPrimitive::Float) => match value {
+                Value::Float(bits) => Ok(HostArg::Float(bits)),
                 _ => Err(FaultCode::TypeMismatch),
             },
             AbiType::Primitive(AbiPrimitive::String) => match value.as_obj().map(|r| heap.get(r)) {

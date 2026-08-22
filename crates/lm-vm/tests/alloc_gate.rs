@@ -38,6 +38,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 fn loop_module() -> Module {
     Module {
         strings: vec![],
+        bytes: vec![],
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],

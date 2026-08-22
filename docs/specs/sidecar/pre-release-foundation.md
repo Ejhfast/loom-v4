@@ -643,7 +643,7 @@ Built-in structural and identity equality remain language rules.
 
 These rules do not imply a `PartialEq` conformance.
 
-Int, Bool, Text, Char, and Bytes implement the interface.
+Int, Float, Bool, Text, Char, and Bytes implement the interface.
 
 A method named `__eq__` without conformance does not enable the operator.
 

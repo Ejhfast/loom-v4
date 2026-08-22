@@ -16,7 +16,7 @@ class Meter
   end
 
   def __add__(self, other: Meter): String
-    "meter {self.reading + other.reading}"
+    "meter #{self.reading + other.reading}"
   end
 end
 
@@ -26,7 +26,7 @@ class Doubling < Meter
   end
 
   def __add__(self, other: Meter): String
-    "doubling {(self.reading + other.reading) * 2}"
+    "doubling #{(self.reading + other.reading) * 2}"
   end
 end
 
@@ -39,7 +39,7 @@ final class Report
 
   # The row travels with the hook.
   def __add__(self, other: Report): Report with Io.Print
-    sys.io.print("merging {self.count} and {other.count}\n")
+    sys.io.print("merging #{self.count} and #{other.count}\n")
     Report(self.count + other.count)
   end
 end
@@ -55,7 +55,7 @@ def go(): String with Io.Print
   m: Meter = Doubling(10)
   dispatched = m + Meter(5)
   total = merge_all()
-  "{dispatched}, total {total}"
+  "#{dispatched}, total #{total}"
 end
 
 go()

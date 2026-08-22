@@ -165,7 +165,7 @@ fn interface_inheritance_crosses_module_boundaries() {
             "main.lm",
             "use labels\n\
              def describe[T: labels.Labeled](value: T): String\n\
-               \"{value.name()}:{value.label()}\"\nend\n\
+               \"#{value.name()}:#{value.label()}\"\nend\n\
              describe(labels.Item())\n"
                 .to_string(),
         ),
@@ -319,16 +319,16 @@ end
         "app.main",
         &SourceFile::new(
             "main.lm",
-            r#"
+            r##"
 use catalog
 
 def describe[C: catalog.Catalog](value: C): String
   item = value.item()
-  "{item.name()}:{item.price()}"
+  "#{item.name()}:#{item.price()}"
 end
 
 describe(catalog.Shelf())
-"#
+"##
             .to_string(),
         ),
         &compile_env.freeze(),
@@ -456,7 +456,7 @@ end
 
 #[test]
 fn self_and_interface_inheritance_preserve_the_conforming_type() {
-    let source = r#"
+    let source = r##"
 interface Cloneable
   def clone(self): Self
   def same(self, other: Self): Bool
@@ -490,7 +490,7 @@ final class Box implements Cloneable, Labeled
   end
 
   def label(self): String
-    "{self.name()}:{self.value}"
+    "#{self.name()}:#{self.value}"
   end
 end
 
@@ -499,13 +499,13 @@ def copy[T: Cloneable](value: T): T
 end
 
 def title[T: Labeled](value: T): String
-  "{value.name()} {value.label()}"
+  "#{value.name()} #{value.label()}"
 end
 
 box = Box(7)
 copy_box = copy(box)
 (copy_box.same(box), title(copy_box))
-"#;
+"##;
     assert_eq!(outcome(source), "Done((true, \"box box:7\"))");
 
     let bad = error(
@@ -526,7 +526,7 @@ copy_box = copy(box)
 
 #[test]
 fn display_drives_custom_and_generic_interpolation() {
-    let source = r#"
+    let source = r##"
 final class Label implements Display
   text: String
 
@@ -543,7 +543,7 @@ final class Label implements Display
 end
 
 def render[T: Display](value: T): String
-  "value={value}"
+  "value=#{value}"
 end
 
 one = Label("one")
@@ -551,8 +551,8 @@ letter = case "é".at(0)
 in Some(value) then value
 in None then panic("the text is empty")
 end
-("{one}", render(Label("two")), display(Label("three")), "{letter}", render(7), display(true), display(letter))
-"#;
+("#{one}", render(Label("two")), display(Label("three")), "#{letter}", render(7), display(true), display(letter))
+"##;
     assert_eq!(
         outcome(source),
         "Done((\"<one>\", \"value=<two>\", \"<three>\", \"é\", \"value=7\", \
@@ -560,7 +560,7 @@ end
     );
 
     let missing = error(
-        "final class Label\n  def append_to(self, mut builder: StringBuilder)\n    ()\n  end\nend\n\"{Label()}\"\n",
+        "final class Label\n  def append_to(self, mut builder: StringBuilder)\n    ()\n  end\nend\n\"#{Label()}\"\n",
     );
     assert!(missing.contains("does not implement Display"), "{missing}");
 }
@@ -571,7 +571,7 @@ fn core_display_interpolation_keeps_native_builder_instructions() {
         "native_display.lm",
         "number = 7\nflag = true\ntext = \"ok\"\nletter = case text.at(0)\n\
          in Some(value) then value\nin None then panic(\"the text is empty\")\nend\n\
-         \"{number}:{flag}:{text}:{letter}\"\n",
+         \"#{number}:#{flag}:#{text}:#{letter}\"\n",
     )
     .expect("the source compiles");
     let instructions: Vec<Instr> = module.funcs[module.entry as usize]
@@ -591,12 +591,12 @@ fn core_display_interpolation_keeps_native_builder_instructions() {
 
 #[test]
 fn core_errors_display_without_message_methods() {
-    let source = r#"
+    let source = r##"
 file = FsError.Closed
 snapshot = SnapshotError.ResourceActive([], "socket")
 utf8 = Utf8Error.InvalidBoundary
-("{file}", "{snapshot}", display(utf8))
-"#;
+("#{file}", "#{snapshot}", display(utf8))
+"##;
     assert_eq!(
         outcome(source),
         "Done((\"file handle is closed\", \"a live socket blocks snapshot creation\", \
@@ -765,7 +765,7 @@ drain(PureCounter()) + drain(LoudCounter())
 
 #[test]
 fn a_concrete_empty_interface_bound_accepts_only_pure_conformances() {
-    let declarations = r#"
+    let declarations = r##"
 interface Labeled[effect e]
   def label(self): String with e
 end
@@ -784,13 +784,13 @@ final class Loud implements Labeled with Io.Print
 end
 
 def describe[P: Labeled](item: P): String
-  "it is {item.label()}"
+  "it is #{item.label()}"
 end
 
 def describe_loud[P: Labeled with Io.Print](item: P): String with Io.Print
-  "it is {item.label()}"
+  "it is #{item.label()}"
 end
-"#;
+"##;
     assert_eq!(
         outcome(&format!("{declarations}\ndescribe(Quiet())\n")),
         "Done(\"it is quiet\")"
@@ -1829,14 +1829,14 @@ fn callbacks_do_not_allocate_guest_closures() {
 
 #[test]
 fn callbacks_forward_effects_and_default_to_nonescaping() {
-    let source = r#"
+    let source = r##"
 def emit(values: List[Int]): Int with Io.Print
-  values.each() { |value: Int| with Io.Print sys.io.print("{value}") }
+  values.each() { |value: Int| with Io.Print sys.io.print("#{value}") }
   values.len()
 end
 
 emit([1, 2])
-"#;
+"##;
     assert_eq!(
         run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
         "Done(2)"

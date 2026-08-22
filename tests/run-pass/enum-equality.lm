@@ -29,7 +29,7 @@ end
 def some(v: Int): Option[Int]
   Some(v)
 end
-core = "{none() == none()} {some(1) == some(1)} {some(1) == none()}"
+core = "#{none() == none()} #{some(1) == some(1)} #{some(1) == none()}"
 ord = Ordering.Less == Ordering.Less
 
 # A recursive enum compares to its own depth.
@@ -40,7 +40,7 @@ end
 def chain(second: Int): Chain
   Link(1, Link(second, Tip))
 end
-deep = "{chain(2) == chain(2)} {chain(2) == chain(9)}"
+deep = "#{chain(2) == chain(2)} #{chain(2) == chain(9)}"
 
 # An ordinary class still compares by reference.
 class Box
@@ -48,4 +48,4 @@ class Box
 end
 boxes = Box() == Box()
 
-"{same_unit} {cross} {same_payload} {diff_payload} | {core} | {ord} | {deep} | {boxes}"
+"#{same_unit} #{cross} #{same_payload} #{diff_payload} | #{core} | #{ord} | #{deep} | #{boxes}"

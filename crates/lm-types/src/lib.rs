@@ -53,6 +53,8 @@ pub const FILE_HANDLE: TypeId = TypeId(12);
 pub const RESOURCE_HANDLE: TypeId = TypeId(13);
 /// An opaque extension host resource.
 pub const HOST_RESOURCE: TypeId = TypeId(14);
+/// The IEEE 754 binary64 type.
+pub const FLOAT: TypeId = TypeId(15);
 
 /// One element of an effect row.
 ///
@@ -84,6 +86,7 @@ pub enum Type {
     Unit,
     Bool,
     Int,
+    Float,
     String,
     Never,
     /// Immutable binary data.
@@ -234,6 +237,7 @@ impl TypeStore {
         store.intern(Type::FileHandle);
         store.intern(Type::ResourceHandle);
         store.intern(Type::HostResource);
+        store.intern(Type::Float);
         store
     }
 
@@ -630,6 +634,7 @@ impl TypeStore {
             "Bool" => Some(BOOL),
             "Never" => Some(NEVER),
             "Int" => Some(INT),
+            "Float" => Some(FLOAT),
             "String" => Some(STRING),
             "Fault" => Some(FAULT),
             "Request" => Some(REQUEST),
@@ -1011,6 +1016,7 @@ impl TypeStore {
             Type::Unit => "()".to_string(),
             Type::Bool => "Bool".to_string(),
             Type::Int => "Int".to_string(),
+            Type::Float => "Float".to_string(),
             Type::String => "String".to_string(),
             Type::Never => "Never".to_string(),
             Type::Bytes => "Bytes".to_string(),
@@ -1177,6 +1183,7 @@ mod tests {
         assert_eq!(*store.get(BOOL), Type::Bool);
         assert_eq!(*store.get(INT), Type::Int);
         assert_eq!(*store.get(STRING), Type::String);
+        assert_eq!(*store.get(FLOAT), Type::Float);
         assert_eq!(*store.get(NEVER), Type::Never);
         assert_eq!(*store.get(FAULT), Type::Fault);
         assert_eq!(*store.get(BYTES), Type::Bytes);

@@ -42,4 +42,4 @@ child.table().pass(Fs)
 
 opened: [String] = []
 text = audit(child, opened)
-"{opened.len()} open(s), first={opened[0]}, text={text}"
+"#{opened.len()} open(s), first=#{opened[0]}, text=#{text}"

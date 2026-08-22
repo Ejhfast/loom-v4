@@ -38,7 +38,7 @@ end
 def logged_map[effect e](vs: [Int], f: (Int) -> Int with e): [Int] with e, Io.Print
   out: [Int] = []
   for value in vs
-    sys.io.print("mapping {value}\n")
+    sys.io.print("mapping #{value}\n")
     out.push(f(value))
   end
   out
@@ -53,7 +53,7 @@ end
 # `apply_all`.
 def announce(): [Int] with Io.Print
   apply_all([1, 2, 3], do |x: Int|: Int with Io.Print
-    sys.io.print("counted {x}\n")
+    sys.io.print("counted #{x}\n")
     x + 1
   end)
 end

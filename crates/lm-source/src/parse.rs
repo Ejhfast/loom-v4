@@ -1360,7 +1360,7 @@ impl Parser<'_> {
 
     /// Equality, `is`, and `as` share one precedence level.
     fn eq_expr(&mut self) -> Result<Expr, Diagnostic> {
-        let mut left = self.ord_expr()?;
+        let mut left = self.binary_expr(1)?;
         loop {
             match self.peek() {
                 Tok::EqEq | Tok::NotEq => {
@@ -1370,7 +1370,7 @@ impl Parser<'_> {
                         BinOp::Ne
                     };
                     self.pos += 1;
-                    let right = self.ord_expr()?;
+                    let right = self.binary_expr(1)?;
                     let span = left.span.to(right.span);
                     left = Expr {
                         kind: ExprKind::Binary {
@@ -1411,65 +1411,18 @@ impl Parser<'_> {
         Ok(left)
     }
 
-    fn ord_expr(&mut self) -> Result<Expr, Diagnostic> {
-        let mut left = self.add_expr()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Lt => BinOp::Lt,
-                Tok::Le => BinOp::Le,
-                Tok::Gt => BinOp::Gt,
-                Tok::Ge => BinOp::Ge,
-                _ => break,
-            };
-            self.pos += 1;
-            let right = self.add_expr()?;
-            let span = left.span.to(right.span);
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                span,
-            };
-        }
-        Ok(left)
-    }
-
-    fn add_expr(&mut self) -> Result<Expr, Diagnostic> {
-        let mut left = self.mul_expr()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Plus => BinOp::Add,
-                Tok::Minus => BinOp::Sub,
-                _ => break,
-            };
-            self.pos += 1;
-            let right = self.mul_expr()?;
-            let span = left.span.to(right.span);
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                span,
-            };
-        }
-        Ok(left)
-    }
-
-    fn mul_expr(&mut self) -> Result<Expr, Diagnostic> {
+    /// Parse all binary precedence levels with one bounded call chain.
+    fn binary_expr(&mut self, minimum: u8) -> Result<Expr, Diagnostic> {
         let mut left = self.unary_expr()?;
         loop {
-            let op = match self.peek() {
-                Tok::Star => BinOp::Mul,
-                Tok::Slash => BinOp::Div,
-                Tok::Percent => BinOp::Rem,
-                _ => break,
+            let Some((precedence, op)) = Self::binary_operator(self.peek()) else {
+                break;
             };
+            if precedence < minimum {
+                break;
+            }
             self.pos += 1;
-            let right = self.unary_expr()?;
+            let right = self.binary_expr(precedence + 1)?;
             let span = left.span.to(right.span);
             left = Expr {
                 kind: ExprKind::Binary {
@@ -1481,6 +1434,27 @@ impl Parser<'_> {
             };
         }
         Ok(left)
+    }
+
+    fn binary_operator(token: &Tok) -> Option<(u8, BinOp)> {
+        Some(match token {
+            Tok::Lt => (1, BinOp::Lt),
+            Tok::Le => (1, BinOp::Le),
+            Tok::Gt => (1, BinOp::Gt),
+            Tok::Ge => (1, BinOp::Ge),
+            Tok::Pipe => (2, BinOp::BitOr),
+            Tok::Caret => (3, BinOp::BitXor),
+            Tok::Amp => (4, BinOp::BitAnd),
+            Tok::Shl => (5, BinOp::Shl),
+            Tok::Shr => (5, BinOp::Shr),
+            Tok::Ushr => (5, BinOp::Ushr),
+            Tok::Plus => (6, BinOp::Add),
+            Tok::Minus => (6, BinOp::Sub),
+            Tok::Star => (7, BinOp::Mul),
+            Tok::Slash => (7, BinOp::Div),
+            Tok::Percent => (7, BinOp::Rem),
+            _ => return None,
+        })
     }
 
     fn unary_expr(&mut self) -> Result<Expr, Diagnostic> {
@@ -1507,6 +1481,15 @@ impl Parser<'_> {
                 let span = token.span.to(inner.span);
                 Ok(Expr {
                     kind: ExprKind::Neg(Box::new(inner)),
+                    span,
+                })
+            }
+            Tok::Tilde => {
+                let token = self.next();
+                let inner = self.unary_expr()?;
+                let span = token.span.to(inner.span);
+                Ok(Expr {
+                    kind: ExprKind::Invert(Box::new(inner)),
                     span,
                 })
             }
@@ -1766,6 +1749,16 @@ impl Parser<'_> {
                     _ => unreachable!(),
                 }
             }
+            Tok::Float(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Float(v) => Ok(Expr {
+                        kind: ExprKind::Float(v),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
             Tok::Str(_) => {
                 let token = self.next();
                 match token.tok {
@@ -1812,6 +1805,16 @@ impl Parser<'_> {
                     kind: ExprKind::Interp(parts),
                     span: token.span,
                 })
+            }
+            Tok::Bytes(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Bytes(v) => Ok(Expr {
+                        kind: ExprKind::Bytes(v),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
             }
             Tok::KwTrue => {
                 let token = self.next();
@@ -2670,12 +2673,35 @@ end
 
     #[test]
     fn parses_interpolation_expression() {
-        let module = parse("name = \"Ada\"\n\"Hello {name}!\"\n").unwrap();
+        let module = parse("name = \"Ada\"\n\"Hello #{name}!\"\n").unwrap();
         assert_eq!(module.entry.len(), 2);
         match &module.entry[1].kind {
             StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Interp(_))),
             other => panic!("expected an expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_bitwise_precedence() {
+        let module = parse("1 | 2 ^ 3 & 4 == 5\n").unwrap();
+        let StmtKind::Expr(expr) = &module.entry[0].kind else {
+            panic!("the entry holds an expression");
+        };
+        let ExprKind::Binary {
+            op: BinOp::Eq,
+            left,
+            ..
+        } = &expr.kind
+        else {
+            panic!("equality has the weakest tested precedence");
+        };
+        assert!(matches!(
+            left.kind,
+            ExprKind::Binary {
+                op: BinOp::BitOr,
+                ..
+            }
+        ));
     }
 
     #[test]

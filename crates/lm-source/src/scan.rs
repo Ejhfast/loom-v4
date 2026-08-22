@@ -4,7 +4,7 @@
 //! with a `Newline` token. It does not emit a `Newline` token inside
 //! delimiters or after a token that cannot end an expression.
 //!
-//! A string literal can hold `{ expression }` interpolation. The
+//! A string literal can hold `#{ expression }` interpolation. The
 //! scanner scans the inner expression with one nested pass and stores
 //! its tokens inside the string token. The inner expression cannot
 //! hold a string literal or a brace in this slice.
@@ -138,6 +138,13 @@ impl<'a> Scanner<'a> {
                     | Tok::Star
                     | Tok::Slash
                     | Tok::Percent
+                    | Tok::Amp
+                    | Tok::Pipe
+                    | Tok::Caret
+                    | Tok::Shl
+                    | Tok::Shr
+                    | Tok::Ushr
+                    | Tok::Tilde
                     | Tok::Comma
                     | Tok::Colon
                     | Tok::Dot
@@ -177,28 +184,12 @@ impl<'a> Scanner<'a> {
                 '\n' => {
                     return Err(self.error("E0002", "unterminated string literal", start));
                 }
-                '{' => {
-                    if self.peek_byte(1) == b'{' {
-                        lit.push('{');
-                        self.pos += 2;
-                    } else {
-                        if !lit.is_empty() {
-                            pieces.push(StrPiece::Lit(std::mem::take(&mut lit)));
-                        }
-                        pieces.push(self.scan_interpolation()?);
+                '#' if self.peek_byte(1) == b'{' => {
+                    if !lit.is_empty() {
+                        pieces.push(StrPiece::Lit(std::mem::take(&mut lit)));
                     }
-                }
-                '}' => {
-                    if self.peek_byte(1) == b'}' {
-                        lit.push('}');
-                        self.pos += 2;
-                    } else {
-                        return Err(self.error(
-                            "E0003",
-                            "write `}}` for a literal `}` in a string",
-                            self.pos,
-                        ));
-                    }
+                    self.pos += 1;
+                    pieces.push(self.scan_interpolation()?);
                 }
                 '\\' => {
                     let esc_start = self.pos;
@@ -212,6 +203,20 @@ impl<'a> Scanner<'a> {
                         'r' => lit.push('\r'),
                         't' => lit.push('\t'),
                         '0' => lit.push('\0'),
+                        '#' if self.peek_byte(1) == b'{' => lit.push('#'),
+                        'x' => {
+                            self.pos += 1;
+                            let byte = self.scan_hex_byte(esc_start)?;
+                            if byte > 0x7f {
+                                return Err(self.error(
+                                    "E0003",
+                                    "a string byte escape must be in the ASCII range",
+                                    esc_start,
+                                ));
+                            }
+                            lit.push(char::from(byte));
+                            continue;
+                        }
                         'u' => {
                             self.pos += 1;
                             let scalar = self.scan_unicode_escape(esc_start)?;
@@ -242,7 +247,87 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
-    /// Scan one `{ expression }` interpolation. `pos` is at `{`.
+    /// Scan one immutable byte string. `pos` is at the opening quote.
+    fn scan_bytes(&mut self, start: usize) -> Result<(), Diagnostic> {
+        self.pos += 1;
+        let mut out = Vec::new();
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err(self.error("E0002", "unterminated byte string literal", start));
+            }
+            let byte = self.peek_byte(0);
+            match byte {
+                b'"' => {
+                    self.pos += 1;
+                    break;
+                }
+                b'\n' | b'\r' => {
+                    return Err(self.error("E0002", "unterminated byte string literal", start));
+                }
+                b'\\' => {
+                    let esc_start = self.pos;
+                    self.pos += 1;
+                    let value = match self.peek_byte(0) {
+                        b'\\' => b'\\',
+                        b'"' => b'"',
+                        b'\'' => b'\'',
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'0' => b'\0',
+                        b'x' => {
+                            self.pos += 1;
+                            let value = self.scan_hex_byte(esc_start)?;
+                            out.push(value);
+                            continue;
+                        }
+                        _ => {
+                            self.pos += 1;
+                            return Err(self.error(
+                                "E0003",
+                                "invalid byte string escape",
+                                esc_start,
+                            ));
+                        }
+                    };
+                    self.pos += 1;
+                    out.push(value);
+                }
+                0x20..=0x7e => {
+                    out.push(byte);
+                    self.pos += 1;
+                }
+                _ => {
+                    self.pos += self.cur_char().len_utf8();
+                    return Err(self.error(
+                        "E0009",
+                        "a byte string can contain direct ASCII bytes only",
+                        self.pos.saturating_sub(1),
+                    ));
+                }
+            }
+        }
+        self.push(Tok::Bytes(out), start);
+        Ok(())
+    }
+
+    /// Scan exactly two hexadecimal digits after one `\\x` escape.
+    fn scan_hex_byte(&mut self, esc_start: usize) -> Result<u8, Diagnostic> {
+        let hi = self.peek_byte(0);
+        let lo = self.peek_byte(1);
+        if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+            return Err(self.error(
+                "E0003",
+                "a byte escape needs two hexadecimal digits",
+                esc_start,
+            ));
+        }
+        self.pos += 2;
+        let digit = |byte: u8| (byte as char).to_digit(16).expect("validated hex") as u8;
+        Ok((digit(hi) << 4) | digit(lo))
+    }
+
+    /// Scan one `#{ expression }` interpolation. `pos` is at `{`.
     fn scan_interpolation(&mut self) -> Result<StrPiece, Diagnostic> {
         let brace = self.pos;
         self.pos += 1;
@@ -325,7 +410,7 @@ impl<'a> Scanner<'a> {
             radix = 10;
         }
         let digits_start = self.pos;
-        let mut value: i64 = 0;
+        let mut value = Some(0i64);
         let mut digit_count = 0u32;
         while self.pos < self.bytes.len() {
             let byte = self.bytes[self.pos];
@@ -339,18 +424,14 @@ impl<'a> Scanner<'a> {
             };
             digit_count += 1;
             value = value
-                .checked_mul(radix as i64)
-                .and_then(|v| v.checked_add(digit as i64))
-                .ok_or_else(|| {
-                    self.error("E0004", "integer literal is too large for Int", start)
-                })?;
+                .and_then(|value| value.checked_mul(radix as i64))
+                .and_then(|value| value.checked_add(digit as i64));
             self.pos += 1;
         }
         if digit_count == 0 {
             self.pos = digits_start.max(self.pos);
             return Err(self.error("E0007", "invalid numeric literal", start));
         }
-        // Reject float forms with a clear diagnostic.
         if radix == 10 {
             let next = self.peek_byte(0);
             let exponent = (next == b'e' || next == b'E')
@@ -359,16 +440,44 @@ impl<'a> Scanner<'a> {
                         && self.peek_byte(2).is_ascii_digit()));
             let is_float = (next == b'.' && self.peek_byte(1).is_ascii_digit()) || exponent;
             if is_float {
-                return Err(self.error(
-                    "E0005",
-                    "float literals are not supported in this language slice",
-                    start,
-                ));
+                if next == b'.' {
+                    self.pos += 1;
+                    while self.peek_byte(0).is_ascii_digit() || self.peek_byte(0) == b'_' {
+                        self.pos += 1;
+                    }
+                }
+                if matches!(self.peek_byte(0), b'e' | b'E') {
+                    self.pos += 1;
+                    if matches!(self.peek_byte(0), b'+' | b'-') {
+                        self.pos += 1;
+                    }
+                    let exponent_start = self.pos;
+                    while self.peek_byte(0).is_ascii_digit() || self.peek_byte(0) == b'_' {
+                        self.pos += 1;
+                    }
+                    if self.pos == exponent_start {
+                        return Err(self.error("E0007", "a float exponent needs digits", start));
+                    }
+                }
+                if self.peek_byte(0).is_ascii_alphanumeric() {
+                    return Err(self.error("E0007", "invalid numeric literal", start));
+                }
+                let cleaned: String = self.text[start..self.pos]
+                    .chars()
+                    .filter(|ch| *ch != '_')
+                    .collect();
+                let value = cleaned
+                    .parse::<f64>()
+                    .map_err(|_| self.error("E0007", "invalid float literal", start))?;
+                self.push(Tok::Float(value.to_bits()), start);
+                return Ok(());
             }
         }
         if self.peek_byte(0).is_ascii_alphanumeric() {
             return Err(self.error("E0007", "invalid numeric literal", start));
         }
+        let value = value
+            .ok_or_else(|| self.error("E0004", "integer literal is too large for Int", start))?;
         self.push(Tok::Int(value), start);
         Ok(())
     }
@@ -378,12 +487,8 @@ impl<'a> Scanner<'a> {
             self.pos += 1;
         }
         let word = &self.text[start..self.pos];
-        if word == "b" && self.peek_byte(0) == b'"' {
-            return Err(self.error(
-                "E0009",
-                "byte-string literals are not supported in this language slice",
-                start,
-            ));
+        if self.peek_byte(0) == b'"' && word == "b" {
+            return self.scan_bytes(start);
         }
         let tok = match word {
             "and" => Tok::KwAnd,
@@ -495,7 +600,16 @@ impl<'a> Scanner<'a> {
 
     fn scan_punct(&mut self, start: usize) -> Result<(), Diagnostic> {
         let two = |a: u8, b: u8, s: &Scanner| s.peek_byte(0) == a && s.peek_byte(1) == b;
-        let tok = if two(b'=', b'=', self) {
+        let tok = if self.text[self.pos..].starts_with(">>>") {
+            self.pos += 3;
+            Tok::Ushr
+        } else if two(b'<', b'<', self) {
+            self.pos += 2;
+            Tok::Shl
+        } else if two(b'>', b'>', self) {
+            self.pos += 2;
+            Tok::Shr
+        } else if two(b'=', b'=', self) {
             self.pos += 2;
             Tok::EqEq
         } else if two(b'!', b'=', self) {
@@ -520,6 +634,9 @@ impl<'a> Scanner<'a> {
                 b'*' => Tok::Star,
                 b'/' => Tok::Slash,
                 b'%' => Tok::Percent,
+                b'&' => Tok::Amp,
+                b'^' => Tok::Caret,
+                b'~' => Tok::Tilde,
                 b'?' => Tok::Question,
                 b'(' => {
                     self.nesting.push(Nest::Delim);
@@ -600,13 +717,30 @@ mod tests {
     fn scans_string_escapes() {
         assert_eq!(
             kinds("\"a\\n{{b}}\\u{41}\""),
-            vec![Tok::Str("a\n{b}A".to_string()), Tok::Eof]
+            vec![Tok::Str("a\n{{b}}A".to_string()), Tok::Eof]
         );
     }
 
     #[test]
+    fn plain_strings_keep_braces_inert() {
+        assert_eq!(
+            kinds("\"{name} {{literal}}\""),
+            vec![Tok::Str("{name} {{literal}}".to_string()), Tok::Eof]
+        );
+    }
+
+    #[test]
+    fn a_backslash_escapes_the_interpolation_marker() {
+        let tokens = kinds("\"\\#{name} #{name}\"");
+        let Tok::StrInterp(pieces) = &tokens[0] else {
+            panic!("the second marker must interpolate");
+        };
+        assert_eq!(pieces[0], StrPiece::Lit("#{name} ".to_string()));
+    }
+
+    #[test]
     fn scans_interpolation_pieces() {
-        let toks = kinds("\"Hello {name}!\"");
+        let toks = kinds("\"Hello #{name}!\"");
         assert_eq!(toks.len(), 2);
         match &toks[0] {
             Tok::StrInterp(pieces) => {
@@ -618,8 +752,8 @@ mod tests {
                         assert_eq!(inner[0].tok, Tok::Ident("name".to_string()));
                         assert_eq!(inner[1].tok, Tok::Eof);
                         // Spans point into the outer source text.
-                        assert_eq!(inner[0].span.lo, 8);
-                        assert_eq!(inner[0].span.hi, 12);
+                        assert_eq!(inner[0].span.lo, 9);
+                        assert_eq!(inner[0].span.hi, 13);
                     }
                     other => panic!("expected an expression piece, got {other:?}"),
                 }
@@ -631,10 +765,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_interpolation() {
-        assert_eq!(scan("\"x {\"").unwrap_err().code, "E0006");
-        assert_eq!(scan("\"x { }\"").unwrap_err().code, "E0006");
-        assert_eq!(scan("\"x {a{b}\"").unwrap_err().code, "E0006");
-        assert_eq!(scan("\"x {\"y\"}\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x #{\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x #{ }\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x #{a{b}\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x #{\"y\"}\"").unwrap_err().code, "E0006");
     }
 
     #[test]
@@ -677,9 +811,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_float_literal() {
-        assert_eq!(scan("1.5").unwrap_err().code, "E0005");
-        assert_eq!(scan("1e9").unwrap_err().code, "E0005");
+    fn scans_float_literals() {
+        assert_eq!(
+            kinds("1.5 1e9 2.5e-3 9223372036854775808.0"),
+            vec![
+                Tok::Float(1.5f64.to_bits()),
+                Tok::Float(1e9f64.to_bits()),
+                Tok::Float(2.5e-3f64.to_bits()),
+                Tok::Float(9_223_372_036_854_775_808.0f64.to_bits()),
+                Tok::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -700,10 +842,51 @@ mod tests {
     }
 
     #[test]
-    fn rejects_char_and_byte_literals() {
+    fn scans_byte_literals() {
+        assert_eq!(
+            kinds("b\"LM\\0\\x01\\xff\""),
+            vec![Tok::Bytes(vec![b'L', b'M', 0, 1, 255]), Tok::Eof]
+        );
+    }
+
+    #[test]
+    fn rejects_char_and_triple_literals() {
         assert_eq!(scan("'a'").unwrap_err().code, "E0008");
-        assert_eq!(scan("b\"x\"").unwrap_err().code, "E0009");
         assert_eq!(scan("\"\"\"x\"\"\"").unwrap_err().code, "E0010");
+    }
+
+    #[test]
+    fn checks_hex_escape_ranges() {
+        assert_eq!(
+            kinds("\"\\x7f\""),
+            vec![Tok::Str("\u{7f}".into()), Tok::Eof]
+        );
+        assert_eq!(scan("\"\\x80\"").unwrap_err().code, "E0003");
+        assert_eq!(scan("b\"é\"").unwrap_err().code, "E0009");
+    }
+
+    #[test]
+    fn scans_bitwise_operators() {
+        assert_eq!(
+            kinds("a & b | c ^ ~d << 1 >> 2 >>> 3"),
+            vec![
+                Tok::Ident("a".into()),
+                Tok::Amp,
+                Tok::Ident("b".into()),
+                Tok::Pipe,
+                Tok::Ident("c".into()),
+                Tok::Caret,
+                Tok::Tilde,
+                Tok::Ident("d".into()),
+                Tok::Shl,
+                Tok::Int(1),
+                Tok::Shr,
+                Tok::Int(2),
+                Tok::Ushr,
+                Tok::Int(3),
+                Tok::Eof,
+            ]
+        );
     }
 
     #[test]

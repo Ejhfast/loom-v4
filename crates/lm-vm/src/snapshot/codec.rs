@@ -97,6 +97,7 @@ const V_UNINIT: u8 = 5;
 const V_CHAR: u8 = 6;
 const V_EMPTY_CASE: u8 = 7;
 const V_CALLBACK: u8 = 8;
+const V_FLOAT: u8 = 9;
 
 /// The container hash of one byte prefix.
 pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
@@ -209,6 +210,10 @@ impl Out<'_> {
             Value::Int(i) => {
                 self.u8(V_INT);
                 self.i64(i);
+            }
+            Value::Float(bits) => {
+                self.u8(V_FLOAT);
+                self.u64(bits);
             }
             Value::Char(value) => {
                 self.u8(V_CHAR);
@@ -1866,6 +1871,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
             ClosedType::Callback(params, muts, ret, row)
         }
         28 => ClosedType::HostResource,
+        29 => ClosedType::Float,
         other => {
             return err(
                 ImageReason::Layout,
@@ -1886,6 +1892,13 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32, callbacks: u32) -> Read<
         V_UNIT => Value::Unit,
         V_BOOL => Value::Bool(cur.flag()?),
         V_INT => Value::Int(cur.i64()?),
+        V_FLOAT => {
+            let bits = cur.u64()?;
+            if f64::from_bits(bits).is_nan() && bits != lm_value::CANONICAL_NAN_BITS {
+                return err(ImageReason::Layout, "a Float value has a noncanonical NaN");
+            }
+            Value::Float(bits)
+        }
         V_OP => {
             let id = cur.hash()?;
             let slot =

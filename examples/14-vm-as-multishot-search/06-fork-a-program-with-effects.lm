@@ -27,7 +27,7 @@ def rollout(): Int with Choose, Io.Print
     # Risk grows faster than size, so one big wave costs more than
     # three small ones.
     risk = risk + size * size
-    sys.io.print("wave {size} ")
+    sys.io.print("wave #{size} ")
     step = step + 1
   end
   # The plan is only valid when it lands exactly six machines.
@@ -66,7 +66,7 @@ def cheapest(child: Run[Int], log: String): (Int, String) with Vm
     # taken before the line existed.
     in Call(Io.Print, call, (text,))
       child.answer(call, ())
-      cheapest(child, "{log}{text}")
+      cheapest(child, "#{log}#{text}")
     in Call(Choose.Pick, call, (count,))
       case child.snapshot()
       in Ok(image)

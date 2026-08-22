@@ -12,8 +12,8 @@ bad.append(104).append(255)
 
 def describe(raw: Bytes): String
   case raw.utf8_view()
-  in Ok(text)  then "text[{text}]"
-  in Err(_)    then "not utf8, {raw.len()} bytes"
+  in Ok(text)  then "text[#{text}]"
+  in Err(_)    then "not utf8, #{raw.len()} bytes"
   end
 end
 
@@ -23,4 +23,4 @@ in Ok(text)  then text
 in Err(_)    then "undecodable"
 end
 
-"{describe(good.build())} {describe(bad.build())} durable[{durable}]"
+"#{describe(good.build())} #{describe(bad.build())} durable[#{durable}]"

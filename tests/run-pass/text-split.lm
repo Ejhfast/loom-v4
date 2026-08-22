@@ -27,4 +27,4 @@ fields = "a,b,,c".split(",")
 empty = ""
 scalars = "aé".split(empty)
 
-"{out.finish()}| rows={rows.len()} pairs={pairs} fields={fields.len()} third=[{fields.at(2)}] scalars={scalars.len()} [{scalars.at(1)}{scalars.at(2)}]"
+"#{out.finish()}| rows=#{rows.len()} pairs=#{pairs} fields=#{fields.len()} third=[#{fields.at(2)}] scalars=#{scalars.len()} [#{scalars.at(1)}#{scalars.at(2)}]"

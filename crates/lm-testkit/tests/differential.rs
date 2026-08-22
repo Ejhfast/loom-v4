@@ -99,7 +99,7 @@ fn oracle_agrees_on_the_feature_corpus() {
         "def flip(n: Int): Option[Int]\n  if n > 0\n    Some(n)\n  else\n    None\n  end\nend\n\
          (flip(2).value_or(0), flip(-2).value_or(0))\n",
         // Interpolation with case values.
-        "o: Option[Int] = Some(2)\n\"value {o.value_or(0)}!\"\n",
+        "o: Option[Int] = Some(2)\n\"value #{o.value_or(0)}!\"\n",
         // Deeply mixed data.
         "rows = [(1, \"a\"), (2, \"b\")]\ntotal = 0\nnames = StringBuilder()\ni = 0\n\
          while i < rows.len()\n  total = total + rows.at(i)[0]\n  \

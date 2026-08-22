@@ -15,7 +15,7 @@ def read_message(): String with Fs.Open, Fs.Read, Fs.Close
     case file.read(1024)
     in Ok(bytes)
       file.close()
-      "the child read {bytes.len()} bytes"
+      "the child read #{bytes.len()} bytes"
     in Err(error) then display(error)
     end
   in Err(error) then display(error)
@@ -35,10 +35,10 @@ def capture_when_quiet(child: Run[String], budget: Int): String with Vm
     in Waiting then ()
     end
     if child.snapshot().is_ok()
-      return "captured after {steps} steps"
+      return "captured after #{steps} steps"
     end
   end
-  "no quiet point within {budget} steps"
+  "no quiet point within #{budget} steps"
 end
 
 def supervise(child: Run[String]): String with Vm
@@ -47,7 +47,7 @@ def supervise(child: Run[String]): String with Vm
   in Asked(request)
     child.dispatch(request)
     live = child.snapshot().is_ok()
-    "live capture={live}, then {capture_when_quiet(child, 5000)}"
+    "live capture=#{live}, then #{capture_when_quiet(child, 5000)}"
   in Done(value)
     return value
   in Fault(_)

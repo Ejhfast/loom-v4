@@ -1,4 +1,4 @@
 name = "Ada"
 n = 3
 flag = true
-"Hello {name}! n={n} flag={flag} {{literal}}"
+"Hello #{name}! n=#{n} flag=#{flag} {literal}"

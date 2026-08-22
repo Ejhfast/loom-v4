@@ -26,8 +26,8 @@ ordered = sorted_copy(pairs)
 scores: Map[(Int, String), Int] = {(2, "two"): 20}
 
 (
-  "{labels}",
-  "{ordered}",
+  "#{labels}",
+  "#{ordered}",
   scores.at((2, "two")),
   ordered.min(),
   hash_of((2, "two")) == hash_of((2, "two"))
