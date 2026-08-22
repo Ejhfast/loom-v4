@@ -375,6 +375,23 @@ impl Parser<'_> {
         let start = self.expect(Tok::KwInterface, "`interface`")?;
         let (name, name_span) = self.ident("an interface name")?;
         let generics = self.generic_params()?;
+        let mut parents = Vec::new();
+        if matches!(self.peek(), Tok::Colon) {
+            self.pos += 1;
+            loop {
+                parents.push(self.interface_ref()?);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else if matches!(self.peek(), Tok::Plus) {
+                    return Err(self.error(
+                        "E1053",
+                        "`,` separates parent interfaces. Use `+` only between bounds.",
+                    ));
+                } else {
+                    break;
+                }
+            }
+        }
         self.expect_terminator()?;
         let mut associated = Vec::new();
         let mut methods = Vec::new();
@@ -401,6 +418,7 @@ impl Parser<'_> {
             name,
             name_span,
             generics,
+            parents,
             associated,
             methods,
             span: start.span.to(end.span),
@@ -603,19 +621,41 @@ impl Parser<'_> {
         let enum_tok = self.expect(Tok::KwEnum, "`enum`")?;
         let (name, name_span) = self.ident("an enum name")?;
         let generics = self.generic_params()?;
+        let mut interfaces = Vec::new();
+        if matches!(self.peek(), Tok::KwImplements) {
+            self.pos += 1;
+            loop {
+                interfaces.push(self.interface_ref()?);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else if matches!(self.peek(), Tok::Plus) {
+                    return Err(self.error(
+                        "E1053",
+                        "`,` separates enum conformances. Use `+` only between bounds.",
+                    ));
+                } else {
+                    break;
+                }
+            }
+        }
         self.expect_terminator()?;
         let mut arms: Vec<ArmDef> = Vec::new();
+        let mut associated = Vec::new();
         let mut methods = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
                 Tok::KwEnd => break,
                 Tok::KwDef => methods.push(self.method_def()?),
-                Tok::Ident(_) if methods.is_empty() => {
+                Tok::KwType if methods.is_empty() => associated.push(self.associated_type(true)?),
+                Tok::Ident(_) if methods.is_empty() && associated.is_empty() => {
                     arms.push(self.enum_arm()?);
                 }
                 Tok::Ident(_) => {
-                    return Err(self.error("E1040", "enum arms must come before the enum methods"));
+                    return Err(self.error(
+                        "E1040",
+                        "enum arms must come before associated types and methods",
+                    ));
                 }
                 Tok::Eof => {
                     return Err(self.error("E1003", "expected `end`, found end of file"));
@@ -623,7 +663,7 @@ impl Parser<'_> {
                 other => {
                     return Err(self.error(
                         "E1003",
-                        format!("expected an arm, a method, or `end`, found {other}"),
+                        format!("expected an arm, an associated type, a method, or `end`, found {other}"),
                     ));
                 }
             }
@@ -641,6 +681,8 @@ impl Parser<'_> {
             name,
             name_span,
             generics,
+            interfaces,
+            associated,
             arms,
             methods,
             span: enum_tok.span.to(end_tok.span),
@@ -849,12 +891,19 @@ impl Parser<'_> {
         match self.peek() {
             Tok::KwSelf => {
                 let start = self.next();
-                self.expect(Tok::Dot, "`.` after `Self`")?;
-                let (name, end) = self.ident("an associated type name")?;
-                Ok(TypeExpr {
-                    kind: TypeExprKind::Name(format!("Self.{name}")),
-                    span: start.span.to(end),
-                })
+                if matches!(self.peek(), Tok::Dot) {
+                    self.pos += 1;
+                    let (name, end) = self.ident("an associated type name")?;
+                    Ok(TypeExpr {
+                        kind: TypeExprKind::Name(format!("Self.{name}")),
+                        span: start.span.to(end),
+                    })
+                } else {
+                    Ok(TypeExpr {
+                        kind: TypeExprKind::Name("Self".to_string()),
+                        span: start.span,
+                    })
+                }
             }
             Tok::Ident(_) => {
                 let (mut name, mut span) = self.ident("a type")?;

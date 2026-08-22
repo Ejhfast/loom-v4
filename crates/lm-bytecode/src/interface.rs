@@ -28,7 +28,7 @@ pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
 // Version 17 binds each interface to one immutable ABI bundle.
-const VERSION: u16 = 17;
+const VERSION: u16 = 18;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -181,6 +181,7 @@ pub struct IfaceInterface {
     pub type_params: u32,
     pub effect_params: u32,
     pub generic_is_effect: Vec<bool>,
+    pub parents: Vec<IfaceInterfaceUse>,
     pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
     pub associated: Vec<IfaceAssociated>,
     pub methods: Vec<IfaceInterfaceMethod>,
@@ -767,6 +768,10 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             for marker in &interface.generic_is_effect {
                 out.push(u8::from(*marker));
             }
+            write_u32(out, interface.parents.len() as u32);
+            for parent in &interface.parents {
+                encode_interface_use(out, parent);
+            }
             encode_bounds(out, &interface.type_bounds);
             write_u32(out, interface.associated.len() as u32);
             for associated in &interface.associated {
@@ -1137,6 +1142,11 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             for _ in 0..generic_count {
                 generic_is_effect.push(cur.flag()?);
             }
+            let parent_count = cur.len()?;
+            let mut parents = Vec::with_capacity(parent_count);
+            for _ in 0..parent_count {
+                parents.push(decode_interface_use(cur)?);
+            }
             let type_bounds = decode_bounds(cur)?;
             let associated_count = cur.len()?;
             let mut associated = Vec::with_capacity(associated_count);
@@ -1192,6 +1202,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 type_params,
                 effect_params,
                 generic_is_effect,
+                parents,
                 type_bounds,
                 associated,
                 methods,

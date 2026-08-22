@@ -1,6 +1,6 @@
 # Pre-release Language and Host Foundation
 
-Status: stages 1 through 3 implemented. Stages 4 through 7 remain required.
+Status: stages 1 through 4 implemented. Stages 5 through 7 remain required.
 
 This sidecar defines the first public release foundation.
 
@@ -278,7 +278,7 @@ Normal completion exits with status zero.
 
 A machine fault exits with status one.
 
-The first release needs a separate explicit status operation.
+The first release defers an explicit status operation.
 
 A terminal value does not control process status by its nominal type.
 
@@ -562,6 +562,8 @@ Inside a class, `Self` names the current nominal type application.
 
 Interface inheritance uses the existing colon form.
 
+A comma separates several parent interfaces.
+
 An inherited interface contributes its methods and associated type requirements.
 
 Two bounds can contribute one identical method contract without ambiguity.
@@ -569,6 +571,18 @@ Two bounds can contribute one identical method contract without ambiguity.
 Different contracts with one method name remain ambiguous.
 
 Enums can declare and implement interfaces.
+
+A normal class that conforms to a `Self`-dependent interface must be final.
+
+An enum family can conform because its family is closed.
+
+Class `Self` names the declared class application. It does not promise a dynamic subclass type.
+
+Artifacts store direct parent applications.
+
+Generic bounds and conformances also store the complete parent closure.
+
+The verifier rejects cycles, missing parent conformances, and inheritance beyond 128 levels.
 
 Interface contracts and inherited contracts enter interface identity hashes.
 

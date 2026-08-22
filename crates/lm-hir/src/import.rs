@@ -188,6 +188,7 @@ impl<'a> Materializer<'a> {
                 .map(|index| format!("e{index}"))
                 .collect(),
             generic_is_effect: interface.generic_is_effect.clone(),
+            parents: Vec::new(),
             type_bounds: vec![Vec::new(); interface.type_params as usize],
             associated: interface
                 .associated
@@ -206,6 +207,9 @@ impl<'a> Materializer<'a> {
             interface: interface.clone(),
         });
         let interface = interface.clone();
+        for parent in &interface.parents {
+            self.reserve_interface_use(ctx, parent, span)?;
+        }
         for bounds in &interface.type_bounds {
             for bound in bounds {
                 self.reserve_interface_use(ctx, bound, span)?;
@@ -438,6 +442,12 @@ impl<'a> Materializer<'a> {
     ) -> Result<(), Diagnostic> {
         let pending = std::mem::take(&mut self.pending_interfaces);
         for item in pending {
+            let parents = item
+                .interface
+                .parents
+                .iter()
+                .map(|parent| self.resolve_interface_use(ctx, parent, span))
+                .collect::<Result<Vec<_>, _>>()?;
             let type_bounds = self.resolve_bounds(ctx, &item.interface.type_bounds, span)?;
             let associated: Vec<AssociatedInfo> = item
                 .interface
@@ -476,6 +486,7 @@ impl<'a> Materializer<'a> {
                 })
                 .collect::<Result<_, Diagnostic>>()?;
             let info = &mut ctx.interfaces[item.id as usize];
+            info.parents = parents;
             info.type_bounds = type_bounds;
             info.associated = associated;
             info.methods = methods;

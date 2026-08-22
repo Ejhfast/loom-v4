@@ -173,6 +173,7 @@ pub fn append_resolved(
                 type_params: 0,
                 effect_params: 0,
                 generic_is_effect: Vec::new(),
+                parents: Vec::new(),
                 type_bounds: Vec::new(),
                 associated: Vec::new(),
                 methods: Vec::new(),
@@ -807,6 +808,11 @@ fn reloc_interface(source: &BcInterface, reloc: &AppendReloc) -> BcInterface {
         type_params: source.type_params,
         effect_params: source.effect_params,
         generic_is_effect: source.generic_is_effect.clone(),
+        parents: source
+            .parents
+            .iter()
+            .map(|parent| reloc_interface_use(parent, reloc))
+            .collect(),
         type_bounds: reloc_bounds(&source.type_bounds, reloc),
         associated: source
             .associated

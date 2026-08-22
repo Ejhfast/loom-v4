@@ -121,6 +121,7 @@ pub struct HirInterface {
     pub type_params: u32,
     pub effect_params: u32,
     pub generic_is_effect: Vec<bool>,
+    pub parents: Vec<HirInterfaceUse>,
     pub type_bounds: Vec<Vec<HirInterfaceUse>>,
     pub associated: Vec<HirAssociated>,
     pub methods: Vec<HirInterfaceMethod>,

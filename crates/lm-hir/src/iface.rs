@@ -289,6 +289,11 @@ impl Naming<'_> {
             type_params: info.type_params.len() as u32,
             effect_params: info.effect_params.len() as u32,
             generic_is_effect: info.generic_is_effect.clone(),
+            parents: info
+                .parents
+                .iter()
+                .map(|parent| self.interface_use(parent))
+                .collect(),
             type_bounds: self.bounds(&info.type_bounds),
             associated: info
                 .associated

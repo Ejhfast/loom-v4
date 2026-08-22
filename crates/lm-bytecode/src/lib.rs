@@ -227,6 +227,7 @@ pub struct BcInterface {
     pub type_params: u32,
     pub effect_params: u32,
     pub generic_is_effect: Vec<bool>,
+    pub parents: Vec<BcInterfaceUse>,
     pub type_bounds: Vec<Vec<BcInterfaceUse>>,
     pub associated: Vec<BcAssociated>,
     pub methods: Vec<BcInterfaceMethod>,
@@ -1124,7 +1125,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// 43 stores several bounds for each associated interface type.
 /// Version 44 adds deliberate fault instructions.
 /// Version 45 binds each artifact to one ABI bundle digest.
-pub const VERSION: u16 = 45;
+pub const VERSION: u16 = 46;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1457,6 +1458,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         write_u32(&mut out, interface.generic_is_effect.len() as u32);
         for is_effect in &interface.generic_is_effect {
             out.push(u8::from(*is_effect));
+        }
+        write_u32(&mut out, interface.parents.len() as u32);
+        for parent in &interface.parents {
+            encode_interface_use(&mut out, parent);
         }
         encode_type_bounds(&mut out, &interface.type_bounds);
         write_u32(&mut out, interface.associated.len() as u32);
@@ -2711,6 +2716,11 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..generic_count {
             generic_is_effect.push(cur.flag()?);
         }
+        let parent_count = cur.len()?;
+        let mut parents = Vec::with_capacity(parent_count);
+        for _ in 0..parent_count {
+            parents.push(decode_interface_use(&mut cur)?);
+        }
         let type_bounds = decode_type_bounds(&mut cur)?;
         let associated_count = cur.len()?;
         let mut associated = Vec::with_capacity(associated_count);
@@ -2764,6 +2774,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             type_params,
             effect_params,
             generic_is_effect,
+            parents,
             type_bounds,
             associated,
             methods,

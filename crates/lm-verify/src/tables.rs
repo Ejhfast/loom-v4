@@ -392,8 +392,29 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 .map(|parameter| vec![BcRow::Var(parameter)])
                 .collect(),
         };
-        let mut interface_scope = vec![vec![self_application]];
+        let mut self_bounds = vec![self_application];
+        let mut parent_ids = HashSet::new();
+        for parent in &contract.parents {
+            ctx.check_interface_use(parent, contract.type_params + 1, contract.effect_params)
+                .map_err(&ierr)?;
+            if parent.interface == iidx as u32 {
+                return Err(ierr("an interface cannot extend itself".to_string()));
+            }
+            if !parent_ids.insert(parent.interface) {
+                return Err(ierr("a parent interface appears twice".to_string()));
+            }
+            self_bounds.push(parent.clone());
+        }
+        let mut interface_scope = vec![self_bounds];
         interface_scope.extend(contract.type_bounds.clone());
+        let self_ty = ctx.intern(BcType::Var(0));
+        for parent in &contract.parents {
+            if !ctx.interface_arguments_meet_bounds(self_ty, parent, &interface_scope) {
+                return Err(ierr(
+                    "a parent interface has arguments outside its bounds".to_string(),
+                ));
+            }
+        }
         for (parameter, bounds) in contract.type_bounds.iter().enumerate() {
             let mut seen = HashSet::new();
             for bound in bounds {
@@ -495,6 +516,40 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 return Err(ierr("a method row is not canonical".to_string()));
             }
         }
+    }
+    let mut pending: Vec<usize> = module
+        .interfaces
+        .iter()
+        .map(|interface| interface.parents.len())
+        .collect();
+    let mut children = vec![Vec::new(); module.interfaces.len()];
+    for (child, interface) in module.interfaces.iter().enumerate() {
+        for parent in &interface.parents {
+            children[parent.interface as usize].push(child);
+        }
+    }
+    let mut queue: std::collections::VecDeque<usize> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index))
+        .collect();
+    let mut depth = vec![0usize; module.interfaces.len()];
+    let mut finished = 0usize;
+    while let Some(parent) = queue.pop_front() {
+        finished += 1;
+        for child in &children[parent] {
+            depth[*child] = depth[*child].max(depth[parent] + 1);
+            if depth[*child] > 128 {
+                return Err(terr("interface inheritance exceeds 128 levels".to_string()));
+            }
+            pending[*child] -= 1;
+            if pending[*child] == 0 {
+                queue.push_back(*child);
+            }
+        }
+    }
+    if finished != module.interfaces.len() {
+        return Err(terr("interface inheritance contains a cycle".to_string()));
     }
     if module.func_bounds.len() != module.funcs.len() {
         return Err(terr(
@@ -869,6 +924,51 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     Ok(())
 }
 
+fn interface_type_uses_self(ctx: &Ctx<'_>, root: u32) -> bool {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(ty) = stack.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        match ctx.ty(ty) {
+            BcType::Var(0) => return true,
+            BcType::Inst(_, args) | BcType::Tuple(args) => stack.extend(args),
+            BcType::List(item)
+            | BcType::Run(item)
+            | BcType::Wait(item)
+            | BcType::RunSnapshot(item) => stack.push(item),
+            BcType::Map(key, value)
+            | BcType::PendingCall(key, value)
+            | BcType::Handle(key, value) => {
+                stack.push(key);
+                stack.push(value);
+            }
+            BcType::Fn(params, _, ret, _) | BcType::Callback(params, _, ret, _) => {
+                stack.extend(params);
+                stack.push(ret);
+            }
+            BcType::Op(_, callable) => stack.push(callable),
+            BcType::Projection { .. } => {}
+            _ => {}
+        }
+    }
+    false
+}
+
+fn interface_uses_self(ctx: &Ctx<'_>, interface: u32) -> bool {
+    ctx.module.interfaces[interface as usize]
+        .methods
+        .iter()
+        .any(|method| {
+            method
+                .params
+                .iter()
+                .any(|ty| interface_type_uses_self(ctx, *ty))
+                || interface_type_uses_self(ctx, method.ret)
+        })
+}
+
 /// Conformance references and their method witnesses.
 fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let module = ctx.module;
@@ -914,6 +1014,33 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             ));
         }
         let contract = &module.interfaces[conformance.application.interface as usize];
+        if class.kind == BcClassKind::Normal
+            && !class.is_final
+            && interface_uses_self(ctx, conformance.application.interface)
+        {
+            return Err(cerr(
+                "a non-final class conforms to a Self-dependent interface".to_string(),
+            ));
+        }
+        let mut contract_types = Vec::with_capacity(conformance.application.types.len() + 1);
+        let self_ty = ctx
+            .class_self_type(conformance.class)
+            .ok_or_else(|| cerr("the class has no canonical self type".to_string()))?;
+        contract_types.push(self_ty);
+        contract_types.extend_from_slice(&conformance.application.types);
+        for parent in &contract.parents {
+            let required =
+                ctx.subst_interface_use(parent, &contract_types, &conformance.application.rows);
+            let found = module.conformances.iter().find(|candidate| {
+                candidate.class == conformance.class
+                    && candidate.application.interface == required.interface
+            });
+            if found.map(|candidate| &candidate.application) != Some(&required) {
+                return Err(cerr(
+                    "the conformance omits one parent interface".to_string(),
+                ));
+            }
+        }
         for ty in &conformance.associated {
             if !ctx.vars_bounded(*ty, class.type_params, 0) {
                 return Err(cerr(
@@ -931,9 +1058,6 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 ));
             }
         }
-        let self_ty = ctx
-            .class_self_type(conformance.class)
-            .ok_or_else(|| cerr("the class has no canonical self type".to_string()))?;
         if !ctx.interface_arguments_meet_bounds(
             self_ty,
             &conformance.application,
@@ -943,9 +1067,6 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 "the interface arguments do not meet their bounds".to_string(),
             ));
         }
-        let mut contract_types = Vec::with_capacity(conformance.application.types.len() + 1);
-        contract_types.push(self_ty);
-        contract_types.extend_from_slice(&conformance.application.types);
         for (associated, actual) in contract.associated.iter().zip(&conformance.associated) {
             for bound in &associated.bounds {
                 let required =
@@ -1041,7 +1162,19 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 .iter()
                 .map(|item| ctx.subst(*item, &contract_types, &conformance.application.rows))
                 .collect();
-            if actual_params != required_params {
+            let params_match = actual_params.len() == required_params.len()
+                && actual_params
+                    .iter()
+                    .zip(&required_params)
+                    .zip(&requirement.param_muts)
+                    .all(|((implementation, required), mutable)| {
+                        if *mutable {
+                            implementation == required
+                        } else {
+                            ctx.is_subtype(*required, *implementation)
+                        }
+                    });
+            if !params_match {
                 return Err(cerr(
                     "an interface method implementation changes parameter types".to_string(),
                 ));

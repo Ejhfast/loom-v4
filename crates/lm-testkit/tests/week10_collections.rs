@@ -1,6 +1,6 @@
 //! Week-10 native collection and iteration behavior.
 
-use lm_bytecode::{BcType, ExtendedInstr, Instr};
+use lm_bytecode::{BcInterfaceUse, BcType, ExtendedInstr, Instr};
 use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
 use lm_heap::{Object, StructuralEpoch};
 use lm_source::SourceFile;
@@ -136,6 +136,132 @@ fn interface_contracts_cross_module_boundaries() {
 }
 
 #[test]
+fn interface_inheritance_crosses_module_boundaries() {
+    let library = compile_module(
+        "lib.labels",
+        &SourceFile::new(
+            "labels.lm",
+            "interface Named\n  def name(self): String\nend\n\
+             interface Labeled: Named\n  def label(self): String\nend\n\
+             final class Item implements Labeled\n\
+               def name(self): String\n    \"item\"\n  end\n\
+               def label(self): String\n    \"ready\"\n  end\nend\n"
+                .to_string(),
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    compile_env
+        .bind_root("labels", "lib.labels")
+        .expect("the root binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "main.lm",
+            "use labels\n\
+             def describe[T: labels.Labeled](value: T): String\n\
+               \"{value.name()}:{value.label()}\"\nend\n\
+             describe(labels.Item())\n"
+                .to_string(),
+        ),
+        &compile_env.freeze(),
+        true,
+    )
+    .expect("the program compiles");
+    let mut link_env = LinkEnv::new();
+    for module in [&library, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: module.path.clone(),
+                module: module.module.clone(),
+                interface: module.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(\"item:ready\")");
+}
+
+#[test]
+fn the_verifier_checks_interface_inheritance() {
+    let source = r#"
+interface Named
+  def name(self): String
+end
+
+interface Labeled: Named
+  def label(self): String
+end
+
+final class Item implements Labeled
+  def name(self): String
+    "item"
+  end
+
+  def label(self): String
+    "ready"
+  end
+end
+
+Item()
+"#;
+    let module = compile_text("interface-inheritance.lm", source).expect("the source compiles");
+    let item = module
+        .classes
+        .iter()
+        .position(|class| class.name == "Item")
+        .expect("the Item class exists") as u32;
+    let named = module
+        .interfaces
+        .iter()
+        .position(|interface| interface.name == "Named")
+        .expect("the Named interface exists");
+    let labeled = module
+        .interfaces
+        .iter()
+        .position(|interface| interface.name == "Labeled")
+        .expect("the Labeled interface exists");
+
+    let original = lm_bytecode::identity::module_identity(&module).expect("the module hashes");
+    let mut changed = module.clone();
+    changed.interfaces[named].methods[0].ret = 2;
+    let changed =
+        lm_bytecode::identity::module_identity(&changed).expect("the changed module hashes");
+    assert_ne!(
+        original.interface_hashes[labeled],
+        changed.interface_hashes[labeled]
+    );
+
+    let mut missing = module.clone();
+    missing.conformances.retain(|conformance| {
+        conformance.class != item || conformance.application.interface != named as u32
+    });
+    let failure =
+        lm_verify::verify_module(&missing).expect_err("the missing parent conformance verifies");
+    assert!(
+        failure.message.contains("omits one parent interface"),
+        "{failure}"
+    );
+
+    let mut cyclic = module;
+    cyclic.interfaces[named].parents.push(BcInterfaceUse {
+        interface: labeled as u32,
+        types: Vec::new(),
+        rows: Vec::new(),
+    });
+    let failure = lm_verify::verify_module(&cyclic).expect_err("the interface cycle verifies");
+    assert!(failure.message.contains("cycle"), "{failure}");
+}
+
+#[test]
 fn multiple_associated_bounds_cross_module_boundaries() {
     let library = compile_module(
         "lib.catalog",
@@ -267,7 +393,7 @@ BadCatalog()
 }
 
 #[test]
-fn associated_bounds_reject_duplicates_and_ambiguous_methods() {
+fn associated_bounds_reject_duplicates_and_merge_identical_methods() {
     let duplicate = error(
         "interface Named\n  def name(self): String\nend\n\
          interface Catalog\n  type Item: Named + Named\nend\n1\n",
@@ -277,8 +403,7 @@ fn associated_bounds_reject_duplicates_and_ambiguous_methods() {
         "{duplicate}"
     );
 
-    let ambiguous = error(
-        r#"
+    let identical = r#"
 interface Left
   def value(self): Int
 end
@@ -297,12 +422,134 @@ def read[H: Holder](holder: H): Int
 end
 
 1
+"#;
+    compile_text("identical_interface_methods.lm", identical)
+        .expect("identical interface methods merge");
+
+    let ambiguous = error(
+        r#"
+interface Left
+  def value(self): Int
+end
+
+interface Right
+  def value(self): String
+end
+
+interface Holder
+  type Item: Left + Right
+  def item(self): Self.Item
+end
+
+def read[H: Holder](holder: H): Int
+  holder.item().value()
+end
+
+1
 "#,
     );
     assert!(
         ambiguous.contains("interface method `value` is ambiguous"),
         "{ambiguous}"
     );
+}
+
+#[test]
+fn self_and_interface_inheritance_preserve_the_conforming_type() {
+    let source = r#"
+interface Cloneable
+  def clone(self): Self
+  def same(self, other: Self): Bool
+end
+
+interface Named
+  def name(self): String
+end
+
+interface Labeled: Named
+  def label(self): String
+end
+
+final class Box implements Cloneable, Labeled
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def clone(self): Self
+    Box(self.value)
+  end
+
+  def same(self, other: Self): Bool
+    self.value == other.value
+  end
+
+  def name(self): String
+    "box"
+  end
+
+  def label(self): String
+    "{self.name()}:{self.value}"
+  end
+end
+
+def copy[T: Cloneable](value: T): T
+  value.clone()
+end
+
+def title[T: Labeled](value: T): String
+  "{value.name()} {value.label()}"
+end
+
+box = Box(7)
+copy_box = copy(box)
+(copy_box.same(box), title(copy_box))
+"#;
+    assert_eq!(outcome(source), "Done((true, \"box box:7\"))");
+
+    let bad = error(
+        "interface Cloneable\n  def clone(self): Self\nend\n\
+         final class Bad implements Cloneable\n  def clone(self): String\n    \"bad\"\n  end\nend\n1\n",
+    );
+    assert!(
+        bad.contains("does not match interface `Cloneable`"),
+        "{bad}"
+    );
+
+    let open = error(
+        "interface Cloneable\n  def clone(self): Self\nend\n\
+         class Open implements Cloneable\n  def clone(self): Open\n    Open()\n  end\nend\n1\n",
+    );
+    assert!(open.contains("non-final class cannot conform"), "{open}");
+}
+
+#[test]
+fn enums_can_implement_interfaces() {
+    let source = r#"
+interface Labeled
+  def label(self): String
+end
+
+enum Tone implements Labeled
+  Light
+  Dark
+
+  def label(self): String
+    case self
+    in Light then "light"
+    in Dark then "dark"
+    end
+  end
+end
+
+def label[T: Labeled](value: T): String
+  value.label()
+end
+
+label(Light)
+"#;
+    assert_eq!(outcome(source), "Done(\"light\")");
 }
 
 #[test]

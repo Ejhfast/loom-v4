@@ -59,7 +59,7 @@ use crate::{
     BcClassKind, BcRow, BcType, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT, VERSION,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 /// The compiler ABI version. It covers the canonical bytecode
 /// semantics, the identity encoding, and the lowering conventions.
@@ -100,7 +100,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 35 publishes static bindings apart from late linkage.
 /// Version 36 makes a class family part of its replacement contract.
 /// Version 37 adds multiple bounds to associated interface types.
-pub const COMPILER_ABI_VERSION: u32 = 37;
+/// Version 38 adds interface inheritance and bare `Self` contracts.
+pub const COMPILER_ABI_VERSION: u32 = 38;
 
 /// The refinement work budget of one component.
 ///
@@ -494,6 +495,9 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             Ok(())
         };
     for (iidx, interface) in module.interfaces.iter().enumerate() {
+        for parent in &interface.parents {
+            check_use(&format!("interface {iidx}"), parent)?;
+        }
         for bounds in &interface.type_bounds {
             for bound in bounds {
                 check_use(&format!("interface {iidx}"), bound)?;
@@ -519,6 +523,40 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             }
             check_row(&format!("interface {iidx}"), &method.row)?;
         }
+    }
+    let mut pending: Vec<usize> = module
+        .interfaces
+        .iter()
+        .map(|interface| interface.parents.len())
+        .collect();
+    let mut children = vec![Vec::new(); module.interfaces.len()];
+    for (child, interface) in module.interfaces.iter().enumerate() {
+        for parent in &interface.parents {
+            children[parent.interface as usize].push(child);
+        }
+    }
+    let mut queue: VecDeque<usize> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index))
+        .collect();
+    let mut depth = vec![0usize; module.interfaces.len()];
+    let mut finished = 0usize;
+    while let Some(parent) = queue.pop_front() {
+        finished += 1;
+        for child in &children[parent] {
+            depth[*child] = depth[*child].max(depth[parent] + 1);
+            if depth[*child] > 128 {
+                return Err(fail("interface inheritance exceeds 128 levels"));
+            }
+            pending[*child] -= 1;
+            if pending[*child] == 0 {
+                queue.push_back(*child);
+            }
+        }
+    }
+    if finished != module.interfaces.len() {
+        return Err(fail("interface inheritance contains a cycle"));
     }
     if module.class_bounds.len() != s.classes || module.func_bounds.len() != s.funcs {
         return Err(fail("interface-bound table length mismatch"));
@@ -1632,11 +1670,11 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Return the structural digest of one nominal interface contract.
-    fn interface_digest(&self, interface: u32) -> [u8; 32] {
+    /// Return the digest of one interface's direct contract.
+    fn interface_local_digest(&self, interface: u32) -> [u8; 32] {
         let contract = &self.module.interfaces[interface as usize];
         let mut out = Vec::new();
-        out.extend_from_slice(b"lm-interface-v2\0");
+        out.extend_from_slice(b"lm-interface-local-v1\0");
         out.extend_from_slice(&contract.type_params.to_le_bytes());
         out.extend_from_slice(&contract.effect_params.to_le_bytes());
         out.extend_from_slice(&(contract.generic_is_effect.len() as u32).to_le_bytes());
@@ -1665,6 +1703,42 @@ impl<'a> Resolver<'a> {
             }
             out.extend_from_slice(&self.type_digest(method.ret));
             self.row_bytes(&mut out, &method.row);
+        }
+        sha256(&out)
+    }
+
+    /// Return the structural digest of one nominal interface contract.
+    fn interface_digest(&self, interface: u32) -> [u8; 32] {
+        enum Step {
+            Enter(crate::BcInterfaceUse),
+            Leave,
+        }
+
+        let contract = &self.module.interfaces[interface as usize];
+        let mut out = Vec::new();
+        out.extend_from_slice(b"lm-interface-v3\0");
+        out.extend_from_slice(&self.interface_local_digest(interface));
+        let mut stack = Vec::new();
+        for parent in contract.parents.iter().rev() {
+            stack.push(Step::Enter(parent.clone()));
+        }
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(parent) => {
+                    out.push(1);
+                    self.interface_use_bytes(&mut out, &parent, false);
+                    out.extend_from_slice(&self.interface_local_digest(parent.interface));
+                    stack.push(Step::Leave);
+                    for ancestor in self.module.interfaces[parent.interface as usize]
+                        .parents
+                        .iter()
+                        .rev()
+                    {
+                        stack.push(Step::Enter(ancestor.clone()));
+                    }
+                }
+                Step::Leave => out.push(0),
+            }
         }
         sha256(&out)
     }

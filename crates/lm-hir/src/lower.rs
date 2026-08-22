@@ -381,6 +381,11 @@ pub fn lower_module_with_linkage(
             type_params: interface.type_params,
             effect_params: interface.effect_params,
             generic_is_effect: interface.generic_is_effect.clone(),
+            parents: interface
+                .parents
+                .iter()
+                .map(|parent| m.interface_use(parent))
+                .collect(),
             type_bounds: m.bounds(&interface.type_bounds),
             associated: interface
                 .associated

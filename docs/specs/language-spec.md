@@ -543,6 +543,26 @@ A bare interface application supplies an empty row for each effect parameter.
 
 Use `+` between several interface bounds. Use commas between class conformances.
 
+An interface can extend several interfaces after a colon. Commas separate these parent interfaces.
+
+Each inherited method and associated requirement remains part of the child contract.
+
+Identical method contracts from several bounds merge into one callable requirement.
+
+Different contracts with one method name remain ambiguous.
+
+Bare `Self` names the conforming type inside an interface contract.
+
+Bare `Self` names the declared nominal application inside a class or enum.
+
+A normal class that conforms to a `Self`-dependent interface must be final.
+
+An enum family can conform because its family is closed.
+
+An interface name is a bound. It is not a value type.
+
+Version 0.2 has no existential interface value.
+
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
 An associated type can declare several interface bounds. The selected type must satisfy every bound.
@@ -1121,6 +1141,10 @@ enum Option[T]
   end
 end
 ```
+
+An enum can use `implements` after its generic parameters.
+
+Associated type bindings follow all arms and precede methods.
 
 ### 9.2 Patterns
 
@@ -3812,9 +3836,11 @@ module          = opt_separators, { definition, separators },
 
 definition      = interface_decl | class_decl | enum_decl | function_decl ;
 
-interface_decl  = "interface", IDENT, [ generic_params ], separators,
+interface_decl  = "interface", IDENT, [ generic_params ],
+                  [ interface_parents ], separators,
                   { ( associated_requirement | interface_method ), separators },
                   "end" ;
+interface_parents = ":", interface_ref, { ",", interface_ref } ;
 associated_requirement = "type", IDENT, [ bound_clause ] ;
 interface_method = "def", IDENT, "(", method_parameters, ")",
                    [ ":", type ], [ effect_clause ] ;
@@ -3838,12 +3864,15 @@ function_decl   = "def", IDENT, [ generic_params ], "(", [ parameters ], ")",
                   [ ":", type ], [ effect_clause ], separators,
                   block, "end" ;
 
-enum_decl       = "enum", IDENT, [ generic_params ], separators,
+enum_decl       = "enum", IDENT, [ generic_params ],
+                  [ implements_clause ], separators,
                   { enum_arm, separators },
+                  { associated_binding, separators },
                   { method_decl, separators },
                   "end" ;
 
 enum_arm        = IDENT, [ "(", [ field_parameters ], ")" ] ;
+associated_binding = "type", IDENT, "=", type ;
 
 generic_params  = "[", generic_param, { ",", generic_param }, "]" ;
 generic_param   = IDENT, [ bound_clause ] | "effect", IDENT ;
@@ -3864,6 +3893,7 @@ row_item        = qualified_name | IDENT ;
 
 type            = primary_type, [ function_type_tail ] ;
 primary_type    = qualified_name, [ type_args ]
+                | "Self", [ ".", IDENT ]
                 | "[", type, "]"
                 | "{", type, ":", type, "}"
                 | "(", [ type_list ], ")"
@@ -3971,6 +4001,7 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - Parentheses are required for an empty interface row or a row with several items.
 - The `+` token separates interface bounds.
 - A comma separates class conformances.
+- A comma separates parent interfaces.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.
@@ -3978,7 +4009,8 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - A single-line `then` arm can contain one expression or one `return` statement.
 - A bracket suffix is generic application only where static resolution permits it and normally precedes a call; otherwise it is indexing. Ambiguous source is rejected.
 - A postfix assignment target must be a writable field or index, not an arbitrary call result.
-- Enum arms must precede enum methods. A zero-field constructor such as `None` is recognized from expected/scrutinee context; another bare name is a binding pattern.
+- Enum arms must precede associated bindings and methods. Associated bindings must precede methods.
+- Expected context recognizes a zero-field constructor such as `None`. Another bare name is a binding pattern.
 - Class fields and methods may be interleaved. Field layout follows inherited fields then local field source order.
 - The built-in static typing rule for `PolicyTable.pass` is specified in section 11.5 and is not expressible fully in the ordinary grammar/type language.
 - The scoped-designator escape rule is specified in section 5.13 and is not a general source lifetime syntax.
