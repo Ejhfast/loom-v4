@@ -570,7 +570,7 @@ fn relocate(
         let merged_slot = match merged.slot_by_key.get(&source.key).copied() {
             Some(existing) => {
                 let found = &mut merged.slots[existing as usize];
-                if found.contract != contract {
+                if found.contract_hash != source.contract_hash || found.contract != contract {
                     return Err(fail(format!(
                         "the slot {slot} of `{path}` has a contract that conflicts with its key"
                     )));
@@ -590,6 +590,7 @@ fn relocate(
                 let index = merged.slots.len() as u32;
                 merged.slots.push(SlotSpec {
                     key: source.key,
+                    contract_hash: source.contract_hash,
                     contract,
                     initial,
                 });

@@ -611,6 +611,73 @@ pub struct Machine {
     pub callbacks: Vec<CallbackSlot>,
 }
 
+struct PortableDefinitionInfo {
+    module_name: String,
+    qualified_key: String,
+    hashes: lm_bytecode::identity::DefinitionHashes,
+    related_functions: Vec<u32>,
+}
+
+fn portable_definition_info(
+    code: &lm_heap::PortableCode,
+    module: &Module,
+    identity: &lm_bytecode::identity::ModuleIdentity,
+) -> Result<PortableDefinitionInfo, FaultCode> {
+    match code.kind {
+        lm_heap::PortableCodeKind::Function => {
+            let binding = module
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding.func == code.index && binding.class == lm_bytecode::NO_CLASS
+                })
+                .min_by(|left, right| left.key.cmp(&right.key))
+                .ok_or(BAD_STATE)?;
+            let module_name = binding
+                .key
+                .rsplit_once('.')
+                .map_or("", |(prefix, _)| prefix)
+                .to_string();
+            let hashes =
+                lm_bytecode::identity::function_definition_hashes(module, identity, code.index)
+                    .map_err(|_| BAD_STATE)?;
+            Ok(PortableDefinitionInfo {
+                module_name,
+                qualified_key: binding.key.clone(),
+                hashes,
+                related_functions: vec![code.index],
+            })
+        }
+        lm_heap::PortableCodeKind::Class => {
+            let class = module.classes.get(code.index as usize).ok_or(BAD_STATE)?;
+            let suffix = format!(".{}", class.name);
+            let module_name = if class.key == class.name {
+                String::new()
+            } else {
+                class
+                    .key
+                    .strip_suffix(&suffix)
+                    .ok_or(BAD_STATE)?
+                    .to_string()
+            };
+            let hashes =
+                lm_bytecode::identity::class_definition_hashes(module, identity, code.index)
+                    .map_err(|_| BAD_STATE)?;
+            Ok(PortableDefinitionInfo {
+                module_name,
+                qualified_key: class.key.clone(),
+                hashes,
+                related_functions: class
+                    .methods
+                    .iter()
+                    .map(|(_, function)| *function)
+                    .collect(),
+            })
+        }
+        _ => Err(BAD_TYPE),
+    }
+}
+
 impl Machine {
     /// Return the class method table for one runtime value.
     fn virtual_class(&self, module: &Module, value: Value) -> Result<u32, FaultCode> {
@@ -3096,6 +3163,105 @@ impl Machine {
         Ok(value)
     }
 
+    /// Allocate one verified definition record.
+    fn alloc_definition_spec(
+        &mut self,
+        module: &Module,
+        code: &lm_heap::PortableCode,
+        decoded: &Module,
+        module_identity: &lm_bytecode::identity::ModuleIdentity,
+    ) -> Result<Value, FaultCode> {
+        let info = portable_definition_info(code, decoded, module_identity)?;
+        let identity_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_IDENTITY];
+        let spec_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SPEC];
+        if identity_class == lm_bytecode::NO_ROLE || spec_class == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+
+        let root = self.vm.operands.len();
+        let module_name =
+            SharedText::try_from_string(info.module_name).map_err(|_| FaultCode::HeapLimit)?;
+        let module_name = self.alloc(Object::Str(module_name))?;
+        self.push(module_name)?;
+        let qualified_key =
+            SharedText::try_from_string(info.qualified_key).map_err(|_| FaultCode::HeapLimit)?;
+        let qualified_key = self.alloc(Object::Str(qualified_key))?;
+        self.push(qualified_key)?;
+        let contract_hash = self.alloc(Object::NativeDigest(info.hashes.contract))?;
+        self.push(contract_hash)?;
+        let implementation_hash = self.alloc(Object::NativeDigest(info.hashes.implementation))?;
+        self.push(implementation_hash)?;
+        let definition_identity = self.alloc(Object::Instance {
+            class: identity_class,
+            fields: vec![
+                module_name,
+                qualified_key,
+                contract_hash,
+                implementation_hash,
+            ],
+            env: Witness::EMPTY,
+        })?;
+        let reference = definition_identity.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(reference);
+        self.push(definition_identity)?;
+
+        let module_hash = self.alloc(Object::NativeDigest(module_identity.semantic_hash))?;
+        self.push(module_hash)?;
+        let mut slot_values = Vec::new();
+        slot_values
+            .try_reserve_exact(decoded.slots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for (index, slot) in decoded.slots.iter().enumerate() {
+            let matches = match (code.kind, slot.initial) {
+                (
+                    lm_heap::PortableCodeKind::Function,
+                    Some(lm_bytecode::SlotTarget::Function(target)),
+                ) => target == code.index,
+                (
+                    lm_heap::PortableCodeKind::Class,
+                    Some(lm_bytecode::SlotTarget::Class { class, .. }),
+                ) => class == code.index,
+                (
+                    lm_heap::PortableCodeKind::Class,
+                    Some(lm_bytecode::SlotTarget::Function(target)),
+                ) => info.related_functions.contains(&target),
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
+            let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
+                kind: lm_heap::PortableCodeKind::SlotSpec,
+                bytes: code.bytes.clone(),
+                interface: code.interface.clone(),
+                index,
+                origin: None,
+            })))?;
+            self.push(value)?;
+            slot_values.push(value);
+        }
+        if slot_values.is_empty() {
+            return Err(BAD_STATE);
+        }
+        let slots = self.alloc(Object::List {
+            items: slot_values,
+            epoch: StructuralEpoch::default(),
+        })?;
+        let reference = slots.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(reference);
+        self.push(slots)?;
+        let value = self.alloc(Object::Instance {
+            class: spec_class,
+            fields: vec![definition_identity, module_hash, slots],
+            env: Witness::EMPTY,
+        })?;
+        let reference = value.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(reference);
+        self.vm.operands.truncate(root);
+        Ok(value)
+    }
+
     /// Read one portable definition source attachment.
     #[inline(never)]
     fn exec_code_source(
@@ -3146,18 +3312,6 @@ impl Machine {
             .get(definition.source as usize)
             .ok_or(BAD_STATE)?;
         let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
-        let definition_hash = match kind {
-            lm_bytecode::debug::DefinitionKind::Function => identity
-                .func_hashes
-                .get(code.index as usize)
-                .copied()
-                .ok_or(BAD_STATE)?,
-            lm_bytecode::debug::DefinitionKind::Class => identity
-                .class_hashes
-                .get(code.index as usize)
-                .copied()
-                .ok_or(BAD_STATE)?,
-        };
         let syntax_class = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_NODE];
         let source_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SOURCE];
         if syntax_class == lm_bytecode::NO_ROLE || source_class == lm_bytecode::NO_ROLE {
@@ -3179,65 +3333,11 @@ impl Machine {
         self.push(records)?;
         let syntax = self.alloc_syntax_view(syntax_class, text, records, definition.syntax)?;
         self.push(syntax)?;
-        let definition_hash = self.alloc(Object::NativeDigest(definition_hash))?;
-        self.push(definition_hash)?;
-        let module_hash = self.alloc(Object::NativeDigest(identity.semantic_hash))?;
-        self.push(module_hash)?;
-
-        let mut slot_keys = Vec::new();
-        slot_keys
-            .try_reserve_exact(decoded.slots.len())
-            .map_err(|_| FaultCode::HeapLimit)?;
-        let mut slot_values = Vec::new();
-        slot_values
-            .try_reserve_exact(decoded.slots.len())
-            .map_err(|_| FaultCode::HeapLimit)?;
-        for (index, slot) in decoded.slots.iter().enumerate() {
-            let matches = match (kind, slot.initial) {
-                (
-                    lm_bytecode::debug::DefinitionKind::Function,
-                    Some(lm_bytecode::SlotTarget::Function(target)),
-                ) => target == code.index,
-                (
-                    lm_bytecode::debug::DefinitionKind::Class,
-                    Some(lm_bytecode::SlotTarget::Class { class, .. }),
-                ) => class == code.index,
-                _ => false,
-            };
-            if !matches {
-                continue;
-            }
-            let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
-            let key = self.alloc(Object::NativeDigest(slot.key))?;
-            self.push(key)?;
-            slot_keys.push(key);
-            let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
-                kind: lm_heap::PortableCodeKind::SlotSpec,
-                bytes: code.bytes.clone(),
-                interface: code.interface.clone(),
-                index,
-                origin: None,
-            })))?;
-            self.push(value)?;
-            slot_values.push(value);
-        }
-        let slot_keys = self.alloc(Object::List {
-            items: slot_keys,
-            epoch: StructuralEpoch::default(),
-        })?;
-        let slot_keys_reference = slot_keys.as_obj().ok_or(BAD_STATE)?;
-        self.vm.heap.set_frozen(slot_keys_reference);
-        self.push(slot_keys)?;
-        let slots = self.alloc(Object::List {
-            items: slot_values,
-            epoch: StructuralEpoch::default(),
-        })?;
-        let slots_reference = slots.as_obj().ok_or(BAD_STATE)?;
-        self.vm.heap.set_frozen(slots_reference);
-        self.push(slots)?;
+        let spec = self.alloc_definition_spec(module, &code, &decoded, &identity)?;
+        self.push(spec)?;
         let value = self.alloc(Object::Instance {
             class: source_class,
-            fields: vec![path, syntax, definition_hash, module_hash, slot_keys, slots],
+            fields: vec![path, syntax, spec],
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(BAD_STATE)?;
@@ -3264,149 +3364,7 @@ impl Machine {
         };
         let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
         let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
-        let (qualified_key, module_name, definition_hash, related_functions) = match code.kind {
-            lm_heap::PortableCodeKind::Function => {
-                let binding = decoded
-                    .bindings
-                    .iter()
-                    .filter(|binding| {
-                        binding.func == code.index && binding.class == lm_bytecode::NO_CLASS
-                    })
-                    .min_by(|left, right| left.key.cmp(&right.key))
-                    .ok_or(BAD_STATE)?;
-                let module_name = binding
-                    .key
-                    .rsplit_once('.')
-                    .map_or("", |(prefix, _)| prefix)
-                    .to_string();
-                let definition_hash = *identity
-                    .func_hashes
-                    .get(code.index as usize)
-                    .ok_or(BAD_STATE)?;
-                (
-                    binding.key.clone(),
-                    module_name,
-                    definition_hash,
-                    vec![code.index],
-                )
-            }
-            lm_heap::PortableCodeKind::Class => {
-                let class = decoded.classes.get(code.index as usize).ok_or(BAD_STATE)?;
-                let suffix = format!(".{}", class.name);
-                let module_name = if class.key == class.name {
-                    String::new()
-                } else {
-                    class
-                        .key
-                        .strip_suffix(&suffix)
-                        .ok_or(BAD_STATE)?
-                        .to_string()
-                };
-                let definition_hash = *identity
-                    .class_hashes
-                    .get(code.index as usize)
-                    .ok_or(BAD_STATE)?;
-                let related = class
-                    .methods
-                    .iter()
-                    .map(|(_, function)| *function)
-                    .collect();
-                (class.key.clone(), module_name, definition_hash, related)
-            }
-            _ => return Err(BAD_TYPE),
-        };
-        let definition_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SPEC];
-        if definition_class == lm_bytecode::NO_ROLE {
-            return Err(BAD_STATE);
-        }
-
-        let root = self.vm.operands.len();
-        let module_name =
-            SharedText::try_from_string(module_name).map_err(|_| FaultCode::HeapLimit)?;
-        let module_name = self.alloc(Object::Str(module_name))?;
-        self.push(module_name)?;
-        let qualified_key =
-            SharedText::try_from_string(qualified_key).map_err(|_| FaultCode::HeapLimit)?;
-        let qualified_key = self.alloc(Object::Str(qualified_key))?;
-        self.push(qualified_key)?;
-        let definition_hash = self.alloc(Object::NativeDigest(definition_hash))?;
-        self.push(definition_hash)?;
-        let module_hash = self.alloc(Object::NativeDigest(identity.semantic_hash))?;
-        self.push(module_hash)?;
-
-        let mut slot_keys = Vec::new();
-        slot_keys
-            .try_reserve_exact(decoded.slots.len())
-            .map_err(|_| FaultCode::HeapLimit)?;
-        let mut slot_values = Vec::new();
-        slot_values
-            .try_reserve_exact(decoded.slots.len())
-            .map_err(|_| FaultCode::HeapLimit)?;
-        for (index, slot) in decoded.slots.iter().enumerate() {
-            let matches = match (code.kind, slot.initial) {
-                (
-                    lm_heap::PortableCodeKind::Function,
-                    Some(lm_bytecode::SlotTarget::Function(target)),
-                ) => target == code.index,
-                (
-                    lm_heap::PortableCodeKind::Class,
-                    Some(lm_bytecode::SlotTarget::Class { class, .. }),
-                ) => class == code.index,
-                (
-                    lm_heap::PortableCodeKind::Class,
-                    Some(lm_bytecode::SlotTarget::Function(target)),
-                ) => related_functions.contains(&target),
-                _ => false,
-            };
-            if !matches {
-                continue;
-            }
-            let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
-            let key = self.alloc(Object::NativeDigest(slot.key))?;
-            self.push(key)?;
-            slot_keys.push(key);
-            let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
-                kind: lm_heap::PortableCodeKind::SlotSpec,
-                bytes: code.bytes.clone(),
-                interface: code.interface.clone(),
-                index,
-                origin: None,
-            })))?;
-            self.push(value)?;
-            slot_values.push(value);
-        }
-        if slot_values.is_empty() {
-            return Err(BAD_STATE);
-        }
-        let slot_keys = self.alloc(Object::List {
-            items: slot_keys,
-            epoch: StructuralEpoch::default(),
-        })?;
-        let slot_keys_reference = slot_keys.as_obj().ok_or(BAD_STATE)?;
-        self.vm.heap.set_frozen(slot_keys_reference);
-        self.push(slot_keys)?;
-        let slots = self.alloc(Object::List {
-            items: slot_values,
-            epoch: StructuralEpoch::default(),
-        })?;
-        let slots_reference = slots.as_obj().ok_or(BAD_STATE)?;
-        self.vm.heap.set_frozen(slots_reference);
-        self.push(slots)?;
-        let value = self.alloc(Object::Instance {
-            class: definition_class,
-            fields: vec![
-                module_name,
-                qualified_key,
-                definition_hash,
-                module_hash,
-                slot_keys,
-                slots,
-            ],
-            env: Witness::EMPTY,
-        })?;
-        let definition_reference = value.as_obj().ok_or(BAD_STATE)?;
-        self.vm.heap.set_frozen(definition_reference);
-        self.vm.operands.truncate(root);
+        let value = self.alloc_definition_spec(module, &code, &decoded, &identity)?;
         self.push(value)
     }
 

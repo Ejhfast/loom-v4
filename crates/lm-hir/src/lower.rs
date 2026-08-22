@@ -64,6 +64,7 @@ pub enum LateCallableKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LateCallable {
     pub key: [u8; 32],
+    pub contract_hash: [u8; 32],
     pub kind: LateCallableKind,
 }
 
@@ -556,6 +557,7 @@ pub fn lower_module_with_linkage(
         };
         module.slots.push(SlotSpec {
             key: selected.key,
+            contract_hash: selected.contract_hash,
             contract: match selected.kind {
                 LateCallableKind::Function => SlotContract::Function(contract),
                 LateCallableKind::Method => SlotContract::Method(contract),
@@ -585,6 +587,7 @@ pub fn lower_module_with_linkage(
         }
         module.slots.push(SlotSpec {
             key: selected.key,
+            contract_hash: selected.abi,
             contract: SlotContract::Class {
                 type_params: definition.type_params,
                 abi: selected.abi,

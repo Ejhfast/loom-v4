@@ -98,7 +98,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 33 adds portable definition source lookup.
 /// Version 34 adds fault source lookup instructions.
 /// Version 35 publishes static bindings apart from late linkage.
-pub const COMPILER_ABI_VERSION: u32 = 35;
+/// Version 36 makes a class family part of its replacement contract.
+pub const COMPILER_ABI_VERSION: u32 = 36;
 
 /// The refinement work budget of one component.
 ///
@@ -161,6 +162,104 @@ impl ModuleIdentity {
     pub fn class_hash(&self, class: u32) -> [u8; 32] {
         self.class_hashes[class as usize]
     }
+}
+
+/// The two identities of one portable definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionHashes {
+    pub contract: [u8; 32],
+    pub implementation: [u8; 32],
+}
+
+/// Return the contract and implementation identities of one function.
+pub fn function_definition_hashes(
+    module: &Module,
+    identity: &ModuleIdentity,
+    function: u32,
+) -> Result<DefinitionHashes, IdentityError> {
+    let implementation = identity
+        .func_hashes
+        .get(function as usize)
+        .copied()
+        .ok_or_else(|| fail("a portable function index is invalid"))?;
+    let contract = module
+        .slots
+        .iter()
+        .filter(|slot| slot.initial == Some(crate::SlotTarget::Function(function)))
+        .min_by_key(|slot| {
+            let kind = matches!(slot.contract, crate::SlotContract::Method(_));
+            (kind, slot.key)
+        })
+        .map(|slot| slot.contract_hash)
+        .ok_or_else(|| fail("a portable function has no definition contract"))?;
+    Ok(DefinitionHashes {
+        contract,
+        implementation,
+    })
+}
+
+/// Return the contract and implementation identities of one class.
+pub fn class_definition_hashes(
+    module: &Module,
+    identity: &ModuleIdentity,
+    class: u32,
+) -> Result<DefinitionHashes, IdentityError> {
+    let class_hash = identity
+        .class_hashes
+        .get(class as usize)
+        .copied()
+        .ok_or_else(|| fail("a portable class index is invalid"))?;
+    let definition = module
+        .classes
+        .get(class as usize)
+        .ok_or_else(|| fail("a portable class index is invalid"))?;
+    let slot = module
+        .slots
+        .iter()
+        .find(|slot| {
+            matches!(
+                slot.initial,
+                Some(crate::SlotTarget::Class { class: found, .. }) if found == class
+            )
+        })
+        .ok_or_else(|| fail("a portable class has no definition contract"))?;
+    let constructor = match slot.initial {
+        Some(crate::SlotTarget::Class { constructor, .. }) => constructor,
+        _ => return Err(fail("a portable class has no constructor")),
+    };
+    let constructor_hash = identity
+        .func_hashes
+        .get(constructor as usize)
+        .copied()
+        .ok_or_else(|| fail("a portable class constructor index is invalid"))?;
+    let mut methods = Vec::with_capacity(definition.methods.len());
+    for (selector, function) in &definition.methods {
+        let selector = module
+            .selectors
+            .get(*selector as usize)
+            .ok_or_else(|| fail("a portable class method selector is invalid"))?;
+        let hash = identity
+            .func_hashes
+            .get(*function as usize)
+            .copied()
+            .ok_or_else(|| fail("a portable class method index is invalid"))?;
+        methods.push((selector.as_str(), hash));
+    }
+    methods.sort_unstable();
+
+    let mut bytes = b"lm-class-implementation-v1\0".to_vec();
+    bytes.extend_from_slice(&slot.contract_hash);
+    bytes.extend_from_slice(&class_hash);
+    bytes.extend_from_slice(&constructor_hash);
+    bytes.extend_from_slice(&(methods.len() as u32).to_le_bytes());
+    for (selector, hash) in methods {
+        write_str(&mut bytes, selector);
+        bytes.extend_from_slice(&hash);
+    }
+    Ok(DefinitionHashes {
+        contract: slot.contract_hash,
+        implementation: sha256(&bytes),
+    })
 }
 
 /// The container hash: SHA-256 over the exact container bytes.
@@ -2372,6 +2471,7 @@ impl<'a> Resolver<'a> {
     fn slot_contract_bytes(&self, out: &mut Vec<u8>, slot: u32, include_class_abi: bool) {
         let spec = &self.module.slots[slot as usize];
         out.extend_from_slice(&spec.key);
+        out.extend_from_slice(&spec.contract_hash);
         match &spec.contract {
             crate::SlotContract::Function(callable) => {
                 out.push(0);
@@ -3206,6 +3306,7 @@ mod slot_tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [9; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Function(BcCallableContract {
                     type_params: 0,
                     effect_params: 0,

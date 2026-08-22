@@ -458,6 +458,7 @@ The type universe has four strata.
 | `VerifiedModule` | Portable verified module revision |
 | `FunctionCode[A,T]` | Portable verified function code |
 | `ClassCode` | Portable verified class code |
+| `DefinitionIdentity` | Contract and implementation identities for one definition |
 | `DefinitionSpec` | Verified identity and slot contracts for one definition |
 | `DefinitionSource` | Optional syntax and verified identity data for portable code |
 | `SourceRange` | Half-open byte range in one source text |
@@ -2325,23 +2326,47 @@ Definitions outside the closure remain static.
 
 `ClassCode.definition()` returns `DefinitionSpec`.
 
-`DefinitionSpec` contains six fields.
-
-The fields are `module_name`, `qualified_key`, `definition_hash`, `module_hash`, `slot_keys`, and `slots`.
-
-The definition hash includes the selected implementation.
-
-The module hash identifies the complete verified source module.
-
-Each slot key combines one qualified binding with its body-independent contract hash.
-
-The slot keys align with the slot specifications.
+`DefinitionIdentity` contains `module_name`, `qualified_key`, `contract_hash`, and `implementation_hash`.
 
 The module name is a logical namespace. It is not a filesystem path.
 
+The qualified key names one definition in that namespace.
+
+The contract hash identifies body-independent replacement compatibility.
+
+A function contract excludes its binding name.
+
+A class contract includes its qualified nominal family and complete replacement shape.
+
+Function bodies, method bodies, and field default expressions do not enter a contract hash.
+
+The implementation hash identifies the selected executable implementation.
+
+A class implementation hash includes its class structure, generated constructor, methods, and static dependencies.
+
+`DefinitionSpec` contains `identity`, `module_hash`, and `slots`.
+
+The module hash identifies the complete verified source module.
+
+It does not decide definition replacement compatibility.
+
+Each `SlotSpec` stores its contract hash.
+
+The compiler derives its slot key from the qualified binding and contract hash.
+
+`DefinitionSpec.slots` contains the primary definition slot and required related slots.
+
+`ExportEntry.iface_hash` identifies a named source interface for import invalidation.
+
+It is not a definition replacement contract.
+
+`IfaceSlotSpec.contract_hash` equals the corresponding bytecode slot contract hash.
+
 The compiler uses `CompileEnv.definitions` to bind local declarations to these verified contracts.
 
-`DefinitionSource` contains `path`, `syntax`, `definition_hash`, `module_hash`, `slot_keys`, and `slots`.
+`DefinitionSource` contains `path`, `syntax`, and `definition`.
+
+The `definition` field contains the same `DefinitionSpec` data that `code.definition()` returns.
 
 The source attachment does not affect semantic or verification hashes.
 

@@ -3,8 +3,8 @@
 # Run with `--allow Compiler,Vm`.
 #
 # `codeof` reifies a named definition. Beside its portable code it
-# carries a `DefinitionSpec`: the module it belongs to, its qualified
-# key, its contract digest, and its slots.
+# carries a `DefinitionSpec`. Its identity names the definition and
+# separates compatibility from implementation changes.
 #
 # That spec is what makes a revision a revision. Binding it into a
 # `CompileEnv` tells the compiler that the source below defines the
@@ -53,7 +53,7 @@ def revision(): String
     "end\n"
 end
 
-def go(): Result[(Int, Int), String] with Compiler, Vm
+def go(): Result[(Int, Bool, Bool, Int), String] with Compiler, Vm
   image = sys.vm.Vm()
   original = image.install(codeof(Box)).map_error() { |e: CodeError| e.message }?
   reader = image.install(read_box).map_error() { |e: CodeError| e.message }?
@@ -75,7 +75,7 @@ def go(): Result[(Int, Int), String] with Compiler, Vm
   # The revision compiles under the module of the original, and under
   # its own file name.
   artifact = sys.compiler.compile(
-    spec.module_name,
+    spec.identity.module_name,
     "box-revision.lm",
     revision(),
     env,
@@ -83,13 +83,20 @@ def go(): Result[(Int, Int), String] with Compiler, Vm
   ).map_error() { |e: CompileErrors| e.message }?
   module = artifact.verify().map_error() { |e: CodeError| e.message }?
   code = module.class_code("Box").map_error() { |e: CodeError| e.message }?
+
+  # The implementation identity detects code changes.
+  # The contract identity predicts replacement compatibility.
+  replacement_spec = code.definition()
+  changed = spec.identity.implementation_hash != replacement_spec.identity.implementation_hash
+  compatible = spec.identity.contract_hash == replacement_spec.identity.contract_hash
+
   replacement = image.install(code).map_error() { |e: CodeError| e.message }?
   image.replace(original, replacement).map_error() { |e: CodeError| e.message }?
 
   after = run_read(image, reader)?
-  Ok((before, after))
+  Ok((before, changed, compatible, after))
 end
 
-# `Box().amount()` answered 5 + 1, and after the revision it answers
-# 50 + 10.
+# `Box().amount()` first answers 5 + 1.
+# The class replacement changes later field defaults.
 go()

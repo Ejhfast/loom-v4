@@ -646,11 +646,10 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             .filter_map(|(_, ty)| module.types.get(*ty as usize))
             .collect();
         let syntax = slot(lm_bytecode::corepin::ROLE_SYNTAX_NODE);
-        let slot_spec = slot(lm_bytecode::corepin::ROLE_SLOT_SPEC);
-        let valid_fields = matches!(fields.as_slice(), [BcType::Str, BcType::Class(found), BcType::Digest, BcType::Digest, BcType::List(key), BcType::List(item)]
+        let spec = slot(lm_bytecode::corepin::ROLE_DEFINITION_SPEC);
+        let valid_fields = matches!(fields.as_slice(), [BcType::Str, BcType::Class(found), BcType::Class(definition)]
             if Some(*found) == syntax
-                && matches!(module.types.get(*key as usize), Some(BcType::Digest))
-                && matches!(module.types.get(*item as usize), Some(BcType::Class(found)) if Some(*found) == slot_spec));
+                && Some(*definition) == spec);
         if class.kind != BcClassKind::Normal
             || !class.is_final
             || class.type_params != 0
@@ -671,8 +670,9 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             .filter_map(|(_, ty)| module.types.get(*ty as usize))
             .collect();
         let slot_spec = slot(lm_bytecode::corepin::ROLE_SLOT_SPEC);
-        let valid_fields = matches!(fields.as_slice(), [BcType::Str, BcType::Str, BcType::Digest, BcType::Digest, BcType::List(key), BcType::List(item)]
-            if matches!(module.types.get(*key as usize), Some(BcType::Digest))
+        let identity = slot(lm_bytecode::corepin::ROLE_DEFINITION_IDENTITY);
+        let valid_fields = matches!(fields.as_slice(), [BcType::Class(found), BcType::Digest, BcType::List(item)]
+            if Some(*found) == identity
                 && matches!(module.types.get(*item as usize), Some(BcType::Class(found)) if Some(*found) == slot_spec));
         if class.kind != BcClassKind::Normal
             || !class.is_final
@@ -683,6 +683,28 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         {
             return Err(terr(
                 "the DefinitionSpec role has an invalid layout".to_string(),
+            ));
+        }
+    }
+    if let Some(definition) = slot(lm_bytecode::corepin::ROLE_DEFINITION_IDENTITY) {
+        let class = &module.classes[definition as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !matches!(
+                fields.as_slice(),
+                [BcType::Str, BcType::Str, BcType::Digest, BcType::Digest]
+            )
+        {
+            return Err(terr(
+                "the DefinitionIdentity role has an invalid layout".to_string(),
             ));
         }
     }

@@ -90,7 +90,7 @@ def go(): Result[(Bool, Int, Int), String] with Compiler, Vm
     late_classes: List[String]()
   )
   artifact = sys.compiler.compile_syntax(
-    spec.module_name,
+    spec.identity.module_name,
     "limit-revision.lm",
     edited,
     env,

@@ -440,6 +440,9 @@ pub fn validate_interface(
             .iter()
             .find(|slot| slot.key == spec.key)
             .ok_or_else(|| "an interface slot has no module slot".to_string())?;
+        if slot.contract_hash != spec.contract_hash {
+            return Err("an interface slot has another contract identity".to_string());
+        }
         let agrees = matches!(
             (spec.kind, &slot.contract),
             (IfaceSlotKind::Function, crate::SlotContract::Function(_))

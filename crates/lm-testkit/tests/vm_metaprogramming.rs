@@ -366,11 +366,10 @@ def execute(): Bool
     source.path == "meta.lm" and
     source.syntax.kind() == 6 and
     source.syntax.text().contains("value + 1") and
-    source.slots.len() == 1 and
-    source.slot_keys.len() == 1 and
-    source.definition_hash == definition.definition_hash and
-    source.module_hash == definition.module_hash and
-    source.slot_keys.at(0) == definition.slot_keys.at(0)
+    source.definition.slots.len() == 1 and
+    source.definition.identity.contract_hash == definition.identity.contract_hash and
+    source.definition.identity.implementation_hash == definition.identity.implementation_hash and
+    source.definition.module_hash == definition.module_hash
   in None then false
   end
 end
@@ -391,7 +390,7 @@ def second(): Int
   1
 end
 
-def execute(): (Bool, Bool, Bool, Bool)
+def execute(): (Bool, Bool, Bool, Bool, Bool, Bool)
   first_source = case codeof(first).source()
   in Some(source) then source.syntax.text().contains("def first")
   in None then false
@@ -400,11 +399,15 @@ def execute(): (Bool, Bool, Bool, Bool)
   in Some(source) then source.syntax.text().contains("def second")
   in None then false
   end
+  first_definition = codeof(first).definition()
+  second_definition = codeof(second).definition()
   (
     first_source,
     second_source,
-    codeof(first).definition().qualified_key == "first",
-    codeof(second).definition().qualified_key == "second"
+    first_definition.identity.qualified_key == "first",
+    second_definition.identity.qualified_key == "second",
+    first_definition.identity.contract_hash == second_definition.identity.contract_hash,
+    first_definition.identity.implementation_hash == second_definition.identity.implementation_hash
   )
 end
 
@@ -412,7 +415,7 @@ execute()
 "#;
     assert_eq!(
         run_with_files(source, &[]),
-        "Done((true, true, true, true))"
+        "Done((true, true, true, true, true, true))"
     );
 }
 
@@ -468,7 +471,7 @@ def execute(): Result[(Int, Int), String] with Compiler.CompileSyntax, Compiler.
     late_classes: List[String]()
   )
   artifact = sys.compiler.compile_syntax(
-    definition.module_name,
+    definition.identity.module_name,
     "edited-add.lm",
     edited,
     env,
@@ -479,11 +482,11 @@ def execute(): Result[(Int, Int), String] with Compiler.CompileSyntax, Compiler.
     |error: CodeError| error.message
   }?
   replacement_definition = code.definition()
-  if replacement_definition.definition_hash == definition.definition_hash
-    return Err("the edited body kept its definition hash")
+  if replacement_definition.identity.implementation_hash == definition.identity.implementation_hash
+    return Err("the edited body kept its implementation identity")
   end
-  if replacement_definition.slot_keys.at(0) != definition.slot_keys.at(0)
-    return Err("the compatible edit changed its slot key")
+  if replacement_definition.identity.contract_hash != definition.identity.contract_hash
+    return Err("the compatible edit changed its contract identity")
   end
   image = sys.vm.Vm()
   original_binding = image.install(portable).map_error() {
@@ -646,7 +649,7 @@ def execute(): Result[(Int, Int, String), String] with Compiler.Compile, Compile
     late_classes: List[String]()
   )
   artifact = sys.compiler.compile(
-    definition.module_name,
+    definition.identity.module_name,
     "unrelated-patch-name.lm",
     "final class Box\n  value: Int = 50\n\n  def amount(self): Int\n    self.value + 10\n  end\nend\n",
     env,
@@ -656,6 +659,13 @@ def execute(): Result[(Int, Int, String), String] with Compiler.Compile, Compile
   replacement_code = module.class_code("Box").map_error() {
     |error: CodeError| error.message
   }?
+  replacement_definition = replacement_code.definition()
+  if definition.identity.contract_hash != replacement_definition.identity.contract_hash
+    return Err("the compatible class revision changed its contract identity")
+  end
+  if definition.identity.implementation_hash == replacement_definition.identity.implementation_hash
+    return Err("the class revision kept its implementation identity")
+  end
 
   image = sys.vm.Vm()
   original = image.install(original_code).map_error() {
@@ -687,7 +697,7 @@ def execute(): Result[(Int, Int, String), String] with Compiler.Compile, Compile
   }?)
   image.replace_all(changes).map_error() { |error: CodeError| error.message }?
   after = run_read(image, reader)?
-  Ok((before, after, definition.qualified_key))
+  Ok((before, after, definition.identity.qualified_key))
 end
 
 execute()
@@ -719,7 +729,7 @@ def execute(): Bool with Compiler.Compile
     late_classes: List[String]()
   )
   case sys.compiler.compile(
-    definition.module_name,
+    definition.identity.module_name,
     "incompatible-box.lm",
     "final class Box\n  value: Int = 5\n  label: String = \"new\"\nend\n",
     env,
@@ -886,7 +896,7 @@ def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify
     late_classes: List[String]()
   )
   artifact = sys.compiler.compile(
-    definition.module_name,
+    definition.identity.module_name,
     "box-batch-revision.lm",
     "final class Box\n  value: Int = 50\nend\n",
     env,
@@ -2024,8 +2034,8 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
     case fault.site()
     in None then false
     in Some(site)
-      site.function == second_source.definition_hash and
-      site.function != first_source.definition_hash
+      site.function == second_source.definition.identity.implementation_hash and
+      site.function != first_source.definition.identity.implementation_hash
     end
   end
 end
@@ -2191,11 +2201,13 @@ fn complete_slot_artifact() -> Vec<u8> {
         .expect("the Int type exists") as u32;
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("slot-kinds.value"),
+        contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("slot-kinds.process"),
+        contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Process {
             message: int,
             result: int,

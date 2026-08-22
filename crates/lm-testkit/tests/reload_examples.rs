@@ -55,13 +55,14 @@ fn the_evaluator_example_classifies_each_line() {
 fn a_program_redefines_its_own_class() {
     // `Box().amount()` answered 5 + 1. The revision compiles under
     // the module of the original, so it lands in the same nominal
-    // family and replaces it. The reader then answers 50 + 10.
+    // family. Its implementation identity changes.
+    // Its contract identity remains equal.
     assert_eq!(
         run_example(
             "examples/15-compiler-and-hot-code-reloading/03-redefine-your-own-code.lm",
             &["Compiler", "Vm"],
         ),
-        "Done(Ok((6, 51)))"
+        "Done(Ok((6, true, true, 51)))"
     );
 }
 

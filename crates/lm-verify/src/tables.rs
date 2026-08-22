@@ -1229,10 +1229,15 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             }
             SlotContract::Class {
                 type_params,
-                abi: _,
+                abi,
                 ty,
                 constructor,
             } => {
+                if spec.contract_hash != *abi {
+                    return Err(serr(
+                        "the class contract identity differs from its ABI".to_string(),
+                    ));
+                }
                 verify_slot_type(ctx, slot, *ty, *type_params, 0, &[], false)?;
                 verify_callable_contract(ctx, slot, constructor)?;
                 if constructor.type_params != *type_params

@@ -616,6 +616,7 @@ mod tests {
         module.func_bounds.push(vec![]);
         module.slots.push(lm_bytecode::SlotSpec {
             key: [1; 32],
+            contract_hash: [0; 32],
             contract: SlotContract::Function(BcCallableContract {
                 type_params: 0,
                 effect_params: 0,
@@ -642,6 +643,7 @@ mod tests {
         module.func_bounds.push(vec![]);
         module.slots.push(lm_bytecode::SlotSpec {
             key: [2; 32],
+            contract_hash: [0; 32],
             contract: SlotContract::Function(BcCallableContract {
                 type_params: 0,
                 effect_params: 0,

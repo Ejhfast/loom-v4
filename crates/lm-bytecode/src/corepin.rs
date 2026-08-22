@@ -167,6 +167,7 @@ pub struct CoreLayout {
     pub class_binding: Option<u32>,
     pub definition_spec: Option<u32>,
     pub slot_change: Option<u32>,
+    pub definition_identity: Option<u32>,
     pub code_error: Option<u32>,
     pub link_env: Option<u32>,
     pub compile_env: Option<u32>,
@@ -188,7 +189,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 142] = [
+pub const PINNED_LABELS: [&str; 143] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -331,6 +332,7 @@ pub const PINNED_LABELS: [&str; 142] = [
     "ClassBinding",
     "DefinitionSpec",
     "SlotChange",
+    "DefinitionIdentity",
 ];
 
 /// The core role of immediate integer values.
@@ -443,6 +445,7 @@ pub const ROLE_FUNCTION_BINDING: usize = 138;
 pub const ROLE_CLASS_BINDING: usize = 139;
 pub const ROLE_DEFINITION_SPEC: usize = 140;
 pub const ROLE_SLOT_CHANGE: usize = 141;
+pub const ROLE_DEFINITION_IDENTITY: usize = 142;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -617,6 +620,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ClassBinding" => &mut layout.class_binding,
         "DefinitionSpec" => &mut layout.definition_spec,
         "SlotChange" => &mut layout.slot_change,
+        "DefinitionIdentity" => &mut layout.definition_identity,
         "CodeError" => &mut layout.code_error,
         "LinkEnv" => &mut layout.link_env,
         "CompileEnv" => &mut layout.compile_env,

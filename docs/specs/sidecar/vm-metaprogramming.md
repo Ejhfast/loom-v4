@@ -33,6 +33,7 @@ The implementation uses these decisions:
 - Module installation returns an `Instance`.
 - Definition installation returns an installed binding.
 - Each binding retains an immutable definition target.
+- `DefinitionIdentity` separates replacement compatibility from implementation identity.
 - `DefinitionSpec` binds new source to one verified definition contract.
 - A `Slot` provides optional late binding under one immutable contract.
 - `SlotChange` prepares one checked slot update without publishing it.
@@ -258,23 +259,53 @@ Generic definitions require an explicit type application in version 0.2.
 
 `FunctionCode.definition()` returns one frozen `DefinitionSpec`.
 
-`ClassCode.definition()` returns one frozen `DefinitionSpec`.
+`ClassCode.definition()` returns the same public record type.
 
-The specification contains a logical module name and a qualified key.
+`DefinitionSpec.identity` contains one `DefinitionIdentity`.
 
-It also contains a definition hash, module hash, slot keys, and verified slot specifications.
+`DefinitionIdentity` contains a logical module name and qualified key.
 
-The definition hash includes the selected implementation.
+It also contains a contract hash and an implementation hash.
 
-The module hash identifies the complete verified source module.
+The contract hash identifies body-independent replacement compatibility.
 
-Each slot key combines one qualified binding with its body-independent contract hash.
+A function contract covers its type parameters, parameter types, mutability, result, and effect row.
 
-Equal slot keys identify the same compatible replacement address.
+The function binding name stays outside that contract.
 
-`ModuleIdentity.interface_hashes` identifies declared Loom interfaces instead.
+Two differently named functions can therefore fill the same function slot.
 
-Those hashes do not identify function or class replacement contracts.
+A class contract includes its qualified nominal family.
+
+It also covers class kind, generic structure, parent, fields, methods, constructor, conformances, and enum metadata.
+
+Method bodies and field default expressions stay outside the class contract.
+
+The function implementation hash is its verified structural definition hash.
+
+The class implementation hash groups its class structure, generated constructor, methods, and their static dependencies.
+
+A method body or field default edit therefore changes the class implementation hash.
+
+`DefinitionSpec.module_hash` identifies the complete verified source module.
+
+The module hash does not decide replacement compatibility.
+
+`DefinitionSpec.slots` contains verified slot specifications for the definition family.
+
+Each bytecode slot stores its intrinsic contract hash.
+
+The compiler combines the qualified binding and contract hash to create the slot key.
+
+`IfaceSlotSpec.contract_hash` carries this same value through a module interface.
+
+`ExportEntry.iface_hash` answers a different question.
+
+It includes the export name and complete source interface for importer invalidation.
+
+`ModuleIdentity.interface_hashes` identifies declared Loom interfaces.
+
+Neither interface hash decides function or class replacement compatibility.
 
 The logical module name creates qualified declaration keys.
 
@@ -959,11 +990,13 @@ It does affect the exact container hash.
 
 `ClassCode.source()` returns `Option[DefinitionSource]`.
 
-`DefinitionSource` contains the selected syntax node and its compile metadata.
+`DefinitionSource` contains the selected syntax node and its `DefinitionSpec`.
 
 The selected node is one definition or one required recursive definition group.
 
-It also contains the diagnostic source name, definition hash, module hash, slot keys, and slot specifications.
+It contains `path`, `syntax`, and `definition`.
+
+The definition record matches the data from `code.definition()`.
 
 Tools can inspect or transform that node with the public syntax API.
 

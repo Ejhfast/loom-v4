@@ -290,11 +290,13 @@ pub fn append_resolved(
         let contract = reloc_slot_contract(&slot.contract, &reloc);
         let initial = slot.initial.map(|target| reloc_slot_target(target, &reloc));
         let target = if let Some(existing) = slot_index.get(&slot.key).copied() {
-            if !slot_contracts_match(
-                &merged,
-                &merged.slots[existing as usize].contract,
-                &contract,
-            ) {
+            if merged.slots[existing as usize].contract_hash != slot.contract_hash
+                || !slot_contracts_match(
+                    &merged,
+                    &merged.slots[existing as usize].contract,
+                    &contract,
+                )
+            {
                 return Err(fail(format!(
                     "slot {index} has a contract that conflicts with its key"
                 )));
@@ -304,6 +306,7 @@ pub fn append_resolved(
             let target = merged.slots.len() as u32;
             merged.slots.push(SlotSpec {
                 key: slot.key,
+                contract_hash: slot.contract_hash,
                 contract,
                 initial,
             });

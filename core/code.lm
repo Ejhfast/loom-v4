@@ -12,28 +12,39 @@ end
 final class ClassCode
 end
 
-final class DefinitionSpec
+final class DefinitionIdentity
   module_name: String
   qualified_key: String
-  definition_hash: Digest
-  module_hash: Digest
-  slot_keys: List[Digest]
-  slots: List[SlotSpec]
+  contract_hash: Digest
+  implementation_hash: Digest
 
   def init(
     mut self,
     module_name: String,
     qualified_key: String,
-    definition_hash: Digest,
-    module_hash: Digest,
-    slot_keys: List[Digest],
-    slots: List[SlotSpec]
+    contract_hash: Digest,
+    implementation_hash: Digest
   )
     self.module_name = module_name
     self.qualified_key = qualified_key
-    self.definition_hash = definition_hash
+    self.contract_hash = contract_hash
+    self.implementation_hash = implementation_hash
+  end
+end
+
+final class DefinitionSpec
+  identity: DefinitionIdentity
+  module_hash: Digest
+  slots: List[SlotSpec]
+
+  def init(
+    mut self,
+    identity: DefinitionIdentity,
+    module_hash: Digest,
+    slots: List[SlotSpec]
+  )
+    self.identity = identity
     self.module_hash = module_hash
-    self.slot_keys = slot_keys
     self.slots = slots
   end
 end
@@ -41,26 +52,17 @@ end
 final class DefinitionSource
   path: String
   syntax: SyntaxNode
-  definition_hash: Digest
-  module_hash: Digest
-  slot_keys: List[Digest]
-  slots: List[SlotSpec]
+  definition: DefinitionSpec
 
   def init(
     mut self,
     path: String,
     syntax: SyntaxNode,
-    definition_hash: Digest,
-    module_hash: Digest,
-    slot_keys: List[Digest],
-    slots: List[SlotSpec]
+    definition: DefinitionSpec
   )
     self.path = path
     self.syntax = syntax
-    self.definition_hash = definition_hash
-    self.module_hash = module_hash
-    self.slot_keys = slot_keys
-    self.slots = slots
+    self.definition = definition
   end
 end
 

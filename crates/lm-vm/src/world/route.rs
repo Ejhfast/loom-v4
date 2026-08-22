@@ -800,50 +800,45 @@ impl World {
             let Object::Instance { class, fields, .. } = heap.get(definition) else {
                 return Err(FaultCode::TypeMismatch);
             };
-            if Some(*class) != self.core.definition_spec || fields.len() != 6 {
+            if Some(*class) != self.core.definition_spec || fields.len() != 3 {
                 return Err(FaultCode::TypeMismatch);
             }
-            let module_name = fields[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
-            let qualified_key = fields[1].as_obj().ok_or(FaultCode::TypeMismatch)?;
-            let definition_hash = fields[2].as_obj().ok_or(FaultCode::TypeMismatch)?;
-            let module_hash = fields[3].as_obj().ok_or(FaultCode::TypeMismatch)?;
-            let slot_keys = fields[4].as_obj().ok_or(FaultCode::TypeMismatch)?;
-            let slots = fields[5].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let identity = fields[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let module_hash = fields[1].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let slots = fields[2].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Instance {
+                class,
+                fields: identity,
+                ..
+            } = heap.get(identity)
+            else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            if Some(*class) != self.core.definition_identity || identity.len() != 4 {
+                return Err(FaultCode::TypeMismatch);
+            }
+            let module_name = identity[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let qualified_key = identity[1].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let contract_hash = identity[2].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let implementation_hash = identity[3].as_obj().ok_or(FaultCode::TypeMismatch)?;
             let Object::Str(module_name) = heap.get(module_name) else {
                 return Err(FaultCode::TypeMismatch);
             };
             let Object::Str(qualified_key) = heap.get(qualified_key) else {
                 return Err(FaultCode::TypeMismatch);
             };
-            let Object::NativeDigest(definition_hash) = heap.get(definition_hash) else {
+            let Object::NativeDigest(contract_hash) = heap.get(contract_hash) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let Object::NativeDigest(implementation_hash) = heap.get(implementation_hash) else {
                 return Err(FaultCode::TypeMismatch);
             };
             let Object::NativeDigest(module_hash) = heap.get(module_hash) else {
                 return Err(FaultCode::TypeMismatch);
             };
-            let Object::List {
-                items: slot_keys, ..
-            } = heap.get(slot_keys)
-            else {
-                return Err(FaultCode::TypeMismatch);
-            };
             let Object::List { items: slots, .. } = heap.get(slots) else {
                 return Err(FaultCode::TypeMismatch);
             };
-            if slot_keys.len() != slots.len() {
-                return Err(FaultCode::TypeMismatch);
-            }
-            let mut host_slot_keys = Vec::new();
-            host_slot_keys
-                .try_reserve_exact(slot_keys.len())
-                .map_err(|_| FaultCode::HeapLimit)?;
-            for key in slot_keys {
-                let key = key.as_obj().ok_or(FaultCode::TypeMismatch)?;
-                let Object::NativeDigest(key) = heap.get(key) else {
-                    return Err(FaultCode::TypeMismatch);
-                };
-                host_slot_keys.push(*key);
-            }
             let mut host_slots = Vec::new();
             host_slots
                 .try_reserve_exact(slots.len())
@@ -871,9 +866,9 @@ impl World {
                 local_name: local_name.clone(),
                 module_name: module_name.clone(),
                 qualified_key: qualified_key.clone(),
-                definition_hash: *definition_hash,
+                contract_hash: *contract_hash,
+                implementation_hash: *implementation_hash,
                 module_hash: *module_hash,
-                slot_keys: host_slot_keys,
                 slots: host_slots,
             });
         }

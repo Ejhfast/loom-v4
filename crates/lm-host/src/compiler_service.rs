@@ -168,13 +168,7 @@ fn bind_definition(
     let first_module = decode_compile_slot(first)?;
     validate_definition_identity(&first_module, &definition)?;
 
-    if definition.slot_keys.len() != definition.slots.len() {
-        return Err(format!(
-            "definition `{}` has misaligned slot keys",
-            definition.local_name
-        ));
-    }
-    for (slot, slot_key) in definition.slots.iter().zip(&definition.slot_keys) {
+    for slot in &definition.slots {
         if slot.artifact != first.artifact {
             return Err(format!(
                 "definition `{}` combines different modules",
@@ -186,12 +180,6 @@ fn bind_definition(
             .slots
             .get(slot.index as usize)
             .ok_or_else(|| "a definition slot index is invalid".to_string())?;
-        if spec.key != *slot_key {
-            return Err(format!(
-                "definition `{}` has another slot key",
-                definition.local_name
-            ));
-        }
         let (binding, kind) = definition_slot_binding(&module, slot, spec, &definition)?;
         let in_family = binding == definition.qualified_key.as_str()
             || binding
@@ -203,7 +191,7 @@ fn bind_definition(
                 definition.qualified_key
             ));
         }
-        env.bind_late(&binding, [0; 32], spec.key, kind)
+        env.bind_late(&binding, spec.contract_hash, spec.key, kind)
             .map_err(|error| format!("compile environment error: {error}"))?;
     }
     Ok(())
@@ -238,7 +226,11 @@ fn validate_definition_identity(
         .classes
         .iter()
         .position(|class| class.key == definition.qualified_key.as_str())
-        .and_then(|index| identity.class_hashes.get(index).copied());
+        .map(|index| {
+            lm_bytecode::identity::class_definition_hashes(module, &identity, index as u32)
+        })
+        .transpose()
+        .map_err(|error| format!("the definition class has no identity: {error}"))?;
     let function = module
         .bindings
         .iter()
@@ -246,16 +238,26 @@ fn validate_definition_identity(
             binding.key == definition.qualified_key.as_str()
                 && binding.class == lm_bytecode::NO_CLASS
         })
-        .and_then(|binding| identity.func_hashes.get(binding.func as usize).copied());
+        .map(|binding| {
+            lm_bytecode::identity::function_definition_hashes(module, &identity, binding.func)
+        })
+        .transpose()
+        .map_err(|error| format!("the definition function has no identity: {error}"))?;
     let Some(found) = class.or(function) else {
         return Err(format!(
             "definition `{}` is absent from its module",
             definition.qualified_key
         ));
     };
-    if found != definition.definition_hash {
+    if found.contract != definition.contract_hash {
         return Err(format!(
-            "definition `{}` has another verified identity",
+            "definition `{}` has another contract identity",
+            definition.qualified_key
+        ));
+    }
+    if found.implementation != definition.implementation_hash {
+        return Err(format!(
+            "definition `{}` has another implementation identity",
             definition.qualified_key
         ));
     }

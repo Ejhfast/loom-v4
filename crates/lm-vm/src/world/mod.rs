@@ -808,6 +808,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [19; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Function(contract),
                 initial: Some(SlotTarget::Function(0)),
             }],
@@ -982,6 +983,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [7; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Function(callable),
                 initial: Some(SlotTarget::Function(1)),
             }],
@@ -1042,6 +1044,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [8; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Value { ty: 3 },
                 initial: None,
             }],
@@ -1166,6 +1169,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [9; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Method(BcCallableContract {
                     type_params: 0,
                     effect_params: 0,
@@ -1280,6 +1284,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [10; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Class {
                     type_params: 0,
                     abi: [0; 32],
@@ -1299,6 +1304,7 @@ mod tests {
             .class_hashes[0];
         module.slots[0] = SlotSpec {
             key: [10; 32],
+            contract_hash: abi,
             contract: SlotContract::Class {
                 type_params: 0,
                 abi,
@@ -1399,6 +1405,7 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [11; 32],
+                contract_hash: [0; 32],
                 contract: SlotContract::Process {
                     message: 2,
                     result: 2,

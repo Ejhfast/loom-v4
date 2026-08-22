@@ -626,8 +626,8 @@ fn class_contract_hash(hir: &lm_hir::HirModule, class_index: u32) -> Result<[u8;
         .classes
         .get(class_index as usize)
         .ok_or_else(|| "a slot contract names no class".to_string())?;
-    let mut bytes = b"lm-slot-contract-v1\0".to_vec();
-    bytes.push(2);
+    let mut bytes = b"lm-class-contract-v2\0".to_vec();
+    contract_text(&mut bytes, &class.key);
     out_class_contract(&mut bytes, hir, class_index, class)?;
     Ok(lm_bytecode::hash::sha256(&bytes))
 }
@@ -1265,6 +1265,7 @@ pub(crate) fn select_linkage(
                     function,
                     LateCallable {
                         key: spec.key,
+                        contract_hash: spec.contract_hash,
                         kind: if spec.kind == IfaceSlotKind::Method {
                             LateCallableKind::Method
                         } else {
@@ -1427,6 +1428,45 @@ mod tests {
             first.interface.slots[0].contract_hash,
             second.interface.slots[0].contract_hash
         );
+        let stored = first
+            .module
+            .slots
+            .iter()
+            .find(|slot| slot.key == first.interface.slots[0].key)
+            .expect("the first function slot exists");
+        assert_eq!(stored.contract_hash, first.interface.slots[0].contract_hash);
+        let first_identity = lm_bytecode::identity::module_identity(&first.module)
+            .expect("the first revision has an identity");
+        let second_identity = lm_bytecode::identity::module_identity(&second.module)
+            .expect("the second revision has an identity");
+        let first_function = first
+            .module
+            .bindings
+            .iter()
+            .find(|binding| binding.key == "probe.step")
+            .expect("the first function has a binding")
+            .func;
+        let second_function = second
+            .module
+            .bindings
+            .iter()
+            .find(|binding| binding.key == "probe.step")
+            .expect("the second function has a binding")
+            .func;
+        let first_hashes = lm_bytecode::identity::function_definition_hashes(
+            &first.module,
+            &first_identity,
+            first_function,
+        )
+        .expect("the first function has definition identities");
+        let second_hashes = lm_bytecode::identity::function_definition_hashes(
+            &second.module,
+            &second_identity,
+            second_function,
+        )
+        .expect("the second function has definition identities");
+        assert_eq!(first_hashes.contract, second_hashes.contract);
+        assert_ne!(first_hashes.implementation, second_hashes.implementation);
     }
 
     #[test]
@@ -1444,6 +1484,30 @@ mod tests {
             first.interface.slots[0].contract_hash,
             second.interface.slots[0].contract_hash
         );
+    }
+
+    #[test]
+    fn equal_function_contracts_do_not_include_the_binding_name() {
+        let compiled = compile(
+            "def rate(value: Int): Int\n  value * 2\nend\ndef with_fee(value: Int): Int\n  value * 20\nend\n0\n",
+            &CompileOptions::new()
+                .late_function("rate")
+                .late_function("with_fee"),
+        );
+        let rate = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.rate")
+            .expect("the rate slot exists");
+        let with_fee = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.with_fee")
+            .expect("the fee slot exists");
+        assert_eq!(rate.contract_hash, with_fee.contract_hash);
+        assert_ne!(rate.key, with_fee.key);
     }
 
     #[test]
@@ -1505,14 +1569,28 @@ mod tests {
             Some(lm_bytecode::SlotTarget::Class { class, constructor }) => (class, constructor),
             _ => panic!("the first class slot has no constructor"),
         };
-        let second_constructor = match second_slot.initial {
-            Some(lm_bytecode::SlotTarget::Class { constructor, .. }) => constructor,
+        let (second_class, second_constructor) = match second_slot.initial {
+            Some(lm_bytecode::SlotTarget::Class { class, constructor }) => (class, constructor),
             _ => panic!("the second class slot has no constructor"),
         };
         assert_ne!(
             first_identity.func_hashes[first_constructor as usize],
             second_identity.func_hashes[second_constructor as usize]
         );
+        let first_hashes = lm_bytecode::identity::class_definition_hashes(
+            &first.module,
+            &first_identity,
+            first_class,
+        )
+        .expect("the first class has definition identities");
+        let second_hashes = lm_bytecode::identity::class_definition_hashes(
+            &second.module,
+            &second_identity,
+            second_class,
+        )
+        .expect("the second class has definition identities");
+        assert_eq!(first_hashes.contract, second_hashes.contract);
+        assert_ne!(first_hashes.implementation, second_hashes.implementation);
         assert!(first.module.funcs[first_constructor as usize]
             .blocks
             .iter()
@@ -1520,6 +1598,32 @@ mod tests {
             .any(|instruction| {
                 matches!(instruction, Instr::New(class) if *class == first_class)
             }));
+    }
+
+    #[test]
+    fn a_class_contract_includes_its_logical_family() {
+        let source = "final class Box\n  value: Int = 5\nend\nBox().value\n";
+        let options = CompileOptions::new().late_class("Box");
+        let first = compile_module_with_options(
+            "first",
+            &SourceFile::new("first.lm", source),
+            &crate::CompileEnv::new().freeze(),
+            true,
+            &options,
+        )
+        .expect("the first class compiles");
+        let second = compile_module_with_options(
+            "second",
+            &SourceFile::new("second.lm", source),
+            &crate::CompileEnv::new().freeze(),
+            true,
+            &options,
+        )
+        .expect("the second class compiles");
+        assert_ne!(
+            first.interface.slots[0].contract_hash,
+            second.interface.slots[0].contract_hash
+        );
     }
 
     #[test]

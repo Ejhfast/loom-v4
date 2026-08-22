@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 142;
+pub const CORE_ROLE_COUNT: usize = 143;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -285,6 +285,8 @@ pub enum SlotTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotSpec {
     pub key: [u8; 32],
+    /// The intrinsic, body-independent contract identity.
+    pub contract_hash: [u8; 32],
     pub contract: SlotContract,
     pub initial: Option<SlotTarget>,
 }
@@ -1104,8 +1106,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 38 makes class slots select versioned constructors.
 /// Version 39 defines the optional source debug section.
 /// Version 40 adds fault source lookup instructions.
-/// Version 41 adds installed binding core roles.
-pub const VERSION: u16 = 41;
+/// Version 41 adds installed binding core roles. Version 42 stores
+/// each intrinsic definition contract beside its late slot.
+pub const VERSION: u16 = 42;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1484,6 +1487,7 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.slots.len() as u32);
     for slot in &module.slots {
         out.extend_from_slice(&slot.key);
+        out.extend_from_slice(&slot.contract_hash);
         encode_slot_contract(&mut out, &slot.contract);
         match slot.initial {
             None => out.push(0),
@@ -2757,10 +2761,15 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         });
     }
     let slot_count = cur.len()?;
+    if slot_count > cur.remaining() / 66 {
+        return Err(DecodeError::BadLength);
+    }
     let mut slots = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {
         let mut key = [0u8; 32];
         key.copy_from_slice(cur.take(32)?);
+        let mut contract_hash = [0u8; 32];
+        contract_hash.copy_from_slice(cur.take(32)?);
         let contract = decode_slot_contract(&mut cur)?;
         let initial = match cur.u8()? {
             0 => None,
@@ -2773,6 +2782,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         };
         slots.push(SlotSpec {
             key,
+            contract_hash,
             contract,
             initial,
         });
@@ -3517,16 +3527,19 @@ mod tests {
         module.slots = vec![
             SlotSpec {
                 key: [1; 32],
+                contract_hash: [11; 32],
                 contract: SlotContract::Function(callable.clone()),
                 initial: Some(SlotTarget::Function(0)),
             },
             SlotSpec {
                 key: [2; 32],
+                contract_hash: [12; 32],
                 contract: SlotContract::Method(callable),
                 initial: Some(SlotTarget::Function(1)),
             },
             SlotSpec {
                 key: [3; 32],
+                contract_hash: [13; 32],
                 contract: SlotContract::Class {
                     type_params: 0,
                     abi: [7; 32],
@@ -3540,11 +3553,13 @@ mod tests {
             },
             SlotSpec {
                 key: [4; 32],
+                contract_hash: [14; 32],
                 contract: SlotContract::Value { ty: 1 },
                 initial: None,
             },
             SlotSpec {
                 key: [5; 32],
+                contract_hash: [15; 32],
                 contract: SlotContract::Process {
                     message: 2,
                     result: 1,

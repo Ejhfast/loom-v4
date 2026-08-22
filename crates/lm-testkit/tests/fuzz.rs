@@ -850,11 +850,13 @@ fn installed_slot_artifact() -> Vec<u8> {
         .expect("the Int type exists") as u32;
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.value"),
+        contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.process"),
+        contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Process {
             message: int,
             result: int,
