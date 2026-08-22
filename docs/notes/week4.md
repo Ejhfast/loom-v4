@@ -12,7 +12,7 @@ the changed tests, one incident, and the deferred work.
   `Rand.Int`, and the `Vm` control family (`Vm.New`, `Vm.FromFn`,
   `Vm.Run`, `Vm.Step`, `Vm.Drive`, `Vm.Answer`, `Vm.Reject`,
   `Vm.Dispatch`, `Vm.Table`). Each operation has a stable dense slot
-  and a domain-separated SHA-256 identity over its name and full
+  and a domain-separated BLAKE3-256 identity over its name and full
   signature; `manifest_digest()` pins the whole table. The checker,
   the verifier, the VM, and the host all read this one table.
 - The `sys` surface: `sys.<group>.<Member>(args)` is one `PERFORM`.

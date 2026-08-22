@@ -393,7 +393,7 @@ The boundary, restated for week 6:
   moved pin therefore misses the cache, and meets the verifier and
   the loader rule;
 - a rejected module never enters the cache;
-- the remaining assumption is SHA-256 collision resistance.
+- the remaining assumption is BLAKE3-256 collision resistance.
 
 The sweep test `a_cached_load_and_an_uncached_load_always_agree` is
 the durable invariant: for any byte stream, a cached load and an
@@ -827,11 +827,11 @@ that differs only inside a nested closure still receives its own
 colour.
 
 The colours are content ranks, not hashes: the rounds sort byte
-signatures and assign ranks, and one SHA-256 pass at the fixed point
+signatures and assign ranks, and one BLAKE3-256 pass at the fixed point
 produces the component hash and the member hashes. **This is a
 deviation from step 4 of specification section 6**, which states that
 the final label is the iterated hash itself. Iterated hashing costs
-one SHA-256 per member per round, and the round count is one per
+one BLAKE3-256 pass per member per round, and the round count is one per
 member on a crafted component. The partition is identical either way;
 only the hash domain differs.
 

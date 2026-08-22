@@ -54,7 +54,7 @@
 //! validates every index first, allocates only linearly in the input,
 //! and never recurses on the Rust stack over untrusted shapes.
 
-use crate::hash::sha256;
+use crate::hash::hash256;
 use crate::{
     BcClassKind, BcRow, BcType, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT, VERSION,
 };
@@ -107,7 +107,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 42 adds conditional conformance contracts.
 /// Version 43 lowers ordered and unordered hash mixing.
 /// Version 44 lowers tombstone-aware map traversal.
-pub const COMPILER_ABI_VERSION: u32 = 44;
+/// Version 45 uses BLAKE3-256 for bytecode identities.
+pub const COMPILER_ABI_VERSION: u32 = 45;
 
 /// The refinement work budget of one component.
 ///
@@ -266,13 +267,13 @@ pub fn class_definition_hashes(
     }
     Ok(DefinitionHashes {
         contract: slot.contract_hash,
-        implementation: sha256(&bytes),
+        implementation: hash256(&bytes),
     })
 }
 
-/// The container hash: SHA-256 over the exact container bytes.
+/// The container hash: BLAKE3-256 over the exact container bytes.
 pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
-    sha256(bytes)
+    hash256(bytes)
 }
 
 /// The verification hash: an index-preserving digest over every
@@ -328,7 +329,7 @@ pub fn verification_hash_with(manifest: [u8; 32], module: &Module) -> [u8; 32] {
     bytes.extend_from_slice(TAG_VERIFICATION);
     bytes.extend_from_slice(&manifest);
     bytes.extend_from_slice(&crate::semantic_section(module));
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 // ----------------------------------------------------------------
@@ -1548,6 +1549,8 @@ struct Resolver<'a> {
     type_intra: &'a HashMap<u32, [u8; 32]>,
     app_intra: &'a HashMap<u32, [u8; 32]>,
     body_intra: &'a HashMap<u32, [u8; 32]>,
+    /// Final interface contract digests for this identity pass.
+    interface_hashes: Option<&'a [[u8; 32]]>,
     /// Closure bodies on the active serialization path. A reference
     /// to one is a hand-built cycle and gets a marker.
     on_path: &'a [u32],
@@ -1678,7 +1681,11 @@ impl<'a> Resolver<'a> {
     ) {
         write_str(out, self.interface_key(application.interface));
         if contract {
-            out.extend_from_slice(&self.interface_digest(application.interface));
+            let digest = match self.interface_hashes {
+                Some(hashes) => hashes[application.interface as usize],
+                None => self.interface_digest(application.interface),
+            };
+            out.extend_from_slice(&digest);
         }
         out.extend_from_slice(&(application.types.len() as u32).to_le_bytes());
         for ty in &application.types {
@@ -1739,7 +1746,7 @@ impl<'a> Resolver<'a> {
             out.extend_from_slice(&self.type_digest(method.ret));
             self.row_bytes(&mut out, &method.row);
         }
-        sha256(&out)
+        hash256(&out)
     }
 
     /// Return the structural digest of one nominal interface contract.
@@ -1775,7 +1782,7 @@ impl<'a> Resolver<'a> {
                 Step::Leave => out.push(0),
             }
         }
-        sha256(&out)
+        hash256(&out)
     }
 
     /// The structural digest bytes of one type entry, using the child
@@ -1892,7 +1899,7 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*f));
             }
         }
-        sha256(&out)
+        hash256(&out)
     }
 
     /// The digest bytes of one type application.
@@ -1908,7 +1915,7 @@ impl<'a> Resolver<'a> {
         for row in &app.rows {
             self.row_bytes(&mut out, row);
         }
-        sha256(&out)
+        hash256(&out)
     }
 
     /// The canonical member bytes of one class.
@@ -2821,6 +2828,7 @@ fn closure_body_digests(
     graph: &Graph,
     state: &HashState,
     comp_of: &[u32],
+    interface_hashes: &[[u8; 32]],
     closures: &[u32],
 ) -> HashMap<u32, [u8; 32]> {
     let empty_members: HashMap<u32, u32> = HashMap::new();
@@ -2857,13 +2865,14 @@ fn closure_body_digests(
                         type_intra: &empty_digests,
                         app_intra: &empty_digests,
                         body_intra: &done,
+                        interface_hashes: Some(interface_hashes),
                         on_path: &visiting,
                         closure_list: closures,
                     };
                     let mut bytes = Vec::new();
                     bytes.extend_from_slice(TAG_BODY);
                     bytes.extend_from_slice(&resolver.func_bytes(f));
-                    sha256(&bytes)
+                    hash256(&bytes)
                 };
                 visiting.retain(|x| *x != f);
                 done.insert(f, digest);
@@ -2928,6 +2937,76 @@ pub fn module_identity_with_bundle(
     // The empty overlays of the final all-hash view.
     let empty_members: HashMap<u32, u32> = HashMap::new();
     let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
+    let no_colours: [u32; 0] = [];
+    let scratch = RefCell::new(Vec::new());
+    for index in 0..s.types {
+        let digest = {
+            let resolver = Resolver {
+                module,
+                bundle,
+                graph: &graph,
+                state: &state,
+                comp: None,
+                comp_of: &comp_of,
+                member_of: &empty_members,
+                colours: Some(&no_colours),
+                record: &scratch,
+                type_intra: &empty_digests,
+                app_intra: &empty_digests,
+                body_intra: &empty_digests,
+                interface_hashes: None,
+                on_path: &[],
+                closure_list: &[],
+            };
+            resolver.type_digest_of(&module.types[index])
+        };
+        state.type_final[index] = Some(digest);
+    }
+    for index in 0..s.apps {
+        let digest = {
+            let resolver = Resolver {
+                module,
+                bundle,
+                graph: &graph,
+                state: &state,
+                comp: None,
+                comp_of: &comp_of,
+                member_of: &empty_members,
+                colours: Some(&no_colours),
+                record: &scratch,
+                type_intra: &empty_digests,
+                app_intra: &empty_digests,
+                body_intra: &empty_digests,
+                interface_hashes: None,
+                on_path: &[],
+                closure_list: &[],
+            };
+            resolver.app_digest_of(index as u32)
+        };
+        state.app_final[index] = Some(digest);
+    }
+    let interface_hashes = {
+        let resolver = Resolver {
+            module,
+            bundle,
+            graph: &graph,
+            state: &state,
+            comp: None,
+            comp_of: &comp_of,
+            member_of: &empty_members,
+            colours: Some(&no_colours),
+            record: &scratch,
+            type_intra: &empty_digests,
+            app_intra: &empty_digests,
+            body_intra: &empty_digests,
+            interface_hashes: None,
+            on_path: &[],
+            closure_list: &[],
+        };
+        (0..module.interfaces.len() as u32)
+            .map(|interface| resolver.interface_digest(interface))
+            .collect::<Vec<_>>()
+    };
     // An imported definition takes the pinned interface hash as its
     // identity. It references nothing, so it is a singleton component
     // and every hash schedule reaches it before any user of it.
@@ -2943,6 +3022,12 @@ pub fn module_identity_with_bundle(
     }
     for (comp_idx, comp) in comps.iter().enumerate() {
         let comp_idx = comp_idx as u32;
+        if comp
+            .iter()
+            .all(|node| *node as usize >= s.classes + s.funcs)
+        {
+            continue;
+        }
         // An imported definition carries its pin, so the component
         // encoding never runs for it.
         if comp.len() == 1 {
@@ -3026,6 +3111,7 @@ pub fn module_identity_with_bundle(
                     type_intra: &type_intra,
                     app_intra: &app_intra,
                     body_intra: &empty_digests,
+                    interface_hashes: Some(&interface_hashes),
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -3048,6 +3134,7 @@ pub fn module_identity_with_bundle(
                     type_intra: &type_intra,
                     app_intra: &app_intra,
                     body_intra: &empty_digests,
+                    interface_hashes: Some(&interface_hashes),
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -3076,6 +3163,7 @@ pub fn module_identity_with_bundle(
                     type_intra: &type_intra,
                     app_intra: &app_intra,
                     body_intra: &empty_digests,
+                    interface_hashes: Some(&interface_hashes),
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -3115,6 +3203,7 @@ pub fn module_identity_with_bundle(
                 type_intra: &type_intra,
                 app_intra: &app_intra,
                 body_intra: &empty_digests,
+                interface_hashes: Some(&interface_hashes),
                 on_path: &[],
                 closure_list: &closure_funcs,
             };
@@ -3125,7 +3214,7 @@ pub fn module_identity_with_bundle(
                 comp_bytes.extend_from_slice(&bytes);
             }
         }
-        let comp_hash = sha256(&comp_bytes);
+        let comp_hash = hash256(&comp_bytes);
         for &node in comp {
             state.comp_hash[node as usize] = comp_hash;
         }
@@ -3141,7 +3230,7 @@ pub fn module_identity_with_bundle(
             bytes.extend_from_slice(TAG_MEMBER);
             bytes.extend_from_slice(&comp_hash);
             bytes.extend_from_slice(&colours[*i].to_le_bytes());
-            let hash = sha256(&bytes);
+            let hash = hash256(&bytes);
             match kind {
                 KIND_CLASS => state.class_hash[idx as usize] = Some(hash),
                 _ => state.func_hash[idx as usize] = Some(hash),
@@ -3165,6 +3254,7 @@ pub fn module_identity_with_bundle(
                     type_intra: &empty_digests,
                     app_intra: &empty_digests,
                     body_intra: &empty_digests,
+                    interface_hashes: Some(&interface_hashes),
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -3187,6 +3277,7 @@ pub fn module_identity_with_bundle(
                     type_intra: &empty_digests,
                     app_intra: &empty_digests,
                     body_intra: &empty_digests,
+                    interface_hashes: Some(&interface_hashes),
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -3194,8 +3285,15 @@ pub fn module_identity_with_bundle(
             };
             state.app_final[a as usize] = Some(digest);
         }
-        let body_final =
-            closure_body_digests(module, bundle, &graph, &state, &comp_of, &closure_funcs);
+        let body_final = closure_body_digests(
+            module,
+            bundle,
+            &graph,
+            &state,
+            &comp_of,
+            &interface_hashes,
+            &closure_funcs,
+        );
         for (f, digest) in body_final {
             state.body_final[f as usize] = Some(digest);
         }
@@ -3217,8 +3315,6 @@ pub fn module_identity_with_bundle(
         .iter()
         .map(|h| h.expect("every type digest is scheduled"))
         .collect();
-    let scratch = RefCell::new(Vec::new());
-    let no_colours: [u32; 0] = [];
     let resolver = Resolver {
         module,
         bundle,
@@ -3232,12 +3328,10 @@ pub fn module_identity_with_bundle(
         type_intra: &empty_digests,
         app_intra: &empty_digests,
         body_intra: &empty_digests,
+        interface_hashes: Some(&interface_hashes),
         on_path: &[],
         closure_list: &[],
     };
-    let interface_hashes: Vec<[u8; 32]> = (0..module.interfaces.len() as u32)
-        .map(|interface| resolver.interface_digest(interface))
-        .collect();
     // The module semantic hash: format version, compiler ABI, the
     // operation manifest, the explicit empty import set, the export
     // table (name to definition hash, name-sorted), the named function
@@ -3322,7 +3416,7 @@ pub fn module_identity_with_bundle(
         out.extend_from_slice(hash);
     }
     out.extend_from_slice(&func_hashes[module.entry as usize]);
-    let semantic_hash = sha256(&out);
+    let semantic_hash = hash256(&out);
     Ok(ModuleIdentity {
         class_hashes,
         func_hashes,
@@ -3393,7 +3487,7 @@ fn fill_closure_hashes(module: &Module, graph: &Graph, state: &mut HashState) {
             bytes.extend_from_slice(TAG_CLOSURE);
             bytes.extend_from_slice(&parent_hash);
             bytes.extend_from_slice(&occurrence.to_le_bytes());
-            state.func_hash[f as usize] = Some(sha256(&bytes));
+            state.func_hash[f as usize] = Some(hash256(&bytes));
         }
     }
     // Hand-built cycles and unreferenced closure flags: fall back to
@@ -3405,7 +3499,7 @@ fn fill_closure_hashes(module: &Module, graph: &Graph, state: &mut HashState) {
             bytes.extend_from_slice(TAG_CLOSURE_CYCLIC);
             bytes.extend_from_slice(&state.comp_hash[node as usize]);
             bytes.extend_from_slice(&(f as u32).to_le_bytes());
-            state.func_hash[f] = Some(sha256(&bytes));
+            state.func_hash[f] = Some(hash256(&bytes));
         }
     }
 }

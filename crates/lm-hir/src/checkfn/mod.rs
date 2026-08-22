@@ -146,6 +146,7 @@ pub(crate) type CheckedEntry = (Vec<HStmt>, TypeId, bool, Vec<TypeId>, Row);
 pub(crate) struct CheckedBody {
     pub(crate) body: Vec<HStmt>,
     pub(crate) locals: Vec<TypeId>,
+    pub(crate) type_bounds: Vec<Vec<InterfaceUse>>,
     pub(crate) diverges: bool,
     pub(crate) ctor: Option<CtorCtx>,
 }
@@ -296,7 +297,7 @@ fn ctor_complete(c: &CtorCtx) -> bool {
 
 /// One resolved operator hook: the receiver class, its type
 /// arguments, and the method the class declares.
-type OperatorHook = (u32, Vec<TypeId>, (MethodSig, Vec<TypeId>, u32));
+type OperatorHook = (u32, Vec<TypeId>, (std::rc::Rc<MethodSig>, Vec<TypeId>, u32));
 
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {

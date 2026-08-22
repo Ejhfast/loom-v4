@@ -3,7 +3,7 @@
 //! Standard operations keep their existing dense slots. Extension
 //! operations follow them in stable identity order.
 
-use crate::{sha256, AbiType, OpDef, OpKind, SnapshotClass, GROUPS, GROUP_MEMBERS, OPS};
+use crate::{hash256, AbiType, OpDef, OpKind, SnapshotClass, GROUPS, GROUP_MEMBERS, OPS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
@@ -783,7 +783,7 @@ fn operation_identity(operation: &BundleOp) -> [u8; 32] {
     id_field(&mut input, operation.reply_mode.tag().as_bytes());
     id_field(&mut input, operation.schema.as_bytes());
     id_field(&mut input, operation.snapshot.tag().as_bytes());
-    sha256(&input)
+    hash256(&input)
 }
 
 fn resource_identity(resource: &ResourceDescriptor) -> [u8; 32] {
@@ -792,7 +792,7 @@ fn resource_identity(resource: &ResourceDescriptor) -> [u8; 32] {
     id_field(&mut input, resource.name.as_bytes());
     id_field(&mut input, &resource.version.to_le_bytes());
     id_field(&mut input, resource.snapshot.tag().as_bytes());
-    sha256(&input)
+    hash256(&input)
 }
 
 fn bundle_digest(
@@ -817,7 +817,7 @@ fn bundle_digest(
         id_field(&mut input, &resource.version.to_le_bytes());
         id_field(&mut input, resource.snapshot.tag().as_bytes());
     }
-    sha256(&input)
+    hash256(&input)
 }
 
 #[cfg(test)]

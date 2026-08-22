@@ -671,7 +671,7 @@ fn callable_contract_hash(
         IfaceSlotKind::Class => return Err("a callable slot names a class".to_string()),
     });
     encode_callable_contract(&mut bytes, hir, function)?;
-    Ok(lm_bytecode::hash::sha256(&bytes))
+    Ok(lm_bytecode::hash::hash256(&bytes))
 }
 
 fn class_contract_hash(hir: &lm_hir::HirModule, class_index: u32) -> Result<[u8; 32], String> {
@@ -682,7 +682,7 @@ fn class_contract_hash(hir: &lm_hir::HirModule, class_index: u32) -> Result<[u8;
     let mut bytes = b"lm-class-contract-v2\0".to_vec();
     contract_text(&mut bytes, &class.key);
     out_class_contract(&mut bytes, hir, class_index, class)?;
-    Ok(lm_bytecode::hash::sha256(&bytes))
+    Ok(lm_bytecode::hash::hash256(&bytes))
 }
 
 fn out_class_contract(
@@ -1288,7 +1288,7 @@ pub(crate) fn select_linkage(
         };
         if let Some(mut contract_hash) = local_contract {
             if binding == entry_binding && options.dynamic_result {
-                contract_hash = lm_bytecode::hash::sha256(b"lm-dynamic-entry-contract-v1\0");
+                contract_hash = lm_bytecode::hash::hash256(b"lm-dynamic-entry-contract-v1\0");
             }
             let key = lm_bytecode::slot_key(&binding, &contract_hash);
             if spec.contract_hash != [0; 32] && spec.contract_hash != contract_hash {

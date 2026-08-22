@@ -65,25 +65,40 @@ These measurements include all accepted collection and protocol work.
 | HIR functions | 477 | — |
 | Bytecode functions | 679 | +20.2% |
 | Artifact size | 218,077 bytes | +66.0% |
-| Core checking | 2.538 ms | — |
-| Core lowering | 0.796 ms | — |
-| Core compilation | 3.673 ms | +66.7% |
-| Core loading | 1.979 ms | +101.5% |
-| Workspace suite | 54.183 seconds | +50.7% |
+| Core checking | 1.778 ms | — |
+| Core lowering | 0.792 ms | — |
+| Core compilation | 2.832 ms | +28.5% |
+| Core decoding | 0.326 ms | — |
+| Core verification | 1.120 ms | — |
+| Structural verification | 0.400 ms | — |
+| Verification hash | 0.111 ms | — |
+| Semantic identity | 1.920 ms | — |
+| Decoded loading | 1.254 ms | — |
+| Core loading | 1.577 ms | +60.6% |
+| Admission sweep | 1.990 seconds | — |
+| Workspace suite | 32.790 seconds | -8.8% |
 
 The first completed feature build compiled core in about 4.309 ms.
 
-The checker optimization pass reduced this result by 14.8%.
+The final compiler pass reduced this result by 34.3%.
 
-The pass caches type graph properties and removes repeated signature copies.
+The checker reuses type graph properties during one independent pass.
 
-It also uses direct paths for monomorphic calls and indexed method lookup.
+It also removes repeated signature copies and uses indexed method lookup.
 
-The full suite first took 74.192 seconds after these features landed.
+Identity generation computes each interface digest once during one module pass.
 
-Repeated portable-code verification dominated the admission sweep.
+Verifier indexes remove repeated conformance and constructor table scans.
 
-A bounded proof cache reduced that sweep from 33.62 seconds to 6.36 seconds.
+All 256-bit content identities now use BLAKE3-256.
+
+The identity version increments prevent mixed hash domains.
+
+The admission sweep fell from 33.37 seconds to 1.99 seconds.
+
+No new cross-invocation cache contributes to these results.
+
+Admission keeps its pre-existing aggregate cache behavior.
 
 The final suite keeps the existing worker count and capture coverage.
 

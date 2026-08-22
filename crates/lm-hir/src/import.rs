@@ -34,6 +34,7 @@ use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{ClassId, ClassKind, Row, RowElem, Type, TypeId};
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 /// The interfaces one module may import, and the root names its `use`
 /// lines may start with.
@@ -469,7 +470,7 @@ impl<'a> Materializer<'a> {
                     })
                 })
                 .collect::<Result<_, Diagnostic>>()?;
-            let methods: Vec<InterfaceMethodSig> = item
+            let methods: Vec<Rc<InterfaceMethodSig>> = item
                 .interface
                 .methods
                 .iter()
@@ -479,7 +480,7 @@ impl<'a> Materializer<'a> {
                         .iter()
                         .map(|ty| self.resolve_type(ctx, ty, span))
                         .collect::<Result<Vec<_>, _>>()?;
-                    Ok(InterfaceMethodSig {
+                    Ok(Rc::new(InterfaceMethodSig {
                         name: method.name.clone(),
                         mut_self: method.mut_self,
                         params,
@@ -487,7 +488,7 @@ impl<'a> Materializer<'a> {
                         param_names: method.param_names.clone(),
                         ret: self.resolve_type(ctx, &method.ret, span)?,
                         row: self.resolve_row(ctx, &method.row, span)?,
-                    })
+                    }))
                 })
                 .collect::<Result<_, Diagnostic>>()?;
             let info = &mut ctx.interfaces[item.id as usize];
@@ -571,7 +572,9 @@ impl<'a> Materializer<'a> {
                     .iter_mut()
                     .find(|m| m.name == method.name)
                     .expect("every declared method has a signature");
-                entry.func = func;
+                Rc::get_mut(entry)
+                    .expect("an imported method signature is not shared yet")
+                    .func = func;
             }
         }
         let funcs = std::mem::take(&mut self.pending_funcs);
@@ -656,10 +659,10 @@ impl<'a> Materializer<'a> {
         }
         let mut methods = Vec::new();
         for method in &class.methods {
-            methods.push(self.method_sig(ctx, item, method, self_ty, span)?);
+            methods.push(Rc::new(self.method_sig(ctx, item, method, self_ty, span)?));
         }
         let type_bounds = self.resolve_bounds(ctx, &class.type_bounds, span)?;
-        let conformances: Vec<ConformanceInfo> = class
+        let conformances: Vec<Rc<ConformanceInfo>> = class
             .conformances
             .iter()
             .map(|conformance| {
@@ -689,18 +692,18 @@ impl<'a> Materializer<'a> {
                     lm_types::InterfaceId(application.interface),
                     associated.clone(),
                 );
-                Ok(ConformanceInfo {
+                Ok(Rc::new(ConformanceInfo {
                     application,
                     premises,
                     associated,
-                })
+                }))
             })
             .collect::<Result<_, Diagnostic>>()?;
         let init = match &class.init {
             None => None,
             Some(sig) => {
                 let fsig = self.fn_sig(ctx, sig, None, span)?;
-                Some(MethodSig {
+                Some(Rc::new(MethodSig {
                     name: "init".to_string(),
                     // Phase B fills no function for `init`: the
                     // construction function of the class carries it.
@@ -715,7 +718,7 @@ impl<'a> Materializer<'a> {
                     own_type_params: Vec::new(),
                     own_type_bounds: Vec::new(),
                     own_effect_params: fsig.effect_params.clone(),
-                })
+                }))
             }
         };
         let mut arms = Vec::new();

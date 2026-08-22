@@ -67,7 +67,7 @@ impl<'o> FnChecker<'o> {
         recv: HExpr,
         class: u32,
         class_args: Vec<TypeId>,
-        found: (MethodSig, Vec<TypeId>, u32),
+        found: (std::rc::Rc<MethodSig>, Vec<TypeId>, u32),
         hook: &str,
         operands: &[ast::Expr],
         span: Span,

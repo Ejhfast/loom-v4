@@ -356,7 +356,7 @@ impl<'o> FnChecker<'o> {
         recv_h: HExpr,
         class: u32,
         class_args: Vec<TypeId>,
-        found: (MethodSig, Vec<TypeId>, u32),
+        found: (std::rc::Rc<MethodSig>, Vec<TypeId>, u32),
         name: &str,
         name_span: Span,
         type_args: &[ast::TypeExpr],
@@ -969,8 +969,9 @@ impl<'o> FnChecker<'o> {
         _span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let recv_h = self.synth_expr(ctx, recv)?;
-        match ctx.store.get(recv_h.ty).clone() {
+        match ctx.store.get(recv_h.ty) {
             Type::List(elem) => {
+                let elem = *elem;
                 let idx = self.check_expr(ctx, index, INT)?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
@@ -983,7 +984,9 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Type::Map(k, v) => {
-                let key = self.check_expr(ctx, index, map_query_key_type(ctx, k))?;
+                let (k, v) = (*k, *v);
+                let query_key = map_query_key_type(ctx, k);
+                let key = self.check_expr(ctx, index, query_key)?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
                     ty: v,

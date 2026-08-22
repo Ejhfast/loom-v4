@@ -13,7 +13,7 @@
 
 mod bundle;
 mod fault;
-mod sha;
+mod hash;
 pub mod syntax;
 
 pub use bundle::{
@@ -21,7 +21,7 @@ pub use bundle::{
     OperationSpec, ResourceDescriptor,
 };
 pub use fault::{FaultCode, SnapshotClass, FAULT_CODES};
-pub use sha::{sha256, sha256_hex};
+pub use hash::{hash256, hash256_hex};
 
 /// The manifest ABI version. A signature or membership change must
 /// increment this value.
@@ -47,7 +47,8 @@ pub use sha::{sha256, sha256_hex};
 /// Version 20 adds command input, output, environment, process, and
 /// entropy operations. Version 21 adds `Args.Get` and moves the
 /// current directory operation into `Fs`.
-pub const ABI_VERSION: u32 = 21;
+/// Version 22 uses BLAKE3-256 for manifest identities.
+pub const ABI_VERSION: u32 = 22;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -502,7 +503,9 @@ impl AbiType {
 /// Version 15 adds direct integer and Boolean builder appends.
 /// Version 16 adds stable text and byte hashes.
 /// Version 17 adds ordered and unordered hash mixing.
-pub const INTRINSIC_ABI_VERSION: u32 = 18;
+/// Version 18 adds tombstone-aware map traversal.
+/// Version 19 uses BLAKE3-256 for intrinsic identities.
+pub const INTRINSIC_ABI_VERSION: u32 = 19;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -1582,7 +1585,7 @@ pub fn intrinsic_identity(slot: IntrinsicSlot) -> [u8; 32] {
     }
     id_field(&mut input, def.reply.text().as_bytes());
     id_field(&mut input, &def.semantic_revision.to_le_bytes());
-    sha256(&input)
+    hash256(&input)
 }
 
 /// Return the digest of the intrinsic manifest.
@@ -1593,7 +1596,7 @@ pub fn intrinsic_manifest_digest() -> [u8; 32] {
     for slot in 0..INTRINSIC_COUNT {
         input.extend_from_slice(&intrinsic_identity(slot));
     }
-    sha256(&input)
+    hash256(&input)
 }
 
 /// The behavior family of one operation.
@@ -3086,7 +3089,7 @@ pub fn row_name_valid(name: &str) -> bool {
 }
 
 /// The stable identity hash of one operation: the domain-separated
-/// SHA-256 of the ABI version, the qualified name, the complete
+/// BLAKE3-256 of the ABI version, the qualified name, the complete
 /// signature or schema text, and every other semantic field.
 pub fn op_identity(slot: OpSlot) -> [u8; 32] {
     identity_of(&op_name(slot), op(slot))
@@ -3137,7 +3140,7 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
     id_field(&mut input, def.reply.text().as_bytes());
     id_field(&mut input, def.schema.as_bytes());
     id_field(&mut input, def.snapshot.tag().as_bytes());
-    sha256(&input)
+    hash256(&input)
 }
 
 /// The digest of the full manifest: version, groups, and every
@@ -3175,7 +3178,7 @@ pub fn manifest_digest_of(identities: &[[u8; 32]]) -> [u8; 32] {
     for id in identities {
         input.extend_from_slice(id);
     }
-    sha256(&input)
+    hash256(&input)
 }
 
 #[cfg(test)]

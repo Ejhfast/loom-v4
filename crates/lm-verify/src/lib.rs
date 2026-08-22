@@ -206,6 +206,12 @@ struct Ctx<'m> {
     /// Class index to the type index of its `Class` entry, when the
     /// module contains one.
     class_ty: Vec<Option<u32>>,
+    /// The first conformance for each class and interface pair.
+    conformance_index: HashMap<(u32, u32), usize>,
+    /// The class built by each function, when it is a constructor.
+    constructor_classes: Vec<Option<u32>>,
+    /// Constructor functions grouped by their class.
+    class_constructors: Vec<Vec<u32>>,
     uni: RefCell<Universe>,
     /// The resolved pinned core definitions of this module.
     core: CoreLayout,

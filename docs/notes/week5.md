@@ -118,7 +118,7 @@ The hashing domains, written out:
   as name-sorted `(kind, name, definition hash)` triples over every
   class and every non-closure function, and the entry definition
   hash.
-- The container hash is plain SHA-256 over the exact container
+- The container hash is BLAKE3-256 over the exact container
   bytes.
 
 `COMPILER_ABI_VERSION` lives in `lm_bytecode::identity`. Bump rules:
@@ -207,7 +207,7 @@ counter proves the skip. The trust boundary, exactly:
   with these exact verifier inputs passed the whole verifier before.
   The core layout and the dispatch rows are pure functions of the
   same inputs, so they stay valid. The remaining assumption is
-  SHA-256 collision resistance.
+  BLAKE3-256 collision resistance.
 - The manifest digest is in the hash because the row and signature
   rules read the manifest, and the container does not store it. The
   semantic hash covered it through every definition hash; an

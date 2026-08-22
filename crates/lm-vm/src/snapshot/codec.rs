@@ -1153,7 +1153,7 @@ pub fn load_external(
 /// Load one external container with a bounded verified-code cache.
 ///
 /// Each call still decodes and admits all mutable state. The cache
-/// reuses unchanged installed code and portable code proofs.
+/// reuses only the latest unchanged installed code aggregate.
 pub fn load_external_cached(
     bytes: &[u8],
     loaded: &LoadedModule,

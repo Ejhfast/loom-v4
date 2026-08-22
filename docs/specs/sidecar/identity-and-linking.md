@@ -88,6 +88,16 @@ and every resolved input the verifier reads. Section 9 defines the
 membership rule and the constraint that governs when a name may leave
 this hash.
 
+### 2.5 Hash algorithm
+
+All 256-bit content identities use BLAKE3-256.
+
+This rule covers structural, interface, verification, artifact, and build-cache hashes.
+
+An algorithm change moves all affected identities.
+
+It must increment `ABI_VERSION`, `INTRINSIC_ABI_VERSION`, and `COMPILER_ABI_VERSION`.
+
 ## 3. The naming rule
 
 Use this rule, and no shorter form of it:

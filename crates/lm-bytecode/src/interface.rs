@@ -20,7 +20,7 @@
 //!   implementation?" (specification 3.7). The build cache and the
 //!   linker use it.
 
-use crate::hash::sha256;
+use crate::hash::hash256;
 use crate::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
 use crate::{DecodeError, Module};
 
@@ -378,7 +378,7 @@ pub fn interface_hash_with_bundle(
     bytes.push(kind.tag());
     write_str(&mut bytes, name);
     encode_item(&mut bytes, item);
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 /// Build one interface from the exported items and the computed

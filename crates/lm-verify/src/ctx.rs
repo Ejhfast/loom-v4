@@ -8,11 +8,20 @@ use super::*;
 impl<'m> Ctx<'m> {
     /// Return the class built by one named constructor function.
     pub(crate) fn constructor_class(&self, func: u32) -> Option<u32> {
-        self.module
-            .bindings
-            .iter()
-            .find(|binding| binding.func == func && binding.class != lm_bytecode::NO_CLASS)
-            .map(|binding| binding.class)
+        self.constructor_classes
+            .get(func as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Return one direct class conformance.
+    pub(crate) fn direct_conformance(
+        &self,
+        class: u32,
+        interface: u32,
+    ) -> Option<&lm_bytecode::BcConformance> {
+        let index = *self.conformance_index.get(&(class, interface))?;
+        self.module.conformances.get(index)
     }
 
     /// Test whether every value of one type is deeply frozen.
@@ -245,11 +254,17 @@ impl<'m> Ctx<'m> {
 
     /// The class that declares one selector, walking the ancestor
     /// chain from `class`.
-    pub(crate) fn method_owner(&self, mut class: u32, selector: u32) -> Option<u32> {
+    pub(crate) fn method_owner(&self, class: u32, selector: u32) -> Option<u32> {
+        self.method_resolution(class, selector)
+            .map(|(owner, _)| owner)
+    }
+
+    /// Resolve one method and its declaring class.
+    pub(crate) fn method_resolution(&self, mut class: u32, selector: u32) -> Option<(u32, u32)> {
         loop {
             let entry = &self.module.classes[class as usize];
-            if entry.methods.iter().any(|(sel, _)| *sel == selector) {
-                return Some(class);
+            if let Some((_, function)) = entry.methods.iter().find(|(sel, _)| *sel == selector) {
+                return Some((class, *function));
             }
             class = entry.parent()?;
         }
@@ -490,12 +505,7 @@ impl<'m> Ctx<'m> {
         }
         let (mut class, mut args) = self.as_instance(ty)?;
         loop {
-            if let Some(conformance) = self
-                .module
-                .conformances
-                .iter()
-                .find(|item| item.class == class && item.application.interface == interface)
-            {
+            if let Some(conformance) = self.direct_conformance(class, interface) {
                 let satisfied = conformance.premises.iter().all(|premise| {
                     let Some(actual) = args.get(premise.param as usize).copied() else {
                         return false;
@@ -962,19 +972,9 @@ impl<'m> Ctx<'m> {
     }
 
     /// Resolve a selector on a class, walking the ancestor chain.
-    pub(crate) fn find_method(&self, mut class: u32, selector: u32) -> Option<u32> {
-        loop {
-            let c = &self.module.classes[class as usize];
-            for (sel, func) in &c.methods {
-                if *sel == selector {
-                    return Some(*func);
-                }
-            }
-            match c.parent() {
-                Some(p) => class = p,
-                None => return None,
-            }
-        }
+    pub(crate) fn find_method(&self, class: u32, selector: u32) -> Option<u32> {
+        self.method_resolution(class, selector)
+            .map(|(_, function)| function)
     }
 
     /// Test whether one class is an enum parent or an enum case.

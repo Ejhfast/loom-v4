@@ -433,7 +433,7 @@ fn load_inner(
             ),
         });
     }
-    match cache {
+    let verification = match cache {
         Some(cache) => {
             // The key is the verification hash, never the semantic
             // hash. The semantic hash answers "same program meaning?"
@@ -451,10 +451,14 @@ fn load_inner(
                 cache.verifications = cache.verifications.saturating_add(1);
                 cache.verified.insert(key);
             }
+            key.0
         }
-        None => lm_verify::verify_module_with_bundle(&module, bundle)?,
-    }
-    Ok(admit(module, bundle.clone()))
+        None => {
+            lm_verify::verify_module_with_bundle(&module, bundle)?;
+            lm_bytecode::identity::verification_hash_with_bundle(bundle, &module)
+        }
+    };
+    Ok(admit(module, bundle.clone(), verification))
 }
 
 /// Admit a decoded module through a verdict an external store kept.
@@ -491,7 +495,8 @@ pub fn load_with_record_and_bundle(
     if !module.imports.is_empty() {
         return Err(reject("the module has unresolved import slots"));
     }
-    if verified_key_with_bundle(&module, bundle) != *key {
+    let found = verified_key_with_bundle(&module, bundle);
+    if found != *key {
         return Err(reject("the stored verdict does not belong to this module"));
     }
     // The key proves the verdict belongs to this module. It does not
@@ -505,12 +510,15 @@ pub fn load_with_record_and_bundle(
     // damage of a store an attacker reaches: the table rules of these
     // exact bytes hold, whatever the verdict claims.
     lm_verify::verify_structure_only_with_bundle(&module, bundle)?;
-    Ok(admit(module, bundle.clone()))
+    Ok(admit(module, bundle.clone(), found.0))
 }
 
 /// Build the sealed dispatch tables of an admitted module.
-fn admit(module: Module, bundle: std::sync::Arc<lm_abi::AbiBundle>) -> LoadedModule {
-    let verification = lm_bytecode::identity::verification_hash_with_bundle(&bundle, &module);
+fn admit(
+    module: Module,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+    verification: [u8; 32],
+) -> LoadedModule {
     let core = lm_bytecode::corepin::declared_layout(&module);
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.

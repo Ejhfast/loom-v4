@@ -59,7 +59,7 @@ the changed tests, and the deferred work.
   `core/range.lm` are ordinary source compiled by the same pipeline
   into every module, after the user definitions, so user definition
   indices stay stable. `lm_hir::core_image()` compiles the core
-  alone; its encoded bytes are pinned by SHA-256 in
+  alone; its encoded bytes are pinned by BLAKE3-256 in
   `core/pinned-hash.txt`. A test recompiles the image, compares the
   bytes, and compares the hash against the pin, and fails loudly
   with the new hash on a deliberate change.

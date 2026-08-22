@@ -61,7 +61,7 @@
 //! cache answers "did the verifier admit these exact bytes before?".
 //! Neither key stands in for the other.
 
-use lm_bytecode::hash::sha256;
+use lm_bytecode::hash::hash256;
 use lm_bytecode::interface::Interface;
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,7 @@ pub fn interface_identity(interface: &Interface) -> [u8; 32] {
         write_str(&mut bytes, name);
         bytes.extend_from_slice(&hash);
     }
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 fn write_str(out: &mut Vec<u8>, text: &str) {
@@ -144,7 +144,7 @@ pub fn compile_key_with_bundle(
         write_str(&mut bytes, path);
         bytes.extend_from_slice(id);
     }
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 const PROGRAM_TAG: &[u8] = b"lm-program-key-v1\0";
@@ -161,7 +161,7 @@ const PROGRAM_ENTRY_VERSION: u32 = 1;
 /// linker never produced.
 ///
 /// A module content hash is the container hash of the module
-/// artifact. It is exact, it costs one SHA-256 pass over bytes the
+/// artifact. It is exact, and it costs one BLAKE3-256 pass over bytes the
 /// build loop already holds, and it covers the embedded core image.
 /// A core edit therefore moves every module hash and misses this key.
 pub fn program_key(root_module: &str, modules: &[(String, [u8; 32])]) -> [u8; 32] {
@@ -196,7 +196,7 @@ pub fn program_key_with_bundle(
         write_str(&mut bytes, path);
         bytes.extend_from_slice(hash);
     }
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 /// One stage-2 entry: the linked artifact and its two hashes.

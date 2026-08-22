@@ -557,7 +557,7 @@ the whole table. A swap of the map key and value order fails the test.
 
 ## Open questions
 
-### BLAKE3-256 against the hand-rolled SHA-256 (decided 2026-08-15)
+### BLAKE3-256 against the hand-rolled SHA-256 (superseded before release)
 
 Specification 10.3 names BLAKE3-256 for the value digest. Week 7
 shipped the SHA-256 of `lm-abi` behind one function. Three options
@@ -573,10 +573,10 @@ The reason: a hand-rolled tree hash is a silent-corruption risk in
 pinned identity. The vendored official implementation gets one
 review and then stays hermetic.
 
-The scope is the value digest only. Bytecode, artifact, interface,
-and build-cache identity stay on the SHA-256 of `lm-abi`. The
-implementation now matches the specification, so the specification
-is unchanged.
+Week 7 limited BLAKE3-256 to value digests.
+
+The pre-release work later applied BLAKE3-256 to all content identities.
+It removed the custom SHA-256 implementation.
 
 ### No stable fault code names a resource budget
 

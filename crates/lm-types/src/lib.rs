@@ -237,6 +237,11 @@ impl TypeStore {
         store
     }
 
+    /// Reserve class metadata for one checker pass.
+    pub fn reserve_classes(&mut self, additional: usize) {
+        self.classes.reserve(additional);
+    }
+
     /// Intern a type and return its stable identifier.
     pub fn intern(&mut self, ty: Type) -> TypeId {
         if let Some(id) = self.index.get(&ty) {

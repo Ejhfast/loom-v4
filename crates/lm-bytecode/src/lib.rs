@@ -54,14 +54,14 @@ pub fn slot_key(binding: &str, contract_hash: &[u8; 32]) -> [u8; 32] {
     let mut bytes = b"lm-slot-key-v2\0".to_vec();
     bytes.extend_from_slice(binding.as_bytes());
     bytes.extend_from_slice(contract_hash);
-    hash::sha256(&bytes)
+    hash::hash256(&bytes)
 }
 
 /// Derive one test or host slot key without a source binding contract.
 pub fn ad_hoc_slot_key(binding: &str) -> [u8; 32] {
     let mut bytes = b"lm-ad-hoc-slot-key-v1\0".to_vec();
     bytes.extend_from_slice(binding.as_bytes());
-    hash::sha256(&bytes)
+    hash::hash256(&bytes)
 }
 
 /// One element of an effect row in the serialized module.

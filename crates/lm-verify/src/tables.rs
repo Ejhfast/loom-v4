@@ -170,6 +170,29 @@ pub(crate) fn verify_tables(
             class_ty[*c as usize] = Some(idx as u32);
         }
     }
+    let mut conformance_index = HashMap::with_capacity(module.conformances.len());
+    for (index, conformance) in module.conformances.iter().enumerate() {
+        if conformance.class as usize >= module.classes.len()
+            || conformance.application.interface as usize >= module.interfaces.len()
+        {
+            continue;
+        }
+        conformance_index
+            .entry((conformance.class, conformance.application.interface))
+            .or_insert(index);
+    }
+    let mut constructor_classes = vec![None; module.funcs.len()];
+    let mut class_constructors = vec![Vec::new(); module.classes.len()];
+    for binding in &module.bindings {
+        if binding.class == lm_bytecode::NO_CLASS || binding.class as usize >= module.classes.len()
+        {
+            continue;
+        }
+        class_constructors[binding.class as usize].push(binding.func);
+        if let Some(class) = constructor_classes.get_mut(binding.func as usize) {
+            class.get_or_insert(binding.class);
+        }
+    }
     // Bound the nesting depth of the type table. A type child names an
     // earlier entry, so one forward pass gives the depth of each entry.
     let mut depth: Vec<u32> = Vec::with_capacity(module.types.len());
@@ -201,6 +224,9 @@ pub(crate) fn verify_tables(
         module,
         bundle,
         class_ty,
+        conformance_index,
+        constructor_classes,
+        class_constructors,
         uni: RefCell::new(Universe {
             types: module.types.clone(),
             index,
@@ -210,10 +236,10 @@ pub(crate) fn verify_tables(
     };
     verify_type_placement(&ctx)?;
     verify_applications(&ctx)?;
-    verify_interfaces(&ctx)?;
+    let interface_self = verify_interfaces(&ctx)?;
     verify_imports(&ctx)?;
     verify_classes(&ctx)?;
-    verify_conformances(&ctx)?;
+    verify_conformances(&ctx, &interface_self)?;
     verify_map_key_types(&ctx)?;
     verify_signatures(&ctx)?;
     verify_slots(&ctx)?;
@@ -355,7 +381,7 @@ fn verify_applications(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
 }
 
 /// The nominal interface contracts.
-fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
     let module = ctx.module;
     // Validate nominal interface contracts before any bound uses them.
     let mut interface_keys: HashMap<&str, usize> = HashMap::new();
@@ -542,11 +568,25 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         .filter_map(|(index, count)| (*count == 0).then_some(index))
         .collect();
     let mut depth = vec![0usize; module.interfaces.len()];
+    let mut uses_self: Vec<bool> = module
+        .interfaces
+        .iter()
+        .map(|contract| {
+            contract.methods.iter().any(|method| {
+                method
+                    .params
+                    .iter()
+                    .any(|ty| interface_type_uses_self(ctx, *ty))
+                    || interface_type_uses_self(ctx, method.ret)
+            })
+        })
+        .collect();
     let mut finished = 0usize;
     while let Some(parent) = queue.pop_front() {
         finished += 1;
         for child in &children[parent] {
             depth[*child] = depth[*child].max(depth[parent] + 1);
+            uses_self[*child] |= uses_self[parent];
             if depth[*child] > 128 {
                 return Err(terr("interface inheritance exceeds 128 levels".to_string()));
             }
@@ -630,7 +670,7 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             }
         }
     }
-    Ok(())
+    Ok(uses_self)
 }
 
 /// The import slots and the signatures the class checks read.
@@ -752,22 +792,18 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 return Err(cerr("a frozen class cannot declare a parent".to_string()));
             }
             if !extern_classes[cidx] {
-                let constructors: Vec<_> = module
-                    .bindings
-                    .iter()
-                    .filter(|binding| binding.class == cidx as u32)
-                    .collect();
+                let constructors = &ctx.class_constructors[cidx];
                 if constructors.len() != 1 {
                     return Err(cerr(
                         "a frozen class needs one named constructor".to_string(),
                     ));
                 }
-                if constructors[0].func as usize >= module.funcs.len() {
+                if constructors[0] as usize >= module.funcs.len() {
                     return Err(cerr(
                         "the frozen class constructor does not exist".to_string(),
                     ));
                 }
-                let constructor = &module.funcs[constructors[0].func as usize];
+                let constructor = &module.funcs[constructors[0] as usize];
                 if !constructor.blocks.iter().flatten().any(|instruction| {
                     matches!(instruction, Instr::Extended(ExtendedInstr::SealInstance))
                 }) {
@@ -1010,23 +1046,6 @@ fn interface_type_uses_self(ctx: &Ctx<'_>, root: u32) -> bool {
     false
 }
 
-fn interface_uses_self(ctx: &Ctx<'_>, interface: u32, visiting: &mut HashSet<u32>) -> bool {
-    if !visiting.insert(interface) {
-        return false;
-    }
-    let contract = &ctx.module.interfaces[interface as usize];
-    contract.methods.iter().any(|method| {
-        method
-            .params
-            .iter()
-            .any(|ty| interface_type_uses_self(ctx, *ty))
-            || interface_type_uses_self(ctx, method.ret)
-    }) || contract
-        .parents
-        .iter()
-        .any(|parent| interface_uses_self(ctx, parent.interface, visiting))
-}
-
 /// Test whether one conformance premise set provides another set.
 fn conformance_premises_imply(
     available: &[lm_bytecode::BcConformancePremise],
@@ -1045,8 +1064,20 @@ fn conformance_premises_imply(
     })
 }
 
+/// Test whether one bound table provides another table.
+fn conformance_bounds_imply(
+    available: &[Vec<BcInterfaceUse>],
+    required: &[Vec<BcInterfaceUse>],
+) -> bool {
+    required.iter().enumerate().all(|(index, bounds)| {
+        available
+            .get(index)
+            .is_some_and(|actual| bounds.iter().all(|bound| actual.contains(bound)))
+    })
+}
+
 /// Conformance references and their method witnesses.
-fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), VerifyError> {
     let module = ctx.module;
     // Validate all direct conformance references first. One conformance
     // can resolve another conformance during its semantic checks.
@@ -1123,7 +1154,7 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
         if class.kind == BcClassKind::Normal
             && !class.is_final
-            && interface_uses_self(ctx, conformance.application.interface, &mut HashSet::new())
+            && interface_self[conformance.application.interface as usize]
         {
             return Err(cerr(
                 "a non-final class conforms to a Self-dependent interface".to_string(),
@@ -1142,10 +1173,7 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 &conformance.application.rows,
                 &conformance_bounds,
             );
-            let found = module.conformances.iter().find(|candidate| {
-                candidate.class == conformance.class
-                    && candidate.application.interface == required.interface
-            });
+            let found = ctx.direct_conformance(conformance.class, required.interface);
             let valid = found.is_some_and(|candidate| {
                 candidate.application == required
                     && conformance_premises_imply(&conformance.premises, &candidate.premises)
@@ -1250,12 +1278,9 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             .map(|item| ctx.intern(BcType::Var(item)))
             .collect();
         for requirement in &contract.methods {
-            let target = ctx
-                .find_method(conformance.class, requirement.selector)
+            let (owner, target) = ctx
+                .method_resolution(conformance.class, requirement.selector)
                 .ok_or_else(|| cerr("a required method is missing".to_string()))?;
-            let owner = ctx
-                .method_owner(conformance.class, requirement.selector)
-                .ok_or_else(|| cerr("a required method has no owner".to_string()))?;
             let owner_args = ctx
                 .ancestor_args(conformance.class, &class_args, owner)
                 .ok_or_else(|| cerr("a required method owner is not an ancestor".to_string()))?;
@@ -1276,12 +1301,17 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "an interface method has too few class bound entries".to_string(),
                 ));
             };
-            if !ctx.type_arguments_meet_bounds(
-                &owner_args,
-                &[],
-                class_method_bounds,
-                &conformance_bounds,
-            ) {
+            let bounds_hold = if owner == conformance.class {
+                conformance_bounds_imply(&conformance_bounds, class_method_bounds)
+            } else {
+                ctx.type_arguments_meet_bounds(
+                    &owner_args,
+                    &[],
+                    class_method_bounds,
+                    &conformance_bounds,
+                )
+            };
+            if !bounds_hold {
                 return Err(cerr(
                     "an interface method needs a premise outside the conformance".to_string(),
                 ));
@@ -1296,34 +1326,24 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                         .to_string(),
                 ));
             }
-            let actual_params: Vec<u32> = method.params[1..]
+            let params_match = method.params[1..]
                 .iter()
-                .map(|item| ctx.subst(*item, &owner_args, &[]))
-                .collect();
-            let required_params: Vec<u32> = requirement
-                .params
-                .iter()
-                .map(|item| {
-                    ctx.subst_with_bounds(
-                        *item,
+                .zip(&requirement.params)
+                .zip(&requirement.param_muts)
+                .all(|((implementation, required), mutable)| {
+                    let implementation = ctx.subst(*implementation, &owner_args, &[]);
+                    let required = ctx.subst_with_bounds(
+                        *required,
                         &contract_types,
                         &conformance.application.rows,
                         &conformance_bounds,
-                    )
-                })
-                .collect();
-            let params_match = actual_params.len() == required_params.len()
-                && actual_params
-                    .iter()
-                    .zip(&required_params)
-                    .zip(&requirement.param_muts)
-                    .all(|((implementation, required), mutable)| {
-                        if *mutable {
-                            implementation == required
-                        } else {
-                            ctx.is_subtype(*required, *implementation)
-                        }
-                    });
+                    );
+                    if *mutable {
+                        implementation == required
+                    } else {
+                        ctx.is_subtype(required, implementation)
+                    }
+                });
             if !params_match {
                 return Err(cerr(
                     "an interface method implementation changes parameter types".to_string(),

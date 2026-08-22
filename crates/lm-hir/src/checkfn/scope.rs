@@ -33,6 +33,11 @@ impl<'o> FnChecker<'o> {
         checker
     }
 
+    pub(crate) fn reserve_parameters(&mut self, count: usize) {
+        self.locals.reserve(count);
+        self.scopes[0].bindings.reserve(count);
+    }
+
     pub(super) fn lookup_slot(&self, name: &str) -> Option<u32> {
         for scope in self.scopes.iter().rev() {
             if let Some(slot) = scope.get(name) {
@@ -185,6 +190,7 @@ impl<'o> FnChecker<'o> {
         Ok(CheckedBody {
             body,
             locals: self.locals.iter().map(|(t, _)| *t).collect(),
+            type_bounds: self.env.type_bounds,
             diverges,
             ctor: self.ctor,
         })

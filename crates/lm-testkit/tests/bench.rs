@@ -818,6 +818,73 @@ fn bench_core_compilation() {
 
     let module = lm_hir::core_image();
     let bytes = lm_bytecode::encode(&module);
+    let mut decode_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let decoded = lm_bytecode::decode(&bytes).expect("the core image decodes");
+        let elapsed = start.elapsed();
+        std::hint::black_box(decoded.funcs.len());
+        if round > 0 {
+            decode_runs.push(elapsed);
+        }
+    }
+
+    let decoded = lm_bytecode::decode(&bytes).expect("the core image decodes");
+    let mut verify_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        lm_verify::verify_module(&decoded).expect("the core image verifies");
+        let elapsed = start.elapsed();
+        if round > 0 {
+            verify_runs.push(elapsed);
+        }
+    }
+
+    let mut structure_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        lm_verify::verify_structure_only(&decoded).expect("the core structure verifies");
+        let elapsed = start.elapsed();
+        if round > 0 {
+            structure_runs.push(elapsed);
+        }
+    }
+
+    let mut hash_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let hash = lm_bytecode::identity::verification_hash(&decoded);
+        let elapsed = start.elapsed();
+        std::hint::black_box(hash);
+        if round > 0 {
+            hash_runs.push(elapsed);
+        }
+    }
+
+    let mut identity_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let identity =
+            lm_bytecode::identity::module_identity(&decoded).expect("the core image has identity");
+        let elapsed = start.elapsed();
+        std::hint::black_box(identity.semantic_hash);
+        if round > 0 {
+            identity_runs.push(elapsed);
+        }
+    }
+
+    let mut decoded_load_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let module = decoded.clone();
+        let start = Instant::now();
+        let loaded = lm_vm::load(module).expect("the core image loads");
+        let elapsed = start.elapsed();
+        std::hint::black_box(loaded.dispatch_cells());
+        if round > 0 {
+            decoded_load_runs.push(elapsed);
+        }
+    }
+
     let mut load_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
@@ -846,6 +913,42 @@ fn bench_core_compilation() {
         module.classes.len(),
         module.funcs.len(),
         median(compile_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_decode\t{}\t{}\t{:.3}\tms",
+        bytes.len(),
+        module.funcs.len(),
+        median(decode_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_verify\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(verify_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_verify_structure\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(structure_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_verify_hash\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(hash_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_identity\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(identity_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_decoded_load\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(decoded_load_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tcore_load\t{}\t{}\t{:.3}\tms",

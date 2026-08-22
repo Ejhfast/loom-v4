@@ -37,7 +37,7 @@ fn core_image_passes_the_verifier() {
 #[test]
 fn core_image_matches_the_pinned_hash() {
     let bytes = lm_bytecode::encode(&lm_hir::core_image());
-    let found = lm_bytecode::hash::sha256_hex(&bytes);
+    let found = lm_bytecode::hash::hash256_hex(&bytes);
     let pin_path = repo_root().join("core/pinned-hash.txt");
     let pinned = std::fs::read_to_string(&pin_path)
         .expect("core/pinned-hash.txt exists")
@@ -142,7 +142,7 @@ fn a_renamed_shape_cannot_spoof_the_core_layout() {
 #[ignore]
 fn regenerate_core_pins() {
     let bytes = lm_bytecode::encode(&lm_hir::core_image());
-    let hash = lm_bytecode::hash::sha256_hex(&bytes);
+    let hash = lm_bytecode::hash::hash256_hex(&bytes);
     std::fs::write(
         repo_root().join("core/pinned-hash.txt"),
         format!("{hash}\n"),

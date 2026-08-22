@@ -15,7 +15,7 @@ impl<'o> FnChecker<'o> {
         mode: BlockMode,
         block_span: Span,
     ) -> Result<(Vec<HStmt>, TypeId, bool), Diagnostic> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(stmts.len());
         for (idx, stmt) in stmts.iter().enumerate() {
             if let Some(prev) = out.last() {
                 let prev: &HStmt = prev;

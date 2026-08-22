@@ -1,6 +1,5 @@
-//! SHA-256 for content hashes.
+//! BLAKE3-256 for bytecode content hashes.
 //!
-//! The implementation lives in `lm-abi`, the dependency-free manifest
-//! crate. This module re-exports it under the established path.
+//! The implementation lives in the foundational ABI crate.
 
-pub use lm_abi::{sha256, sha256_hex};
+pub use lm_abi::{hash256, hash256_hex};

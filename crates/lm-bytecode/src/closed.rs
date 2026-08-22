@@ -1261,7 +1261,7 @@ impl TypeEnvs {
             }
             _ => {}
         }
-        crate::hash::sha256(&out)
+        crate::hash::hash256(&out)
     }
 }
 
