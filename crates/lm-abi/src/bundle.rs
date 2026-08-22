@@ -584,10 +584,7 @@ fn extension_type_supported(ty: AbiType, resources: &BTreeSet<[u8; 32]>) -> bool
             .iter()
             .copied()
             .all(|item| extension_type_supported(item, resources)),
-        AbiType::Apply(
-            AbiConstructor::Option | AbiConstructor::Result | AbiConstructor::Pair,
-            items,
-        ) => {
+        AbiType::Apply(AbiConstructor::Option | AbiConstructor::Result, items) => {
             ty.valid()
                 && items
                     .iter()

@@ -179,7 +179,7 @@ final class TcpStream < TcpResource
 end
 
 final class TcpListener < TcpResource
-  def accept(self): Result[Pair[TcpStream, SocketAddress], NetError] with Tcp.Accept
+  def accept(self): Result[(TcpStream, SocketAddress), NetError] with Tcp.Accept
     sys.tcp.accept(self)
   end
 end

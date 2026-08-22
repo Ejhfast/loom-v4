@@ -27,7 +27,7 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/ordering.lm"),
     "\n",
-    include_str!("../../../core/pair.lm"),
+    include_str!("../../../core/tuple.lm"),
     "\n",
     include_str!("../../../core/range.lm"),
     "\n",
@@ -66,11 +66,26 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 94] = [
+pub const PRELUDE_TYPES: [&str; 109] = [
     "Option",
     "Result",
     "Ordering",
-    "Pair",
+    "Unit",
+    "Tuple2",
+    "Tuple3",
+    "Tuple4",
+    "Tuple5",
+    "Tuple6",
+    "Tuple7",
+    "Tuple8",
+    "Tuple9",
+    "Tuple10",
+    "Tuple11",
+    "Tuple12",
+    "Tuple13",
+    "Tuple14",
+    "Tuple15",
+    "Tuple16",
     "Range",
     "RunResult",
     "StepEvent",
@@ -183,6 +198,11 @@ pub const PRELUDE_CTORS: [&str; 17] = [
     "InteractionIncomplete",
     "InteractionInvalid",
 ];
+
+fn tuple_core_arity(name: &str) -> Option<usize> {
+    let arity = name.strip_prefix("Tuple")?.parse().ok()?;
+    (2..=16).contains(&arity).then_some(arity)
+}
 
 /// Checker options. `prelude` controls only unqualified name
 /// resolution; the core image itself never depends on it.
@@ -1293,7 +1313,7 @@ pub(crate) fn resolve_type(
                         ty.span,
                     ));
                 }
-                return Ok(ctx.store.intern(Type::Class(ClassId(class))));
+                return Ok(ctx.store.type_for_nominal(ClassId(class), Vec::new()));
             }
             if ctx.lookup_interface(name, env).is_some() {
                 return Err(Diagnostic::new(
@@ -1426,7 +1446,7 @@ pub(crate) fn resolve_type(
                     for arg in args {
                         resolved.push(resolve_type(ctx, env, arg)?);
                     }
-                    return Ok(ctx.store.intern(Type::Inst(ClassId(class), resolved)));
+                    return Ok(ctx.store.type_for_nominal(ClassId(class), resolved));
                 }
                 if ctx.lookup_interface(other, env).is_some() {
                     return Err(Diagnostic::new(
@@ -2174,13 +2194,19 @@ fn assemble(
         } else {
             CtorKind::Defaults
         };
-        let (ctor_params, ctor_param_muts) = match (&info.init, info.kind) {
-            (_, ClassKind::EnumCase) => {
+        let (ctor_params, ctor_param_muts) = match (&info.init, info.kind, info.native_repr) {
+            (_, _, Some(NativeRepr::Tuple(_))) => {
+                let Type::Tuple(params) = ctx.store.get(info.self_ty) else {
+                    unreachable!("a tuple carrier has a tuple self type")
+                };
+                (params.clone(), vec![false; params.len()])
+            }
+            (_, ClassKind::EnumCase, _) => {
                 let count = info.field_tys.len();
                 (info.field_tys.clone(), vec![false; count])
             }
-            (Some(init), _) => (init.params.clone(), init.param_muts.clone()),
-            (None, _) => (vec![], vec![]),
+            (Some(init), _, _) => (init.params.clone(), init.param_muts.clone()),
+            (None, _, _) => (vec![], vec![]),
         };
         let ctor_row = info
             .init
@@ -2856,6 +2882,7 @@ fn register_type_names(
         )?;
         if is_core {
             let primitive = match class.name.as_str() {
+                "Unit" => Some(lm_types::UNIT),
                 "Int" => Some(lm_types::INT),
                 "Bool" => Some(lm_types::BOOL),
                 "String" => Some(lm_types::STRING),
@@ -2868,7 +2895,11 @@ fn register_type_names(
             match class.name.as_str() {
                 "List" => ctx.store.set_native_list_class(ClassId(idx)),
                 "Map" => ctx.store.set_native_map_class(ClassId(idx)),
-                _ => {}
+                name => {
+                    if let Some(arity) = tuple_core_arity(name) {
+                        ctx.store.set_native_tuple_class(arity, ClassId(idx));
+                    }
+                }
             }
         }
     }
@@ -3499,6 +3530,7 @@ fn resolve_class(
     let parent = ctx.store.class_meta(ClassId(idx)).parent.map(|p| p.0);
     let (type_names, _) = split_generics(&class.generics);
     let native_repr = match (is_core, class.name.as_str()) {
+        (true, "Unit") => Some(NativeRepr::Unit),
         (true, "Int") => Some(NativeRepr::Int),
         (true, "Bool") => Some(NativeRepr::Bool),
         (true, "Text") => Some(NativeRepr::Text),
@@ -3526,6 +3558,7 @@ fn resolve_class(
         (true, "FunctionBinding") => Some(NativeRepr::FunctionBinding),
         (true, "ClassBinding") => Some(NativeRepr::ClassBinding),
         (true, "DynValue") => Some(NativeRepr::DynValue),
+        (true, name) => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
         _ => None,
     };
     let text_parent = ctx.core_types.get("Text").copied();
@@ -3543,6 +3576,7 @@ fn resolve_class(
     };
     let valid_native_arity = match native_repr {
         Some(NativeRepr::List) => type_names.len() == 1,
+        Some(NativeRepr::Tuple(arity)) => type_names.len() == arity as usize,
         Some(
             NativeRepr::Map
             | NativeRepr::FunctionCode
@@ -3568,6 +3602,7 @@ fn resolve_class(
         ));
     }
     let self_ty = match native_repr {
+        Some(NativeRepr::Unit) => lm_types::UNIT,
         Some(NativeRepr::Int) => lm_types::INT,
         Some(NativeRepr::Bool) => lm_types::BOOL,
         Some(NativeRepr::String) => lm_types::STRING,
@@ -3580,6 +3615,12 @@ fn resolve_class(
             let key = ctx.store.intern(Type::Var(0));
             let value = ctx.store.intern(Type::Var(1));
             ctx.store.intern(Type::Map(key, value))
+        }
+        Some(NativeRepr::Tuple(arity)) => {
+            let elements = (0..arity)
+                .map(|index| ctx.store.intern(Type::Var(index as u32)))
+                .collect();
+            ctx.store.intern(Type::Tuple(elements))
         }
         Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef | NativeRepr::FunctionBinding) => {
             let args = vec![

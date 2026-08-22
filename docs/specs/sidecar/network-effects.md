@@ -121,7 +121,7 @@ Dns.Resolve       (String, Int) -> Result[List[SocketAddress], NetError]
 
 Tcp.Connect       (SocketAddress) -> Result[TcpStream, NetError]
 Tcp.Listen        (SocketAddress, Int) -> Result[TcpListener, NetError]
-Tcp.Accept        (TcpListener) -> Result[Pair[TcpStream, SocketAddress], NetError]
+Tcp.Accept        (TcpListener) -> Result[(TcpStream, SocketAddress), NetError]
 Tcp.Read          (TcpStream, Int) -> Result[TcpRead, NetError]
 Tcp.Write         (TcpStream, Bytes) -> Result[Int, NetError]
 Tcp.Shutdown      (TcpStream, Shutdown) -> Result[(), NetError]

@@ -26,7 +26,7 @@ There is one guest-to-host boundary primitive: calling an operation object. Prin
 A conforming distribution keeps five semantic layers distinct.
 
 1. **Language primitives.** Syntax and structural types that cannot be written as ordinary declarations: unit, `Never`, `Any`, scalar machine types, tuples, function types, operation types, local mutation capability, and the bytecode/runtime machinery required to execute them.
-2. **Core image.** A pinned, dependency-free artifact compiled from ordinary language source plus declarations for native classes. It defines nominal types required by public signatures, including `Option`, `Result`, `Ordering`, `Pair`, `Range`, VM/proc event enums, and portable error values. These are not parser keywords and are not magic enum layouts. Their structural hashes are part of the language ABI, and an artifact names each of them through a stable core role slot (5.2).
+2. **Core image.** A pinned artifact contains ordinary source and native class declarations. It defines `Option`, `Result`, `Ordering`, `Range`, VM events, and errors. Tuple carrier classes expose methods on primitive tuples. These definitions are not parser keywords. Stable core role slots identify them (5.2).
 3. **Prelude.** A deliberately small set of names implicitly introduced during name resolution. The prelude re-exports selected primitive, native-core, and core-image names; it does not define their identity and does not automatically import general algorithms or host wrappers.
 4. **Standard library.** Explicitly linked ordinary modules for collections algorithms, text, formatting, paths, files, time, random, networking, JSON, VM helpers, proc supervision, compilation, reflection, and testing. Standard-library code can call pure intrinsics or explicit host operations but cannot bypass rows or policy.
 5. **Host operations.** Fixed members of `sys.*`. They may suspend, are policy-gated, and their exact identities appear in rows.
@@ -479,7 +479,7 @@ The type universe has four strata.
 
 **Core-image nominal types** are ordinary source definitions with pinned hashes.
 
-The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Pair`, `Range`, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, and `ProcResult`.
+The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Range`, tuple carriers, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, and `ProcResult`.
 
 It also includes `Set` and the core collection interfaces.
 
@@ -2903,7 +2903,7 @@ Dns.Resolve       (String, Int) -> Result[[SocketAddress], NetError]
 
 Tcp.Connect       (SocketAddress) -> Result[TcpStream, NetError]
 Tcp.Listen        (SocketAddress, Int) -> Result[TcpListener, NetError]
-Tcp.Accept        (TcpListener) -> Result[Pair[TcpStream, SocketAddress], NetError]
+Tcp.Accept        (TcpListener) -> Result[(TcpStream, SocketAddress), NetError]
 Tcp.Read          (TcpStream, Int) -> Result[TcpRead, NetError]
 Tcp.Write         (TcpStream, Bytes) -> Result[Int, NetError]
 Tcp.Shutdown      (TcpStream, Shutdown) -> Result[(), NetError]
@@ -3194,13 +3194,9 @@ enum Ordering
   Greater
 end
 
-class Pair[A, B]
-  first: A
-  second: B
-
-  def init(mut self, first: A, second: B)
-    self.first = first
-    self.second = second
+final class Tuple2[A, B]
+  def swap(self): (B, A)
+    (self[1], self[0])
   end
 end
 
@@ -3238,7 +3234,7 @@ The prelude introduces the pinned value and resource surface:
 
 ```text
 (), Never, Bool, Int, Float, Byte, List, Map
-Option, Some, None, Result, Ok, Err, Ordering, Pair, Range
+Option, Some, None, Result, Ok, Err, Ordering, Unit, Tuple2, ..., Tuple16, Range
 RunResult, StepEvent, DriveEvent, Proc, Recv, SendResult, ProcResult, ProcError
 Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown

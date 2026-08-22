@@ -156,6 +156,7 @@ pub enum CtorKind {
 /// The native value representation of one core class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRepr {
+    Unit,
     Int,
     Bool,
     Text,
@@ -167,6 +168,7 @@ pub enum NativeRepr {
     ByteBuffer,
     List,
     Map,
+    Tuple(u8),
     TcpResource,
     TcpStream,
     TcpListener,

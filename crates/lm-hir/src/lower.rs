@@ -2939,6 +2939,46 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![vec![Instr::Unreachable]],
         };
     }
+    if class.native_repr == Some(NativeRepr::Unit) {
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: m.intern_type(BcType::Unit),
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
+        };
+    }
+    if let Some(NativeRepr::Tuple(arity)) = class.native_repr {
+        let params: Vec<u32> = (0..arity)
+            .map(|index| m.intern_type(BcType::Var(index as u32)))
+            .collect();
+        let tuple = m.intern_type(BcType::Tuple(params.clone()));
+        let mut block: Vec<Instr> = (0..arity)
+            .map(|index| Instr::LoadLocal(index as u32))
+            .collect();
+        block.push(Instr::TupleNew {
+            ty: tuple,
+            count: arity as u32,
+        });
+        block.push(Instr::Return);
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: arity as u32,
+            effect_params: 0,
+            params: params.clone(),
+            param_muts: vec![false; arity as usize],
+            ret: tuple,
+            row: vec![],
+            captures: vec![],
+            local_types: params,
+            blocks: vec![block],
+        };
+    }
     if class.native_repr == Some(NativeRepr::Int) {
         let int = m.intern_type(BcType::Int);
         return Func {

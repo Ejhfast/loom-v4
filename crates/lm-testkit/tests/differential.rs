@@ -57,8 +57,8 @@ fn oracle_agrees_on_the_feature_corpus() {
         "a: Option[Int] = Some(1)\nb: Option[Int] = None\n\
          (a.is_some(), b.is_none(), a.value_or(0), b.value_or(9))\n",
         "r: Result[Int, String] = Err(\"bad\")\n(r.is_err(), r.value_or(3))\n",
-        // Ordering, Pair, Range.
-        "(Ordering.Less.reverse().is_greater(), Pair(1, 2).swap().first, Range(3, 9).len(), \
+        // Ordering, Tuple2, Range.
+        "(Ordering.Less.reverse().is_greater(), (1, 2).swap()[0], Range(3, 9).len(), \
          Range(3, 9).has(3), Range(3, 9).has(9))\n",
         // Enums with nested patterns and methods.
         "enum Tree\n  Leaf(v: Int)\n  Node(l: Tree, r: Tree)\n\n  def sum(self): Int\n    \

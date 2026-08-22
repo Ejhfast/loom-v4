@@ -403,6 +403,7 @@ impl<'m> Oracle<'m> {
     fn construct(&self, class: u32, args: Vec<OV>, depth: u32) -> EResult {
         let c = &self.m.classes[class as usize];
         match c.native_repr {
+            Some(NativeRepr::Unit) => return Ok(OV::Unit),
             Some(NativeRepr::Int) => return Ok(OV::Int(0)),
             Some(NativeRepr::Bool) => return Ok(OV::Bool(false)),
             Some(NativeRepr::String) => return Ok(OV::Str(Rc::new(String::new()))),
@@ -413,6 +414,12 @@ impl<'m> Oracle<'m> {
             Some(NativeRepr::ByteBuffer) => return Ok(self.alloc(OKind::Bb(Some(Vec::new())))),
             Some(NativeRepr::List) => return Ok(self.alloc(OKind::List(Vec::new()))),
             Some(NativeRepr::Map) => return Ok(self.alloc(OKind::Map(Vec::new()))),
+            Some(NativeRepr::Tuple(arity)) => {
+                if args.len() != arity as usize {
+                    return Err(Stop::Limit("the tuple constructor has the wrong arity"));
+                }
+                return Ok(self.alloc(OKind::Tuple(args)));
+            }
             Some(
                 NativeRepr::Text
                 | NativeRepr::Substring

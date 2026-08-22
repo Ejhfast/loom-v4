@@ -27,7 +27,6 @@ pub enum HostArg {
     Tuple(Vec<HostArg>),
     Option(Option<Box<HostArg>>),
     Result(Result<Box<HostArg>, Box<HostArg>>),
-    Pair(Box<HostArg>, Box<HostArg>),
     Tls(u64),
     Resource(HostResource),
     CompileEnv(HostCompileEnv),
@@ -170,7 +169,6 @@ pub enum CoreCtor {
     EntropyFailed,
     FsErrorClosed,
     FsErrorFailed,
-    Pair,
     NetInvalidInput,
     NetNameNotFound,
     NetUnavailable,
@@ -261,11 +259,6 @@ impl HostValue {
     /// Build one failed `Result` reply.
     pub fn err(value: HostValue) -> HostValue {
         HostValue::Ctor(CoreCtor::Err, vec![value])
-    }
-
-    /// Build one `Pair` reply.
-    pub fn pair(first: HostValue, second: HostValue) -> HostValue {
-        HostValue::Ctor(CoreCtor::Pair, vec![first, second])
     }
 }
 
@@ -624,10 +617,10 @@ impl RecordingHost {
             return Some(net_closed());
         };
         let (stream, peer) = listener.incoming.pop_front()?;
-        Some(net_ok(HostValue::Ctor(
-            CoreCtor::Pair,
-            vec![HostValue::TcpStream(stream), HostValue::SocketAddress(peer)],
-        )))
+        Some(net_ok(HostValue::Tuple(vec![
+            HostValue::TcpStream(stream),
+            HostValue::SocketAddress(peer),
+        ])))
     }
 
     fn read_value(&mut self, stream: u64, count: usize) -> Option<HostValue> {

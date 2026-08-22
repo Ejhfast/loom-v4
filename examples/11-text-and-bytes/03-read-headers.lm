@@ -40,7 +40,7 @@ def declared_length(line: Text): Int
   end
 end
 
-def read_head(head: Text): Pair[String, Int]
+def read_head(head: Text): (String, Int)
   rows = head.lines()
   path = "/"
   length = 0
@@ -57,7 +57,7 @@ def read_head(head: Text): Pair[String, Int]
     end
     row = row + 1
   end
-  Pair(path, length)
+  (path, length)
 end
 
 message = frame()
@@ -70,8 +70,8 @@ in Some(at)
   body = case message.slice(at + marker.len(), rest) in Ok(part) then part in Err(_) then message end
   request = case head.utf8_view()
   in Ok(text) then read_head(text)
-  in Err(_)   then Pair("/", 0)
+  in Err(_)   then ("/", 0)
   end
-  "{request.first} declares {request.second} and carries {body.len()}"
+  "{request[0]} declares {request[1]} and carries {body.len()}"
 in None then "no header end"
 end

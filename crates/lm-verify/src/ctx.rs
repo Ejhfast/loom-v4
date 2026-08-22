@@ -56,6 +56,7 @@ impl<'m> Ctx<'m> {
             self.core.bytes,
             self.core.string_builder,
             self.core.byte_buffer,
+            self.core.unit,
             self.core.list,
             self.core.map,
             self.core.tcp_resource,
@@ -71,11 +72,16 @@ impl<'m> Ctx<'m> {
             self.core.class_def,
             self.core.dyn_value,
         ]
-        .contains(&Some(class))
+        .into_iter()
+        .chain(self.core.tuples)
+        .any(|candidate| candidate == Some(class))
     }
 
     /// Return the canonical self type of one class.
     pub(crate) fn class_self_type(&self, class: u32) -> Option<u32> {
+        if self.core.unit == Some(class) {
+            return Some(TY_UNIT);
+        }
         if self.core.int == Some(class) {
             return Some(TY_INT);
         }
@@ -97,6 +103,17 @@ impl<'m> Ctx<'m> {
             let key = self.intern(BcType::Var(0));
             let value = self.intern(BcType::Var(1));
             return Some(self.intern(BcType::Map(key, value)));
+        }
+        if let Some(arity) = self
+            .core
+            .tuples
+            .iter()
+            .position(|candidate| *candidate == Some(class))
+        {
+            let elements = (0..arity)
+                .map(|index| self.intern(BcType::Var(index as u32)))
+                .collect();
+            return Some(self.intern(BcType::Tuple(elements)));
         }
         if entry.type_params == 0 {
             return self.class_ty[class as usize];
@@ -842,12 +859,20 @@ impl<'m> Ctx<'m> {
     /// The nominal class and arguments of one instance type.
     pub(crate) fn as_instance(&self, ty: u32) -> Option<(u32, Vec<u32>)> {
         match self.ty(ty) {
+            BcType::Unit => self.core.unit.map(|class| (class, vec![])),
             BcType::Int => self.core.int.map(|class| (class, vec![])),
             BcType::Bool => self.core.boolean.map(|class| (class, vec![])),
             BcType::Str => self.core.string.map(|class| (class, vec![])),
             BcType::Bytes => self.core.bytes.map(|class| (class, vec![])),
             BcType::List(element) => self.core.list.map(|class| (class, vec![element])),
             BcType::Map(key, value) => self.core.map.map(|class| (class, vec![key, value])),
+            BcType::Tuple(elements) => self
+                .core
+                .tuples
+                .get(elements.len())
+                .copied()
+                .flatten()
+                .map(|class| (class, elements)),
             BcType::Class(c) => Some((c, vec![])),
             BcType::Inst(c, args) => Some((c, args)),
             _ => None,
@@ -1020,7 +1045,6 @@ impl<'m> Ctx<'m> {
                 let class = match constructor {
                     lm_abi::AbiConstructor::Option => self.core.option,
                     lm_abi::AbiConstructor::Result => self.core.result,
-                    lm_abi::AbiConstructor::Pair => self.core.pair,
                 }
                 .ok_or_else(|| {
                     format!(

@@ -64,12 +64,12 @@ def exchange(): String with Tcp
     return display(error)
   in Ok(_)      then ()
   end
-  answer = case accepted.first.read_exact(5)
+  answer = case accepted[0].read_exact(5)
   in Ok(bytes)  then bytes.text()
   in Err(error) then display(error)
   end
   client.close()
-  accepted.first.close()
+  accepted[0].close()
   listener.close()
   answer
 end
@@ -108,7 +108,7 @@ def transfer(): Int with Tcp
     return -4
   end
   server = case listener.accept()
-  in Ok(value)  then value.first
+  in Ok(value)  then value[0]
   in Err(_)
     return -5
   end

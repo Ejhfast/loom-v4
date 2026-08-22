@@ -72,7 +72,7 @@ def exchange(): String with Tcp, Tls
     return display(error)
   end
   server = case listener.accept()
-  in Ok(value) then value.first
+  in Ok(value) then value[0]
   in Err(error)
     return display(error)
   end
@@ -139,7 +139,7 @@ def exchange(): String with Tcp, Tls
     return display(error)
   end
   server = case listener.accept()
-  in Ok(value) then value.first
+  in Ok(value) then value[0]
   in Err(error)
     return display(error)
   end
@@ -203,7 +203,7 @@ def capture(): String with Tcp, Tls, Vm
     return "connect failed"
   end
   server = case listener.accept()
-  in Ok(value) then value.first
+  in Ok(value) then value[0]
   in Err(_)
     return "accept failed"
   end
@@ -258,7 +258,7 @@ def capture(): String with Tcp, Tls, Vm
     return "connect failed"
   end
   server = case listener.accept()
-  in Ok(value) then value.first
+  in Ok(value) then value[0]
   in Err(_)
     return "accept failed"
   end

@@ -267,7 +267,6 @@ impl AbiNative {
 pub enum AbiConstructor {
     Option,
     Result,
-    Pair,
 }
 
 impl AbiConstructor {
@@ -275,7 +274,6 @@ impl AbiConstructor {
         match self {
             AbiConstructor::Option => "Option",
             AbiConstructor::Result => "Result",
-            AbiConstructor::Pair => "Pair",
         }
     }
 
@@ -283,7 +281,6 @@ impl AbiConstructor {
         match self {
             AbiConstructor::Option => 1,
             AbiConstructor::Result => 2,
-            AbiConstructor::Pair => 2,
         }
     }
 }
@@ -403,13 +400,11 @@ impl AbiType {
         AbiConstructor::Result,
         &[AbiType::TCP_LISTENER, AbiType::NET_ERROR],
     );
-    pub const PAIR_TCP_STREAM_SOCKET_ADDRESS: AbiType = AbiType::Apply(
-        AbiConstructor::Pair,
-        &[AbiType::TCP_STREAM, AbiType::SOCKET_ADDRESS],
-    );
+    pub const TUPLE_TCP_STREAM_SOCKET_ADDRESS: AbiType =
+        AbiType::Tuple(&[AbiType::TCP_STREAM, AbiType::SOCKET_ADDRESS]);
     pub const RESULT_ACCEPT_NET_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
-        &[AbiType::PAIR_TCP_STREAM_SOCKET_ADDRESS, AbiType::NET_ERROR],
+        &[AbiType::TUPLE_TCP_STREAM_SOCKET_ADDRESS, AbiType::NET_ERROR],
     );
     pub const RESULT_TCP_READ_NET_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
@@ -3291,7 +3286,7 @@ mod tests {
         assert_eq!(validate_manifest(), Ok(()));
         assert_eq!(
             AbiType::RESULT_ACCEPT_NET_ERROR.text(),
-            "Result[Pair[TcpStream, SocketAddress], NetError]"
+            "Result[(TcpStream, SocketAddress), NetError]"
         );
         assert!(AbiType::RESULT_ACCEPT_NET_ERROR.valid());
         assert!(!AbiType::Apply(AbiConstructor::Option, &[]).valid());

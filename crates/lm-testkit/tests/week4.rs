@@ -206,16 +206,16 @@ fn a_label_must_name_a_parameter_of_the_target() {
 // ---------------------------------------------------------------
 
 #[test]
-fn class_constructor_patterns_destructure_core_pair() {
+fn tuple_patterns_destructure_native_tuples() {
     assert_eq!(
-        runs("p = Pair(2, \"x\")\ncase p\nin Pair(a, b) then \"{b}{a}\"\nend\n"),
+        runs("p = (2, \"x\")\ncase p\nin (a, b) then \"{b}{a}\"\nend\n"),
         "Done(\"x2\")"
     );
-    // Nested patterns inside a class constructor pattern.
+    // Nested patterns inside a tuple pattern.
     assert_eq!(
         runs(
-            "p: Pair[Option[Int], Int] = Pair(Some(4), 1)\ncase p\nin Pair(Some(v), n) then v + n\n\
-             in Pair(None, n) then n\nend\n"
+            "p: (Option[Int], Int) = (Some(4), 1)\ncase p\nin (Some(v), n) then v + n\n\
+             in (None, n) then n\nend\n"
         ),
         "Done(5)"
     );

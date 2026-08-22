@@ -1126,13 +1126,11 @@ mod tests {
             lm_abi::OP_TCP_ACCEPT,
             vec![tcp(HostTcpKind::Listener, listener)],
         )) {
-            HostValue::Ctor(CoreCtor::Pair, mut values) if values.len() == 2 => {
-                match values.remove(0) {
-                    HostValue::TcpStream(token) => token,
-                    other => panic!("expected a server stream, found {other:?}"),
-                }
-            }
-            other => panic!("expected an accepted pair, found {other:?}"),
+            HostValue::Tuple(mut values) if values.len() == 2 => match values.remove(0) {
+                HostValue::TcpStream(token) => token,
+                other => panic!("expected a server stream, found {other:?}"),
+            },
+            other => panic!("expected an accepted tuple, found {other:?}"),
         };
         (listener, client, server)
     }

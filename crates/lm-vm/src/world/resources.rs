@@ -189,7 +189,6 @@ impl World {
                     CoreCtor::EntropyFailed => self.core.entropy_error_failed,
                     CoreCtor::FsErrorClosed => self.core.fs_error_closed,
                     CoreCtor::FsErrorFailed => self.core.fs_error_failed,
-                    CoreCtor::Pair => self.core.pair,
                     CoreCtor::NetInvalidInput => self.core.net_invalid_input,
                     CoreCtor::NetNameNotFound => self.core.net_name_not_found,
                     CoreCtor::NetUnavailable => self.core.net_unavailable,

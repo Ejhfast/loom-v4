@@ -921,6 +921,10 @@ impl TypeEnvs {
         let (class, args) = match self.ty(receiver).cloned() {
             Some(ClosedType::Class(class)) => (class, Vec::new()),
             Some(ClosedType::Inst(class, args)) => (class, args),
+            Some(ClosedType::Unit) => match role(crate::corepin::ROLE_UNIT) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
             Some(ClosedType::Int) => match role(crate::corepin::ROLE_INT) {
                 Some(class) => (class, Vec::new()),
                 None => return Ok(None),
@@ -945,6 +949,15 @@ impl TypeEnvs {
                 Some(class) => (class, vec![key, value]),
                 None => return Ok(None),
             },
+            Some(ClosedType::Tuple(args)) => {
+                let Some(role_index) = crate::corepin::tuple_role(args.len()) else {
+                    return Ok(None);
+                };
+                match role(role_index) {
+                    Some(class) => (class, args),
+                    None => return Ok(None),
+                }
+            }
             _ => return Ok(None),
         };
         if class != runtime_class {
@@ -956,6 +969,10 @@ impl TypeEnvs {
             .and_then(|item| module.types.get(*item as usize))
         {
             Some(BcType::Class(owner) | BcType::Inst(owner, _)) => *owner,
+            Some(BcType::Unit) => match role(crate::corepin::ROLE_UNIT) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
             Some(BcType::Int) => match role(crate::corepin::ROLE_INT) {
                 Some(owner) => owner,
                 None => return Ok(None),
@@ -980,6 +997,15 @@ impl TypeEnvs {
                 Some(owner) => owner,
                 None => return Ok(None),
             },
+            Some(BcType::Tuple(items)) => {
+                let Some(role_index) = crate::corepin::tuple_role(items.len()) else {
+                    return Ok(None);
+                };
+                match role(role_index) {
+                    Some(owner) => owner,
+                    None => return Ok(None),
+                }
+            }
             _ => return Ok(None),
         };
         let types = match self.ancestor_args(module, class, &args, owner) {
@@ -1026,6 +1052,7 @@ impl TypeEnvs {
         match self.ty(ty)? {
             ClosedType::Class(class) => Some((*class, Vec::new())),
             ClosedType::Inst(class, args) => Some((*class, args.clone())),
+            ClosedType::Unit => Some((role(crate::corepin::ROLE_UNIT)?, Vec::new())),
             ClosedType::Int => Some((role(crate::corepin::ROLE_INT)?, Vec::new())),
             ClosedType::Bool => Some((role(crate::corepin::ROLE_BOOL)?, Vec::new())),
             ClosedType::Str => Some((role(crate::corepin::ROLE_STRING)?, Vec::new())),
@@ -1034,6 +1061,10 @@ impl TypeEnvs {
             ClosedType::Map(key, value) => {
                 Some((role(crate::corepin::ROLE_MAP)?, vec![*key, *value]))
             }
+            ClosedType::Tuple(items) => Some((
+                role(crate::corepin::tuple_role(items.len())?)?,
+                items.clone(),
+            )),
             _ => None,
         }
     }

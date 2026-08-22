@@ -727,6 +727,14 @@ impl Machine {
     /// Return the class method table for one runtime value.
     fn virtual_class(&self, module: &Module, value: Value) -> Result<u32, FaultCode> {
         match value {
+            Value::Unit => {
+                let class = module.core_roles[lm_bytecode::corepin::ROLE_UNIT];
+                if class == lm_bytecode::NO_ROLE {
+                    Err(BAD_TYPE)
+                } else {
+                    Ok(class)
+                }
+            }
             Value::Int(_) => {
                 let class = module.core_roles[lm_bytecode::corepin::ROLE_INT];
                 if class == lm_bytecode::NO_ROLE {
@@ -803,6 +811,15 @@ impl Machine {
                 }
                 Object::Map { .. } => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_MAP];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::Tuple { items } => {
+                    let role = lm_bytecode::corepin::tuple_role(items.len()).ok_or(BAD_TYPE)?;
+                    let class = module.core_roles[role];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
                     } else {

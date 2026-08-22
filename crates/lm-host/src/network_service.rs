@@ -1216,13 +1216,10 @@ fn drive_listener(
                     completions,
                     count,
                     pending,
-                    net_ok(HostValue::Ctor(
-                        CoreCtor::Pair,
-                        vec![
-                            HostValue::TcpStream(stream),
-                            HostValue::SocketAddress(host_address(address)),
-                        ],
-                    )),
+                    net_ok(HostValue::Tuple(vec![
+                        HostValue::TcpStream(stream),
+                        HostValue::SocketAddress(host_address(address)),
+                    ])),
                 );
             }
             Err((pending, error)) => complete(completions, count, pending, io_error(error)),

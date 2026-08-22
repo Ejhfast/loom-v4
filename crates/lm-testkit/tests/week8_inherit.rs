@@ -184,14 +184,14 @@ fn a_subclass_is_valid_at_the_instantiated_parent_type() {
 #[test]
 fn a_generic_method_of_a_generic_parent_still_infers() {
     let source = "class Maker[T]\n\
-                  \x20 def pair[U](self, a: T, b: U): Pair[T, U]\n\
-                  \x20   Pair(a, b)\n\
+                  \x20 def pair[U](self, a: T, b: U): (T, U)\n\
+                  \x20   (a, b)\n\
                   \x20 end\n\
                   end\n\
                   class IntMaker < Maker[Int]\n\
                   end\n\
                   p = IntMaker().pair(1, \"x\")\n\
-                  (p.first, p.second)\n";
+                  (p[0], p[1])\n";
     assert_eq!(run(source), "Done((1, \"x\"))");
 }
 

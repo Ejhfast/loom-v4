@@ -48,6 +48,10 @@ pub struct CoreLayout {
     pub string_builder: Option<u32>,
     /// The core method table of ByteBuffer values.
     pub byte_buffer: Option<u32>,
+    /// The core method table of unit values.
+    pub unit: Option<u32>,
+    /// Native tuple method tables indexed by arity.
+    pub tuples: [Option<u32>; 17],
     pub option_some: Option<u32>,
     pub option_none: Option<u32>,
     pub result_ok: Option<u32>,
@@ -122,7 +126,6 @@ pub struct CoreLayout {
     pub seek_start: Option<u32>,
     pub seek_current: Option<u32>,
     pub seek_end: Option<u32>,
-    pub pair: Option<u32>,
     pub ip_address: Option<u32>,
     pub ip_v4: Option<u32>,
     pub ip_v6: Option<u32>,
@@ -202,7 +205,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 156] = [
+pub const PINNED_LABELS: [&str; 171] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -271,7 +274,7 @@ pub const PINNED_LABELS: [&str; 156] = [
     "Text",
     "Substring",
     "Char",
-    "Pair",
+    "Tuple2",
     "IpAddress",
     "IpAddress.V4",
     "IpAddress.V6",
@@ -359,6 +362,21 @@ pub const PINNED_LABELS: [&str; 156] = [
     "EntropyError.LimitExceeded",
     "EntropyError.Unavailable",
     "EntropyError.Failed",
+    "Tuple3",
+    "Tuple4",
+    "Tuple5",
+    "Tuple6",
+    "Tuple7",
+    "Tuple8",
+    "Tuple9",
+    "Tuple10",
+    "Tuple11",
+    "Tuple12",
+    "Tuple13",
+    "Tuple14",
+    "Tuple15",
+    "Tuple16",
+    "Unit",
 ];
 
 /// The core role of immediate integer values.
@@ -397,7 +415,7 @@ pub const ROLE_SUBSTRING: usize = 66;
 /// The core role of immediate Unicode scalar values.
 pub const ROLE_CHAR: usize = 67;
 
-pub const ROLE_PAIR: usize = 68;
+pub const ROLE_TUPLE2: usize = 68;
 pub const ROLE_IP_ADDRESS: usize = 69;
 pub const ROLE_IP_V4: usize = 70;
 pub const ROLE_IP_V6: usize = 71;
@@ -485,6 +503,30 @@ pub const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 152;
 pub const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 153;
 pub const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 154;
 pub const ROLE_ENTROPY_ERROR_FAILED: usize = 155;
+pub const ROLE_TUPLE3: usize = 156;
+pub const ROLE_TUPLE4: usize = 157;
+pub const ROLE_TUPLE5: usize = 158;
+pub const ROLE_TUPLE6: usize = 159;
+pub const ROLE_TUPLE7: usize = 160;
+pub const ROLE_TUPLE8: usize = 161;
+pub const ROLE_TUPLE9: usize = 162;
+pub const ROLE_TUPLE10: usize = 163;
+pub const ROLE_TUPLE11: usize = 164;
+pub const ROLE_TUPLE12: usize = 165;
+pub const ROLE_TUPLE13: usize = 166;
+pub const ROLE_TUPLE14: usize = 167;
+pub const ROLE_TUPLE15: usize = 168;
+pub const ROLE_TUPLE16: usize = 169;
+pub const ROLE_UNIT: usize = 170;
+
+/// The tuple carrier role for one supported arity.
+pub fn tuple_role(arity: usize) -> Option<usize> {
+    match arity {
+        2 => Some(ROLE_TUPLE2),
+        3..=16 => Some(ROLE_TUPLE3 + arity - 3),
+        _ => None,
+    }
+}
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -534,6 +576,13 @@ fn pinned_map() -> &'static HashMap<(String, [u8; 32]), &'static str> {
 }
 
 fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> {
+    if let Some(arity) = label
+        .strip_prefix("Tuple")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|arity| (2..=16).contains(arity))
+    {
+        return &mut layout.tuples[arity];
+    }
     match label {
         "Int" => &mut layout.int,
         "Bool" => &mut layout.boolean,
@@ -544,6 +593,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Bytes" => &mut layout.bytes,
         "StringBuilder" => &mut layout.string_builder,
         "ByteBuffer" => &mut layout.byte_buffer,
+        "Unit" => &mut layout.unit,
         "Option" => &mut layout.option,
         "Option.Some" => &mut layout.option_some,
         "Option.None" => &mut layout.option_none,
@@ -616,7 +666,6 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SeekFrom.Start" => &mut layout.seek_start,
         "SeekFrom.Current" => &mut layout.seek_current,
         "SeekFrom.End" => &mut layout.seek_end,
-        "Pair" => &mut layout.pair,
         "IpAddress" => &mut layout.ip_address,
         "IpAddress.V4" => &mut layout.ip_v4,
         "IpAddress.V6" => &mut layout.ip_v6,

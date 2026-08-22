@@ -63,7 +63,6 @@ pub(crate) const ROLE_SEEK_FROM: usize = 52;
 pub(crate) const ROLE_SEEK_START: usize = 53;
 pub(crate) const ROLE_SEEK_CURRENT: usize = 54;
 pub(crate) const ROLE_SEEK_END: usize = 55;
-pub(crate) const ROLE_PAIR: usize = 68;
 pub(crate) const ROLE_IP_ADDRESS: usize = 69;
 pub(crate) const ROLE_IP_V4: usize = 70;
 pub(crate) const ROLE_IP_V6: usize = 71;
@@ -548,24 +547,34 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
-    if let Some(idx) = slot(ROLE_PAIR) {
+    for arity in 2..=16 {
+        let role = lm_bytecode::corepin::tuple_role(arity)
+            .expect("every supported tuple arity has one role");
+        let Some(idx) = slot(role) else { continue };
         let class = &module.classes[idx as usize];
-        let fields: Vec<&BcType> = class
-            .fields
-            .iter()
-            .filter_map(|(_, ty)| module.types.get(*ty as usize))
-            .collect();
         if class.kind != BcClassKind::Normal
-            || class.is_final
-            || class.type_params != 2
+            || !class.is_final
+            || class.type_params != arity as u32
             || class.parent().is_some()
             || !class.parent_args.is_empty()
-            || fields.len() != 2
-            || fields[0] != &BcType::Var(0)
-            || fields[1] != &BcType::Var(1)
+            || !class.fields.is_empty()
+        {
+            return Err(terr(format!(
+                "the core role `Tuple{arity}` does not name its native tuple carrier"
+            )));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_UNIT) {
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
         {
             return Err(terr(
-                "the core role `Pair` does not name its two-field generic class".to_string(),
+                "the core role `Unit` does not name its native unit carrier".to_string(),
             ));
         }
     }

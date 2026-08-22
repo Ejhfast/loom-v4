@@ -863,23 +863,6 @@ impl World {
                     Err(FaultCode::TypeMismatch)
                 }
             }
-            AbiType::Apply(AbiConstructor::Pair, arguments) if arguments.len() == 2 => {
-                let Some(Object::Instance { class, fields, .. }) =
-                    value.as_obj().map(|reference| heap.get(reference))
-                else {
-                    return Err(FaultCode::TypeMismatch);
-                };
-                let [first, second] = fields.as_slice() else {
-                    return Err(FaultCode::TypeMismatch);
-                };
-                if Some(*class) != self.core.pair {
-                    return Err(FaultCode::TypeMismatch);
-                }
-                Ok(HostArg::Pair(
-                    Box::new(self.host_data_arg(vm, *first, arguments[0])?),
-                    Box::new(self.host_data_arg(vm, *second, arguments[1])?),
-                ))
-            }
             _ => Err(FaultCode::TypeMismatch),
         }
     }
@@ -984,21 +967,6 @@ impl World {
                     return Err(FaultCode::TypeMismatch);
                 };
                 self.collect_host_resources(vm, *payload, ty, out)?;
-            }
-            AbiType::Apply(AbiConstructor::Pair, arguments) if arguments.len() == 2 => {
-                let Some(Object::Instance { class, fields, .. }) =
-                    value.as_obj().map(|reference| heap.get(reference))
-                else {
-                    return Err(FaultCode::TypeMismatch);
-                };
-                let [first, second] = fields.as_slice() else {
-                    return Err(FaultCode::TypeMismatch);
-                };
-                if Some(*class) != self.core.pair {
-                    return Err(FaultCode::TypeMismatch);
-                }
-                self.collect_host_resources(vm, *first, arguments[0], out)?;
-                self.collect_host_resources(vm, *second, arguments[1], out)?;
             }
             _ => {}
         }

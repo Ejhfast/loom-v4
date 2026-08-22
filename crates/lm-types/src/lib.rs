@@ -179,6 +179,7 @@ pub struct TypeStore {
     native_classes: HashMap<TypeId, ClassId>,
     native_list: Option<ClassId>,
     native_map: Option<ClassId>,
+    native_tuples: [Option<ClassId>; 17],
     conformances: HashMap<(ClassId, InterfaceId), Vec<TypeId>>,
     /// Memoized subtype answers keyed by `(expected, found)`.
     subtype_cache: RefCell<HashMap<(TypeId, TypeId), bool>>,
@@ -207,6 +208,7 @@ impl TypeStore {
             native_classes: HashMap::new(),
             native_list: None,
             native_map: None,
+            native_tuples: [None; 17],
             conformances: HashMap::new(),
             subtype_cache: RefCell::new(HashMap::new()),
         };
@@ -384,6 +386,14 @@ impl TypeStore {
         self.subtype_cache.borrow_mut().clear();
     }
 
+    /// Link one structural tuple arity to its native core class.
+    pub fn set_native_tuple_class(&mut self, arity: usize, class: ClassId) {
+        if let Some(slot) = self.native_tuples.get_mut(arity) {
+            *slot = Some(class);
+            self.subtype_cache.borrow_mut().clear();
+        }
+    }
+
     /// Record one class-owned interface conformance.
     pub fn set_conformance(
         &mut self,
@@ -457,6 +467,12 @@ impl TypeStore {
             Type::Inst(class, args) => Some((*class, args.clone())),
             Type::List(element) => self.native_list.map(|class| (class, vec![*element])),
             Type::Map(key, value) => self.native_map.map(|class| (class, vec![*key, *value])),
+            Type::Tuple(elements) => self
+                .native_tuples
+                .get(elements.len())
+                .copied()
+                .flatten()
+                .map(|class| (class, elements.clone())),
             _ => self
                 .native_classes
                 .get(&ty)
@@ -465,12 +481,21 @@ impl TypeStore {
         }
     }
 
-    fn type_for_nominal(&mut self, class: ClassId, args: Vec<TypeId>) -> TypeId {
+    pub fn type_for_nominal(&mut self, class: ClassId, args: Vec<TypeId>) -> TypeId {
         if self.native_list == Some(class) && args.len() == 1 {
             return self.intern(Type::List(args[0]));
         }
         if self.native_map == Some(class) && args.len() == 2 {
             return self.intern(Type::Map(args[0], args[1]));
+        }
+        if let Some(arity) = self
+            .native_tuples
+            .iter()
+            .position(|candidate| *candidate == Some(class))
+        {
+            if args.len() == arity {
+                return self.intern(Type::Tuple(args));
+            }
         }
         if args.is_empty() {
             if let Some((ty, _)) = self

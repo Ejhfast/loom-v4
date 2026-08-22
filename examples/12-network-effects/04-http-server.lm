@@ -46,7 +46,7 @@ class Server < Proc[TcpListener]
     served = 0
     while served < 3
       stream = case listener.accept()
-      in Ok(value) then value.first
+      in Ok(value) then value[0]
       in Err(error)
         return "accept: {error}"
       end

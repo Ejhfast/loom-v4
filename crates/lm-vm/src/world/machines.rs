@@ -1717,7 +1717,9 @@ impl World {
                     .alloc(Object::NativeTcpStream { resource })
                     .and_then(|stream| {
                         if token.2 == lm_abi::OP_TCP_ACCEPT {
-                            self.make_instance(sink.target, self.core.pair, vec![stream, peer])
+                            self.machines[sink.target as usize].alloc(Object::Tuple {
+                                items: vec![stream, peer],
+                            })
                         } else {
                             Ok(stream)
                         }

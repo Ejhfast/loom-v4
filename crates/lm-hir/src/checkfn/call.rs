@@ -150,14 +150,20 @@ impl<'o> FnChecker<'o> {
                 let type_names = info.type_params.clone();
                 let type_bounds = info.type_bounds.clone();
                 let ret = info.self_ty;
-                let (params, muts, names, row) = match &info.init {
-                    Some(init) => (
+                let (params, muts, names, row) = match (info.native_repr, &info.init) {
+                    (Some(NativeRepr::Tuple(_)), _) => {
+                        let Type::Tuple(items) = ctx.store.get(info.self_ty) else {
+                            unreachable!("a tuple carrier has a tuple self type")
+                        };
+                        (items.clone(), vec![false; items.len()], vec![], vec![])
+                    }
+                    (_, Some(init)) => (
                         init.params.clone(),
                         init.param_muts.clone(),
                         init.param_names.clone(),
                         init.row.clone(),
                     ),
-                    None => (vec![], vec![], vec![], vec![]),
+                    (_, None) => (vec![], vec![], vec![], vec![]),
                 };
                 let out = self.check_poly_call(
                     ctx,
@@ -639,11 +645,19 @@ impl<'o> FnChecker<'o> {
                 if let Some(class) = ctx.lookup_type(name, &self.env) {
                     let info = &ctx.classes[class as usize];
                     if info.kind == ClassKind::Normal {
-                        let params = info
-                            .init
-                            .as_ref()
-                            .map(|i| i.params.clone())
-                            .unwrap_or_default();
+                        let params = match info.native_repr {
+                            Some(NativeRepr::Tuple(_)) => {
+                                let Type::Tuple(items) = ctx.store.get(info.self_ty) else {
+                                    unreachable!("a tuple carrier has a tuple self type")
+                                };
+                                items.clone()
+                            }
+                            _ => info
+                                .init
+                                .as_ref()
+                                .map(|i| i.params.clone())
+                                .unwrap_or_default(),
+                        };
                         return ctor_determined(ctx, &params, info.type_params.len());
                     }
                 }

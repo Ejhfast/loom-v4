@@ -19,6 +19,14 @@ fn a_tuple_pattern_binds_every_element() {
 }
 
 #[test]
+fn tuple_carriers_use_the_native_tuple_value() {
+    let source = "pair: Tuple2[Int, String] = Tuple2(7, \"hi\")\n\
+                  unit: Unit = Unit()\n\
+                  (pair.swap(), unit)\n";
+    assert_eq!(run(source), "Done(((\"hi\", 7), ()))");
+}
+
+#[test]
 fn a_one_tuple_pattern_needs_its_comma() {
     assert_eq!(run("case (3,)\nin (n,) then n\nend\n"), "Done(3)");
     // Without the comma the parentheses only group, so this binds the

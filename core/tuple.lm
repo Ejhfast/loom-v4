@@ -1,0 +1,52 @@
+# Core: native unit and tuple method tables.
+
+final class Unit
+end
+
+final class Tuple2[A, B]
+  def swap(self): (B, A)
+    (self[1], self[0])
+  end
+end
+
+final class Tuple3[A, B, C]
+end
+
+final class Tuple4[A, B, C, D]
+end
+
+final class Tuple5[A, B, C, D, E]
+end
+
+final class Tuple6[A, B, C, D, E, F]
+end
+
+final class Tuple7[A, B, C, D, E, F, G]
+end
+
+final class Tuple8[A, B, C, D, E, F, G, H]
+end
+
+final class Tuple9[A, B, C, D, E, F, G, H, I]
+end
+
+final class Tuple10[A, B, C, D, E, F, G, H, I, J]
+end
+
+final class Tuple11[A, B, C, D, E, F, G, H, I, J, K]
+end
+
+final class Tuple12[A, B, C, D, E, F, G, H, I, J, K, L]
+end
+
+final class Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M]
+end
+
+final class Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N]
+end
+
+final class Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]
+end
+
+final class Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]
+end

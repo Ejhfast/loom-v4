@@ -52,15 +52,6 @@ fn extension_reply_matches(value: &HostValue, ty: lm_abi::AbiType) -> bool {
                 && arguments.len() == 2
                 && extension_reply_matches(&values[0], arguments[1])
         }
-        (
-            HostValue::Ctor(CoreCtor::Pair, values),
-            AbiType::Apply(AbiConstructor::Pair, arguments),
-        ) => {
-            values.len() == 2
-                && arguments.len() == 2
-                && extension_reply_matches(&values[0], arguments[0])
-                && extension_reply_matches(&values[1], arguments[1])
-        }
         _ => false,
     }
 }
