@@ -2,7 +2,7 @@
 
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostIpAddress, HostShutdown, HostSocketAddress,
-    HostTcpKind, HostTcpResource, HostValue, SharedBytes,
+    HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, SharedBytes,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -34,6 +34,7 @@ pub(crate) struct NetworkService {
     retained: Arc<AtomicUsize>,
     active_dns: Arc<Mutex<HashSet<u64>>>,
     canceled_dns: Arc<Mutex<HashSet<u64>>>,
+    waits: Arc<Mutex<NetworkWaitState>>,
     reactor: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -112,11 +113,13 @@ struct DnsJob {
     port: u16,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Pending {
     key: CompletionKey,
     token: u64,
     retained: usize,
+    wait_state: Option<Arc<Mutex<NetworkWaitState>>>,
+    retained_budget: Option<Arc<AtomicUsize>>,
 }
 
 struct NetworkCompletion {
@@ -147,6 +150,14 @@ enum Command {
 
 enum Control {
     Cancel(u64),
+    CancelWait {
+        token: u64,
+        reply: SyncSender<bool>,
+    },
+    RestoreWait {
+        rollback: NetworkWaitRollback,
+        reply: SyncSender<bool>,
+    },
     ForceClose(HostTcpResource),
     ForceCloseTls(u64),
     Stop,
@@ -164,6 +175,7 @@ struct StreamState {
     connect: Option<Pending>,
     reads: VecDeque<(Pending, usize)>,
     writes: VecDeque<PendingWrite>,
+    read_buffer: VecDeque<u8>,
     read_shutdown: bool,
     write_shutdown: bool,
 }
@@ -171,6 +183,7 @@ struct StreamState {
 struct ListenerState {
     socket: TcpListener,
     accepts: VecDeque<(Pending, u64)>,
+    accepted: VecDeque<(TcpStream, SocketAddr)>,
 }
 
 struct TlsState {
@@ -179,6 +192,7 @@ struct TlsState {
     registered: bool,
     handshake: Option<Pending>,
     reads: VecDeque<(Pending, usize)>,
+    read_buffer: VecDeque<u8>,
     writes: VecDeque<PendingWrite>,
     shutdowns: VecDeque<Pending>,
     peer_closed: bool,
@@ -186,6 +200,44 @@ struct TlsState {
     write_shutdown: bool,
     close_notify_sent: bool,
     _retained: RetainedLease,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NetworkWaitKind {
+    Dns,
+    Reactor,
+}
+
+struct ReadyNetworkWait {
+    rollback: NetworkWaitRollback,
+    retained: usize,
+}
+
+enum NetworkWaitRollback {
+    None,
+    Connect {
+        stream: u64,
+    },
+    Accept {
+        listener: u64,
+        stream: u64,
+        address: SocketAddr,
+    },
+    TcpRead {
+        stream: u64,
+        bytes: Vec<u8>,
+    },
+    TlsRead {
+        stream: u64,
+        bytes: Vec<u8>,
+    },
+}
+
+#[derive(Default)]
+struct NetworkWaitState {
+    pending: HashMap<u64, NetworkWaitKind>,
+    ready: HashMap<u64, ReadyNetworkWait>,
+    cancelled: HashSet<u64>,
 }
 
 impl TcpRequest {
@@ -230,8 +282,10 @@ impl NetworkService {
         let (completion_tx, completions) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let retained = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(Mutex::new(NetworkWaitState::default()));
         let reactor_pending = Arc::clone(&pending);
         let reactor_retained = Arc::clone(&retained);
+        let reactor_waits = Arc::clone(&waits);
         let reactor_completions = completion_tx.clone();
         let reactor = std::thread::Builder::new()
             .name("loom-network".to_string())
@@ -243,6 +297,7 @@ impl NetworkService {
                     reactor_completions,
                     reactor_pending,
                     reactor_retained,
+                    reactor_waits,
                 )
             })
             .expect("the network reactor starts");
@@ -274,6 +329,7 @@ impl NetworkService {
             retained,
             active_dns,
             canceled_dns,
+            waits,
             reactor: Some(reactor),
         }
     }
@@ -284,6 +340,7 @@ impl NetworkService {
         token: u64,
         name: String,
         port: u16,
+        wait_source: bool,
     ) -> bool {
         let retained = name.len();
         if !reserve(&self.pending, &self.retained, retained) {
@@ -298,10 +355,19 @@ impl NetworkService {
                 key,
                 token,
                 retained,
+                wait_state: wait_source.then(|| Arc::clone(&self.waits)),
+                retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
             },
             name,
             port,
         };
+        if wait_source {
+            self.waits
+                .lock()
+                .expect("the network wait state locks")
+                .pending
+                .insert(token, NetworkWaitKind::Dns);
+        }
         match self.dns.try_send(job) {
             Ok(()) => true,
             Err(TrySendError::Full(job)) | Err(TrySendError::Disconnected(job)) => {
@@ -309,6 +375,13 @@ impl NetworkService {
                     .lock()
                     .expect("the DNS set locks")
                     .remove(&job.pending.token);
+                if wait_source {
+                    self.waits
+                        .lock()
+                        .expect("the network wait state locks")
+                        .pending
+                        .remove(&token);
+                }
                 release_pending(&self.pending);
                 release_retained(&self.retained, job.pending.retained);
                 false
@@ -316,7 +389,13 @@ impl NetworkService {
         }
     }
 
-    pub(crate) fn submit_tcp(&self, key: CompletionKey, token: u64, request: TcpRequest) -> bool {
+    pub(crate) fn submit_tcp(
+        &self,
+        key: CompletionKey,
+        token: u64,
+        request: TcpRequest,
+        wait_source: bool,
+    ) -> bool {
         let retained = request.retained_bytes();
         if !reserve(&self.pending, &self.retained, retained) {
             return false;
@@ -325,10 +404,26 @@ impl NetworkService {
             key,
             token,
             retained,
+            wait_state: wait_source.then(|| Arc::clone(&self.waits)),
+            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
         };
+        if wait_source {
+            self.waits
+                .lock()
+                .expect("the network wait state locks")
+                .pending
+                .insert(token, NetworkWaitKind::Reactor);
+        }
         match self.requests.try_send(Command::Request(pending, request)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                if wait_source {
+                    self.waits
+                        .lock()
+                        .expect("the network wait state locks")
+                        .pending
+                        .remove(&token);
+                }
                 release_pending(&self.pending);
                 release_retained(&self.retained, retained);
                 return false;
@@ -338,7 +433,13 @@ impl NetworkService {
         true
     }
 
-    pub(crate) fn submit_tls(&self, key: CompletionKey, token: u64, request: TlsRequest) -> bool {
+    pub(crate) fn submit_tls(
+        &self,
+        key: CompletionKey,
+        token: u64,
+        request: TlsRequest,
+        wait_source: bool,
+    ) -> bool {
         let retained = request.retained_bytes();
         if !reserve(&self.pending, &self.retained, retained) {
             return false;
@@ -347,10 +448,26 @@ impl NetworkService {
             key,
             token,
             retained,
+            wait_state: wait_source.then(|| Arc::clone(&self.waits)),
+            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
         };
+        if wait_source {
+            self.waits
+                .lock()
+                .expect("the network wait state locks")
+                .pending
+                .insert(token, NetworkWaitKind::Reactor);
+        }
         match self.requests.try_send(Command::Tls(pending, request)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                if wait_source {
+                    self.waits
+                        .lock()
+                        .expect("the network wait state locks")
+                        .pending
+                        .remove(&token);
+                }
                 release_pending(&self.pending);
                 release_retained(&self.retained, retained);
                 return false;
@@ -372,6 +489,83 @@ impl NetworkService {
         let sent = self.controls.send(Control::Cancel(token)).is_ok();
         let _ = self.wake.wake();
         sent
+    }
+
+    pub(crate) fn commit_wait(&self, token: u64) -> bool {
+        let ready = self
+            .waits
+            .lock()
+            .expect("the network wait state locks")
+            .ready
+            .remove(&token);
+        let Some(ready) = ready else {
+            return false;
+        };
+        release_retained(&self.retained, ready.retained);
+        true
+    }
+
+    pub(crate) fn cancel_wait(&self, token: u64) -> HostWaitCancel {
+        enum State {
+            Ready(ReadyNetworkWait),
+            Pending(NetworkWaitKind),
+            Missing,
+        }
+
+        let state = {
+            let mut waits = self.waits.lock().expect("the network wait state locks");
+            if let Some(ready) = waits.ready.remove(&token) {
+                State::Ready(ready)
+            } else if let Some(kind) = waits.pending.get(&token).copied() {
+                waits.cancelled.insert(token);
+                State::Pending(kind)
+            } else {
+                State::Missing
+            }
+        };
+        match state {
+            State::Ready(ready) => {
+                release_retained(&self.retained, ready.retained);
+                if matches!(ready.rollback, NetworkWaitRollback::None) {
+                    return HostWaitCancel::ReadyRestored;
+                }
+                let (reply, answer) = mpsc::sync_channel(1);
+                if self
+                    .controls
+                    .send(Control::RestoreWait {
+                        rollback: ready.rollback,
+                        reply,
+                    })
+                    .is_err()
+                {
+                    return HostWaitCancel::Missing;
+                }
+                let _ = self.wake.wake();
+                if answer.recv_timeout(Duration::from_secs(1)) == Ok(true) {
+                    HostWaitCancel::ReadyRestored
+                } else {
+                    HostWaitCancel::Missing
+                }
+            }
+            State::Pending(NetworkWaitKind::Dns) => HostWaitCancel::Cancelled,
+            State::Pending(NetworkWaitKind::Reactor) => {
+                let (reply, answer) = mpsc::sync_channel(1);
+                if self
+                    .controls
+                    .send(Control::CancelWait { token, reply })
+                    .is_err()
+                {
+                    return HostWaitCancel::Missing;
+                }
+                let _ = self.wake.wake();
+                if answer.recv_timeout(Duration::from_secs(1)) == Ok(true) {
+                    HostWaitCancel::Cancelled
+                } else {
+                    HostWaitCancel::Missing
+                }
+            }
+            State::Missing => HostWaitCancel::Missing,
+        }
     }
 
     pub(crate) fn force_close(&self, resource: HostTcpResource) -> bool {
@@ -453,15 +647,55 @@ fn complete(
     pending: Pending,
     value: HostValue,
 ) {
+    let _ = complete_with_rollback(
+        completions,
+        count,
+        pending,
+        value,
+        NetworkWaitRollback::None,
+    );
+}
+
+fn complete_with_rollback(
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    pending: Pending,
+    value: HostValue,
+    rollback: NetworkWaitRollback,
+) -> Option<NetworkWaitRollback> {
+    let completion_retained = if let Some(waits) = &pending.wait_state {
+        let mut state = waits.lock().expect("the network wait state locks");
+        state.pending.remove(&pending.token);
+        if state.cancelled.remove(&pending.token) {
+            let retained = pending
+                .retained_budget
+                .as_ref()
+                .expect("a network wait has a retained-byte budget");
+            release_retained(retained, pending.retained);
+            release_pending(count);
+            return Some(rollback);
+        }
+        state.ready.insert(
+            pending.token,
+            ReadyNetworkWait {
+                rollback,
+                retained: pending.retained,
+            },
+        );
+        0
+    } else {
+        pending.retained
+    };
     let _ = completions.send(NetworkCompletion {
         value: HostCompletion {
             key: pending.key,
             token: pending.token,
             result: Ok(value),
         },
-        retained: pending.retained,
+        retained: completion_retained,
     });
     release_pending(count);
+    None
 }
 
 fn dns_worker(
@@ -526,6 +760,7 @@ fn reactor(
     completions: Sender<NetworkCompletion>,
     pending: Arc<AtomicUsize>,
     retained: Arc<AtomicUsize>,
+    waits: Arc<Mutex<NetworkWaitState>>,
 ) {
     let mut events = Events::with_capacity(1_024);
     let mut entries: HashMap<u64, Entry> = HashMap::new();
@@ -533,9 +768,28 @@ fn reactor(
         while let Ok(control) = controls.try_recv() {
             match control {
                 Control::Cancel(token) => {
-                    if let Some(resource) = cancel_token(&mut entries, &pending, &retained, token) {
+                    if let CancelToken::Close(resource) =
+                        cancel_token(&mut entries, &pending, &retained, token)
+                    {
                         close_entry(&poll, &mut entries, &completions, &pending, resource);
                     }
+                }
+                Control::CancelWait { token, reply } => {
+                    let cancelled = cancel_token(&mut entries, &pending, &retained, token);
+                    if let CancelToken::Close(resource) = cancelled {
+                        close_entry(&poll, &mut entries, &completions, &pending, resource);
+                    }
+                    if !matches!(cancelled, CancelToken::Missing) {
+                        let mut state = waits.lock().expect("the network wait state locks");
+                        state.pending.remove(&token);
+                        state.cancelled.remove(&token);
+                    }
+                    let _ = reply.send(true);
+                }
+                Control::RestoreWait { rollback, reply } => {
+                    let restored =
+                        restore_wait(&poll, &mut entries, &completions, &pending, rollback);
+                    let _ = reply.send(restored);
                 }
                 Control::ForceClose(resource) => {
                     close_entry(&poll, &mut entries, &completions, &pending, resource.token);
@@ -553,6 +807,7 @@ fn reactor(
                 &completions,
                 &pending,
                 &retained,
+                &waits,
                 command,
             );
         }
@@ -590,8 +845,30 @@ fn handle_command(
     completions: &Sender<NetworkCompletion>,
     count: &AtomicUsize,
     retained: &Arc<AtomicUsize>,
+    waits: &Mutex<NetworkWaitState>,
     command: Command,
 ) {
+    let token = match &command {
+        Command::Request(pending, _) | Command::Tls(pending, _) => pending.token,
+    };
+    if waits
+        .lock()
+        .expect("the network wait state locks")
+        .cancelled
+        .remove(&token)
+    {
+        waits
+            .lock()
+            .expect("the network wait state locks")
+            .pending
+            .remove(&token);
+        release_pending(count);
+        let pending_retained = match command {
+            Command::Request(pending, _) | Command::Tls(pending, _) => pending.retained,
+        };
+        release_retained(retained, pending_retained);
+        return;
+    }
     match command {
         Command::Request(pending, request) => match request {
             TcpRequest::Connect { stream, address } => {
@@ -654,6 +931,7 @@ fn handle_command(
                                 connect: Some(pending),
                                 reads: VecDeque::new(),
                                 writes: VecDeque::new(),
+                                read_buffer: VecDeque::new(),
                                 read_shutdown: false,
                                 write_shutdown: false,
                             }),
@@ -699,6 +977,7 @@ fn handle_command(
                             Entry::Listener(ListenerState {
                                 socket,
                                 accepts: VecDeque::new(),
+                                accepted: VecDeque::new(),
                             }),
                         );
                         complete(
@@ -930,6 +1209,7 @@ fn handle_tls_request(
                     registered: false,
                     handshake: Some(pending),
                     reads: VecDeque::new(),
+                    read_buffer: VecDeque::new(),
                     writes: VecDeque::new(),
                     shutdowns: VecDeque::new(),
                     peer_closed: false,
@@ -1153,7 +1433,7 @@ fn drive_entry(
 }
 
 fn drive_listener(
-    _poll: &Poll,
+    poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
     completions: &Sender<NetworkCompletion>,
     count: &AtomicUsize,
@@ -1183,7 +1463,11 @@ fn drive_listener(
             let Some((pending, stream)) = state.accepts.pop_front() else {
                 return;
             };
-            match state.socket.accept() {
+            let accepted = match state.accepted.pop_front() {
+                Some(accepted) => Ok(accepted),
+                None => state.socket.accept(),
+            };
+            match accepted {
                 Ok((socket, address)) => {
                     // An accepted stream needs the same treatment as
                     // a connected one. The error drops for the same
@@ -1208,11 +1492,13 @@ fn drive_listener(
                         connect: None,
                         reads: VecDeque::new(),
                         writes: VecDeque::new(),
+                        read_buffer: VecDeque::new(),
                         read_shutdown: false,
                         write_shutdown: false,
                     }),
                 );
-                complete(
+                let rollback_address = address;
+                let rollback = complete_with_rollback(
                     completions,
                     count,
                     pending,
@@ -1220,7 +1506,15 @@ fn drive_listener(
                         HostValue::TcpStream(stream),
                         HostValue::SocketAddress(host_address(address)),
                     ])),
+                    NetworkWaitRollback::Accept {
+                        listener,
+                        stream,
+                        address: rollback_address,
+                    },
                 );
+                if let Some(rollback) = rollback {
+                    let _ = restore_wait(poll, entries, completions, count, rollback);
+                }
             }
             Err((pending, error)) => complete(completions, count, pending, io_error(error)),
         }
@@ -1241,34 +1535,65 @@ fn drive_stream(
         let Some(Entry::Stream(state)) = entries.get_mut(&stream) else {
             return;
         };
-        if let Some(pending) = state.connect {
-            if readable || writable {
-                match state.socket.take_error() {
-                    Ok(Some(error)) => {
-                        state.connect = None;
-                        complete(completions, count, pending, io_error(error));
+        if state.connect.is_some() && (readable || writable) {
+            match state.socket.take_error() {
+                Ok(Some(error)) => {
+                    let pending = state.connect.take().expect("the connect call exists");
+                    complete(completions, count, pending, io_error(error));
+                    failed = Some(());
+                }
+                Ok(None) if state.socket.peer_addr().is_ok() => {
+                    let pending = state.connect.take().expect("the connect call exists");
+                    let cancelled = complete_with_rollback(
+                        completions,
+                        count,
+                        pending,
+                        net_ok(HostValue::TcpStream(stream)),
+                        NetworkWaitRollback::Connect { stream },
+                    )
+                    .is_some();
+                    if cancelled {
                         failed = Some(());
                     }
-                    Ok(None) if state.socket.peer_addr().is_ok() => {
-                        state.connect = None;
-                        complete(
-                            completions,
-                            count,
-                            pending,
-                            net_ok(HostValue::TcpStream(stream)),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        state.connect = None;
-                        complete(completions, count, pending, io_error(error));
-                        failed = Some(());
-                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let pending = state.connect.take().expect("the connect call exists");
+                    complete(completions, count, pending, io_error(error));
+                    failed = Some(());
                 }
             }
         }
         if state.connect.is_none() && failed.is_none() && readable {
             while let Some((pending, size)) = state.reads.pop_front() {
+                if !state.read_buffer.is_empty() {
+                    let take = size.min(state.read_buffer.len());
+                    let bytes: Vec<u8> = state.read_buffer.drain(..take).collect();
+                    let rollback = if pending.wait_state.is_some() {
+                        NetworkWaitRollback::TcpRead {
+                            stream,
+                            bytes: bytes.clone(),
+                        }
+                    } else {
+                        NetworkWaitRollback::None
+                    };
+                    let cancelled = complete_with_rollback(
+                        completions,
+                        count,
+                        pending,
+                        net_ok(HostValue::Ctor(
+                            CoreCtor::TcpReadData,
+                            vec![HostValue::Bytes(bytes.into())],
+                        )),
+                        rollback,
+                    );
+                    if let Some(NetworkWaitRollback::TcpRead { bytes, .. }) = cancelled {
+                        for byte in bytes.into_iter().rev() {
+                            state.read_buffer.push_front(byte);
+                        }
+                    }
+                    continue;
+                }
                 let mut bytes = vec![0; size];
                 match state.socket.read(&mut bytes) {
                     Ok(0) => complete(
@@ -1279,7 +1604,15 @@ fn drive_stream(
                     ),
                     Ok(read) => {
                         bytes.truncate(read);
-                        complete(
+                        let rollback = if pending.wait_state.is_some() {
+                            NetworkWaitRollback::TcpRead {
+                                stream,
+                                bytes: bytes.clone(),
+                            }
+                        } else {
+                            NetworkWaitRollback::None
+                        };
+                        let cancelled = complete_with_rollback(
                             completions,
                             count,
                             pending,
@@ -1287,7 +1620,13 @@ fn drive_stream(
                                 CoreCtor::TcpReadData,
                                 vec![HostValue::Bytes(bytes.into())],
                             )),
+                            rollback,
                         );
+                        if let Some(NetworkWaitRollback::TcpRead { bytes, .. }) = cancelled {
+                            for byte in bytes.into_iter().rev() {
+                                state.read_buffer.push_front(byte);
+                            }
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         state.reads.push_front((pending, size));
@@ -1437,6 +1776,34 @@ fn drive_tls(
                 let Some((pending, size)) = state.reads.pop_front() else {
                     break;
                 };
+                if !state.read_buffer.is_empty() {
+                    let take = size.min(state.read_buffer.len());
+                    let bytes: Vec<u8> = state.read_buffer.drain(..take).collect();
+                    let rollback = if pending.wait_state.is_some() {
+                        NetworkWaitRollback::TlsRead {
+                            stream,
+                            bytes: bytes.clone(),
+                        }
+                    } else {
+                        NetworkWaitRollback::None
+                    };
+                    let cancelled = complete_with_rollback(
+                        completions,
+                        count,
+                        pending,
+                        tls_ok(HostValue::Ctor(
+                            CoreCtor::TcpReadData,
+                            vec![HostValue::Bytes(bytes.into())],
+                        )),
+                        rollback,
+                    );
+                    if let Some(NetworkWaitRollback::TlsRead { bytes, .. }) = cancelled {
+                        for byte in bytes.into_iter().rev() {
+                            state.read_buffer.push_front(byte);
+                        }
+                    }
+                    continue;
+                }
                 let mut bytes = vec![0; size];
                 match state.connection.reader().read(&mut bytes) {
                     Ok(0) if state.peer_closed => complete(
@@ -1458,7 +1825,15 @@ fn drive_tls(
                     }
                     Ok(read) => {
                         bytes.truncate(read);
-                        complete(
+                        let rollback = if pending.wait_state.is_some() {
+                            NetworkWaitRollback::TlsRead {
+                                stream,
+                                bytes: bytes.clone(),
+                            }
+                        } else {
+                            NetworkWaitRollback::None
+                        };
+                        let cancelled = complete_with_rollback(
                             completions,
                             count,
                             pending,
@@ -1466,7 +1841,13 @@ fn drive_tls(
                                 CoreCtor::TcpReadData,
                                 vec![HostValue::Bytes(bytes.into())],
                             )),
+                            rollback,
                         );
+                        if let Some(NetworkWaitRollback::TlsRead { bytes, .. }) = cancelled {
+                            for byte in bytes.into_iter().rev() {
+                                state.read_buffer.push_front(byte);
+                            }
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         state.reads.push_front((pending, size));
@@ -1659,20 +2040,85 @@ fn close_entry(
     true
 }
 
+fn restore_wait(
+    poll: &Poll,
+    entries: &mut HashMap<u64, Entry>,
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    rollback: NetworkWaitRollback,
+) -> bool {
+    match rollback {
+        NetworkWaitRollback::None => true,
+        NetworkWaitRollback::Connect { stream } => {
+            close_entry(poll, entries, completions, count, stream)
+        }
+        NetworkWaitRollback::Accept {
+            listener,
+            stream,
+            address,
+        } => {
+            let Some(Entry::Stream(mut state)) = entries.remove(&stream) else {
+                return false;
+            };
+            if state.registered {
+                let _ = poll.registry().deregister(&mut state.socket);
+            }
+            if state.connect.is_some() || !state.reads.is_empty() || !state.writes.is_empty() {
+                entries.insert(stream, Entry::Stream(state));
+                return false;
+            }
+            let Some(Entry::Listener(listener)) = entries.get_mut(&listener) else {
+                return true;
+            };
+            listener.accepted.push_front((state.socket, address));
+            true
+        }
+        NetworkWaitRollback::TcpRead { stream, bytes } => {
+            let Some(Entry::Stream(state)) = entries.get_mut(&stream) else {
+                return true;
+            };
+            for byte in bytes.into_iter().rev() {
+                state.read_buffer.push_front(byte);
+            }
+            true
+        }
+        NetworkWaitRollback::TlsRead { stream, bytes } => {
+            let Some(Entry::Tls(state)) = entries.get_mut(&stream) else {
+                return true;
+            };
+            for byte in bytes.into_iter().rev() {
+                state.read_buffer.push_front(byte);
+            }
+            true
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CancelToken {
+    Missing,
+    Removed,
+    Close(u64),
+}
+
 fn cancel_token(
     entries: &mut HashMap<u64, Entry>,
     count: &AtomicUsize,
     retained: &AtomicUsize,
     token: u64,
-) -> Option<u64> {
+) -> CancelToken {
     for (resource, entry) in entries.iter_mut() {
         match entry {
             Entry::Stream(state) => {
-                if state.connect.is_some_and(|pending| pending.token == token) {
+                if state
+                    .connect
+                    .as_ref()
+                    .is_some_and(|pending| pending.token == token)
+                {
                     let pending = state.connect.take().expect("the connect call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return Some(*resource);
+                    return CancelToken::Close(*resource);
                 }
                 if let Some(at) = state
                     .reads
@@ -1682,7 +2128,7 @@ fn cancel_token(
                     let (pending, _) = state.reads.remove(at).expect("the read call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
                 if let Some(at) = state
                     .writes
@@ -1692,7 +2138,7 @@ fn cancel_token(
                     let write = state.writes.remove(at).expect("the write call exists");
                     release_pending(count);
                     release_retained(retained, write.pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
             }
             Entry::Listener(state) => {
@@ -1704,18 +2150,19 @@ fn cancel_token(
                     let (pending, _) = state.accepts.remove(at).expect("the accept call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
             }
             Entry::Tls(state) => {
                 if state
                     .handshake
+                    .as_ref()
                     .is_some_and(|pending| pending.token == token)
                 {
                     let pending = state.handshake.take().expect("the handshake call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return Some(*resource);
+                    return CancelToken::Close(*resource);
                 }
                 if let Some(at) = state
                     .reads
@@ -1725,7 +2172,7 @@ fn cancel_token(
                     let (pending, _) = state.reads.remove(at).expect("the read call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
                 if let Some(at) = state
                     .writes
@@ -1735,7 +2182,7 @@ fn cancel_token(
                     let write = state.writes.remove(at).expect("the write call exists");
                     release_pending(count);
                     release_retained(retained, write.pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
                 if let Some(at) = state
                     .shutdowns
@@ -1748,12 +2195,12 @@ fn cancel_token(
                         .expect("the shutdown call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
-                    return None;
+                    return CancelToken::Removed;
                 }
             }
         }
     }
-    None
+    CancelToken::Missing
 }
 
 fn socket_address(address: HostSocketAddress) -> SocketAddr {

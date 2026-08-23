@@ -1340,6 +1340,12 @@ impl World {
                     WaitSource::Choice { first, second } => {
                         ImageWaitSource::Choice { first, second }
                     }
+                    WaitSource::Operation { .. } => {
+                        return Err(SnapshotFail::Fault(
+                            FaultCode::MalformedState,
+                            "a host wait source reached snapshot encoding".to_string(),
+                        ));
+                    }
                 };
                 Ok(ImageWaitEntry {
                     token: *token,

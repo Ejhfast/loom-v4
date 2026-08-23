@@ -138,7 +138,7 @@ impl World {
             .host_completions
             .keys()
             .copied()
-            .find(|key| accepts(*key))?;
+            .find(|key| accepts(*key) && !self.prepared_wait_exists(*key))?;
         self.host_completions.remove(&key)
     }
 
@@ -146,7 +146,7 @@ impl World {
     pub(super) fn prune_host_completions(&mut self) {
         let machines = &self.machines;
         self.host_completions.retain(|key, _| {
-            machines
+            let direct = machines
                 .get(key.machine.vm as usize)
                 .is_some_and(|machine| {
                     machine.generation == key.machine.generation
@@ -156,13 +156,27 @@ impl World {
                             .pending
                             .as_ref()
                             .is_some_and(|pending| pending.ordinal == key.ordinal)
-                })
+                });
+            let prepared = machines
+                .get(key.machine.vm as usize)
+                .is_some_and(|machine| {
+                    machine.generation == key.machine.generation
+                        && !matches!(machine.vm.state, MachineState::Done | MachineState::Faulted)
+                        && machine.vm.waits.values().any(|entry| {
+                            matches!(
+                                entry.source,
+                                WaitSource::Operation { ordinal, .. } if ordinal == key.ordinal
+                            )
+                        })
+                });
+            direct || prepared
         });
     }
 
     /// True when one completion still names its waiting request.
     pub(super) fn completion_is_current(&self, key: CompletionKey) -> bool {
-        self.machines
+        let direct = self
+            .machines
             .get(key.machine.vm as usize)
             .is_some_and(|machine| {
                 machine.generation == key.machine.generation
@@ -172,7 +186,8 @@ impl World {
                         .pending
                         .as_ref()
                         .is_some_and(|pending| pending.ordinal == key.ordinal)
-            })
+            });
+        direct || self.prepared_wait_exists(key)
     }
 
     /// Install one host completion when its machine still waits.
@@ -183,6 +198,23 @@ impl World {
         let key = completion.key;
         if !self.completion_is_current(key) {
             return None;
+        }
+        if self.prepared_wait_exists(key) {
+            let machine = &self.machines[key.machine.vm as usize];
+            let scope_matches = machine
+                .resources
+                .pending(key.ordinal)
+                .is_some_and(|record| record.scope == completion.token);
+            if !scope_matches {
+                self.machines[key.machine.vm as usize].set_fault(
+                    FaultCode::HostFault,
+                    "the host completion has another wait scope",
+                    None,
+                );
+                return Some(key);
+            }
+            self.host_completions.entry(key).or_insert(completion);
+            return Some(key);
         }
         let machine = &self.machines[key.machine.vm as usize];
         let scope_matches = machine
@@ -599,6 +631,10 @@ impl World {
         value: Value,
         close_host: bool,
     ) {
+        if self.machines[vm as usize].preparing_wait.is_some() {
+            self.finish_prepared_guest_wait(vm, value);
+            return;
+        }
         let closing = match self.pending_op(vm) {
             Some(lm_abi::OP_FS_CLOSE) if self.value_is_result_ok(vm, value) => {
                 self.pending_resource_of(vm, ResourceErrors::Fs)
@@ -667,25 +703,15 @@ impl World {
 
     /// Convert one host reply into a guest value and install it.
     pub(super) fn install_host_reply(&mut self, vm: VmId, reply: HostValue) {
-        let extension_schema = self.machines[vm as usize]
-            .vm
-            .pending
-            .as_ref()
-            .filter(|pending| pending.op >= lm_abi::OP_COUNT)
-            .and_then(|pending| self.loaded.bundle().op(pending.op))
-            .map(|operation| operation.reply);
-        let built =
-            if extension_schema.is_some_and(|schema| !extension_reply_matches(&reply, schema)) {
-                Err(FaultCode::TypeMismatch)
-            } else {
-                self.reply_type(vm).and_then(|(ty, env)| {
-                    let expected = self
-                        .envs
-                        .close(&self.module, ty, env)
-                        .map_err(|_| FaultCode::BoundaryLimit)?;
-                    self.build_host_value(vm, &reply, expected)
-                })
-            };
+        let (reply_ty, env) = match self.reply_type(vm) {
+            Ok(found) => found,
+            Err(code) => {
+                self.machines[vm as usize].set_fault(code, "", None);
+                return;
+            }
+        };
+        let op = self.pending_op(vm).unwrap_or(u32::MAX);
+        let built = self.build_host_reply_value(vm, op, &reply, reply_ty, env);
         match built {
             Ok(value) => self.install_value_reply_with_file_close(vm, value, false),
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
@@ -693,5 +719,28 @@ impl World {
         if self.machines[vm as usize].vm.state == MachineState::Faulted {
             self.close_resources_for_machine(vm);
         }
+    }
+
+    /// Convert one host reply through one stored static reply type.
+    pub(super) fn build_host_reply_value(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        reply: &HostValue,
+        reply_ty: u32,
+        env: TypeEnvId,
+    ) -> Result<Value, FaultCode> {
+        let extension_schema = (op >= lm_abi::OP_COUNT)
+            .then(|| self.loaded.bundle().op(op))
+            .flatten()
+            .map(|operation| operation.reply);
+        if extension_schema.is_some_and(|schema| !extension_reply_matches(reply, schema)) {
+            return Err(FaultCode::TypeMismatch);
+        }
+        let expected = self
+            .envs
+            .close(&self.module, reply_ty, env)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        self.build_host_value(vm, reply, expected)
     }
 }

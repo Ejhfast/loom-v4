@@ -39,6 +39,7 @@ pub struct BundleOp {
     pub reply_mode: BoundaryMode,
     pub schema: String,
     pub snapshot: SnapshotClass,
+    pub wait_source: bool,
 }
 
 impl BundleOp {
@@ -101,6 +102,7 @@ pub struct OperationSpec {
     pub param_modes: Vec<BoundaryMode>,
     pub reply_mode: BoundaryMode,
     pub snapshot: SnapshotClass,
+    pub wait_source: bool,
 }
 
 impl OperationSpec {
@@ -121,6 +123,7 @@ impl OperationSpec {
             param_modes,
             reply_mode: BoundaryMode::Copy,
             snapshot: SnapshotClass::MachineState,
+            wait_source: false,
         }
     }
 
@@ -133,6 +136,12 @@ impl OperationSpec {
     /// Mark the operation as a suspending host attachment.
     pub fn suspending(mut self) -> OperationSpec {
         self.snapshot = SnapshotClass::HostAttachment;
+        self
+    }
+
+    /// Mark the operation as a selectable wait source.
+    pub fn wait_source(mut self) -> OperationSpec {
+        self.wait_source = true;
         self
     }
 
@@ -494,6 +503,7 @@ impl AbiBundleBuilder {
                 reply_mode: operation.reply_mode,
                 schema: String::new(),
                 snapshot: operation.snapshot,
+                wait_source: operation.wait_source,
             });
         }
         extension_operations.sort_by(|left, right| {
@@ -502,6 +512,21 @@ impl AbiBundleBuilder {
                 .then_with(|| left.name.cmp(&right.name))
         });
         operations.extend(extension_operations);
+
+        for (slot, operation) in operations.iter().enumerate() {
+            if operation.wait_source && slot > u16::MAX as usize {
+                return Err(format!(
+                    "wait operation `{}` exceeds the selectable slot limit",
+                    operation.name
+                ));
+            }
+            if operation.wait_source && operation.params.len() > u16::MAX as usize {
+                return Err(format!(
+                    "wait operation `{}` exceeds the selectable argument limit",
+                    operation.name
+                ));
+            }
+        }
 
         let operation_slots: BTreeMap<String, u32> = operations
             .iter()
@@ -566,6 +591,7 @@ fn standard_operation(definition: &OpDef) -> BundleOp {
         reply_mode: BoundaryMode::Copy,
         schema: definition.schema.to_string(),
         snapshot: definition.snapshot,
+        wait_source: definition.wait_source(),
     }
 }
 
@@ -784,6 +810,14 @@ fn operation_identity(operation: &BundleOp) -> [u8; 32] {
     id_field(&mut input, operation.reply_mode.tag().as_bytes());
     id_field(&mut input, operation.schema.as_bytes());
     id_field(&mut input, operation.snapshot.tag().as_bytes());
+    id_field(
+        &mut input,
+        if operation.wait_source {
+            b"wait"
+        } else {
+            b"direct"
+        },
+    );
     hash256(&input)
 }
 
@@ -876,5 +910,37 @@ mod tests {
         cycle.add_group(GroupSpec::effect_set("First", ["Second"]));
         cycle.add_group(GroupSpec::effect_set("Second", ["First"]));
         assert!(cycle.build().is_err());
+    }
+
+    #[test]
+    fn waitability_forms_part_of_operation_identity() {
+        let direct = OperationSpec::fixed("Probe", "Read", vec![], AbiType::INT);
+        let selectable = direct.clone().wait_source();
+        let build = |operation| {
+            let mut builder = AbiBundle::builder();
+            builder.add_group(GroupSpec::namespace("Probe"));
+            builder.add_operation(operation);
+            builder.build().expect("the probe bundle builds")
+        };
+        let direct = build(direct);
+        let selectable = build(selectable);
+        let direct_slot = direct
+            .op_by_name("Probe.Read")
+            .expect("the direct operation exists");
+        let selectable_slot = selectable
+            .op_by_name("Probe.Read")
+            .expect("the selectable operation exists");
+        assert_ne!(
+            direct.op_identity(direct_slot),
+            selectable.op_identity(selectable_slot)
+        );
+
+        let bundle = standard_bundle();
+        assert!(bundle
+            .op(crate::OP_IO_READ_BYTES)
+            .is_some_and(|operation| operation.wait_source));
+        assert!(bundle
+            .op(crate::OP_IO_WRITE)
+            .is_some_and(|operation| !operation.wait_source));
     }
 }

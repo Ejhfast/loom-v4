@@ -1825,7 +1825,34 @@ pub(crate) fn step(
         Instr::Return => {
             pop_expect(state, func.ret)?;
         }
-        Instr::Perform { op, reply_ty, .. } => {
+        Instr::Extended(ExtendedInstr::PrepareWait { op_argc, reply_ty }) => {
+            let (op, _) = ExtendedInstr::wait_parts(*op_argc);
+            let operation = ctx
+                .bundle
+                .op(op)
+                .expect("the structural pass checked the wait operation");
+            let name = operation.name.clone();
+            if !ctx.row_has_name(&func.row, &name) {
+                return Err(fail(format!(
+                    "the wait source for `{name}` is not inside the claimed row"
+                )));
+            }
+            for want in operation.params.iter().rev() {
+                let want = ctx.abi_ty(*want).map_err(&fail)?;
+                pop_expect(state, want)?;
+            }
+            let reply = ctx.abi_ty(operation.reply).map_err(&fail)?;
+            if ctx.ty(*reply_ty) != ctx.ty(reply) {
+                return Err(fail("the wait source has another reply type".to_string()));
+            }
+            let wait = ctx.intern(BcType::Wait(reply));
+            push(state, wait)?;
+        }
+        Instr::Perform {
+            op,
+            argc: _,
+            reply_ty,
+        } => {
             let reply_ty = *reply_ty;
             let op = *op;
             let name = ctx

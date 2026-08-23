@@ -22,7 +22,8 @@ pub use host::{
     CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
     HostCompileOptions, HostCompileSlot, HostCompletion, HostIpAddress, HostOpenOptions,
     HostParseStatus, HostResource, HostSeekFrom, HostShutdown, HostSocketAddress, HostStart,
-    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, NullHost, RecordingHost,
+    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, NullHost,
+    RecordingHost,
 };
 pub use machine::{
     Block, FaultRec, FunctionVersionId, MachineState, Mailbox, Ownership, VmId, VmState,

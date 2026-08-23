@@ -1186,6 +1186,12 @@ The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 
 
 The runtime tests ready arms in source order whenever the proc resumes.
 
+An exact operation can define `wait` through its manifest entry.
+
+For `Op[op, (A...) -> R]`, `wait(A...)` returns `Wait[R]` and charges `op`.
+
+The checker rejects `wait` when the operation manifest does not permit selection.
+
 ---
 
 ## 8. Classes and objects
@@ -3278,7 +3284,15 @@ Wait.Cancel[T]        (Wait[T]) -> Bool
 
 Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
 
+The operation manifest marks each exact operation that can create a wait source.
+
+Preparation keeps consumable input until selection commits.
+
+Cancellation keeps that input available to the same logical resource.
+
 `docs/specs/sidecar/waits.md` defines readiness, drive leases, and scheduler indexes.
+
+`docs/specs/sidecar/pre-release-foundation.md` defines host-operation wait sources.
 
 ### 23.8 Compiler and reflection
 

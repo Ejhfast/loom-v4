@@ -1920,6 +1920,18 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     reply_ty,
                 });
             }
+            HExprKind::PrepareWait { op, args } => {
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                let Type::Wait(reply) = self.m.store.get(expr.ty) else {
+                    unreachable!("a prepared wait has a Wait result type")
+                };
+                let reply_ty = self.m.bc_ty(*reply);
+                let instruction = ExtendedInstr::prepare_wait(*op, args.len() as u32, reply_ty)
+                    .expect("a checked wait fits the compact instruction");
+                self.emit(extended(instruction));
+            }
             HExprKind::OpConst(op) => {
                 self.m.bc_ty(expr.ty);
                 self.emit(Instr::OpConst(*op));
@@ -2740,7 +2752,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 }
             }
         }
-        HExprKind::Perform { args, .. } => {
+        HExprKind::Perform { args, .. } | HExprKind::PrepareWait { args, .. } => {
             for a in args {
                 shift_expr_in_place(a, base, max);
             }
@@ -3752,6 +3764,10 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         ExtendedInstr::MapProbeRemove => (2, 1),
         ExtendedInstr::MapInsertHashed => (5, 1),
         ExtendedInstr::MapWriteGuard => (1, 1),
+        ExtendedInstr::PrepareWait { op_argc, .. } => {
+            let (_, argc) = ExtendedInstr::wait_parts(*op_argc);
+            (argc as usize, 1)
+        }
     }
 }
 
@@ -4038,6 +4054,10 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::MapProbeRemove => "MapProbeRemove".to_string(),
         ExtendedInstr::MapInsertHashed => "MapInsertHashed".to_string(),
         ExtendedInstr::MapWriteGuard => "MapWriteGuard".to_string(),
+        ExtendedInstr::PrepareWait { op_argc, .. } => {
+            let (op, argc) = ExtendedInstr::wait_parts(*op_argc);
+            format!("PrepareWait {} argc {argc}", op_text(op))
+        }
     }
 }
 

@@ -4,22 +4,26 @@
 //! or stream wait. Fixed workers own all operating-system I/O.
 
 use lm_vm::{
-    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue, SharedBytes,
-    SharedText,
+    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue,
+    HostWaitCancel, SharedBytes, SharedText,
 };
-use std::collections::HashMap;
-use std::io::{BufRead, Read, Seek, Write};
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Seek, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
+use std::time::Duration;
 
 const FILE_WORKERS: usize = 4;
 const MAX_PENDING_IO: usize = 1_024;
+const MAX_INPUT_BUFFER: usize = 1 << 20;
+const INPUT_CHUNKS: usize = 16;
+const INPUT_CHUNK_BYTES: usize = 8 << 10;
 
 pub(crate) struct IoService {
     completions: Receiver<HostCompletion>,
     files: Vec<Sender<FileJob>>,
-    input: Sender<StreamJob>,
+    input: Sender<InputCommand>,
     output: Sender<StreamJob>,
     pending: Arc<AtomicUsize>,
 }
@@ -78,6 +82,32 @@ enum FileJob {
 }
 
 struct StreamJob(Job<StreamRequest>);
+
+enum InputCommand {
+    Request {
+        job: Job<StreamRequest>,
+        wait_source: bool,
+    },
+    Commit {
+        token: u64,
+        reply: SyncSender<bool>,
+    },
+    Cancel {
+        token: u64,
+        reply: SyncSender<HostWaitCancel>,
+    },
+}
+
+enum InputData {
+    Bytes(Vec<u8>),
+    Eof,
+    Failed(String),
+}
+
+struct InputPending {
+    job: Job<StreamRequest>,
+    wait_source: bool,
+}
 
 struct Job<T> {
     key: CompletionKey,
@@ -153,28 +183,56 @@ impl IoService {
         key: CompletionKey,
         token: u64,
         request: StreamRequest,
+        wait_source: bool,
     ) -> bool {
         if !self.reserve() {
             return false;
         }
-        let target = match &request {
-            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => &self.input,
+        let job = Job {
+            key,
+            token,
+            request,
+        };
+        let sent = match &job.request {
+            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => self
+                .input
+                .send(InputCommand::Request { job, wait_source })
+                .is_ok(),
             StreamRequest::Print(_)
             | StreamRequest::Error(_)
             | StreamRequest::Write(_)
-            | StreamRequest::WriteError(_) => &self.output,
+            | StreamRequest::WriteError(_) => self.output.send(StreamJob(job)).is_ok(),
         };
-        let sent = target
-            .send(StreamJob(Job {
-                key,
-                token,
-                request,
-            }))
-            .is_ok();
         if !sent {
             self.release();
         }
         sent
+    }
+
+    pub(crate) fn commit_wait(&self, token: u64) -> bool {
+        let (reply, answer) = mpsc::sync_channel(1);
+        if self
+            .input
+            .send(InputCommand::Commit { token, reply })
+            .is_err()
+        {
+            return false;
+        }
+        answer.recv_timeout(Duration::from_secs(1)).unwrap_or(false)
+    }
+
+    pub(crate) fn cancel_wait(&self, token: u64) -> HostWaitCancel {
+        let (reply, answer) = mpsc::sync_channel(1);
+        if self
+            .input
+            .send(InputCommand::Cancel { token, reply })
+            .is_err()
+        {
+            return HostWaitCancel::Missing;
+        }
+        answer
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or(HostWaitCancel::Missing)
     }
 
     pub(crate) fn force_close(&self, file: u64) -> bool {
@@ -326,25 +384,235 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
 }
 
 fn input_worker(
-    jobs: Receiver<StreamJob>,
+    commands: Receiver<InputCommand>,
     completions: Sender<HostCompletion>,
-    pending: Arc<AtomicUsize>,
+    pending_count: Arc<AtomicUsize>,
 ) {
-    while let Ok(StreamJob(job)) = jobs.recv() {
-        let value = match job.request {
-            StreamRequest::ReadLine => read_line(),
-            StreamRequest::ReadBytes(count) => read_bytes(count),
-            StreamRequest::Print(_)
-            | StreamRequest::Error(_)
-            | StreamRequest::Write(_)
-            | StreamRequest::WriteError(_) => HostValue::Ctor(CoreCtor::Err, vec![]),
-        };
-        let _ = completions.send(HostCompletion {
-            key: job.key,
-            token: job.token,
-            result: Ok(value),
-        });
-        release_pending(&pending);
+    let (data_tx, data_rx) = mpsc::sync_channel(INPUT_CHUNKS);
+    let mut reader_started = false;
+    let mut pending = VecDeque::<InputPending>::new();
+    let mut retained = HashMap::<u64, Vec<u8>>::new();
+    let mut buffer = VecDeque::<u8>::new();
+    let mut eof = false;
+    let mut failure = None;
+    let mut disconnected = false;
+
+    loop {
+        let mut moved = false;
+        loop {
+            match commands.try_recv() {
+                Ok(command) => {
+                    moved = true;
+                    handle_input_command(
+                        command,
+                        &mut pending,
+                        &mut retained,
+                        &mut buffer,
+                        &pending_count,
+                    );
+                    if !reader_started && !pending.is_empty() {
+                        start_input_reader(data_tx.clone());
+                        reader_started = true;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        while buffer.len() <= MAX_INPUT_BUFFER.saturating_sub(INPUT_CHUNK_BYTES) {
+            match data_rx.try_recv() {
+                Ok(InputData::Bytes(bytes)) => {
+                    moved = true;
+                    buffer.extend(bytes);
+                }
+                Ok(InputData::Eof) => {
+                    moved = true;
+                    eof = true;
+                }
+                Ok(InputData::Failed(message)) => {
+                    moved = true;
+                    failure = Some(message);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    eof = true;
+                    break;
+                }
+            }
+        }
+        while let Some(front) = pending.front() {
+            let Some((value, consumed)) =
+                prepare_input_reply(&front.job.request, &mut buffer, eof, failure.as_deref())
+            else {
+                break;
+            };
+            let front = pending.pop_front().expect("the input request exists");
+            if front.wait_source {
+                retained.insert(front.job.token, consumed);
+            }
+            let _ = completions.send(HostCompletion {
+                key: front.job.key,
+                token: front.job.token,
+                result: Ok(value),
+            });
+            release_pending(&pending_count);
+            moved = true;
+        }
+        if disconnected && pending.is_empty() {
+            return;
+        }
+        if moved {
+            continue;
+        }
+        match commands.recv_timeout(Duration::from_millis(2)) {
+            Ok(command) => {
+                handle_input_command(
+                    command,
+                    &mut pending,
+                    &mut retained,
+                    &mut buffer,
+                    &pending_count,
+                );
+                if !reader_started && !pending.is_empty() {
+                    start_input_reader(data_tx.clone());
+                    reader_started = true;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => disconnected = true,
+        }
+    }
+}
+
+fn handle_input_command(
+    command: InputCommand,
+    pending: &mut VecDeque<InputPending>,
+    retained: &mut HashMap<u64, Vec<u8>>,
+    buffer: &mut VecDeque<u8>,
+    pending_count: &AtomicUsize,
+) {
+    match command {
+        InputCommand::Request { job, wait_source } => {
+            pending.push_back(InputPending { job, wait_source });
+        }
+        InputCommand::Commit { token, reply } => {
+            let found = retained.remove(&token).is_some();
+            let _ = reply.send(found);
+        }
+        InputCommand::Cancel { token, reply } => {
+            if let Some(at) = pending.iter().position(|entry| entry.job.token == token) {
+                pending.remove(at);
+                release_pending(pending_count);
+                let _ = reply.send(HostWaitCancel::Cancelled);
+            } else if let Some(bytes) = retained.remove(&token) {
+                for byte in bytes.into_iter().rev() {
+                    buffer.push_front(byte);
+                }
+                let _ = reply.send(HostWaitCancel::ReadyRestored);
+            } else {
+                let _ = reply.send(HostWaitCancel::Missing);
+            }
+        }
+    }
+}
+
+fn start_input_reader(data: SyncSender<InputData>) {
+    std::thread::Builder::new()
+        .name("loom-stdin-reader".to_string())
+        .spawn(move || {
+            let input = std::io::stdin();
+            let mut input = input.lock();
+            loop {
+                let mut bytes = vec![0; INPUT_CHUNK_BYTES];
+                match input.read(&mut bytes) {
+                    Ok(0) => {
+                        let _ = data.send(InputData::Eof);
+                        return;
+                    }
+                    Ok(read) => {
+                        bytes.truncate(read);
+                        if data.send(InputData::Bytes(bytes)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        let _ = data.send(InputData::Failed(format!("stdin read failed: {error}")));
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("the standard input reader starts");
+}
+
+fn prepare_input_reply(
+    request: &StreamRequest,
+    buffer: &mut VecDeque<u8>,
+    eof: bool,
+    failure: Option<&str>,
+) -> Option<(HostValue, Vec<u8>)> {
+    if let Some(message) = failure {
+        return Some((io_error(message.to_string()), Vec::new()));
+    }
+    match request {
+        StreamRequest::ReadBytes(count) => {
+            if *count > 0 && buffer.is_empty() && !eof {
+                return None;
+            }
+            let take = (*count).min(buffer.len());
+            let consumed: Vec<u8> = buffer.drain(..take).collect();
+            Some((io_ok(HostValue::Bytes(consumed.clone().into())), consumed))
+        }
+        StreamRequest::ReadLine => {
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|at| at + 1);
+            let take = match end {
+                Some(take) => take,
+                None if eof && !buffer.is_empty() => buffer.len(),
+                None if eof => {
+                    return Some((
+                        HostValue::Ctor(
+                            CoreCtor::Ok,
+                            vec![HostValue::Ctor(CoreCtor::None, vec![])],
+                        ),
+                        Vec::new(),
+                    ));
+                }
+                None => return None,
+            };
+            let consumed: Vec<u8> = buffer.drain(..take).collect();
+            let mut text = consumed.as_slice();
+            if text.ends_with(b"\n") {
+                text = &text[..text.len() - 1];
+                if text.ends_with(b"\r") {
+                    text = &text[..text.len() - 1];
+                }
+            }
+            let value = match std::str::from_utf8(text) {
+                Ok(text) => HostValue::Ctor(
+                    CoreCtor::Ok,
+                    vec![HostValue::Ctor(
+                        CoreCtor::Some,
+                        vec![HostValue::Str(text.to_string().into())],
+                    )],
+                ),
+                Err(_) => io_error("standard input is not valid UTF-8".to_string()),
+            };
+            Some((value, consumed))
+        }
+        StreamRequest::Print(_)
+        | StreamRequest::Error(_)
+        | StreamRequest::Write(_)
+        | StreamRequest::WriteError(_) => Some((
+            io_error("the input service received an output request".to_string()),
+            Vec::new(),
+        )),
     }
 }
 
@@ -387,45 +655,6 @@ fn output_worker(
             result,
         });
         release_pending(&pending);
-    }
-}
-
-fn read_line() -> HostValue {
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) => HostValue::Ctor(CoreCtor::Ok, vec![HostValue::Ctor(CoreCtor::None, vec![])]),
-        Ok(_) => {
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
-            HostValue::Ctor(
-                CoreCtor::Ok,
-                vec![HostValue::Ctor(
-                    CoreCtor::Some,
-                    vec![HostValue::Str(line.into())],
-                )],
-            )
-        }
-        Err(error) => io_error(format!("stdin read failed: {error}")),
-    }
-}
-
-fn read_bytes(count: usize) -> HostValue {
-    let mut bytes = vec![0; count];
-    let input = std::io::stdin();
-    let mut input = input.lock();
-    loop {
-        match input.read(&mut bytes) {
-            Ok(read) => {
-                bytes.truncate(read);
-                return io_ok(HostValue::Bytes(bytes.into()));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return io_error(format!("stdin read failed: {error}")),
-        }
     }
 }
 

@@ -931,6 +931,18 @@ impl World {
                                 return event;
                             }
                         }
+                        Ok(Some(ExecOutcome::PrepareWait {
+                            op,
+                            argc,
+                            reply_ty,
+                            env,
+                        })) => {
+                            if let Some(event) =
+                                self.handle_prepare_wait(stack, act.vm, op, argc, reply_ty, env)
+                            {
+                                return event;
+                            }
+                        }
                         Ok(Some(ExecOutcome::LoadSlot { slot })) => {
                             if let Err(code) = self.load_value_slot(act.vm, slot) {
                                 self.machines[act.vm as usize].set_fault(code, "", None);

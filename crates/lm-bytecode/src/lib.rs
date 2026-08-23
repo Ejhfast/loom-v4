@@ -763,6 +763,29 @@ pub enum ExtendedInstr {
     MapInsertHashed,
     /// Pop a map, check its write capability, and push unit.
     MapWriteGuard,
+    /// Prepare one exact host operation as a selectable wait source.
+    PrepareWait { op_argc: u32, reply_ty: u32 },
+}
+
+const WAIT_FIELD_BITS: u32 = 16;
+const WAIT_FIELD_MAX: u32 = (1 << WAIT_FIELD_BITS) - 1;
+
+impl ExtendedInstr {
+    /// Build one compact prepared wait instruction.
+    pub fn prepare_wait(op: u32, argc: u32, reply_ty: u32) -> Option<ExtendedInstr> {
+        if op > WAIT_FIELD_MAX || argc > WAIT_FIELD_MAX {
+            return None;
+        }
+        Some(ExtendedInstr::PrepareWait {
+            op_argc: op | (argc << WAIT_FIELD_BITS),
+            reply_ty,
+        })
+    }
+
+    /// Return the operation and argument count of one prepared wait.
+    pub fn wait_parts(op_argc: u32) -> (u32, u32) {
+        (op_argc & WAIT_FIELD_MAX, op_argc >> WAIT_FIELD_BITS)
+    }
 }
 
 /// One native value instruction.
@@ -1272,7 +1295,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 49 adds tombstone-aware map traversal.
 /// Version 50 adds Float, byte literals, and prefixed numeric instructions.
 /// Version 51 adds text padding and Float text conversions.
-pub const VERSION: u16 = 51;
+/// Version 52 adds selectable host-operation sources.
+pub const VERSION: u16 = 52;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1500,6 +1524,7 @@ const OP_NUMERIC: u8 = 0xfb;
 const OP_CONST_FLOAT: u8 = 0xfc;
 const OP_CONST_BYTES: u8 = 0xfd;
 const OP_TEXT_EXTENSION: u8 = 0xfe;
+const OP_PREPARE_WAIT: u8 = 0xff;
 
 const TEXT_EXT_PAD_START: u8 = 0;
 const TEXT_EXT_PAD_END: u8 = 1;
@@ -2336,6 +2361,13 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
 
 fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
     match instr {
+        ExtendedInstr::PrepareWait { op_argc, reply_ty } => {
+            let (op, argc) = ExtendedInstr::wait_parts(op_argc);
+            out.push(OP_PREPARE_WAIT);
+            write_u32(out, op);
+            write_u32(out, argc);
+            write_u32(out, reply_ty);
+        }
         ExtendedInstr::MakeCallback { func, captures } => {
             out.push(OP_MAKE_CALLBACK);
             write_u32(out, func);
@@ -3637,6 +3669,14 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             reply_ty: cur.u32()?,
         },
         OP_OP_CONST => Instr::OpConst(cur.u32()?),
+        OP_PREPARE_WAIT => {
+            let op = cur.u32()?;
+            let argc = cur.u32()?;
+            let reply_ty = cur.u32()?;
+            let instruction =
+                ExtendedInstr::prepare_wait(op, argc, reply_ty).ok_or(DecodeError::BadLength)?;
+            Instr::Extended(instruction)
+        }
         OP_TABLE_EDIT => Instr::TableEdit {
             action: cur.u32()?,
             kind: cur.u32()?,
@@ -3798,6 +3838,18 @@ mod tests {
     #[test]
     fn decoded_instruction_form_is_fixed_size() {
         assert_eq!(std::mem::size_of::<Instr>(), 16);
+    }
+
+    #[test]
+    fn a_prepared_wait_round_trips_in_its_compact_form() {
+        let instruction =
+            ExtendedInstr::prepare_wait(7, 3, 1).expect("the prepared wait fields fit");
+        let mut module = sample_module();
+        module.funcs[0].blocks[0] = vec![Instr::Extended(instruction), Instr::Return];
+        let bytes = encode(&module);
+        assert_eq!(decode(&bytes).expect("the artifact decodes"), module);
+        assert!(ExtendedInstr::prepare_wait(u32::from(u16::MAX) + 1, 0, 1).is_none());
+        assert!(ExtendedInstr::prepare_wait(0, u32::from(u16::MAX) + 1, 1).is_none());
     }
 
     #[test]

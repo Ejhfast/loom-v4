@@ -653,7 +653,7 @@ impl World {
             .pending_scopes()
             .collect();
         for token in pending {
-            self.host.cancel(token);
+            let _ = self.host.cancel_wait(token);
         }
         let resources: Vec<u64> = self
             .bound_resources

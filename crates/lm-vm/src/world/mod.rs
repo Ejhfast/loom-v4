@@ -24,12 +24,12 @@ pub(crate) use show::show_trace_event;
 use crate::host::{
     CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
     HostCompileOptions, HostCompileSlot, HostCompletion, HostOpenOptions, HostParseStatus,
-    HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue,
+    HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue, HostWaitCancel,
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
     Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry,
-    WaitSource, MAX_LIVE_WAITS,
+    WaitPreparation, WaitSource, MAX_LIVE_WAITS,
 };
 use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
@@ -264,10 +264,20 @@ enum ShowOption {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitLeaf {
     Receive,
-    Drive { target: VmId },
+    Drive {
+        target: VmId,
+    },
+    Operation {
+        op: u32,
+        ordinal: u64,
+        scope: u64,
+        reply_ty: u32,
+        env: TypeEnvId,
+        ready: Option<Value>,
+    },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WaitLeafPath {
     leaf: WaitLeaf,
     /// False selects `Choice.First`. True selects `Choice.Second`.

@@ -216,3 +216,45 @@ The snapshot format version is 29.
 The suite used the existing worker count.
 
 The release benchmarks used nine measured rounds after one warm-up round.
+
+## Host-effects Stage 1
+
+The parent revision is `c790b83`.
+
+The manifest ABI version is 25.
+
+The bytecode version is 52.
+
+The snapshot format version remains 29.
+
+| Core measurement | Stage 0 | Stage 1 |
+| --- | ---: | ---: |
+| Classes | 209 | 209 |
+| HIR functions | 524 | 524 |
+| Bytecode functions | 733 | 733 |
+| Artifact size | 226,704 bytes | 226,704 bytes |
+| Core checking | 1.777 ms | 1.797 ms |
+| Core lowering | 0.815 ms | 0.815 ms |
+| Core compilation | 2.899 ms | 2.902 ms |
+| Core decoding | 0.332 ms | 0.334 ms |
+| Core verification | 1.111 ms | 1.127 ms |
+| Structural verification | 0.400 ms | 0.400 ms |
+| Verification hash | 0.112 ms | 0.113 ms |
+| Semantic identity | 2.014 ms | 1.986 ms |
+| Decoded loading | 1.253 ms | 1.269 ms |
+| Core loading | 1.598 ms | 1.613 ms |
+
+| Runtime measurement | Stage 0 | Stage 1 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 32.3 ns | 32.6 ns | +0.9% |
+| `direct_call` | 31.1 ns | 31.1 ns | 0.0% |
+| `direct_clock` | 102.9 ns | 105.4 ns | +2.4% |
+| Warm workspace suite | 35.34 seconds | 35.27 seconds | -0.2% |
+
+The prepared outcome keeps its argument values on the machine stack.
+
+This form prevents new drop code in the hot interpreter loop.
+
+The decoded instruction remains 16 bytes.
+
+The result keeps static execution within normal measurement noise.

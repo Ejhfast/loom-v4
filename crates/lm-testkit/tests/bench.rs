@@ -99,10 +99,14 @@ fn report(name: &str, iterations: u64, source: &str, base: Duration) {
 /// A program with no proc runs one machine there, so this case
 /// measures the path a plain `lm run` takes.
 fn report_world(name: &str, iterations: u64, source: &str, expected: &str) {
+    report_world_with(name, iterations, source, &[], expected);
+}
+
+fn report_world_with(name: &str, iterations: u64, source: &str, grants: &[&str], expected: &str) {
     if !selected(name) {
         return;
     }
-    let total = time_world(source, &[], config(), expected);
+    let total = time_world(source, grants, config(), expected);
     let per = total.as_nanos() as f64 / iterations as f64;
     println!(
         "LOOM\t{name}\t{iterations}\t{:.1}\t{:.3}",
@@ -555,6 +559,13 @@ fn bench_language_operations() {
         1_000_000,
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
         "Done(499999500000)",
+    );
+    report_world_with(
+        "direct_clock",
+        1_000_000,
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + sys.clock.now()\n  i = i + 1\nend\ns\n",
+        &["Clock"],
+        "Done(501000500000)",
     );
 }
 

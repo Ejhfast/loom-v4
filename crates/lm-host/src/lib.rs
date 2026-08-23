@@ -16,7 +16,7 @@ use compiler_service::{CompileRequest, CompilerService};
 use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
     CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostParseStatus, HostStart,
-    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, SharedBytes,
+    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, SharedBytes,
 };
 use network_service::{NetworkService, TcpRequest, TlsClientSettings, TlsRequest};
 use std::collections::HashMap;
@@ -35,6 +35,15 @@ pub struct CliHost {
     io: Option<IoService>,
     network: Option<NetworkService>,
     compiler: Option<CompilerService>,
+    starting_wait: bool,
+    wait_services: HashMap<u64, WaitService>,
+}
+
+#[derive(Clone, Copy)]
+enum WaitService {
+    Input,
+    Network,
+    Sleep,
 }
 
 impl CliHost {
@@ -56,6 +65,8 @@ impl CliHost {
             io: None,
             network: None,
             compiler: None,
+            starting_wait: false,
+            wait_services: HashMap::new(),
         }
     }
 
@@ -88,7 +99,8 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.io().submit_stream(key, token, request) {
+        let wait_source = self.starting_wait;
+        if self.io().submit_stream(key, token, request, wait_source) {
             HostStart::Waiting(token)
         } else if typed {
             HostStart::Completed(error_value(
@@ -116,7 +128,11 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.network().submit_dns(key, token, name, port) {
+        let wait_source = self.starting_wait;
+        if self
+            .network()
+            .submit_dns(key, token, name, port, wait_source)
+        {
             HostStart::Waiting(token)
         } else {
             HostStart::Completed(net_error(
@@ -130,7 +146,8 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.network().submit_tcp(key, token, request) {
+        let wait_source = self.starting_wait;
+        if self.network().submit_tcp(key, token, request, wait_source) {
             HostStart::Waiting(token)
         } else {
             HostStart::Completed(net_error(
@@ -144,7 +161,8 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.network().submit_tls(key, token, request) {
+        let wait_source = self.starting_wait;
+        if self.network().submit_tls(key, token, request, wait_source) {
             HostStart::Waiting(token)
         } else {
             HostStart::Completed(tls_error(
@@ -913,6 +931,28 @@ impl Host for CliHost {
         }
     }
 
+    fn start_wait(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        self.starting_wait = true;
+        let started = self.start(key, op, args);
+        self.starting_wait = false;
+        if let HostStart::Waiting(token) = &started {
+            let service = match op {
+                lm_abi::OP_IO_READ_BYTES => Some(WaitService::Input),
+                lm_abi::OP_CLOCK_SLEEP => Some(WaitService::Sleep),
+                lm_abi::OP_DNS_RESOLVE
+                | lm_abi::OP_TCP_CONNECT
+                | lm_abi::OP_TCP_ACCEPT
+                | lm_abi::OP_TCP_READ
+                | lm_abi::OP_TLS_READ => Some(WaitService::Network),
+                _ => None,
+            };
+            if let Some(service) = service {
+                self.wait_services.insert(*token, service);
+            }
+        }
+        started
+    }
+
     fn poll(&mut self) -> Option<HostCompletion> {
         if let Some(io) = &self.io {
             if let Some(completion) = io.poll() {
@@ -995,6 +1035,41 @@ impl Host for CliHost {
                 .network
                 .as_ref()
                 .is_some_and(|network| network.cancel(token))
+    }
+
+    fn commit_wait(&mut self, token: u64) -> bool {
+        match self.wait_services.remove(&token) {
+            Some(WaitService::Input) => self.io.as_ref().is_some_and(|io| io.commit_wait(token)),
+            Some(WaitService::Network) => self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.commit_wait(token)),
+            Some(WaitService::Sleep) => true,
+            None => false,
+        }
+    }
+
+    fn cancel_wait(&mut self, token: u64) -> HostWaitCancel {
+        match self.wait_services.remove(&token) {
+            Some(WaitService::Input) => self
+                .io
+                .as_ref()
+                .map_or(HostWaitCancel::Missing, |io| io.cancel_wait(token)),
+            Some(WaitService::Network) => self
+                .network
+                .as_ref()
+                .map_or(HostWaitCancel::Missing, |network| {
+                    network.cancel_wait(token)
+                }),
+            Some(WaitService::Sleep) => {
+                if self.sleeps.remove(&token).is_some() {
+                    HostWaitCancel::Cancelled
+                } else {
+                    HostWaitCancel::ReadyRestored
+                }
+            }
+            None => HostWaitCancel::Missing,
+        }
     }
 
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
@@ -1093,6 +1168,13 @@ mod tests {
         match host.start(completion(), op, args) {
             HostStart::Waiting(token) => token,
             other => panic!("expected a pending host operation, found {other:?}"),
+        }
+    }
+
+    fn start_wait_token(host: &mut CliHost, op: u32, args: Vec<HostArg>) -> u64 {
+        match host.start_wait(completion(), op, args) {
+            HostStart::Waiting(token) => token,
+            other => panic!("expected a pending wait source, found {other:?}"),
         }
     }
 
@@ -1735,6 +1817,58 @@ end
             )),
             HostValue::Int(8)
         );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_READ,
+                vec![tcp(HostTcpKind::Stream, server), HostArg::Int(32)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(b"retained".into())]
+            )
+        );
+        for resource in [
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: client,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: server,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Listener,
+                token: listener,
+            },
+        ] {
+            assert!(host.close_tcp(resource));
+        }
+    }
+
+    #[test]
+    fn a_ready_network_wait_restores_its_bytes_when_cancelled() {
+        let mut host = CliHost::new(1);
+        let (listener, client, server) = connected_pair(&mut host);
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_WRITE,
+                vec![
+                    tcp(HostTcpKind::Stream, client),
+                    HostArg::Bytes(b"retained".into()),
+                ],
+            )),
+            HostValue::Int(8)
+        );
+        let read = start_wait_token(
+            &mut host,
+            lm_abi::OP_TCP_READ,
+            vec![tcp(HostTcpKind::Stream, server), HostArg::Int(32)],
+        );
+        let completion = host.wait().expect("the network wait becomes ready");
+        assert_eq!(completion.token, read);
+        assert_eq!(host.cancel_wait(read), HostWaitCancel::ReadyRestored);
         assert_eq!(
             net_ok_value(run_host(
                 &mut host,

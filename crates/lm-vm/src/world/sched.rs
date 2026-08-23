@@ -121,7 +121,7 @@ impl World {
                     .into_iter()
                     .filter_map(|leaf| match leaf.leaf {
                         WaitLeaf::Drive { target } => Some(target),
-                        WaitLeaf::Receive => None,
+                        WaitLeaf::Receive | WaitLeaf::Operation { .. } => None,
                     })
                     .collect()
             })
@@ -348,6 +348,14 @@ impl World {
                         seen.pop();
                         return true;
                     }
+                }
+                WaitLeaf::Operation { ordinal, ready, .. } => {
+                    let key = self.prepared_completion_key(wait.owner.vm, ordinal);
+                    if ready.is_some() || self.host_completions.contains_key(&key) {
+                        seen.pop();
+                        return true;
+                    }
+                    sources.push(WaitSourceKey::Completion(key));
                 }
             }
         }

@@ -55,6 +55,87 @@ impl World {
         self.resolve_and_dispatch(stack, vm, PolicyCursor::Table(vm), DispatchMode::Continue)
     }
 
+    /// Prepare one exact operation as a selectable source.
+    pub(super) fn handle_prepare_wait(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        vm: VmId,
+        op: u32,
+        argc: u32,
+        reply_ty: u32,
+        env: TypeEnvId,
+    ) -> Option<RootEvent> {
+        if self
+            .loaded
+            .bundle()
+            .op(op)
+            .is_none_or(|operation| !operation.wait_source)
+        {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the operation is not a wait source",
+                Some(op),
+            );
+            return None;
+        }
+        let m = &mut self.machines[vm as usize];
+        let args = match m.take_arguments(argc) {
+            Ok(args) => args,
+            Err(code) => {
+                m.set_fault(code, "the wait source has a short stack", Some(op));
+                return None;
+            }
+        };
+        let ordinal = match m.take_request_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(code) => {
+                m.set_fault(code, "the request ordinal is exhausted", Some(op));
+                return None;
+            }
+        };
+        if let Err(code) =
+            m.resources
+                .register(crate::ResourceKind::PendingOperation, vm, 0, ordinal, op)
+        {
+            m.set_fault(
+                code,
+                "the machine reached its host resource limit",
+                Some(op),
+            );
+            return None;
+        }
+        m.vm.pending = Some(Pending { op, args, ordinal });
+        m.preparing_wait = Some(WaitPreparation { op, reply_ty, env });
+        let Some(top) = stack.last().copied() else {
+            return Some(self.fault_event(vm, "the performing machine left the driver stack"));
+        };
+        debug_assert_eq!(top.vm, vm);
+        if top.mode == StopMode::DriveToAsk {
+            let Some(act) = stack.pop() else {
+                return Some(self.fault_event(vm, "the performing machine left the driver stack"));
+            };
+            self.release_activation(act);
+            self.machines[vm as usize].vm.state = MachineState::Asked;
+            match act.reply_to {
+                None => return Some(RootEvent::Asked(ordinal)),
+                Some(parent) => {
+                    if self.machines[parent as usize].vm.nested != Some(vm) {
+                        self.machines[parent as usize].set_fault(
+                            FaultCode::MalformedState,
+                            "the asked result has no matching control edge",
+                            None,
+                        );
+                        return None;
+                    }
+                    self.machines[parent as usize].vm.nested = None;
+                    self.deliver_asked(vm, parent, ordinal);
+                    return None;
+                }
+            }
+        }
+        self.resolve_and_dispatch(stack, vm, PolicyCursor::Table(vm), DispatchMode::Continue)
+    }
+
     /// Build and install `DriveEvent.Asked(request)` into `parent`.
     pub(super) fn deliver_asked(&mut self, child: VmId, parent: VmId, ordinal: u64) {
         let built = self.machines[parent as usize]
@@ -488,9 +569,14 @@ impl World {
                             return None;
                         }
                     };
-                    if let Err(code) = self.machines[vm as usize].resources.prepare_register() {
+                    if self.machines[vm as usize].preparing_wait.is_none()
+                        && self.machines[vm as usize]
+                            .resources
+                            .prepare_register()
+                            .is_err()
+                    {
                         self.machines[vm as usize].set_fault(
-                            code,
+                            FaultCode::HostFault,
                             "the world has no host resource capacity",
                             Some(op),
                         );
@@ -504,7 +590,11 @@ impl World {
                         );
                         return None;
                     };
-                    let started = self.host.start(completion, op, args);
+                    let started = if self.machines[vm as usize].preparing_wait.is_some() {
+                        self.host.start_wait(completion, op, args)
+                    } else {
+                        self.host.start(completion, op, args)
+                    };
                     if !matches!(started, HostStart::Failed(_)) {
                         for resource in moved {
                             self.retire_resource(resource, false);
@@ -512,7 +602,13 @@ impl World {
                     }
                     match started {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
-                        HostStart::Waiting(token) => self.start_wait(vm, op, token),
+                        HostStart::Waiting(token) => {
+                            if self.machines[vm as usize].preparing_wait.is_some() {
+                                self.start_prepared_host_wait(vm, op, token);
+                            } else {
+                                self.start_wait(vm, op, token);
+                            }
+                        }
                         HostStart::Failed(message) => {
                             self.machines[vm as usize].set_fault(
                                 FaultCode::HostFault,

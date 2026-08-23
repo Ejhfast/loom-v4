@@ -1090,6 +1090,11 @@ fn preflight_extended(
                 return Err(bad("type index"));
             }
         }
+        ExtendedInstr::PrepareWait { reply_ty, .. } => {
+            if *reply_ty as usize >= s.types {
+                return Err(bad("type index"));
+            }
+        }
         ExtendedInstr::AsCallback
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::ListEpoch
@@ -1380,6 +1385,9 @@ impl Graph {
                             | ExtendedInstr::CodeSource { ty }
                             | ExtendedInstr::FaultSite { ty }
                             | ExtendedInstr::FaultTrace { ty } => list.push(s.type_node(*ty)),
+                            ExtendedInstr::PrepareWait { reply_ty, .. } => {
+                                list.push(s.type_node(*reply_ty));
+                            }
                             ExtendedInstr::CallSlot { slot, app }
                             | ExtendedInstr::NewSlot { slot, app } => {
                                 push_slot_contract_edges(module, &s, *slot, list);
@@ -2048,11 +2056,11 @@ impl<'a> Resolver<'a> {
         out
     }
 
-    /// The leading identity byte of one instruction.
+    /// The leading identity word of one instruction.
     ///
     /// The tag alone names the instruction kind. Two kinds must
     /// never share one tag.
-    fn instr_tag(instr: &Instr) -> u8 {
+    fn instr_tag(instr: &Instr) -> u16 {
         match instr {
             Instr::ConstUnit => 0x00,
             Instr::ConstBool(..) => 0x01,
@@ -2218,7 +2226,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn extended_instr_tag(instr: &ExtendedInstr) -> u8 {
+    fn extended_instr_tag(instr: &ExtendedInstr) -> u16 {
         match instr {
             ExtendedInstr::MakeCallback { .. } => 0xcf,
             ExtendedInstr::AsCallback => 0xd0,
@@ -2280,6 +2288,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::MapProbeRemove => 0xf4,
             ExtendedInstr::MapInsertHashed => 0xf5,
             ExtendedInstr::MapWriteGuard => 0xf6,
+            ExtendedInstr::PrepareWait { .. } => 0x0100,
         }
     }
 
@@ -2301,7 +2310,7 @@ impl<'a> Resolver<'a> {
     ///   order-stable).
     fn instr_bytes(&self, out: &mut Vec<u8>, instr: &Instr) {
         let u = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
-        out.push(Self::instr_tag(instr));
+        out.extend_from_slice(&Self::instr_tag(instr).to_le_bytes());
         match instr {
             Instr::ConstBool(v) => {
                 out.push(u8::from(*v));
@@ -2592,6 +2601,12 @@ impl<'a> Resolver<'a> {
         match instr {
             ExtendedInstr::MakeCallback { func, captures } => {
                 self.closure_instr_bytes(out, *func, *captures);
+            }
+            ExtendedInstr::PrepareWait { op_argc, reply_ty } => {
+                let (op, argc) = ExtendedInstr::wait_parts(*op_argc);
+                out.extend_from_slice(&op.to_le_bytes());
+                out.extend_from_slice(&argc.to_le_bytes());
+                out.extend_from_slice(&self.type_digest(*reply_ty));
             }
             ExtendedInstr::FunctionCode { func } => {
                 write_ident(out, &self.func_ident(*func));
@@ -3551,18 +3566,20 @@ mod tag_tests {
     fn every_instruction_tag_is_distinct() {
         let source = include_str!("identity.rs");
         let start = source
-            .find("fn instr_tag(instr: &Instr) -> u8 {")
+            .find("fn instr_tag(instr: &Instr) -> u16 {")
             .expect("the tag table exists");
         let body = &source[start..];
-        let end = body.find("\n    }\n").expect("the tag table ends");
-        let mut seen: std::collections::HashMap<u8, &str> = std::collections::HashMap::new();
+        let end = body
+            .find("    /// The canonical encoding of one instruction.")
+            .expect("the tag tables end");
+        let mut seen: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
         let mut count = 0;
         for line in body[..end].lines() {
             let Some((pattern, tail)) = line.split_once(" => 0x") else {
                 continue;
             };
             let hex = tail.trim_end_matches(',').trim();
-            let tag = u8::from_str_radix(hex, 16).expect("the tag is one hexadecimal byte");
+            let tag = u16::from_str_radix(hex, 16).expect("the tag is one hexadecimal word");
             count += 1;
             if let Some(first) = seen.insert(tag, pattern.trim()) {
                 panic!(
@@ -3573,7 +3590,7 @@ mod tag_tests {
         }
         // The floor guards the reader itself: a table this test cannot
         // parse must fail, not pass by finding nothing.
-        assert!(count > 100, "the tag table did not parse: {count} entries");
+        assert!(count > 200, "the tag tables did not parse: {count} entries");
         assert_eq!(count, seen.len(), "a tag repeats");
     }
 }

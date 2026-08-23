@@ -4,6 +4,8 @@ use lm_heap::Object;
 use lm_testkit::{compile_to_bytes, repo_root};
 use lm_vm::snapshot::{codec, ImageBlock, ImageReason};
 use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn run(source: &str, grants: &[&str]) -> String {
     let bytes = compile_to_bytes("waits.lm", source).expect("the program compiles");
@@ -18,6 +20,162 @@ fn run(source: &str, grants: &[&str]) -> String {
     }
     let outcome = lm_proc::run_world(&mut world);
     world.show_outcome(&outcome)
+}
+
+#[test]
+fn a_host_operation_can_supply_a_wait_source() {
+    let source = r#"
+sys.clock.sleep.wait(0).wait()
+"ready"
+"#;
+
+    assert_eq!(run(source, &["Clock", "Wait"]), "Done(\"ready\")");
+}
+
+#[test]
+fn a_losing_console_read_keeps_its_bytes() {
+    let source = r#"
+selected = select
+in sys.clock.sleep.wait(0) -> _
+  "timer"
+in sys.io.read_bytes.wait(3) -> _
+  "input"
+end
+hex = case sys.io.read_bytes(3)
+in Ok(bytes) then bytes.hex()
+in Err(_) then "error"
+end
+(selected, hex)
+"#;
+    let bytes = compile_to_bytes("host-wait-race.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().input_bytes.extend_from_slice(b"abc");
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    for grant in ["Clock", "Io", "Wait"] {
+        world.allow(grant).expect("the grant exists");
+    }
+
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done((\"timer\", \"616263\"))"
+    );
+}
+
+#[test]
+fn one_select_combines_host_mailbox_and_drive_sources() {
+    let source = r#"
+enum Command
+  Stop
+end
+
+def spin(): Never
+  loop do
+    ()
+  end
+end
+
+class Supervisor < Proc[Command]
+  def on_spawn(self): String with Proc, Vm, Wait, Clock
+    child = sys.vm.Vm().activate_or_fault(spin, args: ())
+    select
+    in child.drive_wait() -> _
+      "drive"
+    in sys.clock.sleep.wait(0) -> _
+      "clock"
+    in self.receive_wait() -> _
+      "mailbox"
+    end
+  end
+end
+
+supervisor = Supervisor.spawn()
+supervisor.send(Stop)
+case supervisor.done()
+in Done(value) then value
+in Fault(fault) then fault.code()
+end
+"#;
+
+    assert_eq!(
+        run(source, &["Proc", "Vm", "Wait", "Clock"]),
+        "Done(\"mailbox\")"
+    );
+}
+
+#[test]
+fn machine_failure_cancels_mixed_prepared_sources() {
+    let source = r#"
+def spin(): Never
+  loop do
+    ()
+  end
+end
+
+class Probe < Proc
+  def on_spawn(self): Never with Proc, Vm, Io, Clock
+    child = sys.vm.Vm().activate_or_fault(spin, args: ())
+    input = sys.io.read_bytes.wait(3)
+    timer = sys.clock.sleep.wait(10)
+    mailbox = self.receive_wait()
+    drive = child.drive_wait()
+    panic("stop")
+  end
+end
+
+probe = Probe.spawn()
+probe.done()
+case sys.io.read_bytes(3)
+in Ok(bytes) then bytes.hex()
+in Err(_) then "error"
+end
+"#;
+    let bytes = compile_to_bytes("mixed-wait-cleanup.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().input_bytes.extend_from_slice(b"abc");
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    for grant in ["Proc", "Vm", "Io", "Clock"] {
+        world.allow(grant).expect("the grant exists");
+    }
+
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(\"616263\")");
+    assert_eq!(world.world_resource_count(), 0);
+}
+
+#[test]
+fn a_nonwaitable_operation_rejects_wait_syntax() {
+    let source = r#"
+sys.io.write.wait(b"x")
+"#;
+    let error = compile_to_bytes("bad-operation-wait.lm", source)
+        .expect_err("the nonwaitable operation rejects");
+    assert!(error.contains("is not a wait source"), "{error}");
+}
+
+#[test]
+fn a_live_operation_wait_blocks_snapshot_capture() {
+    let source = r#"
+def capture(): String with Io, Vm, Wait
+  input = sys.io.read_bytes.wait(1)
+  blocker = case sys.vm.snapshot_self()
+  in Ok(_) then "captured"
+  in Err(ResourceActive(_, name)) then name
+  in Err(_) then "wrong error"
+  end
+  input.cancel()
+  blocker
+end
+
+capture()
+"#;
+
+    assert_eq!(
+        run(source, &["Io", "Vm", "Wait"]),
+        "Done(\"a pending Io.ReadBytes\")"
+    );
 }
 
 #[test]

@@ -377,11 +377,10 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     }
                 }
                 Instr::Perform { op, argc, reply_ty } => {
-                    if *op >= ctx.bundle.op_count() {
+                    if ctx.bundle.op(*op).is_none() {
                         return Err(err(fidx, at("perform operation slot out of range")));
                     }
-                    let want = perform_argc(ctx, *op);
-                    if *argc != want {
+                    if *argc != perform_argc(ctx, *op) {
                         return Err(err(fidx, at("perform argument count mismatch")));
                     }
                     if *reply_ty as usize >= module.types.len() {
@@ -430,6 +429,21 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     }
                 }
                 Instr::Extended(instr) => match instr {
+                    ExtendedInstr::PrepareWait { op_argc, reply_ty } => {
+                        let (op, argc) = ExtendedInstr::wait_parts(*op_argc);
+                        let Some(operation) = ctx.bundle.op(op) else {
+                            return Err(err(fidx, at("wait operation slot out of range")));
+                        };
+                        if operation.kind != lm_abi::OpKind::Fixed || !operation.wait_source {
+                            return Err(err(fidx, at("operation is not a wait source")));
+                        }
+                        if argc != operation.params.len() as u32 {
+                            return Err(err(fidx, at("wait argument count mismatch")));
+                        }
+                        if *reply_ty as usize >= module.types.len() {
+                            return Err(err(fidx, at("wait reply type index out of range")));
+                        }
+                    }
                     ExtendedInstr::MakeCallback { func: f, captures } => {
                         let Some(target) = module.funcs.get(*f as usize) else {
                             return Err(err(fidx, at("closure function out of range")));

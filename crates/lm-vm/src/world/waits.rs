@@ -114,6 +114,24 @@ impl World {
                     leaf: WaitLeaf::Drive { target },
                     path,
                 }),
+                WaitSource::Operation {
+                    op,
+                    ordinal,
+                    scope,
+                    reply_ty,
+                    env,
+                    ready,
+                } => leaves.push(WaitLeafPath {
+                    leaf: WaitLeaf::Operation {
+                        op,
+                        ordinal,
+                        scope,
+                        reply_ty,
+                        env,
+                        ready,
+                    },
+                    path,
+                }),
                 WaitSource::Choice { first, second } => {
                     if first == second {
                         return Err(FaultCode::MalformedState);
@@ -136,6 +154,132 @@ impl World {
     pub(super) fn retire_wait_tree(&mut self, vm: VmId, tokens: &[u64]) {
         for token in tokens {
             self.machines[vm as usize].vm.waits.remove(token);
+        }
+    }
+
+    /// Finish a prepared operation whose guest path produced a value.
+    pub(super) fn finish_prepared_guest_wait(&mut self, vm: VmId, value: Value) {
+        let Some(preparation) = self.machines[vm as usize].preparing_wait else {
+            return;
+        };
+        if let Err(code) = self.check_reply(vm, value) {
+            self.machines[vm as usize].set_fault(
+                code,
+                "the reply does not carry the wait source type",
+                Some(preparation.op),
+            );
+            return;
+        }
+        let Some(ordinal) = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| pending.ordinal)
+        else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the wait preparation has no pending operation",
+                Some(preparation.op),
+            );
+            return;
+        };
+        if self.machines[vm as usize].push(value).is_err() {
+            self.machines[vm as usize].set_fault(FaultCode::HeapLimit, "", Some(preparation.op));
+            return;
+        }
+        let built = self.allocate_wait(
+            vm,
+            WaitSource::Operation {
+                op: preparation.op,
+                ordinal,
+                scope: 0,
+                reply_ty: preparation.reply_ty,
+                env: preparation.env,
+                ready: Some(value),
+            },
+        );
+        let _ = self.machines[vm as usize].vm.operands.pop();
+        let Ok((_, wait)) = built else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::BoundaryLimit,
+                "the wait limit is full",
+                Some(preparation.op),
+            );
+            return;
+        };
+        let machine = &mut self.machines[vm as usize];
+        machine.vm.pending = None;
+        machine.preparing_wait = None;
+        if let Err(code) = machine.push(wait) {
+            machine.set_fault(code, "", Some(preparation.op));
+        } else if machine.vm.state != MachineState::Running {
+            machine.vm.state = MachineState::Ready;
+        }
+        self.notify_task_state(vm);
+    }
+
+    /// Finish a prepared operation after the root host arms it.
+    pub(super) fn start_prepared_host_wait(&mut self, vm: VmId, op: u32, scope: u64) {
+        let Some(preparation) = self.machines[vm as usize].preparing_wait else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the host armed an operation without a wait preparation",
+                Some(op),
+            );
+            return;
+        };
+        let Some(ordinal) = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| pending.ordinal)
+        else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the host armed an operation without a pending request",
+                Some(op),
+            );
+            return;
+        };
+        if !self.machines[vm as usize]
+            .resources
+            .set_pending_scope(ordinal, scope)
+        {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the wait source has no resource record",
+                Some(op),
+            );
+            return;
+        }
+        let built = self.allocate_wait(
+            vm,
+            WaitSource::Operation {
+                op,
+                ordinal,
+                scope,
+                reply_ty: preparation.reply_ty,
+                env: preparation.env,
+                ready: None,
+            },
+        );
+        let Ok((_, wait)) = built else {
+            let _ = self.host.cancel_wait(scope);
+            self.machines[vm as usize]
+                .resources
+                .close_by_ordinal(ordinal);
+            self.machines[vm as usize].set_fault(
+                FaultCode::BoundaryLimit,
+                "the wait limit is full",
+                Some(op),
+            );
+            return;
+        };
+        let machine = &mut self.machines[vm as usize];
+        machine.vm.pending = None;
+        machine.preparing_wait = None;
+        if let Err(code) = machine.push(wait) {
+            machine.set_fault(code, "", Some(op));
         }
     }
 
@@ -200,7 +344,7 @@ impl World {
                 if !self.wait_root_is_current(vm, op, token) {
                     return;
                 }
-                let Ok((_, tokens)) = self.wait_tree(vm, token) else {
+                let Ok((leaves, tokens)) = self.wait_tree(vm, token) else {
                     self.fault_caller(
                         vm,
                         op,
@@ -209,8 +353,14 @@ impl World {
                     );
                     return;
                 };
+                let cancelled = self.cancel_wait_operations(vm, &leaves, None);
                 self.retire_wait_tree(vm, &tokens);
-                self.install_value_reply(vm, Value::Bool(true));
+                match cancelled {
+                    Ok(()) => self.install_value_reply(vm, Value::Bool(true)),
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the host could not cancel a wait source")
+                    }
+                }
             }
             lm_abi::OP_WAIT_WAIT => {
                 let Some(token) = self.wait_token(vm, op, args[0]) else {
@@ -308,10 +458,16 @@ impl World {
             );
             return true;
         };
-        for leaf in leaves {
+        for (selected, leaf) in leaves.iter().enumerate() {
             let ready = match leaf.leaf {
                 WaitLeaf::Receive => self.receive_wait_ready(vm),
                 WaitLeaf::Drive { target } => self.drive_wait_ready(target),
+                WaitLeaf::Operation { ordinal, ready, .. } => {
+                    ready.is_some()
+                        || self
+                            .host_completions
+                            .contains_key(&self.prepared_completion_key(vm, ordinal))
+                }
             };
             if !ready {
                 continue;
@@ -319,12 +475,17 @@ impl World {
             let built = match leaf.leaf {
                 WaitLeaf::Receive => self.take_receive_wait_value(vm),
                 WaitLeaf::Drive { target } => self.take_drive_wait_value(vm, target),
+                operation @ WaitLeaf::Operation { .. } => {
+                    self.take_operation_wait_value(vm, operation)
+                }
             }
             .and_then(|value| self.wrap_wait_choice(vm, value, &leaf.path));
+            let cancelled = self.cancel_wait_operations(vm, &leaves, Some(selected));
             let mut seen = Vec::new();
             self.quiesce_wait_leases(vm, token, &mut seen);
             self.retire_wait_tree(vm, &tokens);
             self.machines[vm as usize].vm.block = None;
+            let built = built.and_then(|value| cancelled.map(|()| value));
             match built {
                 Ok(value) => self.install_value_reply(vm, value),
                 Err(code) => {
@@ -334,6 +495,103 @@ impl World {
             return true;
         }
         false
+    }
+
+    pub(super) fn prepared_completion_key(&self, vm: VmId, ordinal: u64) -> CompletionKey {
+        CompletionKey {
+            machine: TaskKey {
+                vm,
+                generation: self.machines[vm as usize].generation,
+            },
+            ordinal,
+        }
+    }
+
+    pub(super) fn prepared_wait_exists(&self, key: CompletionKey) -> bool {
+        let Some(machine) = self.machines.get(key.machine.vm as usize) else {
+            return false;
+        };
+        if machine.generation != key.machine.generation
+            || matches!(machine.vm.state, MachineState::Done | MachineState::Faulted)
+        {
+            return false;
+        }
+        machine.vm.waits.values().any(|entry| {
+            matches!(
+                entry.source,
+                WaitSource::Operation { ordinal, .. } if ordinal == key.ordinal
+            )
+        })
+    }
+
+    pub(super) fn take_operation_wait_value(
+        &mut self,
+        vm: VmId,
+        operation: WaitLeaf,
+    ) -> Result<Value, FaultCode> {
+        let WaitLeaf::Operation {
+            op,
+            ordinal,
+            scope,
+            reply_ty,
+            env,
+            ready,
+        } = operation
+        else {
+            return Err(FaultCode::MalformedState);
+        };
+        let value = match ready {
+            Some(value) => value,
+            None => {
+                let key = self.prepared_completion_key(vm, ordinal);
+                let completion = self
+                    .host_completions
+                    .remove(&key)
+                    .ok_or(FaultCode::MalformedState)?;
+                if completion.token != scope {
+                    return Err(FaultCode::HostFault);
+                }
+                if !self.host.commit_wait(scope) {
+                    return Err(FaultCode::HostFault);
+                }
+                let result = completion.result.map_err(|_| FaultCode::HostFault)?;
+                self.build_host_reply_value(vm, op, &result, reply_ty, env)?
+            }
+        };
+        self.machines[vm as usize]
+            .resources
+            .close_by_ordinal(ordinal);
+        Ok(value)
+    }
+
+    pub(super) fn cancel_wait_operations(
+        &mut self,
+        vm: VmId,
+        leaves: &[WaitLeafPath],
+        selected: Option<usize>,
+    ) -> Result<(), FaultCode> {
+        let mut missing = false;
+        for (index, leaf) in leaves.iter().enumerate() {
+            if selected == Some(index) {
+                continue;
+            }
+            let WaitLeaf::Operation { ordinal, scope, .. } = leaf.leaf else {
+                continue;
+            };
+            let key = self.prepared_completion_key(vm, ordinal);
+            self.host_completions.remove(&key);
+            if scope != 0 && self.host.cancel_wait(scope) == HostWaitCancel::Missing {
+                missing = true;
+            }
+            self.machines[vm as usize]
+                .resources
+                .close_by_ordinal(ordinal);
+        }
+        if missing {
+            Err(FaultCode::HostFault)
+        } else {
+            Ok(())
+        }
     }
 
     pub(super) fn take_receive_wait_value(&mut self, vm: VmId) -> Result<Value, FaultCode> {

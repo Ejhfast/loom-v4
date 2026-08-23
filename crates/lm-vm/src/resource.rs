@@ -261,6 +261,20 @@ impl ResourceRegistry {
         false
     }
 
+    /// Set the host scope of one prepared operation.
+    pub fn set_pending_scope(&mut self, ordinal: u64, scope: u64) -> bool {
+        for record in &mut self.records {
+            if record.state == ResourceState::Live
+                && record.kind == ResourceKind::PendingOperation
+                && record.ordinal == ordinal
+            {
+                record.scope = scope;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Close every live record. Machine termination calls this. It
     /// invokes no guest callback, and it never replaces an existing
     /// machine fault.

@@ -759,6 +759,7 @@ impl<'m> Oracle<'m> {
                 Err(Stop::Fault("UnreachableCode"))
             }
             HExprKind::Perform { .. }
+            | HExprKind::PrepareWait { .. }
             | HExprKind::Spawn { .. }
             | HExprKind::FunctionCode { .. }
             | HExprKind::ClassCode { .. }

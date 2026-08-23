@@ -680,6 +680,46 @@ mod tests {
     }
 
     #[test]
+    fn verifies_every_part_of_a_prepared_wait() {
+        let mut module = module_with(vec![vec![
+            ConstInt(1),
+            Instr::Extended(
+                ExtendedInstr::prepare_wait(lm_abi::OP_CLOCK_SLEEP, 1, TY_UNIT)
+                    .expect("the wait instruction fits"),
+            ),
+            Return,
+        ]]);
+        let wait_ty = module.types.len() as u32;
+        module.types.push(BcType::Wait(TY_UNIT));
+        module.funcs[0].ret = wait_ty;
+        let sleep_name = module.strings.len() as u32;
+        module.strings.push("Clock.Sleep".to_string());
+        module.funcs[0].row = vec![lm_bytecode::BcRow::Op(sleep_name)];
+        verify_module(&module).expect("the prepared wait verifies");
+
+        let mut nonwaitable = module.clone();
+        nonwaitable.funcs[0].blocks[0][1] = Instr::Extended(
+            ExtendedInstr::prepare_wait(lm_abi::OP_IO_WRITE, 1, TY_UNIT)
+                .expect("the wait instruction fits"),
+        );
+        let error = verify_module(&nonwaitable).expect_err("the forged operation rejects");
+        assert!(error.message.contains("not a wait source"), "{error}");
+
+        let mut wrong_reply = module.clone();
+        wrong_reply.funcs[0].blocks[0][1] = Instr::Extended(
+            ExtendedInstr::prepare_wait(lm_abi::OP_CLOCK_SLEEP, 1, TY_INT)
+                .expect("the wait instruction fits"),
+        );
+        let error = verify_module(&wrong_reply).expect_err("the forged reply type rejects");
+        assert!(error.message.contains("another reply type"), "{error}");
+
+        let mut missing_effect = module;
+        missing_effect.funcs[0].row.clear();
+        let error = verify_module(&missing_effect).expect_err("the missing effect rejects");
+        assert!(error.message.contains("claimed row"), "{error}");
+    }
+
+    #[test]
     fn accepts_a_call_through_an_exact_function_slot() {
         let mut module = module_with(vec![vec![
             Instr::Extended(ExtendedInstr::CallSlot {

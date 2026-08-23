@@ -1099,6 +1099,10 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         ExtendedInstr::DynPack { ty } => ExtendedInstr::DynPack {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::PrepareWait { op_argc, reply_ty } => ExtendedInstr::PrepareWait {
+            op_argc: *op_argc,
+            reply_ty: reloc.types[*reply_ty as usize],
+        },
         ExtendedInstr::CallSlot { slot, app } => ExtendedInstr::CallSlot {
             slot: reloc.slots[*slot as usize],
             app: reloc_app(*app, reloc),

@@ -208,6 +208,47 @@ impl<'o> FnChecker<'o> {
         }
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
+        if let Type::Op(op, fn_ty) = ctx.store.get(recv_ty).clone() {
+            if name != "wait" {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    format!("the operation value has no method named `{name}`"),
+                    name_span,
+                ));
+            }
+            if !type_args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1024",
+                    "`wait` does not take type arguments",
+                    name_span,
+                ));
+            }
+            let operation = ctx
+                .bundle
+                .op(op)
+                .expect("the operation type names a bundle operation");
+            if !operation.wait_source {
+                return Err(Diagnostic::new(
+                    "E1053",
+                    format!("the operation `{}` is not a wait source", operation.name),
+                    name_span,
+                ));
+            }
+            let (params, ret) = match ctx.store.get(fn_ty) {
+                Type::Fn(params, _, ret, _) => (params.clone(), *ret),
+                _ => unreachable!("an Op type embeds a function type"),
+            };
+            let muts = vec![false; params.len()];
+            let checked =
+                self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, "wait", span)?;
+            self.charge_op(ctx, op, span)?;
+            let ty = ctx.store.intern(Type::Wait(ret));
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::PrepareWait { op, args: checked },
+            });
+        }
         // Native control methods on the VM surface types.
         let code_control = match ctx.store.get(recv_ty) {
             Type::Class(class) => matches!(

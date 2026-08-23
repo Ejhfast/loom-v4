@@ -988,7 +988,8 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         }
         HExprKind::Native { args, .. }
         | HExprKind::Intrinsic { args, .. }
-        | HExprKind::Perform { args, .. } => collect_dependency_exprs(args, out),
+        | HExprKind::Perform { args, .. }
+        | HExprKind::PrepareWait { args, .. } => collect_dependency_exprs(args, out),
         HExprKind::Interp(parts) => {
             for part in parts {
                 match part {

@@ -1,6 +1,6 @@
 # Pre-release Host Effects
 
-Status: accepted plan. Stage 0 complete.
+Status: accepted plan. Stages 0 and 1 complete.
 
 This sidecar replaces the completed pre-release foundation plan.
 
@@ -127,6 +127,10 @@ It rejects `.wait` on an operation without the manifest flag.
 The bytecode adds one typed wait preparation instruction.
 
 That instruction stores the exact operation and its checked arguments.
+
+Selectable operation slots and argument counts must not exceed 65,535.
+
+The container keeps 32-bit fields. The decoder rejects values that exceed the compact execution form.
 
 The verifier repeats the manifest, argument, result, and effect checks.
 
@@ -938,7 +942,7 @@ Terminal and signal support can add one reviewed platform dependency.
 
 Gate: Each later stage reconciles its active specifications and generated tables.
 
-### Stage 1: General host wait sources
+### Stage 1: General host wait sources (complete)
 
 - Add the manifest wait-source flag.
 - Add the checker and bytecode preparation rule.

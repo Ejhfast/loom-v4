@@ -149,6 +149,15 @@ pub enum WaitSource {
     Drive { target: VmId },
     /// Select between two existing wait trees.
     Choice { first: u64, second: u64 },
+    /// One exact operation that becomes visible only after selection.
+    Operation {
+        op: u32,
+        ordinal: u64,
+        scope: u64,
+        reply_ty: u32,
+        env: TypeEnvId,
+        ready: Option<Value>,
+    },
 }
 
 /// One wait entry in its owner machine.
@@ -157,6 +166,14 @@ pub struct WaitEntry {
     pub source: WaitSource,
     /// A choice owns linked entries. Their old tokens are stale.
     pub linked: bool,
+}
+
+/// One operation that is producing a selectable wait source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitPreparation {
+    pub op: u32,
+    pub reply_ty: u32,
+    pub env: TypeEnvId,
 }
 
 /// Which side owns the execution of one machine (specification 18.2).
@@ -497,6 +514,13 @@ pub enum ExecOutcome {
     /// A perform: the arguments are recorded in `Pending` by the
     /// driver.
     Perform { op: u32, args: Vec<Value> },
+    /// Prepare one exact operation as a selectable source.
+    PrepareWait {
+        op: u32,
+        argc: u32,
+        reply_ty: u32,
+        env: TypeEnvId,
+    },
     /// Copy one image-owned value into this run.
     LoadSlot { slot: u32 },
     /// A policy-table edit through a table handle.
@@ -656,6 +680,8 @@ pub struct Machine {
     pub start_body: Option<ObjRef>,
     /// Machine-local descriptors for active nonescaping callbacks.
     pub callbacks: Vec<CallbackSlot>,
+    /// The original operation whose reply becomes a wait source.
+    pub preparing_wait: Option<WaitPreparation>,
 }
 
 struct PortableDefinitionInfo {
@@ -1019,6 +1045,7 @@ impl Machine {
             gate: 0,
             start_body: None,
             callbacks: Vec::new(),
+            preparing_wait: None,
         }
     }
 
@@ -1076,6 +1103,7 @@ impl Machine {
         self.vm.terminal = Some(Terminal::Done(value));
         self.vm.state = MachineState::Done;
         self.vm.pending = None;
+        self.preparing_wait = None;
         self.vm.nested = None;
         self.vm.routed = None;
         self.callbacks.clear();
@@ -1093,6 +1121,7 @@ impl Machine {
         }));
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
+        self.preparing_wait = None;
         self.vm.nested = None;
         self.vm.routed = None;
         self.callbacks.clear();
@@ -1227,6 +1256,15 @@ impl Machine {
                 if let Value::Obj(r) = value {
                     roots.push(*r);
                 }
+            }
+        }
+        for entry in self.vm.waits.values() {
+            if let WaitSource::Operation {
+                ready: Some(Value::Obj(reference)),
+                ..
+            } = entry.source
+            {
+                roots.push(reference);
             }
         }
         if let Some(Terminal::Done(Value::Obj(r))) = &self.vm.terminal {
@@ -4218,6 +4256,10 @@ impl Machine {
         instr: ExtendedInstr,
     ) -> Result<ExecOutcome, FaultCode> {
         match instr {
+            ExtendedInstr::PrepareWait { op_argc, reply_ty } => {
+                let (op, argc) = ExtendedInstr::wait_parts(op_argc);
+                return self.exec_prepare_wait(op, argc, reply_ty);
+            }
             ExtendedInstr::MakeCallback { func, captures } => {
                 self.exec_make_callback(func, captures)?;
             }
@@ -4448,6 +4490,35 @@ impl Machine {
             }
         }
         Ok(ExecOutcome::Continue)
+    }
+
+    #[inline(never)]
+    fn exec_prepare_wait(
+        &mut self,
+        op: u32,
+        argc: u32,
+        reply_ty: u32,
+    ) -> Result<ExecOutcome, FaultCode> {
+        if self.vm.operands.len() < argc as usize {
+            return Err(BAD_STATE);
+        }
+        Ok(ExecOutcome::PrepareWait {
+            op,
+            argc,
+            reply_ty,
+            env: self.frame_env(),
+        })
+    }
+
+    /// Remove one verified instruction argument list from the stack.
+    pub(crate) fn take_arguments(&mut self, argc: u32) -> Result<Vec<Value>, FaultCode> {
+        let split = self
+            .vm
+            .operands
+            .len()
+            .checked_sub(argc as usize)
+            .ok_or(BAD_STATE)?;
+        Ok(self.vm.operands.split_off(split))
     }
 
     /// Execute one fetched instruction of the current frame.

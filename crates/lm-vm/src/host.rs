@@ -276,6 +276,17 @@ pub enum HostStart {
     Failed(String),
 }
 
+/// The result of cancelling one selectable host source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostWaitCancel {
+    /// Cancellation removed the source before selection.
+    Cancelled,
+    /// The host had retained a ready result and restored its input.
+    ReadyRestored,
+    /// No current source used this token.
+    Missing,
+}
+
 /// One completed asynchronous host operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostCompletion {
@@ -292,6 +303,10 @@ pub struct HostCompletion {
 pub trait Host {
     /// Start one operation.
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart;
+    /// Start one operation as a selectable source.
+    fn start_wait(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        self.start(key, op, args)
+    }
     /// Poll the completion source without blocking.
     fn poll(&mut self) -> Option<HostCompletion>;
     /// Wait for the next completion.
@@ -303,6 +318,18 @@ pub trait Host {
     /// Cancel one pending completion token.
     fn cancel(&mut self, _token: u64) -> bool {
         false
+    }
+    /// Commit one ready selectable source.
+    fn commit_wait(&mut self, _token: u64) -> bool {
+        true
+    }
+    /// Cancel one selectable source and preserve consumable input.
+    fn cancel_wait(&mut self, token: u64) -> HostWaitCancel {
+        if self.cancel(token) {
+            HostWaitCancel::Cancelled
+        } else {
+            HostWaitCancel::Missing
+        }
     }
     /// Close one TCP resource during forced cleanup.
     fn close_tcp(&mut self, _resource: HostTcpResource) -> bool {
@@ -359,6 +386,8 @@ pub struct RecordingHost {
     /// the same operations. A test therefore meets the same boundary:
     /// a reply arrives at a later poll, not inside `start`.
     pending: BTreeMap<u64, Deferred>,
+    ready_waits: std::collections::BTreeSet<u64>,
+    retained_waits: BTreeMap<u64, RetainedWait>,
     next_token: u64,
     files: BTreeMap<String, Vec<u8>>,
     file_handles: BTreeMap<u64, MemoryFile>,
@@ -379,14 +408,33 @@ struct Deferred {
     /// Polls remaining before the reply is ready.
     left: u32,
     action: DeferredAction,
+    wait_source: bool,
+    rollback: Option<RetainedWait>,
 }
 
 #[derive(Debug, Clone)]
 enum DeferredAction {
     Ready(HostValue),
+    InputRead(usize),
     Accept(u64),
     Read { stream: u64, count: usize },
     TlsRead { stream: u64, count: usize },
+}
+
+#[derive(Debug)]
+enum RetainedWait {
+    Input(Vec<u8>),
+    StreamRead {
+        stream: u64,
+        bytes: Vec<u8>,
+    },
+    Accept {
+        listener: u64,
+        connection: (u64, HostSocketAddress),
+    },
+    Connect {
+        client: u64,
+    },
 }
 
 /// True when the command-line host serves this operation off the
@@ -558,6 +606,8 @@ impl RecordingHost {
             monotonic: 0,
             rand_state: seed.max(1),
             pending: BTreeMap::new(),
+            ready_waits: std::collections::BTreeSet::new(),
+            retained_waits: BTreeMap::new(),
             next_token: 1,
             files: BTreeMap::new(),
             file_handles: BTreeMap::new(),
@@ -715,6 +765,11 @@ impl RecordingHost {
         let action = self.pending.get(&token)?.action.clone();
         match action {
             DeferredAction::Ready(value) => Some(value),
+            DeferredAction::InputRead(count) => {
+                let count = count.min(self.input_bytes.len());
+                let bytes: Vec<u8> = self.input_bytes.drain(..count).collect();
+                Some(core_ok(HostValue::Bytes(bytes.into())))
+            }
             DeferredAction::Accept(listener) => self.accept_value(listener),
             DeferredAction::Read { stream, count } => self.read_value(stream, count),
             DeferredAction::TlsRead { stream, count } => self.tls_read_value(stream, count),
@@ -733,6 +788,8 @@ impl RecordingHost {
                 key,
                 left: 1,
                 action: DeferredAction::Ready(value),
+                wait_source: false,
+                rollback: None,
             },
         );
         HostStart::Waiting(token)
@@ -748,6 +805,30 @@ impl RecordingHost {
                 key,
                 left: 1,
                 action,
+                wait_source: false,
+                rollback: None,
+            },
+        );
+        HostStart::Waiting(token)
+    }
+
+    /// Hold one selectable reply for a later poll.
+    fn defer_wait(
+        &mut self,
+        key: CompletionKey,
+        action: DeferredAction,
+        rollback: Option<RetainedWait>,
+    ) -> HostStart {
+        let token = self.next_token;
+        self.next_token += 1;
+        self.pending.insert(
+            token,
+            Deferred {
+                key,
+                left: 1,
+                action,
+                wait_source: true,
+                rollback,
             },
         );
         HostStart::Waiting(token)
@@ -1631,13 +1712,129 @@ impl RecordingHost {
     }
 
     fn take_ready(&mut self, token: u64) -> Option<HostCompletion> {
+        let action = self.pending.get(&token)?.action.clone();
+        let input = match &action {
+            DeferredAction::InputRead(count) => Some(
+                self.input_bytes
+                    .iter()
+                    .copied()
+                    .take(*count)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let stream = match &action {
+            DeferredAction::Read { stream, .. } | DeferredAction::TlsRead { stream, .. } => self
+                .streams
+                .get(stream)
+                .map(|state| (*stream, state.incoming.clone())),
+            _ => None,
+        };
+        let accepted = match &action {
+            DeferredAction::Accept(listener) => self
+                .listeners
+                .get(listener)
+                .and_then(|state| state.incoming.front().copied())
+                .map(|connection| (*listener, connection)),
+            _ => None,
+        };
         let value = self.deferred_value(token)?;
-        let entry = self.pending.remove(&token)?;
+        let mut entry = self.pending.remove(&token)?;
+        if entry.wait_source {
+            let dynamic = if let Some(bytes) = input {
+                (!bytes.is_empty()).then_some(RetainedWait::Input(bytes))
+            } else if let Some((stream, before)) = stream {
+                let after = self
+                    .streams
+                    .get(&stream)
+                    .map(|state| state.incoming.len())
+                    .unwrap_or(0);
+                let removed = before.len().saturating_sub(after);
+                (removed > 0).then(|| RetainedWait::StreamRead {
+                    stream,
+                    bytes: before.into_iter().take(removed).collect(),
+                })
+            } else if let Some((listener, connection)) = accepted {
+                let still_first = self
+                    .listeners
+                    .get(&listener)
+                    .and_then(|state| state.incoming.front().copied())
+                    == Some(connection);
+                (!still_first).then_some(RetainedWait::Accept {
+                    listener,
+                    connection,
+                })
+            } else {
+                None
+            };
+            if let Some(retained) = entry.rollback.take().or(dynamic) {
+                self.retained_waits.insert(token, retained);
+            }
+            self.ready_waits.insert(token);
+        }
         Some(HostCompletion {
             key: entry.key,
             token,
             result: Ok(value),
         })
+    }
+
+    fn restore_wait(&mut self, retained: RetainedWait) {
+        match retained {
+            RetainedWait::Input(bytes) => {
+                let mut restored = bytes;
+                restored.append(&mut self.input_bytes);
+                self.input_bytes = restored;
+            }
+            RetainedWait::StreamRead { stream, bytes } => {
+                if let Some(state) = self.streams.get_mut(&stream) {
+                    for byte in bytes.into_iter().rev() {
+                        state.incoming.push_front(byte);
+                    }
+                }
+            }
+            RetainedWait::Accept {
+                listener,
+                connection,
+            } => {
+                if let Some(state) = self.listeners.get_mut(&listener) {
+                    state.incoming.push_front(connection);
+                }
+            }
+            RetainedWait::Connect { client } => {
+                let server = self.streams.get(&client).and_then(|state| state.peer);
+                if let Some(server) = server {
+                    for listener in self.listeners.values_mut() {
+                        if let Some(at) = listener
+                            .incoming
+                            .iter()
+                            .position(|(stream, _)| *stream == server)
+                        {
+                            listener.incoming.remove(at);
+                            break;
+                        }
+                    }
+                    self.close_virtual_tcp(HostTcpResource {
+                        kind: HostTcpKind::Stream,
+                        token: server,
+                    });
+                }
+                self.close_virtual_tcp(HostTcpResource {
+                    kind: HostTcpKind::Stream,
+                    token: client,
+                });
+            }
+        }
+    }
+}
+
+fn result_tcp_stream(value: &HostValue) -> Option<u64> {
+    match value {
+        HostValue::Ctor(CoreCtor::Ok, values) => match values.as_slice() {
+            [HostValue::TcpStream(token)] => Some(*token),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1649,6 +1846,129 @@ impl Host for RecordingHost {
         match self.serve(key, op, args) {
             HostStart::Completed(value) if deferred_op(op) => self.defer(key, value),
             other => other,
+        }
+    }
+
+    fn start_wait(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        match op {
+            lm_abi::OP_CLOCK_SLEEP => {
+                self.defer_wait(key, DeferredAction::Ready(HostValue::Unit), None)
+            }
+            lm_abi::OP_IO_READ_BYTES => {
+                let Some(HostArg::Int(count)) = args.first() else {
+                    return HostStart::Failed("Io.ReadBytes needs one integer".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorInvalidInput,
+                        Some("the read count is negative"),
+                    ));
+                };
+                if count > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the read count is too large"),
+                    ));
+                }
+                self.defer_wait(key, DeferredAction::InputRead(count), None)
+            }
+            lm_abi::OP_DNS_RESOLVE => match self.serve(key, op, args) {
+                HostStart::Completed(value) => {
+                    self.defer_wait(key, DeferredAction::Ready(value), None)
+                }
+                other => other,
+            },
+            lm_abi::OP_TCP_CONNECT => match self.serve(key, op, args) {
+                HostStart::Completed(value) => {
+                    let rollback =
+                        result_tcp_stream(&value).map(|client| RetainedWait::Connect { client });
+                    self.defer_wait(key, DeferredAction::Ready(value), rollback)
+                }
+                other => other,
+            },
+            lm_abi::OP_TCP_ACCEPT => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                };
+                if resource.kind != HostTcpKind::Listener {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                }
+                self.defer_wait(key, DeferredAction::Accept(resource.token), None)
+            }
+            lm_abi::OP_TCP_READ => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tcp.Read needs a stream and count".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Read needs a stream".to_string());
+                }
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the read count is not positive",
+                    ));
+                };
+                if count == 0 || count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(net_error(
+                        if count == 0 {
+                            CoreCtor::NetInvalidInput
+                        } else {
+                            CoreCtor::NetLimitExceeded
+                        },
+                        if count == 0 {
+                            "the read count is not positive"
+                        } else {
+                            "the read count is too large"
+                        },
+                    ));
+                }
+                self.defer_wait(
+                    key,
+                    DeferredAction::Read {
+                        stream: resource.token,
+                        count,
+                    },
+                    None,
+                )
+            }
+            lm_abi::OP_TLS_READ => {
+                let (Some(HostArg::Tls(stream)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tls.Read needs a stream and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS read count is not positive",
+                    ));
+                };
+                if count == 0 || count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(tls_error(
+                        if count == 0 {
+                            CoreCtor::TlsInvalidConfig
+                        } else {
+                            CoreCtor::TlsLimitExceeded
+                        },
+                        if count == 0 {
+                            "the TLS read count is not positive"
+                        } else {
+                            "the TLS read count is too large"
+                        },
+                    ));
+                }
+                self.defer_wait(
+                    key,
+                    DeferredAction::TlsRead {
+                        stream: *stream,
+                        count,
+                    },
+                    None,
+                )
+            }
+            _ => self.start(key, op, args),
         }
     }
 
@@ -1684,6 +2004,28 @@ impl Host for RecordingHost {
         self.pending.remove(&token).is_some()
     }
 
+    fn commit_wait(&mut self, token: u64) -> bool {
+        let ready = self.ready_waits.remove(&token);
+        self.retained_waits.remove(&token);
+        ready
+    }
+
+    fn cancel_wait(&mut self, token: u64) -> HostWaitCancel {
+        if let Some(mut pending) = self.pending.remove(&token) {
+            if let Some(retained) = pending.rollback.take() {
+                self.restore_wait(retained);
+            }
+            return HostWaitCancel::Cancelled;
+        }
+        if self.ready_waits.remove(&token) {
+            if let Some(retained) = self.retained_waits.remove(&token) {
+                self.restore_wait(retained);
+            }
+            return HostWaitCancel::ReadyRestored;
+        }
+        HostWaitCancel::Missing
+    }
+
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
         self.close_virtual_tcp(resource)
     }
@@ -1700,6 +2042,10 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
         self.borrow_mut().start(key, op, args)
     }
 
+    fn start_wait(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        self.borrow_mut().start_wait(key, op, args)
+    }
+
     fn poll(&mut self) -> Option<HostCompletion> {
         self.borrow_mut().poll()
     }
@@ -1714,6 +2060,14 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn cancel(&mut self, token: u64) -> bool {
         self.borrow_mut().cancel(token)
+    }
+
+    fn commit_wait(&mut self, token: u64) -> bool {
+        self.borrow_mut().commit_wait(token)
+    }
+
+    fn cancel_wait(&mut self, token: u64) -> HostWaitCancel {
+        self.borrow_mut().cancel_wait(token)
     }
 
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {

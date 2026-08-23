@@ -50,7 +50,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 22 uses BLAKE3-256 for manifest identities.
 /// Version 23 adds Float to the primitive manifest types.
 /// Version 24 adds Float parsing and formatting intrinsics.
-pub const ABI_VERSION: u32 = 24;
+/// Version 25 adds selectable host-operation sources.
+pub const ABI_VERSION: u32 = 25;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -1943,6 +1944,20 @@ impl OpDef {
     pub fn suspends(&self) -> bool {
         matches!(self.snapshot, SnapshotClass::HostAttachment)
     }
+
+    /// True when this operation can prepare a selectable wait source.
+    pub fn wait_source(&self) -> bool {
+        matches!(
+            (self.group, self.member),
+            ("Clock", "Sleep")
+                | ("Io", "ReadBytes")
+                | ("Dns", "Resolve")
+                | ("Tcp", "Connect")
+                | ("Tcp", "Accept")
+                | ("Tcp", "Read")
+                | ("Tls", "Read")
+        )
+    }
 }
 
 /// Dense slots for the week-4 operations. The constants match the
@@ -3427,6 +3442,14 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
     id_field(&mut input, def.reply.text().as_bytes());
     id_field(&mut input, def.schema.as_bytes());
     id_field(&mut input, def.snapshot.tag().as_bytes());
+    id_field(
+        &mut input,
+        if def.wait_source() {
+            b"wait"
+        } else {
+            b"direct"
+        },
+    );
     hash256(&input)
 }
 
