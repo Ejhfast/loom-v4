@@ -270,7 +270,7 @@ Native Int, Text, Bytes, List, and Map paths remain within normal noise.
 
 Focused benchmarks cover tuple dispatch, collection equality, hashing, sorting, and map removal.
 
-The benchmark baseline lives in `benchmarks/release-baseline.md`.
+The benchmark baseline lives in `benchmarks/latest-baseline.md`.
 
 ## 14. Snapshot trust
 

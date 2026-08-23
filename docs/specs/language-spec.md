@@ -3426,8 +3426,6 @@ Cancellation keeps that input available to the same logical resource.
 
 `docs/specs/sidecar/waits.md` defines readiness, drive leases, and scheduler indexes.
 
-`docs/specs/sidecar/pre-release-foundation.md` defines host-operation wait sources.
-
 ### 23.10 Compiler and reflection
 
 ```text
