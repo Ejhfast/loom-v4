@@ -36,8 +36,12 @@ A missing file also starts an empty buffer. The first save creates it.
 | Ctrl-L | Show the key help again |
 
 Find is incremental. Each typed character moves to the next match. The
-arrow keys step through the matches. Enter keeps the position. Escape
-returns the cursor to its position before the search.
+editor inverts the current match, so you see which one it selected.
+
+The arrow keys step through every match, not one match for each line.
+Down and Right move forward. Up and Left move back. The scan wraps at
+the end of the file. Enter keeps the position. Escape returns the
+cursor to its position before the search.
 
 Ctrl-Q asks once before it discards unsaved changes.
 

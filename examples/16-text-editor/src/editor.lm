@@ -12,6 +12,7 @@ use text.drop_last
 use text.larger
 use text.screen_column
 use text.smaller
+use text.tail_of
 use text.tab_stop
 use text.wrap_index
 
@@ -28,7 +29,7 @@ final class SearchState
   column: Int = 0
   row_offset: Int = 0
   col_offset: Int = 0
-  last_row: Int = -1
+  found: Bool = false
 end
 
 def help_text(): String
@@ -239,35 +240,36 @@ final class Editor
     self.message = help_text()
   end
 
-  # Find the next match. `direction` is -1 or 1.
+  # Move to the next match. `direction` is -1 or 1.
+  # The search counts every match, not one match for each line.
   def find_match(mut self, direction: Int)
     query = self.search.query
     if query.is_empty()
+      self.search.found = false
+      self.message = ""
       return
     end
-    total = self.doc.line_count()
-    start = if self.search.last_row < 0
-      self.row
+    column = if self.search.found
+      self.column + direction
     else
-      self.search.last_row + direction
+      self.column
     end
-    step = 0
-    while step < total
-      row = wrap_index(start + step * direction, total)
-      case self.doc.line(row).find(query)
-      in Some(column)
-        self.row = row
-        self.column = column
-        self.wanted_column = column
-        self.search.last_row = row
-        self.message = ""
-        return
-      in None then ()
-      end
-      step = step + 1
+    found = if direction < 0
+      match_before(self.doc, query, self.row, column)
+    else
+      match_after(self.doc, query, self.row, column)
     end
-    self.search.last_row = -1
-    self.message = "no match for #{query}"
+    case found
+    in Some((row, at))
+      self.row = row
+      self.column = at
+      self.wanted_column = at
+      self.search.found = true
+      self.message = ""
+    in None
+      self.search.found = false
+      self.message = "no match for #{query}"
+    end
   end
 
   # ---- dispatch -------------------------------------------------
@@ -330,11 +332,11 @@ final class Editor
       self.cancel_search()
     in Backspace
       self.search.query = drop_last(self.search.query)
-      self.search.last_row = -1
+      self.search.found = false
       self.find_match(1)
     in Text(value)
       self.search.query = self.search.query + value
-      self.search.last_row = -1
+      self.search.found = false
       self.find_match(1)
     in Up       then self.find_match(-1)
     in Left     then self.find_match(-1)
@@ -412,4 +414,66 @@ def write_document(path: String, data: Bytes): Result[Int, FsError] with Fs
     in Ok(_)      then Ok(data.len())
     end
   end
+end
+
+# Find `query` at or after (row, column). The scan wraps to the start.
+def match_after(doc: Document, query: Text, row: Int, column: Int): Option[(Int, Int)]
+  total = doc.line_count()
+  at_row = wrap_index(row, total)
+  at_column = column
+  step = 0
+  while step <= total
+    line = doc.line(at_row)
+    start = clamp(at_column, 0, line.len())
+    case tail_of(line, start).find(query)
+    in Some(offset)
+      return Some((at_row, start + offset))
+    in None then ()
+    end
+    at_row = wrap_index(at_row + 1, total)
+    at_column = 0
+    step = step + 1
+  end
+  None
+end
+
+# Find `query` at or before (row, column). The scan wraps to the end.
+def match_before(doc: Document, query: Text, row: Int, column: Int): Option[(Int, Int)]
+  total = doc.line_count()
+  at_row = wrap_index(row, total)
+  limit = column
+  step = 0
+  while step <= total
+    best = last_match_upto(doc.line(at_row), query, limit)
+    if best >= 0
+      return Some((at_row, best))
+    end
+    at_row = wrap_index(at_row - 1, total)
+    limit = doc.line(at_row).len()
+    step = step + 1
+  end
+  None
+end
+
+# Return the last start of `query` at or before `limit`, or -1.
+def last_match_upto(line: Text, query: Text, limit: Int): Int
+  if limit < 0
+    return -1
+  end
+  best = -1
+  at = 0
+  while at <= line.len()
+    case tail_of(line, at).find(query)
+    in Some(offset)
+      found = at + offset
+      if found > limit
+        return best
+      end
+      best = found
+      at = found + 1
+    in None
+      return best
+    end
+  end
+  best
 end

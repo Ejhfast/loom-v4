@@ -11,7 +11,9 @@ use std.term.reset_style
 use std.term.show_cursor
 use text.clip
 use text.expand_tabs
+use text.clamp
 use text.larger
+use text.screen_column
 use text.smaller
 
 def home(): Bytes
@@ -44,8 +46,7 @@ def draw(state: Editor): Bytes
     buffer.extend(erase_line())
     row = state.row_offset + screen
     if row < state.doc.line_count()
-      line = expand_tabs(state.doc.line(row))
-      buffer.extend(clip(line, state.col_offset, state.view_columns).bytes())
+      buffer.extend(text_row(state, row))
     else
       buffer.extend(b"~")
     end
@@ -65,6 +66,34 @@ def draw(state: Editor): Bytes
   buffer.extend(cursor_position(state))
   buffer.extend(show_cursor())
   buffer.finish()
+end
+
+# Draw one file row. The current search match is inverted, so the
+# reader sees which match the arrow keys selected.
+def text_row(state: Editor, row: Int): Bytes
+  source = state.doc.line(row)
+  visible = clip(expand_tabs(source), state.col_offset, state.view_columns)
+  if not matched_row(state, row)
+    return visible.bytes()
+  end
+  ends = state.column + state.search.query.len()
+  start = clamp(state.render_column - state.col_offset, 0, visible.len())
+  stop = clamp(screen_column(source, ends) - state.col_offset, start, visible.len())
+  buffer = ByteBuffer()
+  buffer.extend(clip(visible, 0, start).bytes())
+  buffer.extend(invert_style())
+  buffer.extend(clip(visible, start, stop - start).bytes())
+  buffer.extend(reset_style())
+  buffer.extend(clip(visible, stop, visible.len() - stop).bytes())
+  buffer.finish()
+end
+
+# Report whether `row` holds the current search match.
+def matched_row(state: Editor, row: Int): Bool
+  case state.mode
+  in Search then state.search.found and row == state.row
+  in _      then false
+  end
 end
 
 # The status bar names the file and the cursor position.
@@ -87,7 +116,7 @@ def message_line(state: Editor): String
   in Edit
     state.message
   in Search
-    "#{search_prefix()}#{state.search.query}   arrows: next   Enter: keep   Esc: cancel"
+    "#{search_prefix()}#{state.search.query}   arrows: step   Enter: keep   Esc: cancel"
   in SaveAs
     "#{save_prefix()}#{state.prompt}   Enter: save   Esc: cancel"
   end
