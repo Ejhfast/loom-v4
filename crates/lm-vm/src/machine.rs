@@ -984,9 +984,25 @@ impl Machine {
                         Ok(class)
                     }
                 }
-                _ => Err(BAD_TYPE),
+                object => Self::cold_native_class(module, object),
             },
             _ => Err(BAD_TYPE),
+        }
+    }
+
+    /// Resolve native resource classes outside common value dispatch.
+    #[cold]
+    #[inline(never)]
+    fn cold_native_class(module: &Module, object: &Object) -> Result<u32, FaultCode> {
+        let role = match object {
+            Object::NativeFileHandle { .. } => lm_bytecode::corepin::ROLE_FILE_HANDLE,
+            _ => return Err(BAD_TYPE),
+        };
+        let class = module.core_roles[role];
+        if class == lm_bytecode::NO_ROLE {
+            Err(BAD_TYPE)
+        } else {
+            Ok(class)
         }
     }
 

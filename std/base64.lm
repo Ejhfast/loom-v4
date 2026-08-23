@@ -1,0 +1,117 @@
+# Standard library: RFC 4648 base64 encoding.
+
+enum Base64Error implements Error
+  InvalidLength
+  InvalidByte(index: Int)
+  InvalidPadding
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in InvalidLength
+      builder.append("base64 text needs a multiple of four bytes")
+    in InvalidByte(index)
+      builder.append("base64 text has an invalid byte at ")
+      builder.append_int(index)
+    in InvalidPadding
+      builder.append("base64 text has invalid padding")
+    end
+  end
+end
+
+def _base64_digit(byte: Int): Int
+  if byte >= 65 and byte <= 90
+    byte - 65
+  elsif byte >= 97 and byte <= 122
+    byte - 71
+  elsif byte >= 48 and byte <= 57
+    byte + 4
+  elsif byte == 43
+    62
+  elsif byte == 47
+    63
+  else
+    -1
+  end
+end
+
+def encode(bytes: Bytes): String
+  alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  output = ByteBuffer()
+  index = 0
+  while index + 3 <= bytes.len()
+    first = bytes.at(index)
+    second = bytes.at(index + 1)
+    third = bytes.at(index + 2)
+    output.append(alphabet.at(first >> 2))
+    output.append(alphabet.at(((first & 3) << 4) | (second >> 4)))
+    output.append(alphabet.at(((second & 15) << 2) | (third >> 6)))
+    output.append(alphabet.at(third & 63))
+    index = index + 3
+  end
+
+  remaining = bytes.len() - index
+  if remaining == 1
+    first = bytes.at(index)
+    output.append(alphabet.at(first >> 2))
+    output.append(alphabet.at((first & 3) << 4))
+    output.append(61)
+    output.append(61)
+  elsif remaining == 2
+    first = bytes.at(index)
+    second = bytes.at(index + 1)
+    output.append(alphabet.at(first >> 2))
+    output.append(alphabet.at(((first & 3) << 4) | (second >> 4)))
+    output.append(alphabet.at((second & 15) << 2))
+    output.append(61)
+  end
+  output.finish().text()
+end
+
+def decode(text: Text): Result[Bytes, Base64Error]
+  source = text.bytes()
+  if source.len() % 4 != 0
+    return Err(Base64Error.InvalidLength)
+  end
+  output = ByteBuffer()
+  index = 0
+  while index < source.len()
+    first = _base64_digit(source.at(index))
+    second = _base64_digit(source.at(index + 1))
+    if first < 0
+      return Err(Base64Error.InvalidByte(index))
+    end
+    if second < 0
+      return Err(Base64Error.InvalidByte(index + 1))
+    end
+
+    third_byte = source.at(index + 2)
+    fourth_byte = source.at(index + 3)
+    final_group = index + 4 == source.len()
+    if third_byte == 61
+      if not final_group or fourth_byte != 61 or (second & 15) != 0
+        return Err(Base64Error.InvalidPadding)
+      end
+      output.append((first << 2) | (second >> 4))
+    else
+      third = _base64_digit(third_byte)
+      if third < 0
+        return Err(Base64Error.InvalidByte(index + 2))
+      end
+      output.append((first << 2) | (second >> 4))
+      output.append(((second & 15) << 4) | (third >> 2))
+      if fourth_byte == 61
+        if not final_group or (third & 3) != 0
+          return Err(Base64Error.InvalidPadding)
+        end
+      else
+        fourth = _base64_digit(fourth_byte)
+        if fourth < 0
+          return Err(Base64Error.InvalidByte(index + 3))
+        end
+        output.append(((third & 3) << 6) | fourth)
+      end
+    end
+    index = index + 4
+  end
+  Ok(output.finish())
+end

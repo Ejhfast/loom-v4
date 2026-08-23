@@ -546,6 +546,12 @@ The first host read limit is 16 MiB.
 
 The host copies received bytes into immutable `Bytes` storage once.
 
+`TcpStream.read` unwraps this transport value.
+
+It returns `Result[Bytes,NetError]` and implements `ByteReader` with `Tcp.Read`.
+
+Empty bytes report `End` for a positive read count.
+
 ## 13. Write semantics
 
 `Tcp.Write` can write fewer bytes than its input contains.
@@ -689,7 +695,7 @@ The runtime never reconnects or relistens during restore.
 The core image defines direct handle methods with exact rows:
 
 ```text
-TcpStream.read(max_bytes) with Tcp.Read
+TcpStream.read(max_bytes) -> Result[Bytes,NetError] with Tcp.Read
 TcpStream.write(bytes) with Tcp.Write
 TcpStream.shutdown(direction) with Tcp.Shutdown
 TcpStream.local_address() with Tcp.LocalAddress
@@ -898,7 +904,7 @@ These entry points have the following rows:
 Tls.handshake(stream, config) with Tls.Handshake
 Tls.connect_host(host, port, config) with Dns.Resolve, Tcp.Client, Tls.Client
 
-TlsStream.read(max_bytes) with Tls.Read
+TlsStream.read(max_bytes) -> Result[Bytes,TlsError] with Tls.Read
 TlsStream.write(bytes) with Tls.Write
 TlsStream.shutdown() with Tls.Shutdown
 TlsStream.local_address() with Tls.LocalAddress
@@ -950,6 +956,12 @@ The handshake returns only after all required client handshake records enter the
 `Tls.Write` can accept a partial input when the configured buffer is full.
 
 `Tls.Read` returns the same `TcpRead.Data` and `TcpRead.End` values as TCP.
+
+`TlsStream.read` unwraps this transport value.
+
+It returns `Result[Bytes,TlsError]` and implements `ByteReader` with `Tls.Read`.
+
+Empty bytes report `End` for a positive read count.
 
 `Data` never contains zero bytes.
 

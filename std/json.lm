@@ -1,0 +1,483 @@
+# Standard library: bounded JSON values and codecs.
+
+enum Json
+  Null
+  Boolean(value: Bool)
+  Number(value: Float)
+  Text(value: String)
+  ListValue(value: List[Json])
+  Object(value: Map[String, Json])
+end
+
+enum JsonError implements Error
+  Invalid(offset: Int, message: String)
+  LimitExceeded(message: String)
+  NonFiniteNumber
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in Invalid(offset, message)
+      builder.append(message)
+      builder.append(" at byte ")
+      builder.append_int(offset)
+    in LimitExceeded(message)
+      builder.append(message)
+    in NonFiniteNumber
+      builder.append("JSON cannot contain a non-finite number")
+    end
+  end
+end
+
+final class JsonParser
+  source: Bytes
+  cursor: Int = 0
+  items: Int = 0
+  max_depth: Int
+  max_items: Int
+
+  def init(mut self, source: Bytes, max_depth: Int, max_items: Int)
+    self.source = source
+    self.max_depth = max_depth
+    self.max_items = max_items
+  end
+
+  def invalid(self, message: String): JsonError
+    JsonError.Invalid(self.cursor, message)
+  end
+
+  def invalid_at(self, offset: Int, message: String): JsonError
+    JsonError.Invalid(offset, message)
+  end
+
+  def skip_space(mut self)
+    while self.cursor < self.source.len()
+      byte = self.source.at(self.cursor)
+      if byte == 32 or byte == 9 or byte == 10 or byte == 13
+        self.cursor = self.cursor + 1
+      else
+        return ()
+      end
+    end
+  end
+
+  def keyword(mut self, word: Bytes, value: Json): Result[Json, JsonError]
+    if self.cursor + word.len() > self.source.len()
+      return Err(self.invalid("the JSON value is incomplete"))
+    end
+    found = self.source.slice(self.cursor, word.len()).expect("the keyword bounds are valid")
+    if found != word
+      return Err(self.invalid("the JSON value has an unknown token"))
+    end
+    self.cursor = self.cursor + word.len()
+    Ok(value)
+  end
+
+  def hex_quad(mut self): Result[Int, JsonError]
+    if self.cursor + 4 > self.source.len()
+      return Err(self.invalid("the Unicode escape is incomplete"))
+    end
+    value = 0
+    count = 0
+    while count < 4
+      byte = self.source.at(self.cursor)
+      digit = if byte >= 48 and byte <= 57
+        byte - 48
+      elsif byte >= 65 and byte <= 70
+        byte - 55
+      elsif byte >= 97 and byte <= 102
+        byte - 87
+      else
+        -1
+      end
+      if digit < 0
+        return Err(self.invalid("the Unicode escape has an invalid digit"))
+      end
+      value = (value << 4) | digit
+      self.cursor = self.cursor + 1
+      count = count + 1
+    end
+    Ok(value)
+  end
+
+  def append_codepoint(
+    self,
+    mut output: ByteBuffer,
+    value: Int
+  ): Result[(), JsonError]
+    if value < 0 or value > 1114111 or (value >= 55296 and value <= 57343)
+      return Err(self.invalid("the Unicode escape is not a scalar value"))
+    end
+    if value <= 127
+      output.append(value)
+    elsif value <= 2047
+      output.append(192 | (value >> 6))
+      output.append(128 | (value & 63))
+    elsif value <= 65535
+      output.append(224 | (value >> 12))
+      output.append(128 | ((value >> 6) & 63))
+      output.append(128 | (value & 63))
+    else
+      output.append(240 | (value >> 18))
+      output.append(128 | ((value >> 12) & 63))
+      output.append(128 | ((value >> 6) & 63))
+      output.append(128 | (value & 63))
+    end
+    Ok(())
+  end
+
+  def string(mut self): Result[String, JsonError]
+    if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
+      return Err(self.invalid("a JSON string needs an opening quote"))
+    end
+    self.cursor = self.cursor + 1
+    output = ByteBuffer()
+    while self.cursor < self.source.len()
+      byte = self.source.at(self.cursor)
+      self.cursor = self.cursor + 1
+      if byte == 34
+        return Ok(output.finish().text())
+      elsif byte == 92
+        if self.cursor >= self.source.len()
+          return Err(self.invalid("the JSON escape is incomplete"))
+        end
+        escape = self.source.at(self.cursor)
+        self.cursor = self.cursor + 1
+        if escape == 34 or escape == 47 or escape == 92
+          output.append(escape)
+        elsif escape == 98
+          output.append(8)
+        elsif escape == 102
+          output.append(12)
+        elsif escape == 110
+          output.append(10)
+        elsif escape == 114
+          output.append(13)
+        elsif escape == 116
+          output.append(9)
+        elsif escape == 117
+          value = self.hex_quad()?
+          if value >= 55296 and value <= 56319
+            if self.cursor + 2 > self.source.len() or
+              self.source.at(self.cursor) != 92 or
+              self.source.at(self.cursor + 1) != 117
+              return Err(self.invalid("a high surrogate needs a low surrogate"))
+            end
+            self.cursor = self.cursor + 2
+            low = self.hex_quad()?
+            if low < 56320 or low > 57343
+              return Err(self.invalid("a high surrogate needs a low surrogate"))
+            end
+            value = 65536 + ((value - 55296) << 10) + (low - 56320)
+          elsif value >= 56320 and value <= 57343
+            return Err(self.invalid("a low surrogate needs a high surrogate"))
+          end
+          self.append_codepoint(output, value)?
+        else
+          return Err(self.invalid("the JSON escape is invalid"))
+        end
+      elsif byte < 32
+        return Err(self.invalid("a JSON string contains a control byte"))
+      else
+        output.append(byte)
+      end
+    end
+    Err(self.invalid("the JSON string is incomplete"))
+  end
+
+  def number(mut self): Result[Json, JsonError]
+    start = self.cursor
+    if self.source.at(self.cursor) == 45
+      self.cursor = self.cursor + 1
+      if self.cursor >= self.source.len()
+        return Err(self.invalid("the JSON number is incomplete"))
+      end
+    end
+
+    first = self.source.at(self.cursor)
+    if first == 48
+      self.cursor = self.cursor + 1
+      if self.cursor < self.source.len()
+        next = self.source.at(self.cursor)
+        if next >= 48 and next <= 57
+          return Err(self.invalid("a JSON number has a leading zero"))
+        end
+      end
+    elsif first >= 49 and first <= 57
+      self.cursor = self.cursor + 1
+      while self.cursor < self.source.len()
+        next = self.source.at(self.cursor)
+        if next < 48 or next > 57
+          break
+        end
+        self.cursor = self.cursor + 1
+      end
+    else
+      return Err(self.invalid("the JSON number needs an integer part"))
+    end
+
+    if self.cursor < self.source.len() and self.source.at(self.cursor) == 46
+      self.cursor = self.cursor + 1
+      fraction = self.cursor
+      while self.cursor < self.source.len()
+        next = self.source.at(self.cursor)
+        if next < 48 or next > 57
+          break
+        end
+        self.cursor = self.cursor + 1
+      end
+      if self.cursor == fraction
+        return Err(self.invalid("the JSON fraction needs a digit"))
+      end
+    end
+
+    if self.cursor < self.source.len()
+      exponent = self.source.at(self.cursor)
+      if exponent == 69 or exponent == 101
+        self.cursor = self.cursor + 1
+        if self.cursor < self.source.len()
+          sign = self.source.at(self.cursor)
+          if sign == 43 or sign == 45
+            self.cursor = self.cursor + 1
+          end
+        end
+        digits = self.cursor
+        while self.cursor < self.source.len()
+          next = self.source.at(self.cursor)
+          if next < 48 or next > 57
+            break
+          end
+          self.cursor = self.cursor + 1
+        end
+        if self.cursor == digits
+          return Err(self.invalid("the JSON exponent needs a digit"))
+        end
+      end
+    end
+
+    encoded = self.source.slice(start, self.cursor - start).expect("the number bounds are valid")
+    number_text = encoded.utf8().expect("a JSON number is ASCII")
+    case number_text.parse_float()
+    in Ok(value) then Ok(Json.Number(value))
+    in Err(_) then Err(self.invalid_at(start, "the JSON number is outside Float"))
+    end
+  end
+
+  def array(mut self, depth: Int): Result[Json, JsonError]
+    self.cursor = self.cursor + 1
+    values = List[Json]()
+    self.skip_space()
+    if self.cursor < self.source.len() and self.source.at(self.cursor) == 93
+      self.cursor = self.cursor + 1
+      return Ok(Json.ListValue(values))
+    end
+    loop do
+      values.push(self.value(depth + 1)?)
+      self.skip_space()
+      if self.cursor >= self.source.len()
+        return Err(self.invalid("the JSON array is incomplete"))
+      end
+      separator = self.source.at(self.cursor)
+      self.cursor = self.cursor + 1
+      if separator == 93
+        return Ok(Json.ListValue(values))
+      end
+      if separator != 44
+        return Err(self.invalid("a JSON array needs a comma or closing bracket"))
+      end
+      self.skip_space()
+    end
+  end
+
+  def object(mut self, depth: Int): Result[Json, JsonError]
+    self.cursor = self.cursor + 1
+    values = Map[String, Json]()
+    self.skip_space()
+    if self.cursor < self.source.len() and self.source.at(self.cursor) == 125
+      self.cursor = self.cursor + 1
+      return Ok(Json.Object(values))
+    end
+    loop do
+      key = self.string()?
+      self.skip_space()
+      if self.cursor >= self.source.len() or self.source.at(self.cursor) != 58
+        return Err(self.invalid("a JSON object member needs a colon"))
+      end
+      self.cursor = self.cursor + 1
+      self.skip_space()
+      values.put(key, self.value(depth + 1)?)
+      self.skip_space()
+      if self.cursor >= self.source.len()
+        return Err(self.invalid("the JSON object is incomplete"))
+      end
+      separator = self.source.at(self.cursor)
+      self.cursor = self.cursor + 1
+      if separator == 125
+        return Ok(Json.Object(values))
+      end
+      if separator != 44
+        return Err(self.invalid("a JSON object needs a comma or closing brace"))
+      end
+      self.skip_space()
+    end
+  end
+
+  def value(mut self, depth: Int): Result[Json, JsonError]
+    if depth > self.max_depth
+      return Err(JsonError.LimitExceeded("the JSON nesting is too deep"))
+    end
+    self.items = self.items + 1
+    if self.items > self.max_items
+      return Err(JsonError.LimitExceeded("the JSON value has too many items"))
+    end
+    self.skip_space()
+    if self.cursor >= self.source.len()
+      return Err(self.invalid("the JSON value is incomplete"))
+    end
+    byte = self.source.at(self.cursor)
+    if byte == 110
+      self.keyword(b"null", Json.Null)
+    elsif byte == 116
+      self.keyword(b"true", Json.Boolean(true))
+    elsif byte == 102
+      self.keyword(b"false", Json.Boolean(false))
+    elsif byte == 34
+      Ok(Json.Text(self.string()?))
+    elsif byte == 91
+      self.array(depth)
+    elsif byte == 123
+      self.object(depth)
+    elsif byte == 45 or (byte >= 48 and byte <= 57)
+      self.number()
+    else
+      Err(self.invalid("the JSON value has an unknown token"))
+    end
+  end
+
+  def parse(mut self): Result[Json, JsonError]
+    value = self.value(0)?
+    self.skip_space()
+    if self.cursor != self.source.len()
+      return Err(self.invalid("bytes follow the JSON value"))
+    end
+    Ok(value)
+  end
+end
+
+final class JsonWriter
+  output: ByteBuffer = ByteBuffer()
+  items: Int = 0
+  max_depth: Int
+  max_items: Int
+
+  def init(mut self, max_depth: Int, max_items: Int)
+    self.max_depth = max_depth
+    self.max_items = max_items
+  end
+
+  def text(mut self, value: Text)
+    self.output.append(34)
+    bytes = value.bytes()
+    hex = b"0123456789abcdef"
+    index = 0
+    while index < bytes.len()
+      byte = bytes.at(index)
+      if byte == 34 or byte == 92
+        self.output.append(92)
+        self.output.append(byte)
+      elsif byte == 8
+        self.output.append(92)
+        self.output.append(98)
+      elsif byte == 9
+        self.output.append(92)
+        self.output.append(116)
+      elsif byte == 10
+        self.output.append(92)
+        self.output.append(110)
+      elsif byte == 12
+        self.output.append(92)
+        self.output.append(102)
+      elsif byte == 13
+        self.output.append(92)
+        self.output.append(114)
+      elsif byte < 32
+        self.output.append(92)
+        self.output.extend(b"u00")
+        self.output.append(hex.at(byte >> 4))
+        self.output.append(hex.at(byte & 15))
+      else
+        self.output.append(byte)
+      end
+      index = index + 1
+    end
+    self.output.append(34)
+  end
+
+  def value(mut self, value: Json, depth: Int): Result[(), JsonError]
+    if depth > self.max_depth
+      return Err(JsonError.LimitExceeded("the JSON nesting is too deep"))
+    end
+    self.items = self.items + 1
+    if self.items > self.max_items
+      return Err(JsonError.LimitExceeded("the JSON value has too many items"))
+    end
+    case value
+    in Json.Null
+      self.output.extend(b"null")
+    in Json.Boolean(flag)
+      if flag
+        self.output.extend(b"true")
+      else
+        self.output.extend(b"false")
+      end
+    in Json.Number(number)
+      if number.is_nan() or (number - number).is_nan()
+        return Err(JsonError.NonFiniteNumber)
+      end
+      self.output.extend(display(number).bytes())
+    in Json.Text(text)
+      self.text(text)
+    in Json.ListValue(values)
+      self.output.append(91)
+      index = 0
+      for item in values
+        if index > 0
+          self.output.append(44)
+        end
+        self.value(item, depth + 1)?
+        index = index + 1
+      end
+      self.output.append(93)
+    in Json.Object(values)
+      self.output.append(123)
+      index = 0
+      for key, item in values
+        if index > 0
+          self.output.append(44)
+        end
+        self.text(key)
+        self.output.append(58)
+        self.value(item, depth + 1)?
+        index = index + 1
+      end
+      self.output.append(125)
+    end
+    Ok(())
+  end
+
+  def finish(mut self, value: Json): Result[String, JsonError]
+    self.value(value, 0)?
+    Ok(self.output.finish().text())
+  end
+end
+
+def parse(text: Text): Result[Json, JsonError]
+  bytes = text.bytes()
+  if bytes.len() > 16777216
+    return Err(JsonError.LimitExceeded("the JSON input exceeds 16777216 bytes"))
+  end
+  JsonParser(bytes, 128, 1000000).parse()
+end
+
+def stringify(value: Json): Result[String, JsonError]
+  JsonWriter(128, 1000000).finish(value)
+end

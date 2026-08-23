@@ -176,6 +176,41 @@ impl<'o> FnChecker<'o> {
                 }
             }
         }
+        // `Bytes.from_hex(text)` is one fixed core class method.
+        if name == "from_hex" {
+            if let ExprKind::Name(class_name) = &recv.kind {
+                if class_name == "Bytes" && self.lookup_slot(class_name).is_none() {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`Bytes.from_hex` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    if args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("`Bytes.from_hex` expects 1 argument, found {}", args.len()),
+                            span,
+                        ));
+                    }
+                    let func = ctx.core_func_index["_bytes_from_hex"];
+                    let sig = ctx.sigs[func as usize].clone();
+                    let args = arrange_args(args, &["text"], "Bytes.from_hex")?;
+                    let text = self.check_expr(ctx, args[0], sig.params[0])?;
+                    return Ok(HExpr {
+                        ty: sig.ret,
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func,
+                            targs: Vec::new(),
+                            rowargs: Vec::new(),
+                            args: vec![text],
+                        },
+                    });
+                }
+            }
+        }
         // A call into a `use`-bound module: `matrix.det(x)` or the
         // constructor `matrix.Matrix(2, 3)`. The materialized import
         // carries the qualified key, so the ordinary call path
@@ -573,8 +608,7 @@ impl<'o> FnChecker<'o> {
         }
     }
 
-    /// Check a call of one native method: a collection, a builder, or
-    /// a file handle. The receiver carries no declared class.
+    /// Check a call of one native collection or builder method.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn check_native_method(
         &mut self,
@@ -588,47 +622,6 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HExpr, Diagnostic> {
         // Native methods on collections and builders.
         let store_ty = ctx.store.get(recv_ty).clone();
-        if store_ty == Type::FileHandle {
-            // The operation manifest carries no parameter names, so
-            // the method surface names them here. The receiver is the
-            // first manifest parameter, and the list skips it.
-            let (op, names) = match name {
-                "read" => (lm_abi::OP_FS_READ, &["max_bytes"][..]),
-                "write" => (lm_abi::OP_FS_WRITE, &["bytes"][..]),
-                "seek" => (lm_abi::OP_FS_SEEK, &["from"][..]),
-                "flush" => (lm_abi::OP_FS_FLUSH, NO_NAMES),
-                "sync" => (lm_abi::OP_FS_SYNC, NO_NAMES),
-                "close" => (lm_abi::OP_FS_CLOSE, NO_NAMES),
-                _ => {
-                    return Err(Diagnostic::new(
-                        "E1026",
-                        format!("the type FileHandle has no method named `{name}`"),
-                        name_span,
-                    ))
-                }
-            };
-            let def = ctx
-                .bundle
-                .op(op)
-                .expect("the standard operation exists")
-                .clone();
-            let params: Vec<TypeId> = def
-                .params
-                .iter()
-                .skip(1)
-                .map(|param| Self::abi_type_id(ctx, *param))
-                .collect();
-            let muts = vec![false; params.len()];
-            let checked = self.check_args_simple(ctx, args, &params, &muts, names, name, span)?;
-            self.charge_op(ctx, op, span)?;
-            let mut all_args = vec![recv_h];
-            all_args.extend(checked);
-            return Ok(HExpr {
-                ty: Self::abi_type_id(ctx, def.reply),
-                mutable: true,
-                kind: HExprKind::Perform { op, args: all_args },
-            });
-        }
         // Each entry states its parameter names beside its parameter
         // types. The names come from the core method tables of
         // specification 24.4 and 24.5, so a label matches the

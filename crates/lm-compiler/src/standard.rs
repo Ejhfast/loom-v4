@@ -17,18 +17,24 @@ const FS_PATH: &str = "std.fs";
 const TERM_PATH: &str = "std.term";
 const TLS_PATH: &str = "std.tls";
 const HTTP_PATH: &str = "std.http";
+const BASE64_PATH: &str = "std.base64";
+const JSON_PATH: &str = "std.json";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
 const TERM_SOURCE: &str = include_str!("../../../std/term.lm");
 const TLS_SOURCE: &str = include_str!("../../../std/tls.lm");
 const HTTP_SOURCE: &str = include_str!("../../../std/http.lm");
+const BASE64_SOURCE: &str = include_str!("../../../std/base64.lm");
+const JSON_SOURCE: &str = include_str!("../../../std/json.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
 static TERM: OnceLock<CompiledModule> = OnceLock::new();
 static TLS: OnceLock<CompiledModule> = OnceLock::new();
 static HTTP: OnceLock<CompiledModule> = OnceLock::new();
+static BASE64: OnceLock<CompiledModule> = OnceLock::new();
+static JSON: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its runnable linked program.
 #[derive(Debug, Clone)]
@@ -54,7 +60,15 @@ impl StandardCatalog {
 
     /// The module paths supplied by this catalog.
     pub fn paths(self) -> &'static [&'static str] {
-        &[IO_PATH, FS_PATH, TERM_PATH, TLS_PATH, HTTP_PATH]
+        &[
+            IO_PATH,
+            FS_PATH,
+            TERM_PATH,
+            TLS_PATH,
+            HTTP_PATH,
+            BASE64_PATH,
+            JSON_PATH,
+        ]
     }
 
     /// Compile and return one bundled module.
@@ -67,6 +81,8 @@ impl StandardCatalog {
             TERM_PATH => Some(term()),
             TLS_PATH => Some(tls()),
             HTTP_PATH => Some(http()),
+            BASE64_PATH => Some(base64()),
+            JSON_PATH => Some(json()),
             _ => None,
         }
     }
@@ -78,6 +94,8 @@ impl StandardCatalog {
         let mut needs_term = false;
         let mut needs_tls = false;
         let mut needs_http = false;
+        let mut needs_base64 = false;
+        let mut needs_json = false;
         for path in paths {
             match *path {
                 IO_PATH => needs_io = true,
@@ -88,11 +106,19 @@ impl StandardCatalog {
                     needs_tls = true;
                     needs_http = true;
                 }
+                BASE64_PATH => needs_base64 = true,
+                JSON_PATH => needs_json = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
         Ok(selected_modules(
-            needs_io, needs_fs, needs_term, needs_tls, needs_http,
+            needs_io,
+            needs_fs,
+            needs_term,
+            needs_tls,
+            needs_http,
+            needs_base64,
+            needs_json,
         ))
     }
 
@@ -150,11 +176,27 @@ fn http() -> &'static CompiledModule {
     HTTP.get_or_init(|| compile_bundled(HTTP_PATH, "std/http.lm", HTTP_SOURCE, &[tls()]))
 }
 
+fn base64() -> &'static CompiledModule {
+    BASE64.get_or_init(|| compile_bundled(BASE64_PATH, "std/base64.lm", BASE64_SOURCE, &[]))
+}
+
+fn json() -> &'static CompiledModule {
+    JSON.get_or_init(|| compile_bundled(JSON_PATH, "std/json.lm", JSON_SOURCE, &[]))
+}
+
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
-    [IO_PATH, FS_PATH, TERM_PATH, HTTP_PATH, TLS_PATH]
-        .into_iter()
-        .find(|module| text == *module || text.starts_with(&format!("{module}.")))
+    [
+        IO_PATH,
+        FS_PATH,
+        TERM_PATH,
+        HTTP_PATH,
+        TLS_PATH,
+        BASE64_PATH,
+        JSON_PATH,
+    ]
+    .into_iter()
+    .find(|module| text == *module || text.starts_with(&format!("{module}.")))
 }
 
 fn selected_modules(
@@ -163,6 +205,8 @@ fn selected_modules(
     needs_term: bool,
     needs_tls: bool,
     needs_http: bool,
+    needs_base64: bool,
+    needs_json: bool,
 ) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
     if needs_io {
@@ -180,6 +224,12 @@ fn selected_modules(
     if needs_http {
         modules.push(http());
     }
+    if needs_base64 {
+        modules.push(base64());
+    }
+    if needs_json {
+        modules.push(json());
+    }
     modules
 }
 
@@ -190,6 +240,8 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
     let mut needs_term = false;
     let mut needs_tls = false;
     let mut needs_http = false;
+    let mut needs_base64 = false;
+    let mut needs_json = false;
     for path in uses {
         match module_for_use(path) {
             Some(IO_PATH) => needs_io = true,
@@ -200,10 +252,20 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
                 needs_tls = true;
                 needs_http = true;
             }
+            Some(BASE64_PATH) => needs_base64 = true,
+            Some(JSON_PATH) => needs_json = true,
             _ => {}
         }
     }
-    selected_modules(needs_io, needs_fs, needs_term, needs_tls, needs_http)
+    selected_modules(
+        needs_io,
+        needs_fs,
+        needs_term,
+        needs_tls,
+        needs_http,
+        needs_base64,
+        needs_json,
+    )
 }
 
 /// Compile one source module and link its requested standard modules.
@@ -305,7 +367,15 @@ mod tests {
         let catalog = StandardCatalog::bundled();
         assert_eq!(
             catalog.paths(),
-            &[IO_PATH, FS_PATH, TERM_PATH, TLS_PATH, HTTP_PATH]
+            &[
+                IO_PATH,
+                FS_PATH,
+                TERM_PATH,
+                TLS_PATH,
+                HTTP_PATH,
+                BASE64_PATH,
+                JSON_PATH,
+            ]
         );
         assert!(modules_for_uses(&[]).is_empty());
         let selected = catalog.select(&[HTTP_PATH]).expect("the module exists");
@@ -358,5 +428,17 @@ mod tests {
     fn http_source_selects_its_dependency_closure() {
         let compiled = compile("use std.http.Http\nHttp().default_limits().max_headers\n");
         assert_eq!(compiled.standard_modules, &[TLS_PATH, HTTP_PATH]);
+    }
+
+    #[test]
+    fn base64_source_selects_only_base64() {
+        let compiled = compile("use std.base64.encode\nencode(b\"ready\")\n");
+        assert_eq!(compiled.standard_modules, &[BASE64_PATH]);
+    }
+
+    #[test]
+    fn json_source_selects_only_json() {
+        let compiled = compile("use std.json.parse\nparse(\"null\")\n");
+        assert_eq!(compiled.standard_modules, &[JSON_PATH]);
     }
 }

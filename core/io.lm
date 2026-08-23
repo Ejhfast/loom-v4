@@ -1,12 +1,12 @@
 # Core: byte stream helpers.
 
 interface ByteReader[effect e]
-  type Error
+  type Error: Error
   def read(self, count: Int): Result[Bytes, Self.Error] with e
 end
 
 interface ByteWriter[effect e]
-  type Error
+  type Error: Error
   def write(self, bytes: Bytes): Result[Int, Self.Error] with e
 end
 

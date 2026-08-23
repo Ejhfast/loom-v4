@@ -1,0 +1,27 @@
+# Decode protocol bytes and carry them through standard text codecs.
+
+use std.base64.decode
+use std.base64.encode
+use std.json.Json
+use std.json.parse
+use std.json.stringify
+
+payload = Bytes.from_hex("00ff10").expect("the hexadecimal text is valid")
+encoded = encode(payload)
+
+fields = Map[String, Json]()
+fields.put("payload", Json.Text(encoded))
+fields.put("valid", Json.Boolean(true))
+document = stringify(Json.Object(fields)).expect("the JSON values are finite")
+
+parsed = parse(document).expect("the generated JSON is valid")
+round_trip = case parsed
+in Json.Object(values)
+  case values.get("payload")
+  in Some(Json.Text(text)) then decode(text).expect("the base64 text is valid")
+  in _ then Bytes()
+  end
+in _ then Bytes()
+end
+
+"base64=#{encoded} bytes=#{round_trip.hex()} json=#{document}"

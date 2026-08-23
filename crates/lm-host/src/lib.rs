@@ -442,7 +442,7 @@ fn validate_exec_spec(spec: &HostExecSpec) -> Option<HostValue> {
         }
         total = total.saturating_add(directory.len());
     }
-    if let HostChildEnv::Exact(values) = &spec.environment {
+    if let HostChildEnv::Exact(values) | HostChildEnv::Overlay(values) = &spec.environment {
         if values.len() > MAX_EXEC_ITEMS {
             return Some(error_value(
                 CoreCtor::ExecErrorLimitExceeded,

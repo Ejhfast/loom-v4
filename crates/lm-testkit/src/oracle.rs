@@ -433,6 +433,7 @@ impl<'m> Oracle<'m> {
                 NativeRepr::Text
                 | NativeRepr::Substring
                 | NativeRepr::Char
+                | NativeRepr::FileHandle
                 | NativeRepr::TcpResource
                 | NativeRepr::TcpStream
                 | NativeRepr::TcpListener

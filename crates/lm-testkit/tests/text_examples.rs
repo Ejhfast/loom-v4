@@ -37,4 +37,8 @@ fn the_text_examples_run() {
         run_example("examples/11-text-and-bytes/06-binary-literals.lm"),
         "Done(\"frame {v1}: kind=144 raw=89504e470d0a1a0a masked=76504e470d0a1a0a ratio=1.50\")"
     );
+    assert_eq!(
+        run_example("examples/11-text-and-bytes/07-standard-codecs.lm"),
+        "Done(\"base64=AP8Q bytes=00ff10 json={\\\"payload\\\":\\\"AP8Q\\\",\\\"valid\\\":true}\")"
+    );
 }

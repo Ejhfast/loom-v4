@@ -177,6 +177,7 @@ pub enum NativeRepr {
     List,
     Map,
     Tuple(u8),
+    FileHandle,
     TcpResource,
     TcpStream,
     TcpListener,

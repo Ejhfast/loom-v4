@@ -73,7 +73,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 140] = [
+pub const PRELUDE_TYPES: [&str; 141] = [
     "Option",
     "Result",
     "Ordering",
@@ -107,6 +107,7 @@ pub const PRELUDE_TYPES: [&str; 140] = [
     "RestoreError",
     "ByteReader",
     "ByteWriter",
+    "HexError",
     "StdStream",
     "TtySize",
     "TtyError",
@@ -3344,6 +3345,7 @@ fn register_type_names(
                 "Bool" => Some(lm_types::BOOL),
                 "String" => Some(lm_types::STRING),
                 "Bytes" => Some(lm_types::BYTES),
+                "FileHandle" => Some(lm_types::FILE_HANDLE),
                 _ => None,
             };
             if let Some(ty) = primitive {
@@ -4237,6 +4239,7 @@ fn resolve_class(
         (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
         (true, "List") => Some(NativeRepr::List),
         (true, "Map") => Some(NativeRepr::Map),
+        (true, "FileHandle") => Some(NativeRepr::FileHandle),
         (true, "TcpResource") => Some(NativeRepr::TcpResource),
         (true, "TcpStream") => Some(NativeRepr::TcpStream),
         (true, "TcpListener") => Some(NativeRepr::TcpListener),
@@ -4304,6 +4307,7 @@ fn resolve_class(
         Some(NativeRepr::Bool) => lm_types::BOOL,
         Some(NativeRepr::String) => lm_types::STRING,
         Some(NativeRepr::Bytes) => lm_types::BYTES,
+        Some(NativeRepr::FileHandle) => lm_types::FILE_HANDLE,
         Some(NativeRepr::List) => {
             let element = ctx.store.intern(Type::Var(0));
             ctx.store.intern(Type::List(element))

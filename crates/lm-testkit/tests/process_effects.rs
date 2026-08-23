@@ -1,7 +1,10 @@
 //! Anonymous pipe and operating-system child effects.
 
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_vm::{
+    load_bytes, CompletionKey, Host, HostArg, HostChildEnv, HostCompletion, HostStart,
+    RecordingHost, VmConfig, World,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -143,6 +146,83 @@ go()
             host.set_child_program("emit", 7, b"hello".to_vec(), Vec::new());
         }),
         "Done((\"closed\", \"timer:68656c6c6f\", 7))"
+    );
+}
+
+#[test]
+fn a_child_environment_overlay_keeps_inherited_values() {
+    let source = r#"
+def go(): String with Exec
+  values = Map[String, String]()
+  values.put("PATH", "/child/bin")
+  values.put("MODE", "release")
+  directory: Option[String] = None
+  spec = ExecSpec(
+    "inspect",
+    List[String](),
+    directory,
+    ChildEnv.Overlay(values),
+    ChildInput.Null,
+    ChildOutput.Null,
+    ChildOutput.Null
+  )
+  child = Exec().spawn(spec).expect("the child starts")
+  child.close().expect("the child closes")
+  "started"
+end
+go()
+"#;
+
+    struct EnvironmentHost {
+        inner: RecordingHost,
+        seen: Rc<RefCell<Option<HostChildEnv>>>,
+    }
+
+    impl Host for EnvironmentHost {
+        fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+            if op == lm_abi::OP_EXEC_SPAWN {
+                let [HostArg::ExecSpec(spec)] = args.as_slice() else {
+                    return HostStart::Failed("Exec.Spawn needs one child specification".into());
+                };
+                *self.seen.borrow_mut() = Some(spec.environment.clone());
+            }
+            self.inner.start(key, op, args)
+        }
+
+        fn poll(&mut self) -> Option<HostCompletion> {
+            self.inner.poll()
+        }
+
+        fn wait(&mut self) -> Option<HostCompletion> {
+            self.inner.wait()
+        }
+
+        fn close_child(&mut self, token: u64) -> bool {
+            self.inner.close_child(token)
+        }
+    }
+
+    let bytes = compile_to_bytes("child-environment-overlay.lm", source)
+        .expect("the overlay program compiles");
+    let loaded = load_bytes(&bytes).expect("the overlay program loads");
+    let seen = Rc::new(RefCell::new(None));
+    let mut inner = RecordingHost::new(1);
+    inner.set_child_program("inspect", 0, Vec::new(), Vec::new());
+    let host = EnvironmentHost {
+        inner,
+        seen: Rc::clone(&seen),
+    };
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    world.allow("Exec").expect("the Exec grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+
+    assert_eq!(world.show_outcome(&outcome), "Done(\"started\")");
+    assert_eq!(
+        *seen.borrow(),
+        Some(HostChildEnv::Overlay(vec![
+            ("PATH".into(), "/child/bin".into()),
+            ("MODE".into(), "release".into()),
+        ]))
     );
 }
 

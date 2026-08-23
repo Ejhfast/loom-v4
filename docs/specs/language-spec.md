@@ -28,7 +28,7 @@ A conforming distribution keeps five semantic layers distinct.
 1. **Language primitives.** Syntax and structural types that cannot be written as ordinary declarations: unit, `Never`, `Any`, scalar machine types, tuples, function types, operation types, local mutation capability, and the bytecode/runtime machinery required to execute them.
 2. **Core image.** A pinned artifact contains ordinary source and native class declarations. It defines `Option`, `Result`, `Ordering`, `Range`, VM events, and errors. Tuple carrier classes expose methods on primitive tuples. These definitions are not parser keywords. Stable core role slots identify them (5.2).
 3. **Prelude.** A deliberately small set of names implicitly introduced during name resolution. The prelude re-exports selected primitive, native-core, and core-image names; it does not define their identity and does not automatically import general algorithms or host wrappers.
-4. **Standard library.** Explicitly linked ordinary modules for collections algorithms, text, formatting, paths, files, time, random, networking, JSON, VM helpers, proc supervision, compilation, reflection, and testing. Standard-library code can call pure intrinsics or explicit host operations but cannot bypass rows or policy.
+4. **Standard library.** Explicitly linked ordinary modules provide collections, text, files, networking, codecs, VM helpers, compilation, reflection, and testing. Standard code cannot bypass effect rows or policy.
 5. **Host operations.** Fixed members of `sys.*`. They may suspend, are policy-gated, and their exact identities appear in rows.
 
 This separation breaks the bootstrap cycle cleanly. The stage-0 compiler knows only primitive types and the declarative native-class manifest. It compiles the core image first. Host-operation signatures are then resolved against the core role slots of the artifact, so an operation may return `Result[Option[String], IoError]` without making `Option` or `Result` compiler built-ins.
@@ -3076,6 +3076,14 @@ Live pipe ends and child handles block snapshot creation.
 
 The host invokes no shell unless a library names one explicitly.
 
+`ChildEnv.Inherit` passes the host environment without changes.
+
+`ChildEnv.Exact` clears inherited values before it adds the supplied map.
+
+`ChildEnv.Overlay` inherits values before it adds or replaces supplied entries.
+
+An overlay cannot remove an inherited value.
+
 The host-effects sidecar defines child inputs, ownership, limits, and cleanup.
 
 ### 23.4 Clock and randomness
@@ -3169,6 +3177,18 @@ Udp.Close         (UdpSocket) -> Result[(), NetError]
 Live TCP, TLS, and UDP resources block snapshot creation.
 
 `TcpRead.Data` carries nonempty bytes. `TcpRead.End` reports orderly peer closure.
+
+`TcpStream.read` returns `Result[Bytes,NetError]`.
+
+`TlsStream.read` returns `Result[Bytes,TlsError]`.
+
+Empty bytes report orderly end of input for a positive read count.
+
+These methods implement `ByteReader` with their exact read rows.
+
+`FileHandle`, `PipeWriter`, `TcpStream`, and `TlsStream` implement `ByteWriter`.
+
+`FileHandle` and `PipeReader` also implement `ByteReader`.
 
 A submitted TLS handshake consumes its TCP stream on every result.
 
@@ -3516,9 +3536,9 @@ FileKind, FileInfo, DirEntry, RenameMode
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
-Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, ParseFloatError, FloatToIntError, Bytes
+Text, String, Substring, Char, Utf8Error, IndexError, HexError, ParseIntError, ParseFloatError, FloatToIntError, Bytes
 StringBuilder, ByteBuffer
-Display, PartialEq, Hashable, Comparable, Copyable, Error
+Display, PartialEq, Hashable, Comparable, Copyable, Error, ByteReader, ByteWriter
 identity, display, hash_of, hash_combine, assert, assert_message
 ```
 
@@ -3834,7 +3854,7 @@ __ge__(other: Char) -> Bool
 
 `Text.at` allocates no Char object. Its successful path allocates only the `Option.Some` result object.
 
-Core defines `Utf8Error`, `IndexError`, `ParseIntError`, and `ParseFloatError`.
+Core defines `Utf8Error`, `IndexError`, `HexError`, `ParseIntError`, and `ParseFloatError`.
 
 The core Bytes surface follows.
 
@@ -3849,6 +3869,7 @@ concat(other: Bytes) -> Bytes
 starts_with(prefix: Bytes) -> Bool
 find(needle: Bytes) -> Option[Int]
 hex() -> String
+Bytes.from_hex(text: Text) -> Result[Bytes,HexError]
 utf8() -> Result[String,Utf8Error]
 utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
@@ -3871,6 +3892,10 @@ __ge__(other: Bytes) -> Bool
 `compact` copies the visible bytes into a new allocation. Use it to release a large retained allocation.
 
 `find` returns a byte offset. `hex` uses lowercase hexadecimal text.
+
+`Bytes.from_hex` accepts uppercase and lowercase digits.
+
+It returns `HexError.OddLength` or `HexError.InvalidDigit(index)` for invalid text.
 
 `utf8` reports invalid encoding through its result. It returns a bounded String.
 
@@ -4075,9 +4100,26 @@ Proxy policy, redirects, cookies, decompression, and connection pools remain sep
 
 `Args.Get` returns command-line arguments through the `sys.args()` surface. `Env.Get` reads one environment value. `Fs.CurrentDir` reads the current directory.
 
-### 24.11 JSON
+### 24.11 Base64
 
-A small `std/json` module is part of the distribution because it makes file/network examples real without adding runtime machinery:
+`std/base64` provides the standard padded RFC 4648 alphabet.
+
+```lm
+encode(bytes: Bytes) -> String
+decode(text: Text) -> Result[Bytes,Base64Error]
+```
+
+`Base64Error` contains `InvalidLength`, `InvalidByte(index)`, and `InvalidPadding`.
+
+The decoder rejects whitespace, missing padding, invalid bytes, and noncanonical unused bits.
+
+The module uses ordinary Loom code over `Bytes` and integer bit operators.
+
+### 24.12 JSON
+
+The distribution includes a small `std/json` module.
+
+It makes file and network examples practical without new runtime machinery.
 
 ```lm
 enum Json
@@ -4090,9 +4132,29 @@ enum Json
 end
 ```
 
-`parse` returns `Result[Json,JsonError]`; `stringify` is pure and deterministic. Parsing is iterative, depth/byte limited, and preserves object insertion order. JSON is standard-library code over `String`, `List`, and `Map`, not a VM intrinsic.
+`JsonError` contains `Invalid(offset,message)`, `LimitExceeded(message)`, and `NonFiniteNumber`.
 
-### 24.12 Typed VM utilities
+`parse` returns `Result[Json,JsonError]`.
+
+`stringify` is pure and deterministic.
+
+Parsing checks byte, item, and depth limits before recursive work.
+
+Input contains at most 16,777,216 bytes.
+
+Nesting depth is at most 128.
+
+One value contains at most 1,000,000 parsed items.
+
+Objects preserve insertion order.
+
+A duplicate object key replaces its earlier value.
+
+Stringification rejects non-finite numbers.
+
+JSON uses ordinary Loom code over `String`, `List`, and `Map`.
+
+### 24.13 Typed VM utilities
 
 The standard library does not reintroduce an `Answer(Any)` decision enum or a variadic helper that would require type packs. Exact-operation elimination is already ordinary and small enough to package in user code:
 
@@ -4115,7 +4177,7 @@ end
 
 A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Call` pattern rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, and bounded request logging through `ValueView`.
 
-### 24.13 Procs
+### 24.14 Procs
 
 `std/proc` supplies explicit supervision, bounded send loops, close/drain, cancellation-message conventions, and result aggregation. It does not add shared memory or hide proc effects. `Handle[M,R]` preserves message and result types through `send`, `done`, `pause`, `resume`, transfer, and snapshot restore.
 

@@ -1,6 +1,6 @@
 # Pre-release Host Effects
 
-Status: accepted plan. Stages 0 through 4 complete.
+Status: complete. Stages 0 through 8 and the integration follow-up are complete.
 
 This sidecar replaces the completed pre-release foundation plan.
 
@@ -660,6 +660,40 @@ The old operation names receive no compatibility aliases.
 
 Pre-release artifacts and snapshots can break across this ABI change.
 
+### 8.4 Byte stream interfaces
+
+Core defines effect-polymorphic `ByteReader` and `ByteWriter` interfaces.
+
+```lm
+interface ByteReader[effect e]
+  type Error: Error
+  def read(self, count: Int): Result[Bytes, Self.Error] with e
+end
+
+interface ByteWriter[effect e]
+  type Error: Error
+  def write(self, bytes: Bytes): Result[Int, Self.Error] with e
+end
+```
+
+These resource classes implement the interfaces with their exact rows:
+
+| Resource | Reader row | Writer row |
+|---|---|---|
+| `FileHandle` | `Fs.Read` | `Fs.Write` |
+| `PipeReader` | `Pipe.Read` | none |
+| `PipeWriter` | none | `Pipe.Write` |
+| `TcpStream` | `Tcp.Read` | `Tcp.Write` |
+| `TlsStream` | `Tls.Read` | `Tls.Write` |
+
+The public TCP and TLS read methods return `Bytes`.
+
+Empty bytes report orderly end of input for a positive read count.
+
+The exact TCP and TLS operations retain `TcpRead` for driver and wait protocols.
+
+`std/io.write_all_to` accepts every conforming writer.
+
 ## 9. Pipes and operating-system children
 
 ### 9.1 Effect split
@@ -715,7 +749,7 @@ The core defines these boundary values:
 ```text
 ChildInput  = Inherit | Null | Pipe(PipeReader)
 ChildOutput = Inherit | Null | Pipe(PipeWriter)
-ChildEnv    = Inherit | Exact(Map[String, String])
+ChildEnv    = Inherit | Exact(Map[String, String]) | Overlay(Map[String, String])
 
 ExecSpec {
   program: String,
@@ -732,11 +766,19 @@ Separate input and output types reject a pipe direction error statically.
 
 The exact environment contains no inherited value unless the caller supplies it.
 
+The overlay environment inherits host values.
+
+Overlay entries add or replace values with the same name.
+
+An overlay cannot remove an inherited value.
+
+Use an exact environment when inherited values must be absent.
+
 Program lookup uses the selected environment and platform rules.
 
 One child specification contains at most 4,096 arguments.
 
-It contains at most 4,096 exact environment entries.
+It contains at most 4,096 explicit environment entries.
 
 One text item contains at most 65,536 UTF-8 bytes.
 
@@ -1146,3 +1188,17 @@ The first release defers these features:
 These additions can use new operations or standard Loom modules later.
 
 They do not require another resource or policy model.
+
+## 18. Integration follow-up
+
+The checkpoint-on-termination example uses `write_all_to` through `FileHandle` conformance.
+
+It flushes and syncs the file before it closes the handle.
+
+`Bytes.from_hex` decodes hexadecimal text with `HexError` results.
+
+`std/base64` provides strict RFC 4648 encoding and decoding.
+
+`std/json` provides bounded JSON parsing and deterministic stringification.
+
+These standard modules link only when source code imports them.

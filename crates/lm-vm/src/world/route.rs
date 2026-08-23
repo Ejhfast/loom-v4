@@ -1021,6 +1021,23 @@ impl World {
                 }
                 HostChildEnv::Exact(values)
             }
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_env_overlay && fields.len() == 1 =>
+            {
+                let Some(Object::Map { entries, .. }) =
+                    fields[0].as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let mut values = Vec::new();
+                values
+                    .try_reserve(entries.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                for entry in entries.iter().filter(|entry| entry.is_live()) {
+                    values.push((text(entry.key)?, text(entry.value)?));
+                }
+                HostChildEnv::Overlay(values)
+            }
             _ => return Err(FaultCode::TypeMismatch),
         };
         let input = match input.as_obj().map(|reference| heap.get(reference)) {

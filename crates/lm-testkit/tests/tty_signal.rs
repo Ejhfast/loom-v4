@@ -470,6 +470,18 @@ fn the_termination_example_writes_an_admitted_snapshot() {
         lm_vm::snapshot::LoadLimits::default(),
     )
     .expect("the written snapshot admits");
-    assert!(!host.borrow().signal_stream_active());
+    let recorded = host.borrow();
+    let sync = recorded
+        .operations
+        .iter()
+        .position(|operation| *operation == lm_abi::OP_FS_SYNC)
+        .expect("the example syncs the snapshot file");
+    let close = recorded
+        .operations
+        .iter()
+        .position(|operation| *operation == lm_abi::OP_FS_CLOSE)
+        .expect("the example closes the snapshot file");
+    assert!(sync < close);
+    assert!(!recorded.signal_stream_active());
     assert_eq!(world.world_resource_count(), 0);
 }

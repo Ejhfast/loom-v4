@@ -193,6 +193,8 @@ pub(crate) const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 248;
 pub(crate) const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
 pub(crate) const ROLE_EXEC_ERROR_FAILED: usize = 250;
 pub(crate) const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
+pub(crate) const ROLE_CHILD_ENV_OVERLAY: usize = 255;
+pub(crate) const ROLE_FILE_HANDLE: usize = 256;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -512,7 +514,11 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
     (
         ROLE_CHILD_ENV,
         0,
-        &[ROLE_CHILD_ENV_INHERIT, ROLE_CHILD_ENV_EXACT],
+        &[
+            ROLE_CHILD_ENV_INHERIT,
+            ROLE_CHILD_ENV_EXACT,
+            ROLE_CHILD_ENV_OVERLAY,
+        ],
         "ChildEnv",
     ),
     (
@@ -538,7 +544,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 140] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 141] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -673,6 +679,7 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 140] = [
     (ROLE_CHILD_OUTPUT_PIPE, &[FieldShape::PipeWriter]),
     (ROLE_CHILD_ENV_INHERIT, &[]),
     (ROLE_CHILD_ENV_EXACT, &[FieldShape::MapStrStr]),
+    (ROLE_CHILD_ENV_OVERLAY, &[FieldShape::MapStrStr]),
     (ROLE_CHILD_STATUS_EXITED, &[FieldShape::Int]),
     (ROLE_CHILD_STATUS_TERMINATED, &[]),
     (ROLE_EXEC_ERROR_CLOSED, &[]),
@@ -1014,6 +1021,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_FLOAT, "Float"),
         (lm_bytecode::corepin::ROLE_BOOL, "Bool"),
         (lm_bytecode::corepin::ROLE_BYTES, "Bytes"),
+        (ROLE_FILE_HANDLE, "FileHandle"),
         (lm_bytecode::corepin::ROLE_STRING_BUILDER, "StringBuilder"),
         (lm_bytecode::corepin::ROLE_BYTE_BUFFER, "ByteBuffer"),
         (lm_bytecode::corepin::ROLE_CHAR, "Char"),

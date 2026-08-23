@@ -573,6 +573,9 @@ pub(crate) fn step(
                 BcType::Bytes => ctx.core.bytes.ok_or_else(|| {
                     fail("a Bytes method call needs the Bytes core role".to_string())
                 })?,
+                BcType::FileHandle => ctx.core.file_handle.ok_or_else(|| {
+                    fail("a FileHandle method call needs the FileHandle core role".to_string())
+                })?,
                 _ => {
                     return Err(fail(format!(
                         "virtual call receiver type {recv_ty} needs the generic form \

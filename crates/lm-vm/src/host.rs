@@ -176,6 +176,7 @@ pub enum HostChildOutput {
 pub enum HostChildEnv {
     Inherit,
     Exact(Vec<(SharedText, SharedText)>),
+    Overlay(Vec<(SharedText, SharedText)>),
 }
 
 /// One complete operating-system child specification.
@@ -1319,7 +1320,7 @@ impl RecordingHost {
             }
             total = total.saturating_add(directory.len());
         }
-        if let HostChildEnv::Exact(values) = &spec.environment {
+        if let HostChildEnv::Exact(values) | HostChildEnv::Overlay(values) = &spec.environment {
             if values.len() > MAX_EXEC_ITEMS {
                 return Some(exec_error(
                     CoreCtor::ExecErrorLimitExceeded,

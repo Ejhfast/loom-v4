@@ -3034,6 +3034,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         class.native_repr,
         Some(
             NativeRepr::TcpResource
+                | NativeRepr::FileHandle
                 | NativeRepr::TcpStream
                 | NativeRepr::TcpListener
                 | NativeRepr::TlsStream

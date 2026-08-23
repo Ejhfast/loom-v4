@@ -29,9 +29,15 @@ enum TlsError implements Error
   end
 end
 
-final class TlsStream
-  def read(self, max_bytes: Int): Result[TcpRead, TlsError] with Tls.Read
-    sys.tls.read(self, max_bytes)
+final class TlsStream implements ByteReader with Tls.Read, ByteWriter with Tls.Write
+  type Error = TlsError
+
+  def read(self, max_bytes: Int): Result[Bytes, TlsError] with Tls.Read
+    case sys.tls.read(self, max_bytes)
+    in Ok(TcpRead.Data(bytes)) then Ok(bytes)
+    in Ok(TcpRead.End)         then Ok(Bytes())
+    in Err(error)              then Err(error)
+    end
   end
 
   def write(self, bytes: Bytes): Result[Int, TlsError] with Tls.Write
@@ -94,10 +100,11 @@ final class TlsStream
         65535
       end
       case self.read(chunk)
-      in Ok(TcpRead.Data(bytes))
+      in Ok(bytes)
+        if bytes.is_empty()
+          return Err(TlsError.Protocol("the TLS stream ended before the read completed"))
+        end
         buffer.extend(bytes)
-      in Ok(TcpRead.End)
-        return Err(TlsError.Protocol("the TLS stream ended before the read completed"))
       in Err(error)
         return Err(error)
       end
@@ -118,13 +125,14 @@ final class TlsStream
         65535
       end
       case self.read(count)
-      in Ok(TcpRead.Data(bytes))
+      in Ok(bytes)
+        if bytes.is_empty()
+          return Ok(buffer.finish())
+        end
         if bytes.len() > remaining
           return Err(TlsError.LimitExceeded("the TLS stream passed the byte limit"))
         end
         buffer.extend(bytes)
-      in Ok(TcpRead.End)
-        return Ok(buffer.finish())
       in Err(error)
         return Err(error)
       end

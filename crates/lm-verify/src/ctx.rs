@@ -135,6 +135,7 @@ impl<'m> Ctx<'m> {
             self.core.tcp_stream,
             self.core.tcp_listener,
             self.core.tls_stream,
+            self.core.file_handle,
             self.core.artifact,
             self.core.verified_module,
             self.core.slot_spec,
@@ -168,6 +169,9 @@ impl<'m> Ctx<'m> {
         }
         if self.core.bytes == Some(class) {
             return Some(self.intern(BcType::Bytes));
+        }
+        if self.core.file_handle == Some(class) {
+            return Some(self.intern(BcType::FileHandle));
         }
         let entry = self.module.classes.get(class as usize)?;
         if self.core.list == Some(class) && entry.type_params == 1 {
@@ -303,12 +307,15 @@ impl<'m> Ctx<'m> {
         sub.iter().all(|elem| match elem {
             BcRow::Var(v) => sup.contains(&BcRow::Var(*v)),
             BcRow::Op(n) => {
-                let name = &self.module.strings[*n as usize];
+                let Some(name) = self.module.strings.get(*n as usize) else {
+                    return false;
+                };
                 sup.iter().any(|s| match s {
-                    BcRow::Op(m) => {
-                        let sup_name = &self.module.strings[*m as usize];
-                        self.bundle.row_name_included(name, sup_name)
-                    }
+                    BcRow::Op(m) => self
+                        .module
+                        .strings
+                        .get(*m as usize)
+                        .is_some_and(|sup_name| self.bundle.row_name_included(name, sup_name)),
                     BcRow::Var(_) => false,
                 })
             }
@@ -1008,6 +1015,7 @@ impl<'m> Ctx<'m> {
             BcType::Bool => self.core.boolean.map(|class| (class, vec![])),
             BcType::Str => self.core.string.map(|class| (class, vec![])),
             BcType::Bytes => self.core.bytes.map(|class| (class, vec![])),
+            BcType::FileHandle => self.core.file_handle.map(|class| (class, vec![])),
             BcType::List(element) => self.core.list.map(|class| (class, vec![element])),
             BcType::Map(key, value) => self.core.map.map(|class| (class, vec![key, value])),
             BcType::Tuple(elements) => self
@@ -1091,10 +1099,11 @@ impl<'m> Ctx<'m> {
     /// row holds the exact name or one containing effect set.
     pub(crate) fn row_has_name(&self, row: &[BcRow], name: &str) -> bool {
         row.iter().any(|elem| match elem {
-            BcRow::Op(idx) => {
-                let text = &self.module.strings[*idx as usize];
-                self.bundle.row_name_included(name, text)
-            }
+            BcRow::Op(idx) => self
+                .module
+                .strings
+                .get(*idx as usize)
+                .is_some_and(|text| self.bundle.row_name_included(name, text)),
             BcRow::Var(_) => false,
         })
     }

@@ -1,5 +1,20 @@
 # Core: immutable bytes and mutable builders.
 
+enum HexError implements Error
+  OddLength
+  InvalidDigit(index: Int)
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in OddLength
+      builder.append("hex text needs an even byte length")
+    in InvalidDigit(index)
+      builder.append("hex text has an invalid digit at byte ")
+      builder.append_int(index)
+    end
+  end
+end
+
 final class Bytes implements Hashable, Comparable
   def len(self): Int
     intrinsic("bytes.len", self)
@@ -141,6 +156,48 @@ final class Bytes implements Hashable, Comparable
   def __ge__(self, other: Bytes): Bool
     intrinsic("bytes.ge", self, other)
   end
+end
+
+def _bytes_from_hex(text: Text): Result[Bytes, HexError]
+  source = text.bytes()
+  if source.len() % 2 != 0
+    return Err(HexError.OddLength)
+  end
+  output = ByteBuffer()
+  index = 0
+  while index < source.len()
+    high_byte = source.at(index)
+    high = if high_byte >= 48 and high_byte <= 57
+      high_byte - 48
+    elsif high_byte >= 65 and high_byte <= 70
+      high_byte - 55
+    elsif high_byte >= 97 and high_byte <= 102
+      high_byte - 87
+    else
+      -1
+    end
+    if high < 0
+      return Err(HexError.InvalidDigit(index))
+    end
+
+    low_byte = source.at(index + 1)
+    low = if low_byte >= 48 and low_byte <= 57
+      low_byte - 48
+    elsif low_byte >= 65 and low_byte <= 70
+      low_byte - 55
+    elsif low_byte >= 97 and low_byte <= 102
+      low_byte - 87
+    else
+      -1
+    end
+    if low < 0
+      return Err(HexError.InvalidDigit(index + 1))
+    end
+
+    output.append(high * 16 + low)
+    index = index + 2
+  end
+  Ok(output.finish())
 end
 
 final class StringBuilder implements Copyable

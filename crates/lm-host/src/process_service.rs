@@ -598,14 +598,7 @@ fn spawn_child(state: &mut ServiceState, child: u64, spec: &HostExecSpec) -> Hos
     if let Some(directory) = &spec.directory {
         command.current_dir(directory.as_str());
     }
-    if let HostChildEnv::Exact(values) = &spec.environment {
-        command.env_clear();
-        command.envs(
-            values
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-        );
-    }
+    apply_child_environment(&mut command, &spec.environment);
     let stdin = match child_input(state, spec.input) {
         Ok(value) => value,
         Err(error) => return child_pipe_error(error),
@@ -632,6 +625,27 @@ fn spawn_child(state: &mut ServiceState, child: u64, spec: &HostExecSpec) -> Hos
             exec_ok(HostValue::Child(child))
         }
         Err(error) => exec_io_error(error, "child spawn"),
+    }
+}
+
+fn apply_child_environment(command: &mut Command, environment: &HostChildEnv) {
+    match environment {
+        HostChildEnv::Inherit => {}
+        HostChildEnv::Exact(values) => {
+            command.env_clear();
+            command.envs(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            );
+        }
+        HostChildEnv::Overlay(values) => {
+            command.envs(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            );
+        }
     }
 }
 
@@ -833,4 +847,40 @@ fn exec_io_error(error: std::io::Error, action: &str) -> HostValue {
 fn release_pending(pending: &AtomicUsize) {
     let previous = pending.fetch_sub(1, Ordering::Relaxed);
     debug_assert!(previous > 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_replaces_one_value_and_preserves_the_parent_path() {
+        let path = std::env::var("PATH").expect("the test process has PATH");
+        let mut command = Command::new(std::env::current_exe().expect("the test path exists"));
+        command
+            .arg("--exact")
+            .arg("process_service::tests::child_environment_probe");
+        apply_child_environment(
+            &mut command,
+            &HostChildEnv::Overlay(vec![
+                ("LOOM_OVERLAY_TEST".into(), "changed".into()),
+                ("LOOM_PARENT_PATH".into(), path.into()),
+            ]),
+        );
+        let output = command.output().expect("the child runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn child_environment_probe() {
+        let Ok(value) = std::env::var("LOOM_OVERLAY_TEST") else {
+            return;
+        };
+        assert_eq!(value, "changed");
+        assert_eq!(std::env::var("PATH"), std::env::var("LOOM_PARENT_PATH"));
+    }
 }

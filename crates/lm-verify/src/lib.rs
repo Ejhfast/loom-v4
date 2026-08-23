@@ -256,7 +256,8 @@ use tables::verify_tables;
 /// Version 33 verifies ordered and unordered hash mixing.
 /// Version 34 verifies Float and bitwise instructions.
 /// Version 35 verifies text padding and Float text conversions.
-pub const VERIFIER_VERSION: u32 = 35;
+/// Version 36 verifies stream roles and child environment overlays.
+pub const VERIFIER_VERSION: u32 = 36;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1015,6 +1016,35 @@ mod tests {
         m.funcs[0].row = vec![BcRow::Op(0), BcRow::Op(1)]; // Io before Fs
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("canonical"), "{e}");
+    }
+
+    #[test]
+    fn rejects_an_invalid_override_row_without_a_panic() {
+        let mut module = class_module(vec![vec![ConstInt(0), Return]]);
+        module.types.push(BcType::Class(1));
+        module.classes.push(BcClass {
+            name: "Child".to_string(),
+            parent_args: Vec::new(),
+            key: "Child".to_string(),
+            is_final: false,
+            is_frozen: false,
+            parent: 0,
+            type_params: 0,
+            kind: BcClassKind::Normal,
+            fields: vec![("value".to_string(), TY_INT)],
+            methods: vec![(0, 2)],
+        });
+        let mut method = plain_func(
+            "bump",
+            vec![5],
+            TY_INT,
+            vec![vec![LoadLocal(0), LoadField(0), Return]],
+        );
+        method.row = vec![BcRow::Op(u32::MAX)];
+        module.funcs.push(method);
+
+        let error = verify_module(&module).expect_err("the invalid row must reject");
+        assert!(error.message.contains("effect row"), "{error}");
     }
 
     #[test]

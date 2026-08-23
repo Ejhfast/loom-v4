@@ -92,3 +92,31 @@ enum RenameMode
   NoReplace
   Replace
 end
+
+final class FileHandle implements ByteReader with Fs.Read, ByteWriter with Fs.Write
+  type Error = FsError
+
+  def read(self, max_bytes: Int): Result[Bytes, FsError] with Fs.Read
+    sys.fs.read(self, max_bytes)
+  end
+
+  def write(self, bytes: Bytes): Result[Int, FsError] with Fs.Write
+    sys.fs.write(self, bytes)
+  end
+
+  def seek(self, from: SeekFrom): Result[Int, FsError] with Fs.Seek
+    sys.fs.seek(self, from)
+  end
+
+  def flush(self): Result[(), FsError] with Fs.Flush
+    sys.fs.flush(self)
+  end
+
+  def sync(self): Result[(), FsError] with Fs.Sync
+    sys.fs.sync(self)
+  end
+
+  def close(self): Result[(), FsError] with Fs.Close
+    sys.fs.close(self)
+  end
+end

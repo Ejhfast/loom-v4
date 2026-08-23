@@ -123,9 +123,15 @@ class TcpResource
   end
 end
 
-final class TcpStream < TcpResource
-  def read(self, max_bytes: Int): Result[TcpRead, NetError] with Tcp.Read
-    sys.tcp.read(self, max_bytes)
+final class TcpStream < TcpResource implements ByteReader with Tcp.Read, ByteWriter with Tcp.Write
+  type Error = NetError
+
+  def read(self, max_bytes: Int): Result[Bytes, NetError] with Tcp.Read
+    case sys.tcp.read(self, max_bytes)
+    in Ok(TcpRead.Data(bytes)) then Ok(bytes)
+    in Ok(TcpRead.End)         then Ok(Bytes())
+    in Err(error)              then Err(error)
+    end
   end
 
   def write(self, bytes: Bytes): Result[Int, NetError] with Tcp.Write
@@ -181,10 +187,11 @@ final class TcpStream < TcpResource
         65535
       end
       case self.read(chunk)
-      in Ok(TcpRead.Data(bytes))
+      in Ok(bytes)
+        if bytes.is_empty()
+          return Err(NetError.Unavailable("the stream ended before the read completed"))
+        end
         buffer.extend(bytes)
-      in Ok(TcpRead.End)
-        return Err(NetError.Unavailable("the stream ended before the read completed"))
       in Err(error)
         return Err(error)
       end
@@ -205,13 +212,14 @@ final class TcpStream < TcpResource
         65535
       end
       case self.read(chunk)
-      in Ok(TcpRead.Data(bytes))
+      in Ok(bytes)
+        if bytes.is_empty()
+          return Ok(buffer.finish())
+        end
         if bytes.len() > remaining
           return Err(NetError.LimitExceeded("the stream passed the byte limit"))
         end
         buffer.extend(bytes)
-      in Ok(TcpRead.End)
-        return Ok(buffer.finish())
       in Err(error)
         return Err(error)
       end

@@ -1111,9 +1111,9 @@ final class Http
         end
         old_length = buffer.len()
         case stream.read(count)
-        in Ok(TcpRead.Data(bytes))
-          if bytes.len() == 0
-            return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+        in Ok(bytes)
+          if bytes.is_empty()
+            return Err(HttpError.InvalidRequest("the HTTP request headers are incomplete"))
           end
           buffer.extend(bytes)
           scan = if old_length > 3
@@ -1121,8 +1121,6 @@ final class Http
           else
             0
           end
-        in Ok(TcpRead.End)
-          return Err(HttpError.InvalidRequest("the HTTP request headers are incomplete"))
         in Err(error)
           return Err(HttpError.Network(error))
         end
@@ -1169,13 +1167,11 @@ final class Http
         count = remaining
       end
       case stream.read(count)
-      in Ok(TcpRead.Data(bytes))
-        if bytes.len() == 0
-          return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+      in Ok(bytes)
+        if bytes.is_empty()
+          return Err(HttpError.InvalidRequest("the HTTP request body is incomplete"))
         end
         buffer.extend(bytes)
-      in Ok(TcpRead.End)
-        return Err(HttpError.InvalidRequest("the HTTP request body is incomplete"))
       in Err(error)
         return Err(HttpError.Network(error))
       end
@@ -1201,7 +1197,7 @@ final class Http
 
   def read_response_with[effect e](
     self,
-    read: (Int) -> Result[TcpRead, HttpError] with e,
+    read: (Int) -> Result[Bytes, HttpError] with e,
     request_method: String,
     limits: HttpLimits
   ): Result[HttpResponse, HttpError] with e
@@ -1227,9 +1223,9 @@ final class Http
         end
         old_length = buffer.len()
         case read(count)
-        in Ok(TcpRead.Data(bytes))
-          if bytes.len() == 0
-            return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+        in Ok(bytes)
+          if bytes.is_empty()
+            return Err(HttpError.InvalidResponse("the HTTP response headers are incomplete"))
           end
           buffer.extend(bytes)
           scan = if old_length > 3
@@ -1237,8 +1233,6 @@ final class Http
           else
             0
           end
-        in Ok(TcpRead.End)
-          return Err(HttpError.InvalidResponse("the HTTP response headers are incomplete"))
         in Err(error)
           return Err(error)
         end
@@ -1294,17 +1288,16 @@ final class Http
         end
       end
       case read(count)
-      in Ok(TcpRead.Data(bytes))
-        if bytes.len() == 0
-          return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+      in Ok(bytes)
+        if bytes.is_empty()
+          ended = true
+        else
+          if bytes.len() > limits.max_wire_bytes - buffer.len()
+            return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
+          end
+          buffer.extend(bytes)
+          ()
         end
-        if bytes.len() > limits.max_wire_bytes - buffer.len()
-          return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
-        end
-        buffer.extend(bytes)
-        ()
-      in Ok(TcpRead.End)
-        ended = true
       in Err(error)
         return Err(error)
       end
@@ -1341,7 +1334,7 @@ final class Http
     limits: HttpLimits
   ): Result[HttpResponse, HttpError] with Tcp.Read
     self.read_response_with(
-      do |count: Int|: Result[TcpRead, HttpError] with Tcp.Read
+      do |count: Int|: Result[Bytes, HttpError] with Tcp.Read
         case stream.read(count)
         in Ok(value)   then Ok(value)
         in Err(error) then Err(HttpError.Network(error))
@@ -1359,7 +1352,7 @@ final class Http
     limits: HttpLimits
   ): Result[HttpResponse, HttpError] with Tls.Read
     self.read_response_with(
-      do |count: Int|: Result[TcpRead, HttpError] with Tls.Read
+      do |count: Int|: Result[Bytes, HttpError] with Tls.Read
         case stream.read(count)
         in Ok(value)   then Ok(value)
         in Err(error) then Err(HttpError.Tls(error))

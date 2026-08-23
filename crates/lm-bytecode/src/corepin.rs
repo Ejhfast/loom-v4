@@ -46,6 +46,8 @@ pub struct CoreLayout {
     pub char_value: Option<u32>,
     /// The core method table of immutable Bytes values.
     pub bytes: Option<u32>,
+    /// The core method table of native file handles.
+    pub file_handle: Option<u32>,
     /// The core method table of StringBuilder values.
     pub string_builder: Option<u32>,
     /// The core method table of ByteBuffer values.
@@ -272,6 +274,7 @@ pub struct CoreLayout {
     pub child_env: Option<u32>,
     pub child_env_inherit: Option<u32>,
     pub child_env_exact: Option<u32>,
+    pub child_env_overlay: Option<u32>,
     pub exec_spec: Option<u32>,
     pub child_status: Option<u32>,
     pub child_status_exited: Option<u32>,
@@ -290,7 +293,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 255] = [
+pub const PINNED_LABELS: [&str; 257] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -546,6 +549,8 @@ pub const PINNED_LABELS: [&str; 255] = [
     "PipeError.Unsupported",
     "UdpDatagram",
     "UdpSocket",
+    "ChildEnv.Overlay",
+    "FileHandle",
 ];
 
 /// The core role of immediate integer values.
@@ -773,6 +778,8 @@ pub const ROLE_CHILD: usize = 251;
 pub const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
 pub const ROLE_UDP_DATAGRAM: usize = 253;
 pub const ROLE_UDP_SOCKET: usize = 254;
+pub const ROLE_CHILD_ENV_OVERLAY: usize = 255;
+pub const ROLE_FILE_HANDLE: usize = 256;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -847,6 +854,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Substring" => &mut layout.substring,
         "Char" => &mut layout.char_value,
         "Bytes" => &mut layout.bytes,
+        "FileHandle" => &mut layout.file_handle,
         "StringBuilder" => &mut layout.string_builder,
         "ByteBuffer" => &mut layout.byte_buffer,
         "Unit" => &mut layout.unit,
@@ -1064,6 +1072,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ChildEnv" => &mut layout.child_env,
         "ChildEnv.Inherit" => &mut layout.child_env_inherit,
         "ChildEnv.Exact" => &mut layout.child_env_exact,
+        "ChildEnv.Overlay" => &mut layout.child_env_overlay,
         "ExecSpec" => &mut layout.exec_spec,
         "ChildStatus" => &mut layout.child_status,
         "ChildStatus.Exited" => &mut layout.child_status_exited,

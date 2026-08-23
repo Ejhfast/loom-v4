@@ -526,3 +526,51 @@ The two Stage 5 test targets add 0.21 seconds.
 Other targets and run variation contain the remaining difference.
 
 The final measurement uses the original worker count and full coverage.
+
+## Host integration follow-up
+
+The exact comparison parent is `d0b3e86`.
+
+The bytecode version is 55.
+
+The verifier version is 36.
+
+The snapshot format version remains 30.
+
+| Core measurement | Parent | Result | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 297 | 302 | +1.7% |
+| HIR functions | 563 | 571 | +1.4% |
+| Bytecode functions | 860 | 873 | +1.5% |
+| Artifact size | 260,082 bytes | 264,401 bytes | +1.7% |
+| Core checking | 2.063 ms | 2.124 ms | +3.0% |
+| Core lowering | 0.916 ms | 0.927 ms | +1.2% |
+| Core compilation | 3.274 ms | 3.298 ms | +0.7% |
+| Core decoding | 0.389 ms | 0.385 ms | -1.0% |
+| Core verification | 1.239 ms | 1.264 ms | +2.0% |
+| Structural verification | 0.452 ms | 0.454 ms | +0.4% |
+| Verification hash | 0.127 ms | 0.128 ms | +0.8% |
+| Semantic identity | 2.384 ms | 2.383 ms | 0.0% |
+| Decoded loading | 1.425 ms | 1.444 ms | +1.3% |
+| Core loading | 1.822 ms | 1.834 ms | +0.7% |
+| Warm workspace suite | 41.901 seconds | 43.364 seconds | +3.5% |
+
+The standard codec modules link only when source imports them.
+
+The suite uses the original worker count and full coverage.
+
+The runtime pair uses nine-run medians pinned to CPU 0.
+
+| Runtime measurement | Parent | Result | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.6 ns | 31.6 ns | 0.0% |
+| `direct_call` | 31.4 ns | 30.6 ns | -2.5% |
+| `string_interp` | 268.4 ns | 223.4 ns | -16.8% |
+| `float_add` | 31.8 ns | 32.8 ns | +3.1% |
+| `string_builder` | 43.9 ns | 43.0 ns | -2.1% |
+| `byte_buffer` | 39.9 ns | 37.7 ns | -5.5% |
+| `direct_clock` | 107.9 ns | 110.2 ns | +2.1% |
+
+String measurements showed large process variation during the audit.
+
+The final pair records no claim of a durable string speed increase.

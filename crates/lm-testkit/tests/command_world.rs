@@ -130,9 +130,9 @@ fn generic_stream_helpers_use_the_writer_effect_argument() {
 use std.io.write_all_to
 
 final class PartialSink implements ByteWriter
-  type Error = String
+  type Error = IoError
 
-  def write(self, bytes: Bytes): Result[Int, String]
+  def write(self, bytes: Bytes): Result[Int, IoError]
     if bytes.len() > 2
       Ok(2)
     else

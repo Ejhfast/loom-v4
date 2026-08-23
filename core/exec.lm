@@ -27,7 +27,9 @@ class PipeEnd
   end
 end
 
-final class PipeReader < PipeEnd
+final class PipeReader < PipeEnd implements ByteReader with Pipe.Read
+  type Error = PipeError
+
   def read(self, max_bytes: Int): Result[Bytes, PipeError] with Pipe.Read
     sys.pipe.read(self, max_bytes)
   end
@@ -37,7 +39,9 @@ final class PipeReader < PipeEnd
   end
 end
 
-final class PipeWriter < PipeEnd
+final class PipeWriter < PipeEnd implements ByteWriter with Pipe.Write
+  type Error = PipeError
+
   def write(self, bytes: Bytes): Result[Int, PipeError] with Pipe.Write
     sys.pipe.write(self, bytes)
   end
@@ -75,6 +79,7 @@ end
 enum ChildEnv
   Inherit
   Exact(values: Map[String, String])
+  Overlay(values: Map[String, String])
 end
 
 final class ExecSpec

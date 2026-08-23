@@ -140,6 +140,29 @@ transfer()
 }
 
 #[test]
+fn a_public_tcp_read_returns_empty_bytes_at_end_of_input() {
+    let source = format!(
+        r#"{LOOPBACK}
+def read_end(): Int with Tcp
+  address = Tcp().address(IpAddress.V4(b"\x7f\x00\x00\x01"), 0, 0, 0).expect("valid")
+  listener = Tcp().listen(address, 4).expect("the listener opens")
+  bound = listener.local_address().expect("the listener has an address")
+  client = Tcp().connect(bound).expect("the client connects")
+  server = listener.accept().expect("the server accepts")[0]
+  client.close().expect("the client closes")
+  bytes = server.read(1).expect("the end reads")
+  server.close().expect("the server closes")
+  listener.close().expect("the listener closes")
+  bytes.len()
+end
+read_end()
+"#
+    );
+
+    assert_eq!(run(&source, &["Tcp"]).0, "Done(0)");
+}
+
+#[test]
 fn the_public_address_factory_rejects_invalid_values() {
     let source = r#"
 bytes = ByteBuffer()
