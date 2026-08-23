@@ -115,7 +115,10 @@ impl CliHost {
         if self.io().submit_file(key, token, request) {
             HostStart::Waiting(token)
         } else {
-            HostStart::Completed(fs_error("the I/O queue is full".to_string()))
+            HostStart::Completed(error_value(
+                CoreCtor::FsErrorLimitExceeded,
+                Some("the file I/O queue is full"),
+            ))
         }
     }
 
@@ -213,16 +216,6 @@ impl CliHost {
     }
 }
 
-fn fs_error(message: String) -> HostValue {
-    HostValue::Ctor(
-        lm_vm::CoreCtor::Err,
-        vec![HostValue::Ctor(
-            lm_vm::CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message.into())],
-        )],
-    )
-}
-
 fn net_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
     HostValue::Ctor(
         CoreCtor::Err,
@@ -252,6 +245,28 @@ fn error_value(ctor: CoreCtor, message: Option<&str>) -> HostValue {
         .map(|message| vec![HostValue::Str(message.to_string().into())])
         .unwrap_or_default();
     HostValue::Ctor(CoreCtor::Err, vec![HostValue::Ctor(ctor, fields)])
+}
+
+fn current_dir_error(error: std::io::Error) -> HostValue {
+    let (ctor, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => (
+            CoreCtor::FsErrorNotFound,
+            "the current directory does not exist",
+        ),
+        std::io::ErrorKind::PermissionDenied => (
+            CoreCtor::FsErrorPermissionDenied,
+            "the current directory lacks permission",
+        ),
+        std::io::ErrorKind::Unsupported => (
+            CoreCtor::FsErrorUnsupported,
+            "the current directory query is not supported",
+        ),
+        _ => (
+            CoreCtor::FsErrorFailed,
+            "the current directory query failed",
+        ),
+    };
+    error_value(ctor, Some(message))
 }
 
 fn tty_error(error: terminal::TerminalError) -> HostValue {
@@ -302,6 +317,7 @@ fn byte_list(value: &HostArg) -> Option<Vec<SharedBytes>> {
 }
 
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
+const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
 const MAX_CONSOLE_IO_BYTES: usize = 16 << 20;
 const MAX_ENTROPY_BYTES: usize = 16 << 20;
@@ -391,13 +407,12 @@ impl Host for CliHost {
             lm_abi::OP_FS_CURRENT_DIR => match std::env::current_dir() {
                 Ok(path) => match path.into_os_string().into_string() {
                     Ok(path) => HostStart::Completed(ok_value(HostValue::Str(path.into()))),
-                    Err(_) => HostStart::Completed(fs_error(
-                        "the current directory is not valid UTF-8".to_string(),
+                    Err(_) => HostStart::Completed(error_value(
+                        CoreCtor::FsErrorInvalidEncoding,
+                        Some("the current directory is not valid UTF-8"),
                     )),
                 },
-                Err(error) => HostStart::Completed(fs_error(format!(
-                    "current directory query failed: {error}"
-                ))),
+                Err(error) => HostStart::Completed(current_dir_error(error)),
             },
             lm_abi::OP_ENTROPY_BYTES => {
                 let Some(HostArg::Int(count)) = args.first() else {
@@ -617,13 +632,15 @@ impl Host for CliHost {
                     return HostStart::Failed("Fs.Read needs a file and count".to_string());
                 };
                 let Ok(count) = usize::try_from(*count) else {
-                    return HostStart::Completed(fs_error(
-                        "the read count is negative".to_string(),
+                    return HostStart::Completed(error_value(
+                        CoreCtor::FsErrorInvalidInput,
+                        Some("the read count is negative"),
                     ));
                 };
                 if count > MAX_FILE_IO_BYTES {
-                    return HostStart::Completed(fs_error(
-                        "the read count is too large".to_string(),
+                    return HostStart::Completed(error_value(
+                        CoreCtor::FsErrorLimitExceeded,
+                        Some("the read count is too large"),
                     ));
                 }
                 self.start_file(
@@ -668,11 +685,116 @@ impl Host for CliHost {
                 };
                 self.start_file(key, FileRequest::Flush { file: *token })
             }
+            lm_abi::OP_FS_SYNC => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Sync needs a file".to_string());
+                };
+                self.start_file(key, FileRequest::Sync { file: *token })
+            }
             lm_abi::OP_FS_CLOSE => {
                 let Some(HostArg::File(token)) = args.first() else {
                     return HostStart::Failed("Fs.Close needs a file".to_string());
                 };
                 self.start_file(key, FileRequest::Close { file: *token })
+            }
+            lm_abi::OP_FS_STAT => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.Stat needs a path".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::Stat {
+                        path: path.to_string(),
+                    },
+                )
+            }
+            lm_abi::OP_FS_READ_DIR => {
+                let (Some(HostArg::Str(path)), Some(HostArg::Int(max_entries))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.ReadDir needs a path and limit".to_string());
+                };
+                let Ok(max_entries) = usize::try_from(*max_entries) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::FsErrorInvalidInput,
+                        Some("the directory entry limit is negative"),
+                    ));
+                };
+                if max_entries > MAX_DIRECTORY_ENTRIES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::FsErrorLimitExceeded,
+                        Some("the directory entry limit is too large"),
+                    ));
+                }
+                self.start_file(
+                    key,
+                    FileRequest::ReadDir {
+                        path: path.to_string(),
+                        max_entries,
+                    },
+                )
+            }
+            lm_abi::OP_FS_CREATE_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.CreateDir needs a path".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::CreateDir {
+                        path: path.to_string(),
+                    },
+                )
+            }
+            lm_abi::OP_FS_REMOVE_FILE => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.RemoveFile needs a path".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::RemoveFile {
+                        path: path.to_string(),
+                    },
+                )
+            }
+            lm_abi::OP_FS_REMOVE_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.RemoveDir needs a path".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::RemoveDir {
+                        path: path.to_string(),
+                    },
+                )
+            }
+            lm_abi::OP_FS_RENAME => {
+                let (
+                    Some(HostArg::Str(from)),
+                    Some(HostArg::Str(to)),
+                    Some(HostArg::RenameMode(mode)),
+                ) = (args.first(), args.get(1), args.get(2))
+                else {
+                    return HostStart::Failed("Fs.Rename needs two paths and one mode".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::Rename {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        mode: *mode,
+                    },
+                )
+            }
+            lm_abi::OP_FS_SYNC_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.SyncDir needs a path".to_string());
+                };
+                self.start_file(
+                    key,
+                    FileRequest::SyncDir {
+                        path: path.to_string(),
+                    },
+                )
             }
             lm_abi::OP_DNS_RESOLVE => {
                 let (Some(HostArg::Str(name)), Some(HostArg::Int(port))) =
@@ -1332,7 +1454,9 @@ impl Drop for CliHost {
 mod tests {
     use super::*;
     use lm_testkit::compile_to_bytes;
-    use lm_vm::{load_bytes, CoreCtor, HostOpenOptions, HostSeekFrom, VmConfig, World};
+    use lm_vm::{
+        load_bytes, CoreCtor, HostOpenOptions, HostRenameMode, HostSeekFrom, VmConfig, World,
+    };
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use std::io::{Read, Write};
@@ -1343,6 +1467,14 @@ mod tests {
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -1670,6 +1802,127 @@ mod tests {
             HostValue::Unit
         );
         assert_eq!(std::fs::read(&path.0).expect("the file reads"), b"hello");
+    }
+
+    #[test]
+    fn file_metadata_and_durability_use_the_command_line_host() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time follows the epoch")
+            .as_nanos();
+        let directory =
+            TempDir(std::env::temp_dir().join(format!("loom-fs-{}-{unique}", std::process::id())));
+        let directory_text = directory.0.to_string_lossy().into_owned();
+        let temporary = directory.0.join("value.tmp");
+        let target = directory.0.join("value.bin");
+        let temporary_text = temporary.to_string_lossy().into_owned();
+        let target_text = target.to_string_lossy().into_owned();
+        let mut host = CliHost::new(1);
+
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_CREATE_DIR,
+            vec![HostArg::Str(directory_text.clone().into())],
+        ));
+        let file = match unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_OPEN,
+            vec![
+                HostArg::Str(temporary_text.clone().into()),
+                HostArg::OpenOptions(HostOpenOptions::CreateNew),
+            ],
+        )) {
+            HostValue::File(file) => file,
+            other => panic!("expected a file token, found {other:?}"),
+        };
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_WRITE,
+            vec![HostArg::File(file), HostArg::Bytes(b"durable".into())],
+        ));
+        for op in [lm_abi::OP_FS_FLUSH, lm_abi::OP_FS_SYNC] {
+            unwrap_ok_value(run_host(&mut host, op, vec![HostArg::File(file)]));
+        }
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_CLOSE,
+            vec![HostArg::File(file)],
+        ));
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_RENAME,
+            vec![
+                HostArg::Str(temporary_text.into()),
+                HostArg::Str(target_text.clone().into()),
+                HostArg::RenameMode(HostRenameMode::Replace),
+            ],
+        ));
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_SYNC_DIR,
+            vec![HostArg::Str(directory_text.clone().into())],
+        ));
+        let info = unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_STAT,
+            vec![HostArg::Str(target_text.clone().into())],
+        ));
+        assert!(matches!(
+            info,
+            HostValue::Ctor(CoreCtor::FileInfo, fields)
+                if matches!(
+                    fields.as_slice(),
+                    [HostValue::Ctor(CoreCtor::FileKindFile, _), HostValue::Int(7), _, _]
+                )
+        ));
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_REMOVE_FILE,
+            vec![HostArg::Str(target_text.into())],
+        ));
+        unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_REMOVE_DIR,
+            vec![HostArg::Str(directory_text.into())],
+        ));
+        assert!(!directory.0.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_directory_name_remains_visible() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time follows the epoch")
+            .as_nanos();
+        let directory =
+            TempDir(std::env::temp_dir().join(format!("loom-dir-{}-{unique}", std::process::id())));
+        std::fs::create_dir(&directory.0).expect("the test directory creates");
+        let bad_name = std::ffi::OsString::from_vec(vec![b'b', b'a', b'd', 0xff]);
+        std::fs::write(directory.0.join(bad_name), b"x").expect("the test file writes");
+        let path = directory.0.to_string_lossy().into_owned();
+        let mut host = CliHost::new(1);
+
+        let entries = unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_FS_READ_DIR,
+            vec![HostArg::Str(path.into()), HostArg::Int(8)],
+        ));
+
+        assert!(matches!(
+            entries,
+            HostValue::List(values)
+                if matches!(
+                    values.as_slice(),
+                    [HostValue::Ctor(CoreCtor::Err, error)]
+                        if matches!(
+                            error.as_slice(),
+                            [HostValue::Ctor(CoreCtor::FsErrorInvalidEncoding, _)]
+                        )
+                )
+        ));
     }
 
     #[test]

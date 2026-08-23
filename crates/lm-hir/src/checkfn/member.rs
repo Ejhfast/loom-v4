@@ -597,6 +597,7 @@ impl<'o> FnChecker<'o> {
                 "write" => (lm_abi::OP_FS_WRITE, &["bytes"][..]),
                 "seek" => (lm_abi::OP_FS_SEEK, &["from"][..]),
                 "flush" => (lm_abi::OP_FS_FLUSH, NO_NAMES),
+                "sync" => (lm_abi::OP_FS_SYNC, NO_NAMES),
                 "close" => (lm_abi::OP_FS_CLOSE, NO_NAMES),
                 _ => {
                     return Err(Diagnostic::new(

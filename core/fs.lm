@@ -2,12 +2,34 @@
 
 enum FsError implements Error
   Closed
+  InvalidInput(message: String)
+  InvalidEncoding(message: String)
+  LimitExceeded(message: String)
+  NotFound(message: String)
+  AlreadyExists(message: String)
+  PermissionDenied(message: String)
+  NotDirectory(message: String)
+  IsDirectory(message: String)
+  DirectoryNotEmpty(message: String)
+  CrossDevice(message: String)
+  Unsupported(message: String)
   Failed(message: String)
 
   def append_to(self, mut builder: StringBuilder)
     text = case self
-    in Closed    then "file handle is closed"
-    in Failed(m) then m
+    in Closed               then "file handle is closed"
+    in InvalidInput(m)      then m
+    in InvalidEncoding(m)   then m
+    in LimitExceeded(m)     then m
+    in NotFound(m)          then m
+    in AlreadyExists(m)     then m
+    in PermissionDenied(m)  then m
+    in NotDirectory(m)      then m
+    in IsDirectory(m)       then m
+    in DirectoryNotEmpty(m) then m
+    in CrossDevice(m)       then m
+    in Unsupported(m)       then m
+    in Failed(m)            then m
     end
     builder.append(text)
   end
@@ -19,6 +41,7 @@ enum OpenOptions
   ReadWrite
   Create
   CreateTruncate
+  CreateNew
   Append
 end
 
@@ -26,4 +49,46 @@ enum SeekFrom
   Start(offset: Int)
   Current(offset: Int)
   End(offset: Int)
+end
+
+enum FileKind
+  File
+  Directory
+  Symlink
+  Other
+end
+
+final class FileInfo
+  kind: FileKind
+  byte_length: Int
+  modified_ns: Option[Int]
+  read_only: Bool
+
+  def init(
+    mut self,
+    kind: FileKind,
+    byte_length: Int,
+    modified_ns: Option[Int],
+    read_only: Bool
+  )
+    self.kind = kind
+    self.byte_length = byte_length
+    self.modified_ns = modified_ns
+    self.read_only = read_only
+  end
+end
+
+final class DirEntry
+  name: String
+  kind: FileKind
+
+  def init(mut self, name: String, kind: FileKind)
+    self.name = name
+    self.kind = kind
+  end
+end
+
+enum RenameMode
+  NoReplace
+  Replace
 end

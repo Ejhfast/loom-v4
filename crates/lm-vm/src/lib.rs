@@ -21,9 +21,9 @@ mod world;
 pub use host::{
     CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
     HostCompileOptions, HostCompileSlot, HostCompletion, HostIpAddress, HostOpenOptions,
-    HostParseStatus, HostResource, HostSeekFrom, HostShutdown, HostSignalKind, HostSocketAddress,
-    HostStart, HostStdStream, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue,
-    HostWaitCancel, NullHost, RecordingHost,
+    HostParseStatus, HostRenameMode, HostResource, HostSeekFrom, HostShutdown, HostSignalKind,
+    HostSocketAddress, HostStart, HostStdStream, HostSyntaxDiagnostic, HostTcpKind,
+    HostTcpResource, HostValue, HostWaitCancel, NullHost, RecordingHost,
 };
 pub use machine::{
     Block, FaultRec, FunctionVersionId, MachineState, Mailbox, Ownership, VmId, VmState,

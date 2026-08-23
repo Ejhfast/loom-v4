@@ -1,0 +1,18 @@
+# Inspect a directory through portable file-system values.
+# Run this example with `--allow Fs.Stat,Fs.ReadDir`.
+
+use std.fs.read_dir_sorted
+
+def inspect(path: String): Result[(Bool, Bool), FsError] with Fs.Stat, Fs.ReadDir
+  info = sys.fs.stat(path)?
+  entries = read_dir_sorted(path, 10000)?
+  directory = case info.kind
+  in FileKind.Directory then true
+  in FileKind.File then false
+  in FileKind.Symlink then false
+  in FileKind.Other then false
+  end
+  Ok((directory, not entries.is_empty()))
+end
+
+inspect(".")

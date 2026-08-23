@@ -882,6 +882,11 @@ impl World {
                         Ok(HostArg::OpenOptions(HostOpenOptions::CreateTruncate))
                     }
                     Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_create_new && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::CreateNew))
+                    }
+                    Object::Instance { class, fields, .. }
                         if Some(*class) == self.core.open_append && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::Append))
@@ -915,6 +920,16 @@ impl World {
                             }
                             _ => Err(FaultCode::TypeMismatch),
                         }
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.rename_no_replace && fields.is_empty() =>
+                    {
+                        Ok(HostArg::RenameMode(crate::HostRenameMode::NoReplace))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.rename_replace && fields.is_empty() =>
+                    {
+                        Ok(HostArg::RenameMode(crate::HostRenameMode::Replace))
                     }
                     _ => Err(FaultCode::TypeMismatch),
                 },

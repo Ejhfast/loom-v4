@@ -52,7 +52,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 24 adds Float parsing and formatting intrinsics.
 /// Version 25 adds selectable host-operation sources.
 /// Version 26 adds terminal and signal operations.
-pub const ABI_VERSION: u32 = 26;
+/// Version 27 completes the file-system operation group.
+pub const ABI_VERSION: u32 = 27;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -189,6 +190,10 @@ pub enum AbiCore {
     ByteBuffer,
     OpenOptions,
     SeekFrom,
+    FileKind,
+    FileInfo,
+    DirEntry,
+    RenameMode,
     IoError,
     FsError,
     EnvError,
@@ -229,6 +234,10 @@ impl AbiCore {
             AbiCore::ByteBuffer => "ByteBuffer",
             AbiCore::OpenOptions => "OpenOptions",
             AbiCore::SeekFrom => "SeekFrom",
+            AbiCore::FileKind => "FileKind",
+            AbiCore::FileInfo => "FileInfo",
+            AbiCore::DirEntry => "DirEntry",
+            AbiCore::RenameMode => "RenameMode",
             AbiCore::IoError => "IoError",
             AbiCore::FsError => "FsError",
             AbiCore::EnvError => "EnvError",
@@ -342,6 +351,10 @@ impl AbiType {
     pub const BYTE_BUFFER: AbiType = AbiType::Core(AbiCore::ByteBuffer);
     pub const OPEN_OPTIONS: AbiType = AbiType::Core(AbiCore::OpenOptions);
     pub const SEEK_FROM: AbiType = AbiType::Core(AbiCore::SeekFrom);
+    pub const FILE_KIND: AbiType = AbiType::Core(AbiCore::FileKind);
+    pub const FILE_INFO: AbiType = AbiType::Core(AbiCore::FileInfo);
+    pub const DIR_ENTRY: AbiType = AbiType::Core(AbiCore::DirEntry);
+    pub const RENAME_MODE: AbiType = AbiType::Core(AbiCore::RenameMode);
     pub const IO_ERROR: AbiType = AbiType::Core(AbiCore::IoError);
     pub const FS_ERROR: AbiType = AbiType::Core(AbiCore::FsError);
     pub const ENV_ERROR: AbiType = AbiType::Core(AbiCore::EnvError);
@@ -419,6 +432,20 @@ impl AbiType {
         AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::FS_ERROR]);
     pub const RESULT_UNIT_FS_ERROR: AbiType =
         AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::FS_ERROR]);
+    pub const RESULT_FILE_INFO_FS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::FILE_INFO, AbiType::FS_ERROR],
+    );
+    pub const RESULT_DIR_ENTRY_FS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::DIR_ENTRY, AbiType::FS_ERROR],
+    );
+    pub const LIST_RESULT_DIR_ENTRY_FS_ERROR: AbiType =
+        AbiType::List(&AbiType::RESULT_DIR_ENTRY_FS_ERROR);
+    pub const RESULT_DIR_ENTRIES_FS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::LIST_RESULT_DIR_ENTRY_FS_ERROR, AbiType::FS_ERROR],
+    );
     pub const LIST_SOCKET_ADDRESS: AbiType = AbiType::List(&AbiType::SOCKET_ADDRESS);
     pub const LIST_BYTES: AbiType = AbiType::List(&AbiType::BYTES);
     pub const RESULT_LIST_SOCKET_ADDRESS_NET_ERROR: AbiType = AbiType::Apply(
@@ -2133,9 +2160,17 @@ pub const OP_TTY_EXIT_RAW: OpSlot = 118;
 pub const OP_SIGNAL_OPEN: OpSlot = 119;
 pub const OP_SIGNAL_NEXT: OpSlot = 120;
 pub const OP_SIGNAL_CLOSE: OpSlot = 121;
+pub const OP_FS_STAT: OpSlot = 122;
+pub const OP_FS_READ_DIR: OpSlot = 123;
+pub const OP_FS_CREATE_DIR: OpSlot = 124;
+pub const OP_FS_REMOVE_FILE: OpSlot = 125;
+pub const OP_FS_REMOVE_DIR: OpSlot = 126;
+pub const OP_FS_RENAME: OpSlot = 127;
+pub const OP_FS_SYNC: OpSlot = 128;
+pub const OP_FS_SYNC_DIR: OpSlot = 129;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 122] = [
+pub const OPS: [OpDef; 130] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -3277,6 +3312,78 @@ pub const OPS: [OpDef; 122] = [
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Fs",
+        member: "Stat",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_FILE_INFO_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "ReadDir",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR, AbiType::INT],
+        reply: AbiType::RESULT_DIR_ENTRIES_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "CreateDir",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "RemoveFile",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "RemoveDir",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Rename",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR, AbiType::STR, AbiType::RENAME_MODE],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Sync",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FILE_HANDLE],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "SyncDir",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
 ];
 
 /// The number of exact operations.
@@ -3859,6 +3966,14 @@ mod tests {
                 "Io.Write",
                 "Io.WriteError",
                 "Signal.Next",
+                "Fs.Stat",
+                "Fs.ReadDir",
+                "Fs.CreateDir",
+                "Fs.RemoveFile",
+                "Fs.RemoveDir",
+                "Fs.Rename",
+                "Fs.Sync",
+                "Fs.SyncDir",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

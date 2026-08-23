@@ -61,6 +61,7 @@ pub struct CoreLayout {
     pub io_error_broken_pipe: Option<u32>,
     pub io_error_invalid_input: Option<u32>,
     pub io_error_limit_exceeded: Option<u32>,
+    pub io_error_unsupported: Option<u32>,
     pub io_error_failed: Option<u32>,
     pub env_error_invalid_name: Option<u32>,
     pub env_error_invalid_encoding: Option<u32>,
@@ -116,6 +117,17 @@ pub struct CoreLayout {
     pub restore_limit_exceeded: Option<u32>,
     pub fs_error: Option<u32>,
     pub fs_error_closed: Option<u32>,
+    pub fs_error_invalid_input: Option<u32>,
+    pub fs_error_invalid_encoding: Option<u32>,
+    pub fs_error_limit_exceeded: Option<u32>,
+    pub fs_error_not_found: Option<u32>,
+    pub fs_error_already_exists: Option<u32>,
+    pub fs_error_permission_denied: Option<u32>,
+    pub fs_error_not_directory: Option<u32>,
+    pub fs_error_is_directory: Option<u32>,
+    pub fs_error_directory_not_empty: Option<u32>,
+    pub fs_error_cross_device: Option<u32>,
+    pub fs_error_unsupported: Option<u32>,
     pub fs_error_failed: Option<u32>,
     pub open_options: Option<u32>,
     pub open_read_only: Option<u32>,
@@ -123,11 +135,22 @@ pub struct CoreLayout {
     pub open_read_write: Option<u32>,
     pub open_create: Option<u32>,
     pub open_create_truncate: Option<u32>,
+    pub open_create_new: Option<u32>,
     pub open_append: Option<u32>,
     pub seek_from: Option<u32>,
     pub seek_start: Option<u32>,
     pub seek_current: Option<u32>,
     pub seek_end: Option<u32>,
+    pub file_kind: Option<u32>,
+    pub file_kind_file: Option<u32>,
+    pub file_kind_directory: Option<u32>,
+    pub file_kind_symlink: Option<u32>,
+    pub file_kind_other: Option<u32>,
+    pub file_info: Option<u32>,
+    pub dir_entry: Option<u32>,
+    pub rename_mode: Option<u32>,
+    pub rename_no_replace: Option<u32>,
+    pub rename_replace: Option<u32>,
     pub ip_address: Option<u32>,
     pub ip_v4: Option<u32>,
     pub ip_v6: Option<u32>,
@@ -231,7 +254,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 196] = [
+pub const PINNED_LABELS: [&str; 219] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -428,6 +451,29 @@ pub const PINNED_LABELS: [&str; 196] = [
     "SignalError.LimitExceeded",
     "SignalError.Failed",
     "SignalStream",
+    "IoError.Unsupported",
+    "FsError.InvalidInput",
+    "FsError.InvalidEncoding",
+    "FsError.LimitExceeded",
+    "FsError.NotFound",
+    "FsError.AlreadyExists",
+    "FsError.PermissionDenied",
+    "FsError.NotDirectory",
+    "FsError.IsDirectory",
+    "FsError.DirectoryNotEmpty",
+    "FsError.CrossDevice",
+    "FsError.Unsupported",
+    "OpenOptions.CreateNew",
+    "FileKind",
+    "FileKind.File",
+    "FileKind.Directory",
+    "FileKind.Symlink",
+    "FileKind.Other",
+    "FileInfo",
+    "DirEntry",
+    "RenameMode",
+    "RenameMode.NoReplace",
+    "RenameMode.Replace",
 ];
 
 /// The core role of immediate integer values.
@@ -596,6 +642,29 @@ pub const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
 pub const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
 pub const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
 pub const ROLE_SIGNAL_STREAM: usize = 195;
+pub const ROLE_IO_ERROR_UNSUPPORTED: usize = 196;
+pub const ROLE_FS_ERROR_INVALID_INPUT: usize = 197;
+pub const ROLE_FS_ERROR_INVALID_ENCODING: usize = 198;
+pub const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 199;
+pub const ROLE_FS_ERROR_NOT_FOUND: usize = 200;
+pub const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 201;
+pub const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 202;
+pub const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 203;
+pub const ROLE_FS_ERROR_IS_DIRECTORY: usize = 204;
+pub const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 205;
+pub const ROLE_FS_ERROR_CROSS_DEVICE: usize = 206;
+pub const ROLE_FS_ERROR_UNSUPPORTED: usize = 207;
+pub const ROLE_OPEN_CREATE_NEW: usize = 208;
+pub const ROLE_FILE_KIND: usize = 209;
+pub const ROLE_FILE_KIND_FILE: usize = 210;
+pub const ROLE_FILE_KIND_DIRECTORY: usize = 211;
+pub const ROLE_FILE_KIND_SYMLINK: usize = 212;
+pub const ROLE_FILE_KIND_OTHER: usize = 213;
+pub const ROLE_FILE_INFO: usize = 214;
+pub const ROLE_DIR_ENTRY: usize = 215;
+pub const ROLE_RENAME_MODE: usize = 216;
+pub const ROLE_RENAME_NO_REPLACE: usize = 217;
+pub const ROLE_RENAME_REPLACE: usize = 218;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -683,6 +752,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "IoError.BrokenPipe" => &mut layout.io_error_broken_pipe,
         "IoError.InvalidInput" => &mut layout.io_error_invalid_input,
         "IoError.LimitExceeded" => &mut layout.io_error_limit_exceeded,
+        "IoError.Unsupported" => &mut layout.io_error_unsupported,
         "IoError.Failed" => &mut layout.io_error_failed,
         "EnvError" => &mut layout.env_error,
         "EnvError.InvalidName" => &mut layout.env_error_invalid_name,
@@ -733,6 +803,17 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "RestoreError.RestoreLimitExceeded" => &mut layout.restore_limit_exceeded,
         "FsError" => &mut layout.fs_error,
         "FsError.Closed" => &mut layout.fs_error_closed,
+        "FsError.InvalidInput" => &mut layout.fs_error_invalid_input,
+        "FsError.InvalidEncoding" => &mut layout.fs_error_invalid_encoding,
+        "FsError.LimitExceeded" => &mut layout.fs_error_limit_exceeded,
+        "FsError.NotFound" => &mut layout.fs_error_not_found,
+        "FsError.AlreadyExists" => &mut layout.fs_error_already_exists,
+        "FsError.PermissionDenied" => &mut layout.fs_error_permission_denied,
+        "FsError.NotDirectory" => &mut layout.fs_error_not_directory,
+        "FsError.IsDirectory" => &mut layout.fs_error_is_directory,
+        "FsError.DirectoryNotEmpty" => &mut layout.fs_error_directory_not_empty,
+        "FsError.CrossDevice" => &mut layout.fs_error_cross_device,
+        "FsError.Unsupported" => &mut layout.fs_error_unsupported,
         "FsError.Failed" => &mut layout.fs_error_failed,
         "OpenOptions" => &mut layout.open_options,
         "OpenOptions.ReadOnly" => &mut layout.open_read_only,
@@ -740,11 +821,22 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "OpenOptions.ReadWrite" => &mut layout.open_read_write,
         "OpenOptions.Create" => &mut layout.open_create,
         "OpenOptions.CreateTruncate" => &mut layout.open_create_truncate,
+        "OpenOptions.CreateNew" => &mut layout.open_create_new,
         "OpenOptions.Append" => &mut layout.open_append,
         "SeekFrom" => &mut layout.seek_from,
         "SeekFrom.Start" => &mut layout.seek_start,
         "SeekFrom.Current" => &mut layout.seek_current,
         "SeekFrom.End" => &mut layout.seek_end,
+        "FileKind" => &mut layout.file_kind,
+        "FileKind.File" => &mut layout.file_kind_file,
+        "FileKind.Directory" => &mut layout.file_kind_directory,
+        "FileKind.Symlink" => &mut layout.file_kind_symlink,
+        "FileKind.Other" => &mut layout.file_kind_other,
+        "FileInfo" => &mut layout.file_info,
+        "DirEntry" => &mut layout.dir_entry,
+        "RenameMode" => &mut layout.rename_mode,
+        "RenameMode.NoReplace" => &mut layout.rename_no_replace,
+        "RenameMode.Replace" => &mut layout.rename_replace,
         "IpAddress" => &mut layout.ip_address,
         "IpAddress.V4" => &mut layout.ip_v4,
         "IpAddress.V6" => &mut layout.ip_v6,

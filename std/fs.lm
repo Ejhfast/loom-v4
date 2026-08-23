@@ -1,0 +1,103 @@
+# Standard library: scoped and durable file helpers.
+
+def with_file[T, effect e](
+  path: String,
+  options: OpenOptions,
+  body: (FileHandle) -> Result[T, FsError] with e
+): Result[T, FsError] with e, Fs.Open, Fs.Close
+  file = sys.fs.open(path, options)?
+  result = body(file)
+  closed = file.close()
+  case result
+  in Err(error) then Err(error)
+  in Ok(value)
+    case closed
+    in Ok(_) then Ok(value)
+    in Err(error) then Err(error)
+    end
+  end
+end
+
+def read_dir_sorted(
+  path: String,
+  max_entries: Int
+): Result[List[Result[DirEntry, FsError]], FsError] with Fs.ReadDir
+  found = sys.fs.read_dir(path, max_entries)?
+  entries = List[DirEntry]()
+  errors = List[FsError]()
+  for item in found
+    case item
+    in Ok(entry) then entries.push(entry)
+    in Err(error) then errors.push(error)
+    end
+  end
+  entries.sort_by() { |left: DirEntry, right: DirEntry|
+    left.name.compare(right.name)
+  }
+  result = List[Result[DirEntry, FsError]]()
+  result.reserve(entries.len() + errors.len())
+  for entry in entries
+    result.push(Ok(entry))
+  end
+  for error in errors
+    result.push(Err(error))
+  end
+  Ok(result)
+end
+
+def write_file_all(
+  file: FileHandle,
+  bytes: Bytes
+): Result[(), FsError] with Fs.Write
+  offset = 0
+  while offset < bytes.len()
+    count = bytes.len() - offset
+    if count > 65536
+      count = 65536
+    end
+    part = bytes.slice(offset, count).expect("the file write bounds are valid")
+    written = file.write(part)?
+    if written <= 0 or written > part.len()
+      return Err(FsError.Failed("the file write made invalid progress"))
+    end
+    offset = offset + written
+  end
+  Ok(())
+end
+
+def durable_replace(
+  directory: String,
+  temporary_path: String,
+  target_path: String,
+  bytes: Bytes
+): Result[(), FsError] with Fs.Open, Fs.Write, Fs.Flush, Fs.Sync, Fs.Close, Fs.RemoveFile, Fs.Rename, Fs.SyncDir
+  file = sys.fs.open(temporary_path, CreateNew)?
+  prepared = case write_file_all(file, bytes)
+  in Err(error) then Err(error)
+  in Ok(_)
+    case file.flush()
+    in Err(error) then Err(error)
+    in Ok(_) then file.sync()
+    end
+  end
+  closed = file.close()
+  case prepared
+  in Err(error)
+    sys.fs.remove_file(temporary_path)
+    return Err(error)
+  in Ok(_) then ()
+  end
+  case closed
+  in Err(error)
+    sys.fs.remove_file(temporary_path)
+    return Err(error)
+  in Ok(_) then ()
+  end
+  case sys.fs.rename(temporary_path, target_path, RenameMode.Replace)
+  in Err(error)
+    sys.fs.remove_file(temporary_path)
+    Err(error)
+  in Ok(_)
+    sys.fs.sync_dir(directory)
+  end
+end

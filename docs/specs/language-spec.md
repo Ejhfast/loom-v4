@@ -3007,13 +3007,16 @@ Fs.Read        (FileHandle, Int) -> Result[Bytes, FsError]
 Fs.Write       (FileHandle, Bytes) -> Result[Int, FsError]
 Fs.Seek        (FileHandle, SeekFrom) -> Result[Int, FsError]
 Fs.Flush       (FileHandle) -> Result[(), FsError]
+Fs.Sync        (FileHandle) -> Result[(), FsError]
 Fs.Close       (FileHandle) -> Result[(), FsError]
 Fs.CurrentDir  () -> Result[String, FsError]
 Fs.Stat        (String) -> Result[FileInfo, FsError]
-Fs.ReadDir     (String) -> Result[[DirEntry], FsError]
+Fs.ReadDir     (String, Int) -> Result[List[Result[DirEntry, FsError]], FsError]
 Fs.CreateDir   (String) -> Result[(), FsError]
-Fs.Remove      (String) -> Result[(), FsError]
-Fs.Rename      (String, String) -> Result[(), FsError]
+Fs.RemoveFile  (String) -> Result[(), FsError]
+Fs.RemoveDir   (String) -> Result[(), FsError]
+Fs.Rename      (String, String, RenameMode) -> Result[(), FsError]
+Fs.SyncDir     (String) -> Result[(), FsError]
 ```
 
 A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. The standard library never reopens a raw file handle silently. A later version may define a checkpointable file type with an explicit restore contract.
@@ -3433,6 +3436,7 @@ The prelude introduces the pinned value and resource surface:
 Option, Some, None, Result, Ok, Err, Ordering, Unit, Tuple2, ..., Tuple16, Range
 RunResult, StepEvent, DriveEvent, Proc, Recv, SendResult, ProcResult, ProcError
 Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
+FileKind, FileInfo, DirEntry, RenameMode
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
@@ -3926,7 +3930,7 @@ deep_equal[T](a: T, b: T): Bool
 
 ### 24.9 Paths, I/O, and files
 
-`std/path` is pure. `Path` normalizes separators lexically, joins components, extracts parent/name/extension, and never consults the host filesystem.
+The first release uses `String` values for file-system paths.
 
 `std/io` contains thin wrappers:
 
@@ -3938,40 +3942,36 @@ print_error(text: Text): Result[(), IoError] with Io.WriteError
 read_to_end(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
 ```
 
-`std/fs` makes scoped access the standard file path:
+`std/fs` provides scoped and durable file helpers:
 
 ```lm
-files.with_open(path, options) { |file|
-  file.read_all(max_bytes: 1_000_000)
-}
+with_file(path, options, body)
+read_dir_sorted(path, max_entries)
+write_file_all(file, bytes)
+durable_replace(directory, temporary_path, target_path, bytes)
 ```
 
-Conceptually:
+`with_file` always closes a successfully opened handle.
 
-```text
-with_open[R,e](
-  path: Path,
-  options: OpenOptions,
-  body: (FileLease) -> R with e
-) -> Result[R,FsError] with Fs.Open, Fs.Close, e
-```
+It returns the body error before a later close error.
 
-`FileLease` is a scoped designator. It offers `read`, `read_exact`, `read_all`, `read_text`, `write`, `write_all`, `flush`, and `seek`. It has no public `close` method. An open failure returns `Err` without calling the body. A normal body return closes the lease before returning. A close failure returns `Err` instead of the body value.
+A body fault terminates the machine normally.
 
-`with_open` never flattens the body result. A body that returns `Result` gives the caller a nested `Result`. The caller matches both layers with nested patterns (9.2).
+The host resource registry closes the handle during VM cleanup.
 
-A body fault terminates the machine normally. The host-side resource registry closes the lease during VM cleanup. Cleanup invokes no guest callback and does not replace the original terminal fault.
+Cleanup invokes no guest callback and preserves the first fault.
 
-The advanced API remains explicit:
+`FileHandle` has explicit read, write, seek, flush, sync, and close methods.
 
-```text
-open_handle(path, options)
-  -> Result[FileHandle,FsError] with Fs.Open
-```
+A live handle blocks snapshot creation.
 
-`FileHandle` has explicit read, write, seek, flush, and close methods. A live `FileHandle` is a host attachment and blocks snapshot creation. A closed handle remains in machine state and returns `FsError.Closed`. A host extension may define a distinct checkpointable file type with an explicit restore contract in a later version.
+A closed handle remains machine state and returns `FsError.Closed`.
 
-Top-level helpers include `read`, `read_text`, `write`, `write_text`, `stat`, `read_dir`, `create_dir`, `remove`, and `rename`. They use scoped handles internally and retain the exact underlying rows.
+`read_dir_sorted` sorts valid UTF-8 names.
+
+It keeps every invalid entry as an inner error.
+
+`durable_replace` writes, flushes, syncs, renames, and syncs the parent directory.
 
 There are no finalizers. Scoped cleanup is host-managed. Raw handle ownership remains explicit.
 

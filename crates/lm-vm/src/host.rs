@@ -21,6 +21,7 @@ pub enum HostArg {
     File(u64),
     OpenOptions(HostOpenOptions),
     SeekFrom(HostSeekFrom),
+    RenameMode(HostRenameMode),
     SocketAddress(HostSocketAddress),
     Tcp(HostTcpResource),
     Shutdown(HostShutdown),
@@ -157,7 +158,15 @@ pub enum HostOpenOptions {
     ReadWrite,
     Create,
     CreateTruncate,
+    CreateNew,
     Append,
+}
+
+/// One portable file rename mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostRenameMode {
+    NoReplace,
+    Replace,
 }
 
 /// One portable file-seek origin and offset.
@@ -178,6 +187,7 @@ pub enum CoreCtor {
     IoErrorBrokenPipe,
     IoErrorInvalidInput,
     IoErrorLimitExceeded,
+    IoErrorUnsupported,
     IoErrorFailed,
     EnvInvalidName,
     EnvInvalidEncoding,
@@ -188,7 +198,24 @@ pub enum CoreCtor {
     EntropyUnavailable,
     EntropyFailed,
     FsErrorClosed,
+    FsErrorInvalidInput,
+    FsErrorInvalidEncoding,
+    FsErrorLimitExceeded,
+    FsErrorNotFound,
+    FsErrorAlreadyExists,
+    FsErrorPermissionDenied,
+    FsErrorNotDirectory,
+    FsErrorIsDirectory,
+    FsErrorDirectoryNotEmpty,
+    FsErrorCrossDevice,
+    FsErrorUnsupported,
     FsErrorFailed,
+    FileKindFile,
+    FileKindDirectory,
+    FileKindSymlink,
+    FileKindOther,
+    FileInfo,
+    DirEntry,
     NetInvalidInput,
     NetNameNotFound,
     NetUnavailable,
@@ -417,6 +444,8 @@ pub struct RecordingHost {
     pub input_bytes: Vec<u8>,
     pub written_bytes: Vec<u8>,
     pub written_error_bytes: Vec<u8>,
+    /// Exact operations in host submission order.
+    pub operations: Vec<u32>,
     /// The maximum bytes accepted by one console write.
     pub console_write_limit: usize,
     pub environment: BTreeMap<String, String>,
@@ -434,6 +463,7 @@ pub struct RecordingHost {
     retained_waits: BTreeMap<u64, RetainedWait>,
     next_token: u64,
     files: BTreeMap<String, Vec<u8>>,
+    directories: std::collections::BTreeSet<String>,
     file_handles: BTreeMap<u64, MemoryFile>,
     next_file: u64,
     dns: BTreeMap<String, Vec<HostIpAddress>>,
@@ -508,7 +538,15 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_FS_WRITE
             | lm_abi::OP_FS_SEEK
             | lm_abi::OP_FS_FLUSH
+            | lm_abi::OP_FS_SYNC
             | lm_abi::OP_FS_CLOSE
+            | lm_abi::OP_FS_STAT
+            | lm_abi::OP_FS_READ_DIR
+            | lm_abi::OP_FS_CREATE_DIR
+            | lm_abi::OP_FS_REMOVE_FILE
+            | lm_abi::OP_FS_REMOVE_DIR
+            | lm_abi::OP_FS_RENAME
+            | lm_abi::OP_FS_SYNC_DIR
             | lm_abi::OP_IO_PRINT
             | lm_abi::OP_IO_ERROR
             | lm_abi::OP_IO_READ_LINE
@@ -585,13 +623,10 @@ fn core_error(ctor: CoreCtor, message: Option<&str>) -> HostValue {
     HostValue::Ctor(CoreCtor::Err, vec![HostValue::Ctor(ctor, fields)])
 }
 
-fn fs_failed(message: impl Into<String>) -> HostValue {
+fn fs_closed() -> HostValue {
     HostValue::Ctor(
         CoreCtor::Err,
-        vec![HostValue::Ctor(
-            CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(SharedText::from(message.into()))],
-        )],
+        vec![HostValue::Ctor(CoreCtor::FsErrorClosed, Vec::new())],
     )
 }
 
@@ -659,6 +694,7 @@ impl RecordingHost {
             input_bytes: Vec::new(),
             written_bytes: Vec::new(),
             written_error_bytes: Vec::new(),
+            operations: Vec::new(),
             console_write_limit: usize::MAX,
             environment: BTreeMap::new(),
             arguments: Vec::new(),
@@ -671,6 +707,9 @@ impl RecordingHost {
             retained_waits: BTreeMap::new(),
             next_token: 1,
             files: BTreeMap::new(),
+            directories: [".".to_string(), "/".to_string(), "/loom".to_string()]
+                .into_iter()
+                .collect(),
             file_handles: BTreeMap::new(),
             next_file: 1,
             dns,
@@ -692,7 +731,9 @@ impl RecordingHost {
 
     /// Set one in-memory file before execution.
     pub fn set_file(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
-        self.files.insert(path.into(), bytes);
+        let path = path.into();
+        self.directories.insert(memory_parent(&path).to_string());
+        self.files.insert(path, bytes);
     }
 
     /// Read one in-memory file after execution.
@@ -912,6 +953,30 @@ fn std_stream_index(stream: HostStdStream) -> usize {
     }
 }
 
+fn memory_parent(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((parent, _)) => parent,
+        None => ".",
+    }
+}
+
+fn memory_name(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
+fn fs_case(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(ctor, vec![HostValue::Str(message.into().into())])
+}
+
+fn fs_named_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(CoreCtor::Err, vec![fs_case(ctor, message)])
+}
+
+fn memory_file_kind(ctor: CoreCtor) -> HostValue {
+    HostValue::Ctor(ctor, Vec::new())
+}
+
 impl RecordingHost {
     /// Hold one reply for a later poll.
     fn defer(&mut self, key: CompletionKey, value: HostValue) -> HostStart {
@@ -973,6 +1038,7 @@ impl RecordingHost {
 impl RecordingHost {
     fn serve(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
         let _ = key;
+        self.operations.push(op);
         match op {
             lm_abi::OP_IO_PRINT => {
                 if let Some(HostArg::Str(text)) = args.first() {
@@ -1127,16 +1193,38 @@ impl RecordingHost {
                 else {
                     return HostStart::Failed("Fs.Open needs a path and options".to_string());
                 };
-                let (readable, writable, append, create, truncate) = match options {
-                    HostOpenOptions::ReadOnly => (true, false, false, false, false),
-                    HostOpenOptions::WriteOnly => (false, true, false, false, false),
-                    HostOpenOptions::ReadWrite => (true, true, false, false, false),
-                    HostOpenOptions::Create => (true, true, false, true, false),
-                    HostOpenOptions::CreateTruncate => (true, true, false, true, true),
-                    HostOpenOptions::Append => (false, true, true, true, false),
+                let (readable, writable, append, create, truncate, exclusive) = match options {
+                    HostOpenOptions::ReadOnly => (true, false, false, false, false, false),
+                    HostOpenOptions::WriteOnly => (false, true, false, false, false, false),
+                    HostOpenOptions::ReadWrite => (true, true, false, false, false, false),
+                    HostOpenOptions::Create => (true, true, false, true, false, false),
+                    HostOpenOptions::CreateTruncate => (true, true, false, true, true, false),
+                    HostOpenOptions::CreateNew => (true, true, false, true, false, true),
+                    HostOpenOptions::Append => (false, true, true, true, false, false),
                 };
+                if self.directories.contains(path.as_str()) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorIsDirectory,
+                        "file open found a directory",
+                    ));
+                }
+                if exclusive && self.files.contains_key(path.as_str()) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorAlreadyExists,
+                        "file open found an existing path",
+                    ));
+                }
                 if !create && !self.files.contains_key(path.as_str()) {
-                    return HostStart::Completed(fs_failed("the file does not exist"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "file open did not find the path",
+                    ));
+                }
+                if create && !self.directories.contains(memory_parent(path)) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "file open did not find the parent directory",
+                    ));
                 }
                 let path = path.to_string();
                 let file = self.files.entry(path.clone()).or_default();
@@ -1168,20 +1256,32 @@ impl RecordingHost {
                     return HostStart::Failed("Fs.Read needs a file and count".to_string());
                 };
                 let Ok(count) = usize::try_from(*count) else {
-                    return HostStart::Completed(fs_failed("the read count is negative"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorInvalidInput,
+                        "the read count is negative",
+                    ));
                 };
                 if count > MAX_FILE_IO_BYTES {
-                    return HostStart::Completed(fs_failed("the read count is too large"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the read count is too large",
+                    ));
                 }
                 let (files, handles) = (&self.files, &mut self.file_handles);
                 let Some(handle) = handles.get_mut(token) else {
-                    return HostStart::Completed(fs_failed("the file token is not open"));
+                    return HostStart::Completed(fs_closed());
                 };
                 if !handle.readable {
-                    return HostStart::Completed(fs_failed("the file is not readable"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorPermissionDenied,
+                        "the file is not readable",
+                    ));
                 }
                 let Some(file) = files.get(&handle.path) else {
-                    return HostStart::Completed(fs_failed("the file does not exist"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "the file does not exist",
+                    ));
                 };
                 let end = handle.cursor.saturating_add(count).min(file.len());
                 let bytes = file[handle.cursor..end].to_vec();
@@ -1196,19 +1296,28 @@ impl RecordingHost {
                 };
                 let (files, handles) = (&mut self.files, &mut self.file_handles);
                 let Some(handle) = handles.get_mut(token) else {
-                    return HostStart::Completed(fs_failed("the file token is not open"));
+                    return HostStart::Completed(fs_closed());
                 };
                 if !handle.writable {
-                    return HostStart::Completed(fs_failed("the file is not writable"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorPermissionDenied,
+                        "the file is not writable",
+                    ));
                 }
                 let Some(file) = files.get_mut(&handle.path) else {
-                    return HostStart::Completed(fs_failed("the file does not exist"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "the file does not exist",
+                    ));
                 };
                 if handle.append {
                     handle.cursor = file.len();
                 }
                 let Some(end) = handle.cursor.checked_add(bytes.len()) else {
-                    return HostStart::Completed(fs_failed("the write position is too large"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the write position is too large",
+                    ));
                 };
                 if end > file.len() {
                     file.resize(end, 0);
@@ -1225,10 +1334,13 @@ impl RecordingHost {
                 };
                 let (files, handles) = (&self.files, &mut self.file_handles);
                 let Some(handle) = handles.get_mut(token) else {
-                    return HostStart::Completed(fs_failed("the file token is not open"));
+                    return HostStart::Completed(fs_closed());
                 };
                 let Some(file) = files.get(&handle.path) else {
-                    return HostStart::Completed(fs_failed("the file does not exist"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "the file does not exist",
+                    ));
                 };
                 let base = match from {
                     HostSeekFrom::Start(_) => 0i128,
@@ -1242,7 +1354,10 @@ impl RecordingHost {
                 };
                 let position = base + offset;
                 let Ok(position) = usize::try_from(position) else {
-                    return HostStart::Completed(fs_failed("the seek position is invalid"));
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorInvalidInput,
+                        "the seek position is invalid",
+                    ));
                 };
                 handle.cursor = position;
                 HostStart::Completed(fs_ok(HostValue::Int(position as i64)))
@@ -1252,7 +1367,19 @@ impl RecordingHost {
                     return HostStart::Failed("Fs.Flush needs a file".to_string());
                 };
                 if !self.file_handles.contains_key(token) {
-                    return HostStart::Completed(fs_failed("the file token is not open"));
+                    return HostStart::Completed(fs_closed());
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_SYNC => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Sync needs a file".to_string());
+                };
+                if !self.file_handles.contains_key(token) {
+                    return HostStart::Completed(HostValue::Ctor(
+                        CoreCtor::Err,
+                        vec![HostValue::Ctor(CoreCtor::FsErrorClosed, Vec::new())],
+                    ));
                 }
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }
@@ -1261,7 +1388,280 @@ impl RecordingHost {
                     return HostStart::Failed("Fs.Close needs a file".to_string());
                 };
                 if self.file_handles.remove(token).is_none() {
-                    return HostStart::Completed(fs_failed("the file token is not open"));
+                    return HostStart::Completed(fs_closed());
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_STAT => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.Stat needs a path".to_string());
+                };
+                let kind = if let Some(bytes) = self.files.get(path.as_str()) {
+                    Some((CoreCtor::FileKindFile, bytes.len()))
+                } else if self.directories.contains(path.as_str()) {
+                    Some((CoreCtor::FileKindDirectory, 0))
+                } else {
+                    None
+                };
+                let Some((kind, length)) = kind else {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "file metadata query did not find the path",
+                    ));
+                };
+                let Ok(length) = i64::try_from(length) else {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the file length exceeds Int",
+                    ));
+                };
+                HostStart::Completed(fs_ok(HostValue::Ctor(
+                    CoreCtor::FileInfo,
+                    vec![
+                        memory_file_kind(kind),
+                        HostValue::Int(length),
+                        HostValue::Ctor(CoreCtor::None, Vec::new()),
+                        HostValue::Bool(false),
+                    ],
+                )))
+            }
+            lm_abi::OP_FS_READ_DIR => {
+                let (Some(HostArg::Str(path)), Some(HostArg::Int(max_entries))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.ReadDir needs a path and limit".to_string());
+                };
+                let Ok(max_entries) = usize::try_from(*max_entries) else {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorInvalidInput,
+                        "the directory entry limit is negative",
+                    ));
+                };
+                if max_entries > 100_000 {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the directory entry limit is too large",
+                    ));
+                }
+                if !self.directories.contains(path.as_str()) {
+                    let ctor = if self.files.contains_key(path.as_str()) {
+                        CoreCtor::FsErrorNotDirectory
+                    } else {
+                        CoreCtor::FsErrorNotFound
+                    };
+                    return HostStart::Completed(fs_named_error(
+                        ctor,
+                        "directory read did not find a directory",
+                    ));
+                }
+                let mut entries = BTreeMap::<String, CoreCtor>::new();
+                for name in self.files.keys() {
+                    if memory_parent(name) == path.as_str() {
+                        entries.insert(memory_name(name).to_string(), CoreCtor::FileKindFile);
+                    }
+                }
+                for name in &self.directories {
+                    if name != path.as_str() && memory_parent(name) == path.as_str() {
+                        entries.insert(memory_name(name).to_string(), CoreCtor::FileKindDirectory);
+                    }
+                }
+                if entries.len() > max_entries {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the directory exceeds its entry limit",
+                    ));
+                }
+                let entries = entries
+                    .into_iter()
+                    .map(|(name, kind)| {
+                        HostValue::Ctor(
+                            CoreCtor::Ok,
+                            vec![HostValue::Ctor(
+                                CoreCtor::DirEntry,
+                                vec![HostValue::Str(name.into()), memory_file_kind(kind)],
+                            )],
+                        )
+                    })
+                    .collect();
+                HostStart::Completed(fs_ok(HostValue::List(entries)))
+            }
+            lm_abi::OP_FS_CREATE_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.CreateDir needs a path".to_string());
+                };
+                if self.files.contains_key(path.as_str())
+                    || self.directories.contains(path.as_str())
+                {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorAlreadyExists,
+                        "directory creation found an existing path",
+                    ));
+                }
+                if !self.directories.contains(memory_parent(path)) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "directory creation did not find its parent",
+                    ));
+                }
+                self.directories.insert(path.to_string());
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_REMOVE_FILE => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.RemoveFile needs a path".to_string());
+                };
+                if self.directories.contains(path.as_str()) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorIsDirectory,
+                        "file removal found a directory",
+                    ));
+                }
+                if self.files.remove(path.as_str()).is_none() {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "file removal did not find the path",
+                    ));
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_REMOVE_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.RemoveDir needs a path".to_string());
+                };
+                if self.files.contains_key(path.as_str()) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotDirectory,
+                        "directory removal found a file",
+                    ));
+                }
+                if !self.directories.contains(path.as_str()) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "directory removal did not find the path",
+                    ));
+                }
+                let nonempty = self
+                    .files
+                    .keys()
+                    .chain(self.directories.iter())
+                    .any(|name| name != path.as_str() && memory_parent(name) == path.as_str());
+                if nonempty {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorDirectoryNotEmpty,
+                        "directory removal found a nonempty directory",
+                    ));
+                }
+                self.directories.remove(path.as_str());
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_RENAME => {
+                let (
+                    Some(HostArg::Str(from)),
+                    Some(HostArg::Str(to)),
+                    Some(HostArg::RenameMode(mode)),
+                ) = (args.first(), args.get(1), args.get(2))
+                else {
+                    return HostStart::Failed("Fs.Rename needs two paths and one mode".to_string());
+                };
+                let target_exists =
+                    self.files.contains_key(to.as_str()) || self.directories.contains(to.as_str());
+                if !self.directories.contains(memory_parent(to)) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorNotFound,
+                        "rename did not find the target parent",
+                    ));
+                }
+                if target_exists && matches!(mode, HostRenameMode::NoReplace) {
+                    return HostStart::Completed(fs_named_error(
+                        CoreCtor::FsErrorAlreadyExists,
+                        "rename found an existing target",
+                    ));
+                }
+                if let Some(bytes) = self.files.remove(from.as_str()) {
+                    if self.directories.contains(to.as_str()) {
+                        self.files.insert(from.to_string(), bytes);
+                        return HostStart::Completed(fs_named_error(
+                            CoreCtor::FsErrorIsDirectory,
+                            "rename found a target directory",
+                        ));
+                    }
+                    self.files.insert(to.to_string(), bytes);
+                    for handle in self.file_handles.values_mut() {
+                        if handle.path == from.as_str() {
+                            handle.path = to.to_string();
+                        }
+                    }
+                    return HostStart::Completed(fs_ok(HostValue::Unit));
+                }
+                if self.directories.contains(from.as_str()) {
+                    if target_exists {
+                        return HostStart::Completed(fs_named_error(
+                            CoreCtor::FsErrorAlreadyExists,
+                            "directory rename found an existing target",
+                        ));
+                    }
+                    let from_prefix = format!("{from}/");
+                    let to_prefix = format!("{to}/");
+                    let moved_directories: Vec<String> = self
+                        .directories
+                        .iter()
+                        .filter(|path| {
+                            path.as_str() == from.as_str() || path.starts_with(&from_prefix)
+                        })
+                        .cloned()
+                        .collect();
+                    let moved_files: Vec<String> = self
+                        .files
+                        .keys()
+                        .filter(|path| path.starts_with(&from_prefix))
+                        .cloned()
+                        .collect();
+                    for path in &moved_directories {
+                        self.directories.remove(path);
+                    }
+                    for path in moved_directories {
+                        let moved = if path == from.as_str() {
+                            to.to_string()
+                        } else {
+                            format!("{to_prefix}{}", &path[from_prefix.len()..])
+                        };
+                        self.directories.insert(moved);
+                    }
+                    for path in moved_files {
+                        let bytes = self
+                            .files
+                            .remove(&path)
+                            .expect("the moved file remains present");
+                        let moved = format!("{to_prefix}{}", &path[from_prefix.len()..]);
+                        self.files.insert(moved, bytes);
+                    }
+                    for handle in self.file_handles.values_mut() {
+                        if handle.path.starts_with(&from_prefix) {
+                            handle.path =
+                                format!("{to_prefix}{}", &handle.path[from_prefix.len()..]);
+                        }
+                    }
+                    return HostStart::Completed(fs_ok(HostValue::Unit));
+                }
+                HostStart::Completed(fs_named_error(
+                    CoreCtor::FsErrorNotFound,
+                    "rename did not find the source",
+                ))
+            }
+            lm_abi::OP_FS_SYNC_DIR => {
+                let Some(HostArg::Str(path)) = args.first() else {
+                    return HostStart::Failed("Fs.SyncDir needs a path".to_string());
+                };
+                if !self.directories.contains(path.as_str()) {
+                    let ctor = if self.files.contains_key(path.as_str()) {
+                        CoreCtor::FsErrorNotDirectory
+                    } else {
+                        CoreCtor::FsErrorNotFound
+                    };
+                    return HostStart::Completed(fs_named_error(
+                        ctor,
+                        "directory sync did not find a directory",
+                    ));
                 }
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }

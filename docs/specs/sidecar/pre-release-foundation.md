@@ -100,6 +100,14 @@ The first expression performs the operation immediately.
 
 The second expression prepares one wait source.
 
+The API has three consumption tiers.
+
+`sys.io.read_bytes(64)` performs one operation directly.
+
+`sys.io.read_bytes.wait(64).wait()` prepares and consumes one source.
+
+`select` prepares several sources and consumes one selected source.
+
 ### 4.2 Identity and authority
 
 `Op.wait` creates no new exact operation.
@@ -942,6 +950,12 @@ It uses bounded workers or reactors outside the scheduler thread.
 
 The host starts each new service only after its first operation.
 
+The root host serves every operation in its installed ABI table.
+
+A missing platform capability returns the operation's typed `Unsupported` error.
+
+The host never reports a table operation as unimplemented.
+
 The implementation reuses the current socket reactor and TLS library.
 
 Terminal and signal support can add one reviewed platform dependency.
@@ -991,7 +1005,7 @@ Gate: Closing a signal stream completes every armed signal wait.
 
 Gate: Active raw mode keeps cleanup handlers for both supported signals.
 
-### Stage 3: File-system completion
+### Stage 3: File-system completion (complete)
 
 - Add metadata and directory boundary values.
 - Expand `FsError` and host mappings.

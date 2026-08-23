@@ -6,6 +6,7 @@ enum IoError implements Error
   BrokenPipe
   InvalidInput(message: String)
   LimitExceeded(message: String)
+  Unsupported(message: String)
   Failed(message: String)
 
   def append_to(self, mut builder: StringBuilder)
@@ -13,6 +14,7 @@ enum IoError implements Error
     in BrokenPipe      then "the output pipe is closed"
     in InvalidInput(m) then m
     in LimitExceeded(m) then m
+    in Unsupported(m)  then m
     in Failed(m)       then m
     end
     builder.append(text)

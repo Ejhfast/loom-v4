@@ -300,3 +300,41 @@ Stage 2 adds 16 integration tests and two examples to the admission corpus.
 The larger core adds typed terminal and signal values to every program.
 
 Focused runtime remains within normal measurement noise.
+
+## Host-effects Stage 3
+
+The parent revision is `4061438`.
+
+The manifest ABI version is 27.
+
+The bytecode version is 54.
+
+The snapshot format version remains 30.
+
+| Core measurement | Stage 2 | Stage 3 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 235 | 258 | +9.8% |
+| HIR functions | 535 | 537 | +0.4% |
+| Bytecode functions | 770 | 795 | +3.2% |
+| Artifact size | 235,172 bytes | 242,074 bytes | +2.9% |
+| Core checking | 1.859 ms | 1.903 ms | +2.4% |
+| Core lowering | 0.839 ms | 0.870 ms | +3.7% |
+| Core compilation | 3.000 ms | 3.117 ms | +3.9% |
+| Core decoding | 0.343 ms | 0.367 ms | +7.0% |
+| Core verification | 1.145 ms | 1.210 ms | +5.7% |
+| Structural verification | 0.411 ms | 0.430 ms | +4.6% |
+| Verification hash | 0.116 ms | 0.126 ms | +8.6% |
+| Semantic identity | 2.092 ms | 2.253 ms | +7.7% |
+| Decoded loading | 1.291 ms | 1.379 ms | +6.8% |
+| Core loading | 1.645 ms | 1.745 ms | +6.1% |
+
+| Runtime measurement | Stage 2 | Stage 3 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.6 ns | 31.5 ns | -0.3% |
+| `direct_call` | 31.9 ns | 30.4 ns | -4.7% |
+| `direct_clock` | 104.9 ns | 106.6 ns | +1.6% |
+| Warm workspace suite | 37.60 seconds | 38.61 seconds | +2.7% |
+
+Static runtime remains within normal measurement noise.
+
+The larger core adds portable file metadata and stable error cases.

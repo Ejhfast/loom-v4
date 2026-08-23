@@ -71,7 +71,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 120] = [
+pub const PRELUDE_TYPES: [&str; 124] = [
     "Option",
     "Result",
     "Ordering",
@@ -153,6 +153,10 @@ pub const PRELUDE_TYPES: [&str; 120] = [
     "EntropyError",
     "OpenOptions",
     "SeekFrom",
+    "FileKind",
+    "FileInfo",
+    "DirEntry",
+    "RenameMode",
     "IpAddress",
     "SocketAddress",
     "NetError",
@@ -195,7 +199,7 @@ pub const PRELUDE_TYPES: [&str; 120] = [
 ];
 
 /// The constructor names the prelude places into unqualified scope.
-pub const PRELUDE_CTORS: [&str; 17] = [
+pub const PRELUDE_CTORS: [&str; 18] = [
     "Some",
     "None",
     "Ok",
@@ -205,6 +209,7 @@ pub const PRELUDE_CTORS: [&str; 17] = [
     "ReadWrite",
     "Create",
     "CreateTruncate",
+    "CreateNew",
     "Append",
     "Start",
     "Current",

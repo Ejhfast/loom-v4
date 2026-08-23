@@ -137,6 +137,29 @@ pub(crate) const ROLE_SIGNAL_ERROR_BUSY: usize = 191;
 pub(crate) const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
 pub(crate) const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
 pub(crate) const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
+pub(crate) const ROLE_IO_ERROR_UNSUPPORTED: usize = 196;
+pub(crate) const ROLE_FS_ERROR_INVALID_INPUT: usize = 197;
+pub(crate) const ROLE_FS_ERROR_INVALID_ENCODING: usize = 198;
+pub(crate) const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 199;
+pub(crate) const ROLE_FS_ERROR_NOT_FOUND: usize = 200;
+pub(crate) const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 201;
+pub(crate) const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 202;
+pub(crate) const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 203;
+pub(crate) const ROLE_FS_ERROR_IS_DIRECTORY: usize = 204;
+pub(crate) const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 205;
+pub(crate) const ROLE_FS_ERROR_CROSS_DEVICE: usize = 206;
+pub(crate) const ROLE_FS_ERROR_UNSUPPORTED: usize = 207;
+pub(crate) const ROLE_OPEN_CREATE_NEW: usize = 208;
+pub(crate) const ROLE_FILE_KIND: usize = 209;
+pub(crate) const ROLE_FILE_KIND_FILE: usize = 210;
+pub(crate) const ROLE_FILE_KIND_DIRECTORY: usize = 211;
+pub(crate) const ROLE_FILE_KIND_SYMLINK: usize = 212;
+pub(crate) const ROLE_FILE_KIND_OTHER: usize = 213;
+pub(crate) const ROLE_FILE_INFO: usize = 214;
+pub(crate) const ROLE_DIR_ENTRY: usize = 215;
+pub(crate) const ROLE_RENAME_MODE: usize = 216;
+pub(crate) const ROLE_RENAME_NO_REPLACE: usize = 217;
+pub(crate) const ROLE_RENAME_REPLACE: usize = 218;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -156,7 +179,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 29] = [
     (
         ROLE_OPTION,
         1,
@@ -171,6 +194,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
             ROLE_IO_ERROR_BROKEN_PIPE,
             ROLE_IO_ERROR_INVALID_INPUT,
             ROLE_IO_ERROR_LIMIT_EXCEEDED,
+            ROLE_IO_ERROR_UNSUPPORTED,
             ROLE_IO_ERROR_FAILED,
         ],
         "IoError",
@@ -263,7 +287,21 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
     (
         ROLE_FS_ERROR,
         0,
-        &[ROLE_FS_ERROR_CLOSED, ROLE_FS_ERROR_FAILED],
+        &[
+            ROLE_FS_ERROR_CLOSED,
+            ROLE_FS_ERROR_INVALID_INPUT,
+            ROLE_FS_ERROR_INVALID_ENCODING,
+            ROLE_FS_ERROR_LIMIT_EXCEEDED,
+            ROLE_FS_ERROR_NOT_FOUND,
+            ROLE_FS_ERROR_ALREADY_EXISTS,
+            ROLE_FS_ERROR_PERMISSION_DENIED,
+            ROLE_FS_ERROR_NOT_DIRECTORY,
+            ROLE_FS_ERROR_IS_DIRECTORY,
+            ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY,
+            ROLE_FS_ERROR_CROSS_DEVICE,
+            ROLE_FS_ERROR_UNSUPPORTED,
+            ROLE_FS_ERROR_FAILED,
+        ],
         "FsError",
     ),
     (
@@ -275,6 +313,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
             ROLE_OPEN_READ_WRITE,
             ROLE_OPEN_CREATE,
             ROLE_OPEN_CREATE_TRUNCATE,
+            ROLE_OPEN_CREATE_NEW,
             ROLE_OPEN_APPEND,
         ],
         "OpenOptions",
@@ -284,6 +323,23 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
         0,
         &[ROLE_SEEK_START, ROLE_SEEK_CURRENT, ROLE_SEEK_END],
         "SeekFrom",
+    ),
+    (
+        ROLE_FILE_KIND,
+        0,
+        &[
+            ROLE_FILE_KIND_FILE,
+            ROLE_FILE_KIND_DIRECTORY,
+            ROLE_FILE_KIND_SYMLINK,
+            ROLE_FILE_KIND_OTHER,
+        ],
+        "FileKind",
+    ),
+    (
+        ROLE_RENAME_MODE,
+        0,
+        &[ROLE_RENAME_NO_REPLACE, ROLE_RENAME_REPLACE],
+        "RenameMode",
     ),
     (ROLE_IP_ADDRESS, 0, &[ROLE_IP_V4, ROLE_IP_V6], "IpAddress"),
     (
@@ -387,7 +443,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 98] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 117] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -395,6 +451,7 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 98] = [
     (ROLE_IO_ERROR_BROKEN_PIPE, &[]),
     (ROLE_IO_ERROR_INVALID_INPUT, &[FieldShape::Str]),
     (ROLE_IO_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_IO_ERROR_UNSUPPORTED, &[FieldShape::Str]),
     (ROLE_IO_ERROR_FAILED, &[FieldShape::Str]),
     (ROLE_ENV_ERROR_INVALID_NAME, &[FieldShape::Str]),
     (ROLE_ENV_ERROR_INVALID_ENCODING, &[FieldShape::Str]),
@@ -432,16 +489,34 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 98] = [
     (ROLE_SNAPSHOT_BAD_IMAGE, &[FieldShape::Str]),
     (ROLE_RESTORE_LIMIT_EXCEEDED, &[]),
     (ROLE_FS_ERROR_CLOSED, &[]),
+    (ROLE_FS_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_INVALID_ENCODING, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_NOT_FOUND, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_ALREADY_EXISTS, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_NOT_DIRECTORY, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_IS_DIRECTORY, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_CROSS_DEVICE, &[FieldShape::Str]),
+    (ROLE_FS_ERROR_UNSUPPORTED, &[FieldShape::Str]),
     (ROLE_FS_ERROR_FAILED, &[FieldShape::Str]),
     (ROLE_OPEN_READ_ONLY, &[]),
     (ROLE_OPEN_WRITE_ONLY, &[]),
     (ROLE_OPEN_READ_WRITE, &[]),
     (ROLE_OPEN_CREATE, &[]),
     (ROLE_OPEN_CREATE_TRUNCATE, &[]),
+    (ROLE_OPEN_CREATE_NEW, &[]),
     (ROLE_OPEN_APPEND, &[]),
     (ROLE_SEEK_START, &[FieldShape::Int]),
     (ROLE_SEEK_CURRENT, &[FieldShape::Int]),
     (ROLE_SEEK_END, &[FieldShape::Int]),
+    (ROLE_FILE_KIND_FILE, &[]),
+    (ROLE_FILE_KIND_DIRECTORY, &[]),
+    (ROLE_FILE_KIND_SYMLINK, &[]),
+    (ROLE_FILE_KIND_OTHER, &[]),
+    (ROLE_RENAME_NO_REPLACE, &[]),
+    (ROLE_RENAME_REPLACE, &[]),
     (ROLE_IP_V4, &[FieldShape::Bytes]),
     (ROLE_IP_V6, &[FieldShape::Bytes]),
     (ROLE_NET_INVALID_INPUT, &[FieldShape::Str]),
@@ -783,6 +858,64 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         {
             return Err(terr(
                 "the TtySize role does not name its frozen value class".to_string(),
+            ));
+        }
+    }
+    if let Some(info) = slot(ROLE_FILE_INFO) {
+        let Some(kind) = slot(ROLE_FILE_KIND) else {
+            return Err(terr(
+                "the FileInfo role requires the FileKind role".to_string(),
+            ));
+        };
+        let Some(option) = slot(ROLE_OPTION) else {
+            return Err(terr(
+                "the FileInfo role requires the Option role".to_string(),
+            ));
+        };
+        let class = &module.classes[info as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let valid_fields = matches!(fields.as_slice(), [BcType::Class(found_kind), BcType::Int, BcType::Inst(found_option, args), BcType::Bool]
+            if *found_kind == kind
+                && *found_option == option
+                && matches!(args.as_slice(), [item]
+                    if module.types.get(*item as usize) == Some(&BcType::Int)));
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !valid_fields
+        {
+            return Err(terr(
+                "the FileInfo role does not name its final value class".to_string(),
+            ));
+        }
+    }
+    if let Some(entry) = slot(ROLE_DIR_ENTRY) {
+        let Some(kind) = slot(ROLE_FILE_KIND) else {
+            return Err(terr(
+                "the DirEntry role requires the FileKind role".to_string(),
+            ));
+        };
+        let class = &module.classes[entry as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !matches!(fields.as_slice(), [BcType::Str, BcType::Class(found)] if *found == kind)
+        {
+            return Err(terr(
+                "the DirEntry role does not name its final value class".to_string(),
             ));
         }
     }

@@ -4,8 +4,8 @@
 //! or stream wait. Fixed workers own all operating-system I/O.
 
 use lm_vm::{
-    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue,
-    HostWaitCancel, SharedBytes, SharedText,
+    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostRenameMode, HostSeekFrom,
+    HostValue, HostWaitCancel, SharedBytes, SharedText,
 };
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, Write};
@@ -49,20 +49,55 @@ pub(crate) enum FileRequest {
     Flush {
         file: u64,
     },
+    Sync {
+        file: u64,
+    },
     Close {
         file: u64,
+    },
+    Stat {
+        path: String,
+    },
+    ReadDir {
+        path: String,
+        max_entries: usize,
+    },
+    CreateDir {
+        path: String,
+    },
+    RemoveFile {
+        path: String,
+    },
+    RemoveDir {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+        mode: HostRenameMode,
+    },
+    SyncDir {
+        path: String,
     },
 }
 
 impl FileRequest {
-    fn file(&self) -> u64 {
+    fn lane(&self) -> u64 {
         match self {
             FileRequest::Open { file, .. }
             | FileRequest::Read { file, .. }
             | FileRequest::Write { file, .. }
             | FileRequest::Seek { file, .. }
             | FileRequest::Flush { file }
+            | FileRequest::Sync { file }
             | FileRequest::Close { file } => *file,
+            FileRequest::Stat { .. }
+            | FileRequest::ReadDir { .. }
+            | FileRequest::CreateDir { .. }
+            | FileRequest::RemoveFile { .. }
+            | FileRequest::RemoveDir { .. }
+            | FileRequest::Rename { .. }
+            | FileRequest::SyncDir { .. } => 0,
         }
     }
 }
@@ -164,7 +199,7 @@ impl IoService {
         if !self.reserve() {
             return false;
         }
-        let at = request.file() as usize % self.files.len();
+        let at = request.lane() as usize % self.files.len();
         let sent = self.files[at]
             .send(FileJob::Request(Job {
                 key,
@@ -310,6 +345,9 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
                 HostOpenOptions::CreateTruncate => {
                     open.read(true).write(true).create(true).truncate(true);
                 }
+                HostOpenOptions::CreateNew => {
+                    open.read(true).write(true).create_new(true);
+                }
                 HostOpenOptions::Append => {
                     open.write(true).create(true).append(true);
                 }
@@ -319,12 +357,12 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
                     files.insert(file, opened);
                     fs_ok(HostValue::File(file))
                 }
-                Err(error) => fs_error(format!("file open failed: {error}")),
+                Err(error) => fs_io_error(error, "file open"),
             }
         }
         FileRequest::Read { file, count } => {
             let Some(opened) = files.get_mut(&file) else {
-                return fs_error("the file token is not open".to_string());
+                return fs_closed();
             };
             let mut bytes = vec![0; count];
             match opened.read(&mut bytes) {
@@ -332,26 +370,31 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
                     bytes.truncate(read);
                     fs_ok(HostValue::Bytes(bytes.into()))
                 }
-                Err(error) => fs_error(format!("file read failed: {error}")),
+                Err(error) => fs_io_error(error, "file read"),
             }
         }
         FileRequest::Write { file, bytes } => {
             let Some(opened) = files.get_mut(&file) else {
-                return fs_error("the file token is not open".to_string());
+                return fs_closed();
             };
             match opened.write(&bytes) {
                 Ok(written) => fs_ok(HostValue::Int(written as i64)),
-                Err(error) => fs_error(format!("file write failed: {error}")),
+                Err(error) => fs_io_error(error, "file write"),
             }
         }
         FileRequest::Seek { file, from } => {
             let Some(opened) = files.get_mut(&file) else {
-                return fs_error("the file token is not open".to_string());
+                return fs_closed();
             };
             let from = match from {
                 HostSeekFrom::Start(offset) => match u64::try_from(offset) {
                     Ok(offset) => std::io::SeekFrom::Start(offset),
-                    Err(_) => return fs_error("the seek position is invalid".to_string()),
+                    Err(_) => {
+                        return fs_error_with(
+                            CoreCtor::FsErrorInvalidInput,
+                            "the seek position is invalid",
+                        )
+                    }
                 },
                 HostSeekFrom::Current(offset) => std::io::SeekFrom::Current(offset),
                 HostSeekFrom::End(offset) => std::io::SeekFrom::End(offset),
@@ -359,27 +402,64 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
             match opened.seek(from) {
                 Ok(position) => match i64::try_from(position) {
                     Ok(position) => fs_ok(HostValue::Int(position)),
-                    Err(_) => fs_error("the seek position is too large".to_string()),
+                    Err(_) => fs_error_with(
+                        CoreCtor::FsErrorLimitExceeded,
+                        "the seek position is too large",
+                    ),
                 },
-                Err(error) => fs_error(format!("file seek failed: {error}")),
+                Err(error) => fs_io_error(error, "file seek"),
             }
         }
         FileRequest::Flush { file } => {
             let Some(opened) = files.get_mut(&file) else {
-                return fs_error("the file token is not open".to_string());
+                return fs_closed();
             };
             match opened.flush() {
                 Ok(()) => fs_ok(HostValue::Unit),
-                Err(error) => fs_error(format!("file flush failed: {error}")),
+                Err(error) => fs_io_error(error, "file flush"),
+            }
+        }
+        FileRequest::Sync { file } => {
+            let Some(opened) = files.get_mut(&file) else {
+                return fs_closed();
+            };
+            match opened.sync_all() {
+                Ok(()) => fs_ok(HostValue::Unit),
+                Err(error) => fs_io_error(error, "file sync"),
             }
         }
         FileRequest::Close { file } => {
             if files.remove(&file).is_some() {
                 fs_ok(HostValue::Unit)
             } else {
-                fs_error("the file token is not open".to_string())
+                fs_closed()
             }
         }
+        FileRequest::Stat { path } => match std::fs::metadata(path) {
+            Ok(metadata) => file_info_value(&metadata),
+            Err(error) => fs_io_error(error, "file metadata query"),
+        },
+        FileRequest::ReadDir { path, max_entries } => read_dir_value(&path, max_entries),
+        FileRequest::CreateDir { path } => match std::fs::create_dir(path) {
+            Ok(()) => fs_ok(HostValue::Unit),
+            Err(error) => fs_io_error(error, "directory creation"),
+        },
+        FileRequest::RemoveFile { path } => match std::fs::remove_file(path) {
+            Ok(()) => fs_ok(HostValue::Unit),
+            Err(error) => fs_io_error(error, "file removal"),
+        },
+        FileRequest::RemoveDir { path } => match std::fs::remove_dir(path) {
+            Ok(()) => fs_ok(HostValue::Unit),
+            Err(error) => fs_io_error(error, "directory removal"),
+        },
+        FileRequest::Rename { from, to, mode } => rename_value(&from, &to, mode),
+        FileRequest::SyncDir { path } => match std::fs::File::open(path) {
+            Ok(directory) => match directory.sync_all() {
+                Ok(()) => fs_ok(HostValue::Unit),
+                Err(error) => fs_io_error(error, "directory sync"),
+            },
+            Err(error) => fs_io_error(error, "directory open"),
+        },
     }
 }
 
@@ -684,6 +764,157 @@ fn broken_pipe() -> HostValue {
     )
 }
 
+fn file_kind_value(kind: std::fs::FileType) -> HostValue {
+    let ctor = if kind.is_file() {
+        CoreCtor::FileKindFile
+    } else if kind.is_dir() {
+        CoreCtor::FileKindDirectory
+    } else if kind.is_symlink() {
+        CoreCtor::FileKindSymlink
+    } else {
+        CoreCtor::FileKindOther
+    };
+    HostValue::Ctor(ctor, Vec::new())
+}
+
+fn file_info_value(metadata: &std::fs::Metadata) -> HostValue {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .map(|value| HostValue::Ctor(CoreCtor::Some, vec![HostValue::Int(value)]))
+        .unwrap_or_else(|| HostValue::Ctor(CoreCtor::None, Vec::new()));
+    let Ok(length) = i64::try_from(metadata.len()) else {
+        return fs_error_with(
+            CoreCtor::FsErrorLimitExceeded,
+            "the file length exceeds Int",
+        );
+    };
+    fs_ok(HostValue::Ctor(
+        CoreCtor::FileInfo,
+        vec![
+            file_kind_value(metadata.file_type()),
+            HostValue::Int(length),
+            modified,
+            HostValue::Bool(metadata.permissions().readonly()),
+        ],
+    ))
+}
+
+fn read_dir_value(path: &str, max_entries: usize) -> HostValue {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => return fs_io_error(error, "directory read"),
+    };
+    let mut values = Vec::new();
+    for entry in entries {
+        if values.len() == max_entries {
+            return fs_error_with(
+                CoreCtor::FsErrorLimitExceeded,
+                "the directory exceeds its entry limit",
+            );
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return fs_io_error(error, "directory continuation"),
+        };
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => {
+                values.push(HostValue::Ctor(
+                    CoreCtor::Err,
+                    vec![fs_error_case(
+                        CoreCtor::FsErrorInvalidEncoding,
+                        "a directory name is not valid UTF-8",
+                    )],
+                ));
+                continue;
+            }
+        };
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                values.push(HostValue::Ctor(
+                    CoreCtor::Err,
+                    vec![fs_io_error_case(error, "directory entry query")],
+                ));
+                continue;
+            }
+        };
+        values.push(HostValue::Ctor(
+            CoreCtor::Ok,
+            vec![HostValue::Ctor(
+                CoreCtor::DirEntry,
+                vec![HostValue::Str(name.into()), file_kind_value(kind)],
+            )],
+        ));
+    }
+    fs_ok(HostValue::List(values))
+}
+
+fn rename_value(from: &str, to: &str, mode: HostRenameMode) -> HostValue {
+    let source = match std::fs::symlink_metadata(from) {
+        Ok(source) => source,
+        Err(error) => return fs_io_error(error, "rename source query"),
+    };
+    let no_replace = source.is_dir() || matches!(mode, HostRenameMode::NoReplace);
+    if !no_replace {
+        match std::fs::symlink_metadata(to) {
+            Ok(target) if target.is_dir() => {
+                return fs_error_with(
+                    CoreCtor::FsErrorIsDirectory,
+                    "rename cannot replace a directory",
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return fs_io_error(error, "rename target query"),
+        }
+    }
+    let renamed = if no_replace {
+        rename_no_replace(from, to)
+    } else {
+        std::fs::rename(from, to)
+    };
+    match renamed {
+        Ok(()) => fs_ok(HostValue::Unit),
+        Err(error) => fs_io_error(error, "rename"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace(from: &str, to: &str) -> std::io::Result<()> {
+    use std::ffi::CString;
+    let from = CString::new(from)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+    let to = CString::new(to)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+    // The kernel performs one atomic no-replace rename.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_no_replace(_from: &str, _to: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable",
+    ))
+}
+
 fn fs_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
 }
@@ -692,14 +923,58 @@ fn io_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
 }
 
-fn fs_error(message: String) -> HostValue {
+fn fs_closed() -> HostValue {
     HostValue::Ctor(
         CoreCtor::Err,
-        vec![HostValue::Ctor(
-            CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message.into())],
-        )],
+        vec![HostValue::Ctor(CoreCtor::FsErrorClosed, Vec::new())],
     )
+}
+
+fn fs_error_with(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(CoreCtor::Err, vec![fs_error_case(ctor, message)])
+}
+
+fn fs_error_case(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(ctor, vec![HostValue::Str(message.into().into())])
+}
+
+fn fs_io_error(error: std::io::Error, action: &str) -> HostValue {
+    HostValue::Ctor(CoreCtor::Err, vec![fs_io_error_case(error, action)])
+}
+
+fn fs_io_error_case(error: std::io::Error, action: &str) -> HostValue {
+    let cross_device = error.raw_os_error() == Some(libc::EXDEV);
+    let (ctor, detail) = if cross_device {
+        (CoreCtor::FsErrorCrossDevice, "crosses file systems")
+    } else {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => (CoreCtor::FsErrorNotFound, "did not find the path"),
+            std::io::ErrorKind::PermissionDenied => {
+                (CoreCtor::FsErrorPermissionDenied, "lacks permission")
+            }
+            std::io::ErrorKind::AlreadyExists => {
+                (CoreCtor::FsErrorAlreadyExists, "found an existing target")
+            }
+            std::io::ErrorKind::InvalidInput => {
+                (CoreCtor::FsErrorInvalidInput, "received invalid input")
+            }
+            std::io::ErrorKind::InvalidData => (
+                CoreCtor::FsErrorInvalidEncoding,
+                "received invalid encoding",
+            ),
+            std::io::ErrorKind::NotADirectory => {
+                (CoreCtor::FsErrorNotDirectory, "needs a directory")
+            }
+            std::io::ErrorKind::IsADirectory => (CoreCtor::FsErrorIsDirectory, "found a directory"),
+            std::io::ErrorKind::DirectoryNotEmpty => (
+                CoreCtor::FsErrorDirectoryNotEmpty,
+                "found a nonempty directory",
+            ),
+            std::io::ErrorKind::Unsupported => (CoreCtor::FsErrorUnsupported, "is not supported"),
+            _ => (CoreCtor::FsErrorFailed, "failed"),
+        }
+    };
+    fs_error_case(ctor, format!("{action} {detail}"))
 }
 
 fn io_error(message: String) -> HostValue {
