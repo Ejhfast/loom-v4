@@ -3,6 +3,7 @@
 //! The scheduler thread submits plain jobs and never performs a file
 //! or stream wait. Fixed workers own all operating-system I/O.
 
+use crate::ReadySender;
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostRenameMode, HostSeekFrom,
     HostValue, HostWaitCancel, SharedBytes,
@@ -21,7 +22,6 @@ const INPUT_CHUNKS: usize = 16;
 const INPUT_CHUNK_BYTES: usize = 8 << 10;
 
 pub(crate) struct IoService {
-    completions: Receiver<HostCompletion>,
     files: Vec<Sender<FileJob>>,
     input: Sender<InputCommand>,
     output: Sender<StreamJob>,
@@ -148,8 +148,7 @@ struct Job<T> {
 }
 
 impl IoService {
-    pub(crate) fn new() -> IoService {
-        let (completion_tx, completions) = mpsc::channel();
+    pub(crate) fn new(completion_tx: ReadySender) -> IoService {
         let pending = Arc::new(AtomicUsize::new(0));
 
         let mut files = Vec::with_capacity(FILE_WORKERS);
@@ -184,7 +183,6 @@ impl IoService {
         }
 
         IoService {
-            completions,
             files,
             input,
             output,
@@ -271,14 +269,6 @@ impl IoService {
         self.files[at].send(FileJob::ForceClose(file)).is_ok()
     }
 
-    pub(crate) fn poll(&self) -> Option<HostCompletion> {
-        self.completions.try_recv().ok()
-    }
-
-    pub(crate) fn wait(&self) -> Option<HostCompletion> {
-        self.completions.recv().ok()
-    }
-
     fn reserve(&self) -> bool {
         self.pending
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
@@ -293,17 +283,13 @@ impl IoService {
     }
 }
 
-fn file_worker(
-    jobs: Receiver<FileJob>,
-    completions: Sender<HostCompletion>,
-    pending: Arc<AtomicUsize>,
-) {
+fn file_worker(jobs: Receiver<FileJob>, completions: ReadySender, pending: Arc<AtomicUsize>) {
     let mut files = HashMap::new();
     while let Ok(job) = jobs.recv() {
         match job {
             FileJob::Request(job) => {
                 let value = run_file_request(&mut files, job.request);
-                let _ = completions.send(HostCompletion {
+                let _ = completions.completion(HostCompletion {
                     key: job.key,
                     token: job.token,
                     result: Ok(value),
@@ -461,7 +447,7 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
 
 fn input_worker(
     commands: Receiver<InputCommand>,
-    completions: Sender<HostCompletion>,
+    completions: ReadySender,
     pending_count: Arc<AtomicUsize>,
 ) {
     let (data_tx, data_rx) = mpsc::sync_channel(INPUT_CHUNKS);
@@ -529,7 +515,7 @@ fn input_worker(
             if front.wait_source {
                 retained.insert(front.job.token, consumed);
             }
-            let _ = completions.send(HostCompletion {
+            let _ = completions.completion(HostCompletion {
                 key: front.job.key,
                 token: front.job.token,
                 result: Ok(value),
@@ -650,11 +636,7 @@ fn prepare_input_reply(
     }
 }
 
-fn output_worker(
-    jobs: Receiver<StreamJob>,
-    completions: Sender<HostCompletion>,
-    pending: Arc<AtomicUsize>,
-) {
+fn output_worker(jobs: Receiver<StreamJob>, completions: ReadySender, pending: Arc<AtomicUsize>) {
     while let Ok(StreamJob(job)) = jobs.recv() {
         let result = match job.request {
             StreamRequest::Write(bytes) => Ok(write_bytes(std::io::stdout(), &bytes)),
@@ -663,7 +645,7 @@ fn output_worker(
                 unreachable!("input uses its own worker")
             }
         };
-        let _ = completions.send(HostCompletion {
+        let _ = completions.completion(HostCompletion {
             key: job.key,
             token: job.token,
             result,

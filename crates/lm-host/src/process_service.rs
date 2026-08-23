@@ -3,6 +3,7 @@
 //! One service thread owns every pipe end and child handle.
 //! The scheduler submits plain requests and never blocks on them.
 
+use crate::ReadySender;
 use lm_vm::{
     CompletionKey, CoreCtor, HostChildEnv, HostChildInput, HostChildOutput, HostCompletion,
     HostExecSpec, HostValue, HostWaitCancel, SharedBytes,
@@ -21,7 +22,6 @@ const SERVICE_TICK: Duration = Duration::from_millis(2);
 
 pub(crate) struct ProcessService {
     commands: Sender<ServiceCommand>,
-    completions: Receiver<HostCompletion>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -123,20 +123,15 @@ enum Progress {
 }
 
 impl ProcessService {
-    pub(crate) fn new() -> ProcessService {
+    pub(crate) fn new(completion_tx: ReadySender) -> ProcessService {
         let (commands, command_rx) = mpsc::channel();
-        let (completion_tx, completions) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let worker_pending = Arc::clone(&pending);
         std::thread::Builder::new()
             .name("loom-process".to_string())
             .spawn(move || process_worker(command_rx, completion_tx, worker_pending))
             .expect("the process service starts");
-        ProcessService {
-            commands,
-            completions,
-            pending,
-        }
+        ProcessService { commands, pending }
     }
 
     pub(crate) fn submit(
@@ -162,17 +157,6 @@ impl ProcessService {
             self.release();
         }
         sent
-    }
-
-    pub(crate) fn poll(&self) -> Option<HostCompletion> {
-        self.completions.try_recv().ok()
-    }
-
-    pub(crate) fn wait_timeout(
-        &self,
-        duration: Duration,
-    ) -> Result<HostCompletion, RecvTimeoutError> {
-        self.completions.recv_timeout(duration)
     }
 
     pub(crate) fn cancel(&self, token: u64) -> bool {
@@ -252,7 +236,7 @@ impl ProcessService {
 
 fn process_worker(
     commands: Receiver<ServiceCommand>,
-    completions: Sender<HostCompletion>,
+    completions: ReadySender,
     pending_count: Arc<AtomicUsize>,
 ) {
     let mut state = ServiceState {
@@ -280,7 +264,7 @@ fn process_worker(
 fn handle_command(
     command: ServiceCommand,
     state: &mut ServiceState,
-    completions: &Sender<HostCompletion>,
+    completions: &ReadySender,
     pending_count: &AtomicUsize,
 ) {
     match command {
@@ -330,13 +314,13 @@ fn handle_command(
 }
 
 fn send_completion(
-    completions: &Sender<HostCompletion>,
+    completions: &ReadySender,
     pending_count: &AtomicUsize,
     key: CompletionKey,
     token: u64,
     value: HostValue,
 ) {
-    let _ = completions.send(HostCompletion {
+    let _ = completions.completion(HostCompletion {
         key,
         token,
         result: Ok(value),
@@ -346,7 +330,7 @@ fn send_completion(
 
 fn progress_pending(
     state: &mut ServiceState,
-    completions: &Sender<HostCompletion>,
+    completions: &ReadySender,
     pending_count: &AtomicUsize,
 ) {
     let tokens: Vec<u64> = state.pending.keys().copied().collect();

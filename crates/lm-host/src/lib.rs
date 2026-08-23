@@ -28,8 +28,79 @@ use network_service::{
 use process_service::{ProcessRequest, ProcessService};
 use signal_service::{SignalService, SignalServiceError};
 use std::collections::HashMap;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+enum HostReady {
+    Completion(HostCompletion),
+    Network(network_service::NetworkCompletion),
+    Signal,
+}
+
+#[derive(Clone)]
+struct ReadySender {
+    sender: Sender<HostReady>,
+    depth: Arc<AtomicUsize>,
+    max_depth: Arc<AtomicUsize>,
+}
+
+impl ReadySender {
+    fn send(&self, ready: HostReady) -> bool {
+        let depth = self.depth.fetch_add(1, Ordering::Relaxed) + 1;
+        self.max_depth.fetch_max(depth, Ordering::Relaxed);
+        if self.sender.send(ready).is_ok() {
+            true
+        } else {
+            self.depth.fetch_sub(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    fn completion(&self, completion: HostCompletion) -> bool {
+        self.send(HostReady::Completion(completion))
+    }
+
+    fn network(&self, completion: network_service::NetworkCompletion) -> bool {
+        self.send(HostReady::Network(completion))
+    }
+
+    fn signal(&self) -> bool {
+        self.send(HostReady::Signal)
+    }
+}
+
+fn ready_channel() -> (
+    ReadySender,
+    Receiver<HostReady>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let (sender, receiver) = mpsc::channel();
+    let depth = Arc::new(AtomicUsize::new(0));
+    let max_depth = Arc::new(AtomicUsize::new(0));
+    (
+        ReadySender {
+            sender,
+            depth: Arc::clone(&depth),
+            max_depth: Arc::clone(&max_depth),
+        },
+        receiver,
+        depth,
+        max_depth,
+    )
+}
+
+/// Blocking-wait counters for one command-line host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostWaitMetrics {
+    pub completions: u64,
+    pub parks: u64,
+    pub wakeups: u64,
+    pub timeout_wakeups: u64,
+    pub max_ready_depth: usize,
+}
 
 /// The command-line root host.
 pub struct CliHost {
@@ -51,6 +122,11 @@ pub struct CliHost {
     next_signal_stream: u64,
     next_pipe: u64,
     next_child: u64,
+    ready_sender: ReadySender,
+    ready: Receiver<HostReady>,
+    ready_depth: Arc<AtomicUsize>,
+    ready_max_depth: Arc<AtomicUsize>,
+    wait_metrics: HostWaitMetrics,
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +146,7 @@ impl CliHost {
 
     /// Create a host with exact program arguments.
     pub fn with_args(rand_seed: u64, arguments: Vec<String>) -> CliHost {
+        let (ready_sender, ready, ready_depth, ready_max_depth) = ready_channel();
         CliHost {
             started: Instant::now(),
             rand_state: rand_seed.max(1),
@@ -89,24 +166,89 @@ impl CliHost {
             next_signal_stream: 1,
             next_pipe: 1,
             next_child: 1,
+            ready_sender,
+            ready,
+            ready_depth,
+            ready_max_depth,
+            wait_metrics: HostWaitMetrics::default(),
         }
+    }
+
+    /// The current blocking-wait counters.
+    pub fn wait_metrics(&self) -> HostWaitMetrics {
+        let mut metrics = self.wait_metrics;
+        metrics.max_ready_depth = self.ready_max_depth.load(Ordering::Relaxed);
+        metrics
     }
 
     fn ensure_signal_guardian(&mut self) -> Result<(), SignalServiceError> {
         if self.signal.is_none() {
-            self.signal = Some(SignalService::guardian()?);
+            self.signal = Some(SignalService::guardian(self.ready_sender.clone())?);
         }
         Ok(())
     }
 
-    fn prune_signal_guardian(&mut self) {
-        if self.terminal.raw_active() {
-            return;
+    fn refresh_signals(&mut self) {
+        if let Some(signal) = &mut self.signal {
+            signal.refresh();
         }
-        let release = self.signal.as_mut().is_some_and(SignalService::can_release);
-        if release {
-            self.signal = None;
+    }
+
+    fn receive_ready(&self) -> Result<HostReady, mpsc::RecvError> {
+        let ready = self.ready.recv()?;
+        self.ready_depth.fetch_sub(1, Ordering::Relaxed);
+        Ok(ready)
+    }
+
+    fn receive_ready_timeout(&self, duration: Duration) -> Result<HostReady, RecvTimeoutError> {
+        let ready = self.ready.recv_timeout(duration)?;
+        self.ready_depth.fetch_sub(1, Ordering::Relaxed);
+        Ok(ready)
+    }
+
+    fn try_ready(&self) -> Result<HostReady, TryRecvError> {
+        let ready = self.ready.try_recv()?;
+        self.ready_depth.fetch_sub(1, Ordering::Relaxed);
+        Ok(ready)
+    }
+
+    fn signal_completion(&mut self) -> Option<HostCompletion> {
+        let signal = self.signal.as_mut()?;
+        let completion = signal.poll();
+        if let Some(kind) = signal.forced_signal() {
+            self.terminal.restore_all();
+            signal.force_signal(kind);
         }
+        completion
+    }
+
+    fn handle_ready(&mut self, ready: HostReady) -> Option<HostCompletion> {
+        match ready {
+            HostReady::Completion(completion) => Some(completion),
+            HostReady::Network(completion) => Some(completion.into_value()),
+            HostReady::Signal => self.signal_completion(),
+        }
+    }
+
+    fn expired_sleep(&mut self) -> Option<HostCompletion> {
+        let now = Instant::now();
+        let token = self
+            .sleeps
+            .iter()
+            .filter(|(_, (_, deadline))| now >= *deadline)
+            .min_by_key(|(token, (_, deadline))| (*deadline, **token))
+            .map(|(token, _)| *token)?;
+        let (key, _) = self.sleeps.remove(&token)?;
+        Some(HostCompletion {
+            key,
+            token,
+            result: Ok(HostValue::Unit),
+        })
+    }
+
+    fn note_completion(&mut self, completion: HostCompletion) -> Option<HostCompletion> {
+        self.wait_metrics.completions = self.wait_metrics.completions.saturating_add(1);
+        Some(completion)
     }
 
     fn next_rand(&mut self) -> u64 {
@@ -254,19 +396,31 @@ impl CliHost {
     }
 
     fn network(&mut self) -> &mut NetworkService {
-        self.network.get_or_insert_with(NetworkService::new)
+        if self.network.is_none() {
+            self.network = Some(NetworkService::new(self.ready_sender.clone()));
+        }
+        self.network.as_mut().expect("the network service exists")
     }
 
     fn io(&mut self) -> &mut IoService {
-        self.io.get_or_insert_with(IoService::new)
+        if self.io.is_none() {
+            self.io = Some(IoService::new(self.ready_sender.clone()));
+        }
+        self.io.as_mut().expect("the I/O service exists")
     }
 
     fn compiler(&mut self) -> &mut CompilerService {
-        self.compiler.get_or_insert_with(CompilerService::new)
+        if self.compiler.is_none() {
+            self.compiler = Some(CompilerService::new(self.ready_sender.clone()));
+        }
+        self.compiler.as_mut().expect("the compiler service exists")
     }
 
     fn process(&mut self) -> &mut ProcessService {
-        self.process.get_or_insert_with(ProcessService::new)
+        if self.process.is_none() {
+            self.process = Some(ProcessService::new(self.ready_sender.clone()));
+        }
+        self.process.as_mut().expect("the process service exists")
     }
 
     fn take_pipe(&mut self) -> Option<u64> {
@@ -614,7 +768,7 @@ impl Host for CliHost {
                 }
                 let entered = self.terminal.enter_raw();
                 if entered.is_err() {
-                    self.prune_signal_guardian();
+                    self.refresh_signals();
                 }
                 match entered {
                     Ok(token) => HostStart::Completed(ok_value(HostValue::RawMode(token))),
@@ -627,7 +781,7 @@ impl Host for CliHost {
                 };
                 let exited = self.terminal.exit_raw(*token);
                 if exited.is_ok() {
-                    self.prune_signal_guardian();
+                    self.refresh_signals();
                 }
                 match exited {
                     Ok(()) => HostStart::Completed(ok_value(HostValue::Unit)),
@@ -666,7 +820,12 @@ impl Host for CliHost {
                 };
                 let opened = match &mut self.signal {
                     Some(signal) => signal.attach(stream, interrupt, terminate),
-                    None => match SignalService::open(stream, interrupt, terminate) {
+                    None => match SignalService::open(
+                        stream,
+                        interrupt,
+                        terminate,
+                        self.ready_sender.clone(),
+                    ) {
                         Ok(signal) => {
                             self.signal = Some(signal);
                             true
@@ -707,7 +866,7 @@ impl Host for CliHost {
                     .as_mut()
                     .is_some_and(|signal| signal.close(*stream));
                 if closed {
-                    self.prune_signal_guardian();
+                    self.refresh_signals();
                     HostStart::Completed(ok_value(HostValue::Unit))
                 } else {
                     HostStart::Completed(error_value(CoreCtor::SignalClosed, None))
@@ -1647,56 +1806,19 @@ impl Host for CliHost {
     }
 
     fn poll(&mut self) -> Option<HostCompletion> {
-        let signal_state = self
-            .signal
-            .as_mut()
-            .map(|signal| (signal.poll(), signal.forced_signal()));
-        if let Some((completion, forced)) = signal_state {
-            if let Some(kind) = forced {
-                self.terminal.restore_all();
-                self.signal
-                    .as_mut()
-                    .expect("the signal service exists")
-                    .force_signal(kind);
-            }
-            if completion.is_some() {
-                return completion;
+        if let Some(completion) = self.expired_sleep() {
+            return self.note_completion(completion);
+        }
+        loop {
+            match self.try_ready() {
+                Ok(ready) => {
+                    if let Some(completion) = self.handle_ready(ready) {
+                        return self.note_completion(completion);
+                    }
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
             }
         }
-        self.prune_signal_guardian();
-        if let Some(io) = &self.io {
-            if let Some(completion) = io.poll() {
-                return Some(completion);
-            }
-        }
-        if let Some(network) = &self.network {
-            if let Some(completion) = network.poll() {
-                return Some(completion);
-            }
-        }
-        if let Some(process) = &self.process {
-            if let Some(completion) = process.poll() {
-                return Some(completion);
-            }
-        }
-        if let Some(compiler) = &self.compiler {
-            if let Some(completion) = compiler.poll() {
-                return Some(completion);
-            }
-        }
-        let now = Instant::now();
-        let token = self
-            .sleeps
-            .iter()
-            .filter(|(_, (_, deadline))| now >= *deadline)
-            .min_by_key(|(token, (_, deadline))| (*deadline, **token))
-            .map(|(token, _)| *token)?;
-        let (key, _) = self.sleeps.remove(&token)?;
-        Some(HostCompletion {
-            key,
-            token,
-            result: Ok(HostValue::Unit),
-        })
     }
 
     fn wait(&mut self) -> Option<HostCompletion> {
@@ -1705,44 +1827,31 @@ impl Host for CliHost {
                 return Some(completion);
             }
             let deadline = self.sleeps.values().map(|(_, deadline)| *deadline).min();
-            let quantum = Duration::from_millis(10);
-            let duration = deadline
-                .map(|deadline| {
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(quantum)
-                })
-                .unwrap_or(quantum);
-            if let Some(compiler) = &self.compiler {
-                match compiler.wait_timeout(duration) {
-                    Ok(completion) => return Some(completion),
-                    Err(RecvTimeoutError::Timeout) => continue,
-                    Err(RecvTimeoutError::Disconnected) => {}
-                }
-            }
-            if let Some(process) = &self.process {
-                match process.wait_timeout(duration) {
-                    Ok(completion) => return Some(completion),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => {}
-                }
-            }
-            match &self.network {
-                Some(network) => match network.wait_timeout(duration) {
-                    Ok(completion) => return Some(completion),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => {
-                        return self.io.as_ref().and_then(IoService::wait);
-                    }
-                },
-                None => {
-                    if deadline.is_none() && self.signal.is_none() {
-                        if let Some(io) = &self.io {
-                            return io.wait();
+            self.wait_metrics.parks = self.wait_metrics.parks.saturating_add(1);
+            let ready = match deadline {
+                Some(deadline) => {
+                    let duration = deadline.saturating_duration_since(Instant::now());
+                    match self.receive_ready_timeout(duration) {
+                        Ok(ready) => Some(ready),
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.wait_metrics.timeout_wakeups =
+                                self.wait_metrics.timeout_wakeups.saturating_add(1);
+                            None
                         }
+                        Err(RecvTimeoutError::Disconnected) => return None,
                     }
-                    std::thread::sleep(duration);
                 }
+                None => match self.receive_ready() {
+                    Ok(ready) => Some(ready),
+                    Err(_) => return None,
+                },
+            };
+            let Some(ready) = ready else {
+                continue;
+            };
+            self.wait_metrics.wakeups = self.wait_metrics.wakeups.saturating_add(1);
+            if let Some(completion) = self.handle_ready(ready) {
+                return self.note_completion(completion);
             }
         }
     }
@@ -1765,7 +1874,7 @@ impl Host for CliHost {
                 .process
                 .as_ref()
                 .is_some_and(|process| process.cancel(token));
-        self.prune_signal_guardian();
+        self.refresh_signals();
         cancelled
     }
 
@@ -1787,7 +1896,7 @@ impl Host for CliHost {
                 .is_some_and(|process| process.commit_wait(token)),
             None => false,
         };
-        self.prune_signal_guardian();
+        self.refresh_signals();
         committed
     }
 
@@ -1822,7 +1931,7 @@ impl Host for CliHost {
                 }),
             None => HostWaitCancel::Missing,
         };
-        self.prune_signal_guardian();
+        self.refresh_signals();
         cancelled
     }
 
@@ -1846,7 +1955,7 @@ impl Host for CliHost {
 
     fn close_raw_mode(&mut self, token: u64) -> bool {
         let closed = self.terminal.force_close(token);
-        self.prune_signal_guardian();
+        self.refresh_signals();
         closed
     }
 
@@ -1855,7 +1964,7 @@ impl Host for CliHost {
             .signal
             .as_mut()
             .is_some_and(|signal| signal.close(token));
-        self.prune_signal_guardian();
+        self.refresh_signals();
         closed
     }
 
@@ -1914,6 +2023,14 @@ mod tests {
                 generation: 0,
             },
             ordinal: 1,
+        }
+    }
+
+    fn ready_completion(token: u64) -> HostCompletion {
+        HostCompletion {
+            key: completion(),
+            token,
+            result: Ok(HostValue::Unit),
         }
     }
 
@@ -2162,6 +2279,189 @@ mod tests {
         };
         assert_eq!(host.wait().map(|completion| completion.token), Some(token));
         assert_eq!(host.poll(), None);
+    }
+
+    #[test]
+    fn one_sleep_uses_one_exact_host_park() {
+        let mut host = CliHost::new(1);
+        let token = match host.start(
+            completion(),
+            lm_abi::OP_CLOCK_SLEEP,
+            vec![HostArg::Int(35_000_000)],
+        ) {
+            HostStart::Waiting(token) => token,
+            other => panic!("unexpected start result: {other:?}"),
+        };
+
+        assert_eq!(host.wait().map(|completion| completion.token), Some(token));
+        assert_eq!(
+            host.wait_metrics(),
+            HostWaitMetrics {
+                completions: 1,
+                parks: 1,
+                wakeups: 0,
+                timeout_wakeups: 1,
+                max_ready_depth: 0,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_signal_guardian_causes_no_periodic_polling() {
+        let _guard = signal_service::SIGNAL_TEST_LOCK
+            .lock()
+            .expect("the signal test lock works");
+        let mut host = CliHost::new(1);
+        host.ensure_signal_guardian()
+            .expect("the signal guardian starts");
+        let token = match host.start(
+            completion(),
+            lm_abi::OP_CLOCK_SLEEP,
+            vec![HostArg::Int(35_000_000)],
+        ) {
+            HostStart::Waiting(token) => token,
+            other => panic!("unexpected start result: {other:?}"),
+        };
+
+        assert_eq!(host.wait().map(|completion| completion.token), Some(token));
+        let metrics = host.wait_metrics();
+        assert_eq!(metrics.parks, 1);
+        assert_eq!(metrics.timeout_wakeups, 1);
+        assert_eq!(metrics.wakeups, 0);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ReadyProbe {
+        Io,
+        Network,
+        Process,
+        Compiler,
+        Signal,
+    }
+
+    fn probe_token(source: ReadyProbe) -> u64 {
+        match source {
+            ReadyProbe::Io => 1,
+            ReadyProbe::Network => 2,
+            ReadyProbe::Process => 3,
+            ReadyProbe::Compiler => 4,
+            ReadyProbe::Signal => 5,
+        }
+    }
+
+    fn send_probe(host: &CliHost, source: ReadyProbe) {
+        let token = probe_token(source);
+        let sent = match source {
+            ReadyProbe::Io | ReadyProbe::Process | ReadyProbe::Compiler => {
+                host.ready_sender.completion(ready_completion(token))
+            }
+            ReadyProbe::Network => {
+                host.ready_sender
+                    .network(network_service::NetworkCompletion::without_retained(
+                        ready_completion(token),
+                    ))
+            }
+            ReadyProbe::Signal => host.ready_sender.signal(),
+        };
+        assert!(sent);
+    }
+
+    fn receive_probe(host: &CliHost) -> ReadyProbe {
+        match host.try_ready().expect("the readiness event exists") {
+            HostReady::Completion(completion) => match completion.token {
+                1 => ReadyProbe::Io,
+                3 => ReadyProbe::Process,
+                4 => ReadyProbe::Compiler,
+                token => panic!("unexpected completion probe token: {token}"),
+            },
+            HostReady::Network(completion) => {
+                assert_eq!(completion.into_value().token, 2);
+                ReadyProbe::Network
+            }
+            HostReady::Signal => ReadyProbe::Signal,
+        }
+    }
+
+    #[test]
+    fn the_host_hub_preserves_every_ordered_source_pair() {
+        let sources = [
+            ReadyProbe::Io,
+            ReadyProbe::Network,
+            ReadyProbe::Process,
+            ReadyProbe::Compiler,
+            ReadyProbe::Signal,
+        ];
+        for first in sources {
+            for second in sources {
+                let host = CliHost::new(1);
+                send_probe(&host, first);
+                send_probe(&host, second);
+                assert_eq!(receive_probe(&host), first);
+                assert_eq!(receive_probe(&host), second);
+                assert_eq!(host.wait_metrics().max_ready_depth, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_child_probe() {
+        if std::env::var("LOOM_DELAYED_CHILD_PROBE").as_deref() == Ok("1") {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    #[test]
+    fn output_before_a_slow_child_wait_does_not_deadlock() {
+        let mut host = CliHost::new(1);
+        assert_eq!(
+            unwrap_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_IO_WRITE,
+                vec![HostArg::Bytes(Vec::new().into())],
+            )),
+            HostValue::Int(0)
+        );
+        let child = unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_EXEC_SPAWN,
+            vec![HostArg::ExecSpec(HostExecSpec {
+                program: std::env::current_exe()
+                    .expect("the test executable exists")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into(),
+                arguments: vec!["--exact".into(), "tests::delayed_child_probe".into()],
+                directory: None,
+                environment: HostChildEnv::Overlay(vec![(
+                    "LOOM_DELAYED_CHILD_PROBE".into(),
+                    "1".into(),
+                )]),
+                input: lm_vm::HostChildInput::Null,
+                output: lm_vm::HostChildOutput::Null,
+                error: lm_vm::HostChildOutput::Null,
+            })],
+        ));
+        let HostValue::Child(child) = child else {
+            panic!("the spawn returns one child");
+        };
+        let wait = start_token(&mut host, lm_abi::OP_EXEC_WAIT, vec![HostArg::Child(child)]);
+        let before = host.wait_metrics();
+        let (answer, received) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let completion = host.wait();
+            let metrics = host.wait_metrics();
+            let _ = answer.send((completion, metrics));
+        });
+        let (completion, metrics) = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the shared host park wakes for the child");
+        worker.join().expect("the host wait thread stops");
+
+        assert_eq!(completion.map(|completion| completion.token), Some(wait));
+        assert!(metrics.parks > before.parks);
+        assert!(metrics.wakeups > before.wakeups);
+        assert_eq!(metrics.timeout_wakeups, before.timeout_wakeups);
     }
 
     #[test]

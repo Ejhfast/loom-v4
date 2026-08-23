@@ -1,5 +1,6 @@
 //! Bounded runtime compilation for the command-line host.
 
+use crate::ReadySender;
 use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
 use lm_source::SourceFile;
 use lm_vm::{
@@ -7,13 +8,11 @@ use lm_vm::{
     SharedText,
 };
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::time::Duration;
 
 const MAX_PENDING_COMPILES: usize = 64;
 
 pub(crate) struct CompilerService {
     jobs: SyncSender<Job>,
-    completions: Receiver<HostCompletion>,
 }
 
 pub(crate) struct CompileRequest {
@@ -31,14 +30,13 @@ struct Job {
 }
 
 impl CompilerService {
-    pub(crate) fn new() -> CompilerService {
+    pub(crate) fn new(results: ReadySender) -> CompilerService {
         let (jobs, queue) = mpsc::sync_channel(MAX_PENDING_COMPILES);
-        let (results, completions) = mpsc::channel();
         std::thread::Builder::new()
             .name("loom-compiler".to_string())
             .spawn(move || compiler_worker(queue, results))
             .expect("the runtime compiler worker starts");
-        CompilerService { jobs, completions }
+        CompilerService { jobs }
     }
 
     pub(crate) fn submit(&self, key: CompletionKey, token: u64, request: CompileRequest) -> bool {
@@ -51,23 +49,12 @@ impl CompilerService {
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
         }
     }
-
-    pub(crate) fn poll(&self) -> Option<HostCompletion> {
-        self.completions.try_recv().ok()
-    }
-
-    pub(crate) fn wait_timeout(
-        &self,
-        duration: Duration,
-    ) -> Result<HostCompletion, mpsc::RecvTimeoutError> {
-        self.completions.recv_timeout(duration)
-    }
 }
 
-fn compiler_worker(jobs: Receiver<Job>, completions: mpsc::Sender<HostCompletion>) {
+fn compiler_worker(jobs: Receiver<Job>, completions: ReadySender) {
     while let Ok(job) = jobs.recv() {
         let value = compile(job.request);
-        let _ = completions.send(HostCompletion {
+        let _ = completions.completion(HostCompletion {
             key: job.key,
             token: job.token,
             result: Ok(value),

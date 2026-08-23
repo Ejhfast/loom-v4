@@ -1,5 +1,6 @@
 //! Cancellation-safe process signal delivery.
 
+use crate::ReadySender;
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostSignalKind, HostStart, HostValue, HostWaitCancel,
 };
@@ -39,27 +40,30 @@ pub(crate) struct SignalService {
     platform: Option<PlatformSignals>,
     interrupt_seen: bool,
     force_signal: Option<HostSignalKind>,
+    notifier: ReadySender,
 }
 
 impl SignalService {
-    pub(crate) fn guardian() -> Result<SignalService, SignalServiceError> {
-        SignalService::build(None, false, false)
+    pub(crate) fn guardian(notifier: ReadySender) -> Result<SignalService, SignalServiceError> {
+        SignalService::build(None, false, false, notifier)
     }
 
     pub(crate) fn open(
         stream: u64,
         interrupt: bool,
         terminate: bool,
+        notifier: ReadySender,
     ) -> Result<SignalService, SignalServiceError> {
-        SignalService::build(Some(stream), interrupt, terminate)
+        SignalService::build(Some(stream), interrupt, terminate, notifier)
     }
 
     fn build(
         stream: Option<u64>,
         interrupt: bool,
         terminate: bool,
+        notifier: ReadySender,
     ) -> Result<SignalService, SignalServiceError> {
-        let platform = PlatformSignals::open(true, true)?;
+        let platform = PlatformSignals::open(true, true, notifier.clone())?;
         Ok(SignalService {
             stream,
             interrupt,
@@ -71,6 +75,7 @@ impl SignalService {
             platform: Some(platform),
             interrupt_seen: false,
             force_signal: None,
+            notifier,
         })
     }
 
@@ -80,11 +85,6 @@ impl SignalService {
 
     pub(crate) fn is_idle(&self) -> bool {
         self.pending.is_empty() && self.ready.is_empty() && self.retained.is_empty()
-    }
-
-    pub(crate) fn can_release(&mut self) -> bool {
-        self.observe();
-        !self.has_stream() && self.is_idle() && self.force_signal.is_none()
     }
 
     pub(crate) fn attach(&mut self, stream: u64, interrupt: bool, terminate: bool) -> bool {
@@ -134,6 +134,11 @@ impl SignalService {
         self.ready.pop_front()
     }
 
+    pub(crate) fn refresh(&mut self) {
+        self.observe();
+        self.dispatch();
+    }
+
     pub(crate) fn cancel(&mut self, token: u64) -> bool {
         self.pending.remove(&token).is_some()
     }
@@ -177,6 +182,7 @@ impl SignalService {
             }
         }
         let pending = std::mem::take(&mut self.pending);
+        let added = pending.len();
         for (token, request) in pending {
             if request.wait_source {
                 self.retained.insert(token, RetainedSignal::Closed);
@@ -186,6 +192,11 @@ impl SignalService {
                 token,
                 result: Ok(closed.clone()),
             });
+        }
+        for _ in 0..added {
+            if !self.notifier.signal() {
+                break;
+            }
         }
         true
     }
@@ -244,6 +255,7 @@ impl SignalService {
         let Some(stream) = self.stream else {
             return;
         };
+        let before = self.ready.len();
         while let Some(kind) = self.queued.pop_front() {
             let Some(token) = self
                 .pending
@@ -266,6 +278,11 @@ impl SignalService {
                 token,
                 result: Ok(signal_value(kind)),
             });
+        }
+        for _ in before..self.ready.len() {
+            if !self.notifier.signal() {
+                break;
+            }
         }
     }
 }
@@ -290,6 +307,19 @@ static SIGNAL_LEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[cfg(target_os = "linux")]
 static SIGNAL_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static SIGNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "linux")]
+const MAX_FORWARDED_SIGNALS: usize = 256;
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct SignalInbox {
+    signals: VecDeque<HostSignalKind>,
+    notified: bool,
+}
+
 #[cfg(target_os = "linux")]
 extern "C" fn record_signal(signal: libc::c_int) {
     let byte = match signal {
@@ -312,6 +342,8 @@ struct PlatformSignals {
     read_fd: libc::c_int,
     write_fd: libc::c_int,
     old_actions: Vec<(libc::c_int, libc::sigaction)>,
+    inbox: std::sync::Arc<std::sync::Mutex<SignalInbox>>,
+    forwarder: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -319,7 +351,11 @@ struct PlatformSignals;
 
 #[cfg(target_os = "linux")]
 impl PlatformSignals {
-    fn open(interrupt: bool, terminate: bool) -> Result<PlatformSignals, SignalServiceError> {
+    fn open(
+        interrupt: bool,
+        terminate: bool,
+        notifier: ReadySender,
+    ) -> Result<PlatformSignals, SignalServiceError> {
         use std::sync::atomic::Ordering;
         if SIGNAL_LEASE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -328,19 +364,36 @@ impl PlatformSignals {
             return Err(SignalServiceError::Busy);
         }
         let mut fds = [-1; 2];
-        // `pipe2` creates one bounded nonblocking notification pipe.
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        // The signal handler needs one nonblocking write descriptor.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             SIGNAL_LEASE.store(false, Ordering::Release);
             return Err(SignalServiceError::Failed(format!(
                 "signal pipe creation failed: {}",
                 std::io::Error::last_os_error()
             )));
         }
+        let write_flags = unsafe { libc::fcntl(fds[1], libc::F_GETFL) };
+        if write_flags < 0
+            || unsafe { libc::fcntl(fds[1], libc::F_SETFL, write_flags | libc::O_NONBLOCK) } != 0
+        {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            SIGNAL_LEASE.store(false, Ordering::Release);
+            return Err(SignalServiceError::Failed(format!(
+                "signal pipe setup failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
         SIGNAL_WRITE_FD.store(fds[1], Ordering::Release);
+        let inbox = std::sync::Arc::new(std::sync::Mutex::new(SignalInbox::default()));
         let mut platform = PlatformSignals {
             read_fd: fds[0],
             write_fd: fds[1],
             old_actions: Vec::new(),
+            inbox: std::sync::Arc::clone(&inbox),
+            forwarder: None,
         };
         for signal in [
             interrupt.then_some(libc::SIGINT),
@@ -354,6 +407,14 @@ impl PlatformSignals {
                 return Err(error);
             }
         }
+        let read_fd = platform.read_fd;
+        let forwarder = std::thread::Builder::new()
+            .name("loom-signal".to_string())
+            .spawn(move || forward_signals(read_fd, inbox, notifier))
+            .map_err(|error| {
+                SignalServiceError::Failed(format!("signal forwarder creation failed: {error}"))
+            })?;
+        platform.forwarder = Some(forwarder);
         Ok(platform)
     }
 
@@ -376,37 +437,57 @@ impl PlatformSignals {
     }
 
     fn drain(&mut self) -> Vec<HostSignalKind> {
-        let mut out = Vec::new();
-        let mut bytes = [0u8; 64];
-        loop {
-            // `read` drains only the private nonblocking signal pipe.
-            let count = unsafe {
-                libc::read(
-                    self.read_fd,
-                    bytes.as_mut_ptr().cast(),
-                    bytes.len() as libc::size_t,
-                )
-            };
-            if count > 0 {
-                out.extend(
-                    bytes[..count as usize]
-                        .iter()
-                        .filter_map(|byte| match byte {
-                            1 => Some(HostSignalKind::Interrupt),
-                            2 => Some(HostSignalKind::Terminate),
-                            _ => None,
-                        }),
-                );
-                continue;
-            }
-            if count < 0
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-            {
-                continue;
-            }
-            break;
+        let mut inbox = self.inbox.lock().expect("the signal inbox locks");
+        inbox.notified = false;
+        inbox.signals.drain(..).collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn forward_signals(
+    read_fd: libc::c_int,
+    inbox: std::sync::Arc<std::sync::Mutex<SignalInbox>>,
+    notifier: ReadySender,
+) {
+    let mut bytes = [0u8; 64];
+    loop {
+        let count = unsafe {
+            libc::read(
+                read_fd,
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as libc::size_t,
+            )
+        };
+        if count == 0 {
+            return;
         }
-        out
+        if count < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        let mut send = false;
+        {
+            let mut inbox = inbox.lock().expect("the signal inbox locks");
+            for byte in &bytes[..count as usize] {
+                let kind = match byte {
+                    1 => HostSignalKind::Interrupt,
+                    2 => HostSignalKind::Terminate,
+                    _ => continue,
+                };
+                if inbox.signals.len() < MAX_FORWARDED_SIGNALS {
+                    inbox.signals.push_back(kind);
+                }
+            }
+            if !inbox.signals.is_empty() && !inbox.notified {
+                inbox.notified = true;
+                send = true;
+            }
+        }
+        if send && !notifier.signal() {
+            return;
+        }
     }
 }
 
@@ -421,10 +502,15 @@ impl Drop for PlatformSignals {
                 libc::sigaction(signal, &action, std::ptr::null_mut());
             }
         }
-        // These descriptors belong only to this signal service.
+        // Closing the writer wakes the blocking forwarder with EOF.
+        unsafe {
+            libc::close(self.write_fd);
+        }
+        if let Some(forwarder) = self.forwarder.take() {
+            let _ = forwarder.join();
+        }
         unsafe {
             libc::close(self.read_fd);
-            libc::close(self.write_fd);
         }
         SIGNAL_LEASE.store(false, Ordering::Release);
     }
@@ -432,7 +518,11 @@ impl Drop for PlatformSignals {
 
 #[cfg(not(target_os = "linux"))]
 impl PlatformSignals {
-    fn open(_interrupt: bool, _terminate: bool) -> Result<PlatformSignals, SignalServiceError> {
+    fn open(
+        _interrupt: bool,
+        _terminate: bool,
+        _notifier: ReadySender,
+    ) -> Result<PlatformSignals, SignalServiceError> {
         Err(SignalServiceError::Unsupported(
             "signal streams are not supported on this platform".to_string(),
         ))
@@ -447,9 +537,18 @@ impl PlatformSignals {
 mod tests {
     use super::*;
     use lm_vm::TaskKey;
-    use std::sync::Mutex;
 
-    static SIGNAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn readiness() -> (ReadySender, std::sync::mpsc::Receiver<crate::HostReady>) {
+        let (sender, receiver, _, _) = crate::ready_channel();
+        (sender, receiver)
+    }
+
+    fn wait_for_signal(receiver: &std::sync::mpsc::Receiver<crate::HostReady>) {
+        let ready = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the signal marker arrives");
+        assert!(matches!(ready, crate::HostReady::Signal));
+    }
 
     fn completion() -> CompletionKey {
         CompletionKey {
@@ -464,13 +563,15 @@ mod tests {
     #[test]
     fn a_cancelled_ready_wait_restores_the_platform_signal() {
         let _guard = SIGNAL_TEST_LOCK.lock().expect("the test lock works");
-        let mut service = SignalService::open(9, false, true).expect("the stream opens");
+        let (notifier, ready) = readiness();
+        let mut service = SignalService::open(9, false, true, notifier).expect("the stream opens");
         assert_eq!(
             service.start_next(completion(), 7, 9, true),
             HostStart::Waiting(7)
         );
         // Call the handler directly because test runners can block process signals.
         record_signal(libc::SIGTERM);
+        wait_for_signal(&ready);
         let ready = service.poll().expect("the signal becomes ready");
         assert_eq!(ready.token, 7);
         assert_eq!(service.cancel_wait(7), HostWaitCancel::ReadyRestored);
@@ -489,9 +590,11 @@ mod tests {
     #[test]
     fn a_guardian_retains_an_unrequested_signal() {
         let _guard = SIGNAL_TEST_LOCK.lock().expect("the test lock works");
-        let mut service = SignalService::guardian().expect("the guardian opens");
+        let (notifier, ready) = readiness();
+        let mut service = SignalService::guardian(notifier).expect("the guardian opens");
         // Call the handler directly because test runners can block process signals.
         record_signal(libc::SIGTERM);
+        wait_for_signal(&ready);
         assert_eq!(service.poll(), None);
         assert_eq!(service.forced_signal(), Some(HostSignalKind::Terminate));
     }
@@ -499,7 +602,8 @@ mod tests {
     #[test]
     fn closing_a_stream_completes_its_armed_wait() {
         let _guard = SIGNAL_TEST_LOCK.lock().expect("the test lock works");
-        let mut service = SignalService::open(9, true, false).expect("the stream opens");
+        let (notifier, _ready) = readiness();
+        let mut service = SignalService::open(9, true, false, notifier).expect("the stream opens");
         assert_eq!(
             service.start_next(completion(), 7, 9, true),
             HostStart::Waiting(7)
@@ -514,6 +618,6 @@ mod tests {
             })
         );
         assert!(service.commit_wait(7));
-        assert!(service.can_release());
+        assert!(service.is_idle());
     }
 }

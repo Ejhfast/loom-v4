@@ -1,5 +1,6 @@
 //! Bounded DNS workers and one evented network reactor.
 
+use crate::ReadySender;
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostIpAddress, HostShutdown, HostSocketAddress,
     HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, SharedBytes,
@@ -12,7 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +31,6 @@ pub(crate) struct NetworkService {
     controls: Sender<Control>,
     wake: Arc<Waker>,
     dns: SyncSender<DnsJob>,
-    completions: Receiver<NetworkCompletion>,
     pending: Arc<AtomicUsize>,
     retained: Arc<AtomicUsize>,
     active_dns: Arc<Mutex<HashSet<u64>>>,
@@ -153,12 +153,26 @@ struct Pending {
     token: u64,
     retained: usize,
     wait_state: Option<Arc<Mutex<NetworkWaitState>>>,
-    retained_budget: Option<Arc<AtomicUsize>>,
+    retained_budget: Arc<AtomicUsize>,
 }
 
-struct NetworkCompletion {
+pub(crate) struct NetworkCompletion {
     value: HostCompletion,
-    retained: usize,
+    _retained: Option<RetainedLease>,
+}
+
+impl NetworkCompletion {
+    pub(crate) fn into_value(self) -> HostCompletion {
+        self.value
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_retained(value: HostCompletion) -> NetworkCompletion {
+        NetworkCompletion {
+            value,
+            _retained: None,
+        }
+    }
 }
 
 struct RetainedLease {
@@ -358,12 +372,11 @@ impl UdpRequest {
 }
 
 impl NetworkService {
-    pub(crate) fn new() -> NetworkService {
+    pub(crate) fn new(completion_tx: ReadySender) -> NetworkService {
         let poll = Poll::new().expect("the network poll starts");
         let wake = Arc::new(Waker::new(poll.registry(), WAKE).expect("the network wake starts"));
         let (request_tx, request_rx) = mpsc::sync_channel(MAX_PENDING_NETWORK);
         let (control_tx, control_rx) = mpsc::channel();
-        let (completion_tx, completions) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let retained = Arc::new(AtomicUsize::new(0));
         let waits = Arc::new(Mutex::new(NetworkWaitState::default()));
@@ -408,7 +421,6 @@ impl NetworkService {
             controls: control_tx,
             wake,
             dns,
-            completions,
             pending,
             retained,
             active_dns,
@@ -440,7 +452,7 @@ impl NetworkService {
                 token,
                 retained,
                 wait_state: wait_source.then(|| Arc::clone(&self.waits)),
-                retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
+                retained_budget: Arc::clone(&self.retained),
             },
             name,
             port,
@@ -489,7 +501,7 @@ impl NetworkService {
             token,
             retained,
             wait_state: wait_source.then(|| Arc::clone(&self.waits)),
-            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
+            retained_budget: Arc::clone(&self.retained),
         };
         if wait_source {
             self.waits
@@ -533,7 +545,7 @@ impl NetworkService {
             token,
             retained,
             wait_state: wait_source.then(|| Arc::clone(&self.waits)),
-            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
+            retained_budget: Arc::clone(&self.retained),
         };
         if wait_source {
             self.waits
@@ -577,7 +589,7 @@ impl NetworkService {
             token,
             retained,
             wait_state: wait_source.then(|| Arc::clone(&self.waits)),
-            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
+            retained_budget: Arc::clone(&self.retained),
         };
         if wait_source {
             self.waits
@@ -713,22 +725,6 @@ impl NetworkService {
         let _ = self.wake.wake();
         sent
     }
-
-    pub(crate) fn poll(&self) -> Option<HostCompletion> {
-        let completion = self.completions.try_recv().ok()?;
-        release_retained(&self.retained, completion.retained);
-        Some(completion.value)
-    }
-
-    pub(crate) fn wait_timeout(
-        &self,
-        duration: Duration,
-    ) -> Result<HostCompletion, RecvTimeoutError> {
-        self.completions.recv_timeout(duration).map(|completion| {
-            release_retained(&self.retained, completion.retained);
-            completion.value
-        })
-    }
 }
 
 impl Drop for NetworkService {
@@ -775,12 +771,7 @@ fn release_retained(retained: &AtomicUsize, bytes: usize) {
     debug_assert!(previous >= bytes);
 }
 
-fn complete(
-    completions: &Sender<NetworkCompletion>,
-    count: &AtomicUsize,
-    pending: Pending,
-    value: HostValue,
-) {
+fn complete(completions: &ReadySender, count: &AtomicUsize, pending: Pending, value: HostValue) {
     let _ = complete_with_rollback(
         completions,
         count,
@@ -791,7 +782,7 @@ fn complete(
 }
 
 fn complete_with_rollback(
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     pending: Pending,
     value: HostValue,
@@ -801,11 +792,7 @@ fn complete_with_rollback(
         let mut state = waits.lock().expect("the network wait state locks");
         state.pending.remove(&pending.token);
         if state.cancelled.remove(&pending.token) {
-            let retained = pending
-                .retained_budget
-                .as_ref()
-                .expect("a network wait has a retained-byte budget");
-            release_retained(retained, pending.retained);
+            release_retained(&pending.retained_budget, pending.retained);
             release_pending(count);
             return Some(rollback);
         }
@@ -820,13 +807,17 @@ fn complete_with_rollback(
     } else {
         pending.retained
     };
-    let _ = completions.send(NetworkCompletion {
+    let retained = (completion_retained > 0).then(|| RetainedLease {
+        budget: Arc::clone(&pending.retained_budget),
+        bytes: completion_retained,
+    });
+    let _ = completions.network(NetworkCompletion {
         value: HostCompletion {
             key: pending.key,
             token: pending.token,
             result: Ok(value),
         },
-        retained: completion_retained,
+        _retained: retained,
     });
     release_pending(count);
     None
@@ -834,7 +825,7 @@ fn complete_with_rollback(
 
 fn dns_worker(
     jobs: Arc<Mutex<Receiver<DnsJob>>>,
-    completions: Sender<NetworkCompletion>,
+    completions: ReadySender,
     pending_count: Arc<AtomicUsize>,
     retained: Arc<AtomicUsize>,
     active: Arc<Mutex<HashSet<u64>>>,
@@ -891,7 +882,7 @@ fn reactor(
     mut poll: Poll,
     requests: Receiver<Command>,
     controls: Receiver<Control>,
-    completions: Sender<NetworkCompletion>,
+    completions: ReadySender,
     pending: Arc<AtomicUsize>,
     retained: Arc<AtomicUsize>,
     waits: Arc<Mutex<NetworkWaitState>>,
@@ -979,7 +970,7 @@ fn reactor(
 fn handle_command(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     retained: &Arc<AtomicUsize>,
     waits: &Mutex<NetworkWaitState>,
@@ -1278,7 +1269,7 @@ fn handle_command(
 fn handle_udp_request(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     pending: Pending,
     request: UdpRequest,
@@ -1389,7 +1380,7 @@ fn handle_udp_request(
 fn handle_tls_request(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     retained: &Arc<AtomicUsize>,
     pending: Pending,
@@ -1535,7 +1526,7 @@ fn handle_tls_request(
 fn start_tls_handshake(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     retained: &Arc<AtomicUsize>,
     mut pending: Pending,
@@ -1775,7 +1766,7 @@ fn validate_tls_server_settings(settings: &TlsServerSettings) -> Result<(), Stri
 fn drive_entry(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     resource: u64,
     readable: bool,
@@ -1815,7 +1806,7 @@ fn drive_entry(
 }
 
 fn complete_udp_receive(
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     mut pending: Pending,
     socket: u64,
@@ -1834,12 +1825,7 @@ fn complete_udp_receive(
                     bytes: bytes.clone(),
                     peer,
                     _retained: RetainedLease {
-                        budget: Arc::clone(
-                            pending
-                                .retained_budget
-                                .as_ref()
-                                .expect("a UDP wait has a retained-byte budget"),
-                        ),
+                        budget: Arc::clone(&pending.retained_budget),
                         bytes: held,
                     },
                 }
@@ -1871,7 +1857,7 @@ fn complete_udp_receive(
 fn drive_udp(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     socket: u64,
     readable: bool,
@@ -1975,7 +1961,7 @@ fn drive_udp(
 fn fail_udp_entry(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     socket: u64,
 ) {
@@ -2006,7 +1992,7 @@ fn fail_udp_entry(
 fn drive_listener(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     listener: u64,
 ) {
@@ -2092,7 +2078,7 @@ fn drive_listener(
 fn drive_stream(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     stream: u64,
     readable: bool,
@@ -2272,7 +2258,7 @@ fn drive_stream(
 fn drive_tls(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     stream: u64,
     readable: bool,
@@ -2531,7 +2517,7 @@ fn drive_tls(
 fn fail_tls_entry(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     stream: u64,
     value: HostValue,
@@ -2559,7 +2545,7 @@ fn fail_tls_entry(
 fn close_entry(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     resource: u64,
 ) -> bool {
@@ -2622,7 +2608,7 @@ fn close_entry(
 fn restore_wait(
     poll: &Poll,
     entries: &mut HashMap<u64, Entry>,
-    completions: &Sender<NetworkCompletion>,
+    completions: &ReadySender,
     count: &AtomicUsize,
     rollback: NetworkWaitRollback,
 ) -> bool {
@@ -2959,6 +2945,31 @@ fn io_error(error: std::io::Error) -> HostValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_network_completion_releases_retained_bytes_once() {
+        let retained = Arc::new(AtomicUsize::new(9));
+        let completion = NetworkCompletion {
+            value: HostCompletion {
+                key: CompletionKey {
+                    machine: lm_vm::TaskKey {
+                        vm: 0,
+                        generation: 0,
+                    },
+                    ordinal: 1,
+                },
+                token: 3,
+                result: Ok(HostValue::Unit),
+            },
+            _retained: Some(RetainedLease {
+                budget: Arc::clone(&retained),
+                bytes: 9,
+            }),
+        };
+
+        assert_eq!(completion.into_value().token, 3);
+        assert_eq!(retained.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn retained_bytes_have_one_global_limit() {
