@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: proposed design. No implementation exists yet.
+Status: Stages 0 through 2 are complete. Stages 3 through 8 remain planned.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -59,7 +59,7 @@ This work does not require work stealing.
 
 This work does not add a JIT.
 
-## 4. Current architecture
+## 4. Starting architecture
 
 `lm-proc` owns task order, wake indexes, wait indexes, barriers, and deadlock detection.
 
@@ -471,6 +471,10 @@ It does not expose a guest-visible operation or coordinator transaction.
 
 The implementation measures misses before it adds shards or lock-free storage.
 
+One access view copies new canonical records at slice entry.
+
+The machine slot keeps its query caches until that slot gets another machine.
+
 Parallel insertion order cannot affect guest behavior.
 
 Snapshot encoding reconstructs canonical type order from structural content.
@@ -491,11 +495,11 @@ A segmented interner remains deferred while total miss cost stays below two perc
 
 ## 13. Budgets
 
-Shared `Rc<Cell<_>>` counters cannot cross worker threads.
+Thread-safe aggregate ledgers use atomic counters on the coordinator path.
 
-Replacing them with atomic counters would charge every allocation.
+A worker never charges those counters for each allocation.
 
-The coordinator instead grants bounded budget leases.
+The coordinator grants bounded budget leases before dispatch.
 
 ### 13.1 Fuel
 
@@ -537,6 +541,10 @@ The instruction retries from its unchanged start state after a refill.
 
 An intrinsic that cannot provide this guarantee cannot execute inside a worker slice.
 
+Deterministic mode keeps direct aggregate accounting because it executes one slice inline.
+
+Stage 3 divides unused capacity between leases before it dispatches parallel work.
+
 ### 13.3 Resources
 
 Resource creation happens after an effect reaches the coordinator.
@@ -544,6 +552,10 @@ Resource creation happens after an effect reaches the coordinator.
 Workers never mutate the resource registry.
 
 The coordinator owns the aggregate resource count.
+
+The aggregate resource ledger uses synchronized storage.
+
+Only coordinator operations access that storage.
 
 ## 14. Host completions
 
@@ -994,11 +1006,23 @@ Add compile-time `Send` checks for every lease field.
 
 Do not add an `unsafe impl Send`.
 
+Define the owned lease payload before worker dispatch starts.
+
+Keep deterministic execution on the borrowed executor path.
+
+Both executor paths use the same interpreter kernel.
+
+The slot table uses copy-on-write publication.
+
+An active lease keeps its exact immutable slot view.
+
 ### Stage 3: Add the bounded worker pool
 
 Add opt-in parallel mode with one central dispatcher.
 
 Start the pool only when parallel work exists.
+
+Add resident and leased states to each machine slot.
 
 Add one combined wake path for reports and host completions.
 

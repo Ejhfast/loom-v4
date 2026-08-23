@@ -25,9 +25,9 @@ pub use shape::{
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
-use std::cell::Cell;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Object-table slots per page.
 const PAGE_SLOTS: usize = 1024;
@@ -172,16 +172,16 @@ impl GraphScratch {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct HeapBudgetState {
-    bytes: usize,
-    objects: usize,
+    bytes: AtomicUsize,
+    objects: AtomicUsize,
 }
 
 /// One shared heap ledger for all machines in a world.
 #[derive(Debug, Clone)]
 pub struct HeapBudget {
-    state: Rc<Cell<HeapBudgetState>>,
+    state: Arc<HeapBudgetState>,
     max_bytes: usize,
     max_objects: usize,
 }
@@ -190,7 +190,7 @@ impl HeapBudget {
     /// Create one ledger with byte and object limits.
     pub fn new(max_bytes: usize, max_objects: usize) -> HeapBudget {
         HeapBudget {
-            state: Rc::new(Cell::new(HeapBudgetState::default())),
+            state: Arc::new(HeapBudgetState::default()),
             max_bytes,
             max_objects,
         }
@@ -198,22 +198,20 @@ impl HeapBudget {
 
     /// The logical bytes charged to this ledger.
     pub fn used_bytes(&self) -> usize {
-        self.state.get().bytes
+        self.state.bytes.load(Ordering::Relaxed)
     }
 
     /// The live objects charged to this ledger.
     pub fn live_objects(&self) -> usize {
-        self.state.get().objects
+        self.state.objects.load(Ordering::Relaxed)
     }
 
     fn would_exceed(&self, bytes: usize, objects: usize) -> bool {
-        let state = self.state.get();
-        state
-            .bytes
+        self.used_bytes()
             .checked_add(bytes)
             .is_none_or(|total| total > self.max_bytes)
-            || state
-                .objects
+            || self
+                .live_objects()
                 .checked_add(objects)
                 .is_none_or(|total| total > self.max_objects)
     }
@@ -223,9 +221,8 @@ impl HeapBudget {
     /// The caller tests `Heap::would_exceed`, `would_exceed_growth`, or
     /// `would_exceed_batch` first, and each of those reads this ledger.
     /// The rule is a debug assertion, because a release build runs this
-    /// call once for each allocated object, and a second test of the
-    /// same rule costs the allocation path a `Cell` read and two
-    /// checked additions.
+    /// call once for each allocated object. A second test adds more
+    /// work to the allocation path.
     ///
     /// A caller that skips its test over-charges the ledger instead of
     /// raising a fault. The debug build and the test suite catch that
@@ -235,22 +232,82 @@ impl HeapBudget {
             !self.would_exceed(bytes, objects),
             "a checked heap charge fits the world budget"
         );
-        let state = self.state.get();
-        self.state.set(HeapBudgetState {
-            bytes: state.bytes + bytes,
-            objects: state.objects + objects,
-        });
+        self.state.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.state.objects.fetch_add(objects, Ordering::Relaxed);
     }
 
     fn release(&self, bytes: usize, objects: usize) {
-        let state = self.state.get();
-        debug_assert!(state.bytes >= bytes);
-        debug_assert!(state.objects >= objects);
-        self.state.set(HeapBudgetState {
-            bytes: state.bytes.saturating_sub(bytes),
-            objects: state.objects.saturating_sub(objects),
-        });
+        let old_bytes = self
+            .state
+            .bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(bytes))
+            })
+            .expect("the update always returns a value");
+        let old_objects = self
+            .state
+            .objects
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(objects))
+            })
+            .expect("the update always returns a value");
+        debug_assert!(old_bytes >= bytes);
+        debug_assert!(old_objects >= objects);
     }
+
+    fn reserve_available(&self) -> (usize, usize) {
+        let bytes = self.max_bytes.saturating_sub(self.used_bytes());
+        let objects = self.max_objects.saturating_sub(self.live_objects());
+        self.state.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.state.objects.fetch_add(objects, Ordering::Relaxed);
+        (bytes, objects)
+    }
+}
+
+#[derive(Debug)]
+struct HeapBudgetLease {
+    budget: HeapBudget,
+    start_bytes: usize,
+    start_objects: usize,
+    growth_bytes: usize,
+    growth_objects: usize,
+}
+
+impl HeapBudgetLease {
+    fn finish(self, end_bytes: usize, end_objects: usize) -> HeapBudget {
+        let (release_bytes, release_objects) = self.unused(end_bytes, end_objects);
+        self.budget.release(release_bytes, release_objects);
+        self.budget
+    }
+
+    fn unused(&self, end_bytes: usize, end_objects: usize) -> (usize, usize) {
+        let bytes = self
+            .growth_bytes
+            .saturating_add(self.start_bytes)
+            .saturating_sub(end_bytes);
+        let objects = self
+            .growth_objects
+            .saturating_add(self.start_objects)
+            .saturating_sub(end_objects);
+        (bytes, objects)
+    }
+
+    fn exceeds(&self, bytes: usize, objects: usize) -> bool {
+        self.start_bytes
+            .checked_add(self.growth_bytes)
+            .is_none_or(|limit| bytes > limit)
+            || self
+                .start_objects
+                .checked_add(self.growth_objects)
+                .is_none_or(|limit| objects > limit)
+    }
+}
+
+#[derive(Debug)]
+enum HeapAccounting {
+    Detached,
+    Shared(HeapBudget),
+    Leased(HeapBudgetLease),
 }
 
 /// A terminal heap compaction failure.
@@ -285,7 +342,7 @@ pub struct Heap {
     /// Canonical digests of frozen objects, keyed by slot and type.
     digests: std::collections::HashMap<u32, DigestCacheEntry>,
     /// The aggregate ledger of the owning world.
-    budget: Option<HeapBudget>,
+    accounting: HeapAccounting,
     /// Shared immutable allocations referenced by this heap.
     shared_allocations: SharedAllocations,
 }
@@ -312,7 +369,10 @@ impl Heap {
             host_roots: Vec::new(),
             scratch: GraphScratch::default(),
             digests: std::collections::HashMap::new(),
-            budget,
+            accounting: match budget {
+                Some(budget) => HeapAccounting::Shared(budget),
+                None => HeapAccounting::Detached,
+            },
             shared_allocations: SharedAllocations::default(),
         }
     }
@@ -322,15 +382,58 @@ impl Heap {
     /// This operation charges all live storage once. It changes
     /// nothing when the aggregate ledger cannot hold that storage.
     pub fn attach_budget(&mut self, budget: HeapBudget) -> bool {
-        if self.budget.is_some() {
+        if !matches!(self.accounting, HeapAccounting::Detached) {
             return true;
         }
         if budget.would_exceed(self.used_bytes, self.live) {
             return false;
         }
         budget.charge(self.used_bytes, self.live);
-        self.budget = Some(budget);
+        self.accounting = HeapAccounting::Shared(budget);
         true
+    }
+
+    /// Reserve aggregate heap growth for one execution slice.
+    ///
+    /// Allocations use local counters until `end_execution_lease`.
+    pub fn begin_execution_lease(&mut self) {
+        let prior = std::mem::replace(&mut self.accounting, HeapAccounting::Detached);
+        let budget = match prior {
+            HeapAccounting::Shared(budget) => budget,
+            other => {
+                self.accounting = other;
+                return;
+            }
+        };
+        let (growth_bytes, growth_objects) = budget.reserve_available();
+        self.accounting = HeapAccounting::Leased(HeapBudgetLease {
+            budget,
+            start_bytes: self.used_bytes,
+            start_objects: self.live,
+            growth_bytes,
+            growth_objects,
+        });
+    }
+
+    /// Reconcile one execution slice with the aggregate heap ledger.
+    pub fn end_execution_lease(&mut self) {
+        let prior = std::mem::replace(&mut self.accounting, HeapAccounting::Detached);
+        let lease = match prior {
+            HeapAccounting::Leased(lease) => lease,
+            other => {
+                self.accounting = other;
+                return;
+            }
+        };
+        self.accounting = HeapAccounting::Shared(lease.finish(self.used_bytes, self.live));
+    }
+
+    /// Return unused aggregate capacity from the active lease.
+    pub fn execution_lease_unused(&self) -> Option<(usize, usize)> {
+        match &self.accounting {
+            HeapAccounting::Leased(lease) => Some(lease.unused(self.used_bytes, self.live)),
+            _ => None,
+        }
     }
 
     pub fn stats(&self) -> HeapStats {
@@ -420,25 +523,37 @@ impl Heap {
 
     /// True when object growth would exceed a byte limit.
     pub fn would_exceed_growth(&self, cost: usize) -> bool {
-        self.used_bytes
+        let local = self
+            .used_bytes
             .checked_add(cost)
-            .is_none_or(|total| total > self.cap_bytes)
-            || self
-                .budget
-                .as_ref()
-                .is_some_and(|budget| budget.would_exceed(cost, 0))
+            .is_none_or(|total| total > self.cap_bytes);
+        if local {
+            return true;
+        }
+        match &self.accounting {
+            HeapAccounting::Detached => false,
+            HeapAccounting::Shared(budget) => budget.would_exceed(cost, 0),
+            HeapAccounting::Leased(lease) => lease.exceeds(self.used_bytes + cost, self.live),
+        }
     }
 
     /// True when one batch would exceed a heap limit.
     pub fn would_exceed_batch(&self, bytes: usize, objects: usize) -> bool {
-        self.used_bytes
+        let local = self
+            .used_bytes
             .checked_add(bytes)
             .is_none_or(|total| total > self.cap_bytes)
-            || self.live.checked_add(objects).is_none()
-            || self
-                .budget
-                .as_ref()
-                .is_some_and(|budget| budget.would_exceed(bytes, objects))
+            || self.live.checked_add(objects).is_none();
+        if local {
+            return true;
+        }
+        match &self.accounting {
+            HeapAccounting::Detached => false,
+            HeapAccounting::Shared(budget) => budget.would_exceed(bytes, objects),
+            HeapAccounting::Leased(lease) => {
+                lease.exceeds(self.used_bytes + bytes, self.live.saturating_add(objects))
+            }
+        }
     }
 
     fn entry(&self, slot: u32) -> &Entry {
@@ -515,7 +630,7 @@ impl Heap {
         };
         self.used_bytes += cost;
         self.live += 1;
-        if let Some(budget) = &self.budget {
+        if let HeapAccounting::Shared(budget) = &self.accounting {
             budget.charge(cost, 1);
         }
         if let Some(slot) = self.free.pop() {
@@ -664,7 +779,7 @@ impl Heap {
         header.bytes = new_cost;
         header.shared = new_shared_key;
         self.used_bytes = self.used_bytes - old_cost - released + new_cost + added;
-        if let Some(budget) = &self.budget {
+        if let HeapAccounting::Shared(budget) = &self.accounting {
             let old_total = old_cost + released;
             let new_total = new_cost + added;
             if new_total >= old_total {
@@ -689,7 +804,7 @@ impl Heap {
             (old_cost, new_cost)
         };
         self.used_bytes = self.used_bytes - old_cost + new_cost;
-        if let Some(budget) = &self.budget {
+        if let HeapAccounting::Shared(budget) = &self.accounting {
             if new_cost >= old_cost {
                 budget.charge(new_cost - old_cost, 0);
             } else {
@@ -714,7 +829,7 @@ impl Heap {
         let released = header.bytes + shared;
         self.used_bytes -= released;
         self.live -= 1;
-        if let Some(budget) = &self.budget {
+        if let HeapAccounting::Shared(budget) = &self.accounting {
             budget.release(released, 1);
         }
         self.free.push(slot);
@@ -854,7 +969,7 @@ impl Heap {
         }
         self.used_bytes -= freed_bytes;
         self.live -= freed;
-        if let Some(budget) = &self.budget {
+        if let HeapAccounting::Shared(budget) = &self.accounting {
             budget.release(freed_bytes, freed);
         }
     }
@@ -982,8 +1097,13 @@ impl Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        if let Some(budget) = &self.budget {
-            budget.release(self.used_bytes, self.live);
+        match std::mem::replace(&mut self.accounting, HeapAccounting::Detached) {
+            HeapAccounting::Detached => {}
+            HeapAccounting::Shared(budget) => budget.release(self.used_bytes, self.live),
+            HeapAccounting::Leased(lease) => {
+                let budget = lease.finish(self.used_bytes, self.live);
+                budget.release(self.used_bytes, self.live);
+            }
         }
     }
 }
@@ -1200,6 +1320,24 @@ mod tests {
         first.free(value);
         assert_eq!(budget.used_bytes(), 0);
         assert!(!second.would_exceed(cost));
+    }
+
+    #[test]
+    fn one_heap_lease_reconciles_live_growth_once() {
+        let cost = str_obj("one").cost();
+        let budget = HeapBudget::new(cost * 2, 2);
+        let mut heap = Heap::with_budget(1 << 20, budget.clone());
+        let first = heap.alloc(str_obj("one"));
+        assert_eq!(budget.used_bytes(), cost);
+        heap.begin_execution_lease();
+        assert_eq!(budget.used_bytes(), cost * 2);
+        let second = heap.alloc(str_obj("two"));
+        heap.free(first);
+        assert_eq!(budget.used_bytes(), cost * 2);
+        heap.end_execution_lease();
+        assert_eq!(budget.used_bytes(), cost);
+        heap.free(second);
+        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]

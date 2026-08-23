@@ -298,7 +298,7 @@ impl World {
             let record = &mut self.vm_images[image as usize];
             record.live = true;
             record.config = config;
-            record.slots = slots;
+            record.slots = Arc::new(slots);
             record.slot_versions = vec![0; record.slots.len()];
             record.heap = Heap::with_budget(config.heap_bytes, self.budget.heap.clone());
             record.instances.clear();
@@ -314,7 +314,7 @@ impl World {
             live: true,
             config,
             slot_versions: vec![0; slots.len()],
-            slots,
+            slots: Arc::new(slots),
             heap: Heap::with_budget(config.heap_bytes, self.budget.heap.clone()),
             instances: Vec::new(),
         });
@@ -375,9 +375,9 @@ impl World {
 
         for image in &mut self.vm_images {
             if image.live && image.slots.len() < slot_count {
-                image
-                    .slots
-                    .try_reserve_exact(slot_count - image.slots.len())
+                let additional = slot_count - image.slots.len();
+                Arc::make_mut(&mut image.slots)
+                    .try_reserve_exact(additional)
                     .map_err(|_| "the VM image has no slot capacity".to_string())?;
                 image
                     .slot_versions
@@ -410,7 +410,7 @@ impl World {
 
         for image in &mut self.vm_images {
             if image.live {
-                image.slots.resize(slot_count, ImageSlotTarget::Empty);
+                Arc::make_mut(&mut image.slots).resize(slot_count, ImageSlotTarget::Empty);
                 image.slot_versions.resize(slot_count, 0);
             }
         }
@@ -418,7 +418,7 @@ impl World {
         for (source, initial) in binding_targets.iter().enumerate() {
             let slot = appended.reloc.slots[source] as usize;
             if matches!(target.slots[slot], ImageSlotTarget::Empty) {
-                target.slots[slot] = *initial;
+                Arc::make_mut(&mut target.slots)[slot] = *initial;
             }
         }
         target.instances.push(InstalledInstance {
@@ -779,7 +779,7 @@ impl World {
         }
         let image = &mut self.vm_images[key.image as usize];
         for (slot, version, target) in targets {
-            image.slots[*slot as usize] = *target;
+            Arc::make_mut(&mut image.slots)[*slot as usize] = *target;
             image.slot_versions[*slot as usize] = version + 1;
         }
         Ok(())

@@ -17,6 +17,7 @@ use crate::{LoadedModule, VmConfig};
 use lm_bytecode::closed::TypeImportPlan;
 use lm_heap::{Heap, Object, SharedBytes};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use std::sync::Arc;
 
 /// One complete restore that is ready for commit.
 pub(crate) struct RestorePlan {
@@ -288,9 +289,9 @@ impl World {
             let count = code.module().slots.len();
             for image in &mut self.vm_images {
                 if image.live && image.slots.len() < count {
-                    image
-                        .slots
-                        .try_reserve_exact(count - image.slots.len())
+                    let additional = count - image.slots.len();
+                    Arc::make_mut(&mut image.slots)
+                        .try_reserve_exact(additional)
                         .map_err(|_| RestoreFail::LimitExceeded)?;
                 }
             }
@@ -612,7 +613,7 @@ impl World {
                 generation: key.generation,
                 live: true,
                 config,
-                slots,
+                slots: Arc::new(slots),
                 slot_versions: source.slot_versions.clone(),
                 heap,
                 instances,
@@ -661,7 +662,7 @@ impl World {
             let slot_count = self.module.slots.len();
             for image in &mut self.vm_images {
                 if image.live {
-                    image.slots.resize(slot_count, RuntimeSlotTarget::Empty);
+                    Arc::make_mut(&mut image.slots).resize(slot_count, RuntimeSlotTarget::Empty);
                 }
             }
         }

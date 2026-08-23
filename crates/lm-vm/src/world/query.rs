@@ -233,7 +233,7 @@ impl World {
             if !image.live || image.generation != key.generation {
                 continue;
             }
-            for target in &image.slots {
+            for target in image.slots.iter() {
                 if let crate::machine::ImageSlotTarget::Process { proc, .. } = target {
                     if !out.contains(proc) {
                         out.push(*proc);
@@ -618,10 +618,11 @@ impl World {
                 value,
                 &limits,
             );
-            let copied = result
-                .is_ok()
-                .then(|| dst_m.vm.heap.used_bytes().saturating_sub(before))
-                .unwrap_or(0);
+            let copied = if result.is_ok() {
+                dst_m.vm.heap.used_bytes().saturating_sub(before)
+            } else {
+                0
+            };
             (result, copied)
         };
         self.metrics.cross_machine_graph_bytes = self

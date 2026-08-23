@@ -14,47 +14,48 @@
 use crate::machine::VmId;
 use crate::FaultCode;
 use lm_abi::SnapshotClass;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// One live-resource ledger for a root VM and its spawned procs.
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceBudget {
-    used: Rc<Cell<usize>>,
+    used: Arc<AtomicUsize>,
     limit: usize,
 }
 
 impl ResourceBudget {
     pub(crate) fn new(limit: usize) -> ResourceBudget {
         ResourceBudget {
-            used: Rc::new(Cell::new(0)),
+            used: Arc::new(AtomicUsize::new(0)),
             limit,
         }
     }
 
     fn take(&self) -> bool {
-        let used = self.used.get();
-        let Some(next) = used.checked_add(1) else {
-            return false;
-        };
-        if next > self.limit {
-            return false;
-        }
-        self.used.set(next);
-        true
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(1).filter(|next| *next <= self.limit)
+            })
+            .is_ok()
     }
 
     fn has_room(&self) -> bool {
-        self.used.get() < self.limit
+        self.used.load(Ordering::Relaxed) < self.limit
     }
 
     fn give(&self, count: usize) {
-        debug_assert!(self.used.get() >= count);
-        self.used.set(self.used.get().saturating_sub(count));
+        let used = self
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(count))
+            })
+            .expect("the update always returns a value");
+        debug_assert!(used >= count);
     }
 
     pub(crate) fn used(&self) -> usize {
-        self.used.get()
+        self.used.load(Ordering::Relaxed)
     }
 }
 

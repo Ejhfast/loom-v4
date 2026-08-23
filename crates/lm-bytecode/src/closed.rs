@@ -22,6 +22,9 @@
 use crate::{BcClass, BcClassKind, BcRow, BcType, Module, NO_PARENT};
 use lm_value::TypeEnvId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// One entry of the closed type table, by index.
 pub type ClosedTypeId = u32;
@@ -207,6 +210,8 @@ pub struct TypeImportPlan {
     env_index: HashMap<TypeEnv, TypeEnvId>,
     env_map: Vec<TypeEnvId>,
     type_map: Vec<ClosedTypeId>,
+    base_types: usize,
+    base_envs: usize,
 }
 
 /// Runtime derivations rooted at one dense type environment.
@@ -216,6 +221,30 @@ struct TypeEnvCache {
     derived: Vec<(u32, TypeEnvId)>,
     /// Method compositions, sorted by class, function, and own environment.
     methods: Vec<((u32, u32, TypeEnvId), TypeEnvId)>,
+}
+
+/// Canonical records shared by type access views.
+#[derive(Debug)]
+struct CanonicalTypeStore {
+    types: Vec<ClosedType>,
+    type_index: HashMap<ClosedType, ClosedTypeId>,
+    envs: Vec<TypeEnv>,
+    env_index: HashMap<TypeEnv, TypeEnvId>,
+    depths: Vec<u32>,
+    max_types: u32,
+    max_envs: u32,
+}
+
+#[derive(Debug)]
+struct SharedCanonicalTypeStore {
+    store: Mutex<CanonicalTypeStore>,
+    counts: AtomicU64,
+}
+
+#[derive(Debug)]
+struct CanonicalDelta {
+    types: Vec<(ClosedType, u32)>,
+    envs: Vec<TypeEnv>,
 }
 
 impl TypeImportPlan {
@@ -279,6 +308,10 @@ pub struct TypeEnvs {
     max_types: u32,
     max_envs: u32,
     metrics: TypeEnvMetrics,
+    metrics_dirty: bool,
+    canonical_changed: bool,
+    /// Append-only records shared by all access views.
+    canonical: Arc<SharedCanonicalTypeStore>,
 }
 
 impl Default for TypeEnvs {
@@ -298,6 +331,19 @@ impl TypeEnvs {
     /// Environment zero is the empty environment, so a monomorphic
     /// state stores zero and the table allocates nothing for it.
     pub fn new(max_types: u32, max_envs: u32) -> TypeEnvs {
+        let max_envs = max_envs.max(1);
+        let empty = TypeEnv::default();
+        let mut canonical_env_index = HashMap::new();
+        canonical_env_index.insert(empty.clone(), TypeEnvId::EMPTY);
+        let canonical = CanonicalTypeStore {
+            types: Vec::new(),
+            type_index: HashMap::new(),
+            envs: vec![empty.clone()],
+            env_index: canonical_env_index,
+            depths: Vec::new(),
+            max_types,
+            max_envs,
+        };
         let mut table = TypeEnvs {
             types: Vec::new(),
             type_index: HashMap::new(),
@@ -310,14 +356,172 @@ impl TypeEnvs {
             digests: Vec::new(),
             depths: Vec::new(),
             max_types,
-            max_envs: max_envs.max(1),
+            max_envs,
             metrics: TypeEnvMetrics::default(),
+            metrics_dirty: false,
+            canonical_changed: false,
+            canonical: Arc::new(SharedCanonicalTypeStore {
+                store: Mutex::new(canonical),
+                counts: AtomicU64::new(Self::packed_counts(0, 1)),
+            }),
         };
-        let empty = TypeEnv::default();
         table.envs.push(empty.clone());
         table.env_index.insert(empty, TypeEnvId::EMPTY);
         table.env_cache.push(TypeEnvCache::default());
         table
+    }
+
+    fn packed_counts(types: usize, envs: usize) -> u64 {
+        ((types as u64) << 32) | envs as u64
+    }
+
+    fn with_canonical<R>(&mut self, action: impl FnOnce(&mut CanonicalTypeStore) -> R) -> R {
+        if let Some(store) = Arc::get_mut(&mut self.canonical) {
+            let canonical = store
+                .store
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner());
+            let result = action(canonical);
+            *store.counts.get_mut() =
+                Self::packed_counts(canonical.types.len(), canonical.envs.len());
+            return result;
+        }
+        let start = Instant::now();
+        let mut store = self
+            .canonical
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let waited = start.elapsed();
+        let result = action(&mut store);
+        let type_count = store.types.len();
+        let env_count = store.envs.len();
+        self.canonical.counts.store(
+            Self::packed_counts(type_count, env_count),
+            Ordering::Release,
+        );
+        drop(store);
+        self.metrics.interner_lock_wait_ns = self
+            .metrics
+            .interner_lock_wait_ns
+            .saturating_add(waited.as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.metrics_dirty = true;
+        result
+    }
+
+    fn delta(store: &CanonicalTypeStore, types: usize, envs: usize) -> CanonicalDelta {
+        CanonicalDelta {
+            types: store
+                .types
+                .iter()
+                .zip(&store.depths)
+                .skip(types)
+                .map(|(node, depth)| (node.clone(), *depth))
+                .collect(),
+            envs: store.envs.iter().skip(envs).cloned().collect(),
+        }
+    }
+
+    fn apply_delta(&mut self, delta: CanonicalDelta) {
+        for (node, depth) in delta.types {
+            let id = self.types.len() as ClosedTypeId;
+            self.types.push(node.clone());
+            self.type_index.insert(node, id);
+            self.digests.push(None);
+            self.depths.push(depth);
+        }
+        for env in delta.envs {
+            let id = TypeEnvId(self.envs.len() as u32);
+            self.envs.push(env.clone());
+            self.env_index.insert(env, id);
+            self.env_cache.push(TypeEnvCache::default());
+        }
+    }
+
+    /// Copy canonical records that another access view added.
+    pub fn sync_shared(&mut self) {
+        let type_count = self.types.len();
+        let env_count = self.envs.len();
+        if self.canonical.counts.load(Ordering::Acquire)
+            == Self::packed_counts(type_count, env_count)
+        {
+            return;
+        }
+        let delta = self.with_canonical(|store| Self::delta(store, type_count, env_count));
+        self.apply_delta(delta);
+    }
+
+    /// Create one access view with empty machine-local caches.
+    pub fn fork_shared(&mut self) -> TypeEnvs {
+        self.sync_shared();
+        TypeEnvs {
+            types: self.types.clone(),
+            type_index: self.type_index.clone(),
+            envs: self.envs.clone(),
+            env_index: self.env_index.clone(),
+            env_cache: (0..self.envs.len())
+                .map(|_| TypeEnvCache::default())
+                .collect(),
+            cache_entries: 0,
+            closed: HashMap::new(),
+            last_closed: None,
+            digests: vec![None; self.types.len()],
+            depths: self.depths.clone(),
+            max_types: self.max_types,
+            max_envs: self.max_envs,
+            metrics: TypeEnvMetrics::default(),
+            metrics_dirty: false,
+            canonical_changed: false,
+            canonical: self.canonical.clone(),
+        }
+    }
+
+    /// Add counters from one machine-local access view.
+    pub fn merge_metrics(&mut self, other: &mut TypeEnvs) {
+        if !other.metrics_dirty {
+            return;
+        }
+        let incoming = std::mem::take(&mut other.metrics);
+        other.metrics_dirty = false;
+        self.metrics.close_hits = self.metrics.close_hits.saturating_add(incoming.close_hits);
+        self.metrics.close_misses = self
+            .metrics
+            .close_misses
+            .saturating_add(incoming.close_misses);
+        self.metrics.derive_hits = self
+            .metrics
+            .derive_hits
+            .saturating_add(incoming.derive_hits);
+        self.metrics.derive_misses = self
+            .metrics
+            .derive_misses
+            .saturating_add(incoming.derive_misses);
+        self.metrics.method_hits = self
+            .metrics
+            .method_hits
+            .saturating_add(incoming.method_hits);
+        self.metrics.method_misses = self
+            .metrics
+            .method_misses
+            .saturating_add(incoming.method_misses);
+        self.metrics.interned_types = self
+            .metrics
+            .interned_types
+            .saturating_add(incoming.interned_types);
+        self.metrics.interned_envs = self
+            .metrics
+            .interned_envs
+            .saturating_add(incoming.interned_envs);
+        self.metrics.interner_lock_wait_ns = self
+            .metrics
+            .interner_lock_wait_ns
+            .saturating_add(incoming.interner_lock_wait_ns);
+        self.metrics_dirty = true;
+    }
+
+    /// Report whether this view added canonical records.
+    pub fn take_canonical_change(&mut self) -> bool {
+        std::mem::take(&mut self.canonical_changed)
     }
 
     /// The number of closed type nodes the table holds.
@@ -349,6 +553,7 @@ impl TypeEnvs {
     /// Reset the closed-type counters.
     pub fn reset_metrics(&mut self) {
         self.metrics = TypeEnvMetrics::default();
+        self.metrics_dirty = false;
     }
 
     /// One closed type node by index.
@@ -384,6 +589,29 @@ impl TypeEnvs {
         self.env_index
             .try_reserve(envs)
             .map_err(|_| TypeEnvFull { types: false })?;
+        self.with_canonical(|store| {
+            store
+                .types
+                .try_reserve_exact(types)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            store
+                .depths
+                .try_reserve_exact(types)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            store
+                .type_index
+                .try_reserve(types)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            store
+                .envs
+                .try_reserve_exact(envs)
+                .map_err(|_| TypeEnvFull { types: false })?;
+            store
+                .env_index
+                .try_reserve(envs)
+                .map_err(|_| TypeEnvFull { types: false })?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -396,6 +624,9 @@ impl TypeEnvs {
         source_types: &[ClosedType],
         source_envs: &[TypeEnv],
     ) -> Result<TypeImportPlan, TypeEnvFull> {
+        self.sync_shared();
+        let base_types = self.types.len();
+        let base_envs = self.envs.len();
         let mut type_map: Vec<ClosedTypeId> = Vec::new();
         type_map
             .try_reserve_exact(source_types.len())
@@ -533,26 +764,43 @@ impl TypeEnvs {
             env_index: planned_envs,
             env_map,
             type_map,
+            base_types,
+            base_envs,
         })
     }
 
     /// Commit one prepared import.
     pub fn commit_import(&mut self, plan: TypeImportPlan) {
-        for (node, depth) in plan.types {
-            self.types.push(node);
-            self.digests.push(None);
-            self.depths.push(depth);
-        }
-        for (node, id) in plan.type_index {
-            self.type_index.insert(node, id);
-        }
-        for env in plan.envs {
-            self.envs.push(env);
-            self.env_cache.push(TypeEnvCache::default());
-        }
-        for (env, id) in plan.env_index {
-            self.env_index.insert(env, id);
-        }
+        debug_assert_eq!(self.types.len(), plan.base_types);
+        debug_assert_eq!(self.envs.len(), plan.base_envs);
+        let type_count = self.types.len();
+        let env_count = self.envs.len();
+        let TypeImportPlan {
+            types,
+            type_index,
+            envs,
+            env_index,
+            ..
+        } = plan;
+        let delta = self.with_canonical(|store| {
+            debug_assert_eq!(store.types.len(), type_count);
+            debug_assert_eq!(store.envs.len(), env_count);
+            for (node, depth) in types {
+                store.types.push(node);
+                store.depths.push(depth);
+            }
+            for (node, id) in type_index {
+                store.type_index.insert(node, id);
+            }
+            for env in envs {
+                store.envs.push(env);
+            }
+            for (env, id) in env_index {
+                store.env_index.insert(env, id);
+            }
+            Self::delta(store, type_count, env_count)
+        });
+        self.apply_delta(delta);
     }
 
     /// Intern one closed type node.
@@ -563,8 +811,9 @@ impl TypeEnvs {
         if let Some(id) = self.type_index.get(&node) {
             return Ok(*id);
         }
-        if self.types.len() as u32 >= self.max_types {
-            return Err(TypeEnvFull { types: true });
+        self.sync_shared();
+        if let Some(id) = self.type_index.get(&node) {
+            return Ok(*id);
         }
         // The depth of this node is one past its deepest child. A walk
         // over a closed type costs at least its depth, so the bound
@@ -580,12 +829,39 @@ impl TypeEnvs {
         if depth > MAX_CLOSED_DEPTH {
             return Err(TypeEnvFull { types: true });
         }
-        let id = self.types.len() as ClosedTypeId;
-        self.types.push(node.clone());
-        self.digests.push(None);
-        self.depths.push(depth);
-        self.type_index.insert(node, id);
-        self.metrics.interned_types = self.metrics.interned_types.saturating_add(1);
+        let type_count = self.types.len();
+        let env_count = self.envs.len();
+        let (id, inserted, delta) = self.with_canonical(|store| {
+            if let Some(id) = store.type_index.get(&node).copied() {
+                return Ok((id, false, Self::delta(store, type_count, env_count)));
+            }
+            if store.types.len() as u32 >= store.max_types {
+                return Err(TypeEnvFull { types: true });
+            }
+            store
+                .types
+                .try_reserve(1)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            store
+                .depths
+                .try_reserve(1)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            store
+                .type_index
+                .try_reserve(1)
+                .map_err(|_| TypeEnvFull { types: true })?;
+            let id = store.types.len() as ClosedTypeId;
+            store.types.push(node.clone());
+            store.depths.push(depth);
+            store.type_index.insert(node, id);
+            Ok((id, true, Self::delta(store, type_count, env_count)))
+        })?;
+        self.apply_delta(delta);
+        if inserted {
+            self.metrics.interned_types = self.metrics.interned_types.saturating_add(1);
+            self.metrics_dirty = true;
+            self.canonical_changed = true;
+        }
         Ok(id)
     }
 
@@ -597,14 +873,38 @@ impl TypeEnvs {
         if let Some(id) = self.env_index.get(&env) {
             return Ok(*id);
         }
-        if self.envs.len() as u32 >= self.max_envs {
-            return Err(TypeEnvFull { types: false });
+        self.sync_shared();
+        if let Some(id) = self.env_index.get(&env) {
+            return Ok(*id);
         }
-        let id = TypeEnvId(self.envs.len() as u32);
-        self.envs.push(env.clone());
-        self.env_cache.push(TypeEnvCache::default());
-        self.env_index.insert(env, id);
-        self.metrics.interned_envs = self.metrics.interned_envs.saturating_add(1);
+        let type_count = self.types.len();
+        let env_count = self.envs.len();
+        let (id, inserted, delta) = self.with_canonical(|store| {
+            if let Some(id) = store.env_index.get(&env).copied() {
+                return Ok((id, false, Self::delta(store, type_count, env_count)));
+            }
+            if store.envs.len() as u32 >= store.max_envs {
+                return Err(TypeEnvFull { types: false });
+            }
+            store
+                .envs
+                .try_reserve(1)
+                .map_err(|_| TypeEnvFull { types: false })?;
+            store
+                .env_index
+                .try_reserve(1)
+                .map_err(|_| TypeEnvFull { types: false })?;
+            let id = TypeEnvId(store.envs.len() as u32);
+            store.envs.push(env.clone());
+            store.env_index.insert(env, id);
+            Ok((id, true, Self::delta(store, type_count, env_count)))
+        })?;
+        self.apply_delta(delta);
+        if inserted {
+            self.metrics.interned_envs = self.metrics.interned_envs.saturating_add(1);
+            self.metrics_dirty = true;
+            self.canonical_changed = true;
+        }
         Ok(id)
     }
 
@@ -626,15 +926,18 @@ impl TypeEnvs {
         if let Some((cached_ty, cached_env, id)) = self.last_closed {
             if cached_ty == ty && cached_env == env {
                 self.metrics.close_hits = self.metrics.close_hits.saturating_add(1);
+                self.metrics_dirty = true;
                 return Ok(id);
             }
         }
         if let Some(id) = self.closed.get(&(ty, env)).copied() {
             self.metrics.close_hits = self.metrics.close_hits.saturating_add(1);
+            self.metrics_dirty = true;
             self.last_closed = Some((ty, env, id));
             return Ok(id);
         }
         self.metrics.close_misses = self.metrics.close_misses.saturating_add(1);
+        self.metrics_dirty = true;
         // Each entry pairs one module type with the flag that says
         // whether its children already sit on the stack.
         let mut stack: Vec<(u32, bool)> = vec![(ty, false)];
@@ -829,10 +1132,12 @@ impl TypeEnvs {
                 .binary_search_by_key(&app, |(entry, _)| *entry)
             {
                 self.metrics.derive_hits = self.metrics.derive_hits.saturating_add(1);
+                self.metrics_dirty = true;
                 return Ok(cache.derived[at].1);
             }
         }
         self.metrics.derive_misses = self.metrics.derive_misses.saturating_add(1);
+        self.metrics_dirty = true;
         let entry = match module.apps.get(app as usize) {
             Some(entry) => entry.clone(),
             None => return Ok(TypeEnvId::EMPTY),
@@ -889,10 +1194,12 @@ impl TypeEnvs {
                 .binary_search_by_key(&key, |(entry, _)| *entry)
             {
                 self.metrics.method_hits = self.metrics.method_hits.saturating_add(1);
+                self.metrics_dirty = true;
                 return Ok(cache.methods[at].1);
             }
         }
         self.metrics.method_misses = self.metrics.method_misses.saturating_add(1);
+        self.metrics_dirty = true;
 
         let owner = match body
             .params
@@ -1615,5 +1922,81 @@ mod tests {
         // Slot 1 is `Fs` and slot 0 is `Io`, so the text order swaps
         // the slot order.
         assert_eq!(canonical_row(&m, vec![0, 1, 0]), vec![1, 0]);
+    }
+
+    #[test]
+    fn shared_views_intern_one_canonical_type() {
+        let mut owner = TypeEnvs::default();
+        let int = owner.intern(ClosedType::Int).expect("Int fits");
+        let mut first = owner.fork_shared();
+        let mut second = owner.fork_shared();
+        let first = std::thread::spawn(move || {
+            first
+                .intern(ClosedType::List(int))
+                .expect("the first list fits")
+        });
+        let second = std::thread::spawn(move || {
+            second
+                .intern(ClosedType::List(int))
+                .expect("the second list fits")
+        });
+        assert_eq!(first.join().expect("the first view returns"), 1);
+        assert_eq!(second.join().expect("the second view returns"), 1);
+        owner.sync_shared();
+        assert_eq!(owner.type_count(), 2);
+        assert_eq!(owner.ty(1), Some(&ClosedType::List(int)));
+    }
+
+    #[test]
+    fn one_view_can_use_a_type_added_by_another_view() {
+        let mut owner = TypeEnvs::default();
+        let int = owner.intern(ClosedType::Int).expect("Int fits");
+        let mut first = owner.fork_shared();
+        let mut second = owner.fork_shared();
+        let list = first.intern(ClosedType::List(int)).expect("the list fits");
+        let map = second
+            .intern(ClosedType::Map(int, list))
+            .expect("the map view synchronizes first");
+        owner.sync_shared();
+        assert_eq!(owner.ty(list), Some(&ClosedType::List(int)));
+        assert_eq!(owner.ty(map), Some(&ClosedType::Map(int, list)));
+    }
+
+    #[test]
+    fn shared_views_intern_distinct_types_without_reusing_an_index() {
+        let mut owner = TypeEnvs::default();
+        let int = owner.intern(ClosedType::Int).expect("Int fits");
+        let mut first = owner.fork_shared();
+        let mut second = owner.fork_shared();
+        let first =
+            std::thread::spawn(move || first.intern(ClosedType::List(int)).expect("the list fits"));
+        let second =
+            std::thread::spawn(move || second.intern(ClosedType::Run(int)).expect("the run fits"));
+        let list = first.join().expect("the first view returns");
+        let run = second.join().expect("the second view returns");
+        assert_ne!(list, run);
+        owner.sync_shared();
+        assert_eq!(owner.ty(list), Some(&ClosedType::List(int)));
+        assert_eq!(owner.ty(run), Some(&ClosedType::Run(int)));
+    }
+
+    #[test]
+    fn shared_views_keep_independent_derivation_caches() {
+        let m = module();
+        let mut owner = TypeEnvs::default();
+        let mut first = owner.fork_shared();
+        let mut second = owner.fork_shared();
+        let first_env = first
+            .derive(&m, TypeEnvId::EMPTY, 0)
+            .expect("the first environment fits");
+        let second_env = second
+            .derive(&m, TypeEnvId::EMPTY, 0)
+            .expect("the second environment fits");
+        assert_eq!(first_env, second_env);
+        first
+            .derive(&m, TypeEnvId::EMPTY, 0)
+            .expect("the first cache answers");
+        assert_eq!(first.metrics().derive_hits, 1);
+        assert_eq!(second.metrics().derive_hits, 0);
     }
 }

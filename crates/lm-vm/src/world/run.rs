@@ -681,7 +681,7 @@ impl World {
         }
     }
 
-    fn extract_execution(&mut self, vm: VmId, limit: u32) -> ExecutionLease<'_> {
+    fn execute_inline(&mut self, vm: VmId, limit: u32) -> crate::executor::InlineExecutionReport {
         let image = self.machines[vm as usize].image;
         let slots = image.and_then(|key| {
             self.vm_images.get(key.image as usize).and_then(|record| {
@@ -689,7 +689,7 @@ impl World {
                     .then_some(record.slots.as_slice())
             })
         });
-        ExecutionLease::new(
+        crate::executor::execute_inline(
             &mut self.machines[vm as usize],
             self.module.as_ref(),
             self.dispatch.as_ref(),
@@ -705,12 +705,12 @@ impl World {
         top_idx: usize,
         vm: VmId,
         quantum: &mut Option<u32>,
-        report: ExecutionReport,
+        report: crate::executor::InlineExecutionReport,
     ) -> Option<RootEvent> {
-        if report.reached_boundary() {
+        let (stop, retired, reached_boundary) = report.into_parts();
+        if reached_boundary {
             self.metrics.boundary_exits = self.metrics.boundary_exits.saturating_add(1);
         }
-        let (stop, retired) = report.into_parts();
         self.budget.fuel -= u64::from(retired);
         if let Some(remaining) = quantum {
             *remaining = remaining.saturating_sub(retired);
@@ -1033,7 +1033,7 @@ impl World {
                         .unwrap_or(u32::MAX)
                         .max(1);
                     let limit = requested.min(available).min(turn);
-                    let report = crate::execute(self.extract_execution(act.vm, limit));
+                    let report = self.execute_inline(act.vm, limit);
                     if let Some(event) =
                         self.commit_execution_report(stack, top_idx, act.vm, &mut quantum, report)
                     {

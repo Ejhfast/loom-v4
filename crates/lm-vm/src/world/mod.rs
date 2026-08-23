@@ -21,7 +21,7 @@ mod waits;
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
-use crate::executor::{ExecutionLease, ExecutionReport, ExecutionStop};
+use crate::executor::ExecutionStop;
 use crate::host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
@@ -43,6 +43,7 @@ use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcType, Module};
 use lm_heap::{Heap, HeapBudget, Object, SharedBytes, SharedText, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
+use std::sync::Arc;
 
 /// The fuel budget of one mock handler run.
 const MOCK_FUEL: u64 = 1_000_000;
@@ -220,7 +221,7 @@ pub(crate) struct VmImageRecord {
     /// The resource ceiling that image activation applies.
     pub(crate) config: VmConfig,
     /// The current targets of the image's late-bound slots.
-    pub(crate) slots: Vec<ImageSlotTarget>,
+    pub(crate) slots: Arc<Vec<ImageSlotTarget>>,
     /// The replacement version of each late-bound slot.
     pub(crate) slot_versions: Vec<u64>,
     /// Frozen values owned by value slots in this image.
@@ -1247,9 +1248,15 @@ mod tests {
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
+        let published = world.vm_images[image.image as usize].slots.clone();
         world
             .replace_function_slot(image, 0, 2)
             .expect("the second method matches");
+        assert_eq!(published[0], ImageSlotTarget::Function(1));
+        assert_eq!(
+            world.vm_images[image.image as usize].slots[0],
+            ImageSlotTarget::Function(2)
+        );
         assert_eq!(
             world.replace_function_slot(image, 0, 3),
             Err(FaultCode::TypeMismatch)

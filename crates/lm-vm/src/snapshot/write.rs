@@ -211,7 +211,7 @@ impl World {
             })
             .collect();
         let image = &mut self.vm_images[target.image as usize];
-        for slot in &image.slots {
+        for slot in image.slots.iter() {
             if let crate::machine::ImageSlotTarget::Process { proc, generation } = slot {
                 let live = self.machines.get(*proc as usize).is_some_and(|machine| {
                     machine.generation == *generation && machine.vm.state != MachineState::Empty
@@ -784,7 +784,7 @@ impl World {
             });
         }
         let mut slots = Vec::with_capacity(record.slots.len());
-        for target in &record.slots {
+        for target in record.slots.iter() {
             slots.push(match target {
                 crate::machine::ImageSlotTarget::Empty => ImageSlotTarget::Empty,
                 crate::machine::ImageSlotTarget::Function(func) => ImageSlotTarget::Function(*func),
