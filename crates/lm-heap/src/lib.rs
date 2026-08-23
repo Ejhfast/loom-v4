@@ -232,34 +232,36 @@ impl HeapBudget {
             !self.would_exceed(bytes, objects),
             "a checked heap charge fits the world budget"
         );
-        self.state.bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.state.objects.fetch_add(objects, Ordering::Relaxed);
+        // The coordinator serializes shared ledger updates.
+        // A worker uses local counters from its execution lease.
+        self.state
+            .bytes
+            .store(self.used_bytes() + bytes, Ordering::Relaxed);
+        self.state
+            .objects
+            .store(self.live_objects() + objects, Ordering::Relaxed);
     }
 
     fn release(&self, bytes: usize, objects: usize) {
-        let old_bytes = self
-            .state
-            .bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                Some(used.saturating_sub(bytes))
-            })
-            .expect("the update always returns a value");
-        let old_objects = self
-            .state
-            .objects
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                Some(used.saturating_sub(objects))
-            })
-            .expect("the update always returns a value");
+        let old_bytes = self.used_bytes();
+        let old_objects = self.live_objects();
         debug_assert!(old_bytes >= bytes);
         debug_assert!(old_objects >= objects);
+        self.state
+            .bytes
+            .store(old_bytes.saturating_sub(bytes), Ordering::Relaxed);
+        self.state
+            .objects
+            .store(old_objects.saturating_sub(objects), Ordering::Relaxed);
     }
 
     fn reserve_available(&self) -> (usize, usize) {
         let bytes = self.max_bytes.saturating_sub(self.used_bytes());
         let objects = self.max_objects.saturating_sub(self.live_objects());
-        self.state.bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.state.objects.fetch_add(objects, Ordering::Relaxed);
+        self.state.bytes.store(self.max_bytes, Ordering::Relaxed);
+        self.state
+            .objects
+            .store(self.max_objects, Ordering::Relaxed);
         (bytes, objects)
     }
 }

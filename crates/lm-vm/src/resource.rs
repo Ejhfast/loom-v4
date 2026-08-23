@@ -33,11 +33,17 @@ impl ResourceBudget {
     }
 
     fn take(&self) -> bool {
-        self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(1).filter(|next| *next <= self.limit)
-            })
-            .is_ok()
+        // The coordinator serializes resource ledger updates.
+        // Atomic storage lets a dormant registry cross a worker boundary.
+        let used = self.used.load(Ordering::Relaxed);
+        let Some(next) = used.checked_add(1) else {
+            return false;
+        };
+        if next > self.limit {
+            return false;
+        }
+        self.used.store(next, Ordering::Relaxed);
+        true
     }
 
     fn has_room(&self) -> bool {
@@ -45,13 +51,10 @@ impl ResourceBudget {
     }
 
     fn give(&self, count: usize) {
-        let used = self
-            .used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                Some(used.saturating_sub(count))
-            })
-            .expect("the update always returns a value");
+        let used = self.used.load(Ordering::Relaxed);
         debug_assert!(used >= count);
+        self.used
+            .store(used.saturating_sub(count), Ordering::Relaxed);
     }
 
     pub(crate) fn used(&self) -> usize {
