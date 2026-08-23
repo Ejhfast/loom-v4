@@ -352,6 +352,14 @@ Only `lm-vm` can construct or inspect the lease payload.
 
 The deterministic scheduler calls the same executor inline.
 
+Both modes use one scheduler state machine and one report commit path.
+
+Deterministic mode uses borrowed synchronous transport.
+
+Parallel mode uses owned leases and queued reports.
+
+Deterministic mode never routes an inline slice through a worker queue.
+
 ## 9. Slice execution
 
 A worker can execute only guest instructions and local heap work.
@@ -487,7 +495,7 @@ Instrumentation records these values:
 
 - closed-type cache hits per slice;
 - closed-type cache misses per slice;
-- interner lock wait time;
+- benchmark time for workloads that force interner misses;
 - new type nodes per million instructions;
 - new environments per million instructions.
 
@@ -495,11 +503,21 @@ A segmented interner remains deferred while total miss cost stays below two perc
 
 ## 13. Budgets
 
-Thread-safe aggregate ledgers use atomic counters on the coordinator path.
+Aggregate ledgers use atomic storage so their owners can transfer safely.
+
+The coordinator serializes every normal aggregate update.
 
 A worker never charges those counters for each allocation.
 
 The coordinator grants bounded budget leases before dispatch.
+
+The coordinator retains each aggregate reservation while its machine runs.
+
+A worker lease contains only local allowances.
+
+Dropping worker state never changes an aggregate ledger.
+
+The coordinator cancels the retained reservation after worker failure.
 
 ### 13.1 Fuel
 
@@ -544,6 +562,8 @@ An intrinsic that cannot provide this guarantee cannot execute inside a worker s
 Deterministic mode keeps direct aggregate accounting because it executes one slice inline.
 
 Stage 3 divides unused capacity between leases before it dispatches parallel work.
+
+The initial owned executor can request all unused capacity during Stage 2 tests.
 
 ### 13.3 Resources
 
@@ -614,6 +634,10 @@ It sends one coalesced `SignalReady` marker to the shared queue.
 It retains the current delivery, cancellation, escalation, and guardian rules.
 
 Dropping the signal service closes the pipe and joins the forwarder.
+
+The host releases an idle guardian after raw mode and signal streams close.
+
+Service destruction waits for active handlers before it closes the pipe descriptors.
 
 The signal handler never touches a Rust channel or lock.
 
@@ -746,6 +770,24 @@ The trace records coordinator commit order.
 Worker identifiers do not appear in the semantic trace.
 
 ## 18. Snapshot barriers
+
+### 18.1 Initial global quiescence
+
+Stage 3 provides one global quiescence fallback.
+
+The coordinator stops new dispatch and waits for every active lease.
+
+Every lease returns within its remaining quantum, except during one long instruction.
+
+The coordinator then applies the existing serial control operation.
+
+This fallback covers send, pause, snapshot, restore, and replacement.
+
+Stage 4 removes global quiescence from ordinary world transactions.
+
+Stage 5 replaces global control stops with scoped barriers.
+
+The fallback remains a correctness path for unexpected transaction conflicts.
 
 A parallel barrier first stops the target task set.
 
@@ -913,6 +955,10 @@ No lower crate depends on `lm-proc`.
 
 `lm-vm` does not depend on an operating-system thread pool.
 
+`lm-vm`, `lm-bytecode`, and `lm-heap` do not read an ambient clock.
+
+Benchmark code measures slice wall time outside these crates.
+
 ## 23. Instrumentation before refactoring
 
 Stages 0 and 0.5 record the current workload shape.
@@ -927,8 +973,9 @@ The measurements include these counters:
 - closed-type derivations and misses;
 - heap growth per slice;
 - deferred transaction wait time;
-- native intrinsic duration;
-- per-machine GC duration;
+- slice wall time at the executor boundary;
+- native intrinsic calls per slice;
+- collections per slice;
 - host completions per slice;
 - host parks and wakeups;
 - host timeout wakeups;
@@ -1016,6 +1063,22 @@ The slot table uses copy-on-write publication.
 
 An active lease keeps its exact immutable slot view.
 
+### Stage 2.5: Harden the executor boundary
+
+Reject a stale canonical import before any world mutation.
+
+Retry that import from its admitted source after quiescence.
+
+Keep heap and resource reservations on the coordinator.
+
+Add explicit commit and cancellation paths for each reservation.
+
+Remove ambient clock reads from pure runtime crates.
+
+Release an idle signal guardian.
+
+Record the ledger update comparison and complete baseline metadata.
+
 ### Stage 3: Add the bounded worker pool
 
 Add opt-in parallel mode with one central dispatcher.
@@ -1025,6 +1088,16 @@ Start the pool only when parallel work exists.
 Add resident and leased states to each machine slot.
 
 Add one combined wake path for reports and host completions.
+
+Grant bounded heap bytes and object counts to every lease.
+
+Return `NeedsHeapRefill` before an allocation changes state.
+
+Grant more capacity or produce `HeapLimit` from the real aggregate limit.
+
+Catch worker failure and cancel its retained coordinator reservations.
+
+Provide global quiescence for every operation that needs resident machines.
 
 Prove scaling with CPU-only proc programs.
 
@@ -1036,7 +1109,11 @@ Route nested VM control and policy edits through the same path.
 
 Add deferred two-machine transactions.
 
+Remove global quiescence from normal sends and other world transactions.
+
 State every race outcome in tests.
+
+Stages 3 and 4 form one review milestone.
 
 ### Stage 5: Add parallel barriers
 
@@ -1045,6 +1122,8 @@ Implement snapshot stop sets and reachability closure.
 Implement pause and resume over active leases.
 
 Implement image safepoints for replacement batches.
+
+Replace global control quiescence with the smallest required stop set.
 
 Keep snapshot bytes canonical.
 
@@ -1079,6 +1158,9 @@ Do not implement Cranelift in this initiative.
 The implementation must pass these gates:
 
 - deterministic trace fixtures stay byte-for-byte equal;
+- stale canonical imports change no identifier or record;
+- coordinator cancellation releases a destroyed worker's full reservation;
+- pure runtime crates contain no ambient clock access;
 - each machine has at most one active lease;
 - stale and duplicate reports reject safely;
 - same-sender mailbox order stays exact;
@@ -1095,6 +1177,7 @@ The implementation must pass these gates:
 - output before a slow child wait cannot deadlock;
 - compiler, process, and I/O completions wake the same host park;
 - a raw-terminal guardian causes no periodic polling;
+- an idle host releases process signal ownership;
 - signal forwarding preserves cancellation and escalation;
 - network retained-byte guards release exactly once;
 - deadlock detection waits for active reports;
@@ -1114,6 +1197,10 @@ The synchronization core can use a model checker if normal tests cannot cover an
 ## 26. Performance gates
 
 Deterministic root-only execution must stay within normal benchmark noise.
+
+Normal microbenchmark noise is five percent for a nine-run median.
+
+Cached filesystem latency has a ten-percent gate because host variance is larger.
 
 Deterministic proc execution can regress by at most five percent.
 

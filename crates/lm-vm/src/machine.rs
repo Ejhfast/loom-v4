@@ -683,19 +683,15 @@ pub struct Machine {
     pub callbacks: Vec<CallbackSlot>,
     /// The original operation whose reply becomes a wait source.
     pub preparing_wait: Option<WaitPreparation>,
-    /// True when slow wall-clock counters are active.
-    timing_enabled: bool,
-    /// Optional wall-clock counters for profiling.
-    timing: MachineExecutionMetrics,
+    /// Clock-free execution counters.
+    execution_metrics: MachineExecutionMetrics,
 }
 
-/// Optional wall-clock counters for one machine.
+/// Clock-free execution counters for one machine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MachineExecutionMetrics {
     pub native_calls: u64,
-    pub native_time_ns: u64,
     pub collections: u64,
-    pub collection_time_ns: u64,
 }
 
 struct PortableDefinitionInfo {
@@ -1124,19 +1120,13 @@ impl Machine {
             start_body: None,
             callbacks: Vec::new(),
             preparing_wait: None,
-            timing_enabled: false,
-            timing: MachineExecutionMetrics::default(),
+            execution_metrics: MachineExecutionMetrics::default(),
         }
     }
 
-    /// Enable optional wall-clock counters.
-    pub(crate) fn enable_timing_metrics(&mut self) {
-        self.timing_enabled = true;
-    }
-
-    /// The current optional wall-clock counters.
-    pub fn timing_metrics(&self) -> MachineExecutionMetrics {
-        self.timing
+    /// The current clock-free execution counters.
+    pub fn execution_metrics(&self) -> MachineExecutionMetrics {
+        self.execution_metrics
     }
 
     /// Install the initial frame for a function with its locals
@@ -1311,16 +1301,9 @@ impl Machine {
     /// Collect garbage now. `extra` holds additional roots that are
     /// not yet stored in the arenas.
     pub fn collect_garbage(&mut self, extra: &[ObjRef]) {
-        let started = self.timing_enabled.then(std::time::Instant::now);
         let roots = self.gc_roots(extra);
         lm_graph::collect(&mut self.vm.heap, roots);
-        if let Some(started) = started {
-            self.timing.collections = self.timing.collections.saturating_add(1);
-            self.timing.collection_time_ns = self
-                .timing
-                .collection_time_ns
-                .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
-        }
+        self.execution_metrics.collections = self.execution_metrics.collections.saturating_add(1);
     }
 
     /// Every collection root this machine holds outside its heap.
@@ -4634,15 +4617,9 @@ impl Machine {
         instr: Instr,
     ) -> Result<ExecOutcome, FaultCode> {
         if matches!(instr, Instr::Native(_)) {
-            let started = self.timing_enabled.then(std::time::Instant::now);
             let result = self.exec_native_instr(instr);
-            if let Some(started) = started {
-                self.timing.native_calls = self.timing.native_calls.saturating_add(1);
-                self.timing.native_time_ns = self
-                    .timing
-                    .native_time_ns
-                    .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
-            }
+            self.execution_metrics.native_calls =
+                self.execution_metrics.native_calls.saturating_add(1);
             result?;
             return Ok(ExecOutcome::Continue);
         }

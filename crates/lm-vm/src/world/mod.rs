@@ -629,8 +629,6 @@ pub struct World {
     check: crate::typecheck::BoundaryScratch,
     /// Low-cost counters for scheduler measurements.
     metrics: WorldMetrics,
-    /// True when new machines collect wall-clock counters.
-    timing_metrics: bool,
 }
 
 /// One recorded scheduler event. A trace record names machines by

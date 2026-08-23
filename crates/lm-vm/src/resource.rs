@@ -62,6 +62,30 @@ impl ResourceBudget {
     }
 }
 
+#[derive(Debug)]
+enum ResourceAccounting {
+    Detached,
+    Shared(ResourceBudget),
+    Leased { lease: u64, live: usize },
+}
+
+/// One coordinator-owned resource ledger reservation.
+#[derive(Debug)]
+#[must_use = "the coordinator must reconcile or cancel this resource reservation"]
+pub(crate) struct ResourceBudgetReservation {
+    lease: u64,
+    budget: ResourceBudget,
+    live: usize,
+}
+
+impl ResourceBudgetReservation {
+    /// Release every resource charge after the worker machine was destroyed.
+    #[allow(dead_code)]
+    pub(crate) fn cancel_destroyed(self) {
+        self.budget.give(self.live);
+    }
+}
+
 /// The kind of one registered resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -149,7 +173,7 @@ pub struct ResourceRegistry {
     /// The number of records cleanup closed, for the tests.
     closed: u64,
     /// The aggregate ledger of the owning world.
-    budget: Option<ResourceBudget>,
+    accounting: ResourceAccounting,
 }
 
 impl ResourceRegistry {
@@ -167,8 +191,56 @@ impl ResourceRegistry {
             records: Vec::new(),
             cap,
             closed: 0,
-            budget,
+            accounting: match budget {
+                Some(budget) => ResourceAccounting::Shared(budget),
+                None => ResourceAccounting::Detached,
+            },
         }
+    }
+
+    fn assert_coordinator_access(&self) {
+        assert!(
+            !matches!(self.accounting, ResourceAccounting::Leased { .. }),
+            "a worker does not change the resource registry"
+        );
+    }
+
+    /// Detach shared accounting before one worker slice.
+    pub(crate) fn begin_execution_lease(&mut self, lease: u64) -> ResourceBudgetReservation {
+        assert_ne!(lease, 0, "an execution lease has a nonzero identity");
+        let live = self.live_count();
+        let prior = std::mem::replace(&mut self.accounting, ResourceAccounting::Detached);
+        let budget = match prior {
+            ResourceAccounting::Shared(budget) => budget,
+            other => {
+                self.accounting = other;
+                panic!("an execution lease starts once on shared resources");
+            }
+        };
+        self.accounting = ResourceAccounting::Leased { lease, live };
+        ResourceBudgetReservation {
+            lease,
+            budget,
+            live,
+        }
+    }
+
+    /// Restore shared accounting after one worker slice.
+    pub(crate) fn end_execution_lease(&mut self, reservation: ResourceBudgetReservation) {
+        let ResourceAccounting::Leased { lease, live } = &self.accounting else {
+            panic!("an execution lease ends once on leased resources");
+        };
+        assert_eq!(
+            *lease, reservation.lease,
+            "the resource lease identity matches"
+        );
+        assert_eq!(*live, reservation.live, "the resource lease start matches");
+        assert_eq!(
+            self.live_count(),
+            reservation.live,
+            "a worker does not change the resource registry"
+        );
+        self.accounting = ResourceAccounting::Shared(reservation.budget);
     }
 
     /// Register one live resource.
@@ -184,6 +256,7 @@ impl ResourceRegistry {
         ordinal: u64,
         op: u32,
     ) -> Result<(), FaultCode> {
+        self.assert_coordinator_access();
         let record = ResourceRecord {
             kind,
             owner,
@@ -199,8 +272,12 @@ impl ResourceRegistry {
         if reuse.is_none() && self.records.len() as u32 >= self.cap {
             return Err(FaultCode::HostFault);
         }
-        if self.budget.as_ref().is_some_and(|budget| !budget.take()) {
-            return Err(FaultCode::HostFault);
+        match &self.accounting {
+            ResourceAccounting::Shared(budget) if !budget.take() => {
+                return Err(FaultCode::HostFault);
+            }
+            ResourceAccounting::Leased { .. } => return Err(FaultCode::HostFault),
+            ResourceAccounting::Detached | ResourceAccounting::Shared(_) => {}
         }
         match reuse {
             Some(slot) => self.records[slot] = record,
@@ -211,6 +288,7 @@ impl ResourceRegistry {
 
     /// Reserve registry storage before host work can start.
     pub fn prepare_register(&mut self) -> Result<(), FaultCode> {
+        self.assert_coordinator_access();
         let reuses_closed = self
             .records
             .iter()
@@ -218,12 +296,12 @@ impl ResourceRegistry {
         if !reuses_closed && self.records.len() as u32 >= self.cap {
             return Err(FaultCode::HostFault);
         }
-        if self
-            .budget
-            .as_ref()
-            .is_some_and(|budget| !budget.has_room())
-        {
-            return Err(FaultCode::HostFault);
+        match &self.accounting {
+            ResourceAccounting::Shared(budget) if !budget.has_room() => {
+                return Err(FaultCode::HostFault);
+            }
+            ResourceAccounting::Leased { .. } => return Err(FaultCode::HostFault),
+            ResourceAccounting::Detached | ResourceAccounting::Shared(_) => {}
         }
         if !reuses_closed {
             self.records
@@ -236,11 +314,12 @@ impl ResourceRegistry {
     /// Close the live record with this scope identity. Return true
     /// when a record closed.
     pub fn close(&mut self, scope: u64) -> bool {
+        self.assert_coordinator_access();
         for record in &mut self.records {
             if record.state == ResourceState::Live && record.scope == scope {
                 record.state = ResourceState::Closed;
                 self.closed = self.closed.saturating_add(1);
-                if let Some(budget) = &self.budget {
+                if let ResourceAccounting::Shared(budget) = &self.accounting {
                     budget.give(1);
                 }
                 return true;
@@ -251,11 +330,12 @@ impl ResourceRegistry {
 
     /// Close one live record with this kind and scope.
     pub fn close_kind(&mut self, kind: ResourceKind, scope: u64) -> bool {
+        self.assert_coordinator_access();
         for record in &mut self.records {
             if record.state == ResourceState::Live && record.kind == kind && record.scope == scope {
                 record.state = ResourceState::Closed;
                 self.closed = self.closed.saturating_add(1);
-                if let Some(budget) = &self.budget {
+                if let ResourceAccounting::Shared(budget) = &self.accounting {
                     budget.give(1);
                 }
                 return true;
@@ -267,6 +347,7 @@ impl ResourceRegistry {
     /// Close the live record of one pending request ordinal. Return
     /// true when a record closed.
     pub fn close_by_ordinal(&mut self, ordinal: u64) -> bool {
+        self.assert_coordinator_access();
         for record in &mut self.records {
             if record.state == ResourceState::Live
                 && record.kind == ResourceKind::PendingOperation
@@ -274,7 +355,7 @@ impl ResourceRegistry {
             {
                 record.state = ResourceState::Closed;
                 self.closed = self.closed.saturating_add(1);
-                if let Some(budget) = &self.budget {
+                if let ResourceAccounting::Shared(budget) = &self.accounting {
                     budget.give(1);
                 }
                 return true;
@@ -285,6 +366,7 @@ impl ResourceRegistry {
 
     /// Set the host scope of one prepared operation.
     pub fn set_pending_scope(&mut self, ordinal: u64, scope: u64) -> bool {
+        self.assert_coordinator_access();
         for record in &mut self.records {
             if record.state == ResourceState::Live
                 && record.kind == ResourceKind::PendingOperation
@@ -301,6 +383,7 @@ impl ResourceRegistry {
     /// invokes no guest callback, and it never replaces an existing
     /// machine fault.
     pub fn close_all(&mut self) -> usize {
+        self.assert_coordinator_access();
         let mut count = 0;
         for record in &mut self.records {
             if record.state == ResourceState::Live {
@@ -309,7 +392,7 @@ impl ResourceRegistry {
                 count += 1;
             }
         }
-        if let Some(budget) = &self.budget {
+        if let ResourceAccounting::Shared(budget) = &self.accounting {
             budget.give(count);
         }
         count
@@ -317,6 +400,7 @@ impl ResourceRegistry {
 
     /// Release storage after all live resources close.
     pub(crate) fn compact_closed(&mut self) {
+        self.assert_coordinator_access();
         debug_assert_eq!(self.live_count(), 0);
         self.records = Vec::new();
     }
@@ -364,7 +448,7 @@ impl ResourceRegistry {
 impl Drop for ResourceRegistry {
     fn drop(&mut self) {
         let live = self.live_count();
-        if let Some(budget) = &self.budget {
+        if let ResourceAccounting::Shared(budget) = &self.accounting {
             budget.give(live);
         }
     }

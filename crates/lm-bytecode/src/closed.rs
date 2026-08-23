@@ -24,7 +24,6 @@ use lm_value::TypeEnvId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 /// One entry of the closed type table, by index.
 pub type ClosedTypeId = u32;
@@ -194,7 +193,6 @@ pub struct TypeEnvMetrics {
     pub method_misses: u64,
     pub interned_types: u64,
     pub interned_envs: u64,
-    pub interner_lock_wait_ns: u64,
 }
 
 /// One prepared import into a world type table.
@@ -212,6 +210,21 @@ pub struct TypeImportPlan {
     type_map: Vec<ClosedTypeId>,
     base_types: usize,
     base_envs: usize,
+}
+
+/// A prepared import no longer matches the append-only canonical store.
+///
+/// The caller must prepare the import again from its source records.
+#[derive(Debug)]
+pub struct StaleTypeImport {
+    plan: Box<TypeImportPlan>,
+}
+
+impl StaleTypeImport {
+    /// Recover the unchanged plan for cleanup or diagnostics.
+    pub fn into_plan(self) -> TypeImportPlan {
+        *self.plan
+    }
 }
 
 /// Runtime derivations rooted at one dense type environment.
@@ -386,13 +399,11 @@ impl TypeEnvs {
                 Self::packed_counts(canonical.types.len(), canonical.envs.len());
             return result;
         }
-        let start = Instant::now();
         let mut store = self
             .canonical
             .store
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let waited = start.elapsed();
         let result = action(&mut store);
         let type_count = store.types.len();
         let env_count = store.envs.len();
@@ -401,11 +412,6 @@ impl TypeEnvs {
             Ordering::Release,
         );
         drop(store);
-        self.metrics.interner_lock_wait_ns = self
-            .metrics
-            .interner_lock_wait_ns
-            .saturating_add(waited.as_nanos().min(u128::from(u64::MAX)) as u64);
-        self.metrics_dirty = true;
         result
     }
 
@@ -436,6 +442,35 @@ impl TypeEnvs {
             self.env_index.insert(env, id);
             self.env_cache.push(TypeEnvCache::default());
         }
+    }
+
+    fn append_import(
+        store: &mut CanonicalTypeStore,
+        plan: TypeImportPlan,
+        type_count: usize,
+        env_count: usize,
+    ) -> CanonicalDelta {
+        let TypeImportPlan {
+            types,
+            type_index,
+            envs,
+            env_index,
+            ..
+        } = plan;
+        for (node, depth) in types {
+            store.types.push(node);
+            store.depths.push(depth);
+        }
+        for (node, id) in type_index {
+            store.type_index.insert(node, id);
+        }
+        for env in envs {
+            store.envs.push(env);
+        }
+        for (env, id) in env_index {
+            store.env_index.insert(env, id);
+        }
+        Self::delta(store, type_count, env_count)
     }
 
     /// Copy canonical records that another access view added.
@@ -512,10 +547,6 @@ impl TypeEnvs {
             .metrics
             .interned_envs
             .saturating_add(incoming.interned_envs);
-        self.metrics.interner_lock_wait_ns = self
-            .metrics
-            .interner_lock_wait_ns
-            .saturating_add(incoming.interner_lock_wait_ns);
         self.metrics_dirty = true;
     }
 
@@ -770,37 +801,49 @@ impl TypeEnvs {
     }
 
     /// Commit one prepared import.
-    pub fn commit_import(&mut self, plan: TypeImportPlan) {
-        debug_assert_eq!(self.types.len(), plan.base_types);
-        debug_assert_eq!(self.envs.len(), plan.base_envs);
+    ///
+    /// The operation changes nothing when another view grew the store.
+    pub fn commit_import(&mut self, plan: TypeImportPlan) -> Result<(), StaleTypeImport> {
+        if self.types.len() != plan.base_types || self.envs.len() != plan.base_envs {
+            return Err(StaleTypeImport {
+                plan: Box::new(plan),
+            });
+        }
         let type_count = self.types.len();
         let env_count = self.envs.len();
-        let TypeImportPlan {
-            types,
-            type_index,
-            envs,
-            env_index,
-            ..
-        } = plan;
-        let delta = self.with_canonical(|store| {
-            debug_assert_eq!(store.types.len(), type_count);
-            debug_assert_eq!(store.envs.len(), env_count);
-            for (node, depth) in types {
-                store.types.push(node);
-                store.depths.push(depth);
+        let delta = if let Some(shared) = Arc::get_mut(&mut self.canonical) {
+            let store = shared
+                .store
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner());
+            if store.types.len() != type_count || store.envs.len() != env_count {
+                return Err(StaleTypeImport {
+                    plan: Box::new(plan),
+                });
             }
-            for (node, id) in type_index {
-                store.type_index.insert(node, id);
+            let delta = Self::append_import(store, plan, type_count, env_count);
+            *shared.counts.get_mut() = Self::packed_counts(store.types.len(), store.envs.len());
+            delta
+        } else {
+            let mut store = self
+                .canonical
+                .store
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if store.types.len() != type_count || store.envs.len() != env_count {
+                return Err(StaleTypeImport {
+                    plan: Box::new(plan),
+                });
             }
-            for env in envs {
-                store.envs.push(env);
-            }
-            for (env, id) in env_index {
-                store.env_index.insert(env, id);
-            }
-            Self::delta(store, type_count, env_count)
-        });
+            let delta = Self::append_import(&mut store, plan, type_count, env_count);
+            self.canonical.counts.store(
+                Self::packed_counts(store.types.len(), store.envs.len()),
+                Ordering::Release,
+            );
+            delta
+        };
         self.apply_delta(delta);
+        Ok(())
     }
 
     /// Intern one closed type node.
@@ -1978,6 +2021,44 @@ mod tests {
         owner.sync_shared();
         assert_eq!(owner.ty(list), Some(&ClosedType::List(int)));
         assert_eq!(owner.ty(run), Some(&ClosedType::Run(int)));
+    }
+
+    #[test]
+    fn a_stale_import_changes_nothing_and_can_be_prepared_again() {
+        let source_types = [ClosedType::Int, ClosedType::List(0)];
+        let source_envs = [
+            TypeEnv::default(),
+            TypeEnv {
+                types: vec![1],
+                rows: Vec::new(),
+            },
+        ];
+        let mut owner = TypeEnvs::default();
+        let stale = owner
+            .prepare_import(&source_types, &source_envs)
+            .expect("the first import prepares");
+        assert_eq!(stale.type_map(), &[0, 1]);
+
+        let mut worker = owner.fork_shared();
+        assert_eq!(worker.intern(ClosedType::Bool).expect("Bool fits"), 0);
+        let stale = owner
+            .commit_import(stale)
+            .expect_err("the changed canonical store rejects the plan");
+        assert_eq!(stale.into_plan().type_map(), &[0, 1]);
+
+        owner.sync_shared();
+        assert_eq!(owner.ty(0), Some(&ClosedType::Bool));
+        let current = owner
+            .prepare_import(&source_types, &source_envs)
+            .expect("the current import prepares");
+        assert_eq!(current.type_map(), &[1, 2]);
+        assert_eq!(current.env_map(), &[TypeEnvId::EMPTY, TypeEnvId(1)]);
+        owner
+            .commit_import(current)
+            .expect("the current import commits");
+        assert_eq!(owner.ty(1), Some(&ClosedType::Int));
+        assert_eq!(owner.ty(2), Some(&ClosedType::List(1)));
+        assert_eq!(owner.env(TypeEnvId(1)).unwrap().types, vec![2]);
     }
 
     #[test]

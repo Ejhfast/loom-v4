@@ -188,10 +188,20 @@ impl CliHost {
         Ok(())
     }
 
+    fn prune_signal_guardian(&mut self) {
+        if self.terminal.raw_active() {
+            return;
+        }
+        if self.signal.as_mut().is_some_and(SignalService::can_release) {
+            self.signal = None;
+        }
+    }
+
     fn refresh_signals(&mut self) {
         if let Some(signal) = &mut self.signal {
             signal.refresh();
         }
+        self.prune_signal_guardian();
     }
 
     fn receive_ready(&self) -> Result<HostReady, mpsc::RecvError> {
@@ -219,6 +229,7 @@ impl CliHost {
             self.terminal.restore_all();
             signal.force_signal(kind);
         }
+        self.prune_signal_guardian();
         completion
     }
 
@@ -2329,6 +2340,25 @@ mod tests {
         assert_eq!(metrics.parks, 1);
         assert_eq!(metrics.timeout_wakeups, 1);
         assert_eq!(metrics.wakeups, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_idle_host_releases_signal_ownership() {
+        let _guard = signal_service::SIGNAL_TEST_LOCK
+            .lock()
+            .expect("the signal test lock works");
+        let mut first = CliHost::new(1);
+        first
+            .ensure_signal_guardian()
+            .expect("the first guardian starts");
+        first.prune_signal_guardian();
+        assert!(first.signal.is_none());
+
+        let mut second = CliHost::new(2);
+        second
+            .ensure_signal_guardian()
+            .expect("the second guardian starts");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

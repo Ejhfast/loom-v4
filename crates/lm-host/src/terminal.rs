@@ -107,6 +107,10 @@ impl TerminalService {
         self.exit_raw(token).is_ok()
     }
 
+    pub(crate) fn raw_active(&self) -> bool {
+        self.raw.is_some()
+    }
+
     pub(crate) fn restore_all(&mut self) {
         if let Some(state) = self.raw.as_ref() {
             let _ = platform_restore(state);

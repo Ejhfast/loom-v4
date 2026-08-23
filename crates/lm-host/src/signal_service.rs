@@ -87,6 +87,11 @@ impl SignalService {
         self.pending.is_empty() && self.ready.is_empty() && self.retained.is_empty()
     }
 
+    pub(crate) fn can_release(&mut self) -> bool {
+        self.observe();
+        !self.has_stream() && self.is_idle() && self.force_signal.is_none()
+    }
+
     pub(crate) fn attach(&mut self, stream: u64, interrupt: bool, terminate: bool) -> bool {
         self.observe();
         if self.has_stream() || !self.is_idle() || self.force_signal.is_some() {
@@ -306,6 +311,9 @@ fn signal_error(ctor: CoreCtor, message: Option<String>) -> HostValue {
 static SIGNAL_LEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static SIGNAL_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+#[cfg(target_os = "linux")]
+static ACTIVE_SIGNAL_HANDLERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) static SIGNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -327,14 +335,16 @@ extern "C" fn record_signal(signal: libc::c_int) {
         libc::SIGTERM => 2u8,
         _ => return,
     };
-    let fd = SIGNAL_WRITE_FD.load(std::sync::atomic::Ordering::Relaxed);
-    if fd < 0 {
-        return;
+    use std::sync::atomic::Ordering;
+    ACTIVE_SIGNAL_HANDLERS.fetch_add(1, Ordering::AcqRel);
+    let fd = SIGNAL_WRITE_FD.load(Ordering::Acquire);
+    if fd >= 0 {
+        // `write` is async-signal-safe and writes one bounded byte.
+        unsafe {
+            let _ = libc::write(fd, (&byte as *const u8).cast(), 1);
+        }
     }
-    // `write` is async-signal-safe and writes one bounded byte.
-    unsafe {
-        let _ = libc::write(fd, (&byte as *const u8).cast(), 1);
-    }
+    ACTIVE_SIGNAL_HANDLERS.fetch_sub(1, Ordering::Release);
 }
 
 #[cfg(target_os = "linux")]
@@ -501,6 +511,9 @@ impl Drop for PlatformSignals {
             unsafe {
                 libc::sigaction(signal, &action, std::ptr::null_mut());
             }
+        }
+        while ACTIVE_SIGNAL_HANDLERS.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
         }
         // Closing the writer wakes the blocking forwarder with EOF.
         unsafe {

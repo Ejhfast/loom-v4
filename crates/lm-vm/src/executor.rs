@@ -4,9 +4,11 @@
 //! It returns before any operation needs world state.
 
 use crate::machine::{ExecOutcome, ImageSlotTarget, Machine, VmId};
+use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode};
 use lm_bytecode::closed::TypeEnvs;
 use lm_bytecode::Module;
+use lm_heap::HeapBudgetReservation;
 use std::sync::Arc;
 
 /// One immutable verified execution view.
@@ -43,6 +45,33 @@ pub struct ExecutionLease {
     instruction_limit: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExecutionLimits {
+    pub(crate) instructions: u32,
+    pub(crate) heap_growth_bytes: usize,
+    pub(crate) heap_growth_objects: usize,
+}
+
+/// Coordinator-owned accounting for one execution lease.
+///
+/// The marker keeps this value outside worker jobs.
+#[must_use = "the coordinator must commit or cancel this execution reservation"]
+pub(crate) struct ExecutionReservation {
+    token: ExecutionToken,
+    heap: HeapBudgetReservation,
+    resources: ResourceBudgetReservation,
+    coordinator_only: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ExecutionReservation {
+    /// Release all charges after the worker machine was destroyed.
+    #[allow(dead_code)]
+    pub(crate) fn cancel_destroyed(self) {
+        self.resources.cancel_destroyed();
+        self.heap.cancel_destroyed();
+    }
+}
+
 impl ExecutionLease {
     // Stage 3 uses this constructor when worker dispatch starts.
     #[allow(dead_code)]
@@ -52,17 +81,31 @@ impl ExecutionLease {
         code: Arc<ExecutionCode>,
         envs: Box<TypeEnvs>,
         slots: Option<Arc<Vec<ImageSlotTarget>>>,
-        instruction_limit: u32,
-    ) -> ExecutionLease {
-        machine.vm.heap.begin_execution_lease();
-        ExecutionLease {
+        limits: ExecutionLimits,
+    ) -> (ExecutionLease, ExecutionReservation) {
+        let heap = machine.vm.heap.begin_execution_lease(
+            token.lease,
+            limits.heap_growth_bytes,
+            limits.heap_growth_objects,
+        );
+        let resources = machine.resources.begin_execution_lease(token.lease);
+        let reservation = ExecutionReservation {
             token,
-            machine,
-            code,
-            envs,
-            slots,
-            instruction_limit,
-        }
+            heap,
+            resources,
+            coordinator_only: std::marker::PhantomData,
+        };
+        (
+            ExecutionLease {
+                token,
+                machine,
+                code,
+                envs,
+                slots,
+                instruction_limit: limits.instructions,
+            },
+            reservation,
+        )
     }
 }
 
@@ -85,6 +128,7 @@ impl InlineExecutionReport {
 }
 
 /// One complete machine execution report.
+#[must_use = "the coordinator must commit this execution report"]
 pub struct ExecutionReport {
     #[allow(dead_code)]
     token: ExecutionToken,
@@ -149,6 +193,7 @@ impl ExecutionReport {
     #[allow(dead_code)]
     pub(crate) fn into_parts(
         mut self,
+        reservation: ExecutionReservation,
     ) -> (
         ExecutionToken,
         Box<Machine>,
@@ -157,7 +202,14 @@ impl ExecutionReport {
         ExecutionStop,
         u32,
     ) {
-        self.machine.vm.heap.end_execution_lease();
+        assert_eq!(
+            self.token, reservation.token,
+            "the execution report matches its reservation"
+        );
+        self.machine.vm.heap.end_execution_lease(reservation.heap);
+        self.machine
+            .resources
+            .end_execution_lease(reservation.resources);
         (
             self.token,
             self.machine,
@@ -315,7 +367,7 @@ mod tests {
             ResourceBudget::new(config.max_resources as usize),
         ));
         machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
-        let lease = ExecutionLease::new(
+        let (lease, reservation) = ExecutionLease::new(
             ExecutionToken {
                 world: 7,
                 machine: 0,
@@ -324,9 +376,13 @@ mod tests {
             },
             machine,
             Arc::new(ExecutionCode::new(module, Vec::new().into())),
-            Box::new(TypeEnvs::default()),
+            Box::default(),
             None,
-            16,
+            ExecutionLimits {
+                instructions: 16,
+                heap_growth_bytes: usize::MAX,
+                heap_growth_objects: usize::MAX,
+            },
         );
         assert_eq!(budget.used_bytes(), 1024);
         let report = std::thread::spawn(move || execute(lease))
@@ -338,7 +394,7 @@ mod tests {
         assert_eq!(report.heap_released_objects(), 0);
         assert_eq!(report.unused_heap_bytes(), 1024);
         assert_eq!(report.unused_heap_objects(), 64);
-        let (_, machine, _, _, stop, retired) = report.into_parts();
+        let (_, machine, _, _, stop, retired) = report.into_parts(reservation);
         assert_eq!(retired, 2);
         assert_eq!(budget.used_bytes(), 0);
         assert!(matches!(
@@ -347,5 +403,85 @@ mod tests {
         ));
         drop(machine);
         assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn the_coordinator_cancels_a_worker_drop() {
+        let module = Arc::new(Module {
+            strings: vec![],
+            bytes: vec![],
+            types: vec![BcType::Unit],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
+            imports: vec![],
+            slots: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            classes: vec![],
+            funcs: vec![Func {
+                name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 0,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
+            }],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+            debug: vec![],
+        });
+        let config = VmConfig {
+            heap_bytes: 1024,
+            ..VmConfig::default()
+        };
+        let heap_budget = HeapBudget::new(1024, 64);
+        let resource_budget = ResourceBudget::new(4);
+        let mut machine = Box::new(Machine::empty_with_budgets(
+            config,
+            None,
+            0,
+            heap_budget.clone(),
+            resource_budget.clone(),
+        ));
+        machine
+            .resources
+            .register(crate::resource::ResourceKind::File, 0, 1, 0, 0)
+            .expect("the resource fits");
+        machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
+        let (lease, reservation) = ExecutionLease::new(
+            ExecutionToken {
+                world: 7,
+                machine: 0,
+                generation: 0,
+                lease: 2,
+            },
+            machine,
+            Arc::new(ExecutionCode::new(module, Vec::new().into())),
+            Box::default(),
+            None,
+            ExecutionLimits {
+                instructions: 16,
+                heap_growth_bytes: usize::MAX,
+                heap_growth_objects: usize::MAX,
+            },
+        );
+        assert_eq!(heap_budget.used_bytes(), 1024);
+        assert_eq!(resource_budget.used(), 1);
+        std::thread::spawn(move || drop(lease))
+            .join()
+            .expect("the worker exits");
+        assert_eq!(heap_budget.used_bytes(), 1024);
+        assert_eq!(resource_budget.used(), 1);
+        reservation.cancel_destroyed();
+        assert_eq!(heap_budget.used_bytes(), 0);
+        assert_eq!(resource_budget.used(), 0);
     }
 }

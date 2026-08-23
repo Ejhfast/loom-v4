@@ -185,28 +185,35 @@ impl World {
             self.machines[vm as usize].set_fault(code, "", Some(op));
             return;
         }
-        let built = match self.prepare_restore(vm, target, &image) {
-            Ok(plan) => {
-                self.commit_restore(plan);
-                self.install_prepared_restore_reply(vm, reply);
-                return;
-            }
-            Err(crate::snapshot::RestoreFail::LimitExceeded) => {
-                self.discard_restore_reply(vm, reply);
-                self.rollback_run_target(vm, target);
-                self.make_instance(vm, self.core.restore_limit_exceeded, vec![])
-                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]))
-            }
-            Err(crate::snapshot::RestoreFail::OtherProgram) => {
-                self.discard_restore_reply(vm, reply);
-                self.rollback_run_target(vm, target);
-                self.fault_caller(
-                    vm,
-                    op,
-                    FaultCode::BoundaryViolation,
-                    "the snapshot image was admitted against another program",
-                );
-                return;
+        let built = loop {
+            match self.prepare_restore(vm, target, &image) {
+                Ok(plan) => match self.commit_restore(plan) {
+                    Ok(_) => {
+                        self.install_prepared_restore_reply(vm, reply);
+                        return;
+                    }
+                    Err(_) => continue,
+                },
+                Err(crate::snapshot::RestoreFail::LimitExceeded) => {
+                    self.discard_restore_reply(vm, reply);
+                    self.rollback_run_target(vm, target);
+                    break self
+                        .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                        .and_then(|error| {
+                            self.make_instance(vm, self.core.result_err, vec![error])
+                        });
+                }
+                Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                    self.discard_restore_reply(vm, reply);
+                    self.rollback_run_target(vm, target);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        "the snapshot image was admitted against another program",
+                    );
+                    return;
+                }
             }
         };
         self.reply_or_fault(vm, op, built);
@@ -294,51 +301,63 @@ impl World {
         let Some(image) = self.admitted_snapshot_arg(vm, op, args[0]) else {
             return;
         };
-        let plan = match self.prepare_vm_restore(vm, &image) {
-            Ok(plan) => plan,
-            Err(crate::snapshot::RestoreFail::LimitExceeded) => {
-                let built = self
-                    .make_instance(vm, self.core.restore_limit_exceeded, vec![])
-                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
-                self.reply_or_fault(vm, op, built);
-                return;
-            }
-            Err(crate::snapshot::RestoreFail::OtherProgram) => {
-                self.fault_caller(
-                    vm,
-                    op,
-                    FaultCode::BoundaryViolation,
-                    "the snapshot is not a full VM image for this program",
+        loop {
+            let plan = match self.prepare_vm_restore(vm, &image) {
+                Ok(plan) => plan,
+                Err(crate::snapshot::RestoreFail::LimitExceeded) => {
+                    let built = self
+                        .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                        .and_then(|error| {
+                            self.make_instance(vm, self.core.result_err, vec![error])
+                        });
+                    self.reply_or_fault(vm, op, built);
+                    return;
+                }
+                Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        "the snapshot is not a full VM image for this program",
+                    );
+                    return;
+                }
+            };
+            let reply = match self.prepare_vm_restore_reply(vm, plan.image) {
+                Ok(reply) => reply,
+                Err(code) => {
+                    self.discard_vm_restore(vm, plan);
+                    self.machines[vm as usize].set_fault(code, "", Some(op));
+                    return;
+                }
+            };
+            if let Err(code) = self.check_reply(vm, reply.value) {
+                self.discard_restore_reply(vm, reply);
+                self.discard_vm_restore(vm, plan);
+                self.machines[vm as usize].set_fault(
+                    code,
+                    "the reply does not carry the type of its perform",
+                    Some(op),
                 );
                 return;
             }
-        };
-        let reply = match self.prepare_vm_restore_reply(vm, plan.image) {
-            Ok(reply) => reply,
-            Err(code) => {
+            if let Err(code) = self.reserve_restore_reply_slot(vm) {
+                self.discard_restore_reply(vm, reply);
                 self.discard_vm_restore(vm, plan);
                 self.machines[vm as usize].set_fault(code, "", Some(op));
                 return;
             }
-        };
-        if let Err(code) = self.check_reply(vm, reply.value) {
-            self.discard_restore_reply(vm, reply);
-            self.discard_vm_restore(vm, plan);
-            self.machines[vm as usize].set_fault(
-                code,
-                "the reply does not carry the type of its perform",
-                Some(op),
-            );
-            return;
+            match self.commit_vm_restore(plan) {
+                Ok(_) => {
+                    self.install_prepared_restore_reply(vm, reply);
+                    return;
+                }
+                Err(plan) => {
+                    self.discard_restore_reply(vm, reply);
+                    self.discard_vm_restore(vm, *plan);
+                }
+            }
         }
-        if let Err(code) = self.reserve_restore_reply_slot(vm) {
-            self.discard_restore_reply(vm, reply);
-            self.discard_vm_restore(vm, plan);
-            self.machines[vm as usize].set_fault(code, "", Some(op));
-            return;
-        }
-        self.commit_vm_restore(plan);
-        self.install_prepared_restore_reply(vm, reply);
     }
 
     /// Build one successful full VM restore reply.

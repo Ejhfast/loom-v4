@@ -1,7 +1,8 @@
 //! Restore one admitted image into a machine world.
 //!
 //! Preparation builds all restored state outside the live machine
-//! table. Commit installs that state without a fallible operation.
+//! table. Commit first validates the canonical type-table base.
+//! It then installs that state without a fallible operation.
 
 use super::{
     ImageBlock, ImageMachine, ImagePolicyCursor, ImageState, ImageTerminal, ImageWaitSource,
@@ -24,7 +25,7 @@ pub(crate) struct RestorePlan {
     target: Option<VmId>,
     restorer: VmId,
     machines: Vec<Machine>,
-    types: TypeImportPlan,
+    types: Option<TypeImportPlan>,
     child_charge: u32,
     gate: u32,
     gate_members: Vec<VmId>,
@@ -60,10 +61,15 @@ impl World {
         target: VmId,
         admitted: &SnapshotImage,
     ) -> Result<VmId, RestoreFail> {
-        let plan = self.prepare_restore(restorer, target, admitted)?;
-        Ok(self
-            .commit_restore(plan)
-            .expect("a typed restore has one distinguished machine"))
+        loop {
+            let plan = self.prepare_restore(restorer, target, admitted)?;
+            match self.commit_restore(plan) {
+                Ok(restored) => {
+                    return Ok(restored.expect("a typed restore has one distinguished machine"));
+                }
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Build one restore without changing semantic world state.
@@ -151,10 +157,23 @@ impl World {
     }
 
     /// Commit one prepared full VM restore.
-    pub(crate) fn commit_vm_restore(&mut self, plan: VmRestorePlan) -> VmImageKey {
-        let image = plan.image;
-        let _ = self.commit_restore(plan.restore);
-        image
+    pub(crate) fn commit_vm_restore(
+        &mut self,
+        plan: VmRestorePlan,
+    ) -> Result<VmImageKey, Box<VmRestorePlan>> {
+        let VmRestorePlan {
+            restore,
+            image,
+            target,
+        } = plan;
+        match self.commit_restore(restore) {
+            Ok(_) => Ok(image),
+            Err(restore) => Err(Box::new(VmRestorePlan {
+                restore: *restore,
+                image,
+                target,
+            })),
+        }
     }
 
     /// Build one restore for a selected machine or a complete VM.
@@ -409,7 +428,7 @@ impl World {
             target,
             restorer,
             machines,
-            types,
+            types: Some(types),
             child_charge,
             gate,
             gate_members: ids,
@@ -638,12 +657,24 @@ impl World {
     /// The commit marks the world. A restored machine holds values a
     /// container stated, so every later VM boundary of this world
     /// checks the type of the value that crosses it.
-    pub(crate) fn commit_restore(&mut self, plan: RestorePlan) -> Option<VmId> {
+    /// A stale type import changes no world state.
+    pub(crate) fn commit_restore(
+        &mut self,
+        mut plan: RestorePlan,
+    ) -> Result<Option<VmId>, Box<RestorePlan>> {
+        let types = plan
+            .types
+            .take()
+            .expect("a prepared restore holds one type import");
+        if let Err(stale) = self.envs.commit_import(types) {
+            plan.types = Some(stale.into_plan());
+            return Err(Box::new(plan));
+        }
         let RestorePlan {
             target,
             restorer,
             machines,
-            types,
+            types: _,
             child_charge,
             gate,
             gate_members,
@@ -690,7 +721,6 @@ impl World {
                 self.vm_images.push(record);
             }
         }
-        self.envs.commit_import(types);
         self.mark_restored();
         self.set_gate_marker(gate);
         self.machines[restorer as usize].children += child_charge;
@@ -711,7 +741,7 @@ impl World {
             }
         }
         self.install_gate_group(gate, gate_members);
-        target
+        Ok(target)
     }
 }
 
