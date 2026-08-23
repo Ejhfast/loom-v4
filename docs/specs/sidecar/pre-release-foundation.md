@@ -1,6 +1,6 @@
 # Pre-release Host Effects
 
-Status: proposed implementation plan.
+Status: accepted plan. Stage 0 complete.
 
 This sidecar replaces the completed pre-release foundation plan.
 
@@ -933,10 +933,10 @@ Terminal and signal support can add one reviewed platform dependency.
 ### Stage 0: Baseline and document reconciliation
 
 - Record core compile, load, artifact, suite, and focused runtime measurements.
-- Reconcile the language specification with this accepted sidecar.
+- Record every planned difference from the active operation tables.
 - Record the current ABI and snapshot format versions.
 
-Gate: Documentation and generated operation tables agree.
+Gate: Each later stage reconciles its active specifications and generated tables.
 
 ### Stage 1: General host wait sources
 
@@ -949,6 +949,10 @@ Gate: Documentation and generated operation tables agree.
 - Add waits for existing Clock, Io, DNS, TCP, and TLS read operations.
 
 Gate: A read-versus-sleep loop loses no bytes under every race order.
+
+Gate: One select safely combines host, mailbox, and drive sources.
+
+Gate: Machine death cancels mixed armed sources and releases every attachment.
 
 Gate: Direct operation benchmarks remain within normal noise.
 

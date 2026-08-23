@@ -177,3 +177,42 @@ The new operations have these costs.
 | `bytes_xor_32` | 109.2 ns | not available |
 
 CPython does not define a bitwise XOR operator for bytes.
+
+## Host-effects Stage 0
+
+The source revision is `ce15844`.
+
+These measurements precede every host-effects ABI change.
+
+The manifest ABI version is 24.
+
+The bytecode version is 51.
+
+The snapshot format version is 29.
+
+| Core measurement | Stage 0 |
+| --- | ---: |
+| Classes | 209 |
+| HIR functions | 524 |
+| Bytecode functions | 733 |
+| Artifact size | 226,704 bytes |
+| Core checking | 1.777 ms |
+| Core lowering | 0.815 ms |
+| Core compilation | 2.899 ms |
+| Core decoding | 0.332 ms |
+| Core verification | 1.111 ms |
+| Structural verification | 0.400 ms |
+| Verification hash | 0.112 ms |
+| Semantic identity | 2.014 ms |
+| Decoded loading | 1.253 ms |
+| Core loading | 1.598 ms |
+
+| Runtime measurement | Stage 0 |
+| --- | ---: |
+| `int_loop` | 32.3 ns |
+| `direct_call` | 31.1 ns |
+| Warm workspace suite | 35.34 seconds |
+
+The suite used the existing worker count.
+
+The release benchmarks used nine measured rounds after one warm-up round.
