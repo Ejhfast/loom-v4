@@ -15,6 +15,36 @@ fn terr(message: String) -> VerifyError {
     }
 }
 
+/// Build a named subject for one table entry.
+fn named_table_subject(kind: &str, name: &str, index: usize) -> String {
+    if name.is_empty() {
+        format!("{kind} table {index}")
+    } else {
+        format!("{kind} `{name}` (table {index})")
+    }
+}
+
+/// Build a named subject for one conformance entry.
+fn conformance_subject(
+    module: &Module,
+    index: usize,
+    conformance: &lm_bytecode::BcConformance,
+) -> String {
+    let class = module
+        .classes
+        .get(conformance.class as usize)
+        .map(|item| item.name.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("<invalid class>");
+    let interface = module
+        .interfaces
+        .get(conformance.application.interface as usize)
+        .map(|item| item.name.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("<invalid interface>");
+    format!("conformance `{class}: {interface}` (table {index})")
+}
+
 pub(crate) fn verify_tables(
     module: &Module,
     core: CoreLayout,
@@ -386,7 +416,12 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
     // Validate nominal interface contracts before any bound uses them.
     let mut interface_keys: HashMap<&str, usize> = HashMap::new();
     for (iidx, contract) in module.interfaces.iter().enumerate() {
-        let ierr = |message: String| terr(format!("interface {iidx}: {message}"));
+        let ierr = |message: String| {
+            terr(format!(
+                "{}: {message}",
+                named_table_subject("interface", &contract.name, iidx)
+            ))
+        };
         if contract.name.is_empty() || contract.key.is_empty() {
             return Err(ierr("the name and key must not be empty".to_string()));
         }
@@ -645,7 +680,12 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
     }
     for (cidx, bounds) in module.class_bounds.iter().enumerate() {
         let class = &module.classes[cidx];
-        let cerr = |message: String| terr(format!("class {cidx}: {message}"));
+        let cerr = |message: String| {
+            terr(format!(
+                "{}: {message}",
+                named_table_subject("class", &class.name, cidx)
+            ))
+        };
         if bounds.len() != class.type_params as usize {
             return Err(cerr(
                 "the type-bound table does not match the type arity".to_string(),
@@ -739,7 +779,12 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let extern_funcs = module.extern_funcs();
     // Validate classes.
     for (cidx, class) in module.classes.iter().enumerate() {
-        let cerr = |message: String| terr(format!("class {cidx}: {message}"));
+        let cerr = |message: String| {
+            terr(format!(
+                "{}: {message}",
+                named_table_subject("class", &class.name, cidx)
+            ))
+        };
         if extern_classes[cidx] {
             if let Some(p) = class.parent() {
                 if !extern_classes[p as usize] {
@@ -1082,7 +1127,12 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
     // Validate all direct conformance references first. One conformance
     // can resolve another conformance during its semantic checks.
     for (index, conformance) in module.conformances.iter().enumerate() {
-        let cerr = |message: String| terr(format!("conformance {index}: {message}"));
+        let cerr = |message: String| {
+            terr(format!(
+                "{}: {message}",
+                conformance_subject(module, index, conformance)
+            ))
+        };
         let Some(class) = module.classes.get(conformance.class as usize) else {
             return Err(cerr("the class index is out of range".to_string()));
         };
@@ -1133,7 +1183,12 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
         .position(|interface| interface.key == "core.Iterator");
     let mut conformance_keys = HashSet::new();
     for (index, conformance) in module.conformances.iter().enumerate() {
-        let cerr = |message: String| terr(format!("conformance {index}: {message}"));
+        let cerr = |message: String| {
+            terr(format!(
+                "{}: {message}",
+                conformance_subject(module, index, conformance)
+            ))
+        };
         let class = &module.classes[conformance.class as usize];
         if !conformance_keys.insert((conformance.class, conformance.application.interface)) {
             return Err(cerr(
@@ -1278,28 +1333,36 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
             .map(|item| ctx.intern(BcType::Var(item)))
             .collect();
         for requirement in &contract.methods {
+            let merr = |message: &str| {
+                let method_name = module
+                    .selectors
+                    .get(requirement.selector as usize)
+                    .map(String::as_str)
+                    .unwrap_or("<invalid selector>");
+                terr(format!(
+                    "the method `{method_name}` of `{}` does not satisfy `{}`: \
+                     {message} (conformance table {index})",
+                    class.name, contract.name
+                ))
+            };
             let (owner, target) = ctx
                 .method_resolution(conformance.class, requirement.selector)
-                .ok_or_else(|| cerr("a required method is missing".to_string()))?;
+                .ok_or_else(|| merr("the implementation is missing"))?;
             let owner_args = ctx
                 .ancestor_args(conformance.class, &class_args, owner)
-                .ok_or_else(|| cerr("a required method owner is not an ancestor".to_string()))?;
+                .ok_or_else(|| merr("the implementation owner is not an ancestor"))?;
             let method = &module.funcs[target as usize];
             if method.type_params != module.classes[owner as usize].type_params
                 || method.effect_params != 0
             {
-                return Err(cerr(
-                    "an interface method implementation cannot add generics".to_string(),
-                ));
+                return Err(merr("the implementation adds generic parameters"));
             }
             let class_bound_count = module.classes[owner as usize].type_params as usize;
             let Some(method_bounds) = module.func_bounds.get(target as usize) else {
-                return Err(cerr("an interface method has no bound table".to_string()));
+                return Err(merr("the implementation has no generic bound table"));
             };
             let Some(class_method_bounds) = method_bounds.get(..class_bound_count) else {
-                return Err(cerr(
-                    "an interface method has too few class bound entries".to_string(),
-                ));
+                return Err(merr("the implementation has incomplete class bounds"));
             };
             let bounds_hold = if owner == conformance.class {
                 conformance_bounds_imply(&conformance_bounds, class_method_bounds)
@@ -1312,19 +1375,24 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 )
             };
             if !bounds_hold {
-                return Err(cerr(
-                    "an interface method needs a premise outside the conformance".to_string(),
-                ));
+                return Err(merr("the implementation needs an undeclared premise"));
             }
-            if method.params.len() != requirement.params.len() + 1
-                || method.param_muts.len() != method.params.len()
-                || method.param_muts.first().copied() != Some(requirement.mut_self)
-                || method.param_muts[1..] != requirement.param_muts[..]
-            {
-                return Err(cerr(
-                    "an interface method implementation has a different parameter shape"
-                        .to_string(),
-                ));
+            if method.params.len() != requirement.params.len() + 1 {
+                return Err(merr("the parameter count differs"));
+            }
+            if method.param_muts.len() != method.params.len() {
+                return Err(merr("the implementation has invalid parameter mutability"));
+            }
+            if method.param_muts.first().copied() != Some(requirement.mut_self) {
+                let receiver = if requirement.mut_self {
+                    "`mut self`"
+                } else {
+                    "`self`"
+                };
+                return Err(merr(&format!("the contract requires {receiver}")));
+            }
+            if method.param_muts[1..] != requirement.param_muts[..] {
+                return Err(merr("parameter mutability differs"));
             }
             let params_match = method.params[1..]
                 .iter()
@@ -1345,9 +1413,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                     }
                 });
             if !params_match {
-                return Err(cerr(
-                    "an interface method implementation changes parameter types".to_string(),
-                ));
+                return Err(merr("parameter types differ"));
             }
             let actual_ret = ctx.subst(method.ret, &owner_args, &[]);
             let required_ret = ctx.subst_with_bounds(
@@ -1357,15 +1423,11 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 &conformance_bounds,
             );
             if !ctx.is_subtype(actual_ret, required_ret) {
-                return Err(cerr(
-                    "an interface method implementation widens the result type".to_string(),
-                ));
+                return Err(merr("the result type is too wide"));
             }
             let required_row = ctx.row_subst(&requirement.row, &conformance.application.rows);
             if !ctx.row_included(&method.row, &required_row) {
-                return Err(cerr(
-                    "an interface method implementation widens the effect row".to_string(),
-                ));
+                return Err(merr("the effect row is too wide"));
             }
         }
     }

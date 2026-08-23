@@ -1021,12 +1021,21 @@ fn a_crafted_core_role_shape_rejects() {
     let mut twin = module.clone();
     twin.core_roles[some] = module.core_roles[ok];
     let error = lm_verify::verify_module(&twin).expect_err("the crafted role must reject");
-    assert!(error.message.contains("core role"), "{error:?}");
+    assert!(
+        error.message.contains("core roles `Option.Some`"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("`Result.Ok`"), "{error:?}");
     // A role that names a class outside the table rejects at the
     // decoder as well as at the verifier.
     let mut wild = module.clone();
     wild.core_roles[some] = 9999;
-    assert!(lm_verify::verify_module(&wild).is_err());
+    let error = lm_verify::verify_module(&wild).expect_err("the invalid role must reject");
+    assert!(
+        error.message.contains("core role `Option.Some`"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("class table"), "{error:?}");
     let bytes = lm_bytecode::encode(&wild);
     assert_eq!(
         lm_bytecode::decode(&bytes),
@@ -1035,8 +1044,8 @@ fn a_crafted_core_role_shape_rejects() {
     );
 }
 
-/// The verifier reads no source name. A rename of every class and
-/// every function leaves the verification hash unchanged.
+/// The verifier uses no source name in its decision. A rename of every
+/// class and function leaves the verification hash unchanged.
 #[test]
 fn a_rename_of_every_definition_keeps_the_verification_hash() {
     let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \

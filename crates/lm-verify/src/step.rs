@@ -1843,7 +1843,9 @@ pub(crate) fn step(
             }
             let reply = ctx.abi_ty(operation.reply).map_err(&fail)?;
             if ctx.ty(*reply_ty) != ctx.ty(reply) {
-                return Err(fail("the wait source has another reply type".to_string()));
+                return Err(fail(format!(
+                    "the wait source `{name}` has a reply type that differs from its contract"
+                )));
             }
             let wait = ctx.intern(BcType::Wait(reply));
             push(state, wait)?;

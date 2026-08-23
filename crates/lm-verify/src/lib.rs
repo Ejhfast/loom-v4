@@ -262,7 +262,7 @@ pub const VERIFIER_VERSION: u32 = 35;
 ///
 /// The core layout comes from the core role table the artifact
 /// carries. The verifier proves the shape of every filled slot, so it
-/// reads no definition hash and no source name.
+/// uses no definition hash or source name in its decision.
 pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
     let bundle = lm_abi::standard_bundle();
     verify_module_with_bundle(module, &bundle)
@@ -711,7 +711,8 @@ mod tests {
                 .expect("the wait instruction fits"),
         );
         let error = verify_module(&wrong_reply).expect_err("the forged reply type rejects");
-        assert!(error.message.contains("another reply type"), "{error}");
+        assert!(error.message.contains("Clock.Sleep"), "{error}");
+        assert!(error.message.contains("reply type"), "{error}");
 
         let mut missing_effect = module;
         missing_effect.funcs[0].row.clear();

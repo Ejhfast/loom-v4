@@ -710,20 +710,24 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
     // A role slot names a class of this module, and no two roles name
     // one class. The decoder proves the same rule; a hand-built module
     // reaches the verifier without a decoder.
-    let mut taken: Vec<u32> = Vec::new();
+    let mut taken: Vec<(u32, usize)> = Vec::new();
     for role in 0..lm_bytecode::CORE_ROLE_COUNT {
         let Some(idx) = slot(role) else { continue };
         if idx as usize >= module.classes.len() {
+            let label = lm_bytecode::corepin::PINNED_LABELS[role];
             return Err(terr(format!(
-                "core role {role} names a class outside the table"
+                "the core role `{label}` (table {role}) names a class outside the class table"
             )));
         }
-        if taken.contains(&idx) {
+        if let Some((_, first_role)) = taken.iter().find(|(class, _)| *class == idx) {
+            let first_label = lm_bytecode::corepin::PINNED_LABELS[*first_role];
+            let label = lm_bytecode::corepin::PINNED_LABELS[role];
             return Err(terr(format!(
-                "core role {role} names a class another role took"
+                "the core roles `{first_label}` (table {first_role}) and `{label}` \
+                 (table {role}) name the same class"
             )));
         }
-        taken.push(idx);
+        taken.push((idx, role));
     }
     for (family_role, arity, arm_roles, family) in CORE_FAMILIES {
         let Some(parent) = slot(family_role) else {

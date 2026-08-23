@@ -364,10 +364,7 @@ end
     );
     let error = lm_verify::verify_module(&unconditional)
         .expect_err("the missing witness premise must reject");
-    assert!(
-        error.message.contains("outside the conformance"),
-        "{error:?}"
-    );
+    assert!(error.message.contains("undeclared premise"), "{error:?}");
 
     let mut malformed = module;
     let premise = malformed
@@ -454,6 +451,120 @@ end
     let mut vm = Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"box word\")");
+}
+
+#[test]
+fn a_mutable_interface_method_crosses_a_module_boundary() {
+    let library = compile_module(
+        "lib.domain",
+        &SourceFile::new(
+            "domain.lm",
+            r#"
+interface Aggregate
+  def apply(mut self, event: Int)
+end
+
+final class Task implements Aggregate
+  total: Int = 0
+
+  def init(mut self, total: Int)
+    self.total = total
+  end
+
+  def apply(mut self, event: Int)
+    self.total = self.total + event
+  end
+
+  def value(self): Int
+    self.total
+  end
+end
+"#,
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    compile_env
+        .bind_root("domain", "lib.domain")
+        .expect("the root binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "main.lm",
+            "use domain.Task\n\
+             task = Task(7)\n\
+             task.apply(9)\n\
+             task.value()\n",
+        ),
+        &compile_env.freeze(),
+        true,
+    )
+    .expect("the program compiles");
+    let mut link_env = LinkEnv::new();
+    for module in [&library, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: module.path.clone(),
+                module: module.module.clone(),
+                interface: module.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(16)");
+}
+
+#[test]
+fn a_receiver_mismatch_names_the_method_class_and_interface() {
+    let mut module = compile_text(
+        "receiver.lm",
+        r#"
+interface Cursor
+  def next(mut self): Int
+end
+
+final class Counter implements Cursor
+  value: Int = 0
+
+  def next(mut self): Int
+    self.value = self.value + 1
+    self.value
+  end
+end
+
+Counter()
+"#,
+    )
+    .expect("the source compiles");
+    let class = module
+        .classes
+        .iter()
+        .find(|class| class.name == "Counter")
+        .expect("Counter exists");
+    let (_, function) = class
+        .methods
+        .iter()
+        .find(|(selector, _)| module.selectors[*selector as usize] == "next")
+        .copied()
+        .expect("Counter.next exists");
+    module.funcs[function as usize].param_muts[0] = false;
+
+    let error = lm_verify::verify_module(&module).expect_err("the mismatch rejects");
+    assert!(error.message.contains("the method `next`"), "{error:?}");
+    assert!(error.message.contains("of `Counter`"), "{error:?}");
+    assert!(error.message.contains("satisfy `Cursor`"), "{error:?}");
+    assert!(
+        error.message.contains("the contract requires `mut self`"),
+        "{error:?}"
+    );
 }
 
 #[test]

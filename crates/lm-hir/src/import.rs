@@ -540,7 +540,7 @@ impl<'a> Materializer<'a> {
         for item in &pending {
             for method in &item.class.methods.clone() {
                 let self_ty = ctx.classes[item.id as usize].self_ty;
-                let sig = self.fn_sig(ctx, &method.sig, Some(self_ty), span)?;
+                let sig = self.fn_sig(ctx, &method.sig, Some((self_ty, method.mut_self)), span)?;
                 let func = ctx.push_func(
                     HirFunc {
                         source_span: None,
@@ -767,7 +767,7 @@ impl<'a> Materializer<'a> {
         span: Span,
     ) -> Result<MethodSig, Diagnostic> {
         let class_params = item.class.type_params as usize;
-        let sig = self.fn_sig(ctx, &method.sig, Some(self_ty), span)?;
+        let sig = self.fn_sig(ctx, &method.sig, Some((self_ty, method.mut_self)), span)?;
         // The interface counts the class type parameters first, so the
         // method's own parameters follow them.
         let own_type_params: Vec<String> =
@@ -788,20 +788,20 @@ impl<'a> Materializer<'a> {
         })
     }
 
-    /// One callable signature. `self_ty` prepends the receiver.
+    /// One callable signature. `self_param` prepends the receiver.
     fn fn_sig(
         &self,
         ctx: &mut Ctx,
         sig: &IfaceFn,
-        self_ty: Option<TypeId>,
+        self_param: Option<(TypeId, bool)>,
         span: Span,
     ) -> Result<FnSig, Diagnostic> {
         let mut params = Vec::new();
         let mut param_muts = Vec::new();
         let mut param_names = Vec::new();
-        if let Some(ty) = self_ty {
+        if let Some((ty, mutable)) = self_param {
             params.push(ty);
-            param_muts.push(false);
+            param_muts.push(mutable);
             param_names.push("self".to_string());
         }
         for ((p, m), n) in sig
