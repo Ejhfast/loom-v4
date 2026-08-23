@@ -42,10 +42,8 @@ enum Option[T] implements Display when T: Display,
       builder.append("Some(")
       value.append_to(builder)
       builder.append(")")
-      ()
     in None
       builder.append("None")
-      ()
     end
   end
 

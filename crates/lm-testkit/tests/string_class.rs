@@ -62,7 +62,11 @@ fn string_intrinsics_inline_to_canonical_instructions() {
   "ab".ends_with("b"),
   "ab".contains("a"),
   "a" == "a",
-  "a" != "b"
+  "a" != "b",
+  "a".pad_start(2),
+  "a".pad_end(2),
+  "1.5".parse_float(),
+  1.5.fixed(2)
 )
 "#;
     let module = compile_text("string_instructions.lm", source).expect("the program compiles");
@@ -83,8 +87,27 @@ fn string_intrinsics_inline_to_canonical_instructions() {
         Instr::Native(lm_bytecode::NativeInstr::StrContains),
         Instr::Native(lm_bytecode::NativeInstr::EqStr),
         Instr::Native(lm_bytecode::NativeInstr::NeStr),
+        Instr::Native(lm_bytecode::NativeInstr::TextPadStart),
+        Instr::Native(lm_bytecode::NativeInstr::TextPadEnd),
+        Instr::Numeric(lm_bytecode::NumericInstr::FloatFixed),
     ] {
         assert!(instructions.contains(&expected), "missing {expected:?}");
+    }
+    let (_, parse_float) = string_method(&module, "parse_float");
+    let parse_instructions: Vec<Instr> = module.funcs[parse_float as usize]
+        .blocks
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    for expected in [
+        Instr::Numeric(lm_bytecode::NumericInstr::TextParseFloatStatus),
+        Instr::Numeric(lm_bytecode::NumericInstr::TextParseFloatValue),
+    ] {
+        assert!(
+            parse_instructions.contains(&expected),
+            "missing {expected:?}"
+        );
     }
     assert!(instructions
         .iter()

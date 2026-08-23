@@ -3,7 +3,6 @@
 final class Unit implements Display, Hashable
   def append_to(self, mut builder: StringBuilder)
     builder.append("()")
-    ()
   end
 
   def __eq__(self, other: Unit): Bool
@@ -29,7 +28,6 @@ final class Tuple2[A, B] implements Display when A: Display, B: Display,
     builder.append(", ")
     self[1].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple2[A, B]): Bool when A: PartialEq, B: PartialEq
@@ -73,7 +71,6 @@ final class Tuple3[A, B, C] implements Display when A: Display, B: Display, C: D
     builder.append(", ")
     self[2].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple3[A, B, C]): Bool when A: PartialEq, B: PartialEq, C: PartialEq
@@ -127,7 +124,6 @@ final class Tuple4[A, B, C, D] implements Display when A: Display, B: Display, C
     builder.append(", ")
     self[3].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple4[A, B, C, D]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq
@@ -191,7 +187,6 @@ final class Tuple5[A, B, C, D, E] implements Display when A: Display, B: Display
     builder.append(", ")
     self[4].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple5[A, B, C, D, E]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq
@@ -265,7 +260,6 @@ final class Tuple6[A, B, C, D, E, F] implements Display when A: Display, B: Disp
     builder.append(", ")
     self[5].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple6[A, B, C, D, E, F]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq
@@ -349,7 +343,6 @@ final class Tuple7[A, B, C, D, E, F, G] implements Display when A: Display, B: D
     builder.append(", ")
     self[6].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple7[A, B, C, D, E, F, G]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq
@@ -443,7 +436,6 @@ final class Tuple8[A, B, C, D, E, F, G, H] implements Display when A: Display, B
     builder.append(", ")
     self[7].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple8[A, B, C, D, E, F, G, H]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq
@@ -547,7 +539,6 @@ final class Tuple9[A, B, C, D, E, F, G, H, I] implements Display when A: Display
     builder.append(", ")
     self[8].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple9[A, B, C, D, E, F, G, H, I]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq
@@ -661,7 +652,6 @@ final class Tuple10[A, B, C, D, E, F, G, H, I, J] implements Display when A: Dis
     builder.append(", ")
     self[9].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple10[A, B, C, D, E, F, G, H, I, J]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq
@@ -785,7 +775,6 @@ final class Tuple11[A, B, C, D, E, F, G, H, I, J, K] implements Display when A: 
     builder.append(", ")
     self[10].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple11[A, B, C, D, E, F, G, H, I, J, K]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq
@@ -919,7 +908,6 @@ final class Tuple12[A, B, C, D, E, F, G, H, I, J, K, L] implements Display when 
     builder.append(", ")
     self[11].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple12[A, B, C, D, E, F, G, H, I, J, K, L]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq
@@ -1063,7 +1051,6 @@ final class Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M] implements Display wh
     builder.append(", ")
     self[12].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq
@@ -1217,7 +1204,6 @@ final class Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N] implements Display
     builder.append(", ")
     self[13].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq
@@ -1381,7 +1367,6 @@ final class Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O] implements Disp
     builder.append(", ")
     self[14].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq
@@ -1555,7 +1540,6 @@ final class Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P] implements D
     builder.append(", ")
     self[15].append_to(builder)
     builder.append(")")
-    ()
   end
 
   def __eq__(self, other: Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq, P: PartialEq

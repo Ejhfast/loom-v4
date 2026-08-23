@@ -27,7 +27,7 @@ fn the_text_examples_run() {
     );
     assert_eq!(
         run_example("examples/11-text-and-bytes/04-build-a-report.lm"),
-        "Done(\"name       count\\nALPHA      3\\nBETA      11\\nGAMMA      7\\ntotal      21\")"
+        "Done(\"name       count\\nALPHA      3\\nBETA       11\\nGAMMA      7\\ntotal      21\")"
     );
     assert_eq!(
         run_example("examples/11-text-and-bytes/05-slice-without-copy.lm"),
@@ -35,6 +35,6 @@ fn the_text_examples_run() {
     );
     assert_eq!(
         run_example("examples/11-text-and-bytes/06-binary-literals.lm"),
-        "Done(\"frame {v1}: kind=144 raw=89504e470d0a1a0a masked=76504e470d0a1a0a ratio=1.5\")"
+        "Done(\"frame {v1}: kind=144 raw=89504e470d0a1a0a masked=76504e470d0a1a0a ratio=1.50\")"
     );
 }

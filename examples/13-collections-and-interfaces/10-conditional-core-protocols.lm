@@ -10,7 +10,6 @@ frozen class Label[T] implements Display when T: Display
 
   def append_to(self, mut builder: StringBuilder) when T: Display
     self.value.append_to(builder)
-    ()
   end
 end
 

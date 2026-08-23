@@ -99,6 +99,5 @@ final class CodeError implements Error
 
   def append_to(self, mut builder: StringBuilder)
     builder.append(self.message)
-    ()
   end
 end

@@ -1904,7 +1904,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 scrut,
                 scrut_slot,
                 arms,
-            } => self.lower_case(scrut, *scrut_slot, arms),
+            } => self.lower_case(scrut, *scrut_slot, arms, expr.ty == UNIT),
             HExprKind::Perform { op, args } => {
                 for arg in args {
                     self.lower_expr(arg);
@@ -2111,6 +2111,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_FLOAT_TO_INT_VALUE => {
                 Instr::Numeric(lm_bytecode::NumericInstr::FloatToIntValue)
             }
+            lm_abi::INTRINSIC_FLOAT_FIXED => Instr::Numeric(lm_bytecode::NumericInstr::FloatFixed),
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND_FLOAT => {
                 Instr::Numeric(lm_bytecode::NumericInstr::SbAppendFloat)
             }
@@ -2266,6 +2267,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE => {
                 Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
             }
+            lm_abi::INTRINSIC_TEXT_PAD_START => {
+                Instr::Native(lm_bytecode::NativeInstr::TextPadStart)
+            }
+            lm_abi::INTRINSIC_TEXT_PAD_END => Instr::Native(lm_bytecode::NativeInstr::TextPadEnd),
+            lm_abi::INTRINSIC_TEXT_PARSE_FLOAT_STATUS => {
+                Instr::Numeric(lm_bytecode::NumericInstr::TextParseFloatStatus)
+            }
+            lm_abi::INTRINSIC_TEXT_PARSE_FLOAT_VALUE => {
+                Instr::Numeric(lm_bytecode::NumericInstr::TextParseFloatValue)
+            }
             lm_abi::INTRINSIC_BYTES_ENDS_WITH => {
                 Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
             }
@@ -2344,7 +2355,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     /// each arm tests the pattern, binds, runs its body, and jumps to
     /// the join with one value. The checker proved exhaustiveness, so
     /// the last arm destructures without tests.
-    fn lower_case(&mut self, scrut: &HExpr, scrut_slot: u32, arms: &[HArm]) {
+    fn lower_case(&mut self, scrut: &HExpr, scrut_slot: u32, arms: &[HArm], unit_valued: bool) {
         self.lower_expr(scrut);
         self.emit(Instr::StoreLocal(scrut_slot));
         let join_b = self.new_block();
@@ -2357,17 +2368,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         for (aidx, arm) in arms.iter().enumerate() {
             if aidx == last {
                 self.lower_pattern(&arm.pattern, scrut_slot, Some(unreach_b));
-                let pushed = self.lower_block_value(&arm.body);
-                if pushed {
-                    self.emit(Instr::Jump(join_b));
-                }
+                self.lower_branch(&arm.body, unit_valued, join_b);
             } else {
                 let next_b = self.new_block();
                 self.lower_pattern(&arm.pattern, scrut_slot, Some(next_b));
-                let pushed = self.lower_block_value(&arm.body);
-                if pushed {
-                    self.emit(Instr::Jump(join_b));
-                }
+                self.lower_branch(&arm.body, unit_valued, join_b);
                 self.switch_to(next_b);
             }
         }
@@ -3498,6 +3503,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
+        | Instr::Native(lm_bytecode::NativeInstr::TextPadStart)
+        | Instr::Native(lm_bytecode::NativeInstr::TextPadEnd)
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
         | Instr::Native(lm_bytecode::NativeInstr::TextSplit)
@@ -3642,6 +3649,8 @@ fn numeric_stack_effect(instr: lm_bytecode::NumericInstr) -> (usize, usize) {
         | NumericInstr::FloatFromBits
         | NumericInstr::FloatToIntStatus
         | NumericInstr::FloatToIntValue
+        | NumericInstr::TextParseFloatStatus
+        | NumericInstr::TextParseFloatValue
         | NumericInstr::BytesBitNot => (1, 1),
         NumericInstr::IntBitAnd
         | NumericInstr::IntBitOr
@@ -3664,6 +3673,7 @@ fn numeric_stack_effect(instr: lm_bytecode::NumericInstr) -> (usize, usize) {
         | NumericInstr::FloatLe
         | NumericInstr::FloatGt
         | NumericInstr::FloatGe
+        | NumericInstr::FloatFixed
         | NumericInstr::SbAppendFloat
         | NumericInstr::BytesBitAnd
         | NumericInstr::BytesBitOr
@@ -3807,6 +3817,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue) => {
             "TextParseIntValue".to_string()
         }
+        Instr::Native(lm_bytecode::NativeInstr::TextPadStart) => "TextPadStart".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextPadEnd) => "TextPadEnd".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => "BytesEndsWith".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesContains) => "BytesContains".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextSplit) => "TextSplit".to_string(),

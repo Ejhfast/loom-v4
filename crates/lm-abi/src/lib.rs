@@ -49,7 +49,8 @@ pub use hash::{hash256, hash256_hex};
 /// current directory operation into `Fs`.
 /// Version 22 uses BLAKE3-256 for manifest identities.
 /// Version 23 adds Float to the primitive manifest types.
-pub const ABI_VERSION: u32 = 23;
+/// Version 24 adds Float parsing and formatting intrinsics.
+pub const ABI_VERSION: u32 = 24;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -510,7 +511,8 @@ impl AbiType {
 /// Version 18 adds tombstone-aware map traversal.
 /// Version 19 uses BLAKE3-256 for intrinsic identities.
 /// Version 20 adds Float and bitwise numeric operations.
-pub const INTRINSIC_ABI_VERSION: u32 = 20;
+/// Version 21 adds text padding and Float text conversions.
+pub const INTRINSIC_ABI_VERSION: u32 = 21;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -701,9 +703,14 @@ pub const INTRINSIC_BYTES_BIT_AND: IntrinsicSlot = 172;
 pub const INTRINSIC_BYTES_BIT_OR: IntrinsicSlot = 173;
 pub const INTRINSIC_BYTES_BIT_XOR: IntrinsicSlot = 174;
 pub const INTRINSIC_BYTES_BIT_NOT: IntrinsicSlot = 175;
+pub const INTRINSIC_TEXT_PAD_START: IntrinsicSlot = 176;
+pub const INTRINSIC_TEXT_PAD_END: IntrinsicSlot = 177;
+pub const INTRINSIC_TEXT_PARSE_FLOAT_STATUS: IntrinsicSlot = 178;
+pub const INTRINSIC_TEXT_PARSE_FLOAT_VALUE: IntrinsicSlot = 179;
+pub const INTRINSIC_FLOAT_FIXED: IntrinsicSlot = 180;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 176] = [
+pub const INTRINSICS: [IntrinsicDef; 181] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1802,6 +1809,36 @@ pub const INTRINSICS: [IntrinsicDef; 176] = [
         name: "bytes.bit_not",
         params: &[AbiType::BYTES],
         reply: AbiType::BYTES,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.pad_start",
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.pad_end",
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.parse_float_status",
+        params: &[AbiType::TEXT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.parse_float_value",
+        params: &[AbiType::TEXT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.fixed",
+        params: &[AbiType::FLOAT, AbiType::INT],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
 ];

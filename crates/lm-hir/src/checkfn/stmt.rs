@@ -29,10 +29,22 @@ impl<'o> FnChecker<'o> {
             }
             let is_last = idx + 1 == stmts.len();
             if is_last {
-                if let BlockMode::Value(expected) = mode {
-                    let (checked, mutable) = self.check_tail(ctx, stmt, expected)?;
-                    out.push(checked);
-                    return Ok((out, expected, mutable));
+                match mode {
+                    BlockMode::Value(expected) => {
+                        let (checked, mutable) = self.check_tail(ctx, stmt, expected)?;
+                        out.push(checked);
+                        return Ok((out, expected, mutable));
+                    }
+                    BlockMode::Synth => {
+                        if let StmtKind::Expr(expr) = &stmt.kind {
+                            let value = self.synth_expr(ctx, expr)?;
+                            let ty = value.ty;
+                            let mutable = value.mutable;
+                            out.push(HStmt::Expr(value));
+                            return Ok((out, ty, mutable));
+                        }
+                    }
+                    BlockMode::Stmt => {}
                 }
             }
             out.push(self.check_stmt(ctx, stmt)?);
@@ -195,7 +207,21 @@ impl<'o> FnChecker<'o> {
                 }
                 Ok(HStmt::Continue)
             }
-            StmtKind::Expr(expr) => Ok(HStmt::Expr(self.synth_expr(ctx, expr)?)),
+            StmtKind::Expr(expr) => {
+                let expr = match &expr.kind {
+                    ExprKind::If { arms, else_body } => {
+                        self.check_if(ctx, arms, else_body, BlockMode::Stmt, expr.span)?
+                    }
+                    ExprKind::Case { scrut, arms } => {
+                        self.check_case(ctx, scrut, arms, BlockMode::Stmt, expr.span)?
+                    }
+                    ExprKind::Select { arms } => {
+                        self.check_select(ctx, arms, BlockMode::Stmt, expr.span)?
+                    }
+                    _ => self.synth_expr(ctx, expr)?,
+                };
+                Ok(HStmt::Expr(expr))
+            }
         }
     }
 

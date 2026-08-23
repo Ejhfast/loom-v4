@@ -587,6 +587,9 @@ pub enum NumericInstr {
     BytesBitOr,
     BytesBitXor,
     BytesBitNot,
+    TextParseFloatStatus,
+    TextParseFloatValue,
+    FloatFixed,
 }
 
 impl NumericInstr {
@@ -627,6 +630,9 @@ impl NumericInstr {
             32 => NumericInstr::BytesBitOr,
             33 => NumericInstr::BytesBitXor,
             34 => NumericInstr::BytesBitNot,
+            35 => NumericInstr::TextParseFloatStatus,
+            36 => NumericInstr::TextParseFloatValue,
+            37 => NumericInstr::FloatFixed,
             _ => return None,
         })
     }
@@ -799,6 +805,10 @@ pub enum NativeInstr {
     TextParseIntStatus,
     /// Pop a radix and Text, then push the parsed integer.
     TextParseIntValue,
+    /// Pop a width and Text, then push left-padded String text.
+    TextPadStart,
+    /// Pop a width and Text, then push right-padded String text.
+    TextPadEnd,
     /// Pop a suffix and Bytes, then push whether it ends with it.
     BytesEndsWith,
     /// Pop a needle and Bytes, then push whether it contains it.
@@ -1261,7 +1271,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 48 adds ordered and unordered hash instructions.
 /// Version 49 adds tombstone-aware map traversal.
 /// Version 50 adds Float, byte literals, and prefixed numeric instructions.
-pub const VERSION: u16 = 50;
+/// Version 51 adds text padding and Float text conversions.
+pub const VERSION: u16 = 51;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1488,6 +1499,10 @@ const OP_SEAL_INSTANCE: u8 = 0xfa;
 const OP_NUMERIC: u8 = 0xfb;
 const OP_CONST_FLOAT: u8 = 0xfc;
 const OP_CONST_BYTES: u8 = 0xfd;
+const OP_TEXT_EXTENSION: u8 = 0xfe;
+
+const TEXT_EXT_PAD_START: u8 = 0;
+const TEXT_EXT_PAD_END: u8 = 1;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2083,6 +2098,14 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::TextReplace) => out.push(OP_TEXT_REPLACE),
         Instr::Native(NativeInstr::TextParseIntStatus) => out.push(OP_TEXT_PARSE_INT_STATUS),
         Instr::Native(NativeInstr::TextParseIntValue) => out.push(OP_TEXT_PARSE_INT_VALUE),
+        Instr::Native(NativeInstr::TextPadStart) => {
+            out.push(OP_TEXT_EXTENSION);
+            out.push(TEXT_EXT_PAD_START);
+        }
+        Instr::Native(NativeInstr::TextPadEnd) => {
+            out.push(OP_TEXT_EXTENSION);
+            out.push(TEXT_EXT_PAD_END);
+        }
         Instr::Native(NativeInstr::BytesEndsWith) => out.push(OP_BYTES_ENDS_WITH),
         Instr::Native(NativeInstr::BytesContains) => out.push(OP_BYTES_CONTAINS),
         Instr::Native(NativeInstr::TextSplit) => out.push(OP_TEXT_SPLIT),
@@ -3396,6 +3419,11 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_TEXT_REPLACE => Instr::Native(NativeInstr::TextReplace),
         OP_TEXT_PARSE_INT_STATUS => Instr::Native(NativeInstr::TextParseIntStatus),
         OP_TEXT_PARSE_INT_VALUE => Instr::Native(NativeInstr::TextParseIntValue),
+        OP_TEXT_EXTENSION => match cur.u8()? {
+            TEXT_EXT_PAD_START => Instr::Native(NativeInstr::TextPadStart),
+            TEXT_EXT_PAD_END => Instr::Native(NativeInstr::TextPadEnd),
+            _ => return Err(DecodeError::BadOpcode(OP_TEXT_EXTENSION)),
+        },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
         OP_BYTES_CONTAINS => Instr::Native(NativeInstr::BytesContains),
         OP_TEXT_SPLIT => Instr::Native(NativeInstr::TextSplit),
@@ -4112,6 +4140,11 @@ mod tests {
             Instr::Numeric(NumericInstr::BytesBitOr),
             Instr::Numeric(NumericInstr::BytesBitXor),
             Instr::Numeric(NumericInstr::BytesBitNot),
+            Instr::Numeric(NumericInstr::TextParseFloatStatus),
+            Instr::Numeric(NumericInstr::TextParseFloatValue),
+            Instr::Numeric(NumericInstr::FloatFixed),
+            Instr::Native(NativeInstr::TextPadStart),
+            Instr::Native(NativeInstr::TextPadEnd),
             Instr::Freeze,
             Instr::FaultCode,
             Instr::FaultDenied,

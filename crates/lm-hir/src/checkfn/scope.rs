@@ -219,12 +219,14 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HExpr, Diagnostic> {
         match &expr.kind {
             ExprKind::If { arms, else_body } => {
-                self.check_if(ctx, arms, else_body, Some(expected), expr.span)
+                self.check_if(ctx, arms, else_body, BlockMode::Value(expected), expr.span)
             }
             ExprKind::Case { scrut, arms } => {
-                self.check_case(ctx, scrut, arms, Some(expected), expr.span)
+                self.check_case(ctx, scrut, arms, BlockMode::Value(expected), expr.span)
             }
-            ExprKind::Select { arms } => self.check_select(ctx, arms, Some(expected), expr.span),
+            ExprKind::Select { arms } => {
+                self.check_select(ctx, arms, BlockMode::Value(expected), expr.span)
+            }
             ExprKind::TupleLit(items) => {
                 if let Type::Tuple(elems) = ctx.store.get(expected).clone() {
                     if elems.len() == items.len() {

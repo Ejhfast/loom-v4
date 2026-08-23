@@ -1260,6 +1260,15 @@ impl<'m> Oracle<'m> {
                 }
                 Ok(OV::Int(value.trunc() as i64))
             }
+            lm_abi::INTRINSIC_FLOAT_FIXED => {
+                let value = self.as_float(&values[0])?;
+                let digits = self.as_int(&values[1])?;
+                if digits < 0 {
+                    return Err(Stop::Fault("InvalidPrecision"));
+                }
+                let digits = usize::try_from(digits).map_err(|_| Stop::Fault("HeapLimit"))?;
+                Ok(OV::Str(Rc::new(format!("{value:.digits$}"))))
+            }
             lm_abi::INTRINSIC_BOOL_NOT => match values[0] {
                 OV::Bool(value) => Ok(OV::Bool(!value)),
                 _ => Err(Stop::Limit("non-Bool operand")),
@@ -1353,6 +1362,30 @@ impl<'m> Oracle<'m> {
                         _ => 1,
                     },
                 }))
+            }
+            lm_abi::INTRINSIC_TEXT_PAD_START | lm_abi::INTRINSIC_TEXT_PAD_END => {
+                let text = self.as_text(&values[0])?;
+                let width = self.as_int(&values[1])?;
+                let length = i64::try_from(text.chars().count())
+                    .map_err(|_| Stop::Fault("IntegerOverflow"))?;
+                let padding = usize::try_from(width.saturating_sub(length).max(0))
+                    .map_err(|_| Stop::Fault("HeapLimit"))?;
+                let spaces = " ".repeat(padding);
+                let output = if intrinsic == lm_abi::INTRINSIC_TEXT_PAD_START {
+                    format!("{spaces}{text}")
+                } else {
+                    format!("{text}{spaces}")
+                };
+                Ok(OV::Str(Rc::new(output)))
+            }
+            lm_abi::INTRINSIC_TEXT_PARSE_FLOAT_STATUS
+            | lm_abi::INTRINSIC_TEXT_PARSE_FLOAT_VALUE => {
+                let parsed = oracle_parse_float_text(self.as_text(&values[0])?);
+                if intrinsic == lm_abi::INTRINSIC_TEXT_PARSE_FLOAT_STATUS {
+                    return Ok(OV::Int(parsed.err().unwrap_or(0)));
+                }
+                let value = parsed.unwrap_or(0.0);
+                Ok(OV::Float(lm_value::canonical_float_bits(value.to_bits())))
             }
             lm_abi::INTRINSIC_STRING_EQ | lm_abi::INTRINSIC_STRING_NE => {
                 let equal = self.as_text(&values[0])? == self.as_text(&values[1])?;
@@ -1659,7 +1692,7 @@ impl<'m> Oracle<'m> {
                     _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
                 };
                 if left.len() != right.len() {
-                    return Err(Stop::Fault("IndexOutOfBounds"));
+                    return Err(Stop::Fault("LengthMismatch"));
                 }
                 let bytes = left
                     .iter()
@@ -2409,10 +2442,62 @@ fn oracle_float_fits_int(value: f64) -> bool {
     value >= i64::MIN as f64 && value < 9_223_372_036_854_775_808.0
 }
 
+fn oracle_parse_float_text(text: &str) -> Result<f64, i64> {
+    match text {
+        "NaN" => return Ok(f64::NAN),
+        "inf" | "+inf" => return Ok(f64::INFINITY),
+        "-inf" => return Ok(f64::NEG_INFINITY),
+        _ => {}
+    }
+    if !oracle_is_decimal_float_text(text) {
+        return Err(1);
+    }
+    let value = text.parse::<f64>().map_err(|_| 1)?;
+    if value.is_infinite() {
+        Err(2)
+    } else {
+        Ok(value)
+    }
+}
+
+fn oracle_is_decimal_float_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
+    let mut digits = 0usize;
+    while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+        at += 1;
+        digits += 1;
+    }
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if matches!(bytes.get(at), Some(b'e') | Some(b'E')) {
+        at += 1;
+        if matches!(bytes.get(at), Some(b'+') | Some(b'-')) {
+            at += 1;
+        }
+        let exponent = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if at == exponent {
+            return false;
+        }
+    }
+    at == bytes.len()
+}
+
 fn oracle_shift(value: i64) -> Result<u32, Stop> {
-    let value = u32::try_from(value).map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+    let value = u32::try_from(value).map_err(|_| Stop::Fault("ShiftOutOfRange"))?;
     if value > 63 {
-        return Err(Stop::Fault("IndexOutOfBounds"));
+        return Err(Stop::Fault("ShiftOutOfRange"));
     }
     Ok(value)
 }

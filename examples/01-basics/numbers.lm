@@ -1,0 +1,6 @@
+# Parse a decimal value, calculate with it, and format the result.
+
+reading = "3.5".parse_float().expect("the reading is a decimal value")
+name = "rate".pad_end(8)
+
+("#{name}#{reading.fixed(2)}", reading * 2.0, "é".pad_start(3))

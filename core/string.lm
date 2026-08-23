@@ -6,7 +6,6 @@ class Text implements Counted, Iterable, Display, Hashable, Comparable
 
   def append_to(self, mut builder: StringBuilder)
     builder.append(self)
-    ()
   end
 
   def len(self): Int
@@ -89,7 +88,6 @@ class Text implements Counted, Iterable, Display, Hashable, Comparable
       f(value)
       index = index + value.utf8_len()
     end
-    ()
   end
 
   def map[effect e](self, f: (Char) -> Char with e): String with e
@@ -145,6 +143,14 @@ class Text implements Counted, Iterable, Display, Hashable, Comparable
     intrinsic("text.trim_end", self)
   end
 
+  def pad_start(self, width: Int): String
+    intrinsic("text.pad_start", self, width)
+  end
+
+  def pad_end(self, width: Int): String
+    intrinsic("text.pad_end", self, width)
+  end
+
   def to_lower_ascii(self): String
     intrinsic("text.to_lower_ascii", self)
   end
@@ -169,6 +175,19 @@ class Text implements Counted, Iterable, Display, Hashable, Comparable
       Err(ParseIntError.BadRadix)
     else
       Err(ParseIntError.Invalid)
+    end
+  end
+
+  # `parse_float` accepts decimal text and the three values emitted
+  # for non-finite floats. No input makes this method fault.
+  def parse_float(self): Result[Float, ParseFloatError]
+    status = intrinsic("text.parse_float_status", self)
+    if status == 0
+      Ok(intrinsic("text.parse_float_value", self))
+    elsif status == 2
+      Err(ParseFloatError.Overflow)
+    else
+      Err(ParseFloatError.Invalid)
     end
   end
 
@@ -269,7 +288,6 @@ end
 final class Char implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.push_char(self)
-    ()
   end
 
   def codepoint(self): Int

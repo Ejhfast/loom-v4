@@ -210,6 +210,21 @@ pub(crate) fn step(
                     pop_expect(state, TY_INT)?;
                     push(state, float)?;
                 }
+                NumericInstr::TextParseFloatStatus | NumericInstr::TextParseFloatValue => {
+                    let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+                    pop_expect(state, text)?;
+                    let answer = if matches!(instruction, NumericInstr::TextParseFloatStatus) {
+                        TY_INT
+                    } else {
+                        float
+                    };
+                    push(state, answer)?;
+                }
+                NumericInstr::FloatFixed => {
+                    pop_expect(state, TY_INT)?;
+                    pop_expect(state, float)?;
+                    push(state, TY_STR)?;
+                }
                 NumericInstr::SbAppendFloat => {
                     pop_expect(state, float)?;
                     let class = ctx
@@ -404,6 +419,14 @@ pub(crate) fn step(
             let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
             pop_expect(state, text)?;
             push(state, TY_INT)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::TextPadStart | lm_bytecode::NativeInstr::TextPadEnd,
+        ) => {
+            pop_expect(state, TY_INT)?;
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            push(state, TY_STR)?;
         }
         Instr::Native(lm_bytecode::NativeInstr::TextSplit) => {
             let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;

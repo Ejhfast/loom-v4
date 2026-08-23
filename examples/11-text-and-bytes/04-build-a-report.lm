@@ -8,7 +8,8 @@
 rows = "alpha,3\nbeta,11\ngamma,7\n"
 
 report = StringBuilder()
-report.append("name       count\n")
+report.append("name".pad_end(11))
+report.append("count\n")
 
 total = 0
 lines = rows.lines()
@@ -16,8 +17,7 @@ i = 0
 while i < lines.len()
   case lines.at(i).split_once(",")
   in Some((name, count))
-    report.append(name.to_upper_ascii())
-    report.append("      ")
+    report.append(name.to_upper_ascii().pad_end(11))
     report.append(count)
     report.append("\n")
     total = total + case count.parse_int(10)
@@ -29,7 +29,7 @@ while i < lines.len()
   i = i + 1
 end
 
-report.append("total      ")
+report.append("total".pad_end(11))
 report.append("#{total}")
 
 # `finish` transfers the buffer. The builder reports its own end.

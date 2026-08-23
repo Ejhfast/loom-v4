@@ -46,7 +46,6 @@ enum Ordering implements Display, Hashable, Comparable
     in Greater then "Greater"
     end
     builder.append(text)
-    ()
   end
 
   def __eq__(self, other: Ordering): Bool

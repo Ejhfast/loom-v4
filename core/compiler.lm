@@ -63,6 +63,5 @@ final class CompileErrors implements Error
 
   def append_to(self, mut builder: StringBuilder)
     builder.append(self.message)
-    ()
   end
 end

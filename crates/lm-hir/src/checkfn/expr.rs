@@ -342,10 +342,12 @@ impl<'o> FnChecker<'o> {
                 body,
             } => self.check_closure(ctx, params, ret, row, None, body, expr.span),
             ExprKind::If { arms, else_body } => {
-                self.check_if(ctx, arms, else_body, None, expr.span)
+                self.check_if(ctx, arms, else_body, BlockMode::Synth, expr.span)
             }
-            ExprKind::Case { scrut, arms } => self.check_case(ctx, scrut, arms, None, expr.span),
-            ExprKind::Select { arms } => self.check_select(ctx, arms, None, expr.span),
+            ExprKind::Case { scrut, arms } => {
+                self.check_case(ctx, scrut, arms, BlockMode::Synth, expr.span)
+            }
+            ExprKind::Select { arms } => self.check_select(ctx, arms, BlockMode::Synth, expr.span),
             ExprKind::Labeled { label, .. } => Err(Diagnostic::new(
                 "E1006",
                 format!(
@@ -488,7 +490,13 @@ impl<'o> FnChecker<'o> {
             }],
             span,
         };
-        self.check_case_value(ctx, value_h, &[ok_arm, err_arm], Some(ok_ty), span)
+        self.check_case_value(
+            ctx,
+            value_h,
+            &[ok_arm, err_arm],
+            BlockMode::Value(ok_ty),
+            span,
+        )
     }
 
     /// Lower `select` to one wait and one case expression.
@@ -496,7 +504,7 @@ impl<'o> FnChecker<'o> {
         &mut self,
         ctx: &mut Ctx,
         arms: &[ast::SelectArm],
-        expected: Option<TypeId>,
+        mode: BlockMode,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let Some((first, rest)) = arms.split_first() else {
@@ -535,10 +543,7 @@ impl<'o> FnChecker<'o> {
                 span: arm.span,
             })
             .collect::<Vec<_>>();
-        match expected {
-            Some(ty) => self.check_case(ctx, &waited, &case_arms, Some(ty), span),
-            None => self.check_case(ctx, &waited, &case_arms, None, span),
-        }
+        self.check_case(ctx, &waited, &case_arms, mode, span)
     }
 
     pub(super) fn synth_self(&mut self, ctx: &mut Ctx, span: Span) -> Result<HExpr, Diagnostic> {

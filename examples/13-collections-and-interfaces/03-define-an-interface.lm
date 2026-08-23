@@ -41,7 +41,6 @@ final class Book implements Priced, Display
     builder.append("Book(")
     builder.append(self.title)
     builder.append(")")
-    ()
   end
 end
 

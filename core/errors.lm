@@ -16,7 +16,6 @@ enum IoError implements Error
     in Failed(m)       then m
     end
     builder.append(text)
-    ()
   end
 end
 
@@ -34,7 +33,6 @@ enum EnvError implements Error
     in Failed(m)           then m
     end
     builder.append(text)
-    ()
   end
 end
 
@@ -52,7 +50,6 @@ enum EntropyError implements Error
     in Failed(m)        then m
     end
     builder.append(text)
-    ()
   end
 end
 
@@ -68,7 +65,6 @@ enum Utf8Error implements Error
     in InvalidEncoding then "the bytes are not valid UTF-8"
     end
     builder.append(text)
-    ()
   end
 end
 
@@ -77,7 +73,6 @@ enum IndexError implements Error
 
   def append_to(self, mut builder: StringBuilder)
     builder.append("the index is out of bounds")
-    ()
   end
 end
 
@@ -95,7 +90,19 @@ enum ParseIntError implements Error
     in BadRadix then "the radix is outside 2 through 36"
     end
     builder.append(text)
-    ()
+  end
+end
+
+enum ParseFloatError implements Error
+  Invalid
+  Overflow
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Invalid  then "the text is not a float"
+    in Overflow then "the float is out of range"
+    end
+    builder.append(text)
   end
 end
 
@@ -109,6 +116,5 @@ enum FloatToIntError implements Error
     in OutOfRange then "the float is outside the Int range"
     end
     builder.append(text)
-    ()
   end
 end

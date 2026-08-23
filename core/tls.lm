@@ -13,24 +13,18 @@ enum TlsError implements Error
     case self
     in InvalidConfig(value)
       builder.append(value)
-      ()
     in Handshake(value)
       builder.append(value)
-      ()
     in Certificate(value)
       builder.append(value)
-      ()
     in Protocol(value)
       builder.append(value)
-      ()
     in Network(error)
       error.append_to(builder)
     in Closed
       builder.append("TLS stream is closed")
-      ()
     in LimitExceeded(value)
       builder.append(value)
-      ()
     end
   end
 end

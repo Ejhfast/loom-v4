@@ -108,7 +108,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 43 lowers ordered and unordered hash mixing.
 /// Version 44 lowers tombstone-aware map traversal.
 /// Version 45 uses BLAKE3-256 for bytecode identities.
-pub const COMPILER_ABI_VERSION: u32 = 45;
+/// Version 46 lowers text padding and Float text conversions.
+pub const COMPILER_ABI_VERSION: u32 = 46;
 
 /// The refinement work budget of one component.
 ///
@@ -835,6 +836,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::TextReplace)
         | Instr::Native(NativeInstr::TextParseIntStatus)
         | Instr::Native(NativeInstr::TextParseIntValue)
+        | Instr::Native(NativeInstr::TextPadStart)
+        | Instr::Native(NativeInstr::TextPadEnd)
         | Instr::Native(NativeInstr::BytesEndsWith)
         | Instr::Native(NativeInstr::BytesContains)
         | Instr::Native(NativeInstr::TextSplit)
@@ -2048,8 +2051,7 @@ impl<'a> Resolver<'a> {
     /// The leading identity byte of one instruction.
     ///
     /// The tag alone names the instruction kind. Two kinds must
-    /// never share one tag: a duplicate makes two instructions hash
-    /// alike, and no other check reads this encoding.
+    /// never share one tag.
     fn instr_tag(instr: &Instr) -> u8 {
         match instr {
             Instr::ConstUnit => 0x00,
@@ -2096,6 +2098,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::TextReplace) => 0xad,
             Instr::Native(NativeInstr::TextParseIntStatus) => 0xae,
             Instr::Native(NativeInstr::TextParseIntValue) => 0xaf,
+            Instr::Native(NativeInstr::TextPadStart) => 0xfe,
+            Instr::Native(NativeInstr::TextPadEnd) => 0xff,
             Instr::Native(NativeInstr::BytesEndsWith) => 0xb0,
             Instr::Native(NativeInstr::BytesContains) => 0xb1,
             Instr::Native(NativeInstr::TextSplit) => 0xb2,
@@ -2471,6 +2475,8 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::TextReplace)
             | Instr::Native(NativeInstr::TextParseIntStatus)
             | Instr::Native(NativeInstr::TextParseIntValue)
+            | Instr::Native(NativeInstr::TextPadStart)
+            | Instr::Native(NativeInstr::TextPadEnd)
             | Instr::Native(NativeInstr::BytesEndsWith)
             | Instr::Native(NativeInstr::BytesContains)
             | Instr::Native(NativeInstr::TextSplit)

@@ -1,0 +1,36 @@
+decimal = "3.25".parse_float().expect("decimal text parses")
+leading = ".5".parse_float().expect("a leading zero is optional")
+trailing = "3.".parse_float().expect("fraction digits are optional")
+exponent = "-2e2".parse_float().expect("exponent text parses")
+nan = "NaN".parse_float().expect("NaN text parses")
+infinity = "+inf".parse_float().expect("infinity text parses")
+
+invalid = case " 3.25".parse_float()
+in Err(ParseFloatError.Invalid) then true
+in _ then false
+end
+underscores = case "3_000.0".parse_float()
+in Err(ParseFloatError.Invalid) then true
+in _ then false
+end
+overflow = case "1e999".parse_float()
+in Err(ParseFloatError.Overflow) then true
+in _ then false
+end
+
+(
+  decimal,
+  leading,
+  trailing,
+  exponent,
+  nan == Float.from_bits(0x7ff0000000000001),
+  infinity == 1.0 / 0.0,
+  3.5.fixed(2),
+  (-0.0).fixed(2),
+  (2.5.fixed(0), 3.5.fixed(0)),
+  (nan.fixed(2), infinity.fixed(2)),
+  "é".pad_start(3),
+  "é".pad_end(3),
+  "wide".pad_start(-1),
+  (invalid, underscores, overflow)
+)

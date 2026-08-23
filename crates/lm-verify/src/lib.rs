@@ -254,7 +254,9 @@ use tables::verify_tables;
 /// Version 31 verifies native and interface-backed map paths.
 /// Version 32 verifies conditional conformance premises.
 /// Version 33 verifies ordered and unordered hash mixing.
-pub const VERIFIER_VERSION: u32 = 34;
+/// Version 34 verifies Float and bitwise instructions.
+/// Version 35 verifies text padding and Float text conversions.
+pub const VERIFIER_VERSION: u32 = 35;
 
 /// Verify a full module. Every table and every function must pass.
 ///

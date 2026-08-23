@@ -10,4 +10,4 @@ masked = header ^ mask
 kind = (header.at(0) & 0x0f) << 4 | (header.at(1) & 0x0f)
 ratio = 3.to_float() / 2.0
 
-"frame {v1}: kind=#{kind} raw=#{header.hex()} masked=#{masked.hex()} ratio=#{ratio}"
+"frame {v1}: kind=#{kind} raw=#{header.hex()} masked=#{masked.hex()} ratio=#{ratio.fixed(2)}"

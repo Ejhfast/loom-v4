@@ -29,13 +29,10 @@ enum SnapshotError implements Error
       builder.append("a live ")
       builder.append(kind)
       builder.append(" blocks snapshot creation")
-      ()
     in SnapshotLimitExceeded
       builder.append("the snapshot exceeds its byte limit")
-      ()
     in BadImage(reason)
       builder.append(reason)
-      ()
     end
   end
 end
@@ -47,6 +44,5 @@ enum RestoreError implements Error
 
   def append_to(self, mut builder: StringBuilder)
     builder.append("the restored world exceeds its limit")
-    ()
   end
 end

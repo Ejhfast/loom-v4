@@ -2,4 +2,21 @@ def store_nothing()
   x = 1
 end
 
-store_nothing()
+def discard_control(mut builder: StringBuilder)
+  if true
+    builder.append("a")
+  end
+  case Some(1)
+  in Some(_) then builder.append("b")
+  in None then builder.append("x")
+  end
+  if false
+    builder.append("x")
+  else
+    builder.append("c")
+  end
+end
+
+builder = StringBuilder()
+discard_control(builder)
+(store_nothing(), builder.build())

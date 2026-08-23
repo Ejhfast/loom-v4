@@ -149,27 +149,27 @@ impl<'o> FnChecker<'o> {
         Ok(hint)
     }
 
-    /// Check an `if` expression. `expected` is `Some` in check mode.
+    /// Check an `if` expression in the supplied block mode.
     pub(super) fn check_if(
         &mut self,
         ctx: &mut Ctx,
         arms: &[(ast::Expr, Vec<ast::Stmt>)],
         else_body: &Option<Vec<ast::Stmt>>,
-        expected: Option<TypeId>,
+        mode: BlockMode,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
-        if let Some(expected) = expected {
+        if let BlockMode::Value(expected) = mode {
             if else_body.is_none() && expected != UNIT {
                 return Err(self.mismatch(ctx, expected, UNIT, span));
             }
         }
-        let branch_mode = match (expected, else_body) {
-            (Some(t), _) => BlockMode::Value(t),
-            (None, Some(_)) => BlockMode::Synth,
-            // Without `else` the `if` value is `()`. Each branch must
-            // also produce `()`. A non-unit branch value is an error,
-            // not a silent discard.
-            (None, None) => BlockMode::Value(UNIT),
+        let branch_mode = match (mode, else_body) {
+            (BlockMode::Stmt, _) => BlockMode::Stmt,
+            (BlockMode::Value(t), _) => BlockMode::Value(t),
+            (BlockMode::Synth, Some(_)) => BlockMode::Synth,
+            // A value-position `if` without `else` gives unit. Each
+            // branch must therefore produce unit.
+            (BlockMode::Synth, None) => BlockMode::Value(UNIT),
         };
         let synth_join = matches!(branch_mode, BlockMode::Synth);
         // Check every condition first. A later condition runs only
@@ -282,12 +282,13 @@ impl<'o> FnChecker<'o> {
         let checked_arms: Vec<(HExpr, Vec<HStmt>)> = conds.into_iter().zip(final_bodies).collect();
         // Merge constructor states across the non-diverging branches.
         self.merge_ctor_states(ctor_entry, branch_states, span)?;
-        let (ty, mutable) = match expected {
-            Some(t) => {
+        let (ty, mutable) = match mode {
+            BlockMode::Stmt => (UNIT, true),
+            BlockMode::Value(t) => {
                 let mutable = branch_types.iter().all(|(_, m, _)| *m);
                 (t, mutable)
             }
-            None => {
+            BlockMode::Synth => {
                 if else_h.is_none() {
                     (UNIT, true)
                 } else {
@@ -316,11 +317,11 @@ impl<'o> FnChecker<'o> {
         ctx: &mut Ctx,
         scrut: &ast::Expr,
         arms: &[ast::CaseArm],
-        expected: Option<TypeId>,
+        mode: BlockMode,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let scrut_h = self.synth_expr(ctx, scrut)?;
-        self.check_case_value(ctx, scrut_h, arms, expected, span)
+        self.check_case_value(ctx, scrut_h, arms, mode, span)
     }
 
     /// Check a case expression with an existing scrutinee value.
@@ -329,7 +330,7 @@ impl<'o> FnChecker<'o> {
         ctx: &mut Ctx,
         scrut_h: HExpr,
         arms: &[ast::CaseArm],
-        expected: Option<TypeId>,
+        mode: BlockMode,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let scrut_ty = scrut_h.ty;
@@ -337,10 +338,7 @@ impl<'o> FnChecker<'o> {
         // A hidden slot holds the scrutinee during the arm tests.
         let scrut_slot = self.locals.len() as u32;
         self.locals.push((scrut_ty, scrut_mut));
-        let branch_mode = match expected {
-            Some(t) => BlockMode::Value(t),
-            None => BlockMode::Synth,
-        };
+        let branch_mode = mode;
         let synth_join = matches!(branch_mode, BlockMode::Synth);
         let ctor_entry = self.ctor.as_ref().map(|c| c.state.clone());
         // Pass 1: check each arm. In synthesis mode an arm body with
@@ -404,12 +402,13 @@ impl<'o> FnChecker<'o> {
         }
         self.analyze_arms(ctx, scrut_ty, arms, &checked_arms, span)?;
         self.merge_ctor_states(ctor_entry, branch_states, span)?;
-        let (ty, mutable) = match expected {
-            Some(t) => {
+        let (ty, mutable) = match mode {
+            BlockMode::Stmt => (UNIT, true),
+            BlockMode::Value(t) => {
                 let mutable = branch_types.iter().all(|(_, m, _)| *m);
                 (t, mutable)
             }
-            None => {
+            BlockMode::Synth => {
                 let ty = match hinted {
                     Some(hint) => self.join_branches(ctx, &branch_types).unwrap_or(hint),
                     None => self.join_branches(ctx, &branch_types)?,

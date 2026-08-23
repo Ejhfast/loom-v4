@@ -51,7 +51,6 @@ enum ProcError implements Error
     in InUse         then "the proc is in use"
     end
     builder.append(text)
-    ()
   end
 end
 

@@ -63,12 +63,10 @@ enum Result[T, E] implements Display when T: Display, E: Display,
       builder.append("Ok(")
       value.append_to(builder)
       builder.append(")")
-      ()
     in Err(error)
       builder.append("Err(")
       error.append_to(builder)
       builder.append(")")
-      ()
     end
   end
 

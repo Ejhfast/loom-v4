@@ -15,6 +15,7 @@ use lm_heap::{
     NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, Witness};
+use std::fmt::Write as _;
 
 /// The largest typed wait table of one machine.
 pub const MAX_LIVE_WAITS: usize = 1_024;
@@ -1873,6 +1874,8 @@ impl Machine {
                 | lm_bytecode::NativeInstr::TextReplace
                 | lm_bytecode::NativeInstr::TextParseIntStatus
                 | lm_bytecode::NativeInstr::TextParseIntValue
+                | lm_bytecode::NativeInstr::TextPadStart
+                | lm_bytecode::NativeInstr::TextPadEnd
                 | lm_bytecode::NativeInstr::SubstringToString,
             ) => self.exec_string_instr(instr),
             Instr::Native(
@@ -2171,6 +2174,46 @@ impl Machine {
                     (false, Err(_)) => 0,
                 };
                 self.push(Value::Int(answer))?;
+            }
+            Instr::Native(
+                lm_bytecode::NativeInstr::TextPadStart | lm_bytecode::NativeInstr::TextPadEnd,
+            ) => {
+                let width = self.pop_int()?;
+                let text = self.pop_obj()?;
+                let source = self.text_value(text)?.clone();
+                let scalar_len =
+                    i64::try_from(source.char_count()).map_err(|_| FaultCode::IntegerOverflow)?;
+                let padding = width.saturating_sub(scalar_len);
+                if padding <= 0 && matches!(self.vm.heap.get(text), Object::Str(_)) {
+                    self.push(Value::Obj(text))?;
+                    return Ok(());
+                }
+                let padding = usize::try_from(padding.max(0)).map_err(|_| FaultCode::HeapLimit)?;
+                let length = source
+                    .len()
+                    .checked_add(padding)
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.reserve(length, &[Value::Obj(text)])?;
+                let mut output = String::new();
+                output
+                    .try_reserve_exact(length)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let before = matches!(instr, Instr::Native(lm_bytecode::NativeInstr::TextPadStart));
+                if before {
+                    for _ in 0..padding {
+                        output.push(' ');
+                    }
+                }
+                output.push_str(source.as_str());
+                if !before {
+                    for _ in 0..padding {
+                        output.push(' ');
+                    }
+                }
+                let output =
+                    SharedText::try_from_string(output).map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(output))?;
+                self.push(value)?;
             }
             Instr::Native(
                 lm_bytecode::NativeInstr::TextLt
@@ -5134,6 +5177,42 @@ impl Machine {
                 }
                 self.push(Value::Int(value.trunc() as i64))?;
             }
+            NumericInstr::TextParseFloatStatus | NumericInstr::TextParseFloatValue => {
+                let text = self.pop_obj()?;
+                let parsed = parse_float_text(self.text_value(text)?.as_str());
+                if matches!(instr, NumericInstr::TextParseFloatStatus) {
+                    let status = match parsed {
+                        Ok(_) => 0,
+                        Err(status) => status,
+                    };
+                    self.push(Value::Int(status))?;
+                } else {
+                    self.push_float(parsed.unwrap_or(0.0))?;
+                }
+            }
+            NumericInstr::FloatFixed => {
+                let digits = self.pop_int()?;
+                let value = self.pop_float()?;
+                if digits < 0 {
+                    return Err(FaultCode::InvalidPrecision);
+                }
+                let digits = usize::try_from(digits).map_err(|_| FaultCode::HeapLimit)?;
+                let capacity = if value.is_finite() {
+                    digits.checked_add(312).ok_or(FaultCode::HeapLimit)?
+                } else {
+                    4
+                };
+                self.reserve(capacity, &[])?;
+                let mut output = String::new();
+                output
+                    .try_reserve_exact(capacity)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                write!(&mut output, "{value:.digits$}").map_err(|_| FaultCode::HeapLimit)?;
+                let output =
+                    SharedText::try_from_string(output).map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(output))?;
+                self.push(value)?;
+            }
             NumericInstr::SbAppendFloat => {
                 let value = self.pop_float()?;
                 let builder = self.pop_obj()?;
@@ -5151,7 +5230,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 if left.len() != right.len() {
-                    return Err(FaultCode::IndexOutOfBounds);
+                    return Err(FaultCode::LengthMismatch);
                 }
                 let mut result = Vec::new();
                 result
@@ -5849,9 +5928,9 @@ fn integer_text_len(value: i64) -> usize {
 }
 
 fn shift_amount(value: i64) -> Result<u32, FaultCode> {
-    let amount = u32::try_from(value).map_err(|_| FaultCode::IndexOutOfBounds)?;
+    let amount = u32::try_from(value).map_err(|_| FaultCode::ShiftOutOfRange)?;
     if amount > 63 {
-        return Err(FaultCode::IndexOutOfBounds);
+        return Err(FaultCode::ShiftOutOfRange);
     }
     Ok(amount)
 }
@@ -5877,6 +5956,61 @@ fn float_fits_int(value: f64) -> bool {
 
 fn float_text(value: f64) -> String {
     value.to_string()
+}
+
+/// Parse one Float text form. Status 1 means invalid text.
+/// Status 2 means a finite decimal overflowed to infinity.
+fn parse_float_text(text: &str) -> Result<f64, i64> {
+    match text {
+        "NaN" => return Ok(f64::NAN),
+        "inf" | "+inf" => return Ok(f64::INFINITY),
+        "-inf" => return Ok(f64::NEG_INFINITY),
+        _ => {}
+    }
+    if !is_decimal_float_text(text) {
+        return Err(1);
+    }
+    let value = text.parse::<f64>().map_err(|_| 1)?;
+    if value.is_infinite() {
+        Err(2)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Test the decimal grammar accepted by `Text.parse_float`.
+fn is_decimal_float_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
+    let mut digits = 0usize;
+    while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+        at += 1;
+        digits += 1;
+    }
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if matches!(bytes.get(at), Some(b'e') | Some(b'E')) {
+        at += 1;
+        if matches!(bytes.get(at), Some(b'+') | Some(b'-')) {
+            at += 1;
+        }
+        let exponent = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if at == exponent {
+            return false;
+        }
+    }
+    at == bytes.len()
 }
 
 #[cfg(test)]

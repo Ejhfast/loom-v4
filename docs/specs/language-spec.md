@@ -866,6 +866,10 @@ Every construct is an expression, though many evaluate to `()`.
 
 A body is a sequence of expressions. Its value is the last expression, or `()` if empty. `return` exits the nearest callable.
 
+A callable with result `()` discards its final expression value and returns `()`.
+
+An expression in statement position discards its value. Each arm of a discarded control-flow expression also uses statement position.
+
 Assignment declares/rebinds a local or writes a permitted field/index. It evaluates to `()`.
 
 ```lm
@@ -1034,17 +1038,19 @@ The operator `>>>` shifts right with zero extension.
 
 All shift amounts must be from 0 through 63.
 
-An invalid shift amount faults with `IndexOutOfBounds`.
+An invalid shift amount faults with `ShiftOutOfRange`.
 
 `Int.wrapping_add`, `wrapping_sub`, and `wrapping_mul` use two's-complement wrapping arithmetic.
 
 `Int.rotate_left` and `rotate_right` rotate all 64 payload bits.
 
+An invalid rotation amount faults with `ShiftOutOfRange`.
+
 `Bytes` implements elementwise `&`, `|`, `^`, and `~`.
 
 Both binary operands must have equal lengths.
 
-A length mismatch faults with `IndexOutOfBounds`.
+A length mismatch faults with `LengthMismatch`.
 
 `Bytes` does not implement shift operators.
 
@@ -1603,6 +1609,9 @@ A delayed host failure retains the source coordinate of its suspended `perform` 
 | `MissingCode` | required code hash unavailable |
 | `DeadProc` | operation required a live proc |
 | `IndexOutOfBounds` | invalid sequence index |
+| `ShiftOutOfRange` | shift or rotation amount outside 0 through 63 |
+| `LengthMismatch` | fixed-length operands have different lengths |
+| `InvalidPrecision` | formatting precision is negative |
 | `MissingKey` | faulting map lookup missed |
 | `DivideByZero` | invalid division |
 | `IntegerOverflow` | checked integer overflow |
@@ -3378,7 +3387,7 @@ Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
-Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, FloatToIntError, Bytes
+Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, ParseFloatError, FloatToIntError, Bytes
 StringBuilder, ByteBuffer
 Display, PartialEq, Hashable, Comparable, Copyable, Error
 identity, display, hash_of, hash_combine, assert, assert_message
@@ -3597,12 +3606,15 @@ lines() -> List[Substring]
 trim() -> Substring
 trim_start() -> Substring
 trim_end() -> Substring
+pad_start(width: Int) -> String
+pad_end(width: Int) -> String
 strip_prefix(prefix: Text) -> Option[Substring]
 strip_suffix(suffix: Text) -> Option[Substring]
 to_lower_ascii() -> String
 to_upper_ascii() -> String
 replace(needle: Text, replacement: Text) -> String
 parse_int(radix: Int) -> Result[Int,ParseIntError]
+parse_float() -> Result[Float,ParseFloatError]
 __eq__(other: Text) -> Bool
 __lt__(other: Text) -> Bool
 __le__(other: Text) -> Bool
@@ -3618,9 +3630,29 @@ __ge__(other: Text) -> Bool
 
 `find_bytes` supports byte-oriented parsers. It avoids the scalar-position conversion that `find` requires.
 
-One rule sets the result type of every extraction method. A method that narrows its receiver gives a `Substring` and copies nothing. A method that builds new content gives a `String`. So `split`, `lines`, `trim`, and the two `strip_` methods give views, and `to_lower_ascii`, `to_upper_ascii`, and `replace` give durable values.
+One rule sets the result type of every extraction method. A method that narrows its receiver gives a `Substring` and copies nothing. A method that builds new content gives a `String`. So `split`, `lines`, `trim`, and the two `strip_` methods give views. Case conversion, replacement, and padding give durable values.
 
-Every method above is total, under the rule of section 12.1. `split` with an empty separator matches at every scalar boundary and gives one empty piece at each end. `replace` with an empty needle inserts at every scalar boundary. `parse_int` reports `ParseIntError.BadRadix` for a radix outside 2 to 36, because a radix reaches a program from data.
+Every method above is total, under the rule of section 12.1. `split` with an empty separator matches at every scalar boundary and gives one empty piece at each end. `replace` with an empty needle inserts at every scalar boundary. `parse_int` reports `ParseIntError.BadRadix` for a radix outside 2 to 36.
+
+Padding widths count Unicode scalar values. A width below the current length adds no spaces.
+
+Padding adds U+0020 SPACE characters.
+
+`parse_float` accepts decimal text, `NaN`, `inf`, `+inf`, and `-inf`.
+
+A decimal has an optional sign, digits, an optional point, and an optional exponent.
+
+At least one digit must appear before or after the point.
+
+An exponent starts with `e` or `E`. It has an optional sign and at least one digit.
+
+Parsing accepts no whitespace or underscore separators.
+
+Parsing rounds a finite decimal to the nearest binary64 value. A tie selects the value with an even significand.
+
+It reports `ParseFloatError.Invalid` for other text.
+
+A finite decimal that exceeds binary64 reports `ParseFloatError.Overflow`.
 
 `lines` accepts a line feed with or without a leading carriage return. A final line feed ends the last line and adds no empty piece.
 
@@ -3673,7 +3705,7 @@ __ge__(other: Char) -> Bool
 
 `Text.at` allocates no Char object. Its successful path allocates only the `Option.Some` result object.
 
-Core defines `Utf8Error` and `IndexError`. Text-to-Float parsing remains deferred.
+Core defines `Utf8Error`, `IndexError`, `ParseIntError`, and `ParseFloatError`.
 
 The core Bytes surface follows.
 
@@ -3721,7 +3753,7 @@ __ge__(other: Bytes) -> Bool
 
 The binary bitwise methods require equal lengths.
 
-They fault with `IndexOutOfBounds` when the lengths differ.
+They fault with `LengthMismatch` when the lengths differ.
 
 `!=` negates the `PartialEq` result.
 
@@ -3800,6 +3832,7 @@ The core `Float` surface adds these explicit operations:
 is_nan() -> Bool
 bits() -> Int
 to_int() -> Result[Int,FloatToIntError]
+fixed(digits: Int) -> String
 Float.from_bits(bits: Int) -> Float
 ```
 
@@ -3816,6 +3849,14 @@ Ordered operators use IEEE ordered comparisons. They return false when either va
 `compare` defines a total order for collections.
 
 It treats both zeros as equal and places NaN after every number.
+
+`fixed` writes exactly `digits` decimal places.
+
+It rounds the binary64 value to the nearest decimal result. A tie selects an even final digit.
+
+NaN and infinities use their `Display` text without decimal places.
+
+A negative `digits` value faults with `InvalidPrecision`.
 
 `std/math` supplies type-specific pure integer/float `min`, `max`, and `clamp`; `abs`; checked/wrapping/saturating integer operations; `gcd`; `pow_int`; and float rounding, roots, exponentials, logarithms, and trigonometric functions with specified binary64 behavior. With no traits or overloads, these functions are explicitly typed rather than pretending to be universally generic.
 

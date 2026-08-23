@@ -17,11 +17,17 @@ use std::fmt;
 pub enum FaultCode {
     IntegerOverflow,
     DivideByZero,
+    /// A bit shift or rotation used an amount outside 0 through 63.
+    ShiftOutOfRange,
     OutOfFuel,
     StackLimit,
     HeapLimit,
     FrozenWrite,
     IndexOutOfBounds,
+    /// Two fixed-length operands have different lengths.
+    LengthMismatch,
+    /// A formatting precision is negative.
+    InvalidPrecision,
     MissingKey,
     /// A map insertion received a heap key that is not frozen.
     MutableMapKey,
@@ -76,14 +82,17 @@ pub enum FaultCode {
 /// so a loader must map a name back to a code. This table is the one
 /// place that lists the codes, so a new code joins both directions at
 /// once.
-pub const FAULT_CODES: [FaultCode; 26] = [
+pub const FAULT_CODES: [FaultCode; 29] = [
     FaultCode::IntegerOverflow,
     FaultCode::DivideByZero,
+    FaultCode::ShiftOutOfRange,
     FaultCode::OutOfFuel,
     FaultCode::StackLimit,
     FaultCode::HeapLimit,
     FaultCode::FrozenWrite,
     FaultCode::IndexOutOfBounds,
+    FaultCode::LengthMismatch,
+    FaultCode::InvalidPrecision,
     FaultCode::MissingKey,
     FaultCode::MutableMapKey,
     FaultCode::CollectionModified,
@@ -120,11 +129,14 @@ impl fmt::Display for FaultCode {
         let name = match self {
             FaultCode::IntegerOverflow => "IntegerOverflow",
             FaultCode::DivideByZero => "DivideByZero",
+            FaultCode::ShiftOutOfRange => "ShiftOutOfRange",
             FaultCode::OutOfFuel => "OutOfFuel",
             FaultCode::StackLimit => "StackLimit",
             FaultCode::HeapLimit => "HeapLimit",
             FaultCode::FrozenWrite => "FrozenWrite",
             FaultCode::IndexOutOfBounds => "IndexOutOfBounds",
+            FaultCode::LengthMismatch => "LengthMismatch",
+            FaultCode::InvalidPrecision => "InvalidPrecision",
             FaultCode::MissingKey => "MissingKey",
             FaultCode::MutableMapKey => "MutableMapKey",
             FaultCode::CollectionModified => "CollectionModified",

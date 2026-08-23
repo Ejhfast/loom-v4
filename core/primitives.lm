@@ -40,7 +40,6 @@ end
 final class Int implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.append_int(self)
-    ()
   end
 
   def abs(self): Int
@@ -189,7 +188,6 @@ end
 final class Float implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.append_float(self)
-    ()
   end
 
   def __neg__(self): Float
@@ -255,6 +253,10 @@ final class Float implements Display, Hashable, Comparable
     end
   end
 
+  def fixed(self, digits: Int): String
+    intrinsic("float.fixed", self, digits)
+  end
+
   def compare(self, other: Float): Ordering
     if self == other
       Equal
@@ -273,7 +275,6 @@ end
 final class Bool implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.append_bool(self)
-    ()
   end
 
   def __not__(self): Bool

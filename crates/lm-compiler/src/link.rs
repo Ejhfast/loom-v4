@@ -1509,6 +1509,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
+        | Instr::Native(lm_bytecode::NativeInstr::TextPadStart)
+        | Instr::Native(lm_bytecode::NativeInstr::TextPadEnd)
         | Instr::Native(lm_bytecode::NativeInstr::TextHash)
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)

@@ -106,13 +106,11 @@ final class List[T] implements Counted, Iterable, Copyable,
     while index < self.len()
       if index > 0
         builder.append(", ")
-        ()
       end
       self.at(index).append_to(builder)
       index = index + 1
     end
     builder.append("]")
-    ()
   end
 
   def __eq__(self, other: List[T]): Bool when T: PartialEq
@@ -164,7 +162,6 @@ final class List[T] implements Counted, Iterable, Copyable,
   def slice(self, start: Int, length: Int): List[T]
     if start < 0 or length < 0 or start > self.len() - length
       self.at(-1)
-      ()
     end
     result = List[T]()
     result.reserve(length)
@@ -240,7 +237,6 @@ final class List[T] implements Counted, Iterable, Copyable,
     for value in self
       f(value)
     end
-    ()
   end
 
   def map[U, effect e](self, f: (T) -> U with e): List[U] with e
@@ -355,7 +351,6 @@ final class List[T] implements Counted, Iterable, Copyable,
       self.set(index, source.at(index))
       index = index + 1
     end
-    ()
   end
 
   def sort(mut self) when T: Comparable
@@ -414,7 +409,6 @@ final class List[T] implements Counted, Iterable, Copyable,
       self.set(index, source.at(index))
       index = index + 1
     end
-    ()
   end
 
   def min(self): Option[T] when T: Comparable
@@ -529,7 +523,6 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
     for key, value in self
       if index > 0
         builder.append(", ")
-        ()
       end
       key.append_to(builder)
       builder.append(": ")
@@ -537,7 +530,6 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
       index = index + 1
     end
     builder.append("}")
-    ()
   end
 
   def __eq__(self, other: Map[K, V]): Bool when V: PartialEq
@@ -609,7 +601,6 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
     for key, value in self
       f(key, value)
     end
-    ()
   end
 
   def map_values[U, effect e](self, f: (K, V) -> U with e): Map[K, U] with e
@@ -631,7 +622,6 @@ final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
     for key in removed
       self.remove(key)
     end
-    ()
   end
 
   def iterator(self): MapIterator[K, V]
@@ -697,13 +687,11 @@ final class Set[T: Hashable] implements Counted, Iterable, PartialEq, Hashable, 
     for value in self
       if index > 0
         builder.append(", ")
-        ()
       end
       value.append_to(builder)
       index = index + 1
     end
     builder.append("]")
-    ()
   end
 
   def values(self): List[T]
@@ -714,7 +702,6 @@ final class Set[T: Hashable] implements Counted, Iterable, PartialEq, Hashable, 
     for value in self
       f(value)
     end
-    ()
   end
 
   def add_all(mut self, values: List[T])
@@ -733,7 +720,6 @@ final class Set[T: Hashable] implements Counted, Iterable, PartialEq, Hashable, 
     for value in removed
       changed = self.remove(value)
     end
-    ()
   end
 
   def union(self, other: Set[T]): Set[T]
@@ -955,7 +941,6 @@ final class ListSlice[T] implements Counted, Iterable,
   def init(mut self, source: List[T], start: Int, length: Int)
     if start < 0 or length < 0 or start > source.len() - length
       source.at(-1)
-      ()
     end
     self.source = source
     self.start = start
@@ -976,7 +961,6 @@ final class ListSlice[T] implements Counted, Iterable,
     intrinsic("list.iter_len", self.source, self.epoch)
     if index < 0 or index >= self.length
       self.source.at(-1)
-      ()
     end
     self.source.at(self.start + index)
   end
@@ -1005,13 +989,11 @@ final class ListSlice[T] implements Counted, Iterable,
     while index < self.len()
       if index > 0
         builder.append(", ")
-        ()
       end
       self.at(index).append_to(builder)
       index = index + 1
     end
     builder.append("]")
-    ()
   end
 
   def __eq__(self, other: ListSlice[T]): Bool when T: PartialEq

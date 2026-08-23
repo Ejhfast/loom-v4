@@ -10,7 +10,6 @@ enum FsError implements Error
     in Failed(m) then m
     end
     builder.append(text)
-    ()
   end
 end
 

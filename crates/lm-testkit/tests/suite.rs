@@ -43,6 +43,14 @@ fn control_example_prints_4950() {
 }
 
 #[test]
+fn numbers_example_formats_decimal_values() {
+    assert_eq!(
+        run_example("examples/01-basics/numbers.lm"),
+        "Done((\"rate    3.50\", 7, \"  é\"))"
+    );
+}
+
+#[test]
 fn counter_example_prints_done_5() {
     assert_eq!(run_example("examples/02-objects/counter.lm"), "Done(5)");
 }
