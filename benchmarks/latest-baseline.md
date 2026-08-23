@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `1bb9678`.
+The measured source revision is `26f4652`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -37,20 +37,37 @@ The runtime process used CPU 0.
 
 | Operation | Result |
 | --- | ---: |
-| `int_loop` | 31.6 ns |
-| `direct_call` | 30.6 ns |
-| `string_interp` | 223.4 ns |
-| `float_add` | 32.8 ns |
-| `string_builder` | 43.0 ns |
-| `byte_buffer` | 37.7 ns |
-| `direct_clock` | 110.2 ns |
+| `int_loop` | 33.6 ns |
+| `direct_call` | 31.1 ns |
+| `string_interp` | 256.9 ns |
+| `float_add` | 32.9 ns |
+| `string_builder` | 41.1 ns |
+| `byte_buffer` | 37.5 ns |
+| `direct_clock` | 107.5 ns |
 
 String measurements can vary with process layout.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 43.364 seconds.
+The warm debug workspace suite completed in 42.90 seconds.
 
 The suite used the existing worker count and full coverage.
 
 The standard codec modules link only when source imports them.
+
+## Scheduler foundation
+
+These results use the deterministic scheduler.
+
+| Measurement | Result |
+| --- | ---: |
+| Proc send and receive | 346.9 ns per message |
+| File open and close | 7.079 us per lifecycle |
+| Cached 1 KiB file read | 3.152 us per read |
+| One 35 ms sleep | 1 park, 1 timeout wakeup |
+| Sleep with a signal guardian | 1 park, 1 timeout wakeup |
+| Pure-run allocation gate | fewer than 100 allocations |
+
+The shared host queue removed the ten-millisecond polling interval.
+
+The shared host queue also removed the mixed output and child-wait deadlock.
