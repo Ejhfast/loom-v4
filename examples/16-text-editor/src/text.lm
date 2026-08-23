@@ -1,0 +1,106 @@
+# Scalar-indexed text helpers for the editor.
+#
+# The editor measures a line in Unicode scalar values, not in bytes.
+# Every helper here accepts an index outside the line. It returns a
+# safe result instead of an error.
+
+# The number of columns that one tab advances.
+def tab_stop(): Int
+  4
+end
+
+def smaller(left: Int, right: Int): Int
+  if left < right
+    left
+  else
+    right
+  end
+end
+
+def larger(left: Int, right: Int): Int
+  if left > right
+    left
+  else
+    right
+  end
+end
+
+def clamp(value: Int, low: Int, high: Int): Int
+  larger(low, smaller(value, high))
+end
+
+# Return at most `count` scalars of `line`, starting at `start`.
+def clip(line: Text, start: Int, count: Int): String
+  first = clamp(start, 0, line.len())
+  length = clamp(count, 0, line.len() - first)
+  case line.slice(first, length)
+  in Ok(part) then part.to_string()
+  in Err(_)   then ""
+  end
+end
+
+# Return the scalars before `column`.
+def head_of(line: Text, column: Int): String
+  clip(line, 0, column)
+end
+
+# Return the scalars from `column` to the end.
+def tail_of(line: Text, column: Int): String
+  clip(line, column, line.len())
+end
+
+# Remove the last scalar of `line`.
+def drop_last(line: Text): String
+  head_of(line, larger(line.len() - 1, 0))
+end
+
+# Replace each tab with spaces up to the next tab stop.
+# A line without a tab needs no copy.
+def expand_tabs(line: Text): Text
+  if not line.contains("\t")
+    return line
+  end
+  builder = StringBuilder()
+  width = 0
+  for scalar in line
+    if scalar.codepoint() == 9
+      spaces = tab_stop() - (width % tab_stop())
+      count = 0
+      while count < spaces
+        builder.append(" ")
+        count = count + 1
+      end
+      width = width + spaces
+    else
+      builder.push_char(scalar)
+      width = width + 1
+    end
+  end
+  builder.finish()
+end
+
+# Return the screen column that shows the scalar at `column`.
+def screen_column(line: Text, column: Int): Int
+  width = 0
+  index = 0
+  for scalar in line
+    if index >= column
+      return width
+    end
+    if scalar.codepoint() == 9
+      width = width + tab_stop() - (width % tab_stop())
+    else
+      width = width + 1
+    end
+    index = index + 1
+  end
+  width
+end
+
+# Return `value` inside `0` to `total - 1`, with wrap-around.
+def wrap_index(value: Int, total: Int): Int
+  if total <= 0
+    return 0
+  end
+  ((value % total) + total) % total
+end

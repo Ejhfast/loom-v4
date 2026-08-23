@@ -1,0 +1,113 @@
+# Draw one editor frame.
+#
+# The whole frame becomes one byte string. The event loop writes it
+# with one call, so the screen never shows a partial update.
+
+use editor.Editor
+use editor.Mode
+use std.term.cursor_to
+use std.term.hide_cursor
+use std.term.reset_style
+use std.term.show_cursor
+use text.clip
+use text.expand_tabs
+use text.larger
+use text.smaller
+
+def home(): Bytes
+  b"\x1b[H"
+end
+
+def erase_line(): Bytes
+  b"\x1b[2K"
+end
+
+def invert_style(): Bytes
+  b"\x1b[7m"
+end
+
+def search_prefix(): String
+  "Find: "
+end
+
+def save_prefix(): String
+  "Save as: "
+end
+
+def draw(state: Editor): Bytes
+  buffer = ByteBuffer()
+  buffer.extend(hide_cursor())
+  buffer.extend(home())
+
+  screen = 0
+  while screen < state.view_rows
+    buffer.extend(erase_line())
+    row = state.row_offset + screen
+    if row < state.doc.line_count()
+      line = expand_tabs(state.doc.line(row))
+      buffer.extend(clip(line, state.col_offset, state.view_columns).bytes())
+    else
+      buffer.extend(b"~")
+    end
+    buffer.extend(b"\r\n")
+    screen = screen + 1
+  end
+
+  buffer.extend(erase_line())
+  buffer.extend(invert_style())
+  buffer.extend(status_line(state).bytes())
+  buffer.extend(reset_style())
+  buffer.extend(b"\r\n")
+
+  buffer.extend(erase_line())
+  buffer.extend(clip(message_line(state), 0, state.view_columns).bytes())
+
+  buffer.extend(cursor_position(state))
+  buffer.extend(show_cursor())
+  buffer.finish()
+end
+
+# The status bar names the file and the cursor position.
+def status_line(state: Editor): String
+  marker = if state.doc.dirty
+    " (modified)"
+  else
+    ""
+  end
+  left = "#{state.doc.name()}#{marker}"
+  right = "#{state.row + 1}:#{state.column + 1}  #{state.doc.line_count()} lines"
+  width = state.view_columns
+  room = larger(width - right.len(), 0)
+  clip(clip(left, 0, room).pad_end(room) + right, 0, width)
+end
+
+# The bottom line shows a message or one prompt.
+def message_line(state: Editor): String
+  case state.mode
+  in Edit
+    state.message
+  in Search
+    "#{search_prefix()}#{state.search.query}   arrows: next   Enter: keep   Esc: cancel"
+  in SaveAs
+    "#{save_prefix()}#{state.prompt}   Enter: save   Esc: cancel"
+  end
+end
+
+# Place the cursor in the text, or after the prompt input.
+def cursor_position(state: Editor): Bytes
+  case state.mode
+  in Edit
+    column = state.render_column - state.col_offset + 1
+    row = state.row - state.row_offset + 1
+    cursor_to(column, row).expect("the text cursor position is valid")
+  in Search
+    prompt_cursor(state, search_prefix().len() + state.search.query.len())
+  in SaveAs
+    prompt_cursor(state, save_prefix().len() + state.prompt.len())
+  end
+end
+
+def prompt_cursor(state: Editor, offset: Int): Bytes
+  column = smaller(offset + 1, state.view_columns)
+  cursor_to(column, state.view_rows + 2).expect("the prompt cursor position is valid")
+end

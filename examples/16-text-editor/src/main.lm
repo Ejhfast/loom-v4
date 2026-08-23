@@ -1,0 +1,204 @@
+# A small text editor for the terminal.
+#
+# Start it with one file path:
+#
+#   lm run --allow Args,Clock,Fs,Io,Tty,Wait examples/16-text-editor -- notes.txt
+#
+# The editor reads keys, changes the document, and draws one frame for
+# each key. It restores the terminal before it returns.
+
+use document.Document
+use document.empty
+use document.parse
+use editor.Editor
+use keys.Key
+use keys.decode
+use screen.draw
+use std.io.write_all
+use std.term.clear_screen
+use std.term.cursor_to
+use std.term.show_cursor
+use text.larger
+
+# Read one key at a time from standard input.
+final class KeyReader
+  pending: ByteBuffer = ByteBuffer()
+
+  # Return the next key, or `None` after the input ends.
+  def next(mut self): Option[Key] with Io.ReadBytes, Clock.Sleep, Wait
+    finish = false
+    loop do
+      data = self.pending.build()
+      if not data.is_empty()
+        case decode(data, finish)
+        in Ready(key, consumed)
+          self.drop(consumed)
+          return Some(key)
+        in NeedMore
+          if finish
+            self.drop(1)
+          end
+        end
+      end
+
+      if data.is_empty()
+        chunk = read_input()
+        if chunk.is_empty()
+          return None
+        end
+        self.pending.extend(chunk)
+      else
+        chunk = read_input_soon()
+        if chunk.is_empty()
+          finish = true
+        else
+          self.pending.extend(chunk)
+          finish = false
+        end
+      end
+    end
+  end
+
+  # Report whether one complete key already waits in the buffer.
+  # The event loop skips a frame while more keys wait.
+  def has_ready_key(self): Bool
+    case decode(self.pending.build(), false)
+    in Ready(_, _) then true
+    in NeedMore    then false
+    end
+  end
+
+  def drop(mut self, count: Int)
+    data = self.pending.build()
+    rest = case data.slice(count, larger(data.len() - count, 0))
+    in Ok(value) then value
+    in Err(_)    then Bytes("")
+    end
+    self.pending.clear()
+    self.pending.extend(rest)
+  end
+end
+
+def read_input(): Bytes with Io.ReadBytes
+  case sys.io.read_bytes(1024)
+  in Ok(value) then value
+  in Err(_)    then Bytes("")
+  end
+end
+
+# Wait a short time for the rest of one escape sequence.
+# The timer arm tells a single Escape key from an arrow key.
+def read_input_soon(): Bytes with Io.ReadBytes, Clock.Sleep, Wait
+  select
+  in sys.io.read_bytes.wait(1024) -> input
+    case input
+    in Ok(value) then value
+    in Err(_)    then Bytes("")
+    end
+  in sys.clock.sleep.wait(30_000_000) -> _
+    Bytes("")
+  end
+end
+
+def read_file(path: String): Result[Bytes, FsError] with Fs
+  file = sys.fs.open(path, OpenOptions.ReadOnly)?
+  buffer = ByteBuffer()
+  failure: Option[FsError] = None
+  loop do
+    case file.read(65536)
+    in Err(error)
+      failure = Some(error)
+      break
+    in Ok(chunk)
+      if chunk.is_empty()
+        break
+      end
+      buffer.extend(chunk)
+    end
+  end
+  file.close()?
+  case failure
+  in Some(error) then Err(error)
+  in None        then Ok(buffer.finish())
+  end
+end
+
+# Load the named file. A missing file starts one empty document.
+def load_document(path: Option[String]): Result[Document, String] with Fs
+  case path
+  in None
+    Ok(empty(None))
+  in Some(value)
+    case read_file(value)
+    in Ok(data)                 then parse(data, path)
+    in Err(FsError.NotFound(_)) then Ok(empty(path))
+    in Err(error)               then Err(display(error))
+    end
+  end
+end
+
+def fit_to_terminal(mut state: Editor, tty: Tty) with Tty.Size
+  case tty.size(StdStream.Output)
+  in Ok(size) then state.resize(size.columns, size.rows)
+  in Err(_)   then state.resize(80, 24)
+  end
+end
+
+def edit_loop(mut state: Editor, tty: Tty) with Clock.Sleep, Fs, Io, Tty, Wait
+  reader = KeyReader()
+  loop do
+    fit_to_terminal(state, tty)
+    state.follow_cursor()
+    # Draw one frame for each pause in the input. A burst of keys,
+    # such as a paste or a key repeat, applies before the next frame.
+    if not reader.has_ready_key()
+      write_all(draw(state)).expect("the frame writes")
+    end
+    case reader.next()
+    in None then break
+    in Some(key)
+      state.handle(key)
+    end
+    if state.done
+      break
+    end
+  end
+end
+
+def run() with Args, Clock.Sleep, Fs, Io, Tty, Wait
+  arguments = sys.args()
+  path: Option[String] = if arguments.is_empty()
+    None
+  else
+    Some(arguments.at(0))
+  end
+
+  tty = Tty()
+  if not tty.is_terminal(StdStream.Input) or not tty.is_terminal(StdStream.Output)
+    print_error("the editor needs a terminal on standard input and output\n").expect("the message writes")
+    return
+  end
+
+  doc = case load_document(path)
+  in Ok(value) then value
+  in Err(message)
+    print_error("the editor cannot open the file: #{message}\n").expect("the message writes")
+    return
+  end
+
+  raw = case tty.enter_raw()
+  in Ok(value) then value
+  in Err(error)
+    print_error("raw terminal mode failed: #{display(error)}\n").expect("the message writes")
+    return
+  end
+
+  state = Editor(doc)
+  edit_loop(state, tty)
+
+  home = cursor_to(1, 1).expect("the home position is valid")
+  write_all(clear_screen() + home + show_cursor()).expect("the reset writes")
+  raw.exit().expect("raw mode closes")
+end
+
+run()

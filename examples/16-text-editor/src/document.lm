@@ -1,0 +1,110 @@
+# The edited lines and the file that holds them.
+
+use text.head_of
+use text.tail_of
+
+final class Document
+  lines: List[String] = List[String]()
+  path: Option[String] = None
+  dirty: Bool = false
+
+  def init(mut self, lines: List[String], path: Option[String])
+    self.lines = lines
+    if self.lines.is_empty()
+      self.lines.push("")
+    end
+    self.path = path
+  end
+
+  def line_count(self): Int
+    self.lines.len()
+  end
+
+  # Return one line, or an empty line outside the document.
+  def line(self, row: Int): String
+    case self.lines.get(row)
+    in Some(value) then value
+    in None        then ""
+    end
+  end
+
+  def line_length(self, row: Int): Int
+    self.line(row).len()
+  end
+
+  def name(self): String
+    case self.path
+    in Some(value) then value
+    in None        then "[no name]"
+    end
+  end
+
+  # Insert `value` before the scalar at `column`.
+  def insert_text(mut self, row: Int, column: Int, value: Text)
+    current = self.line(row)
+    self.lines.set(row, head_of(current, column) + value + tail_of(current, column))
+    self.dirty = true
+  end
+
+  # Remove the scalar at `column`. Return true after a change.
+  def remove_at(mut self, row: Int, column: Int): Bool
+    current = self.line(row)
+    if column < 0 or column >= current.len()
+      return false
+    end
+    self.lines.set(row, head_of(current, column) + tail_of(current, column + 1))
+    self.dirty = true
+    true
+  end
+
+  # Split `row` at `column`. The tail becomes the next line.
+  def split_line(mut self, row: Int, column: Int)
+    current = self.line(row)
+    self.lines.set(row, head_of(current, column))
+    self.lines.insert(row + 1, tail_of(current, column))
+    self.dirty = true
+  end
+
+  # Append the line after `row` to `row`. Return the join column,
+  # or -1 when no next line exists.
+  def join_next(mut self, row: Int): Int
+    if row < 0 or row + 1 >= self.lines.len()
+      return -1
+    end
+    current = self.line(row)
+    column = current.len()
+    self.lines.set(row, current + self.line(row + 1))
+    self.lines.remove(row + 1)
+    self.dirty = true
+    column
+  end
+
+  # Return the file text. Each line ends with one newline.
+  def bytes(self): Bytes
+    builder = StringBuilder()
+    for line in self.lines
+      builder.append(line)
+      builder.append("\n")
+    end
+    builder.finish().bytes()
+  end
+end
+
+# Build one document from file bytes.
+def parse(data: Bytes, path: Option[String]): Result[Document, String]
+  case data.utf8()
+  in Err(_)
+    Err("the file is not valid UTF-8 text")
+  in Ok(content)
+    lines = List[String]()
+    for line in content.lines()
+      lines.push(line.to_string())
+    end
+    Ok(Document(lines, path))
+  end
+end
+
+# Build one empty document.
+def empty(path: Option[String]): Document
+  Document(List[String](), path)
+end

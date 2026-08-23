@@ -2325,8 +2325,9 @@ depth(1, 3)
 /// the source came from a file.
 fn gate_corpus() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    // The shipped examples. `examples/05-modules` holds package
-    // projects. Those projects need the package compiler driver.
+    // The shipped examples. `examples/05-modules` and
+    // `examples/16-text-editor` hold package projects. Those projects
+    // need the package compiler driver.
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_lm(&lm_testkit::repo_root().join("examples"), &mut files);
     files.sort();
@@ -2336,7 +2337,8 @@ fn gate_corpus() -> Vec<(String, String)> {
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        if name.starts_with("examples/05-modules/") {
+        if name.starts_with("examples/05-modules/") || name.starts_with("examples/16-text-editor/")
+        {
             continue;
         }
         let source = std::fs::read_to_string(&path).expect("the example reads");

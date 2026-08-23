@@ -1,0 +1,415 @@
+# The editor state and its key dispatch.
+#
+# The state holds the document, the cursor, the scroll position, and
+# the current mode. `handle` applies one key. It never draws.
+
+use document.Document
+use keys.Key
+use keys.control_of
+use std.fs.write_file_all
+use text.clamp
+use text.drop_last
+use text.larger
+use text.screen_column
+use text.smaller
+use text.tab_stop
+use text.wrap_index
+
+enum Mode
+  Edit
+  Search
+  SaveAs
+end
+
+# The state of one incremental search.
+final class SearchState
+  query: String = ""
+  row: Int = 0
+  column: Int = 0
+  row_offset: Int = 0
+  col_offset: Int = 0
+  last_row: Int = -1
+end
+
+def help_text(): String
+  "Ctrl-S save   Ctrl-F find   Ctrl-Q quit   Ctrl-A start   Ctrl-E end"
+end
+
+final class Editor
+  doc: Document = Document(List[String](), None)
+  row: Int = 0
+  column: Int = 0
+  wanted_column: Int = 0
+  render_column: Int = 0
+  row_offset: Int = 0
+  col_offset: Int = 0
+  view_rows: Int = 22
+  view_columns: Int = 80
+  message: String = ""
+  mode: Mode = Mode.Edit
+  prompt: String = ""
+  search: SearchState = SearchState()
+  done: Bool = false
+  quit_confirm: Int = 1
+
+  def init(mut self, doc: Document)
+    self.doc = doc
+    self.message = help_text()
+  end
+
+  # Record the terminal size. Two rows hold the status and the message.
+  def resize(mut self, columns: Int, rows: Int)
+    self.view_columns = larger(columns, 20)
+    self.view_rows = larger(rows - 2, 1)
+  end
+
+  def touch(mut self)
+    self.quit_confirm = 1
+  end
+
+  # ---- movement -------------------------------------------------
+
+  def move_up(mut self)
+    if self.row > 0
+      self.row = self.row - 1
+      self.column = smaller(self.wanted_column, self.doc.line_length(self.row))
+    end
+  end
+
+  def move_down(mut self)
+    if self.row + 1 < self.doc.line_count()
+      self.row = self.row + 1
+      self.column = smaller(self.wanted_column, self.doc.line_length(self.row))
+    end
+  end
+
+  def move_left(mut self)
+    if self.column > 0
+      self.column = self.column - 1
+    elsif self.row > 0
+      self.row = self.row - 1
+      self.column = self.doc.line_length(self.row)
+    end
+    self.wanted_column = self.column
+  end
+
+  def move_right(mut self)
+    if self.column < self.doc.line_length(self.row)
+      self.column = self.column + 1
+    elsif self.row + 1 < self.doc.line_count()
+      self.row = self.row + 1
+      self.column = 0
+    end
+    self.wanted_column = self.column
+  end
+
+  def move_home(mut self)
+    self.column = 0
+    self.wanted_column = 0
+  end
+
+  def move_end(mut self)
+    self.column = self.doc.line_length(self.row)
+    self.wanted_column = self.column
+  end
+
+  # Move one screen up or down. `direction` is -1 or 1.
+  def move_page(mut self, direction: Int)
+    step = larger(self.view_rows - 1, 1)
+    last = larger(self.doc.line_count() - 1, 0)
+    self.row = clamp(self.row + direction * step, 0, last)
+    self.row_offset = clamp(self.row_offset + direction * step, 0, last)
+    self.column = smaller(self.wanted_column, self.doc.line_length(self.row))
+  end
+
+  # ---- editing --------------------------------------------------
+
+  # Insert one printable scalar group at the cursor.
+  def insert(mut self, value: String)
+    if value.is_empty()
+      return
+    end
+    case value.at(0)
+    in Some(scalar)
+      if scalar.codepoint() < 32
+        return
+      end
+    in None
+      return
+    end
+    self.doc.insert_text(self.row, self.column, value)
+    self.column = self.column + value.len()
+    self.wanted_column = self.column
+    self.touch()
+  end
+
+  # Insert spaces up to the next tab stop.
+  def insert_tab(mut self)
+    width = screen_column(self.doc.line(self.row), self.column)
+    spaces = tab_stop() - (width % tab_stop())
+    builder = StringBuilder()
+    count = 0
+    while count < spaces
+      builder.append(" ")
+      count = count + 1
+    end
+    self.insert(builder.finish())
+  end
+
+  def insert_newline(mut self)
+    self.doc.split_line(self.row, self.column)
+    self.row = self.row + 1
+    self.column = 0
+    self.wanted_column = 0
+    self.touch()
+  end
+
+  def backspace(mut self)
+    if self.column > 0
+      self.column = self.column - 1
+      self.doc.remove_at(self.row, self.column)
+      self.touch()
+    elsif self.row > 0
+      column = self.doc.join_next(self.row - 1)
+      if column >= 0
+        self.row = self.row - 1
+        self.column = column
+        self.touch()
+      end
+    end
+    self.wanted_column = self.column
+  end
+
+  def delete(mut self)
+    if self.doc.remove_at(self.row, self.column)
+      self.touch()
+      return
+    end
+    if self.row + 1 < self.doc.line_count()
+      self.doc.join_next(self.row)
+      self.touch()
+    end
+  end
+
+  # ---- files ----------------------------------------------------
+
+  def save(mut self) with Fs
+    case self.doc.path
+    in None
+      self.mode = Mode.SaveAs
+      self.prompt = ""
+    in Some(path)
+      case write_document(path, self.doc.bytes())
+      in Ok(count)
+        self.doc.dirty = false
+        self.message = "wrote #{count} bytes to #{path}"
+      in Err(error)
+        self.message = "save failed: #{display(error)}"
+      end
+    end
+  end
+
+  def request_quit(mut self)
+    if self.doc.dirty and self.quit_confirm > 0
+      self.quit_confirm = self.quit_confirm - 1
+      self.message = "unsaved changes. Press Ctrl-Q again to quit."
+      return
+    end
+    self.done = true
+  end
+
+  # ---- search ---------------------------------------------------
+
+  def begin_search(mut self)
+    self.search = SearchState()
+    self.search.row = self.row
+    self.search.column = self.column
+    self.search.row_offset = self.row_offset
+    self.search.col_offset = self.col_offset
+    self.mode = Mode.Search
+    self.message = ""
+  end
+
+  def cancel_search(mut self)
+    self.row = self.search.row
+    self.column = self.search.column
+    self.row_offset = self.search.row_offset
+    self.col_offset = self.search.col_offset
+    self.mode = Mode.Edit
+    self.message = help_text()
+  end
+
+  # Find the next match. `direction` is -1 or 1.
+  def find_match(mut self, direction: Int)
+    query = self.search.query
+    if query.is_empty()
+      return
+    end
+    total = self.doc.line_count()
+    start = if self.search.last_row < 0
+      self.row
+    else
+      self.search.last_row + direction
+    end
+    step = 0
+    while step < total
+      row = wrap_index(start + step * direction, total)
+      case self.doc.line(row).find(query)
+      in Some(column)
+        self.row = row
+        self.column = column
+        self.wanted_column = column
+        self.search.last_row = row
+        self.message = ""
+        return
+      in None then ()
+      end
+      step = step + 1
+    end
+    self.search.last_row = -1
+    self.message = "no match for #{query}"
+  end
+
+  # ---- dispatch -------------------------------------------------
+
+  def handle(mut self, key: Key) with Fs
+    case self.mode
+    in Edit   then self.handle_edit(key)
+    in Search then self.handle_search(key)
+    in SaveAs then self.handle_save_as(key)
+    end
+    self.follow_cursor()
+  end
+
+  def handle_edit(mut self, key: Key) with Fs
+    case key
+    in Text(value)     then self.insert(value)
+    in Control(letter) then self.handle_control(letter)
+    in Enter           then self.insert_newline()
+    in Tab             then self.insert_tab()
+    in Backspace       then self.backspace()
+    in Delete          then self.delete()
+    in Up              then self.move_up()
+    in Down            then self.move_down()
+    in Left            then self.move_left()
+    in Right           then self.move_right()
+    in Home            then self.move_home()
+    in End             then self.move_end()
+    in PageUp          then self.move_page(-1)
+    in PageDown        then self.move_page(1)
+    in Escape
+      self.message = help_text()
+    in Unsupported     then ()
+    end
+  end
+
+  def handle_control(mut self, letter: Int) with Fs
+    if letter == control_of("q")
+      self.request_quit()
+    elsif letter == control_of("s")
+      self.save()
+    elsif letter == control_of("f")
+      self.begin_search()
+    elsif letter == control_of("a")
+      self.move_home()
+    elsif letter == control_of("e")
+      self.move_end()
+    elsif letter == control_of("l")
+      self.message = help_text()
+    else
+      ()
+    end
+  end
+
+  def handle_search(mut self, key: Key)
+    case key
+    in Enter
+      self.mode = Mode.Edit
+      self.message = help_text()
+    in Escape
+      self.cancel_search()
+    in Backspace
+      self.search.query = drop_last(self.search.query)
+      self.search.last_row = -1
+      self.find_match(1)
+    in Text(value)
+      self.search.query = self.search.query + value
+      self.search.last_row = -1
+      self.find_match(1)
+    in Up       then self.find_match(-1)
+    in Left     then self.find_match(-1)
+    in Down     then self.find_match(1)
+    in Right    then self.find_match(1)
+    in Control(letter)
+      if letter == control_of("g")
+        self.cancel_search()
+      end
+    in _ then ()
+    end
+  end
+
+  def handle_save_as(mut self, key: Key) with Fs
+    case key
+    in Enter
+      if self.prompt.is_empty()
+        self.mode = Mode.Edit
+        self.message = "save cancelled"
+      else
+        self.doc.path = Some(self.prompt)
+        self.mode = Mode.Edit
+        self.save()
+      end
+    in Escape
+      self.mode = Mode.Edit
+      self.message = "save cancelled"
+    in Backspace
+      self.prompt = drop_last(self.prompt)
+    in Text(value)
+      self.prompt = self.prompt + value
+    in Control(letter)
+      if letter == control_of("g")
+        self.mode = Mode.Edit
+        self.message = "save cancelled"
+      end
+    in _ then ()
+    end
+  end
+
+  # Keep the cursor inside the document and inside the view.
+  def follow_cursor(mut self)
+    self.row = clamp(self.row, 0, larger(self.doc.line_count() - 1, 0))
+    self.column = clamp(self.column, 0, self.doc.line_length(self.row))
+    self.render_column = screen_column(self.doc.line(self.row), self.column)
+
+    if self.row < self.row_offset
+      self.row_offset = self.row
+    end
+    if self.row >= self.row_offset + self.view_rows
+      self.row_offset = self.row - self.view_rows + 1
+    end
+    if self.render_column < self.col_offset
+      self.col_offset = self.render_column
+    end
+    if self.render_column >= self.col_offset + self.view_columns
+      self.col_offset = self.render_column - self.view_columns + 1
+    end
+  end
+end
+
+# Write the document text to `path`.
+def write_document(path: String, data: Bytes): Result[Int, FsError] with Fs
+  file = sys.fs.open(path, OpenOptions.CreateTruncate)?
+  written = case write_file_all(file, data)
+  in Err(error) then Err(error)
+  in Ok(_)      then file.flush()
+  end
+  closed = file.close()
+  case written
+  in Err(error) then Err(error)
+  in Ok(_)
+    case closed
+    in Err(error) then Err(error)
+    in Ok(_)      then Ok(data.len())
+    end
+  end
+end
