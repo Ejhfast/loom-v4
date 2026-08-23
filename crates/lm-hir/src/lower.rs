@@ -3037,6 +3037,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::TcpStream
                 | NativeRepr::TcpListener
                 | NativeRepr::TlsStream
+                | NativeRepr::UdpSocket
                 | NativeRepr::Artifact
                 | NativeRepr::VerifiedModule
                 | NativeRepr::FunctionCode

@@ -682,6 +682,12 @@ impl World {
             {
                 self.pending_resource_of(vm, ResourceErrors::Exec)
             }
+            Some(lm_abi::OP_UDP_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.net_closed) =>
+            {
+                self.pending_resource_of(vm, ResourceErrors::Net)
+            }
             _ => None,
         };
         let spawn_closing = if self.pending_op(vm) == Some(lm_abi::OP_EXEC_SPAWN)

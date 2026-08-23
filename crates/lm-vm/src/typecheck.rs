@@ -176,6 +176,7 @@ enum Kind {
     PipeReader,
     PipeWriter,
     Child,
+    UdpSocket,
     Artifact,
     VerifiedModule,
     FunctionCode,
@@ -343,6 +344,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::PipeWriter)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_CHILD] == *class {
                 Node::Heap(Kind::Child)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_UDP_SOCKET] == *class {
+                Node::Heap(Kind::UdpSocket)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_ARTIFACT] == *class {
                 Node::Heap(Kind::Artifact)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
@@ -450,6 +453,7 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativePipeReader { .. } => Kind::PipeReader,
         Object::NativePipeWriter { .. } => Kind::PipeWriter,
         Object::NativeChild { .. } => Kind::Child,
+        Object::NativeUdpSocket { .. } => Kind::UdpSocket,
         Object::NativeCode(code) => match code.kind {
             lm_heap::PortableCodeKind::Artifact => Kind::Artifact,
             lm_heap::PortableCodeKind::VerifiedModule => Kind::VerifiedModule,

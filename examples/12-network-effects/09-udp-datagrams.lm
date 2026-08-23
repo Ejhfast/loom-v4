@@ -1,0 +1,26 @@
+# Move complete datagrams between two loopback sockets.
+#
+# Run with `--allow Udp`.
+
+def loopback(port: Int): SocketAddress
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0).expect("the address is valid")
+end
+
+def exchange(): (String, Int) with Udp
+  sender = Udp().bind(loopback(0)).expect("the sender binds")
+  receiver = Udp().bind(loopback(0)).expect("the receiver binds")
+  sender_address = sender.local_address().expect("the sender address exists")
+  receiver_address = receiver.local_address().expect("the receiver address exists")
+
+  sender.send_to(receiver_address, b"one packet").expect("the datagram sends")
+  datagram = receiver.recv_from().expect("the datagram arrives")
+  answer = (datagram.data.text(), datagram.peer.port - sender_address.port)
+
+  sender.close().expect("the sender closes")
+  receiver.close().expect("the receiver closes")
+  answer
+end
+
+exchange()

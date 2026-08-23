@@ -131,6 +131,7 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::ExecSpec => "ExecSpec",
                     lm_abi::AbiCore::ChildStatus => "ChildStatus",
                     lm_abi::AbiCore::ExecError => "ExecError",
+                    lm_abi::AbiCore::UdpDatagram => "UdpDatagram",
                 };
                 Self::core_class(ctx, name)
             }
@@ -146,6 +147,7 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiNative::PipeReader => Self::core_class(ctx, "PipeReader"),
                 lm_abi::AbiNative::PipeWriter => Self::core_class(ctx, "PipeWriter"),
                 lm_abi::AbiNative::Child => Self::core_class(ctx, "Child"),
+                lm_abi::AbiNative::UdpSocket => Self::core_class(ctx, "UdpSocket"),
             },
             lm_abi::AbiType::Var(index) => vars
                 .get(index as usize)

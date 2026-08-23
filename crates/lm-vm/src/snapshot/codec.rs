@@ -686,7 +686,8 @@ fn encode_object(out: &mut Out, object: &Object) {
         | Object::NativeSignalStream { resource }
         | Object::NativePipeReader { resource }
         | Object::NativePipeWriter { resource }
-        | Object::NativeChild { resource } => {
+        | Object::NativeChild { resource }
+        | Object::NativeUdpSocket { resource } => {
             out.u64(*resource);
         }
         Object::NativeHostResource { kind, resource } => {
@@ -2265,6 +2266,9 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             resource: cur.u64()?,
         },
         35 => Object::NativeChild {
+            resource: cur.u64()?,
+        },
+        36 => Object::NativeUdpSocket {
             resource: cur.u64()?,
         },
         25 => Object::NativeRun {

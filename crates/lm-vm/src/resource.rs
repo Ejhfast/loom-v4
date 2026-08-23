@@ -82,6 +82,8 @@ pub enum ResourceKind {
     PipeWriter,
     /// One live operating-system child handle.
     Child,
+    /// One open UDP socket.
+    UdpSocket,
     /// One opaque extension resource, by stable kind identity.
     Extension([u8; 32]),
 }
@@ -101,6 +103,7 @@ impl ResourceKind {
             | ResourceKind::PipeReader
             | ResourceKind::PipeWriter
             | ResourceKind::Child => SnapshotClass::HostAttachment,
+            ResourceKind::UdpSocket => SnapshotClass::HostAttachment,
             ResourceKind::Extension(_) => SnapshotClass::HostAttachment,
         }
     }

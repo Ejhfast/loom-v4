@@ -23,7 +23,7 @@ use lm_vm::{
     HostValue, HostWaitCancel, SharedBytes,
 };
 use network_service::{
-    NetworkService, TcpRequest, TlsClientSettings, TlsRequest, TlsServerSettings,
+    NetworkService, TcpRequest, TlsClientSettings, TlsRequest, TlsServerSettings, UdpRequest,
 };
 use process_service::{ProcessRequest, ProcessService};
 use signal_service::{SignalService, SignalServiceError};
@@ -209,6 +209,21 @@ impl CliHost {
         } else {
             HostStart::Completed(tls_error(
                 CoreCtor::TlsLimitExceeded,
+                "the network queue is full",
+            ))
+        }
+    }
+
+    fn start_udp(&mut self, key: CompletionKey, request: UdpRequest) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        let wait_source = self.starting_wait;
+        if self.network().submit_udp(key, token, request, wait_source) {
+            HostStart::Waiting(token)
+        } else {
+            HostStart::Completed(net_error(
+                CoreCtor::NetLimitExceeded,
                 "the network queue is full",
             ))
         }
@@ -1429,6 +1444,65 @@ impl Host for CliHost {
                 };
                 self.start_tls(key, TlsRequest::Close { stream: *stream })
             }
+            lm_abi::OP_UDP_BIND => {
+                let Some(HostArg::SocketAddress(address)) = args.first() else {
+                    return HostStart::Failed("Udp.Bind needs one address".to_string());
+                };
+                let Some(socket) = self.take_tcp() else {
+                    return HostStart::Failed("the UDP token space is exhausted".to_string());
+                };
+                self.start_udp(
+                    key,
+                    UdpRequest::Bind {
+                        socket,
+                        address: *address,
+                    },
+                )
+            }
+            lm_abi::OP_UDP_SEND_TO => {
+                let (
+                    Some(HostArg::Udp(socket)),
+                    Some(HostArg::SocketAddress(address)),
+                    Some(HostArg::Bytes(bytes)),
+                ) = (args.first(), args.get(1), args.get(2))
+                else {
+                    return HostStart::Failed(
+                        "Udp.SendTo needs a socket, address, and bytes".to_string(),
+                    );
+                };
+                if bytes.len() > 65_535 {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the UDP datagram is too large",
+                    ));
+                }
+                self.start_udp(
+                    key,
+                    UdpRequest::SendTo {
+                        socket: *socket,
+                        address: *address,
+                        bytes: bytes.clone(),
+                    },
+                )
+            }
+            lm_abi::OP_UDP_RECV_FROM => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.RecvFrom needs one socket".to_string());
+                };
+                self.start_udp(key, UdpRequest::RecvFrom { socket: *socket })
+            }
+            lm_abi::OP_UDP_LOCAL_ADDRESS => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.LocalAddress needs one socket".to_string());
+                };
+                self.start_udp(key, UdpRequest::LocalAddress { socket: *socket })
+            }
+            lm_abi::OP_UDP_CLOSE => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.Close needs one socket".to_string());
+                };
+                self.start_udp(key, UdpRequest::Close { socket: *socket })
+            }
             lm_abi::OP_COMPILER_COMPILE => {
                 let [HostArg::Str(module_name), HostArg::Str(source_name), HostArg::Str(source), HostArg::CompileEnv(env), HostArg::CompileOptions(options)] =
                     args.as_slice()
@@ -1559,7 +1633,8 @@ impl Host for CliHost {
                 | lm_abi::OP_TCP_CONNECT
                 | lm_abi::OP_TCP_ACCEPT
                 | lm_abi::OP_TCP_READ
-                | lm_abi::OP_TLS_READ => Some(WaitService::Network),
+                | lm_abi::OP_TLS_READ
+                | lm_abi::OP_UDP_RECV_FROM => Some(WaitService::Network),
                 lm_abi::OP_SIGNAL_NEXT => Some(WaitService::Signal),
                 lm_abi::OP_PIPE_READ | lm_abi::OP_EXEC_WAIT => Some(WaitService::Process),
                 _ => None,
@@ -1761,6 +1836,12 @@ impl Host for CliHost {
         self.network
             .as_ref()
             .is_some_and(|network| network.force_close_tls(token))
+    }
+
+    fn close_udp(&mut self, token: u64) -> bool {
+        self.network
+            .as_ref()
+            .is_some_and(|network| network.force_close_udp(token))
     }
 
     fn close_raw_mode(&mut self, token: u64) -> bool {
@@ -2920,6 +3001,76 @@ end
         ] {
             assert!(host.close_tcp(resource));
         }
+    }
+
+    #[test]
+    fn a_ready_udp_wait_restores_its_complete_datagram() {
+        let mut host = CliHost::new(1);
+        let sender = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_UDP_BIND,
+            vec![HostArg::SocketAddress(loopback(0))],
+        )) {
+            HostValue::UdpSocket(token) => token,
+            other => panic!("expected a UDP socket, found {other:?}"),
+        };
+        let receiver = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_UDP_BIND,
+            vec![HostArg::SocketAddress(loopback(0))],
+        )) {
+            HostValue::UdpSocket(token) => token,
+            other => panic!("expected a UDP socket, found {other:?}"),
+        };
+        let sender_address = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_UDP_LOCAL_ADDRESS,
+            vec![HostArg::Udp(sender)],
+        )) {
+            HostValue::SocketAddress(address) => address,
+            other => panic!("expected a UDP address, found {other:?}"),
+        };
+        let receiver_address = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_UDP_LOCAL_ADDRESS,
+            vec![HostArg::Udp(receiver)],
+        )) {
+            HostValue::SocketAddress(address) => address,
+            other => panic!("expected a UDP address, found {other:?}"),
+        };
+        net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_UDP_SEND_TO,
+            vec![
+                HostArg::Udp(sender),
+                HostArg::SocketAddress(receiver_address),
+                HostArg::Bytes(b"one datagram".into()),
+            ],
+        ));
+        let receive = start_wait_token(
+            &mut host,
+            lm_abi::OP_UDP_RECV_FROM,
+            vec![HostArg::Udp(receiver)],
+        );
+        let completion = host.wait().expect("the UDP wait becomes ready");
+        assert_eq!(completion.token, receive);
+        assert_eq!(host.cancel_wait(receive), HostWaitCancel::ReadyRestored);
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_UDP_RECV_FROM,
+                vec![HostArg::Udp(receiver)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::UdpDatagram,
+                vec![
+                    HostValue::Bytes(b"one datagram".into()),
+                    HostValue::SocketAddress(sender_address),
+                ],
+            )
+        );
+        assert!(host.close_udp(sender));
+        assert!(host.close_udp(receiver));
     }
 
     #[test]

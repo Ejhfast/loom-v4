@@ -1182,7 +1182,7 @@ A select has at least two arms. Each arm expression has type `Wait[T]`.
 
 The arm name has type `T`. `_` discards that arm's result.
 
-The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 23.8 defines their operations.
+The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 23.9 defines their operations.
 
 The runtime tests ready arms in source order whenever the proc resumes.
 
@@ -3010,6 +3010,14 @@ Line-ending policy belongs to core and standard wrappers.
 
 Reads can suspend.
 
+Each write operation makes one platform write attempt.
+
+The host flushes accepted bytes before it returns `Ok`.
+
+A closed output pipe returns `IoError.BrokenPipe`.
+
+Diagnostic reporting treats its own closed pipe as a completed report.
+
 ### 23.2 File system
 
 ```text
@@ -3045,7 +3053,32 @@ Env.Get   (String) -> Result[Option[String], EnvError]
 
 `Env.Get` returns `Ok(None)` when the name is absent.
 
-### 23.3 Clock and randomness
+### 23.3 Pipes and child programs
+
+```text
+Pipe.Open  () -> Result[(PipeReader, PipeWriter), PipeError]
+Pipe.Read  (PipeReader, Int) -> Result[Bytes, PipeError]
+Pipe.Write (PipeWriter, Bytes) -> Result[Int, PipeError]
+Pipe.Close (PipeEnd) -> Result[(), PipeError]
+
+Exec.Spawn     (ExecSpec) -> Result[Child, ExecError]
+Exec.Wait      (Child) -> Result[ChildStatus, ExecError]
+Exec.Terminate (Child) -> Result[(), ExecError]
+Exec.Kill      (Child) -> Result[(), ExecError]
+Exec.Close     (Child) -> Result[(), ExecError]
+```
+
+`PipeEnd` is the sealed native parent of `PipeReader` and `PipeWriter`.
+
+`Pipe.Read` and `Exec.Wait` can create wait sources.
+
+Live pipe ends and child handles block snapshot creation.
+
+The host invokes no shell unless a library names one explicitly.
+
+The host-effects sidecar defines child inputs, ownership, limits, and cleanup.
+
+### 23.4 Clock and randomness
 
 ```text
 Clock.Now       () -> Int             # UTC nanoseconds from Unix epoch
@@ -3059,7 +3092,7 @@ Entropy.Bytes   (Int) -> Result[Bytes, EntropyError]
 
 Range validation is ordinary deterministic checking before host entropy use.
 
-### 23.4 Terminals and process signals
+### 23.5 Terminals and process signals
 
 ```text
 Tty.IsTerminal (StdStream) -> Bool
@@ -3094,7 +3127,7 @@ Live `RawMode` and `SignalStream` resources block snapshot creation.
 
 The host-effects sidecar defines delivery, escalation, limits, and platform behavior.
 
-### 23.5 Networking
+### 23.6 Networking
 
 ```text
 Dns.Resolve       (String, Int) -> Result[[SocketAddress], NetError]
@@ -3111,37 +3144,66 @@ Tcp.Close         (TcpResource) -> Result[(), NetError]
 
 Tls.Handshake     (TcpStream, String, Int, [Bytes], [Bytes], Int, Int)
                   -> Result[TlsStream, TlsError]
+Tls.ServerHandshake
+                  (TcpStream, [Bytes], Bytes, [Bytes], Int, Int)
+                  -> Result[TlsStream, TlsError]
 Tls.Read          (TlsStream, Int) -> Result[TcpRead, TlsError]
 Tls.Write         (TlsStream, Bytes) -> Result[Int, TlsError]
 Tls.Shutdown      (TlsStream) -> Result[(), TlsError]
 Tls.LocalAddress  (TlsStream) -> Result[SocketAddress, TlsError]
 Tls.PeerAddress   (TlsStream) -> Result[SocketAddress, TlsError]
 Tls.Close         (TlsStream) -> Result[(), TlsError]
+
+Udp.Bind          (SocketAddress) -> Result[UdpSocket, NetError]
+Udp.SendTo        (UdpSocket, SocketAddress, Bytes) -> Result[(), NetError]
+Udp.RecvFrom      (UdpSocket) -> Result[UdpDatagram, NetError]
+Udp.LocalAddress  (UdpSocket) -> Result[SocketAddress, NetError]
+Udp.Close         (UdpSocket) -> Result[(), NetError]
 ```
 
 `TcpResource` is the sealed native parent of `TcpStream` and `TcpListener`.
 
 `TlsStream` is a separate final native resource class.
 
-Live TCP and TLS resources block snapshot creation.
+`UdpSocket` is a separate final native resource class.
+
+Live TCP, TLS, and UDP resources block snapshot creation.
 
 `TcpRead.Data` carries nonempty bytes. `TcpRead.End` reports orderly peer closure.
 
 A submitted TLS handshake consumes its TCP stream on every result.
 
+`Udp.RecvFrom` can create a wait source.
+
+A UDP receive returns one complete datagram or an error.
+
+UDP operations accept at most 65,535 payload bytes.
+
+Zero-length UDP datagrams are valid.
+
 Certificate roots, server names, versions, ALPN, and buffers are explicit values.
 
 The transparent effect sets include `Tcp.Stream`, `Tcp.Listener`, `Tcp.Client`, and `Tcp.Server`.
 
-They also include `Tls.Stream`, `Tls.Client`, `Http.CleartextClient`, and `Http.Client`.
+They also include `Tls.Stream`, `Tls.Client`, `Tls.Server`, and both HTTP client groups.
+
+The UDP effect sets include `Udp.Socket` and `Udp`.
 
 An effect set expands to a finite exact-operation closure.
 
 It creates no runtime operation and hides no request from a driver.
 
-The network sidecar defines limits, ownership, errors, and HTTP/TLS layers.
+`Dns.Resolve` uses the operating-system resolver.
 
-### 23.6 VM operations
+The operation can inspect host files, resolver settings, and configured name services.
+
+Every connected or accepted TCP stream has `TCP_NODELAY` enabled.
+
+The host closes the stream when it cannot enable this option.
+
+The network sidecar defines limits, ownership, errors, and protocol layers.
+
+### 23.7 VM operations
 
 Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, `T` is the machine's terminal result, `R` is one pending operation's reply type, and `Fn[A,T,e]` is manifest metanotation for a callable with argument tuple `A`, result `T`, and row `e`.
 
@@ -3299,7 +3361,7 @@ Each `Serve` operation requires a compatible current typed call.
 `Vm.ResourceSame` matches two controls only while their shared entry
 is live. A closed control never matches.
 
-### 23.7 Proc operations
+### 23.8 Proc operations
 
 A proc handle carries both mailbox and terminal result types:
 
@@ -3323,7 +3385,7 @@ A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send`
 
 Fuel counts target-world instructions. Host completion time does not consume fuel.
 
-### 23.8 Wait operations
+### 23.9 Wait operations
 
 ```text
 Wait.Wait[T]          (Wait[T]) -> T
@@ -3343,7 +3405,7 @@ Cancellation keeps that input available to the same logical resource.
 
 `docs/specs/sidecar/pre-release-foundation.md` defines host-operation wait sources.
 
-### 23.9 Compiler and reflection
+### 23.10 Compiler and reflection
 
 ```text
 Compiler.Compile       (String, String, String, CompileEnv, CompileOptions)

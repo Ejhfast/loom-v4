@@ -802,6 +802,9 @@ impl World {
                     Object::NativeChild { resource } => self
                         .host_pipe_token(vm, *resource, crate::ResourceKind::Child)
                         .map(HostArg::Child),
+                    Object::NativeUdpSocket { resource } => self
+                        .host_pipe_token(vm, *resource, crate::ResourceKind::UdpSocket)
+                        .map(HostArg::Udp),
                     Object::Instance { class, fields, .. }
                         if Some(*class) == self.core.exec_spec =>
                     {

@@ -458,3 +458,40 @@ Stage 6 adds no core class or function.
 The earlier Stage 5 runtime result did not repeat.
 
 The final pass will compare the parent and branch in one session.
+
+## Host-effects Stage 7
+
+The parent revision is `59c49b9`.
+
+The manifest ABI version is 31.
+
+The bytecode version remains 54.
+
+The snapshot format version remains 30.
+
+| Core measurement | Parent | Stage 7 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 294 | 297 | +1.0% |
+| HIR functions | 556 | 563 | +1.3% |
+| Bytecode functions | 850 | 860 | +1.2% |
+| Artifact size | 258,307 bytes | 260,082 bytes | +0.7% |
+| Core checking | 2.062 ms | 1.977 ms | -4.1% |
+| Core lowering | 0.907 ms | 0.910 ms | +0.3% |
+| Core compilation | 3.226 ms | 3.237 ms | +0.3% |
+| Core decoding | 0.380 ms | 0.387 ms | +1.8% |
+| Core verification | 1.230 ms | 1.226 ms | -0.3% |
+| Structural verification | 0.437 ms | 0.440 ms | +0.7% |
+| Verification hash | 0.125 ms | 0.125 ms | 0.0% |
+| Semantic identity | 2.324 ms | 2.339 ms | +0.6% |
+| Decoded loading | 1.421 ms | 1.399 ms | -1.5% |
+| Core loading | 1.798 ms | 1.793 ms | -0.3% |
+
+| Runtime measurement | Parent | Stage 7 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 33.6 ns | 31.3 ns | -6.8% |
+| `direct_call` | 31.0 ns | 30.4 ns | -1.9% |
+| `direct_clock` | 108.4 ns | 106.7 ns | -1.6% |
+
+These paired runs used the same release mode and benchmark process shape.
+
+Each reported runtime is the median of nine measured runs.

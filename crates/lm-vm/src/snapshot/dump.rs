@@ -360,6 +360,7 @@ fn payload(object: &Object) -> String {
         Object::NativePipeReader { resource } => format!("pipe reader resource {resource}"),
         Object::NativePipeWriter { resource } => format!("pipe writer resource {resource}"),
         Object::NativeChild { resource } => format!("child resource {resource}"),
+        Object::NativeUdpSocket { resource } => format!("UDP socket resource {resource}"),
         Object::NativeHostResource { kind, resource } => {
             format!("host resource {}:{resource}", hex(kind))
         }

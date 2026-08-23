@@ -1076,7 +1076,7 @@ Gate: Live children and pipe ends report precise snapshot blockers.
 
 Gate: Success and failure both consume the submitted TCP stream.
 
-### Stage 7: UDP
+### Stage 7: UDP (complete)
 
 - Add the UDP resource and exact operations.
 - Add reactor readiness and cancellation.

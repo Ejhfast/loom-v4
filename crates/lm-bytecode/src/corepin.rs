@@ -285,10 +285,12 @@ pub struct CoreLayout {
     pub exec_error_unsupported: Option<u32>,
     pub exec_error_failed: Option<u32>,
     pub child: Option<u32>,
+    pub udp_datagram: Option<u32>,
+    pub udp_socket: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 253] = [
+pub const PINNED_LABELS: [&str; 255] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -542,6 +544,8 @@ pub const PINNED_LABELS: [&str; 253] = [
     "ExecError.Failed",
     "Child",
     "PipeError.Unsupported",
+    "UdpDatagram",
+    "UdpSocket",
 ];
 
 /// The core role of immediate integer values.
@@ -767,6 +771,8 @@ pub const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
 pub const ROLE_EXEC_ERROR_FAILED: usize = 250;
 pub const ROLE_CHILD: usize = 251;
 pub const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
+pub const ROLE_UDP_DATAGRAM: usize = 253;
+pub const ROLE_UDP_SOCKET: usize = 254;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1071,6 +1077,8 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ExecError.Unsupported" => &mut layout.exec_error_unsupported,
         "ExecError.Failed" => &mut layout.exec_error_failed,
         "Child" => &mut layout.child,
+        "UdpDatagram" => &mut layout.udp_datagram,
+        "UdpSocket" => &mut layout.udp_socket,
         _ => unreachable!("only known labels enter the map"),
     }
 }

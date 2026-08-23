@@ -927,6 +927,14 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeUdpSocket { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_UDP_SOCKET];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 Object::NativeCode(code) => {
                     let role = match code.kind {
                         lm_heap::PortableCodeKind::Artifact => lm_bytecode::corepin::ROLE_ARTIFACT,

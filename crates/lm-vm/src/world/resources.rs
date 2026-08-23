@@ -57,6 +57,10 @@ pub(super) fn handle_op_errors(op: u32) -> Option<ResourceErrors> {
         | lm_abi::OP_EXEC_TERMINATE
         | lm_abi::OP_EXEC_KILL
         | lm_abi::OP_EXEC_CLOSE => Some(ResourceErrors::Exec),
+        lm_abi::OP_UDP_SEND_TO
+        | lm_abi::OP_UDP_RECV_FROM
+        | lm_abi::OP_UDP_LOCAL_ADDRESS
+        | lm_abi::OP_UDP_CLOSE => Some(ResourceErrors::Net),
         _ => None,
     }
 }
@@ -75,6 +79,7 @@ fn object_errors(object: &Object) -> Option<ResourceErrors> {
             Some(ResourceErrors::Pipe)
         }
         Object::NativeChild { .. } => Some(ResourceErrors::Exec),
+        Object::NativeUdpSocket { .. } => Some(ResourceErrors::Net),
         _ => None,
     }
 }
@@ -91,6 +96,7 @@ fn object_resource(object: &Object) -> Option<u64> {
         | Object::NativePipeReader { resource }
         | Object::NativePipeWriter { resource }
         | Object::NativeChild { resource }
+        | Object::NativeUdpSocket { resource }
         | Object::NativeHostResource { resource, .. } => Some(*resource),
         _ => None,
     }
@@ -193,6 +199,12 @@ impl World {
                 *token,
                 crate::ResourceKind::Child,
                 lm_abi::OP_EXEC_SPAWN,
+            ),
+            HostValue::UdpSocket(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::UdpSocket,
+                lm_abi::OP_UDP_BIND,
             ),
             HostValue::Resource(resource) => self.build_host_resource(vm, *resource),
             HostValue::Artifact { module, interface } => {
@@ -316,6 +328,7 @@ impl World {
                     CoreCtor::ExecErrorPermissionDenied => self.core.exec_error_permission_denied,
                     CoreCtor::ExecErrorUnsupported => self.core.exec_error_unsupported,
                     CoreCtor::ExecErrorFailed => self.core.exec_error_failed,
+                    CoreCtor::UdpDatagram => self.core.udp_datagram,
                     CoreCtor::CompileErrors => self.core.compile_errors,
                 };
                 if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
@@ -674,6 +687,7 @@ impl World {
                 host.close_pipe(token)
             }
             crate::ResourceKind::Child => host.close_child(token),
+            crate::ResourceKind::UdpSocket => host.close_udp(token),
             _ => false,
         };
         if self.pending_op(vm) != Some(open_op) {
@@ -708,6 +722,7 @@ impl World {
             crate::ResourceKind::PipeReader => Object::NativePipeReader { resource },
             crate::ResourceKind::PipeWriter => Object::NativePipeWriter { resource },
             crate::ResourceKind::Child => Object::NativeChild { resource },
+            crate::ResourceKind::UdpSocket => Object::NativeUdpSocket { resource },
             _ => return Err(FaultCode::MalformedState),
         };
         match self.machines[vm as usize].alloc(object) {
@@ -812,6 +827,9 @@ impl World {
                     }
                     crate::ResourceKind::Child => {
                         self.host.close_child(token);
+                    }
+                    crate::ResourceKind::UdpSocket => {
+                        self.host.close_udp(token);
                     }
                     crate::ResourceKind::PendingOperation | crate::ResourceKind::Extension(_) => {}
                 },
@@ -940,6 +958,7 @@ impl World {
             Object::NativePipeReader { resource }
             | Object::NativePipeWriter { resource }
             | Object::NativeChild { resource } => Some(*resource),
+            Object::NativeUdpSocket { resource } => Some(*resource),
             _ => None,
         }
     }
@@ -1037,6 +1056,7 @@ impl World {
                     Object::NativePipeReader { resource }
                     | Object::NativePipeWriter { resource }
                     | Object::NativeChild { resource } => *resource,
+                    Object::NativeUdpSocket { resource } => *resource,
                     _ => continue,
                 };
                 if self.bound_resources.contains_key(&resource) {

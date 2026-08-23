@@ -1190,6 +1190,7 @@ impl World {
                 Object::NativePipeReader { .. } => Object::NativePipeReader { resource: 0 },
                 Object::NativePipeWriter { .. } => Object::NativePipeWriter { resource: 0 },
                 Object::NativeChild { .. } => Object::NativeChild { resource: 0 },
+                Object::NativeUdpSocket { .. } => Object::NativeUdpSocket { resource: 0 },
                 Object::NativeHostResource { kind, .. } => Object::NativeHostResource {
                     kind: *kind,
                     resource: 0,

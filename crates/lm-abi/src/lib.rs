@@ -56,7 +56,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 28 removes text console operations.
 /// Version 29 adds anonymous pipes and operating-system children.
 /// Version 30 adds the TLS server handshake operation.
-pub const ABI_VERSION: u32 = 30;
+/// Version 31 adds UDP datagram operations.
+pub const ABI_VERSION: u32 = 31;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -70,7 +71,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 30] = [
+pub const GROUPS: [&str; 32] = [
     "Io",
     "Fs",
     "Clock",
@@ -101,6 +102,8 @@ pub const GROUPS: [&str; 30] = [
     "Pipe",
     "Exec",
     "Tls.Server",
+    "Udp",
+    "Udp.Socket",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -126,10 +129,17 @@ const TLS_STREAM_MEMBERS: &[&str] = &[
 ];
 const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
 const TLS_SERVER_MEMBERS: &[&str] = &["Tls.ServerHandshake", "Tls.Stream"];
+const UDP_SOCKET_MEMBERS: &[&str] = &[
+    "Udp.SendTo",
+    "Udp.RecvFrom",
+    "Udp.LocalAddress",
+    "Udp.Close",
+];
+const UDP_MEMBERS: &[&str] = &["Udp.Bind", "Udp.Socket"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 30] = [
+pub const GROUP_MEMBERS: [&[&str]; 32] = [
     &[], // Io
     &[], // Fs
     &[], // Clock
@@ -160,6 +170,8 @@ pub const GROUP_MEMBERS: [&[&str]; 30] = [
     &[], // Pipe
     &[], // Exec
     TLS_SERVER_MEMBERS,
+    UDP_MEMBERS,
+    UDP_SOCKET_MEMBERS,
 ];
 
 /// One primitive manifest type.
@@ -239,6 +251,7 @@ pub enum AbiCore {
     ExecSpec,
     ChildStatus,
     ExecError,
+    UdpDatagram,
 }
 
 impl AbiCore {
@@ -290,6 +303,7 @@ impl AbiCore {
             AbiCore::ExecSpec => "ExecSpec",
             AbiCore::ChildStatus => "ChildStatus",
             AbiCore::ExecError => "ExecError",
+            AbiCore::UdpDatagram => "UdpDatagram",
         }
     }
 }
@@ -308,6 +322,7 @@ pub enum AbiNative {
     PipeReader,
     PipeWriter,
     Child,
+    UdpSocket,
 }
 
 impl AbiNative {
@@ -324,6 +339,7 @@ impl AbiNative {
             AbiNative::PipeReader => "PipeReader",
             AbiNative::PipeWriter => "PipeWriter",
             AbiNative::Child => "Child",
+            AbiNative::UdpSocket => "UdpSocket",
         }
     }
 }
@@ -422,6 +438,7 @@ impl AbiType {
     pub const EXEC_SPEC: AbiType = AbiType::Core(AbiCore::ExecSpec);
     pub const CHILD_STATUS: AbiType = AbiType::Core(AbiCore::ChildStatus);
     pub const EXEC_ERROR: AbiType = AbiType::Core(AbiCore::ExecError);
+    pub const UDP_DATAGRAM: AbiType = AbiType::Core(AbiCore::UdpDatagram);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
@@ -433,6 +450,7 @@ impl AbiType {
     pub const PIPE_READER: AbiType = AbiType::Native(AbiNative::PipeReader);
     pub const PIPE_WRITER: AbiType = AbiType::Native(AbiNative::PipeWriter);
     pub const CHILD: AbiType = AbiType::Native(AbiNative::Child);
+    pub const UDP_SOCKET: AbiType = AbiType::Native(AbiNative::UdpSocket);
 
     pub const LIST_STR: AbiType = AbiType::List(&AbiType::STR);
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
@@ -591,6 +609,14 @@ impl AbiType {
     pub const RESULT_UNIT_EXEC_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::UNIT, AbiType::EXEC_ERROR],
+    );
+    pub const RESULT_UDP_SOCKET_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::UDP_SOCKET, AbiType::NET_ERROR],
+    );
+    pub const RESULT_UDP_DATAGRAM_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::UDP_DATAGRAM, AbiType::NET_ERROR],
     );
 
     /// The canonical text of this complete type expression.
@@ -2106,6 +2132,7 @@ impl OpDef {
                 | ("Signal", "Next")
                 | ("Pipe", "Read")
                 | ("Exec", "Wait")
+                | ("Udp", "RecvFrom")
         )
     }
 }
@@ -2248,9 +2275,14 @@ pub const OP_EXEC_TERMINATE: OpSlot = 133;
 pub const OP_EXEC_KILL: OpSlot = 134;
 pub const OP_EXEC_CLOSE: OpSlot = 135;
 pub const OP_TLS_SERVER_HANDSHAKE: OpSlot = 136;
+pub const OP_UDP_BIND: OpSlot = 137;
+pub const OP_UDP_SEND_TO: OpSlot = 138;
+pub const OP_UDP_RECV_FROM: OpSlot = 139;
+pub const OP_UDP_LOCAL_ADDRESS: OpSlot = 140;
+pub const OP_UDP_CLOSE: OpSlot = 141;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 137] = [
+pub const OPS: [OpDef; 142] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3534,6 +3566,51 @@ pub const OPS: [OpDef; 137] = [
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
+    OpDef {
+        group: "Udp",
+        member: "Bind",
+        kind: OpKind::Fixed,
+        params: &[AbiType::SOCKET_ADDRESS],
+        reply: AbiType::RESULT_UDP_SOCKET_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Udp",
+        member: "SendTo",
+        kind: OpKind::Fixed,
+        params: &[AbiType::UDP_SOCKET, AbiType::SOCKET_ADDRESS, AbiType::BYTES],
+        reply: AbiType::RESULT_UNIT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Udp",
+        member: "RecvFrom",
+        kind: OpKind::Fixed,
+        params: &[AbiType::UDP_SOCKET],
+        reply: AbiType::RESULT_UDP_DATAGRAM_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Udp",
+        member: "LocalAddress",
+        kind: OpKind::Fixed,
+        params: &[AbiType::UDP_SOCKET],
+        reply: AbiType::RESULT_SOCKET_ADDRESS_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Udp",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::UDP_SOCKET],
+        reply: AbiType::RESULT_UNIT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
 ];
 
 /// The number of exact operations.
@@ -3925,6 +4002,10 @@ mod tests {
         assert_eq!(op_by_name("Exec.Spawn"), Some(OP_EXEC_SPAWN));
         assert_eq!(op_by_name("Exec.Wait"), Some(OP_EXEC_WAIT));
         assert_eq!(op_by_name("Exec.Close"), Some(OP_EXEC_CLOSE));
+        assert_eq!(op_by_name("Udp.Bind"), Some(OP_UDP_BIND));
+        assert_eq!(op_by_name("Udp.SendTo"), Some(OP_UDP_SEND_TO));
+        assert_eq!(op_by_name("Udp.RecvFrom"), Some(OP_UDP_RECV_FROM));
+        assert_eq!(op_by_name("Udp.Close"), Some(OP_UDP_CLOSE));
         assert_eq!(
             op_by_name("Vm.ServeTcpStream"),
             Some(OP_VM_SERVE_TCP_STREAM)
@@ -3970,6 +4051,8 @@ mod tests {
         assert_eq!(group_by_name("Tls.Stream"), Some(18));
         assert_eq!(group_by_name("Http.Client"), Some(20));
         assert_eq!(group_by_name("Tls.Server"), Some(29));
+        assert_eq!(group_by_name("Udp"), Some(30));
+        assert_eq!(group_by_name("Udp.Socket"), Some(31));
     }
 
     #[test]
@@ -3999,6 +4082,16 @@ mod tests {
         assert!(group_contains_op(tls_server, OP_TLS_SERVER_HANDSHAKE));
         assert!(group_contains_op(tls_server, OP_TLS_READ));
         assert!(!group_contains_op(tls_server, OP_TLS_HANDSHAKE));
+
+        let udp = group_by_name("Udp").unwrap();
+        assert!(group_contains_op(udp, OP_UDP_BIND));
+        assert!(group_contains_op(udp, OP_UDP_RECV_FROM));
+
+        let udp_socket = group_by_name("Udp.Socket").unwrap();
+        assert!(!group_contains_op(udp_socket, OP_UDP_BIND));
+        assert!(group_contains_op(udp_socket, OP_UDP_SEND_TO));
+        assert!(group_contains_op(udp_socket, OP_UDP_RECV_FROM));
+        assert!(group_contains_op(udp_socket, OP_UDP_CLOSE));
 
         let secure_http = group_by_name("Http.Client").unwrap();
         assert!(group_contains_op(secure_http, OP_DNS_RESOLVE));
@@ -4149,6 +4242,11 @@ mod tests {
                 "Exec.Kill",
                 "Exec.Close",
                 "Tls.ServerHandshake",
+                "Udp.Bind",
+                "Udp.SendTo",
+                "Udp.RecvFrom",
+                "Udp.LocalAddress",
+                "Udp.Close",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

@@ -25,6 +25,48 @@ final class SocketAddress
   end
 end
 
+final class UdpDatagram
+  data: Bytes
+  peer: SocketAddress
+
+  def init(mut self, data: Bytes, peer: SocketAddress)
+    self.data = data
+    self.peer = peer
+  end
+end
+
+final class UdpSocket
+  def send_to(
+    self,
+    address: SocketAddress,
+    data: Bytes
+  ): Result[(), NetError] with Udp.SendTo
+    sys.udp.send_to(self, address, data)
+  end
+
+  def recv_from(self): Result[UdpDatagram, NetError] with Udp.RecvFrom
+    sys.udp.recv_from(self)
+  end
+
+  def recv_from_wait(self): Wait[Result[UdpDatagram, NetError]] with Udp.RecvFrom
+    sys.udp.recv_from.wait(self)
+  end
+
+  def local_address(self): Result[SocketAddress, NetError] with Udp.LocalAddress
+    sys.udp.local_address(self)
+  end
+
+  def close(self): Result[(), NetError] with Udp.Close
+    sys.udp.close(self)
+  end
+end
+
+final class Udp
+  def bind(self, address: SocketAddress): Result[UdpSocket, NetError] with Udp.Bind
+    sys.udp.bind(address)
+  end
+end
+
 enum NetError implements Error
   InvalidInput(message: String)
   NameNotFound(message: String)

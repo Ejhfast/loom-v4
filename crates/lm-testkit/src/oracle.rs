@@ -437,6 +437,7 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::TcpStream
                 | NativeRepr::TcpListener
                 | NativeRepr::TlsStream
+                | NativeRepr::UdpSocket
                 | NativeRepr::Artifact
                 | NativeRepr::VerifiedModule
                 | NativeRepr::FunctionCode

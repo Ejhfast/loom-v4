@@ -514,6 +514,8 @@ pub enum Object {
     NativePipeWriter { resource: u64 },
     /// An operating-system child designator. Zero marks a closed handle.
     NativeChild { resource: u64 },
+    /// A UDP socket designator. Zero marks a closed handle.
+    NativeUdpSocket { resource: u64 },
     /// An opaque extension resource. Zero marks a closed handle.
     NativeHostResource { kind: [u8; 32], resource: u64 },
     /// One value with its closed static type. Born frozen.
@@ -863,6 +865,16 @@ const SHAPE_CHILD: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_UDP_SOCKET: ShapeDesc = ShapeDesc {
+    name: "UdpSocket",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 const SHAPE_HOST_RESOURCE: ShapeDesc = ShapeDesc {
     name: "HostResource",
     has_refs: false,
@@ -915,7 +927,7 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 36] = [
+pub const SHAPES: [&ShapeDesc; 37] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -952,6 +964,7 @@ pub const SHAPES: [&ShapeDesc; 36] = [
     &SHAPE_PIPE_READER,
     &SHAPE_PIPE_WRITER,
     &SHAPE_CHILD,
+    &SHAPE_UDP_SOCKET,
 ];
 
 impl Object {
@@ -1141,6 +1154,9 @@ impl Object {
             Object::NativeChild { resource } => Object::NativeChild {
                 resource: *resource,
             },
+            Object::NativeUdpSocket { resource } => Object::NativeUdpSocket {
+                resource: *resource,
+            },
             Object::NativeHostResource { kind, resource } => Object::NativeHostResource {
                 kind: *kind,
                 resource: *resource,
@@ -1196,6 +1212,7 @@ impl Object {
             Object::NativePipeReader { .. } => 33,
             Object::NativePipeWriter { .. } => 34,
             Object::NativeChild { .. } => 35,
+            Object::NativeUdpSocket { .. } => 36,
         }
     }
 
@@ -1247,6 +1264,7 @@ impl Object {
                 | Object::NativePipeReader { .. }
                 | Object::NativePipeWriter { .. }
                 | Object::NativeChild { .. }
+                | Object::NativeUdpSocket { .. }
                 | Object::NativeHostResource { .. } => VALUE_COST,
                 Object::NativeFault { message, trace, .. } => message
                     .len()
@@ -1323,6 +1341,7 @@ impl Object {
             | Object::NativePipeReader { .. }
             | Object::NativePipeWriter { .. }
             | Object::NativeChild { .. }
+            | Object::NativeUdpSocket { .. }
             | Object::NativeHostResource { .. } => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
@@ -1406,6 +1425,9 @@ impl Object {
             Object::NativeChild { resource } => Object::NativeChild {
                 resource: *resource,
             },
+            Object::NativeUdpSocket { resource } => Object::NativeUdpSocket {
+                resource: *resource,
+            },
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
@@ -1482,6 +1504,7 @@ impl Object {
             | Object::NativePipeReader { .. }
             | Object::NativePipeWriter { .. }
             | Object::NativeChild { .. } => return None,
+            Object::NativeUdpSocket { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -1713,6 +1736,7 @@ mod tests {
             Object::NativePipeReader { resource: 12 },
             Object::NativePipeWriter { resource: 13 },
             Object::NativeChild { resource: 14 },
+            Object::NativeUdpSocket { resource: 15 },
         ]
     }
 
@@ -1918,6 +1942,7 @@ mod tests {
             Object::NativePipeReader { resource: 0 },
             Object::NativePipeWriter { resource: 0 },
             Object::NativeChild { resource: 0 },
+            Object::NativeUdpSocket { resource: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -2056,6 +2081,7 @@ mod tests {
                 "PipeReader",
                 "PipeWriter",
                 "Child",
+                "UdpSocket",
             ]
         );
         // A builder holds a private mutable buffer.

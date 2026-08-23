@@ -181,6 +181,7 @@ pub enum NativeRepr {
     TcpStream,
     TcpListener,
     TlsStream,
+    UdpSocket,
     Artifact,
     VerifiedModule,
     FunctionCode,

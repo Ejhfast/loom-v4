@@ -376,7 +376,8 @@ impl World {
                 | Object::NativeTcpListener { resource }
                 | Object::NativePipeReader { resource }
                 | Object::NativePipeWriter { resource }
-                | Object::NativeChild { resource } => Some(*resource),
+                | Object::NativeChild { resource }
+                | Object::NativeUdpSocket { resource } => Some(*resource),
                 _ => None,
             };
             if resource.is_some_and(|resource| self.bound_resources.contains_key(&resource)) {
@@ -417,6 +418,7 @@ impl World {
                 crate::ResourceKind::PipeReader => "pipe reader".to_string(),
                 crate::ResourceKind::PipeWriter => "pipe writer".to_string(),
                 crate::ResourceKind::Child => "child handle".to_string(),
+                crate::ResourceKind::UdpSocket => "UDP socket".to_string(),
                 crate::ResourceKind::Extension(identity) => self
                     .loaded
                     .bundle()
@@ -442,6 +444,7 @@ impl World {
                 | Object::NativePipeReader { resource }
                 | Object::NativePipeWriter { resource }
                 | Object::NativeChild { resource }
+                | Object::NativeUdpSocket { resource }
                 | Object::NativeHostResource { resource, .. } => *resource,
                 _ => return None,
             };
@@ -457,6 +460,7 @@ impl World {
                     crate::ResourceKind::PipeReader => "pipe reader".to_string(),
                     crate::ResourceKind::PipeWriter => "pipe writer".to_string(),
                     crate::ResourceKind::Child => "child handle".to_string(),
+                    crate::ResourceKind::UdpSocket => "UDP socket".to_string(),
                     crate::ResourceKind::PendingOperation => "pending operation".to_string(),
                     crate::ResourceKind::Extension(identity) => self
                         .loaded

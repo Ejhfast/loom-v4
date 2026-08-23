@@ -37,6 +37,7 @@ pub enum HostArg {
     PipeReader(u64),
     PipeWriter(u64),
     Child(u64),
+    Udp(u64),
     ExecSpec(HostExecSpec),
     Resource(HostResource),
     CompileEnv(HostCompileEnv),
@@ -307,6 +308,7 @@ pub enum CoreCtor {
     ExecErrorPermissionDenied,
     ExecErrorUnsupported,
     ExecErrorFailed,
+    UdpDatagram,
     CompileErrors,
 }
 
@@ -348,6 +350,7 @@ pub enum HostValue {
     PipeReader(u64),
     PipeWriter(u64),
     Child(u64),
+    UdpSocket(u64),
     Resource(HostResource),
     Artifact {
         module: SharedBytes,
@@ -475,6 +478,10 @@ pub trait Host {
     fn close_child(&mut self, _token: u64) -> bool {
         false
     }
+    /// Close one UDP socket during forced resource cleanup.
+    fn close_udp(&mut self, _token: u64) -> bool {
+        false
+    }
     /// Close one opaque extension resource during forced cleanup.
     fn close_resource(&mut self, _resource: HostResource) -> bool {
         false
@@ -548,6 +555,9 @@ pub struct RecordingHost {
     children: BTreeMap<u64, MemoryChild>,
     child_programs: BTreeMap<String, MemoryChildProgram>,
     next_child: u64,
+    udp_sockets: BTreeMap<u64, MemoryUdpSocket>,
+    udp_addresses: BTreeMap<HostSocketAddress, u64>,
+    next_udp: u64,
 }
 
 /// One reply this host holds until a later poll.
@@ -571,6 +581,7 @@ enum DeferredAction {
     SignalNext { stream: u64 },
     PipeRead { reader: u64, count: usize },
     ChildWait { child: u64 },
+    UdpRecv { socket: u64 },
 }
 
 #[derive(Debug)]
@@ -594,6 +605,11 @@ enum RetainedWait {
     },
     ChildWait {
         child: u64,
+    },
+    UdpDatagram {
+        socket: u64,
+        bytes: SharedBytes,
+        peer: HostSocketAddress,
     },
 }
 
@@ -640,6 +656,12 @@ struct MemoryChildProgram {
     status: MemoryChildStatus,
     output: Vec<u8>,
     error: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct MemoryUdpSocket {
+    address: HostSocketAddress,
+    incoming: VecDeque<(SharedBytes, HostSocketAddress)>,
 }
 
 /// True when the command-line host serves this operation off the
@@ -691,6 +713,11 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_EXEC_TERMINATE
             | lm_abi::OP_EXEC_KILL
             | lm_abi::OP_EXEC_CLOSE
+            | lm_abi::OP_UDP_BIND
+            | lm_abi::OP_UDP_SEND_TO
+            | lm_abi::OP_UDP_RECV_FROM
+            | lm_abi::OP_UDP_LOCAL_ADDRESS
+            | lm_abi::OP_UDP_CLOSE
     )
 }
 
@@ -733,6 +760,8 @@ const MAX_VIRTUAL_PIPE_BYTES: usize = 64 << 20;
 const MAX_EXEC_ITEMS: usize = 4_096;
 const MAX_EXEC_TEXT_BYTES: usize = 1 << 20;
 const MAX_EXEC_ITEM_BYTES: usize = 64 << 10;
+const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
+const MAX_VIRTUAL_UDP_BYTES: usize = 64 << 20;
 
 fn fs_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
@@ -871,6 +900,9 @@ impl RecordingHost {
             children: BTreeMap::new(),
             child_programs: BTreeMap::new(),
             next_child: 1,
+            udp_sockets: BTreeMap::new(),
+            udp_addresses: BTreeMap::new(),
+            next_udp: 1,
         }
     }
 
@@ -980,6 +1012,12 @@ impl RecordingHost {
     fn take_tcp_token(&mut self) -> Option<u64> {
         let token = self.next_tcp;
         self.next_tcp = token.checked_add(1)?;
+        Some(token)
+    }
+
+    fn take_udp_token(&mut self) -> Option<u64> {
+        let token = self.next_udp;
+        self.next_udp = token.checked_add(1)?;
         Some(token)
     }
 
@@ -1099,6 +1137,25 @@ impl RecordingHost {
             kind: HostTcpKind::Stream,
             token,
         })
+    }
+
+    fn close_virtual_udp(&mut self, token: u64) -> bool {
+        let Some(socket) = self.udp_sockets.remove(&token) else {
+            return false;
+        };
+        self.udp_addresses.remove(&socket.address);
+        true
+    }
+
+    fn udp_receive_value(&mut self, socket: u64) -> Option<HostValue> {
+        let Some(socket) = self.udp_sockets.get_mut(&socket) else {
+            return Some(net_closed());
+        };
+        let (bytes, peer) = socket.incoming.pop_front()?;
+        Some(net_ok(HostValue::Ctor(
+            CoreCtor::UdpDatagram,
+            vec![HostValue::Bytes(bytes), HostValue::SocketAddress(peer)],
+        )))
     }
 
     fn take_pipe_token(&mut self) -> Option<u64> {
@@ -1390,6 +1447,9 @@ impl RecordingHost {
             HostValue::Child(token) => {
                 self.children.remove(&token);
             }
+            HostValue::UdpSocket(token) => {
+                self.close_virtual_udp(token);
+            }
             HostValue::List(values) | HostValue::Tuple(values) | HostValue::Ctor(_, values) => {
                 for value in values {
                     self.discard_value_resources(value);
@@ -1427,6 +1487,7 @@ impl RecordingHost {
                 .get(&child)
                 .map(|state| Self::child_status_value(state.status))
                 .or_else(|| Some(exec_error(CoreCtor::ExecErrorClosed, None))),
+            DeferredAction::UdpRecv { socket } => self.udp_receive_value(socket),
         }
     }
 }
@@ -3073,6 +3134,111 @@ impl RecordingHost {
                     HostStart::Completed(exec_error(CoreCtor::ExecErrorClosed, None))
                 }
             }
+            lm_abi::OP_UDP_BIND => {
+                let Some(HostArg::SocketAddress(address)) = args.first() else {
+                    return HostStart::Failed("Udp.Bind needs one address".to_string());
+                };
+                let mut address = *address;
+                if address.port == 0 {
+                    let Some(port) = self.take_port() else {
+                        return HostStart::Completed(net_error(
+                            CoreCtor::NetLimitExceeded,
+                            "the virtual port space is exhausted",
+                        ));
+                    };
+                    address.port = port;
+                }
+                if self.udp_addresses.contains_key(&address) {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetAddressInUse,
+                        "the address already has a UDP socket",
+                    ));
+                }
+                let Some(token) = self.take_udp_token() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual UDP token space is exhausted",
+                    ));
+                };
+                self.udp_sockets.insert(
+                    token,
+                    MemoryUdpSocket {
+                        address,
+                        incoming: VecDeque::new(),
+                    },
+                );
+                self.udp_addresses.insert(address, token);
+                HostStart::Completed(net_ok(HostValue::UdpSocket(token)))
+            }
+            lm_abi::OP_UDP_SEND_TO => {
+                let (
+                    Some(HostArg::Udp(socket)),
+                    Some(HostArg::SocketAddress(address)),
+                    Some(HostArg::Bytes(bytes)),
+                ) = (args.first(), args.get(1), args.get(2))
+                else {
+                    return HostStart::Failed(
+                        "Udp.SendTo needs a socket, address, and bytes".to_string(),
+                    );
+                };
+                let Some(peer) = self.udp_sockets.get(socket).map(|socket| socket.address) else {
+                    return HostStart::Completed(net_closed());
+                };
+                if bytes.len() > MAX_UDP_DATAGRAM_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the UDP datagram is too large",
+                    ));
+                }
+                if let Some(destination) = self.udp_addresses.get(address).copied() {
+                    let target = self
+                        .udp_sockets
+                        .get_mut(&destination)
+                        .expect("the UDP address names one socket");
+                    let retained = target
+                        .incoming
+                        .iter()
+                        .fold(0_usize, |total, (data, _)| total.saturating_add(data.len()));
+                    if retained.saturating_add(bytes.len()) > MAX_VIRTUAL_UDP_BYTES {
+                        return HostStart::Completed(net_error(
+                            CoreCtor::NetLimitExceeded,
+                            "the virtual UDP queue is full",
+                        ));
+                    }
+                    target.incoming.push_back((bytes.clone(), peer));
+                }
+                HostStart::Completed(net_ok(HostValue::Unit))
+            }
+            lm_abi::OP_UDP_RECV_FROM => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.RecvFrom needs one socket".to_string());
+                };
+                match self.udp_receive_value(*socket) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(key, DeferredAction::UdpRecv { socket: *socket }),
+                }
+            }
+            lm_abi::OP_UDP_LOCAL_ADDRESS => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.LocalAddress needs one socket".to_string());
+                };
+                match self.udp_sockets.get(socket) {
+                    Some(socket) => {
+                        HostStart::Completed(net_ok(HostValue::SocketAddress(socket.address)))
+                    }
+                    None => HostStart::Completed(net_closed()),
+                }
+            }
+            lm_abi::OP_UDP_CLOSE => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.Close needs one socket".to_string());
+                };
+                if self.close_virtual_udp(*socket) {
+                    HostStart::Completed(net_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(net_closed())
+                }
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -3119,6 +3285,14 @@ impl RecordingHost {
             DeferredAction::PipeRead { reader, .. } => self.pipe_before_read(*reader),
             _ => None,
         };
+        let udp = match &action {
+            DeferredAction::UdpRecv { socket } => self
+                .udp_sockets
+                .get(socket)
+                .and_then(|state| state.incoming.front().cloned())
+                .map(|(bytes, peer)| (*socket, bytes, peer)),
+            _ => None,
+        };
         let value = self.deferred_value(token)?;
         let mut entry = self.pending.remove(&token)?;
         if entry.wait_source {
@@ -3155,6 +3329,12 @@ impl RecordingHost {
                 (removed > 0).then(|| RetainedWait::PipeRead {
                     pipe,
                     bytes: before.into_iter().take(removed).collect(),
+                })
+            } else if let Some((socket, bytes, peer)) = udp {
+                Some(RetainedWait::UdpDatagram {
+                    socket,
+                    bytes,
+                    peer,
                 })
             } else {
                 signal.map(RetainedWait::Signal)
@@ -3231,6 +3411,15 @@ impl RecordingHost {
                 }
             }
             RetainedWait::ChildWait { .. } => {}
+            RetainedWait::UdpDatagram {
+                socket,
+                bytes,
+                peer,
+            } => {
+                if let Some(state) = self.udp_sockets.get_mut(&socket) {
+                    state.incoming.push_front((bytes, peer));
+                }
+            }
         }
     }
 }
@@ -3429,6 +3618,12 @@ impl Host for RecordingHost {
                     Some(RetainedWait::ChildWait { child: *child }),
                 )
             }
+            lm_abi::OP_UDP_RECV_FROM => {
+                let Some(HostArg::Udp(socket)) = args.first() else {
+                    return HostStart::Failed("Udp.RecvFrom needs one socket".to_string());
+                };
+                self.defer_wait(key, DeferredAction::UdpRecv { socket: *socket }, None)
+            }
             _ => self.start(key, op, args),
         }
     }
@@ -3532,6 +3727,10 @@ impl Host for RecordingHost {
     fn close_child(&mut self, token: u64) -> bool {
         self.children.remove(&token).is_some()
     }
+
+    fn close_udp(&mut self, token: u64) -> bool {
+        self.close_virtual_udp(token)
+    }
 }
 
 /// A shared recording host, so a test keeps access to the buffers
@@ -3575,6 +3774,10 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_tls(&mut self, token: u64) -> bool {
         self.borrow_mut().close_tls(token)
+    }
+
+    fn close_udp(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_udp(token)
     }
 
     fn close_raw_mode(&mut self, token: u64) -> bool {

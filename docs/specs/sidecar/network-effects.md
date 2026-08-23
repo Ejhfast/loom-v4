@@ -6,7 +6,7 @@ Status: accepted design. The network-effects branch implements this foundation.
 
 This document defines Loom network effects and their host resource model.
 
-The first implementation adds DNS, TCP, TLS clients, and direct HTTP/1.1 support.
+The release implementation adds DNS, TCP, UDP, TLS, and direct HTTP/1.1 support.
 
 The design keeps operating-system network state outside `lm-vm`.
 
@@ -32,10 +32,12 @@ The network foundation uses these decisions:
 - HTTP request bodies and response bodies have explicit limits.
 - TLS uses a separate stream resource above TCP.
 - A TLS handshake consumes its TCP stream after host submission.
+- The TLS host supports client and server handshakes.
 - TLS policy, roots, names, versions, ALPN, and buffers stay explicit.
 - Secure HTTP uses the same verified parser as cleartext HTTP.
 - Live network resources block snapshots.
 - Closed network handles remain typed machine state.
+- UDP receives preserve complete datagrams across wait cancellation.
 
 ## 3. Layer boundaries
 
@@ -131,12 +133,21 @@ Tcp.Close         (TcpResource) -> Result[(), NetError]
 
 Tls.Handshake     (TcpStream, String, Int, List[Bytes], List[Bytes], Int, Int)
                   -> Result[TlsStream, TlsError]
+Tls.ServerHandshake
+                  (TcpStream, List[Bytes], Bytes, List[Bytes], Int, Int)
+                  -> Result[TlsStream, TlsError]
 Tls.Read          (TlsStream, Int) -> Result[TcpRead, TlsError]
 Tls.Write         (TlsStream, Bytes) -> Result[Int, TlsError]
 Tls.Shutdown      (TlsStream) -> Result[(), TlsError]
 Tls.LocalAddress  (TlsStream) -> Result[SocketAddress, TlsError]
 Tls.PeerAddress   (TlsStream) -> Result[SocketAddress, TlsError]
 Tls.Close         (TlsStream) -> Result[(), TlsError]
+
+Udp.Bind          (SocketAddress) -> Result[UdpSocket, NetError]
+Udp.SendTo        (UdpSocket, SocketAddress, Bytes) -> Result[(), NetError]
+Udp.RecvFrom      (UdpSocket) -> Result[UdpDatagram, NetError]
+Udp.LocalAddress  (UdpSocket) -> Result[SocketAddress, NetError]
+Udp.Close         (UdpSocket) -> Result[(), NetError]
 ```
 
 Only exact operations execute `PERFORM`.
@@ -213,6 +224,23 @@ Tls.Stream = {
 Tls.Client = {
   Tls.Handshake,
   Tls.Stream
+}
+
+Tls.Server = {
+  Tls.ServerHandshake,
+  Tls.Stream
+}
+
+Udp.Socket = {
+  Udp.SendTo,
+  Udp.RecvFrom,
+  Udp.LocalAddress,
+  Udp.Close
+}
+
+Udp = {
+  Udp.Bind,
+  Udp.Socket
 }
 
 Http.Client = {
@@ -995,9 +1023,11 @@ The initial client does not pool connections, follow redirects, or negotiate HTT
 
 ### 23.7 Deferred TLS features
 
-This slice does not add TLS listeners or server certificates.
+This slice uses TCP listeners and adds one TLS server handshake.
 
 It does not add client certificates, certificate pin sets, or session-cache policy.
+
+It does not add certificate reload policy.
 
 These features require new explicit values and operation identities.
 
@@ -1005,7 +1035,7 @@ They do not require a new VM resource kernel.
 
 ## 24. Deterministic testing
 
-`RecordingHost` implements a bounded virtual DNS and TCP service.
+`RecordingHost` implements bounded virtual DNS, TCP, and UDP services.
 
 Tests can register addresses, listeners, incoming bytes, and expected writes.
 
@@ -1124,6 +1154,18 @@ The bootstrap compiler caches each selected standard module for the process life
 - Link only the standard modules reachable from the program.
 - Keep TCP-only tests on the core-only compile path.
 
+### Stage 8: TLS server handshake
+
+- Add explicit server certificate and key values.
+- Reuse the TLS stream resource and reactor.
+- Consume the submitted TCP stream on every result.
+
+### Stage 9: UDP
+
+- Add one UDP socket resource.
+- Preserve complete datagrams during selection.
+- Add local virtual-host and real-host exchanges.
+
 ## 28. Conformance gates
 
 - Every network operation has checker, verifier, host, and policy tests.
@@ -1145,4 +1187,7 @@ The bootstrap compiler caches each selected standard module for the process life
 - TLS end-of-stream requires `close_notify`.
 - Local certificate tests use no external network access.
 - `Http.Client` expands to DNS, TCP client, and TLS client operations.
+- A TLS server handshake consumes its TCP resource on every result.
+- UDP selection never loses or truncates a datagram.
+- Live UDP sockets block snapshots.
 - The full workspace tests, formatting, and lint checks pass.

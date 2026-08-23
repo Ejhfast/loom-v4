@@ -2006,6 +2006,7 @@ impl World {
                                 crate::ResourceKind::PipeReader => "pipe-reader".to_string(),
                                 crate::ResourceKind::PipeWriter => "pipe-writer".to_string(),
                                 crate::ResourceKind::Child => "child".to_string(),
+                                crate::ResourceKind::UdpSocket => "udp-socket".to_string(),
                                 crate::ResourceKind::PendingOperation => {
                                     "pending-operation".to_string()
                                 }

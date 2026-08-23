@@ -131,6 +131,7 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::TcpStream
                             | NativeRepr::TcpListener
                             | NativeRepr::TlsStream
+                            | NativeRepr::UdpSocket
                             | NativeRepr::Artifact
                             | NativeRepr::VerifiedModule
                             | NativeRepr::FunctionCode

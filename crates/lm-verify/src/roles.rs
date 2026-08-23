@@ -891,6 +891,30 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_UDP_DATAGRAM) {
+        let Some(address) = slot(ROLE_SOCKET_ADDRESS) else {
+            return Err(terr(
+                "the UdpDatagram role requires the SocketAddress role".to_string(),
+            ));
+        };
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields != [&BcType::Bytes, &BcType::Class(address)]
+        {
+            return Err(terr(
+                "the UdpDatagram role does not name its final value class".to_string(),
+            ));
+        }
+    }
     let tcp_roles = [
         slot(ROLE_TCP_RESOURCE),
         slot(ROLE_TCP_STREAM),
@@ -993,6 +1017,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_RAW_MODE, "RawMode"),
         (lm_bytecode::corepin::ROLE_SIGNAL_STREAM, "SignalStream"),
         (lm_bytecode::corepin::ROLE_CHILD, "Child"),
+        (lm_bytecode::corepin::ROLE_UDP_SOCKET, "UdpSocket"),
         (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
         (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
         (lm_bytecode::corepin::ROLE_CLASS_CODE, "ClassCode"),

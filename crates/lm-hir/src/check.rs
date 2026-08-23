@@ -73,7 +73,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 137] = [
+pub const PRELUDE_TYPES: [&str; 140] = [
     "Option",
     "Result",
     "Ordering",
@@ -183,6 +183,9 @@ pub const PRELUDE_TYPES: [&str; 137] = [
     "Tcp",
     "TlsError",
     "TlsStream",
+    "UdpDatagram",
+    "UdpSocket",
+    "Udp",
     "Text",
     "String",
     "Substring",
@@ -4238,6 +4241,7 @@ fn resolve_class(
         (true, "TcpStream") => Some(NativeRepr::TcpStream),
         (true, "TcpListener") => Some(NativeRepr::TcpListener),
         (true, "TlsStream") => Some(NativeRepr::TlsStream),
+        (true, "UdpSocket") => Some(NativeRepr::UdpSocket),
         (true, "Artifact") => Some(NativeRepr::Artifact),
         (true, "VerifiedModule") => Some(NativeRepr::VerifiedModule),
         (true, "FunctionCode") => Some(NativeRepr::FunctionCode),
@@ -4262,7 +4266,7 @@ fn resolve_class(
         Some(NativeRepr::TcpStream | NativeRepr::TcpListener) => {
             class.is_final && parent == tcp_parent
         }
-        Some(NativeRepr::TlsStream) => class.is_final && parent.is_none(),
+        Some(NativeRepr::TlsStream | NativeRepr::UdpSocket) => class.is_final && parent.is_none(),
         Some(_) => class.is_final && parent.is_none(),
         None => true,
     };
@@ -4332,6 +4336,7 @@ fn resolve_class(
             | NativeRepr::TcpStream
             | NativeRepr::TcpListener
             | NativeRepr::TlsStream
+            | NativeRepr::UdpSocket
             | NativeRepr::Artifact
             | NativeRepr::VerifiedModule
             | NativeRepr::ClassCode

@@ -1,10 +1,10 @@
-//! Bounded DNS workers and one evented TCP reactor.
+//! Bounded DNS workers and one evented network reactor.
 
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostIpAddress, HostShutdown, HostSocketAddress,
     HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, SharedBytes,
 };
-use mio::net::{TcpListener, TcpStream};
+use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Interest, Poll, Token, Waker};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -23,6 +23,7 @@ const MAX_NETWORK_RESOURCES: usize = 4_096;
 const MAX_RETAINED_NETWORK_BYTES: usize = 64 << 20;
 const MAX_DNS_RESULTS: usize = 64;
 const TLS_CONFIG_OVERHEAD: usize = 256 << 10;
+const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
 pub(crate) struct NetworkService {
     requests: SyncSender<Command>,
@@ -119,6 +120,27 @@ pub(crate) enum TlsRequest {
     },
 }
 
+pub(crate) enum UdpRequest {
+    Bind {
+        socket: u64,
+        address: HostSocketAddress,
+    },
+    SendTo {
+        socket: u64,
+        address: HostSocketAddress,
+        bytes: SharedBytes,
+    },
+    RecvFrom {
+        socket: u64,
+    },
+    LocalAddress {
+        socket: u64,
+    },
+    Close {
+        socket: u64,
+    },
+}
+
 struct DnsJob {
     pending: Pending,
     name: String,
@@ -155,9 +177,22 @@ struct PendingWrite {
     bytes: SharedBytes,
 }
 
+struct PendingDatagramWrite {
+    pending: Pending,
+    address: SocketAddr,
+    bytes: SharedBytes,
+}
+
+struct QueuedDatagram {
+    bytes: SharedBytes,
+    peer: SocketAddr,
+    _retained: RetainedLease,
+}
+
 enum Command {
     Request(Pending, TcpRequest),
     Tls(Pending, TlsRequest),
+    Udp(Pending, UdpRequest),
 }
 
 enum Control {
@@ -172,6 +207,7 @@ enum Control {
     },
     ForceClose(HostTcpResource),
     ForceCloseTls(u64),
+    ForceCloseUdp(u64),
     Stop,
 }
 
@@ -179,6 +215,7 @@ enum Entry {
     Stream(StreamState),
     Listener(ListenerState),
     Tls(Box<TlsState>),
+    Udp(UdpState),
 }
 
 struct StreamState {
@@ -214,6 +251,14 @@ struct TlsState {
     _retained: RetainedLease,
 }
 
+struct UdpState {
+    socket: UdpSocket,
+    registered: bool,
+    receives: VecDeque<Pending>,
+    writes: VecDeque<PendingDatagramWrite>,
+    queued: VecDeque<QueuedDatagram>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NetworkWaitKind {
     Dns,
@@ -242,6 +287,10 @@ enum NetworkWaitRollback {
     TlsRead {
         stream: u64,
         bytes: Vec<u8>,
+    },
+    UdpRecv {
+        socket: u64,
+        datagram: QueuedDatagram,
     },
 }
 
@@ -293,6 +342,16 @@ impl TlsRequest {
             TlsRequest::ServerHandshake { settings, .. } => settings.retained_bytes(),
             TlsRequest::Read { count, .. } => *count,
             TlsRequest::Write { bytes, .. } => bytes.retained_capacity(),
+            _ => 0,
+        }
+    }
+}
+
+impl UdpRequest {
+    fn retained_bytes(&self) -> usize {
+        match self {
+            UdpRequest::SendTo { bytes, .. } => bytes.retained_capacity(),
+            UdpRequest::RecvFrom { .. } => MAX_UDP_DATAGRAM_BYTES,
             _ => 0,
         }
     }
@@ -502,6 +561,50 @@ impl NetworkService {
         true
     }
 
+    pub(crate) fn submit_udp(
+        &self,
+        key: CompletionKey,
+        token: u64,
+        request: UdpRequest,
+        wait_source: bool,
+    ) -> bool {
+        let retained = request.retained_bytes();
+        if !reserve(&self.pending, &self.retained, retained) {
+            return false;
+        }
+        let pending = Pending {
+            key,
+            token,
+            retained,
+            wait_state: wait_source.then(|| Arc::clone(&self.waits)),
+            retained_budget: wait_source.then(|| Arc::clone(&self.retained)),
+        };
+        if wait_source {
+            self.waits
+                .lock()
+                .expect("the network wait state locks")
+                .pending
+                .insert(token, NetworkWaitKind::Reactor);
+        }
+        match self.requests.try_send(Command::Udp(pending, request)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                if wait_source {
+                    self.waits
+                        .lock()
+                        .expect("the network wait state locks")
+                        .pending
+                        .remove(&token);
+                }
+                release_pending(&self.pending);
+                release_retained(&self.retained, retained);
+                return false;
+            }
+        }
+        let _ = self.wake.wake();
+        true
+    }
+
     pub(crate) fn cancel(&self, token: u64) -> bool {
         let active = self.active_dns.lock().expect("the DNS set locks");
         if active.contains(&token) {
@@ -601,6 +704,12 @@ impl NetworkService {
 
     pub(crate) fn force_close_tls(&self, token: u64) -> bool {
         let sent = self.controls.send(Control::ForceCloseTls(token)).is_ok();
+        let _ = self.wake.wake();
+        sent
+    }
+
+    pub(crate) fn force_close_udp(&self, token: u64) -> bool {
+        let sent = self.controls.send(Control::ForceCloseUdp(token)).is_ok();
         let _ = self.wake.wake();
         sent
     }
@@ -822,6 +931,9 @@ fn reactor(
                 Control::ForceCloseTls(stream) => {
                     close_entry(&poll, &mut entries, &completions, &pending, stream);
                 }
+                Control::ForceCloseUdp(socket) => {
+                    close_entry(&poll, &mut entries, &completions, &pending, socket);
+                }
                 Control::Stop => return,
             }
         }
@@ -874,7 +986,9 @@ fn handle_command(
     command: Command,
 ) {
     let token = match &command {
-        Command::Request(pending, _) | Command::Tls(pending, _) => pending.token,
+        Command::Request(pending, _) | Command::Tls(pending, _) | Command::Udp(pending, _) => {
+            pending.token
+        }
     };
     if waits
         .lock()
@@ -889,7 +1003,9 @@ fn handle_command(
             .remove(&token);
         release_pending(count);
         let pending_retained = match command {
-            Command::Request(pending, _) | Command::Tls(pending, _) => pending.retained,
+            Command::Request(pending, _) | Command::Tls(pending, _) | Command::Udp(pending, _) => {
+                pending.retained
+            }
         };
         release_retained(retained, pending_retained);
         return;
@@ -917,17 +1033,10 @@ fn handle_command(
                 }
                 match TcpStream::connect(socket_address(address)) {
                     Ok(mut socket) => {
-                        // Nagle holds a small second write until the
-                        // peer acknowledges the first. A TLS record
-                        // needs more than one write, so the delayed
-                        // acknowledgement adds 40 ms to each exchange.
-                        //
-                        // The option tunes speed alone. A platform
-                        // that refuses it still moves every byte, so
-                        // this code drops the error on purpose. A
-                        // refused connection would be the worse
-                        // answer.
-                        let _ = socket.set_nodelay(true);
+                        if let Err(error) = socket.set_nodelay(true) {
+                            complete(completions, count, pending, io_error(error));
+                            return;
+                        }
                         if poll
                             .registry()
                             .register(
@@ -1158,6 +1267,120 @@ fn handle_command(
                 retained,
                 pending,
                 request,
+            );
+        }
+        Command::Udp(pending, request) => {
+            handle_udp_request(poll, entries, completions, count, pending, request);
+        }
+    }
+}
+
+fn handle_udp_request(
+    poll: &Poll,
+    entries: &mut HashMap<u64, Entry>,
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    pending: Pending,
+    request: UdpRequest,
+) {
+    match request {
+        UdpRequest::Bind { socket, address } => {
+            if entries.len() >= MAX_NETWORK_RESOURCES {
+                complete(
+                    completions,
+                    count,
+                    pending,
+                    net_error(CoreCtor::NetLimitExceeded, "the socket limit is full"),
+                );
+                return;
+            }
+            if entries.contains_key(&socket) {
+                complete(
+                    completions,
+                    count,
+                    pending,
+                    net_error(CoreCtor::NetFailed, "the UDP token is in use"),
+                );
+                return;
+            }
+            match UdpSocket::bind(socket_address(address)) {
+                Ok(socket_handle) => {
+                    entries.insert(
+                        socket,
+                        Entry::Udp(UdpState {
+                            socket: socket_handle,
+                            registered: false,
+                            receives: VecDeque::new(),
+                            writes: VecDeque::new(),
+                            queued: VecDeque::new(),
+                        }),
+                    );
+                    complete(
+                        completions,
+                        count,
+                        pending,
+                        net_ok(HostValue::UdpSocket(socket)),
+                    );
+                }
+                Err(error) => complete(completions, count, pending, io_error(error)),
+            }
+        }
+        UdpRequest::SendTo {
+            socket,
+            address,
+            bytes,
+        } => {
+            match entries.get_mut(&socket) {
+                Some(Entry::Udp(state)) => {
+                    state.writes.push_back(PendingDatagramWrite {
+                        pending,
+                        address: socket_address(address),
+                        bytes,
+                    });
+                }
+                _ => {
+                    complete(completions, count, pending, net_closed());
+                    return;
+                }
+            }
+            drive_udp(poll, entries, completions, count, socket, false, true);
+        }
+        UdpRequest::RecvFrom { socket } => {
+            match entries.get_mut(&socket) {
+                Some(Entry::Udp(state)) => state.receives.push_back(pending),
+                _ => {
+                    complete(completions, count, pending, net_closed());
+                    return;
+                }
+            }
+            drive_udp(poll, entries, completions, count, socket, true, false);
+        }
+        UdpRequest::LocalAddress { socket } => {
+            let result = match entries.get(&socket) {
+                Some(Entry::Udp(state)) => state.socket.local_addr(),
+                _ => {
+                    complete(completions, count, pending, net_closed());
+                    return;
+                }
+            };
+            let value = match result {
+                Ok(address) => net_ok(HostValue::SocketAddress(host_address(address))),
+                Err(error) => io_error(error),
+            };
+            complete(completions, count, pending, value);
+        }
+        UdpRequest::Close { socket } => {
+            let existed = matches!(entries.get(&socket), Some(Entry::Udp(_)))
+                && close_entry(poll, entries, completions, count, socket);
+            complete(
+                completions,
+                count,
+                pending,
+                if existed {
+                    net_ok(HostValue::Unit)
+                } else {
+                    net_closed()
+                },
             );
         }
     }
@@ -1578,7 +1801,205 @@ fn drive_entry(
             readable,
             writable,
         ),
+        Some(Entry::Udp(_)) => drive_udp(
+            poll,
+            entries,
+            completions,
+            count,
+            resource,
+            readable,
+            writable,
+        ),
         None => {}
+    }
+}
+
+fn complete_udp_receive(
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    mut pending: Pending,
+    socket: u64,
+    bytes: SharedBytes,
+    peer: SocketAddr,
+    queued: Option<QueuedDatagram>,
+) -> Option<QueuedDatagram> {
+    let rollback = if pending.wait_state.is_some() {
+        let datagram = match queued {
+            Some(datagram) => datagram,
+            None => {
+                let held = bytes.retained_capacity();
+                debug_assert!(held <= pending.retained);
+                pending.retained = pending.retained.saturating_sub(held);
+                QueuedDatagram {
+                    bytes: bytes.clone(),
+                    peer,
+                    _retained: RetainedLease {
+                        budget: Arc::clone(
+                            pending
+                                .retained_budget
+                                .as_ref()
+                                .expect("a UDP wait has a retained-byte budget"),
+                        ),
+                        bytes: held,
+                    },
+                }
+            }
+        };
+        NetworkWaitRollback::UdpRecv { socket, datagram }
+    } else {
+        NetworkWaitRollback::None
+    };
+    let cancelled = complete_with_rollback(
+        completions,
+        count,
+        pending,
+        net_ok(HostValue::Ctor(
+            CoreCtor::UdpDatagram,
+            vec![
+                HostValue::Bytes(bytes),
+                HostValue::SocketAddress(host_address(peer)),
+            ],
+        )),
+        rollback,
+    );
+    match cancelled {
+        Some(NetworkWaitRollback::UdpRecv { datagram, .. }) => Some(datagram),
+        _ => None,
+    }
+}
+
+fn drive_udp(
+    poll: &Poll,
+    entries: &mut HashMap<u64, Entry>,
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    socket: u64,
+    readable: bool,
+    writable: bool,
+) {
+    let Some(Entry::Udp(state)) = entries.get_mut(&socket) else {
+        return;
+    };
+    if writable {
+        while let Some(write) = state.writes.pop_front() {
+            match state.socket.send_to(write.bytes.as_slice(), write.address) {
+                Ok(written) if written == write.bytes.len() => {
+                    complete(completions, count, write.pending, net_ok(HostValue::Unit));
+                }
+                Ok(_) => complete(
+                    completions,
+                    count,
+                    write.pending,
+                    net_error(CoreCtor::NetFailed, "the UDP send was incomplete"),
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    state.writes.push_front(write);
+                    break;
+                }
+                Err(error) => complete(completions, count, write.pending, io_error(error)),
+            }
+        }
+    }
+    while let Some(pending) = state.receives.pop_front() {
+        if let Some(datagram) = state.queued.pop_front() {
+            let bytes = datagram.bytes.clone();
+            let peer = datagram.peer;
+            if let Some(restored) = complete_udp_receive(
+                completions,
+                count,
+                pending,
+                socket,
+                bytes,
+                peer,
+                Some(datagram),
+            ) {
+                state.queued.push_front(restored);
+            }
+            continue;
+        }
+        if !readable {
+            state.receives.push_front(pending);
+            break;
+        }
+        let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
+        match state.socket.recv_from(&mut buffer) {
+            Ok((read, peer)) => {
+                buffer.truncate(read);
+                buffer.shrink_to_fit();
+                let bytes: SharedBytes = buffer.into();
+                if let Some(restored) =
+                    complete_udp_receive(completions, count, pending, socket, bytes, peer, None)
+                {
+                    state.queued.push_front(restored);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                state.receives.push_front(pending);
+                break;
+            }
+            Err(error) => complete(completions, count, pending, io_error(error)),
+        }
+    }
+    let interest = match (!state.receives.is_empty(), !state.writes.is_empty()) {
+        (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
+        (true, false) => Some(Interest::READABLE),
+        (false, true) => Some(Interest::WRITABLE),
+        (false, false) => None,
+    };
+    let registration_failed = match (state.registered, interest) {
+        (true, Some(interest)) => poll
+            .registry()
+            .reregister(&mut state.socket, Token(socket as usize), interest)
+            .is_err(),
+        (false, Some(interest)) => {
+            let registered = poll
+                .registry()
+                .register(&mut state.socket, Token(socket as usize), interest)
+                .is_ok();
+            state.registered = registered;
+            !registered
+        }
+        (true, None) => {
+            if poll.registry().deregister(&mut state.socket).is_ok() {
+                state.registered = false;
+            }
+            false
+        }
+        (false, None) => false,
+    };
+    if registration_failed {
+        fail_udp_entry(poll, entries, completions, count, socket);
+    }
+}
+
+fn fail_udp_entry(
+    poll: &Poll,
+    entries: &mut HashMap<u64, Entry>,
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    socket: u64,
+) {
+    let Some(Entry::Udp(mut state)) = entries.remove(&socket) else {
+        return;
+    };
+    if state.registered {
+        let _ = poll.registry().deregister(&mut state.socket);
+    }
+    for pending in state.receives.drain(..) {
+        complete(
+            completions,
+            count,
+            pending,
+            net_error(CoreCtor::NetFailed, "the UDP socket registration failed"),
+        );
+    }
+    for write in state.writes.drain(..) {
+        complete(
+            completions,
+            count,
+            write.pending,
+            net_error(CoreCtor::NetFailed, "the UDP socket registration failed"),
+        );
     }
 }
 
@@ -1618,13 +2039,10 @@ fn drive_listener(
                 None => state.socket.accept(),
             };
             match accepted {
-                Ok((socket, address)) => {
-                    // An accepted stream needs the same treatment as
-                    // a connected one. The error drops for the same
-                    // reason.
-                    let _ = socket.set_nodelay(true);
-                    Ok((pending, stream, socket, address))
-                }
+                Ok((socket, address)) => match socket.set_nodelay(true) {
+                    Ok(()) => Ok((pending, stream, socket, address)),
+                    Err(error) => Err((pending, error)),
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     state.accepts.push_front((pending, stream));
                     return;
@@ -2186,6 +2604,17 @@ fn close_entry(
                 complete(completions, count, pending, tls_closed());
             }
         }
+        Entry::Udp(state) => {
+            if state.registered {
+                let _ = poll.registry().deregister(&mut state.socket);
+            }
+            for pending in state.receives.drain(..) {
+                complete(completions, count, pending, net_closed());
+            }
+            for write in state.writes.drain(..) {
+                complete(completions, count, write.pending, net_closed());
+            }
+        }
     }
     true
 }
@@ -2239,6 +2668,13 @@ fn restore_wait(
             for byte in bytes.into_iter().rev() {
                 state.read_buffer.push_front(byte);
             }
+            true
+        }
+        NetworkWaitRollback::UdpRecv { socket, datagram } => {
+            let Some(Entry::Udp(state)) = entries.get_mut(&socket) else {
+                return true;
+            };
+            state.queued.push_front(datagram);
             true
         }
     }
@@ -2345,6 +2781,28 @@ fn cancel_token(
                         .expect("the shutdown call exists");
                     release_pending(count);
                     release_retained(retained, pending.retained);
+                    return CancelToken::Removed;
+                }
+            }
+            Entry::Udp(state) => {
+                if let Some(at) = state
+                    .receives
+                    .iter()
+                    .position(|pending| pending.token == token)
+                {
+                    let pending = state.receives.remove(at).expect("the UDP receive exists");
+                    release_pending(count);
+                    release_retained(retained, pending.retained);
+                    return CancelToken::Removed;
+                }
+                if let Some(at) = state
+                    .writes
+                    .iter()
+                    .position(|write| write.pending.token == token)
+                {
+                    let write = state.writes.remove(at).expect("the UDP send exists");
+                    release_pending(count);
+                    release_retained(retained, write.pending.retained);
                     return CancelToken::Removed;
                 }
             }

@@ -659,6 +659,13 @@ impl World {
                             format!("<child {resource}>")
                         }
                     }
+                    Object::NativeUdpSocket { resource } => {
+                        if *resource == 0 {
+                            "<UDP socket closed>".to_string()
+                        } else {
+                            format!("<UDP socket {resource}>")
+                        }
+                    }
                     Object::NativeHostResource { kind, resource } => {
                         let name = self
                             .loaded

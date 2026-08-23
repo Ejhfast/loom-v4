@@ -1163,6 +1163,7 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::ExecSpec => (self.core.exec_spec, "ExecSpec"),
                     lm_abi::AbiCore::ChildStatus => (self.core.child_status, "ChildStatus"),
                     lm_abi::AbiCore::ExecError => (self.core.exec_error, "ExecError"),
+                    lm_abi::AbiCore::UdpDatagram => (self.core.udp_datagram, "UdpDatagram"),
                 };
                 self.plain_inst(slot, name)
             }
@@ -1188,6 +1189,7 @@ impl<'m> Ctx<'m> {
                     self.plain_inst(self.core.pipe_writer, "PipeWriter")
                 }
                 lm_abi::AbiNative::Child => self.plain_inst(self.core.child, "Child"),
+                lm_abi::AbiNative::UdpSocket => self.plain_inst(self.core.udp_socket, "UdpSocket"),
             },
             lm_abi::AbiType::Var(index) => Err(format!(
                 "the fixed ABI type names generic parameter {index}"

@@ -1860,6 +1860,7 @@ impl Admit<'_> {
                     | Object::NativePipeReader { resource }
                     | Object::NativePipeWriter { resource }
                     | Object::NativeChild { resource }
+                    | Object::NativeUdpSocket { resource }
                     | Object::NativeHostResource { resource, .. }
                     if resource != 0
             ) {
