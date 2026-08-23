@@ -40,17 +40,13 @@ fn rows_validate_against_the_manifest() {
 #[test]
 fn direct_performs_charge_the_exact_operation() {
     // Perform without the row.
-    assert_eq!(code_of("def f()\n  sys.io.print(\"x\")\nend\n1\n"), "E1046");
+    assert_eq!(code_of("def f()\n  print(\"x\")\nend\n1\n"), "E1046");
     // The exact row admits the perform; the group admits it too.
-    assert!(compile_text(
-        "t.lm",
-        "def f() with Io.Print\n  sys.io.print(\"x\")\nend\n1\n"
-    )
-    .is_ok());
-    assert!(compile_text("t.lm", "def f() with Io\n  sys.io.print(\"x\")\nend\n1\n").is_ok());
+    assert!(compile_text("t.lm", "def f() with Io.Write\n  print(\"x\")\nend\n1\n").is_ok());
+    assert!(compile_text("t.lm", "def f() with Io\n  print(\"x\")\nend\n1\n").is_ok());
     // A sibling exact operation does not admit it.
     assert_eq!(
-        code_of("def f() with Io.Error\n  sys.io.print(\"x\")\nend\n1\n"),
+        code_of("def f() with Io.WriteError\n  print(\"x\")\nend\n1\n"),
         "E1046"
     );
 }
@@ -74,30 +70,35 @@ fn sys_misuse_is_precise() {
 fn first_class_operation_values_carry_their_identity() {
     // Storing and calling through a variable charges the identity.
     assert_eq!(
-        code_of("def f()\n  p = sys.io.print\n  p(\"x\")\nend\n1\n"),
+        code_of("def f()\n  p = sys.io.write\n  p(b\"x\")\nend\n1\n"),
         "E1046"
     );
     assert!(compile_text(
         "t.lm",
-        "def f() with Io.Print\n  p = sys.io.print\n  p(\"x\")\nend\n1\n"
+        "def f() with Io.Write\n  p = sys.io.write\n  p(b\"x\")\nend\n1\n"
     )
     .is_ok());
     // Passing the value as an argument: the parameter type is the
     // identity-indexed Op type, which no plain function type accepts.
     assert_eq!(
-        code_of("def call_it(g: (String) -> ()): ()\n  g(\"x\")\nend\ncall_it(sys.io.print)\n"),
+        code_of(
+            "def call_it(g: (Bytes) -> Result[Int, IoError]): Result[Int, IoError]\n  \
+             g(b\"x\")\nend\ncall_it(sys.io.write)\n"
+        ),
         "E1004"
     );
     // The perform through the value reaches the host.
     let (out, host) = run_world(
         "t.lm",
-        "def f() with Io.Print\n  p = sys.io.print\n  p(\"one\")\n  p(\"two\")\nend\nf()\n",
-        &["Io.Print"],
+        "def f() with Io.Write\n  p = sys.io.write\n  \
+         p(b\"one\").expect(\"the output writes\")\n  \
+         p(b\"two\").expect(\"the output writes\")\nend\nf()\n",
+        &["Io.Write"],
         VmConfig::default(),
     )
     .unwrap();
     assert_eq!(out, "Done(())");
-    assert_eq!(host.borrow().printed, vec!["one", "two"]);
+    assert_eq!(host.borrow().written_bytes, b"onetwo");
 }
 
 #[test]
@@ -105,18 +106,18 @@ fn effect_variables_bind_from_explicitly_rowed_closures() {
     // A closure with an explicit row binds the effect variable of a
     // higher-order callee; the caller is charged the bound row.
     let source = "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  f(x)\nend\n\
-                  def go(): Int with Io.Print\n  \
-                  apply(1, do |n: Int|: Int with Io.Print\n    sys.io.print(\"n\\n\")\n    n\n  end)\n\
+                  def go(): Int with Io.Write\n  \
+                  apply(1, do |n: Int|: Int with Io.Write\n    print(\"n\\n\")\n    n\n  end)\n\
                   end\ngo()\n";
-    let (out, host) = run_world("t.lm", source, &["Io.Print"], VmConfig::default()).unwrap();
+    let (out, host) = run_world("t.lm", source, &["Io.Write"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(1)");
-    assert_eq!(host.borrow().printed, vec!["n\n"]);
+    assert_eq!(host.borrow().written_bytes, b"n\n");
     // Without the charge in the enclosing pure row it is rejected.
     assert_eq!(
         code_of(
             "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  f(x)\nend\n\
              def go(): Int\n  \
-             apply(1, do |n: Int|: Int with Io.Print\n    sys.io.print(\"n\\n\")\n    n\n  end)\n\
+             apply(1, do |n: Int|: Int with Io.Write\n    print(\"n\\n\")\n    n\n  end)\n\
              end\n1\n"
         ),
         "E1046"
@@ -133,12 +134,12 @@ fn table_pass_charges_the_granter_row() {
     // Passing the exact operation under the exact row compiles.
     assert!(compile_text(
         "t.lm",
-        "def f(vm: Run[Int]) with Vm, Io.Print\n  vm.table().pass(Io.Print)\nend\n1\n"
+        "def f(vm: Run[Int]) with Vm, Io.Write\n  vm.table().pass(Io.Write)\nend\n1\n"
     )
     .is_ok());
     // An exact grant does not admit a whole-group pass.
     assert_eq!(
-        code_of("def f(vm: Run[Int]) with Vm, Io.Print\n  vm.table().pass(Io)\nend\n1\n"),
+        code_of("def f(vm: Run[Int]) with Vm, Io.Write\n  vm.table().pass(Io)\nend\n1\n"),
         "E1046"
     );
     // block and mock charge nothing.
@@ -164,7 +165,7 @@ fn mock_needs_the_exact_pure_signature() {
     assert_eq!(
         code_of(
             "def f(vm: Run[Int]) with Vm\n  \
-             vm.table().mock(Clock.Now, { ||: Int with Io.Print 1 })\nend\n1\n"
+             vm.table().mock(Clock.Now, { ||: Int with Io.Write 1 })\nend\n1\n"
         ),
         "E1004"
     );
@@ -180,7 +181,7 @@ fn typed_answer_mismatch_is_static() {
     assert_eq!(
         code_of(
             "def bad(vm: Run[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             case q\n    in Call(Io.Print, call, (_,)) then vm.answer(call, 5)\n    \
+             case q\n    in Call(Io.Write, call, (_,)) then vm.answer(call, 5)\n    \
              in _ then ()\n    end\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
         ),
         "E1004"
@@ -235,17 +236,18 @@ fn tuple_patterns_destructure_native_tuples() {
 
 #[test]
 fn default_deny_blocks_at_the_root() {
-    let source = "def f() with Io.Print\n  sys.io.print(\"x\")\nend\nf()\n";
+    let source = "def f() with Io.Write\n  print(\"x\")\nend\nf()\n";
     assert_eq!(allowed(source, &[]), "Fault(PolicyDenied)");
-    assert_eq!(allowed(source, &["Io.Print"]), "Done(())");
+    assert_eq!(allowed(source, &["Io.Write"]), "Done(())");
     // A group grant covers the exact operation.
     assert_eq!(allowed(source, &["Io"]), "Done(())");
     // A different exact grant does not.
-    assert_eq!(allowed(source, &["Io.Error"]), "Fault(PolicyDenied)");
+    assert_eq!(allowed(source, &["Io.WriteError"]), "Fault(PolicyDenied)");
 }
 
 const CHILD_PRINT: &str = "def spawn_print(): Run[()] with Vm\n  \
-    sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"c\\n\")\n  end, args: ())\n\
+    sys.vm.Vm().activate_or_fault(do || with Io.Write\n    \
+    print(\"c\\n\").expect(\"the output writes\")\n  end, args: ())\n\
     end\n";
 
 #[test]
@@ -254,20 +256,20 @@ fn exact_beats_group_in_one_table() {
     let source = format!(
         "{CHILD_PRINT}\
          def go(): String with Vm, Io\n  vm = spawn_print()\n  \
-         vm.table().pass(Io)\n  vm.table().block(Io.Print)\n  \
+         vm.table().pass(Io)\n  vm.table().block(Io.Write)\n  \
          case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n"
     );
     assert_eq!(allowed(&source, &["Vm", "Io"]), "Done(\"PolicyDenied\")");
     // Group block plus exact pass: the exact entry wins again.
     let source = format!(
         "{CHILD_PRINT}\
-         def go(): String with Vm, Io.Print\n  vm = spawn_print()\n  \
-         vm.table().block(Io)\n  vm.table().pass(Io.Print)\n  \
+         def go(): String with Vm, Io.Write\n  vm = spawn_print()\n  \
+         vm.table().block(Io)\n  vm.table().pass(Io.Write)\n  \
          case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n"
     );
-    let (out, host) = run_world("t.lm", &source, &["Vm", "Io.Print"], VmConfig::default()).unwrap();
+    let (out, host) = run_world("t.lm", &source, &["Vm", "Io.Write"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(\"done\")");
-    assert_eq!(host.borrow().printed, vec!["c\n"]);
+    assert_eq!(host.borrow().written_bytes, b"c\n");
 }
 
 #[test]
@@ -286,14 +288,14 @@ fn pass_chain_reaches_the_root_and_fails_closed() {
     // Grandchild -> child -> root: every level passes Io.
     let source = "def go(): String with Vm, Io\n  \
         vm = sys.vm.Vm().activate_or_fault(do || with Vm, Io\n    \
-        inner = sys.vm.Vm().activate_or_fault(do || with Io.Print\n      sys.io.print(\"deep\\n\")\n    end, args: ())\n    \
+        inner = sys.vm.Vm().activate_or_fault(do || with Io.Write\n      print(\"deep\\n\")\n    end, args: ())\n    \
         inner.table().pass(Io)\n    \
         case inner.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  end, args: ())\n  \
         vm.table().pass(Io)\n  vm.table().pass(Vm)\n  \
         case vm.run()\n  in Done(s) then s\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     let (out, host) = run_world("t.lm", source, &["Vm", "Io"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(\"done\")");
-    assert_eq!(host.borrow().printed, vec!["deep\n"]);
+    assert_eq!(host.borrow().written_bytes, b"deep\n");
     // Without the root grant the same chain fails closed.
     assert_eq!(allowed(source, &["Vm"]), "Done(\"PolicyDenied\")");
 }
@@ -337,11 +339,11 @@ fn mock_runs_pure_and_bounded() {
 
 #[test]
 fn live_table_edits_affect_future_lookups() {
-    // The holder steps the child, then revokes Io.Print between the
+    // The holder steps the child, then revokes Io.Write between the
     // first and second print. The second perform faults.
     let source = "def go(): String with Vm, Io\n  \
-        vm = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    \
-        sys.io.print(\"a\\n\")\n    sys.io.print(\"b\\n\")\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    \
+        print(\"a\\n\")\n    print(\"b\\n\")\n  end, args: ())\n  \
         vm.table().pass(Io)\n  \
         steps = 0\n  \
         revoked = false\n  \
@@ -351,7 +353,7 @@ fn live_table_edits_affect_future_lookups() {
         case vm.step()\n    \
         in Ran\n      \
         if not revoked\n        \
-        vm.table().block(Io.Print)\n        \
+        vm.table().block(Io.Write)\n        \
         revoked = true\n      \
         end\n    \
         in Waiting then ()\n    \
@@ -364,7 +366,7 @@ fn live_table_edits_affect_future_lookups() {
     assert_eq!(out, "Done(\"PolicyDenied\")");
     // The revocation lands after the first retired instruction, well
     // before the first perform, so nothing prints.
-    assert_eq!(host.borrow().printed, Vec::<String>::new());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 // ---------------------------------------------------------------
@@ -472,7 +474,7 @@ fn cross_vm_tokens_fault_safely() {
 fn reject_installs_the_supplied_fault() {
     let source = "def go(): String with Vm\n  \
         vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
-        blocked = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
+        blocked = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    print(\"x\")\n  end, args: ())\n  \
         case blocked.run()\n  in Done(_) then \"no-fault\"\n  in Fault(fault)\n    \
         case vm.drive()\n    in Asked(q)\n      \
         vm.reject(q, fault)\n      \
@@ -529,7 +531,8 @@ fn a_wildcard_arm_can_deny_a_request() {
         def go(): String with Vm\n  \
         vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
         case vm.drive()\n  in Asked(request)\n    \
-        case request\n    in Call(Io.Print, call, (_,))\n      vm.answer(call, ())\n    \
+        case request\n    in Call(Io.Write, call, (bytes,))\n      \
+      vm.answer(call, Ok(bytes.len()))\n    \
         in _\n      vm.reject(request, Fault.denied(\"denied\"))\n    end\n    \
         case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  \
         in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
@@ -571,26 +574,27 @@ fn drive_receives_a_passed_descendant_request() {
     let source = "def drive_loop(vm: Run[Int], mut seen: [String]): Int with Vm\n  \
         loop do\n    \
         case vm.drive()\n    in Asked(q)\n      \
-        case q\n      in Call(Io.Print, call, (text,))\n        \
-        seen.push(text)\n        vm.answer(call, ())\n      \
+        case q\n      in Call(Io.Write, call, (bytes,))\n        \
+        seen.push(bytes.utf8().expect(\"the output is UTF-8\"))\n        \
+        vm.answer(call, Ok(bytes.len()))\n      \
         in _\n        vm.dispatch(q)\n      end\n    \
         in Done(value)\n      return seen.len() * 10 + value\n    \
         in Fault(_)\n      return -1\n    end\n  end\nend\n\
-        inner = do ||: Int with Vm, Io.Print\n  \
-        sys.io.print(\"from A\")\n  \
-        b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print\n    \
-        sys.io.print(\"from B\")\n    7\n  end, args: ())\n  \
-        b.table().pass(Io.Print)\n  \
+        inner = do ||: Int with Vm, Io.Write\n  \
+        print(\"from A\")\n  \
+        b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write\n    \
+        print(\"from B\")\n    7\n  end, args: ())\n  \
+        b.table().pass(Io.Write)\n  \
         case b.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\n\
         a = sys.vm.Vm().activate_or_fault(inner, args: ())\n\
         a.table().pass(Vm)\n\
-        a.table().pass(Io.Print)\n\
+        a.table().pass(Io.Write)\n\
         seen: [String] = []\n\
         drive_loop(a, seen)\n";
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the routed request program runs");
     assert_eq!(out, "Done(27)");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 #[test]
@@ -608,12 +612,12 @@ def drive_all(vm: Run[Int]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print("from B")
+inner = do ||: Int with Vm, Io.Write
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print("from B")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   case b.run()
   in Done(value) then value
   in Fault(_) then -3
@@ -622,13 +626,13 @@ end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 drive_all(a)
 "#;
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the routed dispatch program runs");
     assert_eq!(out, "Done(7)");
-    assert_eq!(host.borrow().printed, vec!["from B"]);
+    assert_eq!(host.borrow().written_bytes, b"from B");
 }
 
 #[test]
@@ -639,7 +643,7 @@ def reject_print(vm: Run[String], source_fault: Fault): String with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, _, (_,))
+      in Call(Io.Write, _, (_,))
         vm.reject(q, source_fault)
       in _
         vm.dispatch(q)
@@ -652,19 +656,19 @@ def reject_print(vm: Run[String], source_fault: Fault): String with Vm
   end
 end
 
-blocked = sys.vm.Vm().activate_or_fault(do || with Io.Print
-  sys.io.print("blocked")
+blocked = sys.vm.Vm().activate_or_fault(do || with Io.Write
+  print("blocked")
 end, args: ())
 
 case blocked.run()
 in Done(_) then "no source fault"
 in Fault(source_fault)
-  inner = do ||: String with Vm, Io.Print
-    b = sys.vm.Vm().activate_or_fault(do ||: String with Io.Print
-      sys.io.print("from B")
+  inner = do ||: String with Vm, Io.Write
+    b = sys.vm.Vm().activate_or_fault(do ||: String with Io.Write
+      print("from B")
       "done"
     end, args: ())
-    b.table().pass(Io.Print)
+    b.table().pass(Io.Write)
     case b.run()
     in Done(value) then value
     in Fault(fault) then fault.code()
@@ -673,14 +677,14 @@ in Fault(source_fault)
 
   a = sys.vm.Vm().activate_or_fault(inner, args: ())
   a.table().pass(Vm)
-  a.table().pass(Io.Print)
+  a.table().pass(Io.Write)
   reject_print(a, source_fault)
 end
 "#;
     let (out, host) = run_world("t.lm", source, &["Vm"], VmConfig::default())
         .expect("the routed rejection program runs");
     assert_eq!(out, "Done(\"PolicyDenied\")");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 #[test]
@@ -691,7 +695,7 @@ def drive_without_print(vm: Run[Int]): Int with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, _, (_,))
+      in Call(Io.Write, _, (_,))
         return -2
       in _ then vm.dispatch(q)
       end
@@ -703,12 +707,12 @@ def drive_without_print(vm: Run[Int]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print("from B")
+inner = do ||: Int with Vm, Io.Write
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print("from B")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   case b.run()
   in Done(value) then value
   in Fault(_) then -1
@@ -719,10 +723,10 @@ a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 drive_without_print(a)
 "#;
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the ancestor denial program runs");
     assert_eq!(out, "Done(-1)");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 #[test]
@@ -773,8 +777,8 @@ def answer_through_wrong_vm(vm: Run[Int], wrong: Run[Int]): Int with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (_,))
-        wrong.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        wrong.answer(call, Ok(bytes.len()))
         return 1
       in _
         vm.dispatch(q)
@@ -787,12 +791,12 @@ def answer_through_wrong_vm(vm: Run[Int], wrong: Run[Int]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print("from B")
+inner = do ||: Int with Vm, Io.Write
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print("from B")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   case b.run()
   in Done(value) then value
   in Fault(_) then -1
@@ -801,12 +805,12 @@ end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 c = sys.vm.Vm().activate_or_fault({ ||: Int 0 }, args: ())
 answer_through_wrong_vm(a, c)
 "#;
     assert_eq!(
-        allowed(source, &["Vm", "Io.Print"]),
+        allowed(source, &["Vm", "Io.Write"]),
         "Fault(InvalidRequestToken)"
     );
 }
@@ -821,9 +825,9 @@ def drive_loop(vm: Run[Int], mut seen: [String]): Int with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
-        seen.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        seen.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in _ then vm.dispatch(q)
       end
     in Done(value)
@@ -847,26 +851,26 @@ def step_all(b: Run[Int]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  sys.io.print("from A")
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print("from B")
+inner = do ||: Int with Vm, Io.Write
+  print("from A")
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print("from B")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   step_all(b)
 end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 seen: [String] = []
 drive_loop(a, seen)
 "#;
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the nested step program runs");
     assert_eq!(out, "Done(27)");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 /// Two drivers stand above one machine. The policy walk stops at the
@@ -879,9 +883,9 @@ def drive_loop(vm: Run[Int], mut seen: [String]): Int with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
-        seen.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        seen.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in _ then vm.dispatch(q)
       end
     in Done(value)
@@ -897,7 +901,7 @@ def a_drives_b(b: Run[Int]): Int with Vm
     case b.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (_,)) then b.answer(call, ())
+      in Call(Io.Write, call, (bytes,)) then b.answer(call, Ok(bytes.len()))
       in _                          then b.dispatch(q)
       end
     in Done(value)
@@ -908,28 +912,28 @@ def a_drives_b(b: Run[Int]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  sys.io.print("from A")
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print("from B")
+inner = do ||: Int with Vm, Io.Write
+  print("from A")
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print("from B")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   a_drives_b(b)
 end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 seen: [String] = []
 drive_loop(a, seen)
 "#;
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the two-driver program runs");
     // The outer driver captured the print of A alone. The inner
     // driver answered the print of B, so neither reached the host.
     assert_eq!(out, "Done(17)");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 /// Routing is transitive. A driver receives a request that passed two
@@ -942,9 +946,9 @@ def drive_loop(vm: Run[Int], mut seen: [String]): Int with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
-        seen.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        seen.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in _ then vm.dispatch(q)
       end
     in Done(value)
@@ -955,22 +959,22 @@ def drive_loop(vm: Run[Int], mut seen: [String]): Int with Vm
   end
 end
 
-inner = do ||: Int with Vm, Io.Print
-  sys.io.print("from A")
-  b = sys.vm.Vm().activate_or_fault(do ||: Int with Vm, Io.Print
-    sys.io.print("from B")
-    c = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-      sys.io.print("from C")
+inner = do ||: Int with Vm, Io.Write
+  print("from A")
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Vm, Io.Write
+    print("from B")
+    c = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+      print("from C")
       7
     end, args: ())
-    c.table().pass(Io.Print)
+    c.table().pass(Io.Write)
     case c.run()
     in Done(value) then value
     in Fault(_) then -3
     end
   end, args: ())
   b.table().pass(Vm)
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   case b.run()
   in Done(value) then value
   in Fault(_) then -4
@@ -979,14 +983,14 @@ end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 seen: [String] = []
 drive_loop(a, seen)
 "#;
-    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Write"], VmConfig::default())
         .expect("the three-level program runs");
     assert_eq!(out, "Done(37)");
-    assert!(host.borrow().printed.is_empty());
+    assert!(host.borrow().written_bytes.is_empty());
 }
 
 #[test]
@@ -1144,21 +1148,21 @@ fn nested_towers_stay_off_the_rust_stack() {
 
 #[test]
 fn read_line_reply_uses_the_pinned_core_result() {
-    let source = "def go(): String with Io.ReadLine\n  \
-        case sys.io.read_line()\n  in Ok(line)\n    \
+    let source = "def go(): String with Io.ReadBytes\n  \
+        case read_line(1048576)\n  in Ok(line)\n    \
         case line\n    in Some(text) then text\n    in None then \"<eof>\"\n    end\n  \
         in Err(e) then display(e)\n  end\nend\ngo()\n";
-    let (out, host) = run_world("t.lm", source, &["Io.ReadLine"], VmConfig::default()).unwrap();
+    let (out, host) = run_world("t.lm", source, &["Io.ReadBytes"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(\"<eof>\")");
-    host.borrow_mut().input.push("hello".to_string());
+    host.borrow_mut().input_bytes.extend_from_slice(b"hello\n");
     let (out, _) = {
         // A fresh world with one queued line.
         let bytes = lm_testkit::compile_to_bytes("t.lm", source).unwrap();
         let loaded = lm_vm::load_bytes(&bytes).unwrap();
         let host = std::rc::Rc::new(std::cell::RefCell::new(lm_vm::RecordingHost::new(1)));
-        host.borrow_mut().input.push("hello".to_string());
+        host.borrow_mut().input_bytes.extend_from_slice(b"hello\n");
         let mut world = lm_vm::World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
-        world.allow("Io.ReadLine").unwrap();
+        world.allow("Io.ReadBytes").unwrap();
         let outcome = world.run_root();
         (world.show_outcome(&outcome), host)
     };
@@ -1184,12 +1188,12 @@ fn week4_examples_have_checked_output() {
     let (out, host) = run_world(
         "hello.lm",
         &read("examples/04-effects/hello.lm"),
-        &["Io.Print"],
+        &["Io.Write"],
         VmConfig::default(),
     )
     .unwrap();
     assert_eq!(out, "Done(())");
-    assert_eq!(host.borrow().printed, vec!["Hello Ada!\n"]);
+    assert_eq!(host.borrow().written_bytes, b"Hello Ada!\n");
     assert_eq!(
         run_allowed(
             "blocked.lm",
@@ -1217,30 +1221,22 @@ fn week4_examples_have_checked_output() {
     .unwrap();
     assert_eq!(out, "Done(([\"tick\\n\"], 123))");
     // The prints were captured by the holder, not the host.
-    assert_eq!(host.borrow().printed, Vec::<String>::new());
+    assert!(host.borrow().written_bytes.is_empty());
 
     let (out, host) = run_world(
         "effect-polymorphism.lm",
         &read("examples/04-effects/effect-polymorphism.lm"),
-        &["Io.Print", "Clock"],
+        &["Io.Write", "Clock"],
         VmConfig::default(),
     )
     .unwrap();
     // Four call sites of two definitions, and four different rows.
     // `apply_all` forwards its closure's row; `logged_map` joins
-    // `Io.Print` onto it, so its callers pay for both.
+    // `Io.Write` onto it, so its callers pay for both.
     assert_eq!(out, "Done(([2, 3, 4], [2, 3, 4], [10, 20], [100, 200]))");
     assert_eq!(
-        host.borrow().printed,
-        vec![
-            "counted 1\n",
-            "counted 2\n",
-            "counted 3\n",
-            "mapping 1\n",
-            "mapping 2\n",
-            "mapping 1\n",
-            "mapping 2\n"
-        ]
+        host.borrow().written_bytes,
+        b"counted 1\ncounted 2\ncounted 3\nmapping 1\nmapping 2\nmapping 1\nmapping 2\n"
     );
 }
 
@@ -1298,20 +1294,20 @@ fn op_name_faults_on_a_spent_request() {
 /// grandchild performed.
 #[test]
 fn op_name_reads_a_descendant_request() {
-    let source = "def inner(): Int with Io.Print\n  sys.io.print(\"x\")\n  1\nend\n\
-        def outer(): Int with Vm, Io.Print\n  \
+    let source = "def inner(): Int with Io.Write\n  print(\"x\")\n  1\nend\n\
+        def outer(): Int with Vm, Io.Write\n  \
         b = sys.vm.Vm().activate_or_fault(inner, args: ())\n  \
-        b.table().pass(Io.Print)\n  \
+        b.table().pass(Io.Write)\n  \
         case b.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\n\
-        def go(): String with Vm, Io.Print\n  \
+        def go(): String with Vm, Io.Write\n  \
         a = sys.vm.Vm().activate_or_fault(outer, args: ())\n  \
-        a.table().pass(Vm)\n  a.table().pass(Io.Print)\n  \
+        a.table().pass(Vm)\n  a.table().pass(Io.Write)\n  \
         loop do\n    case a.drive()\n    in Asked(request)\n      \
         name = request.op_name()\n      \
-        if name == \"Io.Print\"\n        return name\n      end\n      \
+        if name == \"Io.Write\"\n        return name\n      end\n      \
         a.dispatch(request)\n    \
         in Done(_)\n      return \"done\"\n    in Fault(_)\n      return \"fault\"\n    end\n  end\nend\ngo()\n";
-    assert_eq!(allowed(source, &["Vm", "Io.Print"]), "Done(\"Io.Print\")");
+    assert_eq!(allowed(source, &["Vm", "Io.Write"]), "Done(\"Io.Write\")");
 }
 
 #[test]

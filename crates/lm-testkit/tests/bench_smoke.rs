@@ -212,7 +212,7 @@ fn perform_block_smoke() {
     // Each child performs one blocked operation; the holder observes
     // the fault. This times the block path plus machine creation.
     let source = "def one(): String with Vm\n  \
-                  vm = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
+                  vm = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    print(\"x\")\n  end, args: ())\n  \
                   case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\n\
                   def go(): Int with Vm\n  i = 0\n  while i < 300\n    one()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
     timed_world("perform_block_300", source, &["Vm"], "Done(300)");

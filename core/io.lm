@@ -9,3 +9,110 @@ interface ByteWriter[effect e]
   type Error
   def write(self, bytes: Bytes): Result[Int, Self.Error] with e
 end
+
+def print[T: Display](value: T): Result[(), IoError] with Io.Write
+  builder = StringBuilder()
+  value.append_to(builder)
+  bytes = builder.finish().bytes()
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = bytes.slice(offset, count).expect("the output suffix is valid")
+    written = sys.io.write(part)?
+    if written <= 0 or written > part.len()
+      return Err(IoError.Failed("the output stream made invalid progress"))
+    end
+    offset = offset + written
+  end
+  Ok(())
+end
+
+def println[T: Display](value: T): Result[(), IoError] with Io.Write
+  builder = StringBuilder()
+  value.append_to(builder)
+  builder.append("\n")
+  bytes = builder.finish().bytes()
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = bytes.slice(offset, count).expect("the output suffix is valid")
+    written = sys.io.write(part)?
+    if written <= 0 or written > part.len()
+      return Err(IoError.Failed("the output stream made invalid progress"))
+    end
+    offset = offset + written
+  end
+  Ok(())
+end
+
+def print_error[T: Display](value: T): Result[(), IoError] with Io.WriteError
+  builder = StringBuilder()
+  value.append_to(builder)
+  bytes = builder.finish().bytes()
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = bytes.slice(offset, count).expect("the error output suffix is valid")
+    written = sys.io.write_error(part)?
+    if written <= 0 or written > part.len()
+      return Err(IoError.Failed("the error output stream made invalid progress"))
+    end
+    offset = offset + written
+  end
+  Ok(())
+end
+
+def read_line(max_bytes: Int): Result[Option[String], IoError] with Io.ReadBytes
+  if max_bytes < 0
+    return Err(IoError.InvalidInput("the line limit is negative"))
+  end
+  buffer = ByteBuffer()
+  ended_with_newline = false
+  loop do
+    bytes = sys.io.read_bytes(1)?
+    if bytes.is_empty()
+      if buffer.len() == 0
+        return Ok(None)
+      end
+      break
+    end
+    byte = bytes.at(0)
+    if byte == 10
+      ended_with_newline = true
+      break
+    end
+    if buffer.len() == max_bytes and byte != 13
+      return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
+    end
+    if buffer.len() > max_bytes
+      return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
+    end
+    buffer.append(byte)
+  end
+  if not ended_with_newline and buffer.len() > max_bytes
+    return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
+  end
+  data = buffer.finish()
+  if ended_with_newline and not data.is_empty() and data.at(data.len() - 1) == 13
+    data = data.slice(0, data.len() - 1).expect("the line suffix is valid")
+  end
+  case data.utf8()
+  in Ok(text) then Ok(Some(text))
+  in Err(_) then Err(IoError.InvalidInput("the input line is not valid UTF-8"))
+  end
+end

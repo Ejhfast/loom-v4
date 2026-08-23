@@ -78,7 +78,7 @@ class Box[T]
   end
 end
 
-def loud() with Fs, Io.Print
+def loud() with Fs, Io.Write
 end
 
 def id[T](x: T): T
@@ -409,7 +409,7 @@ fn widened_callee_row_is_rejected() {
     // an empty row, so its call must fail row inclusion.
     let bytes = compile_to_bytes(
         "corrupt.lm",
-        "def names_row() with Io.Print\n\
+        "def names_row() with Io.Write\n\
          end\n\
          def row_target(n: Int): Int\n\
          if n == 0\n\
@@ -430,7 +430,7 @@ fn widened_callee_row_is_rejected() {
     let op = module
         .strings
         .iter()
-        .position(|s| s == "Io.Print")
+        .position(|s| s == "Io.Write")
         .expect("the row name is interned");
     module.funcs[target].row = vec![BcRow::Op(op as u32)];
     expect_verify_reject(&lm_bytecode::encode(&module), "slot contract");

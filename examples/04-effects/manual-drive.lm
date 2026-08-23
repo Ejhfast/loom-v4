@@ -6,9 +6,9 @@ def drive_loop(vm: Run[Int], mut captured: [String]): ([String], Int) with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
-        captured.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        captured.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in Call(Clock.Now, call, ())
         vm.answer(call, 123)
       in _
@@ -22,8 +22,8 @@ def drive_loop(vm: Run[Int], mut captured: [String]): ([String], Int) with Vm
   end
 end
 
-vm = sys.vm.Vm().activate_or_fault(do || with Io.Print, Clock.Now
-  sys.io.print("tick\n")
+vm = sys.vm.Vm().activate_or_fault(do || with Io.Write, Clock.Now
+  print("tick\n")
   sys.clock.now()
 end, args: ())
 

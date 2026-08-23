@@ -366,43 +366,43 @@ fn refinement_and_cast_rules() {
 fn row_rules() {
     // A callee row must sit inside the caller row.
     assert_eq!(
-        code_of("def go() with Io.Print\nend\ndef pure()\n  go()\nend\n1\n"),
+        code_of("def go() with Io.Write\nend\ndef pure()\n  go()\nend\n1\n"),
         "E1046"
     );
     // Group inclusion covers exact operations.
     assert_eq!(
-        runs("def go() with Io.Print\nend\ndef wide() with Io\n  go()\nend\n1\n"),
+        runs("def go() with Io.Write\nend\ndef wide() with Io\n  go()\nend\n1\n"),
         "Done(1)"
     );
     // A group is not inside one exact operation.
     assert_eq!(
-        code_of("def go() with Io\nend\ndef narrow() with Io.Print\n  go()\nend\n1\n"),
+        code_of("def go() with Io\nend\ndef narrow() with Io.Write\n  go()\nend\n1\n"),
         "E1046"
     );
     // Week 4: the entry collects its row instead of rejecting; the
     // policy table decides at run time. An unmocked, unpassed
     // operation faults `PolicyDenied` when performed; here nothing
     // performs, so the program completes.
-    assert_eq!(runs("def go() with Io.Print\nend\ngo()\n"), "Done(())");
+    assert_eq!(runs("def go() with Io.Write\nend\ngo()\n"), "Done(())");
     // Closures declare rows; calling charges the closure row into
     // the collected entry row.
-    assert_eq!(runs("f = { || with Io.Print 1 }\nf()\n"), "Done(1)");
+    assert_eq!(runs("f = { || with Io.Write 1 }\nf()\n"), "Done(1)");
     assert_eq!(
         runs(
-            "def hold(f: () -> Int with Io.Print): Int\n  1\nend\n\
-              hold({ || with Io.Print 2 })\n"
+            "def hold(f: () -> Int with Io.Write): Int\n  1\nend\n\
+              hold({ || with Io.Write 2 })\n"
         ),
         "Done(1)"
     );
     // A pure closure fits an effectful expectation, not the reverse.
     assert_eq!(
-        runs("def hold(f: () -> Int with Io.Print): Int\n  1\nend\nhold({ || 2 })\n"),
+        runs("def hold(f: () -> Int with Io.Write): Int\n  1\nend\nhold({ || 2 })\n"),
         "Done(1)"
     );
     assert_eq!(
         code_of(
             "def hold(f: () -> Int): Int\n  f()\nend\n\
-                 hold({ || with Io.Print 2 })\n"
+                 hold({ || with Io.Write 2 })\n"
         ),
         "E1004"
     );
@@ -425,14 +425,14 @@ fn row_rules() {
     // construct the class; the entry collects the charge.
     assert_eq!(
         code_of(
-            "class C\n  x: Int\n  def init(mut self) with Io.Print\n    self.x = 1\n  \
+            "class C\n  x: Int\n  def init(mut self) with Io.Write\n    self.x = 1\n  \
                  end\nend\ndef make(): Int\n  C().x\nend\nmake()\n"
         ),
         "E1046"
     );
     assert_eq!(
         runs(
-            "class C\n  x: Int\n  def init(mut self) with Io.Print\n    self.x = 1\n  \
+            "class C\n  x: Int\n  def init(mut self) with Io.Write\n    self.x = 1\n  \
                  end\nend\nc = C()\nc.x\n"
         ),
         "Done(1)"
@@ -442,14 +442,14 @@ fn row_rules() {
     assert!(compile_text(
         "t.lm",
         "class A\n  def f(self): Int with Io\n    1\n  end\nend\n\
-         class B < A\n  def f(self): Int with Io.Print\n    2\n  end\nend\n1\n",
+         class B < A\n  def f(self): Int with Io.Write\n    2\n  end\nend\n1\n",
     )
     .is_ok());
     // Calling the effectful method from a pure function is rejected;
     // the entry collects the charge instead.
     assert_eq!(
         code_of(
-            "class A\n  def f(self): Int with Io.Print\n    1\n  end\nend\n\
+            "class A\n  def f(self): Int with Io.Write\n    1\n  end\nend\n\
              def pure(): Int\n  A().f()\nend\npure()\n"
         ),
         "E1046"

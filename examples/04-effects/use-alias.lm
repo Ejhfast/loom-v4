@@ -2,11 +2,11 @@
 # path. The alias grants nothing; the row and the policy still
 # decide.
 
-use sys.io.print
+use sys.io.write
 use sys.vm
 
-def greet(name: String) with Io.Print
-  print("Hello #{name}!\n")
+def greet(name: String) with Io.Write
+  write("Hello #{name}!\n".bytes()).expect("the output writes")
 end
 
 def run_child(): Int with Vm

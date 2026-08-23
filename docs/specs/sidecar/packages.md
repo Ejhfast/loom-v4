@@ -74,8 +74,8 @@ definitions. One dotted path per line; the last segment becomes the
 bound name:
 
 ```lm
-use std.io            # io.print(...)
-use std.io.print      # print(...)
+use std.io            # io.write_all(...)
+use std.io.write_all  # write_all(...)
 use sys.vm            # vm.Vm()
 use mathlib.matrix    # matrix.Matrix(...)
 use geometry.shapes   # a module of this package

@@ -7,15 +7,13 @@ use crate::manifest::{render_manifest, valid_name, Manifest};
 use std::path::Path;
 
 /// The first program of a new package.
-const MAIN: &str = "use sys.io.print\n\
-                    \n\
-                    def greeting(name: String): String\n\
+const MAIN: &str = "def greeting(name: String): String\n\
                     \x20 \"Hello #{name}!\"\n\
                     end\n\
                     \n\
-                    def main() with Io.Print\n\
+                    def main() with Io.Write\n\
                     \x20 line = greeting(\"world\")\n\
-                    \x20 print(\"#{line}\\n\")\n\
+                    \x20 println(line).expect(\"the output writes\")\n\
                     end\n\
                     \n\
                     main()\n";

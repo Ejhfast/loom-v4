@@ -1,5 +1,5 @@
 # Interface effect arguments follow `with`.
-# Run this example with `--allow Io.Print`.
+# Run this example with `--allow Io.Write`.
 #
 # A bare interface application requires empty effect rows. A generic
 # row can pass one conformance row through its caller.
@@ -25,14 +25,14 @@ final class Quiet implements Labeled, Formats[Int]
 end
 
 # Each conformance states its own exact row.
-final class Logged implements Labeled with Io.Print, Formats[Int] with Io.Print
-  def label(self): String with Io.Print
-    sys.io.print("read label\n")
+final class Logged implements Labeled with Io.Write, Formats[Int] with Io.Write
+  def label(self): String with Io.Write
+    print("read label\n")
     "logged"
   end
 
-  def format(self, value: Int): String with Io.Print
-    sys.io.print("format #{value}\n")
+  def format(self, value: Int): String with Io.Write
+    print("format #{value}\n")
     "n=#{value}"
   end
 end
@@ -56,7 +56,7 @@ def summary[
   "#{item.label()}: #{item.format(value)}"
 end
 
-def go(): (String, String, String, String) with Io.Print
+def go(): (String, String, String, String) with Io.Write
   quiet = Quiet()
   logged = Logged()
   (

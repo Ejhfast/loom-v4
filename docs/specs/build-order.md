@@ -299,27 +299,27 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 - Dense exact/group policy arrays with default block, transitive `pass`, pure `mock`, and live table editing.
 - Public native `Vm`/`Run[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
 - The typed request pattern `Call(op, call, args)`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
-- Initial host operations: `Io.Print`, `Io.Error`, `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.
+- Initial host operations: `Io.Write`, `Io.WriteError`, `Io.ReadBytes`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.
 - Async completion channel with no Rust reference into guest memory.
 
 ### Runnable outputs
 
 ```lm
-def greet(name: String) with Io.Print
-  sys.io.print("Hello #{name}!\n")
+def greet(name: String) with Io.Write
+  print("Hello #{name}!\n")
 end
 
 greet("Ada")
 ```
 
 ```text
-$ lm run examples/04-effects/hello.lm --allow Io.Print
+$ lm run examples/04-effects/hello.lm --allow Io.Write
 Hello Ada!
 ```
 
 ```lm
-vm = sys.vm.Vm().activate_or_fault(do || with Io.Print, Clock.Now
-  sys.io.print("tick\n")
+vm = sys.vm.Vm().activate_or_fault(do || with Io.Write, Clock.Now
+  print("tick\n")
   sys.clock.now()
 end, args: ())
 
@@ -328,9 +328,10 @@ loop do
   case vm.drive()
   in Asked(q)
     case q
-    in Call(Io.Print, call, (text,))
+    in Call(Io.Write, call, (bytes,))
+      text = bytes.utf8().expect("the output is UTF-8")
       captured.push(text)
-      vm.answer(call, ())
+      vm.answer(call, Ok(bytes.len()))
     in Call(Clock.Now, call, ())
       vm.answer(call, 123)
     in _
@@ -369,7 +370,7 @@ pipeline. Packages and the multi-file build loop follow in week 6.
 ### Land
 
 - The agreed surface amendments, before new code accumulates: callable
-  `sys` members move to snake_case (`sys.io.print`, `sys.clock.now`;
+  `sys` members move to snake_case (`sys.io.write`, `sys.clock.now`;
   `sys.vm.Vm()` stays the one capitalized constructor), `use` becomes
   a keyword with the fixed-binding alias form (`use sys.vm`), and
   A `Call` pattern names an exact `Operation` descriptor.
@@ -477,9 +478,9 @@ from the pinned interface.
 $ lm build examples/05-modules/app
 built mathlib  2cf4…
 built app      91ab…
-$ lm run examples/05-modules/app --allow Io.Print
+$ lm run examples/05-modules/app --allow Io.Write
 Hello Ada!
-$ lm run build/debug/app.lma --allow Io.Print
+$ lm run build/debug/app.lma --allow Io.Write
 Hello Ada!
 ```
 
@@ -856,9 +857,9 @@ nominal interfaces, iteration, core collections, and collection views.
 case files.with_open(path, ReadOnly()) { |file|
   file.read_text(max_bytes: 1_000_000)
 }
-in Ok(Ok(text))   then sys.io.print(text)
-in Ok(Err(error)) then sys.io.error(display(error))
-in Err(error)     then sys.io.error(display(error))
+in Ok(Ok(text))   then print(text)
+in Ok(Err(error)) then print_error(display(error))
+in Err(error)     then print_error(display(error))
 end
 ```
 
@@ -995,7 +996,7 @@ PASS snapshot::resume
 ```text
 $ lm inspect build/debug/app.lma
 module 91ab…
-entry  (List[String]) -> Int with Io.Print, Fs.Read
+entry  (List[String]) -> Int with Io.Write, Fs.Read
 imports 2
 verified yes
 ```
@@ -1033,8 +1034,8 @@ bounded trace, and captured operation transcript.
 
 ```text
 $ lm run examples/12-meta/compile-and-run.lm \
-    --allow Compiler,Vm,Io.Print
-compiled hash=7b2f… row={Io.Print}
+    --allow Compiler,Vm,Io.Write
+compiled hash=7b2f… row={Io.Write}
 Hello generated world!
 ```
 
@@ -1547,7 +1548,7 @@ The release demonstration builds and runs a program that:
 ```text
 $ lm run examples/28-release/sandbox-service.lm \
     --profile examples/28-release/policy.toml -- config.json
-compiled_plugin=9c21… intercepted=Io.Print snapshots=2 results=[41,42]
+compiled_plugin=9c21… intercepted=Io.Write snapshots=2 results=[41,42]
 ```
 
 ### Gates

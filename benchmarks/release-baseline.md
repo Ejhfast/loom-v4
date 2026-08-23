@@ -338,3 +338,43 @@ The snapshot format version remains 30.
 Static runtime remains within normal measurement noise.
 
 The larger core adds portable file metadata and stable error cases.
+
+## Host-effects Stage 4
+
+The parent revision is `c4ae4cd`.
+
+The manifest ABI version is 28.
+
+The bytecode version remains 54.
+
+The snapshot format version remains 30.
+
+| Core measurement | Stage 3 | Stage 4 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 258 | 258 | 0.0% |
+| HIR functions | 537 | 541 | +0.7% |
+| Bytecode functions | 795 | 799 | +0.5% |
+| Artifact size | 242,074 bytes | 245,959 bytes | +1.6% |
+| Core checking | 1.903 ms | 1.925 ms | +1.2% |
+| Core lowering | 0.870 ms | 0.869 ms | -0.1% |
+| Core compilation | 3.117 ms | 3.122 ms | +0.2% |
+| Core decoding | 0.367 ms | 0.367 ms | 0.0% |
+| Core verification | 1.210 ms | 1.194 ms | -1.3% |
+| Structural verification | 0.430 ms | 0.418 ms | -2.8% |
+| Verification hash | 0.126 ms | 0.119 ms | -5.6% |
+| Semantic identity | 2.253 ms | 2.191 ms | -2.8% |
+| Decoded loading | 1.379 ms | 1.350 ms | -2.1% |
+| Core loading | 1.745 ms | 1.720 ms | -1.4% |
+
+| Runtime measurement | Stage 3 | Stage 4 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.5 ns | 31.3 ns | -0.6% |
+| `direct_call` | 30.4 ns | 30.5 ns | +0.3% |
+| `direct_clock` | 106.6 ns | 105.5 ns | -1.0% |
+| Warm workspace suite | 38.61 seconds | 38.97 seconds | +0.9% |
+
+Static runtime remains within normal measurement noise.
+
+Stage 4 adds four core console helpers.
+
+The ABI now contains only three byte console operations.

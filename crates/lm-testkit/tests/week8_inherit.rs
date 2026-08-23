@@ -233,8 +233,8 @@ fn an_override_of_a_generic_parent_method_may_not_widen_the_row() {
          \x20 end\n\
          end\n\
          class Loud < Cell[Int]\n\
-         \x20 def show(self): String with Io.Print\n\
-         \x20   sys.io.print(\"x\")\n\
+         \x20 def show(self): String with Io.Write\n\
+         \x20   print(\"x\")\n\
          \x20   \"loud\"\n\
          \x20 end\n\
          end\n\

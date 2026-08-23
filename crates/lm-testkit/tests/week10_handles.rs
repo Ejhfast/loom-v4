@@ -54,7 +54,7 @@ fn a_holder_closes_live_handles_before_a_snapshot() {
     host.borrow_mut()
         .set_file("message.txt", b"snapshot data".to_vec());
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Vm", "Fs", "Io.Print"] {
+    for grant in ["Vm", "Fs", "Io.Write"] {
         world.allow(grant).expect("the grant exists");
     }
 
@@ -128,7 +128,7 @@ fn a_supervisor_denies_a_request_with_no_error_reply() {
     assert_eq!(
         run_example(
             "examples/09-handles-and-supervision/13-deny-with-a-fault.lm",
-            &["Vm", "Io.Print"],
+            &["Vm", "Io.Write"],
             None,
         ),
         "Done(\"the child stopped with PolicyDenied\")"

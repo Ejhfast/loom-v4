@@ -1,6 +1,6 @@
 # An upgrade never changes a call that already started.
 #
-# Run with `--allow Vm,Io.ReadLine`.
+# Run with `--allow Vm,Io.ReadBytes`.
 #
 # Example 06 replaces code between requests. This one replaces code
 # during a request, which is the harder case.
@@ -13,12 +13,13 @@
 # finishes with the old rule, and the next call reads the new target.
 # No request runs half of one release and half of another.
 
-def factor(): Int with Io.ReadLine
-  line = case sys.io.read_line()
-  in Ok(Some(text)) then text
-  in _ then "1"
+def factor(): Int with Io.ReadBytes
+  bytes = sys.io.read_bytes(1).expect("the factor reads")
+  text = case bytes.utf8()
+  in Ok(value) then value
+  in Err(_) then "1"
   end
-  case line.parse_int(10)
+  case text.parse_int(10)
   in Ok(value) then value
   in Err(_) then 1
   end
@@ -26,17 +27,17 @@ end
 
 # The rule in service, and its replacement. Both suspend part way,
 # so a replacement can land while one of their frames is open.
-def convert(amount: Int): Int with Io.ReadLine
+def convert(amount: Int): Int with Io.ReadBytes
   amount * factor()
 end
 
-def with_fee(amount: Int): Int with Io.ReadLine
+def with_fee(amount: Int): Int with Io.ReadBytes
   amount * factor() + 1000
 end
 
 # Two conversions in order. The first is still open when the holder
 # moves the slot.
-def report(): [Int] with Io.ReadLine
+def report(): [Int] with Io.ReadBytes
   out: [Int] = []
   out.push(convert(10))
   out.push(convert(10))
@@ -56,14 +57,14 @@ def drive(
     case run.drive()
     in Asked(question)
       case question
-      in Call(Io.ReadLine, call, ())
+      in Call(Io.ReadBytes, call, (_count,))
         if not upgraded
           image.replace(original, upgrade).map_error() {
             |e: CodeError| e.message
           }?
           upgraded = true
         end
-        run.answer(call, Ok(Some("3")))
+        run.answer(call, Ok(b"3"))
       in _
         run.dispatch(question)
       end
@@ -75,14 +76,14 @@ def drive(
   end
 end
 
-def show_boundary(): Result[[Int], String] with Vm, Io.ReadLine
+def show_boundary(): Result[[Int], String] with Vm, Io.ReadBytes
   image = sys.vm.Vm()
   image.install(factor).map_error() { |e: CodeError| e.message }?
   original = image.install(convert).map_error() { |e: CodeError| e.message }?
   upgrade = image.install(with_fee).map_error() { |e: CodeError| e.message }?
   entry = image.install(report).map_error() { |e: CodeError| e.message }?
   run = image.activate(entry, args: ()).map_error() { |e: CodeError| e.message }?
-  run.table().pass(Io.ReadLine)
+  run.table().pass(Io.ReadBytes)
   drive(image, run, original, upgrade)
 end
 

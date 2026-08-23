@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn io_source_selects_only_io() {
-        let compiled = compile("use std.io.print\nprint(\"ready\")\n");
+        let compiled = compile("use std.io.write_all\nwrite_all(b\"ready\")\n");
         assert_eq!(compiled.standard_modules, &[IO_PATH]);
     }
 

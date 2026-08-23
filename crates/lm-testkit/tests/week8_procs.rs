@@ -961,8 +961,8 @@ fn a_proc_fault_publishes_as_a_terminal_value() {
 #[test]
 fn the_birth_grant_carries_the_declared_row() {
     let spawned = "class Talker < Proc\n\
-                   \x20 def on_spawn(self): Int with Proc, Io.Print\n\
-                   \x20   sys.io.print(\"x\")\n\
+                   \x20 def on_spawn(self): Int with Proc, Io.Write\n\
+                   \x20   print(\"x\")\n\
                    \x20   1\n\
                    \x20 end\n\
                    end\n\
@@ -977,8 +977,8 @@ fn the_birth_grant_carries_the_declared_row() {
     // A spawner that does not hold the row cannot pass it. The checker
     // refuses the spawn, so no grant reaches the child.
     let under = "class Talker < Proc\n\
-                 \x20 def on_spawn(self): Int with Proc, Io.Print\n\
-                 \x20   sys.io.print(\"x\")\n\
+                 \x20 def on_spawn(self): Int with Proc, Io.Write\n\
+                 \x20   print(\"x\")\n\
                  \x20   1\n\
                  \x20 end\n\
                  end\n\
@@ -993,11 +993,11 @@ fn the_birth_grant_carries_the_declared_row() {
         .expect_err("the spawner may not pass a row it lacks");
     assert!(refused.contains("E1046"), "{refused}");
     // The explicit path grants what the launch needs.
-    let explicit = "vm = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print\n\
-                    \x20 sys.io.print(\"x\")\n\
+    let explicit = "vm = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write\n\
+                    \x20 print(\"x\")\n\
                     \x20 1\n\
                     end, args: ())\n\
-                    vm.table().pass(Io.Print)\n\
+                    vm.table().pass(Io.Write)\n\
                     h = sys.proc.run(vm)\n\
                     case h.done()\n\
                     in Done(v)  then \"#{v}\"\n\

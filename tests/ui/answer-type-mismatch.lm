@@ -2,7 +2,7 @@ def bad(vm: Run[Int]) with Vm
   case vm.drive()
   in Asked(q)
     case q
-    in Call(Io.Print, call, (_,)) then vm.answer(call, 5)
+    in Call(Io.Write, call, (_,)) then vm.answer(call, 5)
     in _ then ()
     end
   in Done(_) then ()

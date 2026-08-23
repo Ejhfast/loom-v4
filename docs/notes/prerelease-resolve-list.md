@@ -344,7 +344,7 @@ reports no error.
 
 ### 18. Stdin carries no byte path
 
-`Io.ReadLine` is the only input operation. The host answers it with
+`Io.ReadBytes` is the only input operation. The host answers it with
 `std::io::stdin().lock().read_line()`, which fills a `String`.
 
 | Input | Result |
@@ -353,7 +353,7 @@ reports no error.
 | empty stdin | `Done("eof")` |
 | `printf '\xff\xfe\n'` | `Done("error")` |
 
-The first two rows are correct. `Io.ReadLine` strips the line ending
+The first two rows are correct. `Io.ReadBytes` strips the line ending
 and reports the end of input as `Ok(None)`.
 
 The third row is the gap. A program cannot read bytes from stdin, so
@@ -367,7 +367,7 @@ skips that design.
 
 ### 19. A closed output pipe ends the program with a fault
 
-`Io.Print` and `Io.Error` both answer with `AbiType::UNIT`. A write
+`Io.Write` and `Io.WriteError` both answer with `AbiType::UNIT`. A write
 that fails has no path back to the program.
 
 A reader that stops early closes the pipe. The program then meets a
@@ -473,7 +473,7 @@ reports the size of a terminal. No operation sets the terminal mode.
 
 These need system calls, so no library can supply them. Most terminal
 work does not: colour, cursor movement, and layout are text that
-`Io.Print` already carries.
+`Io.Write` already carries.
 
 These belong in a separate `Tty` group, and not in `Io`. `Io` works on
 any stream. Every terminal operation fails without a terminal, and the

@@ -22,8 +22,8 @@ fn assert_rejected(module: &Module, needle: &str) {
     );
 }
 
-const GREET: &str =
-    "def greet(name: String) with Io.Print\n  sys.io.print(name)\nend\ngreet(\"x\")\n";
+const GREET: &str = "def greet(name: String) with Io.Write\n  \
+    sys.io.write(name.bytes())\nend\ngreet(\"x\")\n";
 
 /// Find the index of the one function whose name matches.
 fn func_index(module: &Module, name: &str) -> usize {
@@ -197,20 +197,20 @@ fn a_perform_argument_count_forgery_is_rejected() {
 #[test]
 fn a_perform_against_a_widened_target_row_is_rejected() {
     // Swap the exact operation of the perform: the claimed row still
-    // names Io.Print, but the body performs Io.Error.
+    // names Io.Write, but the body performs Io.WriteError.
     let mut module = compile(GREET);
     let greet = func_index(&module, "greet");
     for block in &mut module.funcs[greet].blocks {
         for instr in block.iter_mut() {
             if let Instr::Perform { op, .. } = instr {
-                *op = lm_abi::OP_IO_ERROR;
+                *op = lm_abi::OP_IO_WRITE_ERROR;
             }
         }
     }
     assert_rejected(&module, "not inside the claimed row");
 }
 
-const OP_VALUE: &str = "def f() with Io.Print\n  p = sys.io.print\n  p(\"x\")\nend\nf()\n";
+const OP_VALUE: &str = "def f() with Io.Write\n  p = sys.io.write\n  p(b\"x\")\nend\nf()\n";
 
 #[test]
 fn an_operation_type_with_a_forged_signature_is_rejected() {

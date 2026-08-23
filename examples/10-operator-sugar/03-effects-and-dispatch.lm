@@ -2,8 +2,8 @@
 # and it dispatches like an ordinary method.
 #
 # The row of the hook reaches the caller. `report + report` performs
-# `Io.Print`, so every function that writes that operator must declare
-# `Io.Print` too. An operator cannot hide an effect.
+# `Io.Write`, so every function that writes that operator must declare
+# `Io.Write` too. An operator cannot hide an effect.
 #
 # `Meter` is not final, so `+` dispatches on the runtime class. The
 # subclass answers, and the static type of the operand does not decide.
@@ -38,19 +38,19 @@ final class Report
   end
 
   # The row travels with the hook.
-  def __add__(self, other: Report): Report with Io.Print
-    sys.io.print("merging #{self.count} and #{other.count}\n")
+  def __add__(self, other: Report): Report with Io.Write
+    print("merging #{self.count} and #{other.count}\n")
     Report(self.count + other.count)
   end
 end
 
-# The declared row names `Io.Print`, because the `+` below performs it.
-def merge_all(): Int with Io.Print
+# The declared row names `Io.Write`, because the `+` below performs it.
+def merge_all(): Int with Io.Write
   merged = Report(2) + Report(3)
   merged.count
 end
 
-def go(): String with Io.Print
+def go(): String with Io.Write
   # The static type is `Meter`; the value is a `Doubling`.
   m: Meter = Doubling(10)
   dispatched = m + Meter(5)

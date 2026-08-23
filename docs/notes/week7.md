@@ -124,7 +124,7 @@ code, descriptors, and holder-local designators, and every live host
 state sits outside the guest heap.
 
 Every operation in the manifest declares the same classification.
-`Io.Print`, `Io.Error`, `Io.ReadLine`, and `Clock.Sleep` may suspend
+`Io.Write`, `Io.WriteError`, `Io.ReadBytes`, and `Clock.Sleep` may suspend
 and are host attachments. Everything else must complete inside the
 host call. The classification has a production consumer: a host that
 suspends an operation declared machine state breaks its contract, and

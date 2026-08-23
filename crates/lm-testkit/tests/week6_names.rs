@@ -9,8 +9,8 @@ use lm_bytecode::identity::{module_identity, verification_hash};
 use lm_testkit::compile_to_bytes;
 
 /// A program that needs the pinned core `Option` definition.
-const SOURCE: &str = "def read(): String with Io.ReadLine\n\
-                      \x20 case sys.io.read_line()\n\
+const SOURCE: &str = "def read(): String with Io.ReadBytes\n\
+                      \x20 case read_line(1048576)\n\
                       \x20 in Ok(line)\n\
                       \x20   case line\n\
                       \x20   in Some(text) then text\n\

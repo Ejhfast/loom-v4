@@ -967,9 +967,9 @@ mod tests {
 
     #[test]
     fn rejects_row_not_inside_caller() {
-        // Callee claims Io.Print; caller declares the empty row.
+        // Callee claims Io.Write; caller declares the empty row.
         let mut m = module_with(vec![vec![Call(1), Return]]);
-        m.strings = vec!["Io.Print".to_string()];
+        m.strings = vec!["Io.Write".to_string()];
         m.funcs.push(Func {
             name: "printer".to_string(),
             type_params: 0,
@@ -988,9 +988,9 @@ mod tests {
 
     #[test]
     fn accepts_row_inside_caller_with_group() {
-        // Caller declares Io; callee claims Io.Print.
+        // Caller declares Io; callee claims Io.Write.
         let mut m = module_with(vec![vec![Call(1), Return]]);
-        m.strings = vec!["Io.Print".to_string(), "Io".to_string()];
+        m.strings = vec!["Io.Write".to_string(), "Io".to_string()];
         m.funcs[0].row = vec![BcRow::Op(1)];
         m.funcs.push(Func {
             name: "printer".to_string(),
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn rejects_override_that_widens_the_row() {
         let mut m = class_module(vec![vec![ConstInt(0), Return]]);
-        m.strings = vec!["Io.Print".to_string()];
+        m.strings = vec!["Io.Write".to_string()];
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Loud".to_string(),
@@ -1248,7 +1248,7 @@ mod tests {
             CallValue { argc: 0 },
             Return,
         ]]);
-        m.strings = vec!["Io.Print".to_string()];
+        m.strings = vec!["Io.Write".to_string()];
         m.types
             .push(BcType::Fn(vec![], vec![], TY_INT, vec![BcRow::Op(0)]));
         m.funcs.push(Func {

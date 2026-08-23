@@ -438,9 +438,6 @@ impl Host for NullHost {
 /// It records output and provides input, clocks, random values, and
 /// in-memory files. Sleep completes after a fixed number of polls.
 pub struct RecordingHost {
-    pub printed: Vec<String>,
-    pub errors: Vec<String>,
-    pub input: Vec<String>,
     pub input_bytes: Vec<u8>,
     pub written_bytes: Vec<u8>,
     pub written_error_bytes: Vec<u8>,
@@ -547,9 +544,6 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_FS_REMOVE_DIR
             | lm_abi::OP_FS_RENAME
             | lm_abi::OP_FS_SYNC_DIR
-            | lm_abi::OP_IO_PRINT
-            | lm_abi::OP_IO_ERROR
-            | lm_abi::OP_IO_READ_LINE
             | lm_abi::OP_IO_READ_BYTES
             | lm_abi::OP_IO_WRITE
             | lm_abi::OP_IO_WRITE_ERROR
@@ -688,9 +682,6 @@ impl RecordingHost {
             ])],
         );
         RecordingHost {
-            printed: Vec::new(),
-            errors: Vec::new(),
-            input: Vec::new(),
             input_bytes: Vec::new(),
             written_bytes: Vec::new(),
             written_error_bytes: Vec::new(),
@@ -1040,33 +1031,6 @@ impl RecordingHost {
         let _ = key;
         self.operations.push(op);
         match op {
-            lm_abi::OP_IO_PRINT => {
-                if let Some(HostArg::Str(text)) = args.first() {
-                    self.printed.push(text.to_string());
-                }
-                HostStart::Completed(HostValue::Unit)
-            }
-            lm_abi::OP_IO_ERROR => {
-                if let Some(HostArg::Str(text)) = args.first() {
-                    self.errors.push(text.to_string());
-                }
-                HostStart::Completed(HostValue::Unit)
-            }
-            lm_abi::OP_IO_READ_LINE => {
-                let reply = if self.input.is_empty() {
-                    HostValue::Ctor(CoreCtor::Ok, vec![HostValue::Ctor(CoreCtor::None, vec![])])
-                } else {
-                    let line = self.input.remove(0);
-                    HostValue::Ctor(
-                        CoreCtor::Ok,
-                        vec![HostValue::Ctor(
-                            CoreCtor::Some,
-                            vec![HostValue::Str(line.into())],
-                        )],
-                    )
-                };
-                HostStart::Completed(reply)
-            }
             lm_abi::OP_IO_READ_BYTES => {
                 let Some(HostArg::Int(count)) = args.first() else {
                     return HostStart::Failed("Io.ReadBytes needs one integer".to_string());

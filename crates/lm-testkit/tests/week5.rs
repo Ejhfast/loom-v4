@@ -25,30 +25,30 @@ fn allowed(source: &str, allow: &[&str]) -> String {
 fn callable_sys_members_are_snake_case() {
     assert_eq!(
         allowed(
-            "def f() with Io.Print\n  sys.io.print(\"x\\n\")\nend\nf()\n",
-            &["Io.Print"]
+            "def f() with Io.Write\n  print(\"x\\n\")\nend\nf()\n",
+            &["Io.Write"]
         ),
         "Done(())"
     );
-    // The multi-word mapping is mechanical: read_line -> ReadLine.
-    assert_eq!(code_of("def f()\n  sys.io.read_line()\nend\n1\n"), "E1046");
+    // The multi-word mapping is mechanical: read_bytes -> ReadBytes.
+    assert_eq!(code_of("def f()\n  read_line(1048576)\nend\n1\n"), "E1046");
 }
 
 #[test]
 fn capitalized_callable_members_get_the_casing_rule() {
     let rendered = compile_text(
         "t.lm",
-        "def f() with Io.Print\n  sys.io.Print(\"x\")\nend\n1\n",
+        "def f() with Io.Write\n  sys.io.Write(b\"x\")\nend\n1\n",
     )
     .unwrap_err();
     assert!(rendered.starts_with("error[E1051]"), "{rendered}");
-    assert!(rendered.contains("write `sys.io.print`"), "{rendered}");
+    assert!(rendered.contains("write `sys.io.write`"), "{rendered}");
     let rendered = compile_text(
         "t.lm",
-        "def f() with Io.ReadLine\n  sys.io.ReadLine()\nend\n1\n",
+        "def f() with Io.ReadBytes\n  sys.io.ReadBytes(1)\nend\n1\n",
     )
     .unwrap_err();
-    assert!(rendered.contains("write `sys.io.read_line`"), "{rendered}");
+    assert!(rendered.contains("write `sys.io.read_bytes`"), "{rendered}");
 }
 
 #[test]
@@ -73,16 +73,16 @@ fn descriptors_keep_initial_capitals() {
     // Rows, policy targets, and --allow names are unchanged.
     let (out, host) = run_world(
         "t.lm",
-        "def go(): Int with Vm, Io.Print\n  \
-         m = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"in\\n\")\n    7\n  \
-         end, args: ())\n  m.table().pass(Io.Print)\n  \
+        "def go(): Int with Vm, Io.Write\n  \
+         m = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    print(\"in\\n\")\n    7\n  \
+         end, args: ())\n  m.table().pass(Io.Write)\n  \
          case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
-        &["Vm", "Io.Print"],
+        &["Vm", "Io.Write"],
         VmConfig::default(),
     )
     .unwrap();
     assert_eq!(out, "Done(7)");
-    assert_eq!(host.borrow().printed, vec!["in\n".to_string()]);
+    assert_eq!(host.borrow().written_bytes, b"in\n");
 }
 
 // ---------------------------------------------------------------
@@ -102,8 +102,9 @@ fn use_binds_a_sys_group() {
     );
     assert_eq!(
         allowed(
-            "use sys.io\n\ndef f() with Io.Print\n  io.print(\"x\\n\")\nend\nf()\n",
-            &["Io.Print"]
+            "use sys.io\n\ndef f() with Io.Write\n  \
+             io.write(b\"x\\n\").expect(\"the output writes\")\nend\nf()\n",
+            &["Io.Write"]
         ),
         "Done(())"
     );
@@ -126,18 +127,20 @@ fn use_binds_the_vm_constructor() {
 fn use_binds_a_callable_member() {
     let (out, host) = run_world(
         "t.lm",
-        "use sys.io.print\n\ndef f() with Io.Print\n  print(\"hello\\n\")\nend\nf()\n",
-        &["Io.Print"],
+        "use sys.io.write\n\ndef f() with Io.Write\n  \
+         write(b\"hello\\n\").expect(\"the output writes\")\nend\nf()\n",
+        &["Io.Write"],
         VmConfig::default(),
     )
     .unwrap();
     assert_eq!(out, "Done(())");
-    assert_eq!(host.borrow().printed, vec!["hello\n".to_string()]);
+    assert_eq!(host.borrow().written_bytes, b"hello\n");
     // The bound member is also a first-class operation value.
     assert_eq!(
         allowed(
-            "use sys.io.print\n\ndef f() with Io.Print\n  p = print\n  p(\"x\\n\")\nend\nf()\n",
-            &["Io.Print"]
+            "use sys.io.write\n\ndef f() with Io.Write\n  p = write\n  \
+             p(b\"x\\n\").expect(\"the output writes\")\nend\nf()\n",
+            &["Io.Write"]
         ),
         "Done(())"
     );
@@ -148,7 +151,7 @@ fn a_use_aliased_perform_still_charges_the_row() {
     // The alias grants nothing: a perform through it still needs the
     // declared row.
     assert_eq!(
-        code_of("use sys.io.print\n\ndef f()\n  print(\"x\")\nend\n1\n"),
+        code_of("use sys.io.write\n\ndef f()\n  write(b\"x\")\nend\n1\n"),
         "E1046"
     );
     assert_eq!(
@@ -161,7 +164,10 @@ fn a_use_aliased_perform_still_charges_the_row() {
 fn a_use_aliased_perform_still_needs_policy() {
     // The alias grants no authority: the root policy still decides.
     assert_eq!(
-        runs("use sys.io.print\n\ndef f() with Io.Print\n  print(\"x\")\nend\nf()\n"),
+        runs(
+            "use sys.io.write\n\ndef f() with Io.Write\n  \
+             write(b\"x\").expect(\"the output writes\")\nend\nf()\n"
+        ),
         "Fault(PolicyDenied)"
     );
 }
@@ -186,10 +192,10 @@ fn use_rejects_non_fixed_paths() {
     assert_eq!(code_of("use sys.nope\n1\n"), "E1052");
     assert_eq!(code_of("use sys.io.blast\n1\n"), "E1052");
     // A path with too many segments.
-    assert_eq!(code_of("use sys.io.print.extra\n1\n"), "E1052");
+    assert_eq!(code_of("use sys.io.write.extra\n1\n"), "E1052");
     // The casing rule applies inside `use` paths.
-    let rendered = compile_text("t.lm", "use sys.io.Print\n1\n").unwrap_err();
-    assert!(rendered.contains("use sys.io.print"), "{rendered}");
+    let rendered = compile_text("t.lm", "use sys.io.Write\n1\n").unwrap_err();
+    assert!(rendered.contains("use sys.io.write"), "{rendered}");
 }
 
 #[test]
@@ -198,14 +204,14 @@ fn use_lines_come_first_and_bind_once() {
     assert_eq!(code_of("x = 1\nuse sys.io\nx\n"), "E1052");
     assert_eq!(code_of("def f(): Int\n  1\nend\nuse sys.io\n1\n"), "E1052");
     // One name binds once inside the `use` layer.
-    assert_eq!(code_of("use sys.io.print\nuse sys.io.print\n1\n"), "E1052");
+    assert_eq!(code_of("use sys.io.write\nuse sys.io.write\n1\n"), "E1052");
 }
 
 #[test]
 fn use_bindings_sit_below_locals_and_module_definitions() {
     // A module function shadows the binding; no row is needed.
     assert_eq!(
-        runs("use sys.io.print\n\ndef print(x: Int): Int\n  x\nend\nprint(3)\n"),
+        runs("use sys.io.write\n\ndef write(x: Int): Int\n  x\nend\nwrite(3)\n"),
         "Done(3)"
     );
     // A local assignment declares a local; the binding does not make
@@ -221,12 +227,12 @@ fn use_alias_example_has_checked_output() {
     let (out, host) = run_world(
         "use-alias.lm",
         &text,
-        &["Io.Print", "Vm"],
+        &["Io.Write", "Vm"],
         VmConfig::default(),
     )
     .unwrap();
     assert_eq!(out, "Done(42)");
-    assert_eq!(host.borrow().printed, vec!["Hello Ada!\n".to_string()]);
+    assert_eq!(host.borrow().written_bytes, b"Hello Ada!\n");
 }
 
 // ---------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Pre-release Host Effects
 
-Status: accepted plan. Stages 0 through 2 complete.
+Status: accepted plan. Stages 0 through 4 complete.
 
 This sidecar replaces the completed pre-release foundation plan.
 
@@ -627,7 +627,7 @@ Io.Write      (Bytes) -> Result[Int, IoError]
 Io.WriteError (Bytes) -> Result[Int, IoError]
 ```
 
-The ABI removes `Io.Print`, `Io.Error`, and `Io.ReadLine`.
+The ABI removes the three legacy text operations.
 
 This change removes two parallel console models.
 
@@ -1017,7 +1017,7 @@ Gate: A durable replacement follows the specified sync order.
 
 Gate: A non-UTF-8 directory entry remains visible as an error entry.
 
-### Stage 4: Byte-only console I/O
+### Stage 4: Byte-only console I/O (complete)
 
 - Remove the three text operation identities.
 - Add generic core display helpers.

@@ -670,7 +670,7 @@ fn resolve_uses(
                 return Err(Diagnostic::new(
                     "E1052",
                     "`use sys` binds nothing; name a group or an operation, \
-                     for example `use sys.io` or `use sys.io.print`",
+                     for example `use sys.io` or `use sys.io.write`",
                     decl.span,
                 ));
             }

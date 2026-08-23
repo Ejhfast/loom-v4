@@ -12,17 +12,17 @@ hashes.
 
 ### Surface amendments
 
-- Callable `sys` members are snake_case: `sys.io.print`,
-  `sys.io.error`, `sys.io.read_line`, `sys.clock.now`,
+- Callable `sys` members are snake_case: `sys.io.write`,
+  `sys.io.write_error`, `sys.io.read_bytes`, `sys.clock.now`,
   `sys.clock.monotonic`, `sys.clock.sleep`, `sys.rand.int`. The
   machine constructor `sys.vm.Vm()` keeps the one capitalized
-  member. The member mapping is mechanical (`read_line` maps to
-  `ReadLine`). A capitalized callable member rejects with the exact
+  member. The member mapping is mechanical (`read_bytes` maps to
+  `ReadBytes`). A capitalized callable member rejects with the exact
   snake_case rewrite. Descriptors are unchanged everywhere: rows,
   policy targets, `--allow`, and the manifest identities.
 - `use` is a keyword. A `use` line binds the last segment of one
   fixed `sys` path: `use sys.vm` binds `vm`, `use sys.vm.Vm` binds
-  `Vm`, and `use sys.io.print` binds `print`. Use lines come first
+  `Vm`, and `use sys.io.write` binds `write`. Use lines come first
   in a module, one dotted path per line. The bindings resolve below
   locals and module definitions, in the value namespace. A `use` of
   any other root, an unknown group or member, a bare `use sys`, a
@@ -32,7 +32,7 @@ hashes.
   never changes a row: tests prove an aliased perform still charges
   the row (`E1046`) and still needs policy (`PolicyDenied`).
 - `Request.as_call` takes an exact `Operation` descriptor:
-  `q.as_call(Io.Print)`. The compiler supplies the typed signature
+  `q.as_call(Io.Write)`. The compiler supplies the typed signature
   from the manifest. A group descriptor and a machine control
   operation reject with `E1004`; the old callable-argument form
   rejects with `E1004` and names the exact rewrite.
@@ -294,7 +294,7 @@ the new rejection order reach them:
   `tests/fuzz-regressions/unterminated-block.lm`, and the source
   strings in `week4.rs`, `week4_verifier.rs`, `bench_smoke.rs`, and
   `fuzz.rs`. The `as_call` arguments moved to descriptors
-  (`as_call(Io.Print)`).
+  (`as_call(Io.Write)`).
 - `week4.rs`: `q.as_call(g)` on a function value moved from `E1004`
   to `E1051` (it is not a descriptor); a new case checks that the
   old callable form gets the `E1004` rewrite diagnostic;

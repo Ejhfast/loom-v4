@@ -3729,7 +3729,7 @@ mod tests {
 
     fn sample_module() -> Module {
         Module {
-            strings: vec!["hello".to_string(), "Io.Print".to_string()],
+            strings: vec!["hello".to_string(), "Io.Write".to_string()],
             bytes: vec![vec![0, 255]],
             types: vec![
                 BcType::Unit,

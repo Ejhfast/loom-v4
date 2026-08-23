@@ -148,7 +148,7 @@ impl World {
     }
 
     /// Grant one root policy target by name: an exact operation such
-    /// as `Io.Print`, or a whole group such as `Clock`.
+    /// as `Io.Write`, or a whole group such as `Clock`.
     pub fn allow(&mut self, name: &str) -> Result<(), String> {
         let bundle = self.loaded.bundle();
         let table = &mut self.machines[0].table;

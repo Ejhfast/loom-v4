@@ -244,8 +244,8 @@ Open() == Open()
     );
 
     let effectful = "final class Loud implements PartialEq
-  def __eq__(self, other: Loud): Bool with Io.Print
-    sys.io.print(\"compare\")
+  def __eq__(self, other: Loud): Bool with Io.Write
+    print(\"compare\")
     true
   end
 end
@@ -268,19 +268,19 @@ fn core_ne_methods_are_not_public() {
 #[test]
 fn a_hook_row_is_charged_to_the_caller() {
     let source = "final class L
-  def __mul__(self, other: Int): Int with Io.Print
-    sys.io.print(\"x\")
+  def __mul__(self, other: Int): Int with Io.Write
+    print(\"x\")
     other * 2
   end
 end
-def go(): Int with Io.Print
+def go(): Int with Io.Write
   L() * 21
 end
 go()
 ";
-    assert_eq!(allowed(source, &["Io.Print"]), "Done(42)");
+    assert_eq!(allowed(source, &["Io.Write"]), "Done(42)");
     // The same program without the row is rejected at the operator.
-    let bare = source.replace("def go(): Int with Io.Print", "def go(): Int");
+    let bare = source.replace("def go(): Int with Io.Write", "def go(): Int");
     assert_eq!(code_of(&bare), "E1046");
 }
 
@@ -360,7 +360,7 @@ fn the_operator_examples_run() {
     assert_eq!(
         allowed(
             &read("examples/10-operator-sugar/03-effects-and-dispatch.lm"),
-            &["Io.Print"]
+            &["Io.Write"]
         ),
         "Done(\"doubling 30, total 5\")"
     );

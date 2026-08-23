@@ -96,11 +96,11 @@ fn workspace(tree: &TempTree) {
     );
     tree.write(
         "app/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use greeting\n\
          use mathlib.matrix\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 m = matrix.Matrix(2, 3)\n\
          \x20 line = greeting.greet(\"Ada\")\n\
          \x20 print(\"#{line}\\n\")\n\
@@ -127,7 +127,7 @@ fn run_artifact(path: &Path, allow: &[&str]) -> String {
         "the program faulted: {}",
         world.show_outcome(&outcome)
     );
-    let printed = host.borrow().printed.join("");
+    let printed = String::from_utf8(host.borrow().written_bytes.clone()).expect("output is UTF-8");
     printed
 }
 
@@ -153,7 +153,7 @@ fn a_two_package_workspace_builds_and_runs() {
     assert_eq!(report.modules.len(), 3);
     assert_eq!(report.compiled(), 3, "the first build compiles everything");
     let program = report.program.clone().expect("the app builds a program");
-    let output = run_artifact(&program, &["Io.Print"]);
+    let output = run_artifact(&program, &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }
 
@@ -193,7 +193,7 @@ fn a_body_edit_rebuilds_only_the_edited_package() {
         "the dependent recompiled although no interface moved"
     );
     assert!(report_of(&report, "app.main").cached);
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2 by 3 has 6 cells\n");
 }
 
@@ -256,7 +256,7 @@ fn the_program_artifact_is_closed() {
     let alone = TempTree::new("alone");
     alone.write("app.lma", "");
     std::fs::write(alone.path("app.lma"), &bytes).unwrap();
-    let output = run_artifact(&alone.path("app.lma"), &["Io.Print"]);
+    let output = run_artifact(&alone.path("app.lma"), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }
 
@@ -307,7 +307,7 @@ fn the_linked_program_shares_one_core() {
     );
     tree.write(
         "prog/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use lib.find\n\
          \n\
          def show(o: Option[Int]): String\n\
@@ -317,7 +317,7 @@ fn the_linked_program_shares_one_core() {
          \x20 end\n\
          end\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 line = show(find.first([7, 8]))\n\
          \x20 print(\"#{line}\\n\")\n\
          end\n\
@@ -325,7 +325,7 @@ fn the_linked_program_shares_one_core() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(
         output, "got 7\n",
         "an Option built in one module did not match in another"
@@ -364,7 +364,7 @@ fn an_imported_enum_constructs_and_matches() {
     // unqualified and `case` sees the whole arm set.
     tree.write(
         "prog/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use lib.shape.Shape\n\
          \n\
          def name(s: Shape): String\n\
@@ -374,7 +374,7 @@ fn an_imported_enum_constructs_and_matches() {
          \x20 end\n\
          end\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 a = name(Dot())\n\
          \x20 b = name(Line(4))\n\
          \x20 print(\"#{a} #{b} #{Line(7).size()}\\n\")\n\
@@ -383,7 +383,7 @@ fn an_imported_enum_constructs_and_matches() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "dot line 4 7\n");
 }
 
@@ -421,10 +421,10 @@ fn imported_generics_keep_their_arity() {
     );
     tree.write(
         "prog/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use lib.box\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 a = box.Box(7)\n\
          \x20 b = box.wrap(\"text\")\n\
          \x20 c: box.Box[Int] = a\n\
@@ -434,7 +434,7 @@ fn imported_generics_keep_their_arity() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "7 text\n");
 }
 
@@ -465,7 +465,7 @@ fn an_imported_class_holds_its_mutable_methods() {
     );
     tree.write(
         "prog/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use lib.counter\n\
          \n\
          class Pair\n\
@@ -476,7 +476,7 @@ fn an_imported_class_holds_its_mutable_methods() {
          \x20 end\n\
          end\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 p = Pair()\n\
          \x20 p.bump()\n\
          \x20 print(\"#{p.bump()}\\n\")\n\
@@ -485,7 +485,7 @@ fn an_imported_class_holds_its_mutable_methods() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "4\n");
 }
 
@@ -500,10 +500,10 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
     // `greeting.report`, whose parameter is a `mathlib` class.
     tree.write(
         "app/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use greeting\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 line = greeting.greet(\"Ada\")\n\
          \x20 print(\"#{line}\\n\")\n\
          end\n\
@@ -511,7 +511,7 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
          run()\n",
     );
     let report = tree.build("app").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n");
     // The main module still pins the transitive class, because its
     // own import of `report` names it.
@@ -543,11 +543,11 @@ fn an_imported_effect_parameter_survives_the_interface() {
     );
     tree.write(
         "prog/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use lib.apply\n\
          \n\
-         def run() with Io.Print\n\
-         \x20 total = apply.twice(do ||: Int with Io.Print\n\
+         def run() with Io.Write\n\
+         \x20 total = apply.twice(do ||: Int with Io.Write\n\
          \x20   print(\"tick\\n\")\n\
          \x20   3\n\
          \x20 end)\n\
@@ -557,7 +557,7 @@ fn an_imported_effect_parameter_survives_the_interface() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "tick\ntick\n6\n");
 }
 
@@ -645,9 +645,9 @@ fn an_import_grants_no_authority() {
     );
     tree.write(
         "lib/src/say.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          \n\
-         def shout(text: String) with Io.Print\n\
+         def shout(text: String) with Io.Write\n\
          \x20 print(\"#{text}\\n\")\n\
          end\n",
     );
@@ -667,7 +667,7 @@ fn an_import_grants_no_authority() {
     // policy grant at run time.
     tree.write(
         "prog/src/main.lm",
-        "use lib.say\n\ndef run() with Io.Print\n  say.shout(\"hi\")\nend\n\nrun()\n",
+        "use lib.say\n\ndef run() with Io.Write\n  say.shout(\"hi\")\nend\n\nrun()\n",
     );
     let report = tree.build("prog").expect("builds");
     let bytes = std::fs::read(report.program.clone().unwrap()).unwrap();
@@ -763,7 +763,7 @@ fn the_scaffold_builds_and_runs() {
         "[package]\nname = \"hello\"\nversion = \"0.1.0\"\n"
     );
     let report = tree.build("hello").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello world!\n");
 }
 
@@ -838,10 +838,10 @@ fn a_directory_becomes_a_module_path() {
     );
     tree.write(
         "pkg/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use geometry.shapes\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 d = shapes.Dot()\n\
          \x20 print(\"#{d.area()}\\n\")\n\
          end\n\
@@ -851,7 +851,7 @@ fn a_directory_becomes_a_module_path() {
     let report = tree.build("pkg").expect("builds");
     let paths: Vec<&str> = report.modules.iter().map(|m| m.path.as_str()).collect();
     assert!(paths.contains(&"pkg.geometry.shapes"), "{paths:?}");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "4\n");
 }
 
@@ -1134,6 +1134,6 @@ fn the_example_workspace_runs() {
         &out.path("build"),
     )
     .expect("the example builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }

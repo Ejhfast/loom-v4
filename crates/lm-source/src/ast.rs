@@ -19,7 +19,7 @@ pub struct Module {
 }
 
 /// One `use` line: a dotted path whose last segment becomes the bound
-/// name, for example `use sys.io.print`.
+/// name, for example `use sys.io.write`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UseDecl {
     /// The path segments, in source order.
@@ -98,7 +98,7 @@ pub struct InterfaceDef {
 }
 
 /// One element of a declared effect row: an operation or group name
-/// such as `Io.Print` or `Io`, or an effect-parameter name.
+/// such as `Io.Write` or `Io`, or an effect-parameter name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowItem {
     pub name: String,

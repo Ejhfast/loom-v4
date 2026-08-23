@@ -1,6 +1,6 @@
 # One definition that serves a pure caller and an effectful one.
 #
-# Run with `--allow Io.Print,Clock`.
+# Run with `--allow Io.Write,Clock`.
 #
 # `apply_all` names an effect parameter, `e`. Its closure parameter
 # carries the row `e`, and so does its own row. Whatever the closure
@@ -8,14 +8,14 @@
 # states a shape and not a cost.
 #
 # The cost belongs to the call site. `count_up` has no row, because
-# its closure performs nothing. `announce` has `Io.Print`, because
+# its closure performs nothing. `announce` has `Io.Write`, because
 # its closure prints. Without an effect parameter this needs two
 # definitions with the same body, one pure and one effectful.
 #
 # `logged_map` goes one step further. It forwards `e` and adds an
-# effect of its own, so its row is the union `e, Io.Print`. A caller
-# pays for both: `plain_map` carries `Io.Print` alone, and
-# `stamped_map` carries `Io.Print, Clock.Now`.
+# effect of its own, so its row is the union `e, Io.Write`. A caller
+# pays for both: `plain_map` carries `Io.Write` alone, and
+# `stamped_map` carries `Io.Write, Clock.Now`.
 #
 # That union is what makes a wrapper writable. A retry that sleeps
 # between attempts declares `e, Clock.Sleep` the same way, and its
@@ -34,11 +34,11 @@ def apply_all[effect e](values: [Int], f: (Int) -> Int with e): [Int] with e
   out
 end
 
-# Contributing. This one prints, so its row joins `Io.Print` to `e`.
-def logged_map[effect e](vs: [Int], f: (Int) -> Int with e): [Int] with e, Io.Print
+# Contributing. This one prints, so its row joins `Io.Write` to `e`.
+def logged_map[effect e](vs: [Int], f: (Int) -> Int with e): [Int] with e, Io.Write
   out: [Int] = []
   for value in vs
-    sys.io.print("mapping #{value}\n")
+    print("mapping #{value}\n")
     out.push(f(value))
   end
   out
@@ -49,24 +49,24 @@ def count_up(): [Int]
   apply_all([1, 2, 3]) { |x: Int| x + 1 }
 end
 
-# `Io.Print` reaches this signature from the closure, not from
+# `Io.Write` reaches this signature from the closure, not from
 # `apply_all`.
-def announce(): [Int] with Io.Print
-  apply_all([1, 2, 3], do |x: Int|: Int with Io.Print
-    sys.io.print("counted #{x}\n")
+def announce(): [Int] with Io.Write
+  apply_all([1, 2, 3], do |x: Int|: Int with Io.Write
+    print("counted #{x}\n")
     x + 1
   end)
 end
 
 # A pure closure through the wrapper. Only the wrapper's own effect
 # reaches this row.
-def plain_map(): [Int] with Io.Print
+def plain_map(): [Int] with Io.Write
   logged_map([1, 2]) { |x: Int| x * 10 }
 end
 
 # An effectful closure through the wrapper. Both effects reach this
 # row, and naming one of them is a compile error.
-def stamped_map(): [Int] with Io.Print, Clock.Now
+def stamped_map(): [Int] with Io.Write, Clock.Now
   logged_map([1, 2], do |x: Int|: Int with Clock.Now
     if sys.clock.now() > 0
       x * 100

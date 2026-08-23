@@ -125,7 +125,7 @@ the changed tests, and the deferred work.
 - Row inference through function-typed parameters binds a declared
   row only when it is exactly one effect variable. Mixed rows in an
   inferred position must match exactly.
-- Rows name operations and groups by text (`Io.Print`, `Io`).
+- Rows name operations and groups by text (`Io.Write`, `Io`).
   Unknown names are accepted as operation names when they start with
   an upper-case letter; the ABI manifest arrives in week 4.
 - Tuple equality with `==` is rejected (`E1017`); the specification

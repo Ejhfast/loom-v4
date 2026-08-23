@@ -217,3 +217,113 @@ fn a_pending_byte_read_blocks_snapshot_creation() {
         other => panic!("expected a resource error, found {other:?}"),
     }
 }
+
+#[test]
+fn the_console_manifest_contains_only_byte_operations() {
+    let names: Vec<_> = lm_abi::OPS
+        .iter()
+        .filter(|operation| operation.group == "Io")
+        .map(|operation| operation.member)
+        .collect();
+    assert_eq!(names, ["ReadBytes", "Write", "WriteError"]);
+}
+
+#[test]
+fn core_output_helpers_use_display_and_partial_writes() {
+    let source = r#"
+final class Label implements Display
+  text: String
+
+  def init(mut self, text: String)
+    self.text = text
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("<")
+    builder.append(self.text)
+    builder.append(">")
+  end
+end
+
+def go() with Io.Write, Io.WriteError
+  print(Label("ok")).expect("the output writes")
+  println(12).expect("the output writes")
+  print_error(IoError.Unsupported("not available")).expect("the error output writes")
+end
+
+go()
+"#;
+    let bytes = compile_to_bytes("core-output.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().console_write_limit = 2;
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    world.allow("Io.Write").expect("the operation has a grant");
+    world
+        .allow("Io.WriteError")
+        .expect("the operation has a grant");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(())");
+    assert_eq!(host.borrow().written_bytes, b"<ok>12\n");
+    assert_eq!(host.borrow().written_error_bytes, b"not available");
+}
+
+#[test]
+fn core_read_line_handles_crlf_final_input_and_eof() {
+    let source = r#"
+def go(): (Option[String], Option[String], Bool, Option[String]) with Io.ReadBytes
+  first = read_line(3).expect("the first line reads")
+  second = read_line(3).expect("the second line reads")
+  third = read_line(5).expect("the final line reads")
+  fourth = read_line(4).expect("the input ends")
+  (first, second, third == Some("last\r"), fourth)
+end
+
+go()
+"#;
+    let bytes = compile_to_bytes("core-lines.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().input_bytes = b"one\r\ntwo\nlast\r".to_vec();
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    world
+        .allow("Io.ReadBytes")
+        .expect("the operation has a grant");
+    let outcome = lm_proc::run_world(&mut world);
+    let context = world
+        .root_fault()
+        .map(|fault| world.fault_context(fault))
+        .unwrap_or_default();
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done((Some(\"one\"), Some(\"two\"), true, None))",
+        "{context:?}"
+    );
+}
+
+#[test]
+fn core_read_line_rejects_invalid_utf8() {
+    let source = r#"
+def go(): String with Io.ReadBytes
+  case read_line(8)
+  in Ok(_) then "missing error"
+  in Err(error) then display(error)
+  end
+end
+
+go()
+"#;
+    let bytes = compile_to_bytes("invalid-line.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().input_bytes = vec![0xff, b'\n'];
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    world
+        .allow("Io.ReadBytes")
+        .expect("the operation has a grant");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done(\"the input line is not valid UTF-8\")"
+    );
+}

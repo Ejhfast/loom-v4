@@ -353,7 +353,7 @@ impl TypeStore {
         self.index.get(ty).copied()
     }
 
-    /// Intern an effect row name, for example `Io.Print` or `Io`.
+    /// Intern an effect row name, for example `Io.Write` or `Io`.
     pub fn intern_row_name(&mut self, name: &str) -> u32 {
         if let Some(idx) = self.row_name_index.get(name) {
             return *idx;
@@ -1219,9 +1219,9 @@ mod tests {
         assert_eq!(store.display(t), "(Int, String)");
         let one = store.intern(Type::Tuple(vec![INT]));
         assert_eq!(store.display(one), "(Int,)");
-        let io = store.intern_row_name("Io.Print");
+        let io = store.intern_row_name("Io.Write");
         let f2 = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io)]);
-        assert_eq!(store.display(f2), "() -> () with Io.Print");
+        assert_eq!(store.display(f2), "() -> () with Io.Write");
         let f3 = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Var(0)]);
         assert_eq!(
             store.display_with_names(
@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn function_rows_are_covariant_by_inclusion() {
         let mut store = TypeStore::new();
-        let io_print = store.intern_row_name("Io.Print");
+        let io_print = store.intern_row_name("Io.Write");
         let io = store.intern_row_name("Io");
         let pure_fn = store.intern_fn(vec![], vec![], UNIT, vec![]);
         let print_fn = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io_print)]);
@@ -1325,7 +1325,7 @@ mod tests {
     #[test]
     fn row_inclusion_uses_groups() {
         let mut store = TypeStore::new();
-        let io_print = store.intern_row_name("Io.Print");
+        let io_print = store.intern_row_name("Io.Write");
         let io = store.intern_row_name("Io");
         let fs = store.intern_row_name("Fs");
         assert!(store.row_included(&[], &[RowElem::Op(io_print)]));

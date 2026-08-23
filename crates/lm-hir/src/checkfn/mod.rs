@@ -209,8 +209,8 @@ enum Callee {
     ListCtor(TypeId),
     /// `Map[K, V]()` with explicit arguments.
     MapCtor(TypeId, TypeId),
-    /// A `use`-bound callable `sys` member, for example `print` after
-    /// `use sys.io.print`.
+    /// A `use`-bound callable `sys` member, for example `write` after
+    /// `use sys.io.write`.
     SysMember {
         group: String,
         member: String,

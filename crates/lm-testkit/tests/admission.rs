@@ -1485,8 +1485,8 @@ fn a_pending_request_with_another_argument_count_rejects() {
 
 const FAULTED_SOURCE: &str = "\
 def go(): String with Vm
-  vm = sys.vm.Vm().activate_or_fault(do || with Io.Print
-    sys.io.print(\"hi\\n\")
+  vm = sys.vm.Vm().activate_or_fault(do || with Io.Write
+    print(\"hi\\n\")
   end, args: ())
   case vm.run()
   in Done(_)  then \"done\"
@@ -1552,8 +1552,8 @@ fn a_done_machine_that_holds_a_frame_rejects() {
 
 const ASKED_SOURCE: &str = "\
 def go(): Int with Vm, Io
-  vm = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-    sys.io.print(\"hi\\n\")
+  vm = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+    print(\"hi\\n\")
     41
   end, args: ())
   case vm.drive()
@@ -1571,7 +1571,7 @@ go()
 /// belongs to `Waiting`, and the capture refuses that state.
 ///
 /// The capture is legal, so it must admit. Before the fix a machine
-/// stopped on `Io.Print`, `Io.Error`, `Io.ReadLine`, or `Clock.Sleep`
+/// stopped on `Io.Write`, `Io.WriteError`, `Io.ReadBytes`, or `Clock.Sleep`
 /// was unrestorable.
 #[test]
 fn an_asked_machine_on_a_host_operation_admits() {
@@ -1589,7 +1589,7 @@ fn an_asked_machine_on_a_host_operation_admits() {
             continue;
         }
         count += 1;
-        assert_eq!(admit(&loaded, image), None, "an asked machine on Io.Print");
+        assert_eq!(admit(&loaded, image), None, "an asked machine on Io.Write");
     }
     assert!(
         count > 0,

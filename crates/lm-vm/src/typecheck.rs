@@ -741,7 +741,7 @@ mod tests {
 
     fn module(types: Vec<BcType>, classes: Vec<BcClass>, funcs: Vec<Func>) -> Module {
         Module {
-            strings: vec!["Io.Print".to_string()],
+            strings: vec!["Io.Write".to_string()],
             bytes: vec![],
             types,
             selectors: Vec::new(),

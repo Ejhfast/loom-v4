@@ -33,7 +33,7 @@ fn run(src: &str, grants: &[&str]) -> (String, Vec<String>) {
 #[test]
 fn a_driver_serves_a_child_that_waits_on_a_proc() {
     let src = r#"
-def child(): Int with Vm, Proc, Io.Print
+def child(): Int with Vm, Proc, Io.Write
   worker = sys.vm.Vm().activate_or_fault(do ||: Int
     i = 0
     while i < 500
@@ -42,7 +42,7 @@ def child(): Int with Vm, Proc, Io.Print
     i
   end, args: ())
   h = sys.proc.run(worker)
-  sys.io.print("[child]")
+  print("[child]")
   case h.done()
   in Done(v)  then v
   in Fault(_) then -1
@@ -54,9 +54,9 @@ def supervise(vm: Run[Int], mut seen: [String]): Int with Vm
     case vm.drive()
     in Asked(request)
       case request
-      in Call(Io.Print, call, (text,))
-        seen.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        seen.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in _
         vm.dispatch(request)
       end
@@ -71,12 +71,12 @@ end
 c = sys.vm.Vm().activate_or_fault(child, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
-c.table().pass(Io.Print)
+c.table().pass(Io.Write)
 seen: [String] = []
 r = supervise(c, seen)
 r * 10 + seen.len()
 "#;
-    let (out, faults) = run(src, &["Vm", "Proc", "Io.Print"]);
+    let (out, faults) = run(src, &["Vm", "Proc", "Io.Write"]);
     println!("BUG B outcome: {out}");
     for f in &faults {
         println!("  {f}");
@@ -90,7 +90,7 @@ r * 10 + seen.len()
 #[test]
 fn a_driver_serves_two_levels_of_procs() {
     let src = r#"
-def child(): Int with Vm, Proc, Io.Print
+def child(): Int with Vm, Proc, Io.Write
   outer = sys.vm.Vm().activate_or_fault(do ||: Int with Vm, Proc
     inner = sys.vm.Vm().activate_or_fault(do ||: Int
       i = 0
@@ -108,7 +108,7 @@ def child(): Int with Vm, Proc, Io.Print
   outer.table().pass(Vm)
   outer.table().pass(Proc)
   h = sys.proc.run(outer)
-  sys.io.print("[child]")
+  print("[child]")
   case h.done()
   in Done(v)  then v
   in Fault(_) then -1
@@ -131,10 +131,10 @@ end
 c = sys.vm.Vm().activate_or_fault(child, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
-c.table().pass(Io.Print)
+c.table().pass(Io.Write)
 supervise(c)
 "#;
-    let (out, faults) = run(src, &["Vm", "Proc", "Io.Print"]);
+    let (out, faults) = run(src, &["Vm", "Proc", "Io.Write"]);
     println!("BUG B deep outcome: {out}");
     for f in &faults {
         println!("  {f}");
@@ -258,19 +258,19 @@ end
 #[test]
 fn a_driver_sees_every_effect_of_every_proc() {
     let src = r#"
-def worker(n: Int): Int with Io.Print
-  sys.io.print("[worker]")
+def worker(n: Int): Int with Io.Write
+  print("[worker]")
   n * 2
 end
 
-def app(): Int with Vm, Proc, Io.Print
+def app(): Int with Vm, Proc, Io.Write
   a = sys.vm.Vm().activate_or_fault(worker, args: (10,))
-  a.table().pass(Io.Print)
+  a.table().pass(Io.Write)
   b = sys.vm.Vm().activate_or_fault(worker, args: (20,))
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   ha = sys.proc.run(a)
   hb = sys.proc.run(b)
-  sys.io.print("[app]")
+  print("[app]")
   first = case ha.done()
   in Done(v)  then v
   in Fault(_) then -1
@@ -287,9 +287,9 @@ def audit(vm: Run[Int], mut seen: [String]): Int with Vm
     case vm.drive()
     in Asked(request)
       case request
-      in Call(Io.Print, call, (text,))
-        seen.push(text)
-        vm.answer(call, ())
+      in Call(Io.Write, call, (bytes,))
+        seen.push(bytes.utf8().expect("the output is UTF-8"))
+        vm.answer(call, Ok(bytes.len()))
       in _
         vm.dispatch(request)
       end
@@ -304,12 +304,12 @@ end
 c = sys.vm.Vm().activate_or_fault(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
-c.table().pass(Io.Print)
+c.table().pass(Io.Write)
 seen: [String] = []
 r = audit(c, seen)
 r * 100 + seen.len()
 "#;
-    let (out, faults) = run(src, &["Vm", "Proc", "Io.Print"]);
+    let (out, faults) = run(src, &["Vm", "Proc", "Io.Write"]);
     println!("audit-with-procs outcome: {out}");
     // 60 = 10*2 + 20*2, and the supervisor saw all three prints:
     // the app print and one from each worker proc.

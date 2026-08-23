@@ -15,7 +15,7 @@ fn run(src: &str) -> String {
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
-    for g in ["Vm", "Proc", "Io.Print"] {
+    for g in ["Vm", "Proc", "Io.Write"] {
         world.allow(g).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
@@ -34,7 +34,7 @@ h = Supervisor.spawn()
 case h.pause()
 in Ok(m)
   m.table().pass(Vm)
-  m.table().pass(Io.Print)
+  m.table().pass(Io.Write)
   h.resume()
   h.send(Stop)
   case h.done()
@@ -57,13 +57,13 @@ enum Cmd
 end
 
 class Supervisor < Proc[Cmd]
-  def on_spawn(self): Int with Proc, Vm, Io.Print
-    child = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-      sys.io.print("a")
-      sys.io.print("b")
+  def on_spawn(self): Int with Proc, Vm, Io.Write
+    child = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+      print("a")
+      print("b")
       7
     end, args: ())
-    child.table().pass(Io.Print)
+    child.table().pass(Io.Write)
     seen = 0
     loop do
       case child.drive()

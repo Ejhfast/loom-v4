@@ -527,7 +527,7 @@ end
 
 An artifact carries a **core role table**: one class slot per stable core role, for example `Option`, `Option.Some`, and `Option.None`. The compiler fills the table, the linker relocates it, and the verifier proves the kind, the generic arity, the parent slot, and the exact field layout of every filled slot. A rule that needs a core family, such as the pending-call type of a `Call` pattern, reads a slot. It reads no name and no hash, so a rename changes nothing the verifier reads, and an artifact with no source resolves its core from its own bytes. A family whose parent slot is filled must fill every arm slot.
 
-Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI reads the same slots, so `Io.ReadLine` and user code cannot silently disagree about what `Result` means.
+Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI reads the same slots, so `Io.ReadBytes` and user code cannot silently disagree about what `Result` means.
 
 The prelude puts common result, range, and collection names into unqualified scope.
 
@@ -725,7 +725,7 @@ A function type includes parameters, result, and row:
 
 ```lm
 (String, Int) -> Bool
-(String) -> () with Io.Print
+(Bytes) -> Result[Int, IoError] with Io.Write
 (T) -> U with e
 ```
 
@@ -734,8 +734,8 @@ The checker normalizes source function syntax to the structural form `Fn[A,R,e]`
 An operation object has an identity-indexed callable type:
 
 ```lm
-Op[Io.Print, (String) -> ()]
-Op[e, (String) -> ()]
+Op[Io.Write, (Bytes) -> Result[Int, IoError]]
+Op[e, (Bytes) -> Result[Int, IoError]]
 ```
 
 There is no callable operation type that erases identity. Widening to `Operation` makes it non-callable and suitable only for inspection, equality, diagnostics, or non-granting policy APIs.
@@ -911,8 +911,8 @@ increment = do |x: Int|: Int
   x + 1
 end
 
-printer = do |text: String| with Io.Print
-  sys.io.print(text)
+printer = do |text: String| with Io.Write
+  print(text).expect("the output writes")
 end
 
 thunk = do || 42 end
@@ -1206,8 +1206,8 @@ class Hello
     self.name = name
   end
 
-  def say_name(self) with Io.Print
-    sys.io.print("Hello #{self.name}!")
+  def say_name(self) with Io.Write
+    print("Hello #{self.name}!")
   end
 end
 ```
@@ -1434,13 +1434,19 @@ snapshot of it restores once for each candidate.
 
 The ABI supplies one descriptor constant for each exact operation and group.
 
-Examples include `Io`, `Tcp.Stream`, `Http.Client`, `Io.Print`, and `Tls.Handshake`.
+Examples include `Io`, `Tcp.Stream`, `Http.Client`, `Io.Write`, and `Tls.Handshake`.
 
-A group constant is an `OperationGroup`; an exact constant is an `Operation`. `sys.io.print` is the callable `Op[Io.Print, (String) -> ()]` corresponding to descriptor `Io.Print`. Scope grants nothing.
+A group constant is an `OperationGroup`.
+
+An exact constant is an `Operation`.
+
+`sys.io.write` has type `Op[Io.Write, (Bytes) -> Result[Int, IoError]]`.
+
+Scope grants nothing.
 
 Casing separates the two roles. A callable member of `sys` uses the
-snake_case form of its descriptor name: `sys.io.print` performs
-`Io.Print`, and `sys.io.read_line` performs `Io.ReadLine`. The
+snake_case form of its descriptor name. `sys.io.write` performs
+`Io.Write`. `sys.io.read_bytes` performs `Io.ReadBytes`. The
 mapping is mechanical. Descriptors keep initial capitals, and they
 appear wherever code names, grants, mocks, or matches an operation.
 `Args.Get` also has the direct `sys.args()` surface.
@@ -1453,18 +1459,22 @@ operation. A capitalized name identifies its descriptor.
 ### 11.2 Perform
 
 ```lm
-sys.io.print("Hello")
+sys.io.write(b"Hello").expect("the output writes")
 ```
 
 Calling an operation object executes one `PERFORM`. The VM records exact identity, arguments, expected reply type, destination, and continuation PC, then either dispatches automatically or exposes the request to a manual driver. No other guest mechanism reaches host semantics.
+
+The core output helpers are normal Loom functions.
+
+They use `Display` and perform the byte operations.
 
 ### 11.3 Rows and checking
 
 A row is a comma-separated set of exact identities, groups, and effect variables:
 
 ```lm
-def print_name(self) with Io.Print
-  sys.io.print(self.name)
+def print_name(self) with Io.Write
+  print(self.name).expect("the output writes")
 end
 
 def copy(src: String, dst: String) with Fs
@@ -1494,8 +1504,8 @@ An override may not widen its row. Therefore a virtual call through a supertype 
 
 ```lm
 routes: {String: () -> () with Io} = {
-  "health": do || sys.io.print("ok") end,
-  "help": do || sys.io.print("help") end
+  "health": do || print("ok") end,
+  "help": do || print("help") end
 }
 
 routes[route]()
@@ -1508,7 +1518,7 @@ The selected closure carries its row in its function type. There is no operation
 Rows are ordered by operation-set inclusion:
 
 ```text
-empty row <: Io.Print <: Io <: Io, Fs
+empty row <: Io.Write <: Io <: Io, Fs
 ```
 
 Admission checks use subsumption.
@@ -1865,9 +1875,9 @@ To read arguments or answer, the holder matches the request against an exact typ
 
 ```lm
 case q
-in Call(Io.Print, call, (text,))   # the tuple is (String,)
-  captured.push(text)
-  vm.answer(call, ())              # reply is statically ()
+in Call(Io.Write, call, (bytes,))  # the tuple is (Bytes,)
+  captured.push(bytes)
+  vm.answer(call, Ok(bytes.len())) # reply is Result[Int, IoError]
 in Call(Clock.Now, call, ())
   vm.answer(call, 123)
 in _
@@ -1879,7 +1889,7 @@ end
 
 Call a continuation method on the same `Vm` receiver that produced the event. The route proves that the descendant request reached this receiver.
 
-The `Call` pattern has a narrow compiler-known type rule. Its first position is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the arm binds a `PendingCall[(A...), R]` and matches its third position against `(A...)`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
+The `Call` pattern has a narrow compiler-known type rule. Its first position is an exact `Operation` descriptor known to the checker, such as `Io.Write`. If the manifest signature of that descriptor is `(A...) -> R`, the arm binds a `PendingCall[(A...), R]` and matches its third position against `(A...)`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
 
 ```text
 args(self) -> A
@@ -2314,7 +2324,7 @@ The proc instance is constructed inside its VM. The spawner receives only a type
 
 ```lm
 vm = sys.vm.Vm().activate_or_fault(program, args: ("Ada",))
-vm.table().pass(Io.Print)
+vm.table().pass(Io.Write)
 vm.table().mock(Clock.Now, do || 0 end)
 
 h: Handle[Never, ()] = sys.proc.run(vm)
@@ -2463,12 +2473,12 @@ The metaprogramming sidecar defines syntax inspection, construction, and compile
 ```lm
 src = """
 class Greeter
-  def greet(self, name: String) with Io.Print
-    sys.io.print("Hello #{name}!")
+  def greet(self, name: String) with Io.Write
+    print("Hello #{name}!")
   end
 end
 
-do |name: String| with Io.Print
+do |name: String| with Io.Write
   Greeter().greet(name)
 end
 """
@@ -2989,15 +2999,16 @@ Operation names, signatures, groups, hashes, and ABI versions come from the cano
 ### 23.1 I/O
 
 ```text
-Io.Print       (String) -> ()
-Io.Error       (String) -> ()
-Io.ReadLine    () -> Result[Option[String], IoError]
 Io.ReadBytes   (Int) -> Result[Bytes, IoError]
 Io.Write       (Bytes) -> Result[Int, IoError]
 Io.WriteError  (Bytes) -> Result[Int, IoError]
 ```
 
-`Print` and `Error` accept text exactly as supplied. Line-ending policy belongs to wrappers. Reads may suspend.
+Writes can report partial progress.
+
+Line-ending policy belongs to core and standard wrappers.
+
+Reads can suspend.
 
 ### 23.2 File system
 
@@ -4021,15 +4032,15 @@ end
 The standard library does not reintroduce an `Answer(Any)` decision enum or a variadic helper that would require type packs. Exact-operation elimination is already ordinary and small enough to package in user code:
 
 ```lm
-def answer_print[T](
+def answer_write[T](
   vm: Run[T],
   request: Request,
-  mut captured: [String]
+  mut captured: [Bytes]
 ): Bool with Vm.Answer
   case request
-  in Call(Io.Print, call, (text,))
-    captured.push(text)
-    vm.answer(call, ())
+  in Call(Io.Write, call, (bytes,))
+    captured.push(bytes)
+    vm.answer(call, Ok(bytes.len()))
     true
   in _
     false
@@ -4464,7 +4475,7 @@ Tools print types and rows canonically:
 List[String]                  prints as [String]
 Map[String, Int]              prints as {String: Int}
 () -> ()                      omits an empty with-clause
-(String) -> () with Io.Print
+(Bytes) -> Result[Int, IoError] with Io.Write
 (T) -> U with e
 Op[Clock.Now, () -> Int]
 ```
@@ -4477,8 +4488,8 @@ Canonical artifact rows expand groups to exact ABI operation identities and sort
 
 ```lm
 def supervise(
-  program: () -> String with Io.Print, Clock.Now
-): RunResult[String] with Vm, Io.Print
+  program: () -> String with Io.Write, Clock.Now
+): RunResult[String] with Vm, Io.Write
   vm = sys.vm.Vm().activate_or_fault(program, args: ())
   captured: [String] = []
 
@@ -4486,16 +4497,17 @@ def supervise(
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
+      in Call(Io.Write, call, (bytes,))
+        text = bytes.utf8().expect("the output is UTF-8")
         captured.push(text)
-        vm.answer(call, ())
+        vm.answer(call, Ok(bytes.len()))
       in Call(Clock.Now, call, ())
         vm.answer(call, 1_700_000_000)
       in _
         vm.reject(q, Fault.denied("the supervisor permits print and time only"))
       end
     in Done(value)
-      sys.io.print("captured #{captured.len()} writes\n")
+      print("captured #{captured.len()} writes\n").expect("the output writes")
       return Done(value)
     in Fault(fault)
       return Fault(fault)
@@ -4504,7 +4516,7 @@ def supervise(
 end
 ```
 
-No `Any` appears in the reply path. Matching the exact operation recovers its argument tuple and reply type; the runtime still validates machine identity, ordinal, and one-time use. The child receives neither `Io.Print` nor `Clock.Now` through its table. The holder's summary print is its own effect and needs authority in the holder's table.
+No `Any` appears in the reply path. Matching the exact operation recovers its argument tuple and reply type; the runtime still validates machine identity, ordinal, and one-time use. The child receives neither `Io.Write` nor `Clock.Now` through its table. The holder's summary print is its own effect and needs authority in the holder's table.
 
 ---
 

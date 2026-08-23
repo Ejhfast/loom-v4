@@ -744,9 +744,9 @@ final class PureCounter implements Source
   end
 end
 
-final class LoudCounter implements Source with Io.Print
-  def next(mut self): Int with Io.Print
-    sys.io.print("tick")
+final class LoudCounter implements Source with Io.Write
+  def next(mut self): Int with Io.Write
+    print("tick")
     2
   end
 end
@@ -758,7 +758,7 @@ end
 drain(PureCounter()) + drain(LoudCounter())
 "#;
     assert_eq!(
-        run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
+        run_allowed("collections.lm", source, &["Io.Write"]).expect("the program runs"),
         "Done(3)"
     );
 }
@@ -776,9 +776,9 @@ final class Quiet implements Labeled
   end
 end
 
-final class Loud implements Labeled with Io.Print
-  def label(self): String with Io.Print
-    sys.io.print("loud")
+final class Loud implements Labeled with Io.Write
+  def label(self): String with Io.Write
+    print("loud")
     "loud"
   end
 end
@@ -787,7 +787,7 @@ def describe[P: Labeled](item: P): String
   "it is #{item.label()}"
 end
 
-def describe_loud[P: Labeled with Io.Print](item: P): String with Io.Print
+def describe_loud[P: Labeled with Io.Write](item: P): String with Io.Write
   "it is #{item.label()}"
 end
 "##;
@@ -799,14 +799,14 @@ end
         run_allowed(
             "collections.lm",
             &format!("{declarations}\ndescribe_loud(Loud())\n"),
-            &["Io.Print"],
+            &["Io.Write"],
         )
         .expect("the concrete effect bound accepts the matching conformance"),
         "Done(\"it is loud\")"
     );
     let diagnostic = error(&format!("{declarations}\ndescribe(Loud())\n"));
     assert!(
-        diagnostic.contains("conforms to `Labeled with Io.Print`")
+        diagnostic.contains("conforms to `Labeled with Io.Write`")
             && diagnostic.contains("bound requires `Labeled`")
     );
 }
@@ -843,7 +843,7 @@ final class PureRunner implements Runner
   end
 end
 
-def needs_print[R: Runner with Io.Print](runner: R): Int
+def needs_print[R: Runner with Io.Write](runner: R): Int
   1
 end
 
@@ -852,7 +852,7 @@ needs_print(PureRunner())
     );
     assert!(
         diagnostic.contains("conforms to `Runner`")
-            && diagnostic.contains("bound requires `Runner with Io.Print`")
+            && diagnostic.contains("bound requires `Runner with Io.Write`")
     );
 }
 
@@ -864,13 +864,13 @@ interface TwoPhase[effect first, effect last]
   def last(self): Int with last
 end
 
-final class Mixed implements TwoPhase with () with Io.Print
+final class Mixed implements TwoPhase with () with Io.Write
   def first(self): Int
     1
   end
 
-  def last(self): Int with Io.Print
-    sys.io.print("last\n")
+  def last(self): Int with Io.Write
+    print("last\n")
     2
   end
 end
@@ -882,7 +882,7 @@ end
 both(Mixed())
 "#;
     assert_eq!(
-        run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
+        run_allowed("collections.lm", source, &["Io.Write"]).expect("the program runs"),
         "Done(3)"
     );
 }
@@ -893,7 +893,7 @@ fn interface_effect_row_example_has_checked_output() {
         .join("examples/13-collections-and-interfaces/08-interface-effect-rows.lm");
     let source = std::fs::read_to_string(path).expect("the example reads");
     assert_eq!(
-        run_allowed("interface-effect-rows.lm", &source, &["Io.Print"]).expect("the example runs"),
+        run_allowed("interface-effect-rows.lm", &source, &["Io.Write"]).expect("the example runs"),
         "Done((\"it is quiet\", \"it is quiet\", \"it is logged\", \"logged: n=7\"))"
     );
 }
@@ -1671,8 +1671,8 @@ final class Key implements Hashable
     true
   end
 
-  def __hash__(self): Int with Io.Print
-    sys.io.print("hash")
+  def __hash__(self): Int with Io.Write
+    print("hash")
     1
   end
 end
@@ -1830,15 +1830,17 @@ fn callbacks_do_not_allocate_guest_closures() {
 #[test]
 fn callbacks_forward_effects_and_default_to_nonescaping() {
     let source = r##"
-def emit(values: List[Int]): Int with Io.Print
-  values.each() { |value: Int| with Io.Print sys.io.print("#{value}") }
+def emit(values: List[Int]): Int with Io.Write
+  values.each() { |value: Int| with Io.Write
+    print("#{value}").expect("the output writes")
+  }
   values.len()
 end
 
 emit([1, 2])
 "##;
     assert_eq!(
-        run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
+        run_allowed("collections.lm", source, &["Io.Write"]).expect("the program runs"),
         "Done(2)"
     );
 

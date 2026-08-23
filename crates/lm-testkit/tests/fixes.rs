@@ -126,17 +126,17 @@ fn widened_tuple_local_keeps_its_declared_type() {
 
 #[test]
 fn function_local_holds_a_narrower_row_closure() {
-    let source = "f: (Int) -> Int with Io.Print = { |x: Int|: Int x + 1 }\nf(1)\n";
+    let source = "f: (Int) -> Int with Io.Write = { |x: Int|: Int x + 1 }\nf(1)\n";
     assert_eq!(run(source), "Done(2)");
 }
 
 #[test]
 fn function_local_joins_branches_with_different_rows() {
-    let source = "def go(): Int with Clock.Now, Io.Print
+    let source = "def go(): Int with Clock.Now, Io.Write
   flag = true
-  f: (Int) -> Int with Clock.Now, Io.Print = { |x: Int|: Int x }
+  f: (Int) -> Int with Clock.Now, Io.Write = { |x: Int|: Int x }
   if flag
-    f = { |x: Int|: Int with Io.Print x }
+    f = { |x: Int|: Int with Io.Write x }
   else
     f = { |x: Int|: Int with Clock.Now x }
   end

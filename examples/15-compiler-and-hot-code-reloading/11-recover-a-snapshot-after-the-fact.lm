@@ -1,6 +1,6 @@
 # Add an exporter to a world that shipped without one.
 #
-# Run with `--allow Vm,Io.ReadLine`.
+# Run with `--allow Vm,Io.ReadBytes`.
 #
 # A snapshot is not a sealed box. Restoring one gives a stopped run
 # inside a VM, and a VM accepts new code. So a world captured with
@@ -28,15 +28,16 @@ def report(total: Int): Int
   0
 end
 
-def gather(): Int with Io.ReadLine
+def gather(): Int with Io.ReadBytes
   total = 0
   count = 0
   while count < 3
-    line = case sys.io.read_line()
-    in Ok(Some(text)) then text
-    in _ then "0"
+    bytes = sys.io.read_bytes(1).expect("the answer reads")
+    text = case bytes.utf8()
+    in Ok(value) then value
+    in Err(_) then "0"
     end
-    total = total + case line.parse_int(10)
+    total = total + case text.parse_int(10)
     in Ok(value) then value
     in Err(_) then 0
     end
@@ -57,11 +58,11 @@ def feed(run: Run[Int], answers: [String]): Result[Int, String] with Vm
     case run.drive()
     in Asked(question)
       case question
-      in Call(Io.ReadLine, call, ())
+      in Call(Io.ReadBytes, call, (_count,))
         if next >= answers.len()
-          run.answer(call, Ok(None))
+          run.answer(call, Ok(b""))
         else
-          run.answer(call, Ok(Some(answers.at(next))))
+          run.answer(call, Ok(answers.at(next).bytes()))
           next = next + 1
         end
       in _
@@ -75,7 +76,7 @@ def feed(run: Run[Int], answers: [String]): Result[Int, String] with Vm
   end
 end
 
-def go(): Result[(Int, Int), String] with Vm, Io.ReadLine
+def go(): Result[(Int, Int), String] with Vm, Io.ReadBytes
   image = sys.vm.Vm()
   seam = image.install(report).map_error() { |e: CodeError| e.message }?
   entry = image.install(gather).map_error() { |e: CodeError| e.message }?
@@ -87,8 +88,8 @@ def go(): Result[(Int, Int), String] with Vm, Io.ReadLine
   case run.drive()
   in Asked(question)
     case question
-    in Call(Io.ReadLine, call, ())
-      run.answer(call, Ok(Some("5")))
+    in Call(Io.ReadBytes, call, (_count,))
+      run.answer(call, Ok(b"5"))
     in _
       run.dispatch(question)
     end

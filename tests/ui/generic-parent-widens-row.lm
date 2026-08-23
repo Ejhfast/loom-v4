@@ -5,8 +5,8 @@ class Cell[T]
 end
 
 class Loud < Cell[Int]
-  def show(self): String with Io.Print
-    sys.io.print("x")
+  def show(self): String with Io.Write
+    print("x")
     "loud"
   end
 end

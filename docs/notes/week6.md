@@ -180,10 +180,10 @@ built  app.greeting  86850c4a059e
 built  app.main  9fa072abca88
 linked app  sem=0b91ae8fa454 container=879c429db5f4
   examples/05-modules/app/build/debug/app.lma
-$ lm run examples/05-modules/app --allow Io.Print
+$ lm run examples/05-modules/app --allow Io.Write
 Hello Ada!
 2x3 has 6 cells
-$ lm run examples/05-modules/app/build/debug/app.lma --allow Io.Print
+$ lm run examples/05-modules/app/build/debug/app.lma --allow Io.Write
 Hello Ada!
 2x3 has 6 cells
 ```

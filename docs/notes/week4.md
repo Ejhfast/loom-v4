@@ -7,17 +7,18 @@ the changed tests, one incident, and the deferred work.
 
 - The `lm-abi` crate: the canonical operation and group manifest.
   Groups: `Io`, `Fs`, `Clock`, `Rand`, `Net`, `Proc`, `Vm`,
-  `Compiler`, `Reflect`. Exact operations: `Io.Print`, `Io.Error`,
-  `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`,
+  `Compiler`, `Reflect`. Exact operations: `Io.Write`, `Io.WriteError`,
+  `Io.ReadBytes`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`,
   `Rand.Int`, and the `Vm` control family (`Vm.New`, `Vm.FromFn`,
   `Vm.Run`, `Vm.Step`, `Vm.Drive`, `Vm.Answer`, `Vm.Reject`,
   `Vm.Dispatch`, `Vm.Table`). Each operation has a stable dense slot
   and a domain-separated BLAKE3-256 identity over its name and full
   signature; `manifest_digest()` pins the whole table. The checker,
   the verifier, the VM, and the host all read this one table.
-- The `sys` surface: `sys.<group>.<Member>(args)` is one `PERFORM`.
-  `sys.io.Print` as a value is `Op[Io.Print, (String) -> ()]`, a
-  16-byte immediate (`Value::Op`) whose identity lives in the type.
+- The `sys` surface: `sys.<group>.<member>(args)` is one `PERFORM`.
+  `sys.io.write` has type `Op[Io.Write, (Bytes) -> Result[Int, IoError]]`.
+  The VM stores it as a 16-byte immediate (`Value::Op`).
+  Its identity lives in the type.
   Calling it through a variable emits `PERFORM_VALUE` and charges the
   identity from the static type. Calling an operation object is the
   only guest-to-host boundary.
@@ -34,11 +35,11 @@ the changed tests, one incident, and the deferred work.
   (closes the week-3 observation): the inference pass now also
   synthesizes an argument whose declared parameter still holds an
   unresolved effect variable, so
-  `apply(x, do |n: Int|: Int with Io.Print ... end)` binds
-  `e := {Io.Print}` and the caller is charged the bound row.
+  `apply(x, do |n: Int|: Int with Io.Write ... end)` binds
+  `e := {Io.Write}` and the caller is charged the bound row.
 - The entry block collects its row instead of rejecting performs: the
   inferred entry row is the program row, and the root policy decides
-  at run time. `lm run file.lm --allow Io.Print,Clock` grants exact
+  at run time. `lm run file.lm --allow Io.Write,Clock` grants exact
   operations or whole groups at the root; the default is deny.
 - The independent verifier reconstructs rows: every reachable
   `PERFORM` and `PERFORM_VALUE` must name an operation inside the
@@ -103,12 +104,13 @@ the changed tests, one incident, and the deferred work.
   exact shape. The verifier and the VM share this one module, so the
   class indices behind operation replies and VM events always agree.
   This is the isolated positional coupling until week-5 hash linking.
-- The `lm-host` crate: `CliHost` implements `Io.Print`/`Io.Error`
-  over stdout/stderr, `Io.ReadLine` over stdin with the pinned
-  `Result[Option[String], IoError]` reply, `Clock.Now`/`Monotonic`,
-  `Clock.Sleep` through the asynchronous completion channel
-  (synchronous-in-the-CLI for now), and a seeded deterministic
-  `Rand.Int` (`--rand-seed`). `lm-vm` never depends on `lm-host`;
+- The `lm-host` crate: `CliHost` implements `Io.Write` and `Io.WriteError`.
+  It writes to standard output and standard error.
+  `Io.ReadBytes` reads standard input and returns `Result[Bytes, IoError]`.
+  The host also implements `Clock.Now` and `Clock.Monotonic`.
+  `Clock.Sleep` uses the asynchronous completion channel.
+  The host provides deterministic `Rand.Int` through `--rand-seed`.
+  `lm-vm` never depends on `lm-host`;
   completions carry plain data only. `RecordingHost` in `lm-vm` is
   the deterministic test host and exercises the waiting state.
 - `loop [do] ... end` as sugar for `while true`, and the scanner now
@@ -221,7 +223,7 @@ An independent review confirmed one defect and one documentation gap.
   suspended while its child runs. The runtime still counts activation
   references and faults `InvalidVmState` as defense in depth; Rust
   unit tests cover it directly.
-- `Io.ReadLine` in the CLI blocks synchronously; only `Clock.Sleep`
+- `Io.ReadBytes` uses a bounded input worker. `Clock.Sleep`
   uses the waiting state end to end. The completion channel already
   has the week-9 asynchronous shape (`start`/`poll`/`wait` with
   single-use tokens).
@@ -247,7 +249,7 @@ rejected to supported, plus one stack-size precedent:
 - `lm-testkit/tests/checker.rs`: the `E1002` family case now uses a
   nested `class`, because no reserved keyword remains.
 - `lm-testkit/tests/week3.rs`: the entry now collects its row, so
-  `def go() with Io.Print end go()` and the closure and `init` cases
+  `def go() with Io.Write end go()` and the closure and `init` cases
   run to `Done`; the pure-function forms keep `E1046`. Class
   constructor patterns moved from `E1041` to supported.
 - `lm-testkit/tests/complexity.rs`: the gates run on the supported

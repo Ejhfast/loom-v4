@@ -172,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, d74be8d5)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 3b9a475d)\n"
     );
 }
 
@@ -188,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 35c9813b)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 37fbfe0e)\n"
     );
 }
 
@@ -386,11 +386,11 @@ fn a_closed_output_pipe_does_not_panic() {
     let path = repo_root().join("target/test-closed-pipe.lm");
     std::fs::write(
         &path,
-        "def go() with Io.Print\n  for n in Range(0, 100)\n    sys.io.print(\"line #{n}\\n\")\n  end\nend\ngo()\n",
+        "def go() with Io.Write\n  for n in Range(0, 100)\n    print(\"line #{n}\\n\")\n  end\nend\ngo()\n",
     )
     .expect("the probe source writes");
     let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
-        .args(["run", "--allow", "Io.Print"])
+        .args(["run", "--allow", "Io.Write"])
         .arg(&path)
         .current_dir(repo_root())
         .stdout(Stdio::piped())

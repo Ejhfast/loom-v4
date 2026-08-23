@@ -39,7 +39,7 @@ A live driver was therefore invisible below its direct child.
 ## 3. Demonstration
 
 Three machines. P is the top level. P drives A. A creates B and runs
-B. Both A and B perform `Io.Print`.
+B. Both A and B perform `Io.Write`.
 
 Save the program below as `nested-drive.lm` to repeat the runs.
 
@@ -49,9 +49,10 @@ def drive_loop(vm: Run[Int], mut seen: [String]): ([String], Int) with Vm
     case vm.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (text,))
+      in Call(Io.Write, call, (bytes,))
+        text = bytes.utf8().expect("the output is UTF-8")
         seen.push(text)
-        vm.answer(call, ())
+        vm.answer(call, Ok(bytes.len()))
       in _
         vm.dispatch(q)
       end
@@ -64,13 +65,13 @@ def drive_loop(vm: Run[Int], mut seen: [String]): ([String], Int) with Vm
   (seen.freeze(), 0 - 1)
 end
 
-inner = do || : Int with Vm, Io.Print
-  sys.io.print("from A\n")
-  b = sys.vm.Vm().activate_or_fault(do || : Int with Io.Print
-    sys.io.print("from B\n")
+inner = do || : Int with Vm, Io.Write
+  print("from A\n")
+  b = sys.vm.Vm().activate_or_fault(do || : Int with Io.Write
+    print("from B\n")
     7
   end, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   case b.run()
   in Done(v)  then v
   in Fault(_) then 0 - 1
@@ -79,17 +80,17 @@ end
 
 a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
-a.table().pass(Io.Print)
+a.table().pass(Io.Write)
 
 seen: [String] = []
 out = drive_loop(a, seen)
-sys.io.print("intercepted=#{out[0].len()} result=#{out[1]}\n")
+print("intercepted=#{out[0].len()} result=#{out[1]}\n")
 ```
 
 ### 3.1 Behavior before the fix
 
 ```text
-$ lm run --show-result nested-drive.lm --allow Vm,Io.Print
+$ lm run --show-result nested-drive.lm --allow Vm,Io.Write
 from B
 intercepted=1 result=7
 Done(())
@@ -101,13 +102,13 @@ standard output. P held a live drive loop and never saw the request.
 ### 3.2 Behavior after the fix
 
 ```text
-$ lm run --show-result nested-drive.lm --allow Vm,Io.Print
+$ lm run --show-result nested-drive.lm --allow Vm,Io.Write
 intercepted=2 result=7
 Done(())
 ```
 
 P captures both prints. Neither print reaches the host. A asked its
-holder, because A passes `Io.Print`, and P is the holder.
+holder, because A passes `Io.Write`, and P is the holder.
 
 ## 4. Authority is not affected
 
@@ -115,17 +116,17 @@ Authority already works at every level. Remove one line from the
 program above:
 
 ```lm
-# a.table().pass(Io.Print)
+# a.table().pass(Io.Write)
 ```
 
 ```text
-$ lm run --show-result nested-drive-noio.lm --allow Vm,Io.Print
+$ lm run --show-result nested-drive-noio.lm --allow Vm,Io.Write
 intercepted=1 result=-1
 Done(())
 ```
 
 B faulted with `PolicyDenied`, and `b.run()` returned `Fault`. A passed
-`Io.Print` on the table of B, but P declined on the table of A.
+`Io.Write` on the table of B, but P declined on the table of A.
 
 Specification 15 therefore holds as written: a top-level row bounds the
 operations the whole descendant tower can cause. The defect is in

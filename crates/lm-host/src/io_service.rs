@@ -5,7 +5,7 @@
 
 use lm_vm::{
     CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostRenameMode, HostSeekFrom,
-    HostValue, HostWaitCancel, SharedBytes, SharedText,
+    HostValue, HostWaitCancel, SharedBytes,
 };
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, Write};
@@ -103,9 +103,6 @@ impl FileRequest {
 }
 
 pub(crate) enum StreamRequest {
-    Print(SharedText),
-    Error(SharedText),
-    ReadLine,
     ReadBytes(usize),
     Write(SharedBytes),
     WriteError(SharedBytes),
@@ -229,14 +226,13 @@ impl IoService {
             request,
         };
         let sent = match &job.request {
-            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => self
+            StreamRequest::ReadBytes(_) => self
                 .input
                 .send(InputCommand::Request { job, wait_source })
                 .is_ok(),
-            StreamRequest::Print(_)
-            | StreamRequest::Error(_)
-            | StreamRequest::Write(_)
-            | StreamRequest::WriteError(_) => self.output.send(StreamJob(job)).is_ok(),
+            StreamRequest::Write(_) | StreamRequest::WriteError(_) => {
+                self.output.send(StreamJob(job)).is_ok()
+            }
         };
         if !sent {
             self.release();
@@ -647,49 +643,7 @@ fn prepare_input_reply(
             let consumed: Vec<u8> = buffer.drain(..take).collect();
             Some((io_ok(HostValue::Bytes(consumed.clone().into())), consumed))
         }
-        StreamRequest::ReadLine => {
-            let end = buffer
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map(|at| at + 1);
-            let take = match end {
-                Some(take) => take,
-                None if eof && !buffer.is_empty() => buffer.len(),
-                None if eof => {
-                    return Some((
-                        HostValue::Ctor(
-                            CoreCtor::Ok,
-                            vec![HostValue::Ctor(CoreCtor::None, vec![])],
-                        ),
-                        Vec::new(),
-                    ));
-                }
-                None => return None,
-            };
-            let consumed: Vec<u8> = buffer.drain(..take).collect();
-            let mut text = consumed.as_slice();
-            if text.ends_with(b"\n") {
-                text = &text[..text.len() - 1];
-                if text.ends_with(b"\r") {
-                    text = &text[..text.len() - 1];
-                }
-            }
-            let value = match std::str::from_utf8(text) {
-                Ok(text) => HostValue::Ctor(
-                    CoreCtor::Ok,
-                    vec![HostValue::Ctor(
-                        CoreCtor::Some,
-                        vec![HostValue::Str(text.to_string().into())],
-                    )],
-                ),
-                Err(_) => io_error("standard input is not valid UTF-8".to_string()),
-            };
-            Some((value, consumed))
-        }
-        StreamRequest::Print(_)
-        | StreamRequest::Error(_)
-        | StreamRequest::Write(_)
-        | StreamRequest::WriteError(_) => Some((
+        StreamRequest::Write(_) | StreamRequest::WriteError(_) => Some((
             io_error("the input service received an output request".to_string()),
             Vec::new(),
         )),
@@ -703,29 +657,9 @@ fn output_worker(
 ) {
     while let Ok(StreamJob(job)) = jobs.recv() {
         let result = match job.request {
-            StreamRequest::Print(text) => {
-                let mut out = std::io::stdout();
-                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
-                    Ok(()) => Ok(HostValue::Unit),
-                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
-                        Ok(HostValue::Unit)
-                    }
-                    Err(error) => Err(format!("stream write failed: {error}")),
-                }
-            }
-            StreamRequest::Error(text) => {
-                let mut out = std::io::stderr();
-                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
-                    Ok(()) => Ok(HostValue::Unit),
-                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
-                        Ok(HostValue::Unit)
-                    }
-                    Err(error) => Err(format!("stream write failed: {error}")),
-                }
-            }
             StreamRequest::Write(bytes) => Ok(write_bytes(std::io::stdout(), &bytes)),
             StreamRequest::WriteError(bytes) => Ok(write_bytes(std::io::stderr(), &bytes)),
-            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => {
+            StreamRequest::ReadBytes(_) => {
                 unreachable!("input uses its own worker")
             }
         };

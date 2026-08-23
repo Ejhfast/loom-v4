@@ -2549,7 +2549,7 @@ end
 interface Counted
 end
 
-final class Worker implements Counted, Service[Int] with () with (Io.Print, Clock.Now)
+final class Worker implements Counted, Service[Int] with () with (Io.Write, Clock.Now)
 end
 
 def apply_service[effect e, P: Service[Int] with e with (), U: Counted](value: P, other: U): Int with e

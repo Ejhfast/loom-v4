@@ -33,7 +33,7 @@ fn run(src: &str, grants: &[&str]) -> (String, bool) {
 #[test]
 fn a_supervisor_captures_a_child_with_one_proc() {
     let src = r#"
-def app(): Int with Vm, Proc, Io.Print
+def app(): Int with Vm, Proc, Io.Write
   w = sys.vm.Vm().activate_or_fault(do ||: Int
     i = 0
     while i < 300
@@ -42,7 +42,7 @@ def app(): Int with Vm, Proc, Io.Print
     i
   end, args: ())
   h = sys.proc.run(w)
-  sys.io.print("[app]")
+  print("[app]")
   case h.done()
   in Done(v)  then v
   in Fault(_) then -1
@@ -54,9 +54,9 @@ def supervise(vm: Run[Int]): Int with Vm
     case vm.drive()
     in Asked(request)
       case request
-      in Call(Io.Print, call, (_,))
+      in Call(Io.Write, call, (bytes,))
         took = vm.snapshot().is_ok()
-        vm.answer(call, ())
+        vm.answer(call, Ok(bytes.len()))
         if not took
           return -7
         end
@@ -74,10 +74,10 @@ end
 c = sys.vm.Vm().activate_or_fault(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
-c.table().pass(Io.Print)
+c.table().pass(Io.Write)
 supervise(c)
 "#;
-    let (out, captured) = run(src, &["Vm", "Proc", "Io.Print"]);
+    let (out, captured) = run(src, &["Vm", "Proc", "Io.Write"]);
     println!("one-proc capture: {out} captured={captured}");
     assert_eq!(out, "Done(300)");
     assert!(captured, "the supervisor captured nothing");
@@ -88,16 +88,16 @@ supervise(c)
 #[test]
 fn a_supervisor_captures_a_child_with_two_surfacing_procs() {
     let src = r#"
-def worker(): Int with Io.Print
-  sys.io.print("[worker]")
+def worker(): Int with Io.Write
+  print("[worker]")
   5
 end
 
-def app(): Int with Vm, Proc, Io.Print
+def app(): Int with Vm, Proc, Io.Write
   a = sys.vm.Vm().activate_or_fault(worker, args: ())
-  a.table().pass(Io.Print)
+  a.table().pass(Io.Write)
   b = sys.vm.Vm().activate_or_fault(worker, args: ())
-  b.table().pass(Io.Print)
+  b.table().pass(Io.Write)
   ha = sys.proc.run(a)
   hb = sys.proc.run(b)
   first = case ha.done()
@@ -116,11 +116,11 @@ def supervise(vm: Run[Int], mut misses: [Int]): Int with Vm
     case vm.drive()
     in Asked(request)
       case request
-      in Call(Io.Print, call, (_,))
+      in Call(Io.Write, call, (bytes,))
         if not vm.snapshot().is_ok()
           misses.push(1)
         end
-        vm.answer(call, ())
+        vm.answer(call, Ok(bytes.len()))
       in _
         vm.dispatch(request)
       end
@@ -135,12 +135,12 @@ end
 c = sys.vm.Vm().activate_or_fault(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
-c.table().pass(Io.Print)
+c.table().pass(Io.Write)
 misses: [Int] = []
 r = supervise(c, misses)
 r * 100 + misses.len()
 "#;
-    let (out, captured) = run(src, &["Vm", "Proc", "Io.Print"]);
+    let (out, captured) = run(src, &["Vm", "Proc", "Io.Write"]);
     println!("two-proc capture: {out} captured={captured}");
     // 10 = 5 + 5. The trailing digit counts refused captures.
     assert_eq!(out, "Done(1000)", "captures were refused");

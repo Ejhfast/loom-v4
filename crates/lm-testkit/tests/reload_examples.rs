@@ -73,7 +73,7 @@ fn the_open_request_keeps_its_own_version() {
     assert_eq!(
         run_example(
             "examples/15-compiler-and-hot-code-reloading/04-finish-the-open-request.lm",
-            &["Vm", "Io.ReadLine"],
+            &["Vm", "Io.ReadBytes"],
         ),
         "Done(Ok([30, 1030]))"
     );
@@ -182,7 +182,7 @@ fn a_snapshot_accepts_an_exporter_after_the_fact() {
     assert_eq!(
         run_example(
             "examples/15-compiler-and-hot-code-reloading/11-recover-a-snapshot-after-the-fact.lm",
-            &["Vm", "Io.ReadLine"],
+            &["Vm", "Io.ReadBytes"],
         ),
         "Done(Ok((0, 18)))"
     );

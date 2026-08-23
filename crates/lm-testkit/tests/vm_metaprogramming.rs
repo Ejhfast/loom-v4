@@ -99,8 +99,8 @@ execute()
 #[test]
 fn an_async_policy_fault_keeps_its_perform_location() {
     let source = r#"
-def announce(): Int with Io.Print
-  sys.io.print("hello")
+def announce(): Int with Io.Write
+  sys.io.write(b"hello").expect("the output writes")
   1
 end
 

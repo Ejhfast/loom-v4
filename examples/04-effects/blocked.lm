@@ -2,8 +2,8 @@
 # the fault as an ordinary frozen value with a stable code.
 
 def run_blocked(): String with Vm
-  vm = sys.vm.Vm().activate_or_fault(do || with Io.Print
-    sys.io.print("hi\n")
+  vm = sys.vm.Vm().activate_or_fault(do || with Io.Write
+    print("hi\n")
   end, args: ())
   case vm.run()
   in Done(_)  then "done"

@@ -121,8 +121,8 @@ def report(): [String] with Compiler, Vm
   # A wider row is a different shape. The compiler holds the
   # revision to the identity it was given, so this never becomes an
   # artifact at all.
-  louder = "def rate(n: Int): Int with Io.Print\n" +
-    "  sys.io.print(\"x\\n\")\n  n * 2\nend\n"
+  louder = "def rate(n: Int): Int with Io.Write\n" +
+    "  print(\"x\\n\")\n  n * 2\nend\n"
   out.push(revise("added an effect  ", louder))
 
   out.push(two_modules())

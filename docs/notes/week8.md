@@ -602,7 +602,7 @@ holder can send and close and then read `Fault(PolicyDenied)` from
 `done()`. The behavior follows the text, and one test states it.
 
 The reviewer's position: `Proc.Recv` reads the proc's own mailbox and
-reaches no authority outside the machine, so it is unlike `Io.Print`.
+reaches no authority outside the machine, so it is unlike `Io.Write`.
 The specification should anchor it to a root grant, or to the birth
 grant itself, so a proc can drain its mailbox and finish after its
 parent dies. Under the current rule a supervisor cannot hand work to

@@ -325,19 +325,6 @@ const MAX_ENTROPY_BYTES: usize = 16 << 20;
 impl Host for CliHost {
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
         match op {
-            lm_abi::OP_IO_PRINT => {
-                let Some(HostArg::Str(text)) = args.first() else {
-                    return HostStart::Failed("Io.Print needs one string".to_string());
-                };
-                self.start_stream(key, StreamRequest::Print(text.clone()))
-            }
-            lm_abi::OP_IO_ERROR => {
-                let Some(HostArg::Str(text)) = args.first() else {
-                    return HostStart::Failed("Io.Error needs one string".to_string());
-                };
-                self.start_stream(key, StreamRequest::Error(text.clone()))
-            }
-            lm_abi::OP_IO_READ_LINE => self.start_stream(key, StreamRequest::ReadLine),
             lm_abi::OP_IO_READ_BYTES => {
                 let Some(HostArg::Int(count)) = args.first() else {
                     return HostStart::Failed("Io.ReadBytes needs one integer".to_string());

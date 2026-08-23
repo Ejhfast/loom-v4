@@ -149,9 +149,9 @@ f(20)
 ";
     assert_eq!(runs(multi), "Done(42)");
     let row = "\
-def go(): Int with Io.Print
-  printer = { |text: String| with Io.Print
-    sys.io.print(text)
+def go(): Int with Io.Write
+  printer = { |text: String| with Io.Write
+    print(text)
   }
   printer(\"hello\\n\")
   42
@@ -160,7 +160,7 @@ end
 go()
 ";
     assert_eq!(
-        lm_testkit::run_allowed("t.lm", row, &["Io.Print"]).unwrap(),
+        lm_testkit::run_allowed("t.lm", row, &["Io.Write"]).unwrap(),
         "Done(42)"
     );
 }

@@ -211,7 +211,7 @@ final class PureSource implements Source
   type Item = Int
 end
 
-final class LoudSource implements Source with Io.Print
+final class LoudSource implements Source with Io.Write
   type Item = Int
 end
 
@@ -247,7 +247,7 @@ Row inclusion alone cannot compare them safely because an effect parameter can o
 The `+` token joins several bounds. A comma joins class conformances.
 
 ```lm
-final class LoggedSource implements Counted, Source with Io.Print
+final class LoggedSource implements Counted, Source with Io.Write
 end
 ```
 

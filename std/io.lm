@@ -79,14 +79,6 @@ def write_error_all(bytes: Bytes): Result[(), IoError] with Io.WriteError
   Ok(())
 end
 
-def print(text: Text): Result[(), IoError] with Io.Write
-  write_all(text.bytes())
-end
-
-def print_error(text: Text): Result[(), IoError] with Io.WriteError
-  write_error_all(text.bytes())
-end
-
 def read_to_end(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
   if max_bytes < 0
     return Err(IoError.InvalidInput("the input limit is negative"))
@@ -127,13 +119,13 @@ final class ConsoleLineReader
         -1
       end
       if newline >= 0
-        if newline > max_bytes
-          return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
-        end
         line_end = if newline > 0 and self.buffer.at_or(newline - 1, -1) == 13
           newline - 1
         else
           newline
+        end
+        if line_end > max_bytes
+          return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
         end
         data = self.buffer.build()
         line = data.slice(0, line_end).expect("the line bounds are valid")
@@ -151,7 +143,10 @@ final class ConsoleLineReader
       end
       self.searched = self.buffer.len()
 
-      if self.buffer.len() > max_bytes
+      over_limit = self.buffer.len() > max_bytes
+      only_cr_over = self.buffer.len() == max_bytes + 1 and
+        self.buffer.at_or(max_bytes, -1) == 13
+      if over_limit and not only_cr_over
         return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
       end
       if self.ended
@@ -169,7 +164,9 @@ final class ConsoleLineReader
       end
 
       remaining = max_bytes - self.buffer.len()
-      count = if remaining < 8192
+      count = if remaining < 0
+        1
+      elsif remaining < 8192
         remaining + 1
       else
         8192

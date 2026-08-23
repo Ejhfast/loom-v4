@@ -1,7 +1,7 @@
 # Search an ordinary program, not a pure specification.
 #
 # Run with `--allow Vm`. The child prints, but no print reaches a
-# terminal: the driver answers `Io.Print` itself.
+# terminal: the driver answers `Io.Write` itself.
 #
 # `rollout` is the kind of program someone would write anyway. It
 # keeps a growing list, it accumulates a running total, and it reports
@@ -16,7 +16,7 @@
 # points, and it serves the print effect, so every branch also gets
 # its own transcript.
 
-def rollout(): Int with Choose, Io.Print
+def rollout(): Int with Choose, Io.Write
   applied: [Int] = []
   risk = 0
   step = 0
@@ -27,7 +27,7 @@ def rollout(): Int with Choose, Io.Print
     # Risk grows faster than size, so one big wave costs more than
     # three small ones.
     risk = risk + size * size
-    sys.io.print("wave #{size} ")
+    print("wave #{size} ")
     step = step + 1
   end
   # The plan is only valid when it lands exactly six machines.
@@ -64,8 +64,9 @@ def cheapest(child: Run[Int], log: String): (Int, String) with Vm
     # The transcript belongs to this branch alone. A sibling branch
     # never sees this line, because it resumes from the capture
     # taken before the line existed.
-    in Call(Io.Print, call, (text,))
-      child.answer(call, ())
+    in Call(Io.Write, call, (bytes,))
+      child.answer(call, Ok(bytes.len()))
+      text = bytes.utf8().expect("the output is UTF-8")
       cheapest(child, "#{log}#{text}")
     in Call(Choose.Pick, call, (count,))
       case child.snapshot()

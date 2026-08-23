@@ -53,7 +53,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 25 adds selectable host-operation sources.
 /// Version 26 adds terminal and signal operations.
 /// Version 27 completes the file-system operation group.
-pub const ABI_VERSION: u32 = 27;
+/// Version 28 removes text console operations.
+pub const ABI_VERSION: u32 = 28;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2039,9 +2040,9 @@ impl OpDef {
 
 /// Dense slots for the week-4 operations. The constants match the
 /// index in `OPS`.
-pub const OP_IO_PRINT: OpSlot = 0;
-pub const OP_IO_ERROR: OpSlot = 1;
-pub const OP_IO_READ_LINE: OpSlot = 2;
+pub const OP_IO_READ_BYTES: OpSlot = 0;
+pub const OP_IO_WRITE: OpSlot = 1;
+pub const OP_IO_WRITE_ERROR: OpSlot = 2;
 pub const OP_CLOCK_NOW: OpSlot = 3;
 pub const OP_CLOCK_MONOTONIC: OpSlot = 4;
 pub const OP_CLOCK_SLEEP: OpSlot = 5;
@@ -2146,55 +2147,52 @@ pub const OP_VM_CHANGE_PROCESS: OpSlot = 104;
 pub const OP_VM_REPLACE_ALL: OpSlot = 105;
 pub const OP_VM_RUN_SNAPSHOT_BYTES: OpSlot = 106;
 pub const OP_VM_SNAPSHOT_BYTES: OpSlot = 107;
-pub const OP_IO_READ_BYTES: OpSlot = 108;
-pub const OP_IO_WRITE: OpSlot = 109;
-pub const OP_IO_WRITE_ERROR: OpSlot = 110;
-pub const OP_ENV_GET: OpSlot = 111;
-pub const OP_FS_CURRENT_DIR: OpSlot = 112;
-pub const OP_ENTROPY_BYTES: OpSlot = 113;
-pub const OP_ARGS_GET: OpSlot = 114;
-pub const OP_TTY_IS_TERMINAL: OpSlot = 115;
-pub const OP_TTY_SIZE: OpSlot = 116;
-pub const OP_TTY_ENTER_RAW: OpSlot = 117;
-pub const OP_TTY_EXIT_RAW: OpSlot = 118;
-pub const OP_SIGNAL_OPEN: OpSlot = 119;
-pub const OP_SIGNAL_NEXT: OpSlot = 120;
-pub const OP_SIGNAL_CLOSE: OpSlot = 121;
-pub const OP_FS_STAT: OpSlot = 122;
-pub const OP_FS_READ_DIR: OpSlot = 123;
-pub const OP_FS_CREATE_DIR: OpSlot = 124;
-pub const OP_FS_REMOVE_FILE: OpSlot = 125;
-pub const OP_FS_REMOVE_DIR: OpSlot = 126;
-pub const OP_FS_RENAME: OpSlot = 127;
-pub const OP_FS_SYNC: OpSlot = 128;
-pub const OP_FS_SYNC_DIR: OpSlot = 129;
+pub const OP_ENV_GET: OpSlot = 108;
+pub const OP_FS_CURRENT_DIR: OpSlot = 109;
+pub const OP_ENTROPY_BYTES: OpSlot = 110;
+pub const OP_ARGS_GET: OpSlot = 111;
+pub const OP_TTY_IS_TERMINAL: OpSlot = 112;
+pub const OP_TTY_SIZE: OpSlot = 113;
+pub const OP_TTY_ENTER_RAW: OpSlot = 114;
+pub const OP_TTY_EXIT_RAW: OpSlot = 115;
+pub const OP_SIGNAL_OPEN: OpSlot = 116;
+pub const OP_SIGNAL_NEXT: OpSlot = 117;
+pub const OP_SIGNAL_CLOSE: OpSlot = 118;
+pub const OP_FS_STAT: OpSlot = 119;
+pub const OP_FS_READ_DIR: OpSlot = 120;
+pub const OP_FS_CREATE_DIR: OpSlot = 121;
+pub const OP_FS_REMOVE_FILE: OpSlot = 122;
+pub const OP_FS_REMOVE_DIR: OpSlot = 123;
+pub const OP_FS_RENAME: OpSlot = 124;
+pub const OP_FS_SYNC: OpSlot = 125;
+pub const OP_FS_SYNC_DIR: OpSlot = 126;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 130] = [
+pub const OPS: [OpDef; 127] = [
     OpDef {
         group: "Io",
-        member: "Print",
+        member: "ReadBytes",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
-        reply: AbiType::UNIT,
+        params: &[AbiType::INT],
+        reply: AbiType::RESULT_BYTES_IO_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Io",
-        member: "Error",
+        member: "Write",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
-        reply: AbiType::UNIT,
+        params: &[AbiType::BYTES],
+        reply: AbiType::RESULT_INT_IO_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Io",
-        member: "ReadLine",
+        member: "WriteError",
         kind: OpKind::Fixed,
-        params: &[],
-        reply: AbiType::RESULT_OPTION_STR_IO_ERROR,
+        params: &[AbiType::BYTES],
+        reply: AbiType::RESULT_INT_IO_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -3187,33 +3185,6 @@ pub const OPS: [OpDef; 130] = [
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
-        group: "Io",
-        member: "ReadBytes",
-        kind: OpKind::Fixed,
-        params: &[AbiType::INT],
-        reply: AbiType::RESULT_BYTES_IO_ERROR,
-        schema: "",
-        snapshot: SnapshotClass::HostAttachment,
-    },
-    OpDef {
-        group: "Io",
-        member: "Write",
-        kind: OpKind::Fixed,
-        params: &[AbiType::BYTES],
-        reply: AbiType::RESULT_INT_IO_ERROR,
-        schema: "",
-        snapshot: SnapshotClass::HostAttachment,
-    },
-    OpDef {
-        group: "Io",
-        member: "WriteError",
-        kind: OpKind::Fixed,
-        params: &[AbiType::BYTES],
-        reply: AbiType::RESULT_INT_IO_ERROR,
-        schema: "",
-        snapshot: SnapshotClass::HostAttachment,
-    },
-    OpDef {
         group: "Env",
         member: "Get",
         kind: OpKind::Fixed,
@@ -3398,7 +3369,7 @@ pub fn op(slot: OpSlot) -> &'static OpDef {
 }
 
 /// The canonical qualified name of one operation, for example
-/// `Io.Print`.
+/// `Io.Write`.
 pub fn op_name(slot: OpSlot) -> String {
     let def = op(slot);
     format!("{}.{}", def.group, def.member)
@@ -3724,9 +3695,9 @@ mod tests {
 
     #[test]
     fn slots_match_the_constants() {
-        assert_eq!(op_by_name("Io.Print"), Some(OP_IO_PRINT));
-        assert_eq!(op_by_name("Io.Error"), Some(OP_IO_ERROR));
-        assert_eq!(op_by_name("Io.ReadLine"), Some(OP_IO_READ_LINE));
+        assert_eq!(op_by_name("Io.ReadBytes"), Some(OP_IO_READ_BYTES));
+        assert_eq!(op_by_name("Io.Write"), Some(OP_IO_WRITE));
+        assert_eq!(op_by_name("Io.WriteError"), Some(OP_IO_WRITE_ERROR));
         assert_eq!(op_by_name("Clock.Now"), Some(OP_CLOCK_NOW));
         assert_eq!(op_by_name("Clock.Monotonic"), Some(OP_CLOCK_MONOTONIC));
         assert_eq!(op_by_name("Clock.Sleep"), Some(OP_CLOCK_SLEEP));
@@ -3868,7 +3839,7 @@ mod tests {
     #[test]
     fn row_names_validate() {
         assert!(row_name_valid("Io"));
-        assert!(row_name_valid("Io.Print"));
+        assert!(row_name_valid("Io.Write"));
         assert!(row_name_valid("Fs"));
         assert!(row_name_valid("Vm.Run"));
         assert!(!row_name_valid("Io.Prin"));
@@ -3932,9 +3903,9 @@ mod tests {
         assert_eq!(
             suspending,
             vec![
-                "Io.Print",
-                "Io.Error",
-                "Io.ReadLine",
+                "Io.ReadBytes",
+                "Io.Write",
+                "Io.WriteError",
                 "Clock.Sleep",
                 "Fs.Open",
                 "Fs.Read",
@@ -3962,9 +3933,6 @@ mod tests {
                 "Compiler.Compile",
                 "Compiler.CompileSyntax",
                 "Reflect.ParseSyntax",
-                "Io.ReadBytes",
-                "Io.Write",
-                "Io.WriteError",
                 "Signal.Next",
                 "Fs.Stat",
                 "Fs.ReadDir",
@@ -3987,7 +3955,7 @@ mod tests {
 
     #[test]
     fn fixed_member_excludes_vm_control() {
-        assert_eq!(fixed_member("Io", "Print"), Some(OP_IO_PRINT));
+        assert_eq!(fixed_member("Io", "Write"), Some(OP_IO_WRITE));
         assert_eq!(fixed_member("Vm", "Run"), None);
         assert_eq!(fixed_member("Vm", "New"), None);
     }

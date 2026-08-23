@@ -21,8 +21,8 @@ const SAMPLE: &str = "class Point\n\
                       \x20 Line(len: Int)\n\
                       end\n\
                       \n\
-                      def area(s: Shape): Int with Io.Print\n\
-                      \x20 sys.io.print(\"x\")\n\
+                      def area(s: Shape): Int with Io.Write\n\
+                      \x20 print(\"x\")\n\
                       \x20 case s\n\
                       \x20 in Dot then 0\n\
                       \x20 in Line(l) then l\n\
@@ -69,7 +69,7 @@ fn the_interface_round_trips_and_dumps() {
     let dump = dump_interface(&interface);
     assert!(dump.contains("interface shapes"), "{dump}");
     assert!(dump.contains("fn area"), "{dump}");
-    assert!(dump.contains("with Io.Print"), "{dump}");
+    assert!(dump.contains("with Io.Write"), "{dump}");
     assert!(dump.contains("def sum(self)"), "{dump}");
 }
 

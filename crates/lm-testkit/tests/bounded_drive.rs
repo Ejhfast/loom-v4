@@ -15,7 +15,7 @@ fn run(src: &str) -> String {
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
-    for g in ["Vm", "Proc", "Io.Print"] {
+    for g in ["Vm", "Proc", "Io.Write"] {
         world.allow(g).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);

@@ -97,11 +97,11 @@ fn workspace(tree: &TempTree) {
     );
     tree.write(
         "app/src/main.lm",
-        "use sys.io.print\n\
+        "use sys.io.write\n\
          use greeting\n\
          use mathlib.matrix\n\
          \n\
-         def run() with Io.Print\n\
+         def run() with Io.Write\n\
          \x20 m = matrix.Matrix(2, 3)\n\
          \x20 line = greeting.greet(\"Ada\")\n\
          \x20 print(\"#{line}\\n\")\n\

@@ -1,2 +1,2 @@
-error[E1004]: expected (), found Int
+error[E1004]: expected Result[Int, IoError], found Int
   --> tests/ui/answer-type-mismatch.lm:5:56

@@ -5,7 +5,7 @@ class Quiet
 end
 
 class Loud < Quiet
-  def ping(self): Int with Io.Print
+  def ping(self): Int with Io.Write
     2
   end
 end

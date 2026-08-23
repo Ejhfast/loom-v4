@@ -738,13 +738,13 @@ def dispatch_to_end(vm: Run[Int]): Int with Vm
   end
 end
 
-def go(): Int with Vm, Io.Print
-  inner = do ||: Int with Vm, Io.Print
-    b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
-      sys.io.print("from B")
+def go(): Int with Vm, Io.Write
+  inner = do ||: Int with Vm, Io.Write
+    b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Write
+      print("from B")
       7
     end, args: ())
-    b.table().pass(Io.Print)
+    b.table().pass(Io.Write)
     case b.run()
     in Done(value) then value
     in Fault(_) then -3
@@ -753,15 +753,15 @@ def go(): Int with Vm, Io.Print
 
   a = sys.vm.Vm().activate_or_fault(inner, args: ())
   a.table().pass(Vm)
-  a.table().pass(Io.Print)
+  a.table().pass(Io.Write)
   loop do
     case a.drive()
     in Asked(q)
       case q
-      in Call(Io.Print, call, (_,))
+      in Call(Io.Write, call, (bytes,))
         case a.snapshot()
         in Ok(snap)
-          a.answer(call, ())
+          a.answer(call, Ok(bytes.len()))
           original = case a.run()
                      in Done(value) then value
                      in Fault(_) then -4
@@ -796,19 +796,19 @@ fn a_routed_request_round_trips_with_its_policy_cursor() {
     let (out, host) = run_world(
         "routed-snapshot.lm",
         routed_snapshot_source(),
-        &["Vm", "Io.Print"],
+        &["Vm", "Io.Write"],
         VmConfig::default(),
     )
     .expect("the routed snapshot program runs");
     assert_eq!(out, "Done(14)");
-    assert_eq!(host.borrow().printed, vec!["from B"]);
+    assert_eq!(host.borrow().written_bytes, b"from B");
 }
 
 /// Admission rejects damaged routed control records.
 #[test]
 fn malformed_routed_snapshot_state_rejects() {
     let loaded = program(routed_snapshot_source());
-    let mut world = world_of(&loaded, &["Vm", "Io.Print"]);
+    let mut world = world_of(&loaded, &["Vm", "Io.Write"]);
     let outcome = drive(&mut world);
     assert_eq!(world.show_outcome(&outcome), "Done(14)");
     let image = world
