@@ -606,16 +606,28 @@ impl World {
         // The copy allocates in the destination, so the destination
         // limits govern the walk.
         let limits = self.machines[dst as usize].config.graph;
-        let (src_m, dst_m) = self.two(src, dst);
-        // The destination roots are read before the heap is borrowed:
-        // a destination collection during the copy needs them.
-        let dst_roots = dst_m.gc_roots(&[]);
-        lm_graph::transfer(
-            &mut src_m.vm.heap,
-            &mut dst_m.vm.heap,
-            &dst_roots,
-            value,
-            &limits,
-        )
+        let (result, copied) = {
+            let (src_m, dst_m) = self.two(src, dst);
+            // Read roots before the heap borrow. A collection needs them.
+            let dst_roots = dst_m.gc_roots(&[]);
+            let before = dst_m.vm.heap.used_bytes();
+            let result = lm_graph::transfer(
+                &mut src_m.vm.heap,
+                &mut dst_m.vm.heap,
+                &dst_roots,
+                value,
+                &limits,
+            );
+            let copied = result
+                .is_ok()
+                .then(|| dst_m.vm.heap.used_bytes().saturating_sub(before))
+                .unwrap_or(0);
+            (result, copied)
+        };
+        self.metrics.cross_machine_graph_bytes = self
+            .metrics
+            .cross_machine_graph_bytes
+            .saturating_add(copied as u64);
+        result
     }
 }

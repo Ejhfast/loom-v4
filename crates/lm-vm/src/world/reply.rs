@@ -199,6 +199,7 @@ impl World {
         if !self.completion_is_current(key) {
             return None;
         }
+        self.metrics.host_completions = self.metrics.host_completions.saturating_add(1);
         if self.prepared_wait_exists(key) {
             let machine = &self.machines[key.machine.vm as usize];
             let scope_matches = machine

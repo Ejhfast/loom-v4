@@ -381,6 +381,15 @@ impl World {
         let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
             return;
         };
+        self.metrics.sends = self.metrics.sends.saturating_add(1);
+        if self
+            .machines
+            .get(proc as usize)
+            .is_some_and(|machine| machine.active > 0)
+        {
+            self.metrics.destination_active_sends =
+                self.metrics.destination_active_sends.saturating_add(1);
+        }
         if !self.proc_running(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the target proc is dead")

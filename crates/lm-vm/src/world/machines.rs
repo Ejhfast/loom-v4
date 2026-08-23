@@ -982,6 +982,9 @@ impl World {
             self.budget.resources.clone(),
         );
         machine.table.set_bundle(self.loaded.bundle().clone());
+        if self.timing_metrics {
+            machine.enable_timing_metrics();
+        }
         machine
     }
 

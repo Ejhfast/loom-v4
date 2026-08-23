@@ -520,6 +520,7 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
             world.show_outcome(&outcome),
             world.trace().to_vec(),
             scheduler.stats(),
+            world.metrics(),
         )
     };
     let first = trace_of();
@@ -528,6 +529,10 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
     assert_eq!(first.0, second.0);
     assert_eq!(first.1, second.1);
     assert_eq!(first.2, second.2);
+    assert_eq!(first.3, second.3);
+    assert!(first.3.slices > 0);
+    assert!(first.3.retired_instructions > 0);
+    assert_eq!(first.3.sends, 2);
 }
 
 /// A bounded quantum lets a short later proc finish before a long

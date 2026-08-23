@@ -414,9 +414,10 @@ impl Scheduler {
                 self.tasks.insert(task, IndexedState::Running);
                 let quantum = world.snapshot_wait_quantum(task, self.quantum);
                 let before = world.world_fuel();
+                let heap_before = world.aggregate_heap_bytes();
                 let exit = world.drive_slice(task, quantum);
                 let retired = before.saturating_sub(world.world_fuel());
-                world.note_scheduler_slice(task, retired, exit.is_some());
+                world.note_scheduler_slice(task, retired, exit.is_some(), heap_before);
                 // A terminal parent loses its pass-through before a
                 // child from its last slice runs.
                 if exit == Some(SliceExit::Terminal) {

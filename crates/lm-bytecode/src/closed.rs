@@ -180,6 +180,20 @@ pub struct TypeEnvFull {
     pub types: bool,
 }
 
+/// Runtime counters for closed-type operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeEnvMetrics {
+    pub close_hits: u64,
+    pub close_misses: u64,
+    pub derive_hits: u64,
+    pub derive_misses: u64,
+    pub method_hits: u64,
+    pub method_misses: u64,
+    pub interned_types: u64,
+    pub interned_envs: u64,
+    pub interner_lock_wait_ns: u64,
+}
+
 /// One prepared import into a world type table.
 ///
 /// Preparation resolves every source ordinal and reserves destination
@@ -264,6 +278,7 @@ pub struct TypeEnvs {
     depths: Vec<u32>,
     max_types: u32,
     max_envs: u32,
+    metrics: TypeEnvMetrics,
 }
 
 impl Default for TypeEnvs {
@@ -296,6 +311,7 @@ impl TypeEnvs {
             depths: Vec::new(),
             max_types,
             max_envs: max_envs.max(1),
+            metrics: TypeEnvMetrics::default(),
         };
         let empty = TypeEnv::default();
         table.envs.push(empty.clone());
@@ -323,6 +339,16 @@ impl TypeEnvs {
     /// The environment node cap of this table.
     pub fn max_envs(&self) -> u32 {
         self.max_envs
+    }
+
+    /// The current closed-type counters.
+    pub fn metrics(&self) -> TypeEnvMetrics {
+        self.metrics
+    }
+
+    /// Reset the closed-type counters.
+    pub fn reset_metrics(&mut self) {
+        self.metrics = TypeEnvMetrics::default();
     }
 
     /// One closed type node by index.
@@ -559,6 +585,7 @@ impl TypeEnvs {
         self.digests.push(None);
         self.depths.push(depth);
         self.type_index.insert(node, id);
+        self.metrics.interned_types = self.metrics.interned_types.saturating_add(1);
         Ok(id)
     }
 
@@ -577,6 +604,7 @@ impl TypeEnvs {
         self.envs.push(env.clone());
         self.env_cache.push(TypeEnvCache::default());
         self.env_index.insert(env, id);
+        self.metrics.interned_envs = self.metrics.interned_envs.saturating_add(1);
         Ok(id)
     }
 
@@ -597,13 +625,16 @@ impl TypeEnvs {
     ) -> Result<ClosedTypeId, TypeEnvFull> {
         if let Some((cached_ty, cached_env, id)) = self.last_closed {
             if cached_ty == ty && cached_env == env {
+                self.metrics.close_hits = self.metrics.close_hits.saturating_add(1);
                 return Ok(id);
             }
         }
         if let Some(id) = self.closed.get(&(ty, env)).copied() {
+            self.metrics.close_hits = self.metrics.close_hits.saturating_add(1);
             self.last_closed = Some((ty, env, id));
             return Ok(id);
         }
+        self.metrics.close_misses = self.metrics.close_misses.saturating_add(1);
         // Each entry pairs one module type with the flag that says
         // whether its children already sit on the stack.
         let mut stack: Vec<(u32, bool)> = vec![(ty, false)];
@@ -797,9 +828,11 @@ impl TypeEnvs {
                 .derived
                 .binary_search_by_key(&app, |(entry, _)| *entry)
             {
+                self.metrics.derive_hits = self.metrics.derive_hits.saturating_add(1);
                 return Ok(cache.derived[at].1);
             }
         }
+        self.metrics.derive_misses = self.metrics.derive_misses.saturating_add(1);
         let entry = match module.apps.get(app as usize) {
             Some(entry) => entry.clone(),
             None => return Ok(TypeEnvId::EMPTY),
@@ -855,9 +888,11 @@ impl TypeEnvs {
                 .methods
                 .binary_search_by_key(&key, |(entry, _)| *entry)
             {
+                self.metrics.method_hits = self.metrics.method_hits.saturating_add(1);
                 return Ok(cache.methods[at].1);
             }
         }
+        self.metrics.method_misses = self.metrics.method_misses.saturating_add(1);
 
         let owner = match body
             .params
@@ -1435,6 +1470,9 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, TypeEnvId::EMPTY);
         assert_eq!(table.env_count(), 2);
+        assert_eq!(table.metrics().derive_misses, 1);
+        assert_eq!(table.metrics().derive_hits, 1);
+        assert_eq!(table.metrics().interned_envs, 1);
     }
 
     #[test]

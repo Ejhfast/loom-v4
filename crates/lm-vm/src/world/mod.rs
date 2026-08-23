@@ -625,6 +625,10 @@ pub struct World {
     /// One world runs one check at a time, so one buffer set serves
     /// every boundary. A scalar reply touches none of it.
     check: crate::typecheck::BoundaryScratch,
+    /// Low-cost counters for scheduler measurements.
+    metrics: WorldMetrics,
+    /// True when new machines collect wall-clock counters.
+    timing_metrics: bool,
 }
 
 /// One recorded scheduler event. A trace record names machines by
@@ -688,6 +692,27 @@ pub struct MailboxMetrics {
     pub delivered: u64,
     pub closed: bool,
     pub frozen: bool,
+}
+
+/// Low-cost counters for one world execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorldMetrics {
+    /// Scheduler slices that entered guest execution.
+    pub slices: u64,
+    /// Guest instructions retired by scheduler slices.
+    pub retired_instructions: u64,
+    /// Slices that reached a machine or world boundary.
+    pub boundary_exits: u64,
+    /// Positive aggregate heap growth across scheduler slices.
+    pub heap_growth_bytes: u64,
+    /// Proc send operations that reached runtime dispatch.
+    pub sends: u64,
+    /// Sends whose destination held an active activation.
+    pub destination_active_sends: u64,
+    /// Destination heap growth from graph copies.
+    pub cross_machine_graph_bytes: u64,
+    /// Host completions accepted by this world.
+    pub host_completions: u64,
 }
 
 /// Copy one value that needs no heap traversal.

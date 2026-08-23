@@ -27,18 +27,20 @@ pub use host::{
     RecordingHost,
 };
 pub use machine::{
-    Block, FaultRec, FunctionVersionId, MachineState, Mailbox, Ownership, VmId, VmState,
+    Block, FaultRec, FunctionVersionId, MachineExecutionMetrics, MachineState, Mailbox, Ownership,
+    VmId, VmState,
 };
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
 pub use schedule::{
     CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey, WaitSourceKey,
     WakeKey,
 };
-pub use world::{MailboxMetrics, RootEvent, StopMode, TraceBlock, TraceEvent, World};
+pub use world::{MailboxMetrics, RootEvent, StopMode, TraceBlock, TraceEvent, World, WorldMetrics};
 
 /// The fault codes are manifest content, and the heap and the graph
 /// engine name them too. They live in `lm-abi`.
 pub use lm_abi::{FaultCode, SnapshotClass};
+pub use lm_bytecode::closed::TypeEnvMetrics;
 /// The heap, the native shapes, and the graph engine are separate
 /// crates. `lm-vm` re-exports the parts its callers already name.
 pub use lm_graph::{GraphCost, GraphLimits};

@@ -87,7 +87,53 @@ impl World {
             image_free: Vec::new(),
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
+            metrics: WorldMetrics::default(),
+            timing_metrics: false,
         }
+    }
+
+    /// The current scheduler measurement counters.
+    pub fn metrics(&self) -> WorldMetrics {
+        self.metrics
+    }
+
+    /// Reset the scheduler measurement counters.
+    pub fn reset_metrics(&mut self) {
+        self.metrics = WorldMetrics::default();
+        self.envs.reset_metrics();
+    }
+
+    /// The current closed-type counters.
+    pub fn type_metrics(&self) -> crate::TypeEnvMetrics {
+        self.envs.metrics()
+    }
+
+    /// Enable optional wall-clock counters for every machine.
+    pub fn enable_timing_metrics(&mut self) {
+        self.timing_metrics = true;
+        for machine in &mut self.machines {
+            machine.enable_timing_metrics();
+        }
+    }
+
+    /// Add the optional counters from every machine.
+    pub fn timing_metrics(&self) -> crate::MachineExecutionMetrics {
+        let mut total = crate::MachineExecutionMetrics::default();
+        for machine in &self.machines {
+            let metrics = machine.timing_metrics();
+            total.native_calls = total.native_calls.saturating_add(metrics.native_calls);
+            total.native_time_ns = total.native_time_ns.saturating_add(metrics.native_time_ns);
+            total.collections = total.collections.saturating_add(metrics.collections);
+            total.collection_time_ns = total
+                .collection_time_ns
+                .saturating_add(metrics.collection_time_ns);
+        }
+        total
+    }
+
+    /// The aggregate live heap bytes in this world.
+    pub fn aggregate_heap_bytes(&self) -> usize {
+        self.budget.heap.used_bytes()
     }
 
     /// Turn the proc trace on. The trace records scheduler events in
