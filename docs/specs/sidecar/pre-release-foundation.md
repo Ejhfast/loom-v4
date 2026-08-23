@@ -1,397 +1,679 @@
-# Pre-release Language and Host Foundation
+# Pre-release Host Effects
 
-Status: stages 1 through 7 implemented.
+Status: proposed implementation plan.
 
-This sidecar defines the first public release foundation.
+This sidecar replaces the completed pre-release foundation plan.
 
-It covers language reliability, host operations, and program inputs.
+The language specification records the completed language work.
 
-Self-hosting is outside this work.
+This plan defines the remaining host effects for the first public release.
 
-Interpreter and compiler optimization are outside this work.
+## 1. Purpose
 
-Each stage records its build, test, and execution costs.
+The release must support normal command tools, servers, terminal programs, and durable checkpoints.
 
-## 1. Release contract
+Every host action must keep an exact effect identity.
 
-The first public release makes four user-visible promises.
+Every live host attachment must use the common resource model.
 
-1. Guest code and malformed external data never crash the host process.
-2. A program can consume host inputs and perform normal application work.
-3. Every operation remains visible to effect checking and runtime policy.
-4. Core protocols use interfaces where user types can participate.
+Every ordinary platform failure must return a typed error.
 
-The release can omit later convenience features.
+The VM must contain no operating-system implementation.
 
-It cannot turn ordinary platform failures into host faults.
+Loom code must provide composition and convenience where possible.
 
-It cannot accept program arguments and then discard them.
+## 2. Existing foundation
 
-## 2. Terms
+This work extends these implemented parts:
 
-| Term | Meaning |
+- exact operations and transparent effect groups;
+- policy tables, mocks, drivers, and pass-through routing;
+- typed `Result` errors that implement `Error`;
+- a generic host resource registry;
+- typed `Wait[T]` values and `select`;
+- byte input and output;
+- file handles;
+- DNS, TCP, TLS clients, and HTTP/1.1;
+- arguments, environment access, clocks, and entropy;
+- snapshot checks for live host attachments.
+
+The new work must reuse these parts.
+
+It must not create a second scheduler, handle model, or policy path.
+
+## 3. Main decisions
+
+This plan makes these changes to the initial proposal:
+
+1. One generic `Op.wait(...)` rule creates host-operation wait sources.
+2. The operation manifest marks the operations that support this rule.
+3. Wait selection uses readiness and commit as separate steps.
+4. Raw terminal mode uses an explicit `RawMode` resource.
+5. Signal delivery uses an explicit `SignalStream` resource.
+6. Terminal and signal support land together.
+7. File and directory removal use different operations.
+8. Files and directories have separate durability operations.
+9. Pipes use typed read and write ends.
+10. UDP receives one complete datagram and reports its local address.
+
+These changes remove hidden lifetime state.
+
+They also remove duplicated wait operation identities.
+
+## 4. General host-operation waits
+
+### 4.1 Surface
+
+An exact operation value can create a typed wait source.
+
+```lm
+select
+in sys.io.read_bytes.wait(64) -> input
+  handle_input(input)
+in sys.clock.sleep.wait(16_000_000) -> tick
+  handle_tick(tick)
+end
+```
+
+For an operation with this type:
+
+```text
+Op[op, (A...) -> R]
+```
+
+the checker gives this special method type:
+
+```text
+wait(A...) -> Wait[R] with op
+```
+
+The operation manifest must mark `op` as a wait-source operation.
+
+A direct call keeps its current behavior.
+
+```lm
+result = sys.io.read_bytes(64)
+source = sys.io.read_bytes.wait(64)
+```
+
+The first expression performs the operation immediately.
+
+The second expression prepares one wait source.
+
+### 4.2 Identity and authority
+
+`Op.wait` creates no new exact operation.
+
+The source charges the original operation in the enclosing effect row.
+
+The source also uses the original policy action.
+
+A policy table can block, pass, mock, or drive the operation as before.
+
+A later policy edit does not change an existing prepared source.
+
+That edit applies to later source preparation.
+
+`Wait.Choose`, `Wait.Wait`, and `Wait.Cancel` keep their current identities.
+
+The wait-source flag forms part of the operation manifest identity.
+
+### 4.3 Checker, bytecode, and verifier
+
+The checker reads the argument tuple and result from the operation type.
+
+It rejects `.wait` on an operation without the manifest flag.
+
+The bytecode adds one typed wait preparation instruction.
+
+That instruction stores the exact operation and its checked arguments.
+
+The verifier repeats the manifest, argument, result, and effect checks.
+
+Malformed bytecode cannot prepare a wait for another operation.
+
+Normal `PERFORM` lowering does not change.
+
+### 4.4 Lifecycle
+
+A host-operation wait has these states:
+
+| State | Meaning |
 |---|---|
-| standard bundle | The pinned groups and operations distributed with Loom |
-| ABI bundle | The immutable operation definitions used by one program |
-| bundle digest | The canonical identity of one ABI bundle |
-| host failure | An ordinary platform failure returned as a typed value |
-| host defect | A host implementation violates its declared operation contract |
-| program arguments | The strings after the command-line `--` separator |
+| prepared | The VM validated authority, arguments, limits, and resource use. |
+| armed | The scheduler registered the source with its service. |
+| ready | The service can produce a result without another external wait. |
+| committed | Selection chose this source and consumed its result. |
+| cancelled | Selection withdrew this source without a result. |
 
-## 3. Error boundary
+Preparation does not consume input data.
 
-### 3.1 Ordinary errors
+Arming starts all leaves before the scheduler selects one ready leaf.
 
-An expected platform failure returns the operation's declared error value.
+Arm order resolves simultaneous readiness.
 
-Examples include a closed pipe, a missing file, denied environment access, and invalid UTF-8.
+The selected source commits once.
 
-The host adapter must encode these failures as `Err` values.
+Every losing source cancels once.
 
-The adapter must not report them through `HostStart::Failed`.
+### 4.5 Cancellation contract
 
-### 3.2 Host defects
+The host must separate readiness from guest-visible commitment.
 
-`HostStart::Failed` reports a host implementation defect.
+A ready source must remain ready until commit or cancellation.
 
-Examples include a wrong argument shape and an impossible completion token.
+A read source can fill a bounded host buffer before commit.
 
-The VM converts a host defect into `Fault(HostFault)`.
+Cancellation keeps those bytes on the same logical stream.
 
-The fault records the operation and source call chain.
+An accept source can hold a connection in a bounded host queue.
 
-### 3.3 Output failure
+Cancellation returns that connection to the same logical listener.
 
-Byte output returns `Result[Int, IoError]`.
+A signal source keeps its event in the signal queue until commit.
 
-The integer gives the accepted byte count.
+The input service can read ahead into a bounded host buffer.
 
-A closed pipe returns `Err(IoError.BrokenPipe)`.
+TCP, TLS, pipe, and UDP services can retain input before commit.
 
-Text helpers use byte output and retain its error.
+A connect source starts its connection attempt during arming.
 
-The CLI must not panic while it reports a closed diagnostic stream.
+Cancellation closes an unfinished or uncommitted connection.
 
-The CLI treats a closed report stream as a completed report.
+The remote peer can observe that short connection attempt.
 
-### 3.4 Snapshot errors
+A DNS worker can finish before commit.
 
-`SnapshotError` remains a visible enum.
+The host retains its bounded result until commit or cancellation.
 
-Its constructor is its stable programmatic category.
+The host protocol reports one of these cancellation outcomes:
 
-It implements the common display interface.
+- cancellation won and no result escaped;
+- commitment won and the result belongs to the selected source.
 
-`RunSnapshot[T].to_bytes()` returns `Result[Bytes, SnapshotError]`.
+The current Boolean host cancellation result cannot express this rule.
 
-`VmSnapshot.to_bytes()` returns `Result[Bytes, SnapshotError]`.
+Stage 1 replaces it with an explicit outcome.
 
-The encoded bytes use the canonical snapshot container.
+Guest drivers can perform visible work while they prepare a reply.
 
-The encoding includes the bundle digest.
+Selection does not undo completed guest work.
 
-## 4. Deliberate machine failure
+A driver for a wait-source operation must preserve consumable input on cancellation.
 
-Core adds these functions.
+### 4.6 Initial wait-source operations
+
+The final manifest marks these operations:
+
+| Operation | Cancellation rule |
+|---|---|
+| `Clock.Sleep` | Remove the timer. |
+| `Io.ReadBytes` | Keep unread or read-ahead bytes. |
+| `Dns.Resolve` | Discard a retained result. |
+| `Tcp.Connect` | Close the uncommitted socket. |
+| `Tcp.Accept` | Leave the connection queued until commit. |
+| `Tcp.Read` | Leave bytes in the socket or host buffer. |
+| `Tls.Read` | Leave plaintext in the TLS buffer. |
+| `Signal.Next` | Leave the signal in its bounded queue. |
+| `Pipe.Read` | Leave bytes in the pipe or host buffer. |
+| `Exec.Wait` | Keep the reaped child status. |
+| `Udp.RecvFrom` | Leave the datagram queued until commit. |
+
+Writes do not become wait sources in this release.
+
+A cancelled write can hide partial external progress.
+
+File operations do not become wait sources in this release.
+
+The bounded file worker service remains the file suspension path.
+
+TLS handshakes do not become wait sources in this release.
+
+A handshake consumes its TCP stream when host submission starts.
+
+### 4.7 Resources and snapshots
+
+A prepared root-host source records a pending host attachment.
+
+That attachment blocks snapshot creation before and during arming.
+
+Commit or cancellation removes the attachment.
+
+The snapshot blocker names the exact pending operation.
+
+Receive and drive waits keep their current snapshot behavior.
+
+Host-operation sources use the existing per-machine wait limit.
+
+Their retained values use the existing host retained-byte budgets.
+
+Machine cleanup cancels every live source.
+
+Cleanup never replaces the machine's first fault.
+
+## 5. Terminal effects
+
+### 5.1 Exact operations
+
+The `Tty` group contains these operations:
+
+```text
+Tty.IsTerminal (StdStream) -> Bool
+Tty.Size       (StdStream) -> Result[TtySize, TtyError]
+Tty.EnterRaw   () -> Result[RawMode, TtyError]
+Tty.ExitRaw    (RawMode) -> Result[(), TtyError]
+```
+
+`StdStream` has `Input`, `Output`, and `Error` cases.
+
+`TtySize` contains positive `columns` and `rows` values.
+
+`Tty.Size` rejects a stream that is not a terminal.
+
+`Tty.EnterRaw` changes standard input only.
+
+`TtyError` is this closed family:
 
 ```lm
-panic(message: String): Never
-assert(condition: Bool)
-assert_message(condition: Bool, message: String)
-```
-
-`panic` creates `Fault(UserPanic)`.
-
-The fault carries the supplied message and current source call chain.
-
-`assert` and `assert_message` create `Fault(AssertionFailed)`.
-
-`Option.expect(message)` returns its payload or calls `panic`.
-
-`Result.expect(message)` returns its payload or calls `panic`.
-
-The first release does not add `unwrap`.
-
-## 5. Short case arms
-
-A short case arm accepts any single statement.
-
-This includes `return`, `break`, and `continue`.
-
-The parser stores the statement in the normal arm body.
-
-No control statement becomes a general expression.
-
-Normal loop-placement checks still apply.
-
-## 6. Diagnostic repairs
-
-An interface name in a value-type position produces a specific diagnostic.
-
-The diagnostic states that interfaces can appear as bounds.
-
-A bare associated type inside an interface produces a specific diagnostic.
-
-The diagnostic suggests `Self.Name`.
-
-Diagnostics must use the source name for each effect variable.
-
-The CLI accepts `--help` and `-h` with a successful status.
-
-The CLI accepts `--version` and `-V` with a successful status.
-
-An unknown command remains an error.
-
-## 7. ABI identity
-
-### 7.1 Purpose
-
-The current standard operation manifest becomes the standard ABI bundle.
-
-The compiler, verifier, VM, and host receive the same immutable value.
-
-The standard command uses the standard bundle.
-
-### 7.2 Stable definitions
-
-Each operation definition contains these fields.
-
-```text
-qualified name
-operation version
-parameter schemas
-reply schema
-parameter boundary modes
-reply boundary mode
-operation kind
-snapshot class
-group memberships
-```
-
-Each group contains exact operation names or other group names.
-
-### 7.3 Dense runtime slots
-
-Standard operations retain their current slots.
-
-The resulting slots remain dense.
-
-Portable identity uses operation identities, not dense slots.
-
-### 7.4 Bundle identity
-
-The bundle digest covers every operation field.
-
-It also covers all group membership edges.
-
-Artifact verification binds the exact bundle digest.
-
-Snapshot encoding binds the exact bundle digest.
-
-A loader rejects a different bundle before execution.
-
-The rejection names both bundle digests.
-
-### 7.5 Compiler use
-
-The checker resolves row names through the active bundle.
-
-It creates `sys` operation members from the active bundle.
-
-Every active operation uses the same call syntax.
-
-Every active group uses the same row syntax.
-
-The compiler emits the operation's dense slot.
-
-### 7.6 Verifier use
-
-The verifier validates operation slots against the active bundle.
-
-It validates each operation type against the declared signature.
-
-It validates each `PERFORM` argument and reply type.
-
-It validates every row name against the active bundle.
-
-Verification never trusts the host implementation.
-
-### 7.7 VM use
-
-Each loaded program retains its ABI bundle.
-
-Every machine in one world uses the same bundle.
-
-The VM reads operation names, kinds, signatures, and groups from that bundle.
-
-A world rejects installed code from another bundle.
-
-### 7.8 Public status
-
-The ABI bundle machinery remains an internal runtime boundary.
-
-This release does not expose a stable embedding crate.
-
-Host extensibility needs a separate design and implementation unit.
-
-That unit must use the same checker, verifier, policy, and snapshot contracts.
-
-## 8. Program host inputs
-
-### 8.1 Program arguments
-
-The program entry remains an ordinary zero-parameter entry function.
-
-The CLI does not call a terminal closure by a special rule.
-
-The standard bundle defines this operation.
-
-```text
-Args.Get () -> [String]
-```
-
-Loom exposes the operation as `sys.args()`.
-
-The call charges the `Args` effect row.
-
-Runtime policy must grant `Args` or `Args.Get`.
-
-Each call returns a guest-owned list in the original argument order.
-
-The CLI rejects a native argument that is not valid UTF-8.
-
-### 8.2 Argument parsing
-
-`--` ends `lm run` option parsing.
-
-Every later token belongs to the Loom program.
-
-A token before `--` that is not the program path remains an error.
-
-The CLI never ignores an extra positional token.
-
-### 8.3 Exit status
-
-Normal completion exits with status zero.
-
-A machine fault exits with status one.
-
-The first release defers an explicit status operation.
-
-A terminal value does not control process status by its nominal type.
-
-### 8.4 Standard input and output
-
-The standard bundle adds these operations.
-
-```text
-Io.ReadBytes   (Int)   -> Result[Bytes, IoError]
-Io.Write       (Bytes) -> Result[Int, IoError]
-Io.WriteError  (Bytes) -> Result[Int, IoError]
-```
-
-`ReadBytes` returns empty bytes at the end of input.
-
-A negative count returns `IoError.InvalidInput`.
-
-A count above the host limit returns `IoError.LimitExceeded`.
-
-Writes may accept fewer bytes than requested.
-
-`std/io` supplies `write_all`, text printing, and buffered line reading.
-
-Core does not model the process streams as zero-field resource classes.
-
-The `std.io` helpers call the `sys.io` operations directly.
-
-`ConsoleLineReader` is a class because it owns pending bytes and end-of-input state.
-
-The existing text operations remain during migration.
-
-They use the same underlying host streams.
-
-### 8.5 Stream interfaces
-
-Core defines effect-polymorphic byte stream interfaces.
-
-```lm
-interface ByteReader[effect e]
-  type Error
-  def read(self, count: Int): Result[Bytes, Self.Error] with e
-end
-
-interface ByteWriter[effect e]
-  type Error
-  def write(self, bytes: Bytes): Result[Int, Self.Error] with e
+enum TtyError implements Error
+  Closed
+  NotTerminal
+  Busy
+  PermissionDenied(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
 end
 ```
 
-Concrete resource types retain their exact operation rows.
+### 5.2 Why raw mode uses a resource
 
-Generic helpers use the interface effect argument.
+`SetRaw(Bool)` hides ownership and nesting.
 
-`ByteWriter.write` returns a positive count for each nonempty successful write.
+One proc could disable raw mode that another proc owns.
 
-The count cannot exceed the supplied byte length.
+A `RawMode` value gives the state one explicit lifetime.
 
-`std.io.write_all_to` faults when a writer breaks this contract.
+`RawMode` is a final native resource class.
 
-The interfaces do not merge filesystem, network, and process authority.
+Every alias names the same host attachment.
 
-### 8.6 Environment, arguments, and current directory
+Closing one alias restores the saved terminal state.
 
-The standard bundle adds these operations.
+A later exit request returns `TtyError.Closed`.
+
+Only one raw resource can exist for one root host.
+
+A second enter request returns `TtyError.Busy`.
+
+The host stores the exact original terminal state before the change.
+
+The host restores that state on these events:
+
+- `Tty.ExitRaw`;
+- owner completion;
+- owner fault;
+- normal host exit;
+- handled interrupt or termination.
+
+No process can restore terminal state after `SIGKILL` or a host abort.
+
+A live `RawMode` blocks snapshot creation.
+
+### 5.3 Raw-mode scope
+
+The first raw mode disables canonical input and local echo.
+
+It also exposes terminal control bytes through `Io.ReadBytes`.
+
+The platform adapter documents any unavoidable platform difference.
+
+Later mode flags can use a new configuration value.
+
+The first release exposes no arbitrary terminal control bits.
+
+### 5.4 Standard terminal code
+
+`std/term` contains pure escape-sequence helpers and bounded key decoding.
+
+It performs byte input and output through `Io`.
+
+It polls `Tty.Size` after a timer tick.
+
+The first release adds no resize signal or resize operation.
+
+## 6. Signal effects
+
+### 6.1 Exact operations
+
+The `Signal` group contains these operations:
 
 ```text
-Args.Get       ()       -> [String]
-Env.Get        (String) -> Result[Option[String], EnvError]
-Fs.CurrentDir  ()       -> Result[String, FsError]
+Signal.Open  (List[SignalKind]) -> Result[SignalStream, SignalError]
+Signal.Next  (SignalStream) -> Result[SignalKind, SignalError]
+Signal.Close (SignalStream) -> Result[(), SignalError]
 ```
 
-`Env.Get` reads one named variable.
+`SignalKind` contains `Interrupt` and `Terminate`.
 
-The first release does not expose environment enumeration.
+The requested list must contain at least one kind.
 
-An absent variable returns `Ok(None)`.
+The host removes duplicate kinds before it opens the stream.
 
-Invalid platform text returns an encoding error.
+`Signal.Next` is a wait-source operation.
 
-`Fs.CurrentDir` uses the filesystem effect and error family.
+`SignalStream.next_wait()` uses `sys.signal.next.wait(self)`.
 
-### 8.7 Secure entropy
+### 6.2 Why signals use a stream
 
-The standard bundle adds this operation.
+A stream gives guest signal delivery an explicit lifetime.
 
-```text
-Entropy.Bytes (Int) -> Result[Bytes, EntropyError]
-```
+Without a live stream, the host keeps its normal signal behavior.
 
-`Entropy.Bytes` returns cryptographically secure bytes.
+Opening a stream installs safe host notification handlers.
 
-It never falls back to deterministic data.
+Closing one alias closes the stream and restores normal host behavior.
 
-Deterministic `Rand` remains a separate effect for simulations and tests.
+The host changes only the requested signal dispositions.
 
-A host without secure entropy denies or fails the entropy operation.
+Only one signal stream can exist for one root host.
 
-### 8.8 Snapshot classification
+A second open request returns `SignalError.Busy`.
 
-Completed argument, environment, directory, and entropy values are machine state.
-
-A pending console operation is a host attachment.
-
-Environment, directory, and entropy queries complete inside the host call.
-
-They leave no pending host attachment.
-
-No host worker object enters snapshot bytes.
-
-## 9. Standard error values
-
-`IoError` gains stable cases for common conditions.
+`SignalError` is this closed family:
 
 ```lm
-enum IoError
+enum SignalError implements Error
+  Closed
+  InvalidInput(message: String)
+  Busy
+  Unsupported(message: String)
+  LimitExceeded(message: String)
+  Failed(message: String)
+end
+```
+
+The host handles no signal by running guest code asynchronously.
+
+The platform handler only records a bounded notification.
+
+The scheduler observes that notification at a normal host boundary.
+
+### 6.3 Delivery rules
+
+The host queues requested signals while the stream remains open.
+
+The queue preserves observed order within its bounded capacity.
+
+The platform can coalesce equal signals before host observation.
+
+The host coalesces duplicate queued notifications of one kind.
+
+`Signal.Next` removes one matching signal only after selection commits.
+
+The first observed `Interrupt` starts one escalation state.
+
+A second `Interrupt` before stream closure forces host termination.
+
+The host restores every raw terminal resource before that termination.
+
+Stream closure resets the interrupt escalation state.
+
+Uncatchable platform termination remains outside this guarantee.
+
+### 6.4 Snapshot use
+
+A live `SignalStream` is a host attachment.
+
+It blocks snapshot creation.
+
+A shutdown handler closes the stream before it captures a snapshot.
+
+This flow supports checkpoint-on-termination:
+
+1. Open one signal stream.
+2. Select between work and `Signal.Next`.
+3. Quiesce all live resources after `Terminate`.
+4. Close the signal stream.
+5. Capture and persist the snapshot.
+6. Exit the program.
+
+## 7. File-system completion
+
+### 7.1 Exact operations
+
+The `Fs` group gains these operations:
+
+```text
+Fs.Stat        (String) -> Result[FileInfo, FsError]
+Fs.ReadDir     (String, Int) -> Result[List[Result[DirEntry, FsError]], FsError]
+Fs.CreateDir   (String) -> Result[(), FsError]
+Fs.RemoveFile  (String) -> Result[(), FsError]
+Fs.RemoveDir   (String) -> Result[(), FsError]
+Fs.Rename      (String, String, RenameMode) -> Result[(), FsError]
+Fs.Sync        (FileHandle) -> Result[(), FsError]
+Fs.SyncDir     (String) -> Result[(), FsError]
+```
+
+`OpenOptions` gains `CreateNew`.
+
+`CreateNew` creates one file and rejects an existing path.
+
+`Fs.CreateDir` creates exactly one directory.
+
+Its parent directory must exist.
+
+### 7.2 Portable values
+
+`FileKind` contains `File`, `Directory`, `Symlink`, and `Other`.
+
+`FileInfo` contains these fields:
+
+```text
+kind: FileKind
+byte_length: Int
+modified_ns: Option[Int]
+read_only: Bool
+```
+
+`modified_ns` uses nanoseconds from the Unix epoch.
+
+An unavailable modification time produces `None`.
+
+`Fs.Stat` follows the final symbolic link.
+
+`byte_length` reports the platform metadata length for every file kind.
+
+`DirEntry` contains a UTF-8 `name` and a `FileKind`.
+
+Its `FileKind` does not follow the final symbolic link.
+
+`RenameMode` contains `NoReplace` and `Replace`.
+
+### 7.3 Directory rules
+
+`Fs.ReadDir` accepts an explicit maximum entry count.
+
+The host also enforces a fixed maximum.
+
+An excessive directory returns `FsError.LimitExceeded`.
+
+The outer error reports failure to open or continue the directory.
+
+Each inner error reports one bad entry.
+
+A non-UTF-8 entry name produces `FsError.InvalidEncoding` in that entry.
+
+The operation never drops such an entry silently.
+
+Directory order has no semantic guarantee.
+
+`std/fs` provides a helper that sorts valid names.
+
+String paths remain the first release path model.
+
+Byte paths remain in the release ledger.
+
+### 7.4 Removal and rename
+
+`Fs.RemoveFile` removes a file or a symbolic link.
+
+It never follows the final symbolic link.
+
+`Fs.RemoveDir` removes one empty directory.
+
+The standard library can build recursive removal with explicit policy.
+
+`NoReplace` returns `AlreadyExists` when the target exists.
+
+`Replace` requests an atomic replacement of a compatible target.
+
+It can replace a non-directory target with a non-directory source.
+
+A directory source requires an absent target.
+
+Rename never follows the final symbolic link at either path.
+
+The host returns `Unsupported` when it cannot provide that operation safely.
+
+The host never emulates atomic rename with a remove-then-rename sequence.
+
+The host never copies across file systems during rename.
+
+A cross-file-system request returns `CrossDevice`.
+
+### 7.5 Durability
+
+`Fs.Flush` flushes language and host stream buffers.
+
+It makes no storage durability promise.
+
+`Fs.Sync` requests durable file contents and file metadata.
+
+It maps to the platform equivalent of `sync_all`.
+
+`Fs.SyncDir` requests durability for directory-entry changes.
+
+A durable replacement uses this order:
+
+1. Write a temporary file.
+2. Flush the temporary file.
+3. Sync the temporary file.
+4. Rename it with `Replace`.
+5. Sync its parent directory.
+
+### 7.6 Errors
+
+`FsError` becomes this closed family:
+
+```lm
+enum FsError implements Error
+  Closed
+  InvalidInput(message: String)
+  InvalidEncoding(message: String)
+  LimitExceeded(message: String)
+  NotFound(message: String)
+  AlreadyExists(message: String)
+  PermissionDenied(message: String)
+  NotDirectory(message: String)
+  IsDirectory(message: String)
+  DirectoryNotEmpty(message: String)
+  CrossDevice(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
+end
+```
+
+The host maps stable platform categories before it uses `Failed`.
+
+Messages have a fixed scalar limit.
+
+The host exposes no raw platform error number.
+
+## 8. Byte-only console I/O
+
+### 8.1 Exact operations
+
+The `Io` group keeps only these operations:
+
+```text
+Io.ReadBytes  (Int) -> Result[Bytes, IoError]
+Io.Write      (Bytes) -> Result[Int, IoError]
+Io.WriteError (Bytes) -> Result[Int, IoError]
+```
+
+The ABI removes `Io.Print`, `Io.Error`, and `Io.ReadLine`.
+
+This change removes two parallel console models.
+
+### 8.2 Core helpers
+
+The pinned core provides these zero-import helpers:
+
+```text
+print[T: Display](value: T) -> Result[(), IoError] with Io.Write
+println[T: Display](value: T) -> Result[(), IoError] with Io.Write
+print_error[T: Display](value: T) -> Result[(), IoError] with Io.WriteError
+read_line(Int) -> Result[Option[String], IoError] with Io.ReadBytes
+```
+
+`print` and `println` use the `Display` contract.
+
+`read_line` reads small prompt input without hidden text effects.
+
+`std/io.ConsoleLineReader` keeps its bounded buffered path for bulk input.
+
+Invalid UTF-8 returns `IoError.InvalidInput`.
+
+### 8.3 Migration
+
+This stage migrates every effect row, policy rule, mock, example, and test.
+
+It also updates compiler examples that inspect exact operations.
+
+The old operation names receive no compatibility aliases.
+
+Pre-release artifacts and snapshots can break across this ABI change.
+
+## 9. Pipes and operating-system children
+
+### 9.1 Effect split
+
+`Pipe` controls anonymous byte pipes.
+
+`Exec` controls operating-system child programs.
+
+The split lets policy grant redirection without process creation.
+
+`Proc` remains the Loom process group.
+
+The new API never calls an operating-system child a proc.
+
+### 9.2 Pipe operations
+
+```text
+Pipe.Open  () -> Result[(PipeReader, PipeWriter), PipeError]
+Pipe.Read  (PipeReader, Int) -> Result[Bytes, PipeError]
+Pipe.Write (PipeWriter, Bytes) -> Result[Int, PipeError]
+Pipe.Close (PipeEnd) -> Result[(), PipeError]
+```
+
+`PipeEnd` is the sealed native parent of both end types.
+
+`Pipe.Read` is a wait-source operation.
+
+An empty successful read reports end of input.
+
+`Pipe.Write` can report partial progress.
+
+Closing the final writer lets readers observe end of input.
+
+A live pipe end blocks snapshot creation.
+
+`PipeError` is this closed family:
+
+```lm
+enum PipeError implements Error
+  Closed
   BrokenPipe
   InvalidInput(message: String)
   LimitExceeded(message: String)
@@ -399,372 +681,399 @@ enum IoError
 end
 ```
 
-`EnvError` distinguishes invalid names, invalid encoding, denial, and platform failure.
+### 9.3 Child specification
 
-`EntropyError` distinguishes invalid counts, limits, unavailability, and platform failure.
+The core defines these boundary values:
 
-Every portable error type implements `Display`.
+```text
+ChildInput  = Inherit | Null | Pipe(PipeReader)
+ChildOutput = Inherit | Null | Pipe(PipeWriter)
+ChildEnv    = Inherit | Exact(Map[String, String])
 
-## 10. Stage 1 implementation
+ExecSpec {
+  program: String,
+  arguments: List[String],
+  directory: Option[String],
+  environment: ChildEnv,
+  input: ChildInput,
+  output: ChildOutput,
+  error: ChildOutput
+}
+```
 
-Stage 1 removes known reliability and diagnostic defects.
+Separate input and output types reject a pipe direction error statically.
 
-It includes these changes.
+The exact environment contains no inherited value unless the caller supplies it.
 
-- Add focused probes for every reported failure.
-- Repair broken-pipe handling.
-- Reserve host faults for host defects.
-- Add snapshot error text and snapshot byte encoding.
-- Add deliberate panic and assertion functions.
-- Add `Option.expect` and `Result.expect`.
-- Accept control statements in short case arms.
-- Repair interface diagnostics.
-- Repair help and version handling.
-- Replace misleading error sentinels in examples.
+Program lookup uses the selected environment and platform rules.
 
-Stage 1 passes when failed platform I/O cannot panic the host process.
+The host applies fixed count and byte limits to every field.
 
-## 11. Stage 2 implementation
+### 9.4 Exec operations
 
-Stage 2 gives the host boundary one verified ABI identity.
+```text
+Exec.Spawn     (ExecSpec) -> Result[Child, ExecError]
+Exec.Wait      (Child) -> Result[ChildStatus, ExecError]
+Exec.Terminate (Child) -> Result[(), ExecError]
+Exec.Kill      (Child) -> Result[(), ExecError]
+Exec.Close     (Child) -> Result[(), ExecError]
+```
 
-It includes these changes.
+`ChildStatus` contains `Exited(code: Int)` and `Terminated`.
 
-- Add immutable ABI bundle construction.
-- Convert standard manifest queries into standard-bundle queries.
-- Thread bundles through checking, verification, loading, and execution.
-- Bind artifacts and snapshots to the bundle digest.
-- Keep the dynamic bundle builder as internal runtime machinery.
-- Defer the public host extension API.
+`Exec.Wait` is a wait-source operation.
 
-Stage 2 passes when each artifact and snapshot binds one exact ABI bundle.
-
-## 12. Stage 3 implementation
-
-Stage 3 makes Loom useful as an application language.
-
-It includes these changes.
-
-- Add `Args.Get` and the `sys.args()` surface.
-- Pass arguments after `--` through the `Args` effect.
-- Add byte console operations.
-- Add result-bearing output.
-- Add environment and filesystem current-directory operations.
-- Add secure entropy.
-- Add stream interfaces and standard helpers.
-
-Stage 3 passes when one binary filter uses every command boundary safely.
-
-## 13. Required tests
-
-Each new operation needs checker, verifier, VM, host, and policy tests.
-
-Each new resource needs cleanup, cancellation, and snapshot tests.
-
-Each new error needs rendering and pattern tests.
-
-The ABI bundle suite includes these cases.
-
-- A different bundle rejects the artifact.
-- A different bundle rejects the snapshot.
-- The verifier checks operation slots against the bound bundle.
-
-The command suite includes these cases.
-
-- Binary standard input preserves invalid UTF-8.
-- A closed output pipe returns `BrokenPipe`.
-- CLI fault reporting on a closed pipe does not panic.
-- Arguments preserve empty strings and Unicode.
-- `sys.args()` preserves empty strings and Unicode.
-- `sys.args()` needs the `Args` row and a policy grant.
-- Environment absence returns `None`.
-- Secure entropy never uses deterministic `Rand` state.
-
-## 14. Release checks
-
-Run formatting and workspace linting before every stage commit.
-
-Run the full workspace suite before each stage closes.
-
-Keep the existing test duration as a regression reference.
-
-Do not add workers to hide slower tests.
-
-Record any accepted compile-time or runtime change explicitly.
-
-The branch closes Stage 3 only after all three stage gates pass.
-
-## 15. Stage 3 implementation record
-
-The Stage 3 gate passed on 2026-08-21.
-
-Workspace linting and testing completed without failures.
-
-The warm full workspace suite completed in about 29 seconds.
-
-The release benchmark compared Stage 3 with commit `ed3bb7a`.
-
-| Measurement | Stage 2 | Stage 3 | Change |
-|---|---:|---:|---:|
-| core classes | 172 | 185 | +7.6% |
-| core functions | 513 | 528 | +2.9% |
-| core artifact | 112,328 bytes | 117,003 bytes | +4.2% |
-| core compilation | 1.885 ms | 1.973 ms | +4.7% |
-| core loading | 0.802 ms | 0.830 ms | +3.5% |
-
-Stage 3 adds core contracts, program input operations, and typed errors.
-
-The selected execution benchmarks found no runtime regression.
-
-| Benchmark | Stage 2 | Stage 3 |
-|---|---:|---:|
-| `int_loop` | 34.8 ns | 33.5 ns |
-| `direct_call` | 32.7 ns | 32.9 ns |
-| `world_int_loop` | 35.5 ns | 36.5 ns |
-
-## 16. Interface doctrine
-
-The first release adds an interface only when language syntax or generic core code consumes it.
-
-The required core interface set contains these interfaces.
+`ExecError` is this closed family:
 
 ```lm
-interface Display
-  def append_to(self, mut builder: StringBuilder)
-end
-
-interface PartialEq
-  def __eq__(self, other: Self): Bool
-end
-
-interface Hashable: PartialEq
-  def __hash__(self): Int
+enum ExecError implements Error
+  Closed
+  InvalidInput(message: String)
+  LimitExceeded(message: String)
+  NotFound(message: String)
+  PermissionDenied(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
 end
 ```
 
-`Iterable`, `Iterator`, `Counted`, `ByteReader`, and `ByteWriter` remain part of this set.
+A successful spawn consumes every pipe end that the child receives.
 
-The first release does not add unused `Clone`, `Default`, `Ord`, or marker interfaces.
+Every alias of a consumed pipe end becomes closed.
 
-A later generic consumer can justify each additional interface.
+A failed spawn leaves those pipe ends open.
 
-## 17. Stage 4: `Self` and interface composition
+`Exec.Wait` reaps the child and consumes its handle after commit.
 
-Stage 4 provides the type foundation required by the new core interfaces.
+`Terminate` requests the platform's normal termination path.
 
-Inside an interface contract, bare `Self` names the conforming type.
+`Kill` requests forced termination.
 
-`Self` can appear in parameters, results, and nested type applications.
+The API exposes no raw signal number.
 
-Inside a class, `Self` names the current nominal type application.
+`Exec.Close` detaches a running child and arranges later reaping.
 
-Interface inheritance uses the existing colon form.
+It does not terminate the child.
 
-A comma separates several parent interfaces.
+A live child handle blocks snapshot creation.
 
-An inherited interface contributes its methods and associated type requirements.
+The API never invokes a shell implicitly.
 
-Two bounds can contribute one identical method contract without ambiguity.
+`std/exec` can provide builders and explicit shell helpers later.
 
-Different contracts with one method name remain ambiguous.
+## 10. TLS server handshake
 
-Enums can declare and implement interfaces.
+The `Tls` namespace gains one server operation:
 
-A normal class that conforms to a `Self`-dependent interface must be final.
+```text
+Tls.ServerHandshake
+  (TcpStream, List[Bytes], Bytes, List[Bytes], Int, Int)
+  -> Result[TlsStream, TlsError]
+```
 
-An enum family can conform because its family is closed.
+The surface accepts a `TlsServerConfig` value.
 
-The closed native `Text` family can conform for the same reason.
+That value contains these fields:
 
-Class `Self` names the declared class application. It does not promise a dynamic subclass type.
+```text
+certificate_chain: List[Bytes]
+private_key: Bytes
+alpn: List[Bytes]
+minimum_version: TlsVersion
+max_buffer_bytes: Int
+```
 
-Artifacts store direct parent applications.
+Each certificate uses DER encoding.
 
-Generic bounds and conformances also store the complete parent closure.
+The private key uses PKCS#8 DER encoding.
 
-The verifier rejects cycles, missing parent conformances, and inheritance beyond 128 levels.
+The host repeats all count and byte checks before parsing.
 
-Interface contracts and inherited contracts enter interface identity hashes.
+Submission consumes the TCP stream on every result.
 
-An interface name remains invalid as a value type.
+A successful call returns the existing `TlsStream` type.
 
-The diagnostic states that the name is an interface bound.
+The new `Tls.Server` effect group includes the handshake and `Tls.Stream`.
 
-The first release does not add existential interface values.
+Client authentication and certificate reload policy remain deferred.
 
-A future release can add an explicit form such as `dyn Display`.
+## 11. UDP
 
-Stage 4 passes when `clone(): Self` and `same(other: Self)` enforce the conforming type.
+### 11.1 Exact operations
 
-## 18. Stage 5: `Display`
+```text
+Udp.Bind         (SocketAddress) -> Result[UdpSocket, NetError]
+Udp.SendTo       (UdpSocket, SocketAddress, Bytes) -> Result[(), NetError]
+Udp.RecvFrom     (UdpSocket) -> Result[UdpDatagram, NetError]
+Udp.LocalAddress (UdpSocket) -> Result[SocketAddress, NetError]
+Udp.Close        (UdpSocket) -> Result[(), NetError]
+```
 
-String interpolation accepts any value that conforms to `Display`.
+`Udp.RecvFrom` is a wait-source operation.
 
-`append_to` writes into the interpolation builder without an intermediate `String` allocation.
+`Udp.LocalAddress` makes port-zero binding useful.
 
-The core scalar and text implementations lower to existing builder intrinsics.
+`Udp.Socket` contains send, receive, address, and close operations.
 
-Portable error values implement `Display` and remove their repeated `message()` methods.
+The `Udp` group contains bind and `Udp.Socket`.
 
-A pure core helper builds a standalone `String` from any `Display` value.
+### 11.2 Datagram rules
 
-The checker removes the closed interpolation type list.
+`UdpDatagram` contains immutable `data` and its peer address.
 
-The verifier checks each selected display call.
+The host reads one complete datagram into a bounded buffer.
 
-Stage 5 passes when a user class interpolates through its declared conformance.
+The first datagram byte limit is 65,535.
 
-`string_interp` and `string_builder` must remain within normal benchmark noise.
+The operation never truncates a datagram silently.
 
-The Stage 5 gate passed on 2026-08-22.
+A zero-length datagram remains a valid datagram.
 
-Workspace linting and testing completed without failures.
+`Udp.SendTo` sends the complete datagram or returns an error.
 
-The warm full workspace suite completed in about 30 seconds.
+It never reports partial progress.
 
-The selected execution benchmarks found no regression.
+The existing network retained-byte budget includes queued datagrams.
 
-| Benchmark | Stage 4 | Stage 5 |
-|---|---:|---:|
-| `string_interp` | 258.1 ns | 199.2 ns |
-| `string_builder` | 43.3 ns | 41.4 ns |
+A live UDP socket blocks snapshot creation.
 
-## 19. Stage 6: `PartialEq`
+Connected UDP, multicast, broadcast, and ancillary data remain deferred.
 
-An explicit `PartialEq` conformance activates a user `__eq__` method.
+## 12. Pinned existing semantics
 
-The `==` operator calls that method for a conforming left type.
+### 12.1 Console writes
 
-The `!=` operator negates the same result.
+Each `Io.Write` call makes one platform write attempt.
 
-Core removes `__ne__` as a surface method.
+The host flushes accepted bytes before it returns `Ok`.
 
-Built-in structural and identity equality remain language rules.
+The returned integer reports accepted bytes.
 
-These rules do not imply a `PartialEq` conformance.
+A closed output pipe returns `IoError.BrokenPipe`.
 
-Int, Float, Bool, Text, Char, and Bytes implement the interface.
+Diagnostic reporting treats its own closed pipe as a completed report.
 
-A method named `__eq__` without conformance does not enable the operator.
+### 12.2 DNS scope
 
-Stage 6 passes when generic equality uses one verified interface dispatch.
+`Dns.Resolve` uses the operating-system resolver.
 
-Primitive equality benchmarks must remain within normal benchmark noise.
+It can inspect host files, resolver configuration, and configured name services.
 
-The Stage 6 gate passed on 2026-08-22.
+It can cause network traffic.
 
-Workspace testing completed without failures.
+The exact `Dns.Resolve` effect covers that complete authority.
 
-The warm full workspace suite completed in about 30 seconds.
+### 12.3 TCP delay policy
 
-Core size and startup costs did not increase.
+Every connected or accepted TCP stream enables `TCP_NODELAY`.
 
-| Measurement | Stage 5 | Stage 6 |
-|---|---:|---:|
-| core classes | 185 | 185 |
-| core functions | 540 | 535 |
-| core artifact | 119,968 bytes | 119,518 bytes |
-| core compilation | 1.948 ms | 1.943 ms |
-| core loading | 0.838 ms | 0.835 ms |
+The host closes the socket if it cannot establish that invariant.
 
-Native equality retained its existing instructions.
+Setter operations remain in the release ledger.
 
-| Benchmark | Stage 5 | Stage 6 |
-|---|---:|---:|
-| `int_eq` | 33.4 ns | 32.0 ns |
-| `text_eq` | 40.8 ns | 40.5 ns |
+## 13. Effect and resource summary
 
-Generic `PartialEq` dispatch measured 93.8 ns per comparison.
+| Group | Long-lived resource | Snapshot rule | Wait-source operation |
+|---|---|---|---|
+| `Io` | none | pending read blocks | `Io.ReadBytes` |
+| `Tty` | `RawMode` | live mode blocks | none |
+| `Signal` | `SignalStream` | live stream blocks | `Signal.Next` |
+| `Fs` | `FileHandle` | live handle blocks | none |
+| `Pipe` | pipe ends | live end blocks | `Pipe.Read` |
+| `Exec` | `Child` | live child blocks | `Exec.Wait` |
+| `Dns` | none | pending resolve blocks | `Dns.Resolve` |
+| `Tcp` | stream or listener | live resource blocks | connect, accept, read |
+| `Tls` | `TlsStream` | live stream blocks | `Tls.Read` |
+| `Udp` | `UdpSocket` | live socket blocks | `Udp.RecvFrom` |
 
-## 20. Stage 7: `Hashable`, `Map`, and `Set`
+Closed resource values remain typed machine state.
 
-`Hashable` extends `PartialEq`.
+Restore never recreates an operating-system attachment.
 
-Its equality must be reflexive, symmetric, and transitive.
+## 14. Layer placement
 
-Equal values must return equal semantic hashes.
+### 14.1 Canonical manifest
 
-A hash must remain stable while its value is frozen.
+The manifest owns operation names, signatures, groups, snapshot classes, and wait-source flags.
 
-The VM mixes each semantic hash with a private process key.
+Each field contributes to the ABI identity.
 
-`Map[K, V]` requires `K` to conform to `Hashable`.
+### 14.2 Pinned core
 
-Bytecode selects a native path or an interface-backed path for each map operation.
+The core owns boundary enums, errors, native resource classes, and direct methods.
 
-Built-in keys retain the current native instruction path.
+It also owns zero-import display output helpers.
 
-Generic and user keys call verified `__hash__` and `__eq__` implementations.
+### 14.3 Standard Loom modules
 
-Compiler-private probe instructions separate these calls from synchronous VM instructions.
+Standard modules own buffering, scoped cleanup, sorting, protocol parsing, and ergonomic builders.
 
-The VM never invokes guest code inside one collection instruction.
+They perform only the exact operations in their declared rows.
 
-Each stored entry caches its semantic hash.
+### 14.4 VM
 
-A lookup computes the query hash once.
+The VM owns generic wait, resource, policy, verification, and snapshot machinery.
 
-It calls equality only for matching hash candidates.
+It knows resource kinds but no operating-system API.
 
-The VM mixes semantic hashes with a private process key before bucket access.
+### 14.5 Root host
 
-The map contract rejects an effectful hash or equality method.
+The root host owns terminal state, signal hooks, files, children, pipes, and sockets.
 
-User heap keys must be frozen before insertion.
+It uses bounded workers or reactors outside the scheduler thread.
 
-A mutable user heap key faults with `MutableMapKey`.
+The host starts each new service only after its first operation.
 
-Snapshots store semantic hashes beside entries.
+The implementation reuses the current socket reactor and TLS library.
 
-Snapshots omit the private derived index.
+Terminal and signal support can add one reviewed platform dependency.
 
-Restoration rebuilds that index with the active process key.
+## 15. Implementation stages
 
-Core defines ordered `Set[T]` as an ordinary class over `Map[T, ()]`.
+### Stage 0: Baseline and document reconciliation
 
-`Set` provides insertion, removal, traversal, copying, filtering, and standard set algebra.
+- Record core compile, load, artifact, suite, and focused runtime measurements.
+- Reconcile the language specification with this accepted sidecar.
+- Record the current ABI and snapshot format versions.
 
-Stage 7 passes when a frozen user class works as a map key and set element.
+Gate: Documentation and generated operation tables agree.
 
-Existing Int, Text, and Bytes map benchmarks must not regress.
+### Stage 1: General host wait sources
 
-The Stage 7 gate passed on 2026-08-22.
+- Add the manifest wait-source flag.
+- Add the checker and bytecode preparation rule.
+- Add independent verifier checks.
+- Add prepared, armed, ready, committed, and cancelled VM states.
+- Replace Boolean host cancellation with explicit outcomes.
+- Redesign standard input around a bounded cancellation-safe buffer.
+- Add waits for existing Clock, Io, DNS, TCP, and TLS read operations.
 
-Workspace testing completed without failures.
+Gate: A read-versus-sleep loop loses no bytes under every race order.
 
-Strict workspace linting completed without warnings.
+Gate: Direct operation benchmarks remain within normal noise.
 
-The warm full workspace suite completed in 35.7 seconds.
+### Stage 2: Terminal and signals
 
-Set added two classes and thirty functions.
+- Add terminal and signal manifest entries.
+- Add `RawMode` and `SignalStream` resource kinds.
+- Implement platform adapters and restoration paths.
+- Add `std/term` byte helpers.
+- Add a TUI event-loop example.
+- Add a checkpoint-on-termination example.
 
-Those methods account for this stage's measured core growth.
+Gate: Every normal exit and Loom fault restores the saved terminal state.
 
-| Measurement | Stage 6 | Stage 7 |
-|---|---:|---:|
-| core classes | 185 | 187 |
-| core functions | 535 | 565 |
-| core artifact | 119,518 bytes | 131,407 bytes |
-| core compilation | 1.943 ms | 2.145 ms |
-| core loading | 0.835 ms | 0.983 ms |
+Gate: A losing signal wait preserves its signal.
 
-Native map operations retained their existing instruction path.
+### Stage 3: File-system completion
 
-| Benchmark | Stage 6 | Stage 7 |
-|---|---:|---:|
-| `map_insert` | 128.0 ns | 122.3 ns |
-| `map_lookup` | 71.6 ns | 68.0 ns |
-| `map_str_lookup` | 60.5 ns | 60.4 ns |
-| `map_bytes_lookup` | 57.4 ns | 52.7 ns |
+- Add metadata and directory boundary values.
+- Expand `FsError` and host mappings.
+- Add creation, removal, rename, and durability operations.
+- Add scoped standard-library helpers.
+- Add invalid-name and crash-durability tests.
 
-The generic user-key lookup measured 207.2 ns.
+Gate: A durable replacement follows the specified sync order.
 
-## 21. Interface release gates
+Gate: A non-UTF-8 directory entry remains visible as an error entry.
 
-Each stage records core compilation, artifact size, loading time, and full suite time.
+### Stage 4: Byte-only console I/O
 
-Each stage measures its affected runtime benchmarks.
+- Remove the three text operation identities.
+- Add generic core display helpers.
+- Keep prompt and buffered line readers over bytes.
+- Migrate all examples, tests, rows, policies, and documentation.
 
-The full suite retains the current duration as its reference.
+Gate: The repository contains no old console operation name.
 
-No stage can hide slower tests by adding workers.
+Gate: Closed output pipes never panic the CLI.
+
+### Stage 5: Pipes and Exec
+
+- Add typed pipe ends and one child resource.
+- Add strict spawn boundary values and limits.
+- Add pipe-read and child-wait sources.
+- Add cleanup, detachment, and reaping paths.
+- Add one checked pipeline example.
+
+Gate: A pipeline handles partial writes, end of input, and child failure.
+
+Gate: Live children and pipe ends report precise snapshot blockers.
+
+### Stage 6: TLS server handshake
+
+- Add the server configuration and operation.
+- Reuse the existing TLS stream resource.
+- Add certificate, key, ALPN, and limit checks.
+- Add local client-server integration tests.
+
+Gate: Success and failure both consume the submitted TCP stream.
+
+### Stage 7: UDP
+
+- Add the UDP resource and exact operations.
+- Add reactor readiness and cancellation.
+- Add complete-datagram boundary values.
+- Add a local exchange example.
+
+Gate: Selection never loses or truncates a datagram.
+
+### Stage 8: Release closure
+
+- Pin console, DNS, and TCP delay semantics.
+- Update every normative operation table.
+- Run malformed-module and snapshot mutation suites.
+- Run supported-platform host tests.
+- Record final performance and size measurements.
+- Review all new diagnostics for stable terms.
+
+Gate: The full workspace suite passes with its baseline worker count.
+
+Gate: No stage hides cost through test caching or reduced coverage.
+
+## 16. Landing standard
+
+Each new group needs all items in this list:
+
+- one `Error` implementation for each new ordinary error family;
+- checker tests for exact rows and denied authority;
+- verifier tests for forged argument and result types;
+- VM tests for resources, aliases, cleanup, and policy routing;
+- host tests for success, failure, limits, and cancellation;
+- snapshot tests before, during, and after resource closure;
+- one run-pass example with checked output;
+- one local integration test with no external internet access;
+- focused performance and core-size measurements.
+
+The host test suite must include race permutations with fixed seeds.
+
+It must not depend on timing for correctness.
+
+A program that uses no new group must start no new host worker.
+
+Each stage records core compilation, loading, artifact size, and suite duration.
+
+The measurements use the same worker count and build mode.
+
+## 17. Release ledger
+
+The first release defers these features:
+
+- arbitrary terminal mode flags;
+- a terminal resize wait source;
+- signals other than interrupt and terminate;
+- raw signal numbers and guest signal handlers;
+- byte-valued file paths;
+- file watching and directory streaming;
+- recursive removal as a host primitive;
+- shells, pseudoterminals, and job control;
+- Unix-domain sockets;
+- connected UDP, multicast, and broadcast;
+- TLS client certificates and server client authentication;
+- TCP_NODELAY setters and other socket options;
+- wait-source writes;
+- checkpointable external resources.
+
+These additions can use new operations or standard Loom modules later.
+
+They do not require another resource or policy model.
