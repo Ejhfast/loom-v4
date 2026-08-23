@@ -172,6 +172,10 @@ enum Kind {
     TlsStream,
     RawMode,
     SignalStream,
+    PipeEnd,
+    PipeReader,
+    PipeWriter,
+    Child,
     Artifact,
     VerifiedModule,
     FunctionCode,
@@ -229,7 +233,9 @@ fn check_one(
             let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);
             let tcp_match =
                 kind == Kind::TcpResource && matches!(found, Kind::TcpStream | Kind::TcpListener);
-            if !(found == kind || text_match || tcp_match) {
+            let pipe_match =
+                kind == Kind::PipeEnd && matches!(found, Kind::PipeReader | Kind::PipeWriter);
+            if !(found == kind || text_match || tcp_match || pipe_match) {
                 return Err(FaultCode::TypeMismatch);
             }
 
@@ -329,6 +335,14 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::RawMode)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SIGNAL_STREAM] == *class {
                 Node::Heap(Kind::SignalStream)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_PIPE_END] == *class {
+                Node::Heap(Kind::PipeEnd)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_PIPE_READER] == *class {
+                Node::Heap(Kind::PipeReader)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_PIPE_WRITER] == *class {
+                Node::Heap(Kind::PipeWriter)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_CHILD] == *class {
+                Node::Heap(Kind::Child)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_ARTIFACT] == *class {
                 Node::Heap(Kind::Artifact)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
@@ -433,6 +447,9 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativeTlsStream { .. } => Kind::TlsStream,
         Object::NativeRawMode { .. } => Kind::RawMode,
         Object::NativeSignalStream { .. } => Kind::SignalStream,
+        Object::NativePipeReader { .. } => Kind::PipeReader,
+        Object::NativePipeWriter { .. } => Kind::PipeWriter,
+        Object::NativeChild { .. } => Kind::Child,
         Object::NativeCode(code) => match code.kind {
             lm_heap::PortableCodeKind::Artifact => Kind::Artifact,
             lm_heap::PortableCodeKind::VerifiedModule => Kind::VerifiedModule,

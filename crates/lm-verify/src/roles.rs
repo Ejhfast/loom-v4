@@ -160,6 +160,39 @@ pub(crate) const ROLE_DIR_ENTRY: usize = 215;
 pub(crate) const ROLE_RENAME_MODE: usize = 216;
 pub(crate) const ROLE_RENAME_NO_REPLACE: usize = 217;
 pub(crate) const ROLE_RENAME_REPLACE: usize = 218;
+pub(crate) const ROLE_PIPE_ERROR: usize = 219;
+pub(crate) const ROLE_PIPE_ERROR_CLOSED: usize = 220;
+pub(crate) const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 221;
+pub(crate) const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 222;
+pub(crate) const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 223;
+pub(crate) const ROLE_PIPE_ERROR_FAILED: usize = 224;
+pub(crate) const ROLE_PIPE_END: usize = 225;
+pub(crate) const ROLE_PIPE_READER: usize = 226;
+pub(crate) const ROLE_PIPE_WRITER: usize = 227;
+pub(crate) const ROLE_CHILD_INPUT: usize = 228;
+pub(crate) const ROLE_CHILD_INPUT_INHERIT: usize = 229;
+pub(crate) const ROLE_CHILD_INPUT_NULL: usize = 230;
+pub(crate) const ROLE_CHILD_INPUT_PIPE: usize = 231;
+pub(crate) const ROLE_CHILD_OUTPUT: usize = 232;
+pub(crate) const ROLE_CHILD_OUTPUT_INHERIT: usize = 233;
+pub(crate) const ROLE_CHILD_OUTPUT_NULL: usize = 234;
+pub(crate) const ROLE_CHILD_OUTPUT_PIPE: usize = 235;
+pub(crate) const ROLE_CHILD_ENV: usize = 236;
+pub(crate) const ROLE_CHILD_ENV_INHERIT: usize = 237;
+pub(crate) const ROLE_CHILD_ENV_EXACT: usize = 238;
+pub(crate) const ROLE_EXEC_SPEC: usize = 239;
+pub(crate) const ROLE_CHILD_STATUS: usize = 240;
+pub(crate) const ROLE_CHILD_STATUS_EXITED: usize = 241;
+pub(crate) const ROLE_CHILD_STATUS_TERMINATED: usize = 242;
+pub(crate) const ROLE_EXEC_ERROR: usize = 243;
+pub(crate) const ROLE_EXEC_ERROR_CLOSED: usize = 244;
+pub(crate) const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 245;
+pub(crate) const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 246;
+pub(crate) const ROLE_EXEC_ERROR_NOT_FOUND: usize = 247;
+pub(crate) const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 248;
+pub(crate) const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
+pub(crate) const ROLE_EXEC_ERROR_FAILED: usize = 250;
+pub(crate) const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -175,11 +208,14 @@ enum FieldShape {
     /// `SnapshotError.ResourceActive`.
     ListInt,
     NetError,
+    PipeReader,
+    PipeWriter,
+    MapStrStr,
 }
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 29] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
     (
         ROLE_OPTION,
         1,
@@ -440,10 +476,69 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 29] = [
         ],
         "SignalError",
     ),
+    (
+        ROLE_PIPE_ERROR,
+        0,
+        &[
+            ROLE_PIPE_ERROR_CLOSED,
+            ROLE_PIPE_ERROR_BROKEN_PIPE,
+            ROLE_PIPE_ERROR_INVALID_INPUT,
+            ROLE_PIPE_ERROR_LIMIT_EXCEEDED,
+            ROLE_PIPE_ERROR_UNSUPPORTED,
+            ROLE_PIPE_ERROR_FAILED,
+        ],
+        "PipeError",
+    ),
+    (
+        ROLE_CHILD_INPUT,
+        0,
+        &[
+            ROLE_CHILD_INPUT_INHERIT,
+            ROLE_CHILD_INPUT_NULL,
+            ROLE_CHILD_INPUT_PIPE,
+        ],
+        "ChildInput",
+    ),
+    (
+        ROLE_CHILD_OUTPUT,
+        0,
+        &[
+            ROLE_CHILD_OUTPUT_INHERIT,
+            ROLE_CHILD_OUTPUT_NULL,
+            ROLE_CHILD_OUTPUT_PIPE,
+        ],
+        "ChildOutput",
+    ),
+    (
+        ROLE_CHILD_ENV,
+        0,
+        &[ROLE_CHILD_ENV_INHERIT, ROLE_CHILD_ENV_EXACT],
+        "ChildEnv",
+    ),
+    (
+        ROLE_CHILD_STATUS,
+        0,
+        &[ROLE_CHILD_STATUS_EXITED, ROLE_CHILD_STATUS_TERMINATED],
+        "ChildStatus",
+    ),
+    (
+        ROLE_EXEC_ERROR,
+        0,
+        &[
+            ROLE_EXEC_ERROR_CLOSED,
+            ROLE_EXEC_ERROR_INVALID_INPUT,
+            ROLE_EXEC_ERROR_LIMIT_EXCEEDED,
+            ROLE_EXEC_ERROR_NOT_FOUND,
+            ROLE_EXEC_ERROR_PERMISSION_DENIED,
+            ROLE_EXEC_ERROR_UNSUPPORTED,
+            ROLE_EXEC_ERROR_FAILED,
+        ],
+        "ExecError",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 117] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 140] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -564,6 +659,29 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 117] = [
     (ROLE_SIGNAL_ERROR_UNSUPPORTED, &[FieldShape::Str]),
     (ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
     (ROLE_SIGNAL_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_PIPE_ERROR_CLOSED, &[]),
+    (ROLE_PIPE_ERROR_BROKEN_PIPE, &[]),
+    (ROLE_PIPE_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_PIPE_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_PIPE_ERROR_UNSUPPORTED, &[FieldShape::Str]),
+    (ROLE_PIPE_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_CHILD_INPUT_INHERIT, &[]),
+    (ROLE_CHILD_INPUT_NULL, &[]),
+    (ROLE_CHILD_INPUT_PIPE, &[FieldShape::PipeReader]),
+    (ROLE_CHILD_OUTPUT_INHERIT, &[]),
+    (ROLE_CHILD_OUTPUT_NULL, &[]),
+    (ROLE_CHILD_OUTPUT_PIPE, &[FieldShape::PipeWriter]),
+    (ROLE_CHILD_ENV_INHERIT, &[]),
+    (ROLE_CHILD_ENV_EXACT, &[FieldShape::MapStrStr]),
+    (ROLE_CHILD_STATUS_EXITED, &[FieldShape::Int]),
+    (ROLE_CHILD_STATUS_TERMINATED, &[]),
+    (ROLE_EXEC_ERROR_CLOSED, &[]),
+    (ROLE_EXEC_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_EXEC_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_EXEC_ERROR_NOT_FOUND, &[FieldShape::Str]),
+    (ROLE_EXEC_ERROR_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_EXEC_ERROR_UNSUPPORTED, &[FieldShape::Str]),
+    (ROLE_EXEC_ERROR_FAILED, &[FieldShape::Str]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -657,26 +775,38 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             }
             for (position, want) in fields.iter().enumerate() {
                 let found = &module.types[arm_class.fields[position].1 as usize];
-                let ok = match want {
-                    FieldShape::Var(i) => found == &BcType::Var(*i),
-                    FieldShape::Str => found == &BcType::Str,
-                    FieldShape::Int => found == &BcType::Int,
-                    FieldShape::Bytes => found == &BcType::Bytes,
-                    FieldShape::Fault => found == &BcType::Fault,
-                    FieldShape::Request => found == &BcType::Request,
-                    // The element index is read through `get`, because
-                    // this pass must reject a crafted table instead of
-                    // reaching outside the type table.
-                    FieldShape::ListInt => match found {
-                        BcType::List(elem) => {
-                            module.types.get(*elem as usize) == Some(&BcType::Int)
+                let ok =
+                    match want {
+                        FieldShape::Var(i) => found == &BcType::Var(*i),
+                        FieldShape::Str => found == &BcType::Str,
+                        FieldShape::Int => found == &BcType::Int,
+                        FieldShape::Bytes => found == &BcType::Bytes,
+                        FieldShape::Fault => found == &BcType::Fault,
+                        FieldShape::Request => found == &BcType::Request,
+                        // The element index is read through `get`, because
+                        // this pass must reject a crafted table instead of
+                        // reaching outside the type table.
+                        FieldShape::ListInt => match found {
+                            BcType::List(elem) => {
+                                module.types.get(*elem as usize) == Some(&BcType::Int)
+                            }
+                            _ => false,
+                        },
+                        FieldShape::NetError => {
+                            slot(ROLE_NET_ERROR).is_some_and(|class| found == &BcType::Class(class))
                         }
-                        _ => false,
-                    },
-                    FieldShape::NetError => {
-                        slot(ROLE_NET_ERROR).is_some_and(|class| found == &BcType::Class(class))
-                    }
-                };
+                        FieldShape::PipeReader => slot(ROLE_PIPE_READER)
+                            .is_some_and(|class| found == &BcType::Class(class)),
+                        FieldShape::PipeWriter => slot(ROLE_PIPE_WRITER)
+                            .is_some_and(|class| found == &BcType::Class(class)),
+                        FieldShape::MapStrStr => match found {
+                            BcType::Map(key, value) => {
+                                module.types.get(*key as usize) == Some(&BcType::Str)
+                                    && module.types.get(*value as usize) == Some(&BcType::Str)
+                            }
+                            _ => false,
+                        },
+                    };
                 if !ok {
                     return Err(terr(format!(
                         "the core family `{family}` names an arm whose field {position} \
@@ -806,6 +936,51 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             }
         }
     }
+    let pipe_roles = [
+        slot(ROLE_PIPE_END),
+        slot(ROLE_PIPE_READER),
+        slot(ROLE_PIPE_WRITER),
+    ];
+    if pipe_roles.iter().any(Option::is_some) && pipe_roles.iter().any(Option::is_none) {
+        return Err(terr(
+            "the pipe resource family resolves without every class".to_string(),
+        ));
+    }
+    if let [Some(resource), Some(reader), Some(writer)] = pipe_roles {
+        let base = &module.classes[resource as usize];
+        if base.kind != BcClassKind::Normal
+            || base.is_final
+            || base.type_params != 0
+            || base.parent().is_some()
+            || !base.parent_args.is_empty()
+            || !base.fields.is_empty()
+        {
+            return Err(terr(
+                "the PipeEnd role does not name its stateless base class".to_string(),
+            ));
+        }
+        for (idx, name) in [(reader, "PipeReader"), (writer, "PipeWriter")] {
+            let class = &module.classes[idx as usize];
+            if class.kind != BcClassKind::Normal
+                || !class.is_final
+                || class.type_params != 0
+                || class.parent() != Some(resource)
+                || !class.parent_args.is_empty()
+                || !class.fields.is_empty()
+            {
+                return Err(terr(format!(
+                    "the {name} role does not name its final resource class"
+                )));
+            }
+        }
+        for (idx, class) in module.classes.iter().enumerate() {
+            if class.parent() == Some(resource) && idx as u32 != reader && idx as u32 != writer {
+                return Err(terr(
+                    "a class other than PipeReader or PipeWriter extends PipeEnd".to_string(),
+                ));
+            }
+        }
+    }
     let native_roles = [
         (lm_bytecode::corepin::ROLE_INT, "Int"),
         (lm_bytecode::corepin::ROLE_FLOAT, "Float"),
@@ -817,6 +992,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_TLS_STREAM, "TlsStream"),
         (lm_bytecode::corepin::ROLE_RAW_MODE, "RawMode"),
         (lm_bytecode::corepin::ROLE_SIGNAL_STREAM, "SignalStream"),
+        (lm_bytecode::corepin::ROLE_CHILD, "Child"),
         (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
         (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
         (lm_bytecode::corepin::ROLE_CLASS_CODE, "ClassCode"),
@@ -839,6 +1015,54 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             return Err(terr(format!(
                 "the core role `{name}` does not name a final stateless class"
             )));
+        }
+    }
+    if let Some(spec) = slot(ROLE_EXEC_SPEC) {
+        let Some(option) = slot(ROLE_OPTION) else {
+            return Err(terr(
+                "the ExecSpec role requires the Option role".to_string(),
+            ));
+        };
+        let Some(environment) = slot(ROLE_CHILD_ENV) else {
+            return Err(terr(
+                "the ExecSpec role requires the ChildEnv role".to_string(),
+            ));
+        };
+        let Some(input) = slot(ROLE_CHILD_INPUT) else {
+            return Err(terr(
+                "the ExecSpec role requires the ChildInput role".to_string(),
+            ));
+        };
+        let Some(output) = slot(ROLE_CHILD_OUTPUT) else {
+            return Err(terr(
+                "the ExecSpec role requires the ChildOutput role".to_string(),
+            ));
+        };
+        let class = &module.classes[spec as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let valid = matches!(fields.as_slice(), [BcType::Str, BcType::List(arguments), BcType::Inst(found_option, option_args), BcType::Class(found_env), BcType::Class(found_input), BcType::Class(found_output), BcType::Class(found_error)]
+            if module.types.get(*arguments as usize) == Some(&BcType::Str)
+                && *found_option == option
+                && matches!(option_args.as_slice(), [value]
+                    if module.types.get(*value as usize) == Some(&BcType::Str))
+                && *found_env == environment
+                && *found_input == input
+                && *found_output == output
+                && *found_error == output);
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !valid
+        {
+            return Err(terr(
+                "the ExecSpec role does not name its final value class".to_string(),
+            ));
         }
     }
     if let Some(size) = slot(lm_bytecode::corepin::ROLE_TTY_SIZE) {

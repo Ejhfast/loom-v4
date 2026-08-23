@@ -1187,6 +1187,9 @@ impl World {
                 Object::NativeTlsStream { .. } => Object::NativeTlsStream { resource: 0 },
                 Object::NativeRawMode { .. } => Object::NativeRawMode { resource: 0 },
                 Object::NativeSignalStream { .. } => Object::NativeSignalStream { resource: 0 },
+                Object::NativePipeReader { .. } => Object::NativePipeReader { resource: 0 },
+                Object::NativePipeWriter { .. } => Object::NativePipeWriter { resource: 0 },
+                Object::NativeChild { .. } => Object::NativeChild { resource: 0 },
                 Object::NativeHostResource { kind, .. } => Object::NativeHostResource {
                     kind: *kind,
                     resource: 0,

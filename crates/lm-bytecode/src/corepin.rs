@@ -251,10 +251,44 @@ pub struct CoreLayout {
     pub signal_error_limit_exceeded: Option<u32>,
     pub signal_error_failed: Option<u32>,
     pub signal_stream: Option<u32>,
+    pub pipe_error: Option<u32>,
+    pub pipe_error_closed: Option<u32>,
+    pub pipe_error_broken_pipe: Option<u32>,
+    pub pipe_error_invalid_input: Option<u32>,
+    pub pipe_error_limit_exceeded: Option<u32>,
+    pub pipe_error_unsupported: Option<u32>,
+    pub pipe_error_failed: Option<u32>,
+    pub pipe_end: Option<u32>,
+    pub pipe_reader: Option<u32>,
+    pub pipe_writer: Option<u32>,
+    pub child_input: Option<u32>,
+    pub child_input_inherit: Option<u32>,
+    pub child_input_null: Option<u32>,
+    pub child_input_pipe: Option<u32>,
+    pub child_output: Option<u32>,
+    pub child_output_inherit: Option<u32>,
+    pub child_output_null: Option<u32>,
+    pub child_output_pipe: Option<u32>,
+    pub child_env: Option<u32>,
+    pub child_env_inherit: Option<u32>,
+    pub child_env_exact: Option<u32>,
+    pub exec_spec: Option<u32>,
+    pub child_status: Option<u32>,
+    pub child_status_exited: Option<u32>,
+    pub child_status_terminated: Option<u32>,
+    pub exec_error: Option<u32>,
+    pub exec_error_closed: Option<u32>,
+    pub exec_error_invalid_input: Option<u32>,
+    pub exec_error_limit_exceeded: Option<u32>,
+    pub exec_error_not_found: Option<u32>,
+    pub exec_error_permission_denied: Option<u32>,
+    pub exec_error_unsupported: Option<u32>,
+    pub exec_error_failed: Option<u32>,
+    pub child: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 219] = [
+pub const PINNED_LABELS: [&str; 253] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -474,6 +508,40 @@ pub const PINNED_LABELS: [&str; 219] = [
     "RenameMode",
     "RenameMode.NoReplace",
     "RenameMode.Replace",
+    "PipeError",
+    "PipeError.Closed",
+    "PipeError.BrokenPipe",
+    "PipeError.InvalidInput",
+    "PipeError.LimitExceeded",
+    "PipeError.Failed",
+    "PipeEnd",
+    "PipeReader",
+    "PipeWriter",
+    "ChildInput",
+    "ChildInput.Inherit",
+    "ChildInput.Null",
+    "ChildInput.Pipe",
+    "ChildOutput",
+    "ChildOutput.Inherit",
+    "ChildOutput.Null",
+    "ChildOutput.Pipe",
+    "ChildEnv",
+    "ChildEnv.Inherit",
+    "ChildEnv.Exact",
+    "ExecSpec",
+    "ChildStatus",
+    "ChildStatus.Exited",
+    "ChildStatus.Terminated",
+    "ExecError",
+    "ExecError.Closed",
+    "ExecError.InvalidInput",
+    "ExecError.LimitExceeded",
+    "ExecError.NotFound",
+    "ExecError.PermissionDenied",
+    "ExecError.Unsupported",
+    "ExecError.Failed",
+    "Child",
+    "PipeError.Unsupported",
 ];
 
 /// The core role of immediate integer values.
@@ -665,6 +733,40 @@ pub const ROLE_DIR_ENTRY: usize = 215;
 pub const ROLE_RENAME_MODE: usize = 216;
 pub const ROLE_RENAME_NO_REPLACE: usize = 217;
 pub const ROLE_RENAME_REPLACE: usize = 218;
+pub const ROLE_PIPE_ERROR: usize = 219;
+pub const ROLE_PIPE_ERROR_CLOSED: usize = 220;
+pub const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 221;
+pub const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 222;
+pub const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 223;
+pub const ROLE_PIPE_ERROR_FAILED: usize = 224;
+pub const ROLE_PIPE_END: usize = 225;
+pub const ROLE_PIPE_READER: usize = 226;
+pub const ROLE_PIPE_WRITER: usize = 227;
+pub const ROLE_CHILD_INPUT: usize = 228;
+pub const ROLE_CHILD_INPUT_INHERIT: usize = 229;
+pub const ROLE_CHILD_INPUT_NULL: usize = 230;
+pub const ROLE_CHILD_INPUT_PIPE: usize = 231;
+pub const ROLE_CHILD_OUTPUT: usize = 232;
+pub const ROLE_CHILD_OUTPUT_INHERIT: usize = 233;
+pub const ROLE_CHILD_OUTPUT_NULL: usize = 234;
+pub const ROLE_CHILD_OUTPUT_PIPE: usize = 235;
+pub const ROLE_CHILD_ENV: usize = 236;
+pub const ROLE_CHILD_ENV_INHERIT: usize = 237;
+pub const ROLE_CHILD_ENV_EXACT: usize = 238;
+pub const ROLE_EXEC_SPEC: usize = 239;
+pub const ROLE_CHILD_STATUS: usize = 240;
+pub const ROLE_CHILD_STATUS_EXITED: usize = 241;
+pub const ROLE_CHILD_STATUS_TERMINATED: usize = 242;
+pub const ROLE_EXEC_ERROR: usize = 243;
+pub const ROLE_EXEC_ERROR_CLOSED: usize = 244;
+pub const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 245;
+pub const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 246;
+pub const ROLE_EXEC_ERROR_NOT_FOUND: usize = 247;
+pub const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 248;
+pub const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
+pub const ROLE_EXEC_ERROR_FAILED: usize = 250;
+pub const ROLE_CHILD: usize = 251;
+pub const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -935,6 +1037,40 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SignalError.LimitExceeded" => &mut layout.signal_error_limit_exceeded,
         "SignalError.Failed" => &mut layout.signal_error_failed,
         "SignalStream" => &mut layout.signal_stream,
+        "PipeError" => &mut layout.pipe_error,
+        "PipeError.Closed" => &mut layout.pipe_error_closed,
+        "PipeError.BrokenPipe" => &mut layout.pipe_error_broken_pipe,
+        "PipeError.InvalidInput" => &mut layout.pipe_error_invalid_input,
+        "PipeError.LimitExceeded" => &mut layout.pipe_error_limit_exceeded,
+        "PipeError.Unsupported" => &mut layout.pipe_error_unsupported,
+        "PipeError.Failed" => &mut layout.pipe_error_failed,
+        "PipeEnd" => &mut layout.pipe_end,
+        "PipeReader" => &mut layout.pipe_reader,
+        "PipeWriter" => &mut layout.pipe_writer,
+        "ChildInput" => &mut layout.child_input,
+        "ChildInput.Inherit" => &mut layout.child_input_inherit,
+        "ChildInput.Null" => &mut layout.child_input_null,
+        "ChildInput.Pipe" => &mut layout.child_input_pipe,
+        "ChildOutput" => &mut layout.child_output,
+        "ChildOutput.Inherit" => &mut layout.child_output_inherit,
+        "ChildOutput.Null" => &mut layout.child_output_null,
+        "ChildOutput.Pipe" => &mut layout.child_output_pipe,
+        "ChildEnv" => &mut layout.child_env,
+        "ChildEnv.Inherit" => &mut layout.child_env_inherit,
+        "ChildEnv.Exact" => &mut layout.child_env_exact,
+        "ExecSpec" => &mut layout.exec_spec,
+        "ChildStatus" => &mut layout.child_status,
+        "ChildStatus.Exited" => &mut layout.child_status_exited,
+        "ChildStatus.Terminated" => &mut layout.child_status_terminated,
+        "ExecError" => &mut layout.exec_error,
+        "ExecError.Closed" => &mut layout.exec_error_closed,
+        "ExecError.InvalidInput" => &mut layout.exec_error_invalid_input,
+        "ExecError.LimitExceeded" => &mut layout.exec_error_limit_exceeded,
+        "ExecError.NotFound" => &mut layout.exec_error_not_found,
+        "ExecError.PermissionDenied" => &mut layout.exec_error_permission_denied,
+        "ExecError.Unsupported" => &mut layout.exec_error_unsupported,
+        "ExecError.Failed" => &mut layout.exec_error_failed,
+        "Child" => &mut layout.child,
         _ => unreachable!("only known labels enter the map"),
     }
 }

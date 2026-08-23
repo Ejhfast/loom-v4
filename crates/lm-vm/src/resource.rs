@@ -76,6 +76,12 @@ pub enum ResourceKind {
     RawMode,
     /// One open process signal stream.
     SignalStream,
+    /// One open pipe read end.
+    PipeReader,
+    /// One open pipe write end.
+    PipeWriter,
+    /// One live operating-system child handle.
+    Child,
     /// One opaque extension resource, by stable kind identity.
     Extension([u8; 32]),
 }
@@ -91,7 +97,10 @@ impl ResourceKind {
             | ResourceKind::TcpListener
             | ResourceKind::TlsStream
             | ResourceKind::RawMode
-            | ResourceKind::SignalStream => SnapshotClass::HostAttachment,
+            | ResourceKind::SignalStream
+            | ResourceKind::PipeReader
+            | ResourceKind::PipeWriter
+            | ResourceKind::Child => SnapshotClass::HostAttachment,
             ResourceKind::Extension(_) => SnapshotClass::HostAttachment,
         }
     }

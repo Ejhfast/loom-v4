@@ -18,6 +18,8 @@ pub(super) enum ResourceErrors {
     Tls,
     Tty,
     Signal,
+    Pipe,
+    Exec,
 }
 
 /// The error family of one operation that takes a handle first.
@@ -48,6 +50,13 @@ pub(super) fn handle_op_errors(op: u32) -> Option<ResourceErrors> {
         | lm_abi::OP_TLS_CLOSE => Some(ResourceErrors::Tls),
         lm_abi::OP_TTY_EXIT_RAW => Some(ResourceErrors::Tty),
         lm_abi::OP_SIGNAL_NEXT | lm_abi::OP_SIGNAL_CLOSE => Some(ResourceErrors::Signal),
+        lm_abi::OP_PIPE_READ | lm_abi::OP_PIPE_WRITE | lm_abi::OP_PIPE_CLOSE => {
+            Some(ResourceErrors::Pipe)
+        }
+        lm_abi::OP_EXEC_WAIT
+        | lm_abi::OP_EXEC_TERMINATE
+        | lm_abi::OP_EXEC_KILL
+        | lm_abi::OP_EXEC_CLOSE => Some(ResourceErrors::Exec),
         _ => None,
     }
 }
@@ -62,6 +71,10 @@ fn object_errors(object: &Object) -> Option<ResourceErrors> {
         Object::NativeTlsStream { .. } => Some(ResourceErrors::Tls),
         Object::NativeRawMode { .. } => Some(ResourceErrors::Tty),
         Object::NativeSignalStream { .. } => Some(ResourceErrors::Signal),
+        Object::NativePipeReader { .. } | Object::NativePipeWriter { .. } => {
+            Some(ResourceErrors::Pipe)
+        }
+        Object::NativeChild { .. } => Some(ResourceErrors::Exec),
         _ => None,
     }
 }
@@ -75,6 +88,9 @@ fn object_resource(object: &Object) -> Option<u64> {
         | Object::NativeTlsStream { resource }
         | Object::NativeRawMode { resource }
         | Object::NativeSignalStream { resource }
+        | Object::NativePipeReader { resource }
+        | Object::NativePipeWriter { resource }
+        | Object::NativeChild { resource }
         | Object::NativeHostResource { resource, .. } => Some(*resource),
         _ => None,
     }
@@ -159,6 +175,24 @@ impl World {
                 *token,
                 crate::ResourceKind::SignalStream,
                 lm_abi::OP_SIGNAL_OPEN,
+            ),
+            HostValue::PipeReader(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::PipeReader,
+                lm_abi::OP_PIPE_OPEN,
+            ),
+            HostValue::PipeWriter(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::PipeWriter,
+                lm_abi::OP_PIPE_OPEN,
+            ),
+            HostValue::Child(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::Child,
+                lm_abi::OP_EXEC_SPAWN,
             ),
             HostValue::Resource(resource) => self.build_host_resource(vm, *resource),
             HostValue::Artifact { module, interface } => {
@@ -267,6 +301,21 @@ impl World {
                     CoreCtor::SignalUnsupported => self.core.signal_error_unsupported,
                     CoreCtor::SignalLimitExceeded => self.core.signal_error_limit_exceeded,
                     CoreCtor::SignalFailed => self.core.signal_error_failed,
+                    CoreCtor::PipeErrorClosed => self.core.pipe_error_closed,
+                    CoreCtor::PipeErrorBrokenPipe => self.core.pipe_error_broken_pipe,
+                    CoreCtor::PipeErrorInvalidInput => self.core.pipe_error_invalid_input,
+                    CoreCtor::PipeErrorLimitExceeded => self.core.pipe_error_limit_exceeded,
+                    CoreCtor::PipeErrorUnsupported => self.core.pipe_error_unsupported,
+                    CoreCtor::PipeErrorFailed => self.core.pipe_error_failed,
+                    CoreCtor::ChildStatusExited => self.core.child_status_exited,
+                    CoreCtor::ChildStatusTerminated => self.core.child_status_terminated,
+                    CoreCtor::ExecErrorClosed => self.core.exec_error_closed,
+                    CoreCtor::ExecErrorInvalidInput => self.core.exec_error_invalid_input,
+                    CoreCtor::ExecErrorLimitExceeded => self.core.exec_error_limit_exceeded,
+                    CoreCtor::ExecErrorNotFound => self.core.exec_error_not_found,
+                    CoreCtor::ExecErrorPermissionDenied => self.core.exec_error_permission_denied,
+                    CoreCtor::ExecErrorUnsupported => self.core.exec_error_unsupported,
+                    CoreCtor::ExecErrorFailed => self.core.exec_error_failed,
                     CoreCtor::CompileErrors => self.core.compile_errors,
                 };
                 if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
@@ -614,6 +663,10 @@ impl World {
         let close = |host: &mut Box<dyn Host>| match kind {
             crate::ResourceKind::RawMode => host.close_raw_mode(token),
             crate::ResourceKind::SignalStream => host.close_signal_stream(token),
+            crate::ResourceKind::PipeReader | crate::ResourceKind::PipeWriter => {
+                host.close_pipe(token)
+            }
+            crate::ResourceKind::Child => host.close_child(token),
             _ => false,
         };
         if self.pending_op(vm) != Some(open_op) {
@@ -645,6 +698,9 @@ impl World {
         let object = match kind {
             crate::ResourceKind::RawMode => Object::NativeRawMode { resource },
             crate::ResourceKind::SignalStream => Object::NativeSignalStream { resource },
+            crate::ResourceKind::PipeReader => Object::NativePipeReader { resource },
+            crate::ResourceKind::PipeWriter => Object::NativePipeWriter { resource },
+            crate::ResourceKind::Child => Object::NativeChild { resource },
             _ => return Err(FaultCode::MalformedState),
         };
         match self.machines[vm as usize].alloc(object) {
@@ -744,6 +800,12 @@ impl World {
                     crate::ResourceKind::SignalStream => {
                         self.host.close_signal_stream(token);
                     }
+                    crate::ResourceKind::PipeReader | crate::ResourceKind::PipeWriter => {
+                        self.host.close_pipe(token);
+                    }
+                    crate::ResourceKind::Child => {
+                        self.host.close_child(token);
+                    }
                     crate::ResourceKind::PendingOperation | crate::ResourceKind::Extension(_) => {}
                 },
                 ResourceBacking::Extension(resource) => {
@@ -810,6 +872,54 @@ impl World {
         object_resource(object)
     }
 
+    /// Return every pipe resource supplied to the pending child spawn.
+    pub(super) fn pending_exec_pipe_resources(&self, vm: VmId) -> Vec<u64> {
+        let Some(machine) = self.machines.get(vm as usize) else {
+            return Vec::new();
+        };
+        let Some(spec) = machine
+            .vm
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.args.first())
+            .and_then(|value| value.as_obj())
+            .map(|reference| machine.vm.heap.get(reference))
+        else {
+            return Vec::new();
+        };
+        let Object::Instance { class, fields, .. } = spec else {
+            return Vec::new();
+        };
+        if Some(*class) != self.core.exec_spec || fields.len() != 7 {
+            return Vec::new();
+        }
+        let mut resources = Vec::new();
+        for value in [&fields[4], &fields[5], &fields[6]] {
+            let Some(Object::Instance { fields, .. }) = value
+                .as_obj()
+                .map(|reference| machine.vm.heap.get(reference))
+            else {
+                continue;
+            };
+            let Some(resource) =
+                fields
+                    .first()
+                    .and_then(|value| value.as_obj())
+                    .and_then(|reference| match machine.vm.heap.get(reference) {
+                        Object::NativePipeReader { resource }
+                        | Object::NativePipeWriter { resource } => Some(*resource),
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            if !resources.contains(&resource) {
+                resources.push(resource);
+            }
+        }
+        resources
+    }
+
     pub(super) fn file_handle_resource(&self, holder: VmId, value: Value) -> Option<u64> {
         let reference = value.as_obj()?;
         match self.machines[holder as usize].vm.heap.get(reference) {
@@ -820,6 +930,9 @@ impl World {
             Object::NativeRawMode { resource } | Object::NativeSignalStream { resource } => {
                 Some(*resource)
             }
+            Object::NativePipeReader { resource }
+            | Object::NativePipeWriter { resource }
+            | Object::NativeChild { resource } => Some(*resource),
             _ => None,
         }
     }
@@ -914,6 +1027,9 @@ impl World {
                     Object::NativeTlsStream { resource }
                     | Object::NativeRawMode { resource }
                     | Object::NativeSignalStream { resource } => *resource,
+                    Object::NativePipeReader { resource }
+                    | Object::NativePipeWriter { resource }
+                    | Object::NativeChild { resource } => *resource,
                     _ => continue,
                 };
                 if self.bound_resources.contains_key(&resource) {
@@ -1005,6 +1121,8 @@ impl World {
             ResourceErrors::Tls => self.core.tls_closed,
             ResourceErrors::Tty => self.core.tty_error_closed,
             ResourceErrors::Signal => self.core.signal_error_closed,
+            ResourceErrors::Pipe => self.core.pipe_error_closed,
+            ResourceErrors::Exec => self.core.exec_error_closed,
         };
         let closed = self.make_instance(vm, arm, vec![])?;
         self.make_instance(vm, self.core.result_err, vec![closed])
@@ -1033,6 +1151,12 @@ impl World {
             }
             ResourceErrors::Signal => {
                 self.make_instance(vm, self.core.signal_error_failed, vec![text])?
+            }
+            ResourceErrors::Pipe => {
+                self.make_instance(vm, self.core.pipe_error_failed, vec![text])?
+            }
+            ResourceErrors::Exec => {
+                self.make_instance(vm, self.core.exec_error_failed, vec![text])?
             }
         };
         self.make_instance(vm, self.core.result_err, vec![error])

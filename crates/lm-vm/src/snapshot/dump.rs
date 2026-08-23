@@ -357,6 +357,9 @@ fn payload(object: &Object) -> String {
         Object::NativeTlsStream { resource } => format!("TLS stream resource {resource}"),
         Object::NativeRawMode { resource } => format!("raw mode resource {resource}"),
         Object::NativeSignalStream { resource } => format!("signal stream resource {resource}"),
+        Object::NativePipeReader { resource } => format!("pipe reader resource {resource}"),
+        Object::NativePipeWriter { resource } => format!("pipe writer resource {resource}"),
+        Object::NativeChild { resource } => format!("child resource {resource}"),
         Object::NativeHostResource { kind, resource } => {
             format!("host resource {}:{resource}", hex(kind))
         }

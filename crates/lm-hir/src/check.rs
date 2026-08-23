@@ -42,6 +42,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/fs.lm"),
     "\n",
+    include_str!("../../../core/exec.lm"),
+    "\n",
     include_str!("../../../core/network.lm"),
     "\n",
     include_str!("../../../core/tls.lm"),
@@ -71,7 +73,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 124] = [
+pub const PRELUDE_TYPES: [&str; 137] = [
     "Option",
     "Result",
     "Ordering",
@@ -157,6 +159,19 @@ pub const PRELUDE_TYPES: [&str; 124] = [
     "FileInfo",
     "DirEntry",
     "RenameMode",
+    "PipeError",
+    "PipeEnd",
+    "PipeReader",
+    "PipeWriter",
+    "ChildInput",
+    "ChildOutput",
+    "ChildEnv",
+    "ExecSpec",
+    "ChildStatus",
+    "ExecError",
+    "Child",
+    "Pipe",
+    "Exec",
     "IpAddress",
     "SocketAddress",
     "NetError",

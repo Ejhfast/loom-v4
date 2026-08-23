@@ -1,0 +1,169 @@
+# Core: anonymous pipes and operating-system children.
+
+enum PipeError implements Error
+  Closed
+  BrokenPipe
+  InvalidInput(message: String)
+  LimitExceeded(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Closed              then "the pipe end is closed"
+    in BrokenPipe          then "the pipe has no reader"
+    in InvalidInput(m)     then m
+    in LimitExceeded(m)    then m
+    in Unsupported(m)      then m
+    in Failed(m)           then m
+    end
+    builder.append(text)
+  end
+end
+
+class PipeEnd
+  def close(self): Result[(), PipeError] with Pipe.Close
+    sys.pipe.close(self)
+  end
+end
+
+final class PipeReader < PipeEnd
+  def read(self, max_bytes: Int): Result[Bytes, PipeError] with Pipe.Read
+    sys.pipe.read(self, max_bytes)
+  end
+
+  def read_wait(self, max_bytes: Int): Wait[Result[Bytes, PipeError]] with Pipe.Read
+    sys.pipe.read.wait(self, max_bytes)
+  end
+end
+
+final class PipeWriter < PipeEnd
+  def write(self, bytes: Bytes): Result[Int, PipeError] with Pipe.Write
+    sys.pipe.write(self, bytes)
+  end
+
+  def write_all(self, bytes: Bytes): Result[(), PipeError] with Pipe.Write
+    offset = 0
+    while offset < bytes.len()
+      count = bytes.len() - offset
+      if count > 65535
+        count = 65535
+      end
+      part = bytes.slice(offset, count).expect("the pipe write suffix is valid")
+      written = self.write(part)?
+      if written <= 0 or written > part.len()
+        return Err(PipeError.Failed("the pipe made invalid write progress"))
+      end
+      offset = offset + written
+    end
+    Ok(())
+  end
+end
+
+enum ChildInput
+  Inherit
+  Null
+  Pipe(reader: PipeReader)
+end
+
+enum ChildOutput
+  Inherit
+  Null
+  Pipe(writer: PipeWriter)
+end
+
+enum ChildEnv
+  Inherit
+  Exact(values: Map[String, String])
+end
+
+final class ExecSpec
+  program: String
+  arguments: List[String]
+  directory: Option[String]
+  environment: ChildEnv
+  input: ChildInput
+  output: ChildOutput
+  error: ChildOutput
+
+  def init(
+    mut self,
+    program: String,
+    arguments: List[String],
+    directory: Option[String],
+    environment: ChildEnv,
+    input: ChildInput,
+    output: ChildOutput,
+    error: ChildOutput
+  )
+    self.program = program
+    self.arguments = arguments
+    self.directory = directory
+    self.environment = environment
+    self.input = input
+    self.output = output
+    self.error = error
+  end
+end
+
+enum ChildStatus
+  Exited(code: Int)
+  Terminated
+end
+
+final class Pipe
+  def open(self): Result[(PipeReader, PipeWriter), PipeError] with Pipe.Open
+    sys.pipe.open()
+  end
+end
+
+enum ExecError implements Error
+  Closed
+  InvalidInput(message: String)
+  LimitExceeded(message: String)
+  NotFound(message: String)
+  PermissionDenied(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Closed              then "the child handle is closed"
+    in InvalidInput(m)     then m
+    in LimitExceeded(m)    then m
+    in NotFound(m)         then m
+    in PermissionDenied(m) then m
+    in Unsupported(m)      then m
+    in Failed(m)           then m
+    end
+    builder.append(text)
+  end
+end
+
+final class Child
+  def wait(self): Result[ChildStatus, ExecError] with Exec.Wait
+    sys.exec.wait(self)
+  end
+
+  def wait_source(self): Wait[Result[ChildStatus, ExecError]] with Exec.Wait
+    sys.exec.wait.wait(self)
+  end
+
+  def terminate(self): Result[(), ExecError] with Exec.Terminate
+    sys.exec.terminate(self)
+  end
+
+  def kill(self): Result[(), ExecError] with Exec.Kill
+    sys.exec.kill(self)
+  end
+
+  def close(self): Result[(), ExecError] with Exec.Close
+    sys.exec.close(self)
+  end
+end
+
+final class Exec
+  def spawn(self, spec: ExecSpec): Result[Child, ExecError] with Exec.Spawn
+    sys.exec.spawn(spec)
+  end
+end

@@ -124,6 +124,13 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::TtyError => "TtyError",
                     lm_abi::AbiCore::SignalKind => "SignalKind",
                     lm_abi::AbiCore::SignalError => "SignalError",
+                    lm_abi::AbiCore::PipeError => "PipeError",
+                    lm_abi::AbiCore::ChildInput => "ChildInput",
+                    lm_abi::AbiCore::ChildOutput => "ChildOutput",
+                    lm_abi::AbiCore::ChildEnv => "ChildEnv",
+                    lm_abi::AbiCore::ExecSpec => "ExecSpec",
+                    lm_abi::AbiCore::ChildStatus => "ChildStatus",
+                    lm_abi::AbiCore::ExecError => "ExecError",
                 };
                 Self::core_class(ctx, name)
             }
@@ -135,6 +142,10 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
                 lm_abi::AbiNative::RawMode => Self::core_class(ctx, "RawMode"),
                 lm_abi::AbiNative::SignalStream => Self::core_class(ctx, "SignalStream"),
+                lm_abi::AbiNative::PipeEnd => Self::core_class(ctx, "PipeEnd"),
+                lm_abi::AbiNative::PipeReader => Self::core_class(ctx, "PipeReader"),
+                lm_abi::AbiNative::PipeWriter => Self::core_class(ctx, "PipeWriter"),
+                lm_abi::AbiNative::Child => Self::core_class(ctx, "Child"),
             },
             lm_abi::AbiType::Var(index) => vars
                 .get(index as usize)

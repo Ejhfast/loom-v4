@@ -34,6 +34,10 @@ pub enum HostArg {
     RawMode(u64),
     SignalKind(HostSignalKind),
     SignalStream(u64),
+    PipeReader(u64),
+    PipeWriter(u64),
+    Child(u64),
+    ExecSpec(HostExecSpec),
     Resource(HostResource),
     CompileEnv(HostCompileEnv),
     CompileOptions(HostCompileOptions),
@@ -150,6 +154,41 @@ pub enum HostSignalKind {
     Terminate,
 }
 
+/// One portable child standard-input binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostChildInput {
+    Inherit,
+    Null,
+    Pipe(u64),
+}
+
+/// One portable child standard-output binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostChildOutput {
+    Inherit,
+    Null,
+    Pipe(u64),
+}
+
+/// One portable child environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostChildEnv {
+    Inherit,
+    Exact(Vec<(SharedText, SharedText)>),
+}
+
+/// One complete operating-system child specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostExecSpec {
+    pub program: SharedText,
+    pub arguments: Vec<SharedText>,
+    pub directory: Option<SharedText>,
+    pub environment: HostChildEnv,
+    pub input: HostChildInput,
+    pub output: HostChildOutput,
+    pub error: HostChildOutput,
+}
+
 /// One portable file-open mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOpenOptions {
@@ -253,6 +292,21 @@ pub enum CoreCtor {
     SignalUnsupported,
     SignalLimitExceeded,
     SignalFailed,
+    PipeErrorClosed,
+    PipeErrorBrokenPipe,
+    PipeErrorInvalidInput,
+    PipeErrorLimitExceeded,
+    PipeErrorUnsupported,
+    PipeErrorFailed,
+    ChildStatusExited,
+    ChildStatusTerminated,
+    ExecErrorClosed,
+    ExecErrorInvalidInput,
+    ExecErrorLimitExceeded,
+    ExecErrorNotFound,
+    ExecErrorPermissionDenied,
+    ExecErrorUnsupported,
+    ExecErrorFailed,
     CompileErrors,
 }
 
@@ -291,6 +345,9 @@ pub enum HostValue {
     TlsStream(u64),
     RawMode(u64),
     SignalStream(u64),
+    PipeReader(u64),
+    PipeWriter(u64),
+    Child(u64),
     Resource(HostResource),
     Artifact {
         module: SharedBytes,
@@ -410,6 +467,14 @@ pub trait Host {
     fn close_signal_stream(&mut self, _token: u64) -> bool {
         false
     }
+    /// Close one pipe end during forced resource cleanup.
+    fn close_pipe(&mut self, _token: u64) -> bool {
+        false
+    }
+    /// Detach one child during forced resource cleanup.
+    fn close_child(&mut self, _token: u64) -> bool {
+        false
+    }
     /// Close one opaque extension resource during forced cleanup.
     fn close_resource(&mut self, _resource: HostResource) -> bool {
         false
@@ -477,6 +542,12 @@ pub struct RecordingHost {
     signal_stream: Option<MemorySignalStream>,
     next_signal_stream: u64,
     signals_on_open: VecDeque<HostSignalKind>,
+    pipes: BTreeMap<u64, MemoryPipe>,
+    pipe_ends: BTreeMap<u64, MemoryPipeEnd>,
+    next_pipe: u64,
+    children: BTreeMap<u64, MemoryChild>,
+    child_programs: BTreeMap<String, MemoryChildProgram>,
+    next_child: u64,
 }
 
 /// One reply this host holds until a later poll.
@@ -498,6 +569,8 @@ enum DeferredAction {
     Read { stream: u64, count: usize },
     TlsRead { stream: u64, count: usize },
     SignalNext { stream: u64 },
+    PipeRead { reader: u64, count: usize },
+    ChildWait { child: u64 },
 }
 
 #[derive(Debug)]
@@ -515,6 +588,13 @@ enum RetainedWait {
         client: u64,
     },
     Signal(HostSignalKind),
+    PipeRead {
+        pipe: u64,
+        bytes: Vec<u8>,
+    },
+    ChildWait {
+        child: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -523,6 +603,43 @@ struct MemorySignalStream {
     interrupt: bool,
     terminate: bool,
     queued: VecDeque<HostSignalKind>,
+}
+
+#[derive(Debug)]
+struct MemoryPipe {
+    bytes: VecDeque<u8>,
+    reader_open: bool,
+    writer_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryPipeKind {
+    Reader,
+    Writer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemoryPipeEnd {
+    pipe: u64,
+    kind: MemoryPipeKind,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryChild {
+    status: MemoryChildStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MemoryChildStatus {
+    Exited(i64),
+    Terminated,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryChildProgram {
+    status: MemoryChildStatus,
+    output: Vec<u8>,
+    error: Vec<u8>,
 }
 
 /// True when the command-line host serves this operation off the
@@ -564,6 +681,15 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_TLS_LOCAL_ADDRESS
             | lm_abi::OP_TLS_PEER_ADDRESS
             | lm_abi::OP_TLS_CLOSE
+            | lm_abi::OP_PIPE_OPEN
+            | lm_abi::OP_PIPE_READ
+            | lm_abi::OP_PIPE_WRITE
+            | lm_abi::OP_PIPE_CLOSE
+            | lm_abi::OP_EXEC_SPAWN
+            | lm_abi::OP_EXEC_WAIT
+            | lm_abi::OP_EXEC_TERMINATE
+            | lm_abi::OP_EXEC_KILL
+            | lm_abi::OP_EXEC_CLOSE
     )
 }
 
@@ -601,6 +727,11 @@ const MAX_ENTROPY_BYTES: usize = 16 << 20;
 const MAX_DNS_RESULTS: usize = 64;
 const MAX_VIRTUAL_STREAM_BYTES: usize = 64 << 20;
 const VIRTUAL_WRITE_CHUNK: usize = 4 << 10;
+const MAX_PIPE_IO_BYTES: usize = 16 << 20;
+const MAX_VIRTUAL_PIPE_BYTES: usize = 64 << 20;
+const MAX_EXEC_ITEMS: usize = 4_096;
+const MAX_EXEC_TEXT_BYTES: usize = 1 << 20;
+const MAX_EXEC_ITEM_BYTES: usize = 64 << 10;
 
 fn fs_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
@@ -666,6 +797,22 @@ fn tls_closed() -> HostValue {
     )
 }
 
+fn pipe_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn pipe_error(ctor: CoreCtor, message: Option<&str>) -> HostValue {
+    core_error(ctor, message)
+}
+
+fn exec_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn exec_error(ctor: CoreCtor, message: Option<&str>) -> HostValue {
+    core_error(ctor, message)
+}
+
 impl Default for RecordingHost {
     fn default() -> RecordingHost {
         RecordingHost::new(1)
@@ -717,6 +864,12 @@ impl RecordingHost {
             signal_stream: None,
             next_signal_stream: 1,
             signals_on_open: VecDeque::new(),
+            pipes: BTreeMap::new(),
+            pipe_ends: BTreeMap::new(),
+            next_pipe: 1,
+            children: BTreeMap::new(),
+            child_programs: BTreeMap::new(),
+            next_child: 1,
         }
     }
 
@@ -775,6 +928,24 @@ impl RecordingHost {
         self.signals_on_open.push_back(kind);
     }
 
+    /// Add one deterministic child program to the test host.
+    pub fn set_child_program(
+        &mut self,
+        program: impl Into<String>,
+        exit_code: i64,
+        output: Vec<u8>,
+        error: Vec<u8>,
+    ) {
+        self.child_programs.insert(
+            program.into(),
+            MemoryChildProgram {
+                status: MemoryChildStatus::Exited(exit_code),
+                output,
+                error,
+            },
+        );
+    }
+
     /// True when the test host owns raw terminal mode.
     pub fn raw_mode_active(&self) -> bool {
         self.raw_mode.is_some()
@@ -783,6 +954,16 @@ impl RecordingHost {
     /// True when the test host owns one signal stream.
     pub fn signal_stream_active(&self) -> bool {
         self.signal_stream.is_some()
+    }
+
+    /// Count the live pipe ends in the test host.
+    pub fn pipe_end_count(&self) -> usize {
+        self.pipe_ends.len()
+    }
+
+    /// Count the live child handles in the test host.
+    pub fn child_count(&self) -> usize {
+        self.children.len()
     }
 
     fn next_rand(&mut self) -> u64 {
@@ -919,6 +1100,313 @@ impl RecordingHost {
         })
     }
 
+    fn take_pipe_token(&mut self) -> Option<u64> {
+        let token = self.next_pipe;
+        self.next_pipe = token.checked_add(1)?;
+        Some(token)
+    }
+
+    fn close_virtual_pipe(&mut self, token: u64) -> bool {
+        let Some(end) = self.pipe_ends.remove(&token) else {
+            return false;
+        };
+        let remove = if let Some(pipe) = self.pipes.get_mut(&end.pipe) {
+            match end.kind {
+                MemoryPipeKind::Reader => pipe.reader_open = false,
+                MemoryPipeKind::Writer => pipe.writer_open = false,
+            }
+            !pipe.reader_open && !pipe.writer_open
+        } else {
+            false
+        };
+        if remove {
+            self.pipes.remove(&end.pipe);
+        }
+        true
+    }
+
+    fn pipe_read_value(&mut self, reader: u64, count: usize) -> Option<HostValue> {
+        let Some(end) = self.pipe_ends.get(&reader).copied() else {
+            return Some(pipe_error(CoreCtor::PipeErrorClosed, None));
+        };
+        if end.kind != MemoryPipeKind::Reader {
+            return Some(pipe_error(
+                CoreCtor::PipeErrorInvalidInput,
+                Some("the pipe end is not readable"),
+            ));
+        }
+        let Some(pipe) = self.pipes.get_mut(&end.pipe) else {
+            return Some(pipe_error(CoreCtor::PipeErrorClosed, None));
+        };
+        if !pipe.bytes.is_empty() {
+            let count = count.min(pipe.bytes.len());
+            let bytes: Vec<u8> = pipe.bytes.drain(..count).collect();
+            return Some(pipe_ok(HostValue::Bytes(bytes.into())));
+        }
+        if !pipe.writer_open {
+            return Some(pipe_ok(HostValue::Bytes(Vec::new().into())));
+        }
+        None
+    }
+
+    fn pipe_write_value(&mut self, writer: u64, bytes: &[u8]) -> HostValue {
+        let Some(end) = self.pipe_ends.get(&writer).copied() else {
+            return pipe_error(CoreCtor::PipeErrorClosed, None);
+        };
+        if end.kind != MemoryPipeKind::Writer {
+            return pipe_error(
+                CoreCtor::PipeErrorInvalidInput,
+                Some("the pipe end is not writable"),
+            );
+        }
+        let Some(pipe) = self.pipes.get_mut(&end.pipe) else {
+            return pipe_error(CoreCtor::PipeErrorClosed, None);
+        };
+        if !pipe.reader_open {
+            return pipe_error(CoreCtor::PipeErrorBrokenPipe, None);
+        }
+        let available = MAX_VIRTUAL_PIPE_BYTES.saturating_sub(pipe.bytes.len());
+        let written = bytes.len().min(VIRTUAL_WRITE_CHUNK).min(available);
+        if written == 0 && !bytes.is_empty() {
+            return pipe_error(
+                CoreCtor::PipeErrorLimitExceeded,
+                Some("the virtual pipe buffer is full"),
+            );
+        }
+        pipe.bytes.extend(&bytes[..written]);
+        pipe_ok(HostValue::Int(written as i64))
+    }
+
+    fn pipe_before_read(&self, reader: u64) -> Option<(u64, VecDeque<u8>)> {
+        let end = self.pipe_ends.get(&reader)?;
+        (end.kind == MemoryPipeKind::Reader)
+            .then(|| {
+                self.pipes
+                    .get(&end.pipe)
+                    .map(|pipe| (end.pipe, pipe.bytes.clone()))
+            })
+            .flatten()
+    }
+
+    fn child_status_value(status: MemoryChildStatus) -> HostValue {
+        let status = match status {
+            MemoryChildStatus::Exited(code) => {
+                HostValue::Ctor(CoreCtor::ChildStatusExited, vec![HostValue::Int(code)])
+            }
+            MemoryChildStatus::Terminated => {
+                HostValue::Ctor(CoreCtor::ChildStatusTerminated, Vec::new())
+            }
+        };
+        exec_ok(status)
+    }
+
+    fn child_wait_value(&mut self, child: u64, consume: bool) -> HostValue {
+        let Some(state) = self.children.get(&child) else {
+            return exec_error(CoreCtor::ExecErrorClosed, None);
+        };
+        let value = Self::child_status_value(state.status);
+        if consume {
+            self.children.remove(&child);
+        }
+        value
+    }
+
+    fn validate_exec_spec(&self, spec: &HostExecSpec) -> Option<HostValue> {
+        if spec.program.is_empty() || spec.program.contains('\0') {
+            return Some(exec_error(
+                CoreCtor::ExecErrorInvalidInput,
+                Some("the program name is invalid"),
+            ));
+        }
+        if spec.program.len() > MAX_EXEC_ITEM_BYTES {
+            return Some(exec_error(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("the program name is too large"),
+            ));
+        }
+        if spec.arguments.len() > MAX_EXEC_ITEMS {
+            return Some(exec_error(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("the argument count is too large"),
+            ));
+        }
+        let mut total = spec.program.len();
+        for argument in &spec.arguments {
+            if argument.contains('\0') {
+                return Some(exec_error(
+                    CoreCtor::ExecErrorInvalidInput,
+                    Some("an argument contains a zero byte"),
+                ));
+            }
+            if argument.len() > MAX_EXEC_ITEM_BYTES {
+                return Some(exec_error(
+                    CoreCtor::ExecErrorLimitExceeded,
+                    Some("an argument is too large"),
+                ));
+            }
+            total = total.saturating_add(argument.len());
+        }
+        if let Some(directory) = &spec.directory {
+            if directory.is_empty() || directory.contains('\0') {
+                return Some(exec_error(
+                    CoreCtor::ExecErrorInvalidInput,
+                    Some("the child directory is invalid"),
+                ));
+            }
+            if directory.len() > MAX_EXEC_ITEM_BYTES {
+                return Some(exec_error(
+                    CoreCtor::ExecErrorLimitExceeded,
+                    Some("the child directory is too large"),
+                ));
+            }
+            total = total.saturating_add(directory.len());
+        }
+        if let HostChildEnv::Exact(values) = &spec.environment {
+            if values.len() > MAX_EXEC_ITEMS {
+                return Some(exec_error(
+                    CoreCtor::ExecErrorLimitExceeded,
+                    Some("the environment entry count is too large"),
+                ));
+            }
+            for (name, value) in values {
+                if name.is_empty() || name.contains('=') || name.contains('\0') {
+                    return Some(exec_error(
+                        CoreCtor::ExecErrorInvalidInput,
+                        Some("an environment name is invalid"),
+                    ));
+                }
+                if value.contains('\0') {
+                    return Some(exec_error(
+                        CoreCtor::ExecErrorInvalidInput,
+                        Some("an environment value contains a zero byte"),
+                    ));
+                }
+                if name.len() > MAX_EXEC_ITEM_BYTES || value.len() > MAX_EXEC_ITEM_BYTES {
+                    return Some(exec_error(
+                        CoreCtor::ExecErrorLimitExceeded,
+                        Some("an environment entry is too large"),
+                    ));
+                }
+                total = total.saturating_add(name.len()).saturating_add(value.len());
+            }
+        }
+        if total > MAX_EXEC_TEXT_BYTES {
+            return Some(exec_error(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("the child specification is too large"),
+            ));
+        }
+        let input_valid = match spec.input {
+            HostChildInput::Inherit | HostChildInput::Null => true,
+            HostChildInput::Pipe(token) => self
+                .pipe_ends
+                .get(&token)
+                .is_some_and(|end| end.kind == MemoryPipeKind::Reader),
+        };
+        let output_valid = |output: HostChildOutput| match output {
+            HostChildOutput::Inherit | HostChildOutput::Null => true,
+            HostChildOutput::Pipe(token) => self
+                .pipe_ends
+                .get(&token)
+                .is_some_and(|end| end.kind == MemoryPipeKind::Writer),
+        };
+        if !input_valid || !output_valid(spec.output) || !output_valid(spec.error) {
+            return Some(exec_error(CoreCtor::ExecErrorClosed, None));
+        }
+        None
+    }
+
+    fn write_child_output(&mut self, output: HostChildOutput, bytes: &[u8], error: bool) {
+        match output {
+            HostChildOutput::Inherit => {
+                if error {
+                    self.written_error_bytes.extend_from_slice(bytes);
+                } else {
+                    self.written_bytes.extend_from_slice(bytes);
+                }
+            }
+            HostChildOutput::Null => {}
+            HostChildOutput::Pipe(writer) => {
+                let _ = self.pipe_write_value(writer, bytes);
+            }
+        }
+    }
+
+    fn consume_child_pipes(&mut self, spec: &HostExecSpec) {
+        let mut tokens = Vec::new();
+        if let HostChildInput::Pipe(token) = spec.input {
+            tokens.push(token);
+        }
+        for output in [spec.output, spec.error] {
+            if let HostChildOutput::Pipe(token) = output {
+                if !tokens.contains(&token) {
+                    tokens.push(token);
+                }
+            }
+        }
+        for token in tokens {
+            self.close_virtual_pipe(token);
+        }
+    }
+
+    fn discard_value_resources(&mut self, value: HostValue) {
+        match value {
+            HostValue::File(token) => {
+                self.file_handles.remove(&token);
+            }
+            HostValue::TcpStream(token) => {
+                self.close_virtual_tcp(HostTcpResource {
+                    kind: HostTcpKind::Stream,
+                    token,
+                });
+            }
+            HostValue::TcpListener(token) => {
+                self.close_virtual_tcp(HostTcpResource {
+                    kind: HostTcpKind::Listener,
+                    token,
+                });
+            }
+            HostValue::TlsStream(token) => {
+                self.close_virtual_tls(token);
+            }
+            HostValue::RawMode(token) => {
+                if self.raw_mode == Some(token) {
+                    self.raw_mode = None;
+                }
+            }
+            HostValue::SignalStream(token) => {
+                if self
+                    .signal_stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.token == token)
+                {
+                    self.signal_stream = None;
+                }
+            }
+            HostValue::PipeReader(token) | HostValue::PipeWriter(token) => {
+                self.close_virtual_pipe(token);
+            }
+            HostValue::Child(token) => {
+                self.children.remove(&token);
+            }
+            HostValue::List(values) | HostValue::Tuple(values) | HostValue::Ctor(_, values) => {
+                for value in values {
+                    self.discard_value_resources(value);
+                }
+            }
+            HostValue::Unit
+            | HostValue::Bool(_)
+            | HostValue::Int(_)
+            | HostValue::Float(_)
+            | HostValue::Str(_)
+            | HostValue::Bytes(_)
+            | HostValue::SocketAddress(_)
+            | HostValue::Resource(_)
+            | HostValue::Artifact { .. }
+            | HostValue::SyntaxParse { .. } => {}
+        }
+    }
+
     fn deferred_value(&mut self, token: u64) -> Option<HostValue> {
         let action = self.pending.get(&token)?.action.clone();
         match action {
@@ -932,6 +1420,12 @@ impl RecordingHost {
             DeferredAction::Read { stream, count } => self.read_value(stream, count),
             DeferredAction::TlsRead { stream, count } => self.tls_read_value(stream, count),
             DeferredAction::SignalNext { stream } => self.signal_next_value(stream),
+            DeferredAction::PipeRead { reader, count } => self.pipe_read_value(reader, count),
+            DeferredAction::ChildWait { child } => self
+                .children
+                .get(&child)
+                .map(|state| Self::child_status_value(state.status))
+                .or_else(|| Some(exec_error(CoreCtor::ExecErrorClosed, None))),
         }
     }
 }
@@ -2329,6 +2823,187 @@ impl RecordingHost {
                     HostStart::Completed(core_error(CoreCtor::SignalClosed, None))
                 }
             }
+            lm_abi::OP_PIPE_OPEN => {
+                if !args.is_empty() {
+                    return HostStart::Failed("Pipe.Open takes no arguments".to_string());
+                }
+                let Some(pipe) = self.take_pipe_token() else {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the pipe token space is exhausted"),
+                    ));
+                };
+                let Some(reader) = self.take_pipe_token() else {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the pipe token space is exhausted"),
+                    ));
+                };
+                let Some(writer) = self.take_pipe_token() else {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the pipe token space is exhausted"),
+                    ));
+                };
+                self.pipes.insert(
+                    pipe,
+                    MemoryPipe {
+                        bytes: VecDeque::new(),
+                        reader_open: true,
+                        writer_open: true,
+                    },
+                );
+                self.pipe_ends.insert(
+                    reader,
+                    MemoryPipeEnd {
+                        pipe,
+                        kind: MemoryPipeKind::Reader,
+                    },
+                );
+                self.pipe_ends.insert(
+                    writer,
+                    MemoryPipeEnd {
+                        pipe,
+                        kind: MemoryPipeKind::Writer,
+                    },
+                );
+                HostStart::Completed(pipe_ok(HostValue::Tuple(vec![
+                    HostValue::PipeReader(reader),
+                    HostValue::PipeWriter(writer),
+                ])))
+            }
+            lm_abi::OP_PIPE_READ => {
+                let (Some(HostArg::PipeReader(reader)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Pipe.Read needs a reader and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorInvalidInput,
+                        Some("the read count is not positive"),
+                    ));
+                };
+                if count == 0 || count > MAX_PIPE_IO_BYTES {
+                    let (ctor, message) = if count == 0 {
+                        (
+                            CoreCtor::PipeErrorInvalidInput,
+                            "the read count is not positive",
+                        )
+                    } else {
+                        (
+                            CoreCtor::PipeErrorLimitExceeded,
+                            "the read count is too large",
+                        )
+                    };
+                    return HostStart::Completed(pipe_error(ctor, Some(message)));
+                }
+                match self.pipe_read_value(*reader, count) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(
+                        key,
+                        DeferredAction::PipeRead {
+                            reader: *reader,
+                            count,
+                        },
+                    ),
+                }
+            }
+            lm_abi::OP_PIPE_WRITE => {
+                let (Some(HostArg::PipeWriter(writer)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Pipe.Write needs a writer and bytes".to_string());
+                };
+                if bytes.len() > MAX_PIPE_IO_BYTES {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                HostStart::Completed(self.pipe_write_value(*writer, bytes))
+            }
+            lm_abi::OP_PIPE_CLOSE => {
+                let token = match args.first() {
+                    Some(HostArg::PipeReader(token)) | Some(HostArg::PipeWriter(token)) => *token,
+                    _ => return HostStart::Failed("Pipe.Close needs one pipe end".to_string()),
+                };
+                if self.close_virtual_pipe(token) {
+                    HostStart::Completed(pipe_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(pipe_error(CoreCtor::PipeErrorClosed, None))
+                }
+            }
+            lm_abi::OP_EXEC_SPAWN => {
+                let Some(HostArg::ExecSpec(spec)) = args.first() else {
+                    return HostStart::Failed(
+                        "Exec.Spawn needs one child specification".to_string(),
+                    );
+                };
+                if let Some(error) = self.validate_exec_spec(spec) {
+                    return HostStart::Completed(error);
+                }
+                let Some(program) = self.child_programs.get(spec.program.as_str()).cloned() else {
+                    return HostStart::Completed(exec_error(
+                        CoreCtor::ExecErrorNotFound,
+                        Some("the test host does not know the child program"),
+                    ));
+                };
+                if spec
+                    .directory
+                    .as_ref()
+                    .is_some_and(|path| !self.directories.contains(path.as_str()))
+                {
+                    return HostStart::Completed(exec_error(
+                        CoreCtor::ExecErrorNotFound,
+                        Some("the child directory does not exist"),
+                    ));
+                }
+                let child = self.next_child;
+                let Some(next) = child.checked_add(1) else {
+                    return HostStart::Completed(exec_error(
+                        CoreCtor::ExecErrorLimitExceeded,
+                        Some("the child token space is exhausted"),
+                    ));
+                };
+                self.next_child = next;
+                self.write_child_output(spec.output, &program.output, false);
+                self.write_child_output(spec.error, &program.error, true);
+                self.consume_child_pipes(spec);
+                self.children.insert(
+                    child,
+                    MemoryChild {
+                        status: program.status,
+                    },
+                );
+                HostStart::Completed(exec_ok(HostValue::Child(child)))
+            }
+            lm_abi::OP_EXEC_WAIT => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Wait needs one child".to_string());
+                };
+                HostStart::Completed(self.child_wait_value(*child, true))
+            }
+            lm_abi::OP_EXEC_TERMINATE | lm_abi::OP_EXEC_KILL => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec termination needs one child".to_string());
+                };
+                let Some(child) = self.children.get_mut(child) else {
+                    return HostStart::Completed(exec_error(CoreCtor::ExecErrorClosed, None));
+                };
+                child.status = MemoryChildStatus::Terminated;
+                HostStart::Completed(exec_ok(HostValue::Unit))
+            }
+            lm_abi::OP_EXEC_CLOSE => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Close needs one child".to_string());
+                };
+                if self.children.remove(child).is_some() {
+                    HostStart::Completed(exec_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(exec_error(CoreCtor::ExecErrorClosed, None))
+                }
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -2371,6 +3046,10 @@ impl RecordingHost {
                 .and_then(|state| state.queued.front().copied()),
             _ => None,
         };
+        let pipe = match &action {
+            DeferredAction::PipeRead { reader, .. } => self.pipe_before_read(*reader),
+            _ => None,
+        };
         let value = self.deferred_value(token)?;
         let mut entry = self.pending.remove(&token)?;
         if entry.wait_source {
@@ -2396,6 +3075,17 @@ impl RecordingHost {
                 (!still_first).then_some(RetainedWait::Accept {
                     listener,
                     connection,
+                })
+            } else if let Some((pipe, before)) = pipe {
+                let after = self
+                    .pipes
+                    .get(&pipe)
+                    .map(|state| state.bytes.len())
+                    .unwrap_or(0);
+                let removed = before.len().saturating_sub(after);
+                (removed > 0).then(|| RetainedWait::PipeRead {
+                    pipe,
+                    bytes: before.into_iter().take(removed).collect(),
                 })
             } else {
                 signal.map(RetainedWait::Signal)
@@ -2464,6 +3154,14 @@ impl RecordingHost {
                     }
                 }
             }
+            RetainedWait::PipeRead { pipe, bytes } => {
+                if let Some(state) = self.pipes.get_mut(&pipe) {
+                    for byte in bytes.into_iter().rev() {
+                        state.bytes.push_front(byte);
+                    }
+                }
+            }
+            RetainedWait::ChildWait { .. } => {}
         }
     }
 }
@@ -2614,6 +3312,54 @@ impl Host for RecordingHost {
                 };
                 self.defer_wait(key, DeferredAction::SignalNext { stream: *stream }, None)
             }
+            lm_abi::OP_PIPE_READ => {
+                let (Some(HostArg::PipeReader(reader)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Pipe.Read needs a reader and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(pipe_error(
+                        CoreCtor::PipeErrorInvalidInput,
+                        Some("the read count is not positive"),
+                    ));
+                };
+                if count == 0 || count > MAX_PIPE_IO_BYTES {
+                    let (ctor, message) = if count == 0 {
+                        (
+                            CoreCtor::PipeErrorInvalidInput,
+                            "the read count is not positive",
+                        )
+                    } else {
+                        (
+                            CoreCtor::PipeErrorLimitExceeded,
+                            "the read count is too large",
+                        )
+                    };
+                    return HostStart::Completed(pipe_error(ctor, Some(message)));
+                }
+                self.defer_wait(
+                    key,
+                    DeferredAction::PipeRead {
+                        reader: *reader,
+                        count,
+                    },
+                    None,
+                )
+            }
+            lm_abi::OP_EXEC_WAIT => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Wait needs one child".to_string());
+                };
+                if !self.children.contains_key(child) {
+                    return HostStart::Completed(exec_error(CoreCtor::ExecErrorClosed, None));
+                }
+                self.defer_wait(
+                    key,
+                    DeferredAction::ChildWait { child: *child },
+                    Some(RetainedWait::ChildWait { child: *child }),
+                )
+            }
             _ => self.start(key, op, args),
         }
     }
@@ -2647,12 +3393,20 @@ impl Host for RecordingHost {
     }
 
     fn cancel(&mut self, token: u64) -> bool {
-        self.pending.remove(&token).is_some()
+        let Some(pending) = self.pending.remove(&token) else {
+            return false;
+        };
+        if let DeferredAction::Ready(value) = pending.action {
+            self.discard_value_resources(value);
+        }
+        true
     }
 
     fn commit_wait(&mut self, token: u64) -> bool {
         let ready = self.ready_waits.remove(&token);
-        self.retained_waits.remove(&token);
+        if let Some(RetainedWait::ChildWait { child }) = self.retained_waits.remove(&token) {
+            self.children.remove(&child);
+        }
         ready
     }
 
@@ -2700,6 +3454,14 @@ impl Host for RecordingHost {
         } else {
             false
         }
+    }
+
+    fn close_pipe(&mut self, token: u64) -> bool {
+        self.close_virtual_pipe(token)
+    }
+
+    fn close_child(&mut self, token: u64) -> bool {
+        self.children.remove(&token).is_some()
     }
 }
 
@@ -2752,6 +3514,14 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_signal_stream(&mut self, token: u64) -> bool {
         self.borrow_mut().close_signal_stream(token)
+    }
+
+    fn close_pipe(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_pipe(token)
+    }
+
+    fn close_child(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_child(token)
     }
 }
 

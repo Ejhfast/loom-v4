@@ -1997,6 +1997,9 @@ impl World {
                                 crate::ResourceKind::TlsStream => "tls-stream".to_string(),
                                 crate::ResourceKind::RawMode => "raw-mode".to_string(),
                                 crate::ResourceKind::SignalStream => "signal-stream".to_string(),
+                                crate::ResourceKind::PipeReader => "pipe-reader".to_string(),
+                                crate::ResourceKind::PipeWriter => "pipe-writer".to_string(),
+                                crate::ResourceKind::Child => "child".to_string(),
                                 crate::ResourceKind::PendingOperation => {
                                     "pending-operation".to_string()
                                 }

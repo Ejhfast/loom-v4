@@ -1,0 +1,50 @@
+# Capture one child program through an anonymous pipe.
+# The API does not start a shell unless the program names one.
+
+def capture_child(): String with Pipe, Exec
+  pair = Pipe().open().expect("the pipe opens")
+  reader = pair[0]
+  writer = pair[1]
+  directory: Option[String] = None
+  spec = ExecSpec(
+    "printf",
+    ["real-child"],
+    directory,
+    ChildEnv.Inherit,
+    ChildInput.Null,
+    ChildOutput.Pipe(writer),
+    ChildOutput.Null
+  )
+  child = case Exec().spawn(spec)
+  in Ok(value) then value
+  in Err(error)
+    writer.close()
+    reader.close()
+    return display(error)
+  end
+
+  output = ByteBuffer()
+  loop do
+    bytes = case reader.read(65536)
+    in Ok(value) then value
+    in Err(error)
+      reader.close()
+      child.close()
+      return display(error)
+    end
+    if bytes.is_empty()
+      break
+    end
+    output.extend(bytes)
+  end
+
+  status = child.wait().expect("the child status is available")
+  reader.close().expect("the pipe reader closes")
+  code = case status
+  in ChildStatus.Exited(value) then value
+  in ChildStatus.Terminated then -1
+  end
+  "#{output.finish().text()}:#{code}"
+end
+
+capture_child()

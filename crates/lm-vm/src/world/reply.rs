@@ -668,7 +668,26 @@ impl World {
             {
                 self.pending_resource_of(vm, ResourceErrors::Signal)
             }
+            Some(lm_abi::OP_PIPE_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.pipe_error_closed) =>
+            {
+                self.pending_resource_of(vm, ResourceErrors::Pipe)
+            }
+            Some(lm_abi::OP_EXEC_WAIT) | Some(lm_abi::OP_EXEC_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.exec_error_closed) =>
+            {
+                self.pending_resource_of(vm, ResourceErrors::Exec)
+            }
             _ => None,
+        };
+        let spawn_closing = if self.pending_op(vm) == Some(lm_abi::OP_EXEC_SPAWN)
+            && self.value_is_result_ok(vm, value)
+        {
+            self.pending_exec_pipe_resources(vm)
+        } else {
+            Vec::new()
         };
         if let Err(code) = self.check_reply(vm, value) {
             self.machines[vm as usize].set_fault(
@@ -695,6 +714,9 @@ impl World {
         }
         if let Some(resource) = closing {
             self.retire_resource(resource, close_host);
+        }
+        for resource in spawn_closing {
+            self.retire_resource(resource, false);
         }
         // A machine that parked at `Asked` for its driver leaves the
         // run set. This reply makes it runnable again, so the scheduler
@@ -757,6 +779,18 @@ impl World {
             .envs
             .close(&self.module, reply_ty, env)
             .map_err(|_| FaultCode::BoundaryLimit)?;
-        self.build_host_value(vm, reply, expected)
+        let first_resource = self.next_resource;
+        let built = self.build_host_value(vm, reply, expected);
+        if built.is_err() {
+            let opened: Vec<u64> = self
+                .bound_resources
+                .range(first_resource..)
+                .map(|(resource, _)| *resource)
+                .collect();
+            for resource in opened {
+                self.retire_resource(resource, true);
+            }
+        }
+        built
     }
 }

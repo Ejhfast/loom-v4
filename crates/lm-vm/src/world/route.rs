@@ -793,6 +793,20 @@ impl World {
                             }
                         }
                     }
+                    Object::NativePipeReader { resource } => self
+                        .host_pipe_token(vm, *resource, crate::ResourceKind::PipeReader)
+                        .map(HostArg::PipeReader),
+                    Object::NativePipeWriter { resource } => self
+                        .host_pipe_token(vm, *resource, crate::ResourceKind::PipeWriter)
+                        .map(HostArg::PipeWriter),
+                    Object::NativeChild { resource } => self
+                        .host_pipe_token(vm, *resource, crate::ResourceKind::Child)
+                        .map(HostArg::Child),
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.exec_spec =>
+                    {
+                        self.host_exec_spec(vm, fields).map(HostArg::ExecSpec)
+                    }
                     Object::List { items, .. } => {
                         let mut values = Vec::with_capacity(items.len());
                         for item in items {
@@ -936,6 +950,141 @@ impl World {
                 _ => Err(FaultCode::TypeMismatch),
             })
             .collect()
+    }
+
+    fn host_pipe_token(
+        &self,
+        _vm: VmId,
+        resource: u64,
+        kind: crate::ResourceKind,
+    ) -> Result<u64, FaultCode> {
+        let bound = self
+            .bound_resources
+            .get(&resource)
+            .ok_or(FaultCode::TypeMismatch)?;
+        if bound.kind != kind {
+            return Err(FaultCode::TypeMismatch);
+        }
+        match bound.backing {
+            ResourceBacking::Host(token) => Ok(token),
+            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                Err(FaultCode::TypeMismatch)
+            }
+        }
+    }
+
+    fn host_exec_spec(&self, vm: VmId, fields: &[Value]) -> Result<HostExecSpec, FaultCode> {
+        let [program, arguments, directory, environment, input, output, error] = fields else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let heap = &self.machines[vm as usize].vm.heap;
+        let text = |value: Value| match value.as_obj().map(|reference| heap.get(reference)) {
+            Some(Object::Str(value)) => Ok(value.clone()),
+            _ => Err(FaultCode::TypeMismatch),
+        };
+        let program = text(*program)?;
+        let arguments = match arguments.as_obj().map(|reference| heap.get(reference)) {
+            Some(Object::List { items, .. }) => items
+                .iter()
+                .map(|value| text(*value))
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let directory = if matches!(directory, Value::EmptyCase { arm: 1, .. }) {
+            None
+        } else {
+            Some(text(*directory)?)
+        };
+        let environment = match environment.as_obj().map(|reference| heap.get(reference)) {
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_env_inherit && fields.is_empty() =>
+            {
+                HostChildEnv::Inherit
+            }
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_env_exact && fields.len() == 1 =>
+            {
+                let Some(Object::Map { entries, .. }) =
+                    fields[0].as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let mut values = Vec::new();
+                values
+                    .try_reserve(entries.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                for entry in entries.iter().filter(|entry| entry.is_live()) {
+                    values.push((text(entry.key)?, text(entry.value)?));
+                }
+                HostChildEnv::Exact(values)
+            }
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let input = match input.as_obj().map(|reference| heap.get(reference)) {
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_input_inherit && fields.is_empty() =>
+            {
+                HostChildInput::Inherit
+            }
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_input_null && fields.is_empty() =>
+            {
+                HostChildInput::Null
+            }
+            Some(Object::Instance { class, fields, .. })
+                if Some(*class) == self.core.child_input_pipe && fields.len() == 1 =>
+            {
+                let Some(Object::NativePipeReader { resource }) =
+                    fields[0].as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                HostChildInput::Pipe(self.host_pipe_token(
+                    vm,
+                    *resource,
+                    crate::ResourceKind::PipeReader,
+                )?)
+            }
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let output_value = |value: Value| -> Result<HostChildOutput, FaultCode> {
+            match value.as_obj().map(|reference| heap.get(reference)) {
+                Some(Object::Instance { class, fields, .. })
+                    if Some(*class) == self.core.child_output_inherit && fields.is_empty() =>
+                {
+                    Ok(HostChildOutput::Inherit)
+                }
+                Some(Object::Instance { class, fields, .. })
+                    if Some(*class) == self.core.child_output_null && fields.is_empty() =>
+                {
+                    Ok(HostChildOutput::Null)
+                }
+                Some(Object::Instance { class, fields, .. })
+                    if Some(*class) == self.core.child_output_pipe && fields.len() == 1 =>
+                {
+                    let Some(Object::NativePipeWriter { resource }) =
+                        fields[0].as_obj().map(|reference| heap.get(reference))
+                    else {
+                        return Err(FaultCode::TypeMismatch);
+                    };
+                    Ok(HostChildOutput::Pipe(self.host_pipe_token(
+                        vm,
+                        *resource,
+                        crate::ResourceKind::PipeWriter,
+                    )?))
+                }
+                _ => Err(FaultCode::TypeMismatch),
+            }
+        };
+        Ok(HostExecSpec {
+            program,
+            arguments,
+            directory,
+            environment,
+            input,
+            output: output_value(*output)?,
+            error: output_value(*error)?,
+        })
     }
 
     fn host_data_arg(

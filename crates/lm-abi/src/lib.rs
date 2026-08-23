@@ -54,7 +54,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 26 adds terminal and signal operations.
 /// Version 27 completes the file-system operation group.
 /// Version 28 removes text console operations.
-pub const ABI_VERSION: u32 = 28;
+/// Version 29 adds anonymous pipes and operating-system children.
+pub const ABI_VERSION: u32 = 29;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -68,7 +69,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 27] = [
+pub const GROUPS: [&str; 29] = [
     "Io",
     "Fs",
     "Clock",
@@ -96,6 +97,8 @@ pub const GROUPS: [&str; 27] = [
     "Entropy",
     "Tty",
     "Signal",
+    "Pipe",
+    "Exec",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -123,7 +126,7 @@ const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 27] = [
+pub const GROUP_MEMBERS: [&[&str]; 29] = [
     &[], // Io
     &[], // Fs
     &[], // Clock
@@ -151,6 +154,8 @@ pub const GROUP_MEMBERS: [&[&str]; 27] = [
     &[], // Entropy
     &[], // Tty
     &[], // Signal
+    &[], // Pipe
+    &[], // Exec
 ];
 
 /// One primitive manifest type.
@@ -223,6 +228,13 @@ pub enum AbiCore {
     TtyError,
     SignalKind,
     SignalError,
+    PipeError,
+    ChildInput,
+    ChildOutput,
+    ChildEnv,
+    ExecSpec,
+    ChildStatus,
+    ExecError,
 }
 
 impl AbiCore {
@@ -267,6 +279,13 @@ impl AbiCore {
             AbiCore::TtyError => "TtyError",
             AbiCore::SignalKind => "SignalKind",
             AbiCore::SignalError => "SignalError",
+            AbiCore::PipeError => "PipeError",
+            AbiCore::ChildInput => "ChildInput",
+            AbiCore::ChildOutput => "ChildOutput",
+            AbiCore::ChildEnv => "ChildEnv",
+            AbiCore::ExecSpec => "ExecSpec",
+            AbiCore::ChildStatus => "ChildStatus",
+            AbiCore::ExecError => "ExecError",
         }
     }
 }
@@ -281,6 +300,10 @@ pub enum AbiNative {
     TlsStream,
     RawMode,
     SignalStream,
+    PipeEnd,
+    PipeReader,
+    PipeWriter,
+    Child,
 }
 
 impl AbiNative {
@@ -293,6 +316,10 @@ impl AbiNative {
             AbiNative::TlsStream => "TlsStream",
             AbiNative::RawMode => "RawMode",
             AbiNative::SignalStream => "SignalStream",
+            AbiNative::PipeEnd => "PipeEnd",
+            AbiNative::PipeReader => "PipeReader",
+            AbiNative::PipeWriter => "PipeWriter",
+            AbiNative::Child => "Child",
         }
     }
 }
@@ -384,6 +411,13 @@ impl AbiType {
     pub const TTY_ERROR: AbiType = AbiType::Core(AbiCore::TtyError);
     pub const SIGNAL_KIND: AbiType = AbiType::Core(AbiCore::SignalKind);
     pub const SIGNAL_ERROR: AbiType = AbiType::Core(AbiCore::SignalError);
+    pub const PIPE_ERROR: AbiType = AbiType::Core(AbiCore::PipeError);
+    pub const CHILD_INPUT: AbiType = AbiType::Core(AbiCore::ChildInput);
+    pub const CHILD_OUTPUT: AbiType = AbiType::Core(AbiCore::ChildOutput);
+    pub const CHILD_ENV: AbiType = AbiType::Core(AbiCore::ChildEnv);
+    pub const EXEC_SPEC: AbiType = AbiType::Core(AbiCore::ExecSpec);
+    pub const CHILD_STATUS: AbiType = AbiType::Core(AbiCore::ChildStatus);
+    pub const EXEC_ERROR: AbiType = AbiType::Core(AbiCore::ExecError);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
@@ -391,6 +425,10 @@ impl AbiType {
     pub const TLS_STREAM: AbiType = AbiType::Native(AbiNative::TlsStream);
     pub const RAW_MODE: AbiType = AbiType::Native(AbiNative::RawMode);
     pub const SIGNAL_STREAM: AbiType = AbiType::Native(AbiNative::SignalStream);
+    pub const PIPE_END: AbiType = AbiType::Native(AbiNative::PipeEnd);
+    pub const PIPE_READER: AbiType = AbiType::Native(AbiNative::PipeReader);
+    pub const PIPE_WRITER: AbiType = AbiType::Native(AbiNative::PipeWriter);
+    pub const CHILD: AbiType = AbiType::Native(AbiNative::Child);
 
     pub const LIST_STR: AbiType = AbiType::List(&AbiType::STR);
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
@@ -521,6 +559,34 @@ impl AbiType {
     pub const RESULT_UNIT_SIGNAL_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::UNIT, AbiType::SIGNAL_ERROR],
+    );
+    pub const TUPLE_PIPE_READER_WRITER: AbiType =
+        AbiType::Tuple(&[AbiType::PIPE_READER, AbiType::PIPE_WRITER]);
+    pub const RESULT_PIPE_PAIR_PIPE_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TUPLE_PIPE_READER_WRITER, AbiType::PIPE_ERROR],
+    );
+    pub const RESULT_BYTES_PIPE_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::BYTES, AbiType::PIPE_ERROR],
+    );
+    pub const RESULT_INT_PIPE_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::PIPE_ERROR]);
+    pub const RESULT_UNIT_PIPE_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::UNIT, AbiType::PIPE_ERROR],
+    );
+    pub const RESULT_CHILD_EXEC_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::CHILD, AbiType::EXEC_ERROR],
+    );
+    pub const RESULT_CHILD_STATUS_EXEC_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::CHILD_STATUS, AbiType::EXEC_ERROR],
+    );
+    pub const RESULT_UNIT_EXEC_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::UNIT, AbiType::EXEC_ERROR],
     );
 
     /// The canonical text of this complete type expression.
@@ -2034,6 +2100,8 @@ impl OpDef {
                 | ("Tcp", "Read")
                 | ("Tls", "Read")
                 | ("Signal", "Next")
+                | ("Pipe", "Read")
+                | ("Exec", "Wait")
         )
     }
 }
@@ -2166,9 +2234,18 @@ pub const OP_FS_REMOVE_DIR: OpSlot = 123;
 pub const OP_FS_RENAME: OpSlot = 124;
 pub const OP_FS_SYNC: OpSlot = 125;
 pub const OP_FS_SYNC_DIR: OpSlot = 126;
+pub const OP_PIPE_OPEN: OpSlot = 127;
+pub const OP_PIPE_READ: OpSlot = 128;
+pub const OP_PIPE_WRITE: OpSlot = 129;
+pub const OP_PIPE_CLOSE: OpSlot = 130;
+pub const OP_EXEC_SPAWN: OpSlot = 131;
+pub const OP_EXEC_WAIT: OpSlot = 132;
+pub const OP_EXEC_TERMINATE: OpSlot = 133;
+pub const OP_EXEC_KILL: OpSlot = 134;
+pub const OP_EXEC_CLOSE: OpSlot = 135;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 127] = [
+pub const OPS: [OpDef; 136] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3355,6 +3432,87 @@ pub const OPS: [OpDef; 127] = [
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
+    OpDef {
+        group: "Pipe",
+        member: "Open",
+        kind: OpKind::Fixed,
+        params: &[],
+        reply: AbiType::RESULT_PIPE_PAIR_PIPE_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Pipe",
+        member: "Read",
+        kind: OpKind::Fixed,
+        params: &[AbiType::PIPE_READER, AbiType::INT],
+        reply: AbiType::RESULT_BYTES_PIPE_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Pipe",
+        member: "Write",
+        kind: OpKind::Fixed,
+        params: &[AbiType::PIPE_WRITER, AbiType::BYTES],
+        reply: AbiType::RESULT_INT_PIPE_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Pipe",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::PIPE_END],
+        reply: AbiType::RESULT_UNIT_PIPE_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Exec",
+        member: "Spawn",
+        kind: OpKind::Fixed,
+        params: &[AbiType::EXEC_SPEC],
+        reply: AbiType::RESULT_CHILD_EXEC_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Exec",
+        member: "Wait",
+        kind: OpKind::Fixed,
+        params: &[AbiType::CHILD],
+        reply: AbiType::RESULT_CHILD_STATUS_EXEC_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Exec",
+        member: "Terminate",
+        kind: OpKind::Fixed,
+        params: &[AbiType::CHILD],
+        reply: AbiType::RESULT_UNIT_EXEC_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Exec",
+        member: "Kill",
+        kind: OpKind::Fixed,
+        params: &[AbiType::CHILD],
+        reply: AbiType::RESULT_UNIT_EXEC_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Exec",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::CHILD],
+        reply: AbiType::RESULT_UNIT_EXEC_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
 ];
 
 /// The number of exact operations.
@@ -3736,6 +3894,12 @@ mod tests {
         assert_eq!(op_by_name("Signal.Open"), Some(OP_SIGNAL_OPEN));
         assert_eq!(op_by_name("Signal.Next"), Some(OP_SIGNAL_NEXT));
         assert_eq!(op_by_name("Signal.Close"), Some(OP_SIGNAL_CLOSE));
+        assert_eq!(op_by_name("Pipe.Open"), Some(OP_PIPE_OPEN));
+        assert_eq!(op_by_name("Pipe.Read"), Some(OP_PIPE_READ));
+        assert_eq!(op_by_name("Pipe.Close"), Some(OP_PIPE_CLOSE));
+        assert_eq!(op_by_name("Exec.Spawn"), Some(OP_EXEC_SPAWN));
+        assert_eq!(op_by_name("Exec.Wait"), Some(OP_EXEC_WAIT));
+        assert_eq!(op_by_name("Exec.Close"), Some(OP_EXEC_CLOSE));
         assert_eq!(
             op_by_name("Vm.ServeTcpStream"),
             Some(OP_VM_SERVE_TCP_STREAM)
@@ -3942,6 +4106,15 @@ mod tests {
                 "Fs.Rename",
                 "Fs.Sync",
                 "Fs.SyncDir",
+                "Pipe.Open",
+                "Pipe.Read",
+                "Pipe.Write",
+                "Pipe.Close",
+                "Exec.Spawn",
+                "Exec.Wait",
+                "Exec.Terminate",
+                "Exec.Kill",
+                "Exec.Close",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

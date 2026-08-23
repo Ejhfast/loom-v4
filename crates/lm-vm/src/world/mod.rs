@@ -22,10 +22,10 @@ use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
 use crate::host::{
-    CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
-    HostCompileOptions, HostCompileSlot, HostCompletion, HostOpenOptions, HostParseStatus,
-    HostSeekFrom, HostSignalKind, HostStart, HostStdStream, HostSyntaxDiagnostic, HostValue,
-    HostWaitCancel,
+    CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
+    HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
+    HostExecSpec, HostOpenOptions, HostParseStatus, HostSeekFrom, HostSignalKind, HostStart,
+    HostStdStream, HostSyntaxDiagnostic, HostValue, HostWaitCancel,
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
@@ -272,6 +272,7 @@ enum WaitLeaf {
         op: u32,
         ordinal: u64,
         scope: u64,
+        consume_resource: Option<u64>,
         reply_ty: u32,
         env: TypeEnvId,
         ready: Option<Value>,

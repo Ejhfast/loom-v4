@@ -309,12 +309,13 @@ fn capture_index_out_of_range_is_rejected() {
 #[test]
 fn new_with_bad_class_index_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
+    let invalid_class = module.classes.len() as u32;
     let mut patched = false;
     'outer: for func in &mut module.funcs {
         for block in &mut func.blocks {
             for instr in block.iter_mut() {
                 if let Instr::New(class) = instr {
-                    *class = 250;
+                    *class = invalid_class;
                     patched = true;
                     break 'outer;
                 }

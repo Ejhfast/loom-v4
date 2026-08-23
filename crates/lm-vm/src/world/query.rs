@@ -373,7 +373,10 @@ impl World {
                 Object::NativeFileHandle { resource }
                 | Object::NativeResourceHandle { resource, .. }
                 | Object::NativeTcpStream { resource }
-                | Object::NativeTcpListener { resource } => Some(*resource),
+                | Object::NativeTcpListener { resource }
+                | Object::NativePipeReader { resource }
+                | Object::NativePipeWriter { resource }
+                | Object::NativeChild { resource } => Some(*resource),
                 _ => None,
             };
             if resource.is_some_and(|resource| self.bound_resources.contains_key(&resource)) {
@@ -411,6 +414,9 @@ impl World {
                 crate::ResourceKind::TlsStream => "TLS stream".to_string(),
                 crate::ResourceKind::RawMode => "raw terminal mode".to_string(),
                 crate::ResourceKind::SignalStream => "signal stream".to_string(),
+                crate::ResourceKind::PipeReader => "pipe reader".to_string(),
+                crate::ResourceKind::PipeWriter => "pipe writer".to_string(),
+                crate::ResourceKind::Child => "child handle".to_string(),
                 crate::ResourceKind::Extension(identity) => self
                     .loaded
                     .bundle()
@@ -433,6 +439,9 @@ impl World {
                 Object::NativeTlsStream { resource }
                 | Object::NativeRawMode { resource }
                 | Object::NativeSignalStream { resource }
+                | Object::NativePipeReader { resource }
+                | Object::NativePipeWriter { resource }
+                | Object::NativeChild { resource }
                 | Object::NativeHostResource { resource, .. } => *resource,
                 _ => return None,
             };
@@ -445,6 +454,9 @@ impl World {
                     crate::ResourceKind::TlsStream => "TLS stream".to_string(),
                     crate::ResourceKind::RawMode => "raw terminal mode".to_string(),
                     crate::ResourceKind::SignalStream => "signal stream".to_string(),
+                    crate::ResourceKind::PipeReader => "pipe reader".to_string(),
+                    crate::ResourceKind::PipeWriter => "pipe writer".to_string(),
+                    crate::ResourceKind::Child => "child handle".to_string(),
                     crate::ResourceKind::PendingOperation => "pending operation".to_string(),
                     crate::ResourceKind::Extension(identity) => self
                         .loaded

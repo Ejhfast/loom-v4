@@ -11,17 +11,19 @@
 mod compiler_service;
 mod io_service;
 mod network_service;
+mod process_service;
 mod signal_service;
 mod terminal;
 
 use compiler_service::{CompileRequest, CompilerService};
 use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
-    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostParseStatus, HostSignalKind,
-    HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel,
-    SharedBytes,
+    CompletionKey, CoreCtor, Host, HostArg, HostChildEnv, HostCompletion, HostExecSpec,
+    HostParseStatus, HostSignalKind, HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource,
+    HostValue, HostWaitCancel, SharedBytes,
 };
 use network_service::{NetworkService, TcpRequest, TlsClientSettings, TlsRequest};
+use process_service::{ProcessRequest, ProcessService};
 use signal_service::{SignalService, SignalServiceError};
 use std::collections::HashMap;
 use std::sync::mpsc::RecvTimeoutError;
@@ -39,11 +41,14 @@ pub struct CliHost {
     io: Option<IoService>,
     network: Option<NetworkService>,
     compiler: Option<CompilerService>,
+    process: Option<ProcessService>,
     starting_wait: bool,
     wait_services: HashMap<u64, WaitService>,
     terminal: terminal::TerminalService,
     signal: Option<SignalService>,
     next_signal_stream: u64,
+    next_pipe: u64,
+    next_child: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +57,7 @@ enum WaitService {
     Network,
     Sleep,
     Signal,
+    Process,
 }
 
 impl CliHost {
@@ -73,11 +79,14 @@ impl CliHost {
             io: None,
             network: None,
             compiler: None,
+            process: None,
             starting_wait: false,
             wait_services: HashMap::new(),
             terminal: terminal::TerminalService::new(),
             signal: None,
             next_signal_stream: 1,
+            next_pipe: 1,
+            next_child: 1,
         }
     }
 
@@ -203,6 +212,30 @@ impl CliHost {
         }
     }
 
+    fn start_process(&mut self, key: CompletionKey, request: ProcessRequest) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        let wait_source = self.starting_wait;
+        let pipe = matches!(
+            request,
+            ProcessRequest::OpenPipe { .. }
+                | ProcessRequest::ReadPipe { .. }
+                | ProcessRequest::WritePipe { .. }
+                | ProcessRequest::ClosePipe { .. }
+        );
+        if self.process().submit(key, token, request, wait_source) {
+            HostStart::Waiting(token)
+        } else {
+            let (ctor, message) = if pipe {
+                (CoreCtor::PipeErrorLimitExceeded, "the pipe queue is full")
+            } else {
+                (CoreCtor::ExecErrorLimitExceeded, "the child queue is full")
+            };
+            HostStart::Completed(error_value(ctor, Some(message)))
+        }
+    }
+
     fn network(&mut self) -> &mut NetworkService {
         self.network.get_or_insert_with(NetworkService::new)
     }
@@ -213,6 +246,22 @@ impl CliHost {
 
     fn compiler(&mut self) -> &mut CompilerService {
         self.compiler.get_or_insert_with(CompilerService::new)
+    }
+
+    fn process(&mut self) -> &mut ProcessService {
+        self.process.get_or_insert_with(ProcessService::new)
+    }
+
+    fn take_pipe(&mut self) -> Option<u64> {
+        let token = self.next_pipe;
+        self.next_pipe = token.checked_add(1)?;
+        Some(token)
+    }
+
+    fn take_child(&mut self) -> Option<u64> {
+        let token = self.next_child;
+        self.next_child = token.checked_add(1)?;
+        Some(token)
     }
 }
 
@@ -321,6 +370,97 @@ const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
 const MAX_CONSOLE_IO_BYTES: usize = 16 << 20;
 const MAX_ENTROPY_BYTES: usize = 16 << 20;
+const MAX_PIPE_IO_BYTES: usize = 16 << 20;
+const MAX_EXEC_ITEMS: usize = 4_096;
+const MAX_EXEC_TEXT_BYTES: usize = 1 << 20;
+const MAX_EXEC_ITEM_BYTES: usize = 64 << 10;
+
+fn validate_exec_spec(spec: &HostExecSpec) -> Option<HostValue> {
+    if spec.program.is_empty() || spec.program.contains('\0') {
+        return Some(error_value(
+            CoreCtor::ExecErrorInvalidInput,
+            Some("the program name is invalid"),
+        ));
+    }
+    if spec.program.len() > MAX_EXEC_ITEM_BYTES {
+        return Some(error_value(
+            CoreCtor::ExecErrorLimitExceeded,
+            Some("the program name is too large"),
+        ));
+    }
+    if spec.arguments.len() > MAX_EXEC_ITEMS {
+        return Some(error_value(
+            CoreCtor::ExecErrorLimitExceeded,
+            Some("the argument count is too large"),
+        ));
+    }
+    let mut total = spec.program.len();
+    for argument in &spec.arguments {
+        if argument.contains('\0') {
+            return Some(error_value(
+                CoreCtor::ExecErrorInvalidInput,
+                Some("an argument contains a zero byte"),
+            ));
+        }
+        if argument.len() > MAX_EXEC_ITEM_BYTES {
+            return Some(error_value(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("an argument is too large"),
+            ));
+        }
+        total = total.saturating_add(argument.len());
+    }
+    if let Some(directory) = &spec.directory {
+        if directory.is_empty() || directory.contains('\0') {
+            return Some(error_value(
+                CoreCtor::ExecErrorInvalidInput,
+                Some("the child directory is invalid"),
+            ));
+        }
+        if directory.len() > MAX_EXEC_ITEM_BYTES {
+            return Some(error_value(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("the child directory is too large"),
+            ));
+        }
+        total = total.saturating_add(directory.len());
+    }
+    if let HostChildEnv::Exact(values) = &spec.environment {
+        if values.len() > MAX_EXEC_ITEMS {
+            return Some(error_value(
+                CoreCtor::ExecErrorLimitExceeded,
+                Some("the environment entry count is too large"),
+            ));
+        }
+        for (name, value) in values {
+            if name.is_empty() || name.contains('=') || name.contains('\0') {
+                return Some(error_value(
+                    CoreCtor::ExecErrorInvalidInput,
+                    Some("an environment name is invalid"),
+                ));
+            }
+            if value.contains('\0') {
+                return Some(error_value(
+                    CoreCtor::ExecErrorInvalidInput,
+                    Some("an environment value contains a zero byte"),
+                ));
+            }
+            if name.len() > MAX_EXEC_ITEM_BYTES || value.len() > MAX_EXEC_ITEM_BYTES {
+                return Some(error_value(
+                    CoreCtor::ExecErrorLimitExceeded,
+                    Some("an environment entry is too large"),
+                ));
+            }
+            total = total.saturating_add(name.len()).saturating_add(value.len());
+        }
+    }
+    (total > MAX_EXEC_TEXT_BYTES).then(|| {
+        error_value(
+            CoreCtor::ExecErrorLimitExceeded,
+            Some("the child specification is too large"),
+        )
+    })
+}
 
 impl Host for CliHost {
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
@@ -555,6 +695,126 @@ impl Host for CliHost {
                 } else {
                     HostStart::Completed(error_value(CoreCtor::SignalClosed, None))
                 }
+            }
+            lm_abi::OP_PIPE_OPEN => {
+                if !args.is_empty() {
+                    return HostStart::Failed("Pipe.Open takes no arguments".to_string());
+                }
+                let (Some(reader), Some(writer)) = (self.take_pipe(), self.take_pipe()) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the pipe token space is exhausted"),
+                    ));
+                };
+                self.start_process(key, ProcessRequest::OpenPipe { reader, writer })
+            }
+            lm_abi::OP_PIPE_READ => {
+                let (Some(HostArg::PipeReader(reader)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Pipe.Read needs a reader and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::PipeErrorInvalidInput,
+                        Some("the read count is not positive"),
+                    ));
+                };
+                if count == 0 || count > MAX_PIPE_IO_BYTES {
+                    let (ctor, message) = if count == 0 {
+                        (
+                            CoreCtor::PipeErrorInvalidInput,
+                            "the read count is not positive",
+                        )
+                    } else {
+                        (
+                            CoreCtor::PipeErrorLimitExceeded,
+                            "the read count is too large",
+                        )
+                    };
+                    return HostStart::Completed(error_value(ctor, Some(message)));
+                }
+                self.start_process(
+                    key,
+                    ProcessRequest::ReadPipe {
+                        reader: *reader,
+                        count,
+                    },
+                )
+            }
+            lm_abi::OP_PIPE_WRITE => {
+                let (Some(HostArg::PipeWriter(writer)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Pipe.Write needs a writer and bytes".to_string());
+                };
+                if bytes.len() > MAX_PIPE_IO_BYTES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::PipeErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                self.start_process(
+                    key,
+                    ProcessRequest::WritePipe {
+                        writer: *writer,
+                        bytes: bytes.clone(),
+                    },
+                )
+            }
+            lm_abi::OP_PIPE_CLOSE => {
+                let token = match args.first() {
+                    Some(HostArg::PipeReader(token)) | Some(HostArg::PipeWriter(token)) => *token,
+                    _ => return HostStart::Failed("Pipe.Close needs one pipe end".to_string()),
+                };
+                self.start_process(key, ProcessRequest::ClosePipe { token })
+            }
+            lm_abi::OP_EXEC_SPAWN => {
+                let Some(HostArg::ExecSpec(spec)) = args.first() else {
+                    return HostStart::Failed(
+                        "Exec.Spawn needs one child specification".to_string(),
+                    );
+                };
+                if let Some(error) = validate_exec_spec(spec) {
+                    return HostStart::Completed(error);
+                }
+                let Some(child) = self.take_child() else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::ExecErrorLimitExceeded,
+                        Some("the child token space is exhausted"),
+                    ));
+                };
+                self.start_process(
+                    key,
+                    ProcessRequest::Spawn {
+                        child,
+                        spec: spec.clone(),
+                    },
+                )
+            }
+            lm_abi::OP_EXEC_WAIT => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Wait needs one child".to_string());
+                };
+                self.start_process(key, ProcessRequest::WaitChild { child: *child })
+            }
+            lm_abi::OP_EXEC_TERMINATE => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Terminate needs one child".to_string());
+                };
+                self.start_process(key, ProcessRequest::TerminateChild { child: *child })
+            }
+            lm_abi::OP_EXEC_KILL => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Kill needs one child".to_string());
+                };
+                self.start_process(key, ProcessRequest::KillChild { child: *child })
+            }
+            lm_abi::OP_EXEC_CLOSE => {
+                let Some(HostArg::Child(child)) = args.first() else {
+                    return HostStart::Failed("Exec.Close needs one child".to_string());
+                };
+                self.start_process(key, ProcessRequest::CloseChild { child: *child })
             }
             lm_abi::OP_CLOCK_NOW => {
                 let now = SystemTime::now()
@@ -1239,6 +1499,7 @@ impl Host for CliHost {
                 | lm_abi::OP_TCP_READ
                 | lm_abi::OP_TLS_READ => Some(WaitService::Network),
                 lm_abi::OP_SIGNAL_NEXT => Some(WaitService::Signal),
+                lm_abi::OP_PIPE_READ | lm_abi::OP_EXEC_WAIT => Some(WaitService::Process),
                 _ => None,
             };
             if let Some(service) = service {
@@ -1273,6 +1534,11 @@ impl Host for CliHost {
         }
         if let Some(network) = &self.network {
             if let Some(completion) = network.poll() {
+                return Some(completion);
+            }
+        }
+        if let Some(process) = &self.process {
+            if let Some(completion) = process.poll() {
                 return Some(completion);
             }
         }
@@ -1317,6 +1583,13 @@ impl Host for CliHost {
                     Err(RecvTimeoutError::Disconnected) => {}
                 }
             }
+            if let Some(process) = &self.process {
+                match process.wait_timeout(duration) {
+                    Ok(completion) => return Some(completion),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {}
+                }
+            }
             match &self.network {
                 Some(network) => match network.wait_timeout(duration) {
                     Ok(completion) => return Some(completion),
@@ -1350,7 +1623,11 @@ impl Host for CliHost {
             || self
                 .signal
                 .as_mut()
-                .is_some_and(|signal| signal.cancel(token));
+                .is_some_and(|signal| signal.cancel(token))
+            || self
+                .process
+                .as_ref()
+                .is_some_and(|process| process.cancel(token));
         self.prune_signal_guardian();
         cancelled
     }
@@ -1367,6 +1644,10 @@ impl Host for CliHost {
                 .signal
                 .as_mut()
                 .is_some_and(|signal| signal.commit_wait(token)),
+            Some(WaitService::Process) => self
+                .process
+                .as_ref()
+                .is_some_and(|process| process.commit_wait(token)),
             None => false,
         };
         self.prune_signal_guardian();
@@ -1396,6 +1677,12 @@ impl Host for CliHost {
                 .signal
                 .as_mut()
                 .map_or(HostWaitCancel::Missing, |signal| signal.cancel_wait(token)),
+            Some(WaitService::Process) => self
+                .process
+                .as_ref()
+                .map_or(HostWaitCancel::Missing, |process| {
+                    process.cancel_wait(token)
+                }),
             None => HostWaitCancel::Missing,
         };
         self.prune_signal_guardian();
@@ -1427,6 +1714,18 @@ impl Host for CliHost {
             .is_some_and(|signal| signal.close(token));
         self.prune_signal_guardian();
         closed
+    }
+
+    fn close_pipe(&mut self, token: u64) -> bool {
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.force_close_pipe(token))
+    }
+
+    fn close_child(&mut self, token: u64) -> bool {
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.force_close_child(token))
     }
 }
 
@@ -2429,5 +2728,80 @@ end
                 HostValue::Unit
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canceling_a_ready_pipe_wait_restores_its_bytes() {
+        let mut host = CliHost::new(1);
+        let pair = unwrap_ok_value(run_host(&mut host, lm_abi::OP_PIPE_OPEN, Vec::new()));
+        let HostValue::Tuple(values) = pair else {
+            panic!("the pipe open returns two ends");
+        };
+        let [HostValue::PipeReader(reader), HostValue::PipeWriter(writer)] = values.as_slice()
+        else {
+            panic!("the pipe open returns typed ends");
+        };
+        let (reader, writer) = (*reader, *writer);
+        assert_eq!(
+            unwrap_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_PIPE_WRITE,
+                vec![HostArg::PipeWriter(writer), HostArg::Bytes(b"saved".into())],
+            )),
+            HostValue::Int(5)
+        );
+        let wait = start_wait_token(
+            &mut host,
+            lm_abi::OP_PIPE_READ,
+            vec![HostArg::PipeReader(reader), HostArg::Int(16)],
+        );
+        let completion = host.wait().expect("the pipe wait becomes ready");
+        assert_eq!(completion.token, wait);
+        assert_eq!(host.cancel_wait(wait), HostWaitCancel::ReadyRestored);
+        assert_eq!(
+            unwrap_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_PIPE_READ,
+                vec![HostArg::PipeReader(reader), HostArg::Int(16)],
+            )),
+            HostValue::Bytes(b"saved".into())
+        );
+        assert!(host.close_pipe(reader));
+        assert!(host.close_pipe(writer));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canceling_a_ready_child_wait_keeps_the_reaped_status() {
+        let mut host = CliHost::new(1);
+        let child = unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_EXEC_SPAWN,
+            vec![HostArg::ExecSpec(HostExecSpec {
+                program: "true".into(),
+                arguments: Vec::new(),
+                directory: None,
+                environment: HostChildEnv::Inherit,
+                input: lm_vm::HostChildInput::Null,
+                output: lm_vm::HostChildOutput::Null,
+                error: lm_vm::HostChildOutput::Null,
+            })],
+        ));
+        let HostValue::Child(child) = child else {
+            panic!("the spawn returns one child");
+        };
+        let wait = start_wait_token(&mut host, lm_abi::OP_EXEC_WAIT, vec![HostArg::Child(child)]);
+        let completion = host.wait().expect("the child wait becomes ready");
+        assert_eq!(completion.token, wait);
+        assert_eq!(host.cancel_wait(wait), HostWaitCancel::ReadyRestored);
+        assert_eq!(
+            unwrap_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_EXEC_WAIT,
+                vec![HostArg::Child(child)],
+            )),
+            HostValue::Ctor(CoreCtor::ChildStatusExited, vec![HostValue::Int(0)])
+        );
     }
 }

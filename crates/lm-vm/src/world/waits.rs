@@ -118,6 +118,7 @@ impl World {
                     op,
                     ordinal,
                     scope,
+                    consume_resource,
                     reply_ty,
                     env,
                     ready,
@@ -126,6 +127,7 @@ impl World {
                         op,
                         ordinal,
                         scope,
+                        consume_resource,
                         reply_ty,
                         env,
                         ready,
@@ -193,6 +195,9 @@ impl World {
                 op: preparation.op,
                 ordinal,
                 scope: 0,
+                consume_resource: (preparation.op == lm_abi::OP_EXEC_WAIT)
+                    .then(|| self.pending_resource_of(vm, ResourceErrors::Exec))
+                    .flatten(),
                 reply_ty: preparation.reply_ty,
                 env: preparation.env,
                 ready: Some(value),
@@ -258,6 +263,9 @@ impl World {
                 op,
                 ordinal,
                 scope,
+                consume_resource: (op == lm_abi::OP_EXEC_WAIT)
+                    .then(|| self.pending_resource_of(vm, ResourceErrors::Exec))
+                    .flatten(),
                 reply_ty: preparation.reply_ty,
                 env: preparation.env,
                 ready: None,
@@ -533,6 +541,7 @@ impl World {
             op,
             ordinal,
             scope,
+            consume_resource,
             reply_ty,
             env,
             ready,
@@ -561,6 +570,13 @@ impl World {
         self.machines[vm as usize]
             .resources
             .close_by_ordinal(ordinal);
+        if let Some(resource) = consume_resource {
+            let consumed = self.value_is_result_ok(vm, value)
+                || self.value_is_result_error_class(vm, value, self.core.exec_error_closed);
+            if consumed {
+                self.retire_resource(resource, false);
+            }
+        }
         Ok(value)
     }
 

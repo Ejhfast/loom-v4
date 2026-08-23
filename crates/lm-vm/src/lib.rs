@@ -19,11 +19,12 @@ mod typecheck;
 mod world;
 
 pub use host::{
-    CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
-    HostCompileOptions, HostCompileSlot, HostCompletion, HostIpAddress, HostOpenOptions,
-    HostParseStatus, HostRenameMode, HostResource, HostSeekFrom, HostShutdown, HostSignalKind,
-    HostSocketAddress, HostStart, HostStdStream, HostSyntaxDiagnostic, HostTcpKind,
-    HostTcpResource, HostValue, HostWaitCancel, NullHost, RecordingHost,
+    CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
+    HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
+    HostExecSpec, HostIpAddress, HostOpenOptions, HostParseStatus, HostRenameMode, HostResource,
+    HostSeekFrom, HostShutdown, HostSignalKind, HostSocketAddress, HostStart, HostStdStream,
+    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, NullHost,
+    RecordingHost,
 };
 pub use machine::{
     Block, FaultRec, FunctionVersionId, MachineState, Mailbox, Ownership, VmId, VmState,

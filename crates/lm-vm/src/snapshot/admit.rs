@@ -1857,6 +1857,9 @@ impl Admit<'_> {
                     | Object::NativeTlsStream { resource }
                     | Object::NativeRawMode { resource }
                     | Object::NativeSignalStream { resource }
+                    | Object::NativePipeReader { resource }
+                    | Object::NativePipeWriter { resource }
+                    | Object::NativeChild { resource }
                     | Object::NativeHostResource { resource, .. }
                     if resource != 0
             ) {

@@ -703,6 +703,7 @@ enum PipeError implements Error
   BrokenPipe
   InvalidInput(message: String)
   LimitExceeded(message: String)
+  Unsupported(message: String)
   Failed(message: String)
 end
 ```
@@ -733,7 +734,15 @@ The exact environment contains no inherited value unless the caller supplies it.
 
 Program lookup uses the selected environment and platform rules.
 
-The host applies fixed count and byte limits to every field.
+One child specification contains at most 4,096 arguments.
+
+It contains at most 4,096 exact environment entries.
+
+One text item contains at most 65,536 UTF-8 bytes.
+
+All text items contain at most 1,048,576 UTF-8 bytes together.
+
+One pipe read or write contains at most 16,777,216 bytes.
 
 ### 9.4 Exec operations
 
@@ -1028,7 +1037,7 @@ Gate: The repository contains no old console operation name.
 
 Gate: Closed output pipes never panic the CLI.
 
-### Stage 5: Pipes and Exec
+### Stage 5: Pipes and Exec (complete)
 
 - Add typed pipe ends and one child resource.
 - Add strict spawn boundary values and limits.

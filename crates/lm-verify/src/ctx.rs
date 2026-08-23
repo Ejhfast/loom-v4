@@ -1156,6 +1156,13 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::TtyError => (self.core.tty_error, "TtyError"),
                     lm_abi::AbiCore::SignalKind => (self.core.signal_kind, "SignalKind"),
                     lm_abi::AbiCore::SignalError => (self.core.signal_error, "SignalError"),
+                    lm_abi::AbiCore::PipeError => (self.core.pipe_error, "PipeError"),
+                    lm_abi::AbiCore::ChildInput => (self.core.child_input, "ChildInput"),
+                    lm_abi::AbiCore::ChildOutput => (self.core.child_output, "ChildOutput"),
+                    lm_abi::AbiCore::ChildEnv => (self.core.child_env, "ChildEnv"),
+                    lm_abi::AbiCore::ExecSpec => (self.core.exec_spec, "ExecSpec"),
+                    lm_abi::AbiCore::ChildStatus => (self.core.child_status, "ChildStatus"),
+                    lm_abi::AbiCore::ExecError => (self.core.exec_error, "ExecError"),
                 };
                 self.plain_inst(slot, name)
             }
@@ -1173,6 +1180,14 @@ impl<'m> Ctx<'m> {
                 lm_abi::AbiNative::SignalStream => {
                     self.plain_inst(self.core.signal_stream, "SignalStream")
                 }
+                lm_abi::AbiNative::PipeEnd => self.plain_inst(self.core.pipe_end, "PipeEnd"),
+                lm_abi::AbiNative::PipeReader => {
+                    self.plain_inst(self.core.pipe_reader, "PipeReader")
+                }
+                lm_abi::AbiNative::PipeWriter => {
+                    self.plain_inst(self.core.pipe_writer, "PipeWriter")
+                }
+                lm_abi::AbiNative::Child => self.plain_inst(self.core.child, "Child"),
             },
             lm_abi::AbiType::Var(index) => Err(format!(
                 "the fixed ABI type names generic parameter {index}"

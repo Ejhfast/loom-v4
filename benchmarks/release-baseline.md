@@ -378,3 +378,43 @@ Static runtime remains within normal measurement noise.
 Stage 4 adds four core console helpers.
 
 The ABI now contains only three byte console operations.
+
+## Host-effects Stage 5
+
+The parent revision is `35f7877`.
+
+The manifest ABI version is 29.
+
+The bytecode version remains 54.
+
+The snapshot format version remains 30.
+
+| Core measurement | Stage 4 | Stage 5 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 258 | 294 | +14.0% |
+| HIR functions | 541 | 556 | +2.8% |
+| Bytecode functions | 799 | 850 | +6.4% |
+| Artifact size | 245,959 bytes | 258,307 bytes | +5.0% |
+| Core checking | 1.925 ms | 2.012 ms | +4.5% |
+| Core lowering | 0.869 ms | 0.923 ms | +6.2% |
+| Core compilation | 3.122 ms | 3.285 ms | +5.2% |
+| Core decoding | 0.367 ms | 0.383 ms | +4.4% |
+| Core verification | 1.194 ms | 1.248 ms | +4.5% |
+| Structural verification | 0.418 ms | 0.447 ms | +6.9% |
+| Verification hash | 0.119 ms | 0.187 ms | +57.1% |
+| Semantic identity | 2.191 ms | 2.368 ms | +8.1% |
+| Decoded loading | 1.350 ms | 1.466 ms | +8.6% |
+| Core loading | 1.720 ms | 1.848 ms | +7.4% |
+
+| Runtime measurement | Stage 4 | Stage 5 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.3 ns | 33.7 ns | +7.7% |
+| `direct_call` | 30.5 ns | 35.6 ns | +16.7% |
+| `direct_clock` | 105.5 ns | 109.0 ns | +3.3% |
+| Warm workspace suite | 38.97 seconds | 42.38 seconds | +8.8% |
+
+Stage 5 adds typed pipe ends and operating-system child handles.
+
+The stage adds eight integration tests and one checked example.
+
+The final performance pass must repeat the static runtime measurements.

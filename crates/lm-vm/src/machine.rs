@@ -154,6 +154,7 @@ pub enum WaitSource {
         op: u32,
         ordinal: u64,
         scope: u64,
+        consume_resource: Option<u64>,
         reply_ty: u32,
         env: TypeEnvId,
         ready: Option<Value>,
@@ -896,6 +897,30 @@ impl Machine {
                 }
                 Object::NativeSignalStream { .. } => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_SIGNAL_STREAM];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativePipeReader { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_PIPE_READER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativePipeWriter { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_PIPE_WRITER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeChild { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_CHILD];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
                     } else {

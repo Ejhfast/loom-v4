@@ -508,6 +508,12 @@ pub enum Object {
     NativeRawMode { resource: u64 },
     /// A process signal stream designator. Zero marks a closed handle.
     NativeSignalStream { resource: u64 },
+    /// A pipe read-end designator. Zero marks a closed handle.
+    NativePipeReader { resource: u64 },
+    /// A pipe write-end designator. Zero marks a closed handle.
+    NativePipeWriter { resource: u64 },
+    /// An operating-system child designator. Zero marks a closed handle.
+    NativeChild { resource: u64 },
     /// An opaque extension resource. Zero marks a closed handle.
     NativeHostResource { kind: [u8; 32], resource: u64 },
     /// One value with its closed static type. Born frozen.
@@ -827,6 +833,36 @@ const SHAPE_SIGNAL_STREAM: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_PIPE_READER: ShapeDesc = ShapeDesc {
+    name: "PipeReader",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_PIPE_WRITER: ShapeDesc = ShapeDesc {
+    name: "PipeWriter",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_CHILD: ShapeDesc = ShapeDesc {
+    name: "Child",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 const SHAPE_HOST_RESOURCE: ShapeDesc = ShapeDesc {
     name: "HostResource",
     has_refs: false,
@@ -879,7 +915,7 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 33] = [
+pub const SHAPES: [&ShapeDesc; 36] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -913,6 +949,9 @@ pub const SHAPES: [&ShapeDesc; 33] = [
     &SHAPE_HOST_RESOURCE,
     &SHAPE_RAW_MODE,
     &SHAPE_SIGNAL_STREAM,
+    &SHAPE_PIPE_READER,
+    &SHAPE_PIPE_WRITER,
+    &SHAPE_CHILD,
 ];
 
 impl Object {
@@ -1093,6 +1132,15 @@ impl Object {
             Object::NativeSignalStream { resource } => Object::NativeSignalStream {
                 resource: *resource,
             },
+            Object::NativePipeReader { resource } => Object::NativePipeReader {
+                resource: *resource,
+            },
+            Object::NativePipeWriter { resource } => Object::NativePipeWriter {
+                resource: *resource,
+            },
+            Object::NativeChild { resource } => Object::NativeChild {
+                resource: *resource,
+            },
             Object::NativeHostResource { kind, resource } => Object::NativeHostResource {
                 kind: *kind,
                 resource: *resource,
@@ -1145,6 +1193,9 @@ impl Object {
             Object::NativeHostResource { .. } => 30,
             Object::NativeRawMode { .. } => 31,
             Object::NativeSignalStream { .. } => 32,
+            Object::NativePipeReader { .. } => 33,
+            Object::NativePipeWriter { .. } => 34,
+            Object::NativeChild { .. } => 35,
         }
     }
 
@@ -1193,6 +1244,9 @@ impl Object {
                 Object::NativeTlsStream { .. }
                 | Object::NativeRawMode { .. }
                 | Object::NativeSignalStream { .. }
+                | Object::NativePipeReader { .. }
+                | Object::NativePipeWriter { .. }
+                | Object::NativeChild { .. }
                 | Object::NativeHostResource { .. } => VALUE_COST,
                 Object::NativeFault { message, trace, .. } => message
                     .len()
@@ -1266,6 +1320,9 @@ impl Object {
             Object::NativeTlsStream { .. }
             | Object::NativeRawMode { .. }
             | Object::NativeSignalStream { .. }
+            | Object::NativePipeReader { .. }
+            | Object::NativePipeWriter { .. }
+            | Object::NativeChild { .. }
             | Object::NativeHostResource { .. } => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
@@ -1340,6 +1397,15 @@ impl Object {
             Object::NativeSignalStream { resource } => Object::NativeSignalStream {
                 resource: *resource,
             },
+            Object::NativePipeReader { resource } => Object::NativePipeReader {
+                resource: *resource,
+            },
+            Object::NativePipeWriter { resource } => Object::NativePipeWriter {
+                resource: *resource,
+            },
+            Object::NativeChild { resource } => Object::NativeChild {
+                resource: *resource,
+            },
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
@@ -1411,7 +1477,11 @@ impl Object {
             | Object::NativeTcpStream { .. }
             | Object::NativeTcpListener { .. } => return None,
             Object::NativeTlsStream { .. } => return None,
-            Object::NativeRawMode { .. } | Object::NativeSignalStream { .. } => return None,
+            Object::NativeRawMode { .. }
+            | Object::NativeSignalStream { .. }
+            | Object::NativePipeReader { .. }
+            | Object::NativePipeWriter { .. }
+            | Object::NativeChild { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -1640,6 +1710,9 @@ mod tests {
             },
             Object::NativeRawMode { resource: 10 },
             Object::NativeSignalStream { resource: 11 },
+            Object::NativePipeReader { resource: 12 },
+            Object::NativePipeWriter { resource: 13 },
+            Object::NativeChild { resource: 14 },
         ]
     }
 
@@ -1842,6 +1915,9 @@ mod tests {
             },
             Object::NativeRawMode { resource: 0 },
             Object::NativeSignalStream { resource: 0 },
+            Object::NativePipeReader { resource: 0 },
+            Object::NativePipeWriter { resource: 0 },
+            Object::NativeChild { resource: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1977,6 +2053,9 @@ mod tests {
                 "DynValue",
                 "RawMode",
                 "SignalStream",
+                "PipeReader",
+                "PipeWriter",
+                "Child",
             ]
         );
         // A builder holds a private mutable buffer.

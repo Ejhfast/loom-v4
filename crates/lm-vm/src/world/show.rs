@@ -638,6 +638,27 @@ impl World {
                             format!("<signal stream {resource}>")
                         }
                     }
+                    Object::NativePipeReader { resource } => {
+                        if *resource == 0 {
+                            "<pipe reader closed>".to_string()
+                        } else {
+                            format!("<pipe reader {resource}>")
+                        }
+                    }
+                    Object::NativePipeWriter { resource } => {
+                        if *resource == 0 {
+                            "<pipe writer closed>".to_string()
+                        } else {
+                            format!("<pipe writer {resource}>")
+                        }
+                    }
+                    Object::NativeChild { resource } => {
+                        if *resource == 0 {
+                            "<child closed>".to_string()
+                        } else {
+                            format!("<child {resource}>")
+                        }
+                    }
                     Object::NativeHostResource { kind, resource } => {
                         let name = self
                             .loaded
