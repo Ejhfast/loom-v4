@@ -535,6 +535,23 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
     assert_eq!(first.3.sends, 2);
 }
 
+#[test]
+fn quantum_expiry_is_not_a_semantic_boundary() {
+    let source = "i = 0\nwhile i < 1000\n  i = i + 1\nend\ni\n";
+    let bytes = compile_to_bytes("quantum.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 10).run(&mut world);
+
+    assert_eq!(world.show_outcome(&outcome), "Done(1000)");
+    assert!(world.metrics().slices > 1);
+    assert_eq!(world.metrics().boundary_exits, 1);
+}
+
 /// A bounded quantum lets a short later proc finish before a long
 /// earlier proc.
 #[test]

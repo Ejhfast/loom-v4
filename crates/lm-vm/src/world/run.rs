@@ -681,6 +681,112 @@ impl World {
         }
     }
 
+    fn extract_execution(&mut self, vm: VmId, limit: u32) -> ExecutionLease<'_> {
+        let image = self.machines[vm as usize].image;
+        let slots = image.and_then(|key| {
+            self.vm_images.get(key.image as usize).and_then(|record| {
+                (record.live && record.generation == key.generation)
+                    .then_some(record.slots.as_slice())
+            })
+        });
+        ExecutionLease::new(
+            &mut self.machines[vm as usize],
+            self.module.as_ref(),
+            self.dispatch.as_ref(),
+            &mut self.envs,
+            slots,
+            limit,
+        )
+    }
+
+    fn commit_execution_report(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        top_idx: usize,
+        vm: VmId,
+        quantum: &mut Option<u32>,
+        report: ExecutionReport,
+    ) -> Option<RootEvent> {
+        if report.reached_boundary() {
+            self.metrics.boundary_exits = self.metrics.boundary_exits.saturating_add(1);
+        }
+        let (stop, retired) = report.into_parts();
+        self.budget.fuel -= u64::from(retired);
+        if let Some(remaining) = quantum {
+            *remaining = remaining.saturating_sub(retired);
+        }
+        stack[top_idx].retired |= retired > 0;
+        for activation in stack.iter_mut() {
+            if let Some(left) = &mut activation.fuel {
+                *left = left.saturating_sub(retired);
+            }
+        }
+        match stop {
+            ExecutionStop::Fault(code) => {
+                self.machines[vm as usize].set_fault(code, execution_fault_message(code), None);
+            }
+            ExecutionStop::QuantumExpired | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
+            ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {
+                if self.machines[vm as usize].start_body.is_some() {
+                    self.enter_proc_body(vm, value);
+                } else {
+                    self.machines[vm as usize].set_done(value);
+                }
+            }
+            ExecutionStop::Boundary(ExecOutcome::Raise { code, message }) => {
+                self.machines[vm as usize].set_fault(code, message, None);
+            }
+            ExecutionStop::Boundary(ExecOutcome::Perform { op, args }) => {
+                return self.handle_perform(stack, vm, op, args);
+            }
+            ExecutionStop::Boundary(ExecOutcome::PrepareWait {
+                op,
+                argc,
+                reply_ty,
+                env,
+            }) => {
+                return self.handle_prepare_wait(stack, vm, op, argc, reply_ty, env);
+            }
+            ExecutionStop::Boundary(ExecOutcome::LoadSlot { slot }) => {
+                if let Err(code) = self.load_value_slot(vm, slot) {
+                    self.machines[vm as usize].set_fault(code, "", None);
+                }
+            }
+            ExecutionStop::Boundary(ExecOutcome::TableEdit {
+                table,
+                action,
+                kind,
+                slot,
+                mock,
+            }) => self.handle_table_edit(vm, table, action, kind, slot, mock),
+            ExecutionStop::Boundary(ExecOutcome::AsCall {
+                request,
+                op,
+                ty,
+                env,
+            }) => self.handle_as_call(vm, request, op, ty, env),
+            ExecutionStop::Boundary(ExecOutcome::RequestOp { request }) => {
+                self.handle_request_op(vm, request)
+            }
+            ExecutionStop::Boundary(ExecOutcome::CallArgs { call }) => {
+                self.handle_call_args(vm, call)
+            }
+            ExecutionStop::Boundary(ExecOutcome::Digest { value, ty, env }) => {
+                self.handle_digest(vm, value, ty, env)
+            }
+            ExecutionStop::Boundary(ExecOutcome::DynamicRender { value, ty }) => {
+                self.handle_dynamic_render(vm, value, ty)
+            }
+            ExecutionStop::Boundary(ExecOutcome::FunctionCode { function, origin }) => {
+                self.handle_function_code(vm, function, origin)
+            }
+            ExecutionStop::Boundary(ExecOutcome::ClassCode { class, origin }) => {
+                self.handle_class_code(vm, class, origin)
+            }
+        }
+        None
+    }
+
     /// The one driver loop over the activation stack.
     pub(super) fn drive_stack(
         &mut self,
@@ -927,104 +1033,11 @@ impl World {
                         .unwrap_or(u32::MAX)
                         .max(1);
                     let limit = requested.min(available).min(turn);
-                    let module = self.module.clone();
-                    let dispatch = self.dispatch.clone();
-                    let image = self.machines[act.vm as usize].image;
-                    let slots = image.and_then(|key| {
-                        self.vm_images.get(key.image as usize).and_then(|record| {
-                            (record.live && record.generation == key.generation)
-                                .then_some(record.slots.as_slice())
-                        })
-                    });
-                    let envs = &mut self.envs;
-                    let machine = &mut self.machines[act.vm as usize];
-                    let (outcome, retired) =
-                        machine.exec_for_quantum(&module, &dispatch, envs, slots, limit);
-                    self.budget.fuel -= u64::from(retired);
-                    if let Some(remaining) = &mut quantum {
-                        *remaining = remaining.saturating_sub(retired);
-                    }
-                    stack[top_idx].retired |= retired > 0;
-                    for a in stack.iter_mut() {
-                        if let Some(left) = &mut a.fuel {
-                            *left = left.saturating_sub(retired);
-                        }
-                    }
-                    match outcome {
-                        Err(code) => {
-                            self.machines[act.vm as usize].set_fault(
-                                code,
-                                execution_fault_message(code),
-                                None,
-                            );
-                        }
-                        Ok(None) | Ok(Some(ExecOutcome::Continue)) => {}
-                        Ok(Some(ExecOutcome::Terminal(value))) => {
-                            // A launched proc runs two frames: the
-                            // constructor, then the proc body over the
-                            // constructed instance.
-                            if self.machines[act.vm as usize].start_body.is_some() {
-                                self.enter_proc_body(act.vm, value);
-                            } else {
-                                self.machines[act.vm as usize].set_done(value);
-                            }
-                        }
-                        Ok(Some(ExecOutcome::Raise { code, message })) => {
-                            self.machines[act.vm as usize].set_fault(code, message, None);
-                        }
-                        Ok(Some(ExecOutcome::Perform { op, args })) => {
-                            if let Some(event) = self.handle_perform(stack, act.vm, op, args) {
-                                return event;
-                            }
-                        }
-                        Ok(Some(ExecOutcome::PrepareWait {
-                            op,
-                            argc,
-                            reply_ty,
-                            env,
-                        })) => {
-                            if let Some(event) =
-                                self.handle_prepare_wait(stack, act.vm, op, argc, reply_ty, env)
-                            {
-                                return event;
-                            }
-                        }
-                        Ok(Some(ExecOutcome::LoadSlot { slot })) => {
-                            if let Err(code) = self.load_value_slot(act.vm, slot) {
-                                self.machines[act.vm as usize].set_fault(code, "", None);
-                            }
-                        }
-                        Ok(Some(ExecOutcome::TableEdit {
-                            table,
-                            action,
-                            kind,
-                            slot,
-                            mock,
-                        })) => self.handle_table_edit(act.vm, table, action, kind, slot, mock),
-                        Ok(Some(ExecOutcome::AsCall {
-                            request,
-                            op,
-                            ty,
-                            env,
-                        })) => self.handle_as_call(act.vm, request, op, ty, env),
-                        Ok(Some(ExecOutcome::RequestOp { request })) => {
-                            self.handle_request_op(act.vm, request)
-                        }
-                        Ok(Some(ExecOutcome::CallArgs { call })) => {
-                            self.handle_call_args(act.vm, call)
-                        }
-                        Ok(Some(ExecOutcome::Digest { value, ty, env })) => {
-                            self.handle_digest(act.vm, value, ty, env)
-                        }
-                        Ok(Some(ExecOutcome::DynamicRender { value, ty })) => {
-                            self.handle_dynamic_render(act.vm, value, ty)
-                        }
-                        Ok(Some(ExecOutcome::FunctionCode { function, origin })) => {
-                            self.handle_function_code(act.vm, function, origin)
-                        }
-                        Ok(Some(ExecOutcome::ClassCode { class, origin })) => {
-                            self.handle_class_code(act.vm, class, origin)
-                        }
+                    let report = crate::execute(self.extract_execution(act.vm, limit));
+                    if let Some(event) =
+                        self.commit_execution_report(stack, top_idx, act.vm, &mut quantum, report)
+                    {
+                        return event;
                     }
                 }
             }

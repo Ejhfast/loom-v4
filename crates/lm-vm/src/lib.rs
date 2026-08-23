@@ -10,6 +10,7 @@
 //! Host operations cross one plain-data completion interface defined
 //! in `host`.
 
+mod executor;
 mod host;
 mod machine;
 mod resource;
@@ -18,6 +19,7 @@ pub mod snapshot;
 mod typecheck;
 mod world;
 
+pub use executor::{execute, ExecutionLease, ExecutionReport};
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,

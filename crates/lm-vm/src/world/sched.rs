@@ -681,20 +681,16 @@ impl World {
         &mut self,
         task: TaskKey,
         retired: u64,
-        changed: bool,
+        stopped: bool,
         heap_before: usize,
     ) {
         self.metrics.slices = self.metrics.slices.saturating_add(1);
         self.metrics.retired_instructions =
             self.metrics.retired_instructions.saturating_add(retired);
-        self.metrics.boundary_exits = self
-            .metrics
-            .boundary_exits
-            .saturating_add(u64::from(changed));
         let growth = self.aggregate_heap_bytes().saturating_sub(heap_before);
         self.metrics.heap_growth_bytes =
             self.metrics.heap_growth_bytes.saturating_add(growth as u64);
-        if retired == 0 && !changed {
+        if retired == 0 && !stopped {
             return;
         }
         let watchers = self.snapshot_watchers();

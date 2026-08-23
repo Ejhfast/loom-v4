@@ -21,6 +21,7 @@ mod waits;
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
+use crate::executor::{ExecutionLease, ExecutionReport, ExecutionStop};
 use crate::host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
