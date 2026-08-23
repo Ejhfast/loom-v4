@@ -1085,7 +1085,9 @@ Each new group needs all items in this list:
 - one local integration test with no external internet access;
 - focused performance and core-size measurements.
 
-The host test suite must include race permutations with fixed seeds.
+The host test suite must enumerate deterministic race scenarios with scripted hosts.
+
+The scenarios must cover each relevant completion and cancellation order.
 
 It must not depend on timing for correctness.
 

@@ -130,6 +130,60 @@ fn the_file_system_example_uses_portable_metadata() {
     assert_eq!(world.show_outcome(&outcome), "Done(Ok((true, true)))");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_directory_entry_crosses_the_guest_boundary() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time follows the epoch")
+        .as_nanos();
+    let directory =
+        std::env::temp_dir().join(format!("loom-fs-entry-{}-{unique}", std::process::id()));
+    std::fs::create_dir(&directory).expect("the test directory creates");
+    let invalid_name = std::ffi::OsString::from_vec(vec![b'b', b'a', b'd', 0xff]);
+    let invalid_path = directory.join(&invalid_name);
+    std::fs::write(&invalid_path, b"x").expect("the test file writes");
+    let directory_text = directory
+        .to_str()
+        .expect("the temporary path is valid UTF-8");
+    let source = format!(
+        r#"
+def go(): Result[Bool, FsError] with Fs.ReadDir
+  entries = sys.fs.read_dir("{directory_text}", 8)?
+  for entry in entries
+    case entry
+    in Err(FsError.InvalidEncoding(_)) then return Ok(true)
+    in _ then ()
+    end
+  end
+  Ok(false)
+end
+
+go()
+"#
+    );
+    let bytes = compile_to_bytes("invalid_directory_name.lm", &source)
+        .expect("the directory probe compiles");
+    let loaded = load_bytes(&bytes).expect("the directory probe loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(lm_host::CliHost::new(1)),
+    );
+    world
+        .allow("Fs.ReadDir")
+        .expect("the directory grant exists");
+
+    let outcome = lm_proc::run_world(&mut world);
+
+    std::fs::remove_file(invalid_path).expect("the test file removes");
+    std::fs::remove_dir(directory).expect("the test directory removes");
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(true))");
+}
+
 #[test]
 fn the_verifier_checks_new_file_boundary_roles() {
     let mut module =
