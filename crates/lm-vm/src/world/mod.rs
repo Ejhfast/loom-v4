@@ -24,7 +24,8 @@ pub(crate) use show::show_trace_event;
 use crate::host::{
     CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
     HostCompileOptions, HostCompileSlot, HostCompletion, HostOpenOptions, HostParseStatus,
-    HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue, HostWaitCancel,
+    HostSeekFrom, HostSignalKind, HostStart, HostStdStream, HostSyntaxDiagnostic, HostValue,
+    HostWaitCancel,
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,

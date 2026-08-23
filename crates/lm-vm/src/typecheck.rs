@@ -170,6 +170,8 @@ enum Kind {
     TcpStream,
     TcpListener,
     TlsStream,
+    RawMode,
+    SignalStream,
     Artifact,
     VerifiedModule,
     FunctionCode,
@@ -323,6 +325,10 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::TcpListener)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_TLS_STREAM] == *class {
                 Node::Heap(Kind::TlsStream)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_RAW_MODE] == *class {
+                Node::Heap(Kind::RawMode)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_SIGNAL_STREAM] == *class {
+                Node::Heap(Kind::SignalStream)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_ARTIFACT] == *class {
                 Node::Heap(Kind::Artifact)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
@@ -425,6 +431,8 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativeTcpStream { .. } => Kind::TcpStream,
         Object::NativeTcpListener { .. } => Kind::TcpListener,
         Object::NativeTlsStream { .. } => Kind::TlsStream,
+        Object::NativeRawMode { .. } => Kind::RawMode,
+        Object::NativeSignalStream { .. } => Kind::SignalStream,
         Object::NativeCode(code) => match code.kind {
             lm_heap::PortableCodeKind::Artifact => Kind::Artifact,
             lm_heap::PortableCodeKind::VerifiedModule => Kind::VerifiedModule,

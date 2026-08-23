@@ -1,0 +1,47 @@
+# Core: process signal boundary values and resources.
+
+enum SignalKind
+  Interrupt
+  Terminate
+end
+
+enum SignalError implements Error
+  Closed
+  InvalidInput(message: String)
+  Busy
+  Unsupported(message: String)
+  LimitExceeded(message: String)
+  Failed(message: String)
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Closed          then "signal stream is closed"
+    in InvalidInput(m) then m
+    in Busy            then "a signal stream is already active"
+    in Unsupported(m)  then m
+    in LimitExceeded(m) then m
+    in Failed(m)       then m
+    end
+    builder.append(text)
+  end
+end
+
+final class SignalStream
+  def next(self): Result[SignalKind, SignalError] with Signal.Next
+    sys.signal.next(self)
+  end
+
+  def next_wait(self): Wait[Result[SignalKind, SignalError]] with Signal.Next
+    sys.signal.next.wait(self)
+  end
+
+  def close(self): Result[(), SignalError] with Signal.Close
+    sys.signal.close(self)
+  end
+end
+
+final class Signal
+  def open(self, kinds: List[SignalKind]): Result[SignalStream, SignalError] with Signal.Open
+    sys.signal.open(kinds)
+  end
+end

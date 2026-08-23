@@ -1,0 +1,58 @@
+# Core: terminal boundary values and resources.
+
+enum StdStream
+  Input
+  Output
+  Error
+end
+
+frozen class TtySize
+  columns: Int
+  rows: Int
+
+  def init(mut self, columns: Int, rows: Int)
+    self.columns = columns
+    self.rows = rows
+  end
+end
+
+enum TtyError implements Error
+  Closed
+  NotTerminal
+  Busy
+  PermissionDenied(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Closed              then "terminal mode is closed"
+    in NotTerminal         then "the stream is not a terminal"
+    in Busy                then "raw terminal mode is already active"
+    in PermissionDenied(m) then m
+    in Unsupported(m)      then m
+    in Failed(m)           then m
+    end
+    builder.append(text)
+  end
+end
+
+final class RawMode
+  def exit(self): Result[(), TtyError] with Tty.ExitRaw
+    sys.tty.exit_raw(self)
+  end
+end
+
+final class Tty
+  def is_terminal(self, stream: StdStream): Bool with Tty.IsTerminal
+    sys.tty.is_terminal(stream)
+  end
+
+  def size(self, stream: StdStream): Result[TtySize, TtyError] with Tty.Size
+    sys.tty.size(stream)
+  end
+
+  def enter_raw(self): Result[RawMode, TtyError] with Tty.EnterRaw
+    sys.tty.enter_raw()
+  end
+end

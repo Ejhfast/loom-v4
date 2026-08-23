@@ -36,6 +36,10 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/io.lm"),
     "\n",
+    include_str!("../../../core/tty.lm"),
+    "\n",
+    include_str!("../../../core/signal.lm"),
+    "\n",
     include_str!("../../../core/fs.lm"),
     "\n",
     include_str!("../../../core/network.lm"),
@@ -67,7 +71,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 111] = [
+pub const PRELUDE_TYPES: [&str; 120] = [
     "Option",
     "Result",
     "Ordering",
@@ -101,6 +105,15 @@ pub const PRELUDE_TYPES: [&str; 111] = [
     "RestoreError",
     "ByteReader",
     "ByteWriter",
+    "StdStream",
+    "TtySize",
+    "TtyError",
+    "RawMode",
+    "Tty",
+    "SignalKind",
+    "SignalError",
+    "SignalStream",
+    "Signal",
     "Artifact",
     "VerifiedModule",
     "FunctionCode",

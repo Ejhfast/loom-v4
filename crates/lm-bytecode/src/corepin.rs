@@ -204,10 +204,34 @@ pub struct CoreLayout {
     pub parse_invalid: Option<u32>,
     pub syntax_diagnostic: Option<u32>,
     pub syntax_parse: Option<u32>,
+    pub std_stream: Option<u32>,
+    pub std_stream_input: Option<u32>,
+    pub std_stream_output: Option<u32>,
+    pub std_stream_error: Option<u32>,
+    pub tty_size: Option<u32>,
+    pub tty_error: Option<u32>,
+    pub tty_error_closed: Option<u32>,
+    pub tty_error_not_terminal: Option<u32>,
+    pub tty_error_busy: Option<u32>,
+    pub tty_error_permission_denied: Option<u32>,
+    pub tty_error_unsupported: Option<u32>,
+    pub tty_error_failed: Option<u32>,
+    pub raw_mode: Option<u32>,
+    pub signal_kind: Option<u32>,
+    pub signal_interrupt: Option<u32>,
+    pub signal_terminate: Option<u32>,
+    pub signal_error: Option<u32>,
+    pub signal_error_closed: Option<u32>,
+    pub signal_error_invalid_input: Option<u32>,
+    pub signal_error_busy: Option<u32>,
+    pub signal_error_unsupported: Option<u32>,
+    pub signal_error_limit_exceeded: Option<u32>,
+    pub signal_error_failed: Option<u32>,
+    pub signal_stream: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 172] = [
+pub const PINNED_LABELS: [&str; 196] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -380,6 +404,30 @@ pub const PINNED_LABELS: [&str; 172] = [
     "Tuple16",
     "Unit",
     "Float",
+    "StdStream",
+    "StdStream.Input",
+    "StdStream.Output",
+    "StdStream.Error",
+    "TtySize",
+    "TtyError",
+    "TtyError.Closed",
+    "TtyError.NotTerminal",
+    "TtyError.Busy",
+    "TtyError.PermissionDenied",
+    "TtyError.Unsupported",
+    "TtyError.Failed",
+    "RawMode",
+    "SignalKind",
+    "SignalKind.Interrupt",
+    "SignalKind.Terminate",
+    "SignalError",
+    "SignalError.Closed",
+    "SignalError.InvalidInput",
+    "SignalError.Busy",
+    "SignalError.Unsupported",
+    "SignalError.LimitExceeded",
+    "SignalError.Failed",
+    "SignalStream",
 ];
 
 /// The core role of immediate integer values.
@@ -524,6 +572,30 @@ pub const ROLE_UNIT: usize = 170;
 
 /// The core role of immediate floating-point values.
 pub const ROLE_FLOAT: usize = 171;
+pub const ROLE_STD_STREAM: usize = 172;
+pub const ROLE_STD_STREAM_INPUT: usize = 173;
+pub const ROLE_STD_STREAM_OUTPUT: usize = 174;
+pub const ROLE_STD_STREAM_ERROR: usize = 175;
+pub const ROLE_TTY_SIZE: usize = 176;
+pub const ROLE_TTY_ERROR: usize = 177;
+pub const ROLE_TTY_ERROR_CLOSED: usize = 178;
+pub const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 179;
+pub const ROLE_TTY_ERROR_BUSY: usize = 180;
+pub const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 181;
+pub const ROLE_TTY_ERROR_UNSUPPORTED: usize = 182;
+pub const ROLE_TTY_ERROR_FAILED: usize = 183;
+pub const ROLE_RAW_MODE: usize = 184;
+pub const ROLE_SIGNAL_KIND: usize = 185;
+pub const ROLE_SIGNAL_INTERRUPT: usize = 186;
+pub const ROLE_SIGNAL_TERMINATE: usize = 187;
+pub const ROLE_SIGNAL_ERROR: usize = 188;
+pub const ROLE_SIGNAL_ERROR_CLOSED: usize = 189;
+pub const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 190;
+pub const ROLE_SIGNAL_ERROR_BUSY: usize = 191;
+pub const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
+pub const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
+pub const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
+pub const ROLE_SIGNAL_STREAM: usize = 195;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -747,6 +819,30 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ParseStatus.ParseInvalid" => &mut layout.parse_invalid,
         "SyntaxDiagnostic" => &mut layout.syntax_diagnostic,
         "SyntaxParse" => &mut layout.syntax_parse,
+        "StdStream" => &mut layout.std_stream,
+        "StdStream.Input" => &mut layout.std_stream_input,
+        "StdStream.Output" => &mut layout.std_stream_output,
+        "StdStream.Error" => &mut layout.std_stream_error,
+        "TtySize" => &mut layout.tty_size,
+        "TtyError" => &mut layout.tty_error,
+        "TtyError.Closed" => &mut layout.tty_error_closed,
+        "TtyError.NotTerminal" => &mut layout.tty_error_not_terminal,
+        "TtyError.Busy" => &mut layout.tty_error_busy,
+        "TtyError.PermissionDenied" => &mut layout.tty_error_permission_denied,
+        "TtyError.Unsupported" => &mut layout.tty_error_unsupported,
+        "TtyError.Failed" => &mut layout.tty_error_failed,
+        "RawMode" => &mut layout.raw_mode,
+        "SignalKind" => &mut layout.signal_kind,
+        "SignalKind.Interrupt" => &mut layout.signal_interrupt,
+        "SignalKind.Terminate" => &mut layout.signal_terminate,
+        "SignalError" => &mut layout.signal_error,
+        "SignalError.Closed" => &mut layout.signal_error_closed,
+        "SignalError.InvalidInput" => &mut layout.signal_error_invalid_input,
+        "SignalError.Busy" => &mut layout.signal_error_busy,
+        "SignalError.Unsupported" => &mut layout.signal_error_unsupported,
+        "SignalError.LimitExceeded" => &mut layout.signal_error_limit_exceeded,
+        "SignalError.Failed" => &mut layout.signal_error_failed,
+        "SignalStream" => &mut layout.signal_stream,
         _ => unreachable!("only known labels enter the map"),
     }
 }

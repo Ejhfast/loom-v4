@@ -1,0 +1,166 @@
+# Standard library: portable terminal byte helpers.
+
+enum TermKey
+  Text(value: String)
+  Enter
+  Tab
+  Backspace
+  Escape
+  Up
+  Down
+  Left
+  Right
+  Home
+  End
+  Delete
+  Unknown(value: Bytes)
+end
+
+enum KeyDecode
+  Decoded(key: TermKey, consumed: Int)
+  NeedMore
+end
+
+enum TermError implements Error
+  InvalidPosition(message: String)
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in InvalidPosition(message) then builder.append(message)
+    end
+  end
+end
+
+def clear_screen(): Bytes
+  b"\x1b[2J"
+end
+
+def clear_line(): Bytes
+  b"\x1b[2K"
+end
+
+def hide_cursor(): Bytes
+  b"\x1b[?25l"
+end
+
+def show_cursor(): Bytes
+  b"\x1b[?25h"
+end
+
+def reset_style(): Bytes
+  b"\x1b[0m"
+end
+
+def cursor_to(column: Int, row: Int): Result[Bytes, TermError]
+  if column < 1 or row < 1
+    Err(TermError.InvalidPosition("terminal positions start at one"))
+  else
+    Ok("\x1b[#{row};#{column}H".bytes())
+  end
+end
+
+def unknown_prefix(input: Bytes, count: Int): KeyDecode
+  Decoded(TermKey.Unknown(input.slice(0, count).expect("the key prefix is valid")), count)
+end
+
+# Decode the first key in one bounded input prefix.
+# Set `finish_escape` after an escape timeout or at input completion.
+def decode_key(input: Bytes, finish_escape: Bool): KeyDecode
+  if input.is_empty()
+    return NeedMore
+  end
+
+  first = input.at(0)
+  if first == 10 or first == 13
+    return Decoded(TermKey.Enter, 1)
+  elsif first == 9
+    return Decoded(TermKey.Tab, 1)
+  elsif first == 8 or first == 127
+    return Decoded(TermKey.Backspace, 1)
+  end
+
+  if first == 27
+    if input.len() == 1
+      if finish_escape
+        return Decoded(TermKey.Escape, 1)
+      else
+        return NeedMore
+      end
+    end
+
+    second = input.at(1)
+    if second != 91 and second != 79
+      return unknown_prefix(input, 2)
+    end
+    if input.len() < 3
+      if finish_escape
+        return unknown_prefix(input, input.len())
+      else
+        return NeedMore
+      end
+    end
+
+    third = input.at(2)
+    if third == 65
+      return Decoded(TermKey.Up, 3)
+    elsif third == 66
+      return Decoded(TermKey.Down, 3)
+    elsif third == 67
+      return Decoded(TermKey.Right, 3)
+    elsif third == 68
+      return Decoded(TermKey.Left, 3)
+    elsif third == 72
+      return Decoded(TermKey.Home, 3)
+    elsif third == 70
+      return Decoded(TermKey.End, 3)
+    end
+
+    if second == 91 and (third == 49 or third == 51 or third == 52)
+      if input.len() < 4
+        if finish_escape
+          return unknown_prefix(input, input.len())
+        else
+          return NeedMore
+        end
+      end
+      if input.at(3) == 126
+        if third == 49
+          return Decoded(TermKey.Home, 4)
+        elsif third == 51
+          return Decoded(TermKey.Delete, 4)
+        else
+          return Decoded(TermKey.End, 4)
+        end
+      end
+      return unknown_prefix(input, 4)
+    end
+
+    return unknown_prefix(input, 3)
+  end
+
+  scalar_bytes = if first < 128
+    1
+  elsif first >= 194 and first <= 223
+    2
+  elsif first >= 224 and first <= 239
+    3
+  elsif first >= 240 and first <= 244
+    4
+  else
+    return unknown_prefix(input, 1)
+  end
+
+  if input.len() < scalar_bytes
+    if finish_escape
+      return unknown_prefix(input, input.len())
+    else
+      return NeedMore
+    end
+  end
+
+  prefix = input.slice(0, scalar_bytes).expect("the scalar prefix is valid")
+  case prefix.utf8()
+  in Ok(text) then Decoded(TermKey.Text(text), scalar_bytes)
+  in Err(_)   then unknown_prefix(input, 1)
+  end
+end

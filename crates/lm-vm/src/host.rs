@@ -29,6 +29,10 @@ pub enum HostArg {
     Option(Option<Box<HostArg>>),
     Result(Result<Box<HostArg>, Box<HostArg>>),
     Tls(u64),
+    StdStream(HostStdStream),
+    RawMode(u64),
+    SignalKind(HostSignalKind),
+    SignalStream(u64),
     Resource(HostResource),
     CompileEnv(HostCompileEnv),
     CompileOptions(HostCompileOptions),
@@ -130,6 +134,21 @@ pub enum HostShutdown {
     Both,
 }
 
+/// One standard process stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostStdStream {
+    Input,
+    Output,
+    Error,
+}
+
+/// One portable process signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSignalKind {
+    Interrupt,
+    Terminate,
+}
+
 /// One portable file-open mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOpenOptions {
@@ -192,6 +211,21 @@ pub enum CoreCtor {
     TlsNetwork,
     TlsClosed,
     TlsLimitExceeded,
+    TtySize,
+    TtyClosed,
+    TtyNotTerminal,
+    TtyBusy,
+    TtyPermissionDenied,
+    TtyUnsupported,
+    TtyFailed,
+    SignalInterrupt,
+    SignalTerminate,
+    SignalClosed,
+    SignalInvalidInput,
+    SignalBusy,
+    SignalUnsupported,
+    SignalLimitExceeded,
+    SignalFailed,
     CompileErrors,
 }
 
@@ -228,6 +262,8 @@ pub enum HostValue {
     TcpStream(u64),
     TcpListener(u64),
     TlsStream(u64),
+    RawMode(u64),
+    SignalStream(u64),
     Resource(HostResource),
     Artifact {
         module: SharedBytes,
@@ -339,6 +375,14 @@ pub trait Host {
     fn close_tls(&mut self, _token: u64) -> bool {
         false
     }
+    /// Restore one raw terminal resource during forced cleanup.
+    fn close_raw_mode(&mut self, _token: u64) -> bool {
+        false
+    }
+    /// Close one signal stream during forced cleanup.
+    fn close_signal_stream(&mut self, _token: u64) -> bool {
+        false
+    }
     /// Close one opaque extension resource during forced cleanup.
     fn close_resource(&mut self, _resource: HostResource) -> bool {
         false
@@ -399,6 +443,13 @@ pub struct RecordingHost {
     tls_streams: std::collections::BTreeSet<u64>,
     next_tcp: u64,
     next_port: u16,
+    terminal_streams: [bool; 3],
+    terminal_size: (i64, i64),
+    raw_mode: Option<u64>,
+    next_raw_mode: u64,
+    signal_stream: Option<MemorySignalStream>,
+    next_signal_stream: u64,
+    signals_on_open: VecDeque<HostSignalKind>,
 }
 
 /// One reply this host holds until a later poll.
@@ -419,6 +470,7 @@ enum DeferredAction {
     Accept(u64),
     Read { stream: u64, count: usize },
     TlsRead { stream: u64, count: usize },
+    SignalNext { stream: u64 },
 }
 
 #[derive(Debug)]
@@ -435,6 +487,15 @@ enum RetainedWait {
     Connect {
         client: u64,
     },
+    Signal(HostSignalKind),
+}
+
+#[derive(Debug)]
+struct MemorySignalStream {
+    token: u64,
+    interrupt: bool,
+    terminate: bool,
+    queued: VecDeque<HostSignalKind>,
 }
 
 /// True when the command-line host serves this operation off the
@@ -619,6 +680,13 @@ impl RecordingHost {
             tls_streams: std::collections::BTreeSet::new(),
             next_tcp: 1,
             next_port: 40_000,
+            terminal_streams: [true, true, true],
+            terminal_size: (80, 24),
+            raw_mode: None,
+            next_raw_mode: 1,
+            signal_stream: None,
+            next_signal_stream: 1,
+            signals_on_open: VecDeque::new(),
         }
     }
 
@@ -640,6 +708,49 @@ impl RecordingHost {
     /// Set one environment value before execution.
     pub fn set_env(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.environment.insert(name.into(), value.into());
+    }
+
+    /// Set the terminal state of one standard stream.
+    pub fn set_terminal(&mut self, stream: HostStdStream, terminal: bool) {
+        self.terminal_streams[std_stream_index(stream)] = terminal;
+    }
+
+    /// Set the terminal size returned by the test host.
+    pub fn set_terminal_size(&mut self, columns: i64, rows: i64) {
+        self.terminal_size = (columns, rows);
+    }
+
+    /// Add one signal notification to the active test stream.
+    pub fn notify_signal(&mut self, kind: HostSignalKind) -> bool {
+        let Some(stream) = &mut self.signal_stream else {
+            return false;
+        };
+        let requested = match kind {
+            HostSignalKind::Interrupt => stream.interrupt,
+            HostSignalKind::Terminate => stream.terminate,
+        };
+        if !requested {
+            return false;
+        }
+        if !stream.queued.contains(&kind) {
+            stream.queued.push_back(kind);
+        }
+        true
+    }
+
+    /// Queue one signal when the next test stream opens.
+    pub fn queue_signal_on_open(&mut self, kind: HostSignalKind) {
+        self.signals_on_open.push_back(kind);
+    }
+
+    /// True when the test host owns raw terminal mode.
+    pub fn raw_mode_active(&self) -> bool {
+        self.raw_mode.is_some()
+    }
+
+    /// True when the test host owns one signal stream.
+    pub fn signal_stream_active(&self) -> bool {
+        self.signal_stream.is_some()
     }
 
     fn next_rand(&mut self) -> u64 {
@@ -720,6 +831,21 @@ impl RecordingHost {
         None
     }
 
+    fn signal_next_value(&mut self, token: u64) -> Option<HostValue> {
+        let Some(stream) = &mut self.signal_stream else {
+            return Some(core_error(CoreCtor::SignalClosed, None));
+        };
+        if stream.token != token {
+            return Some(core_error(CoreCtor::SignalClosed, None));
+        }
+        let kind = stream.queued.pop_front()?;
+        let ctor = match kind {
+            HostSignalKind::Interrupt => CoreCtor::SignalInterrupt,
+            HostSignalKind::Terminate => CoreCtor::SignalTerminate,
+        };
+        Some(core_ok(HostValue::Ctor(ctor, vec![])))
+    }
+
     fn close_virtual_tcp(&mut self, resource: HostTcpResource) -> bool {
         match resource.kind {
             HostTcpKind::Listener => {
@@ -773,7 +899,16 @@ impl RecordingHost {
             DeferredAction::Accept(listener) => self.accept_value(listener),
             DeferredAction::Read { stream, count } => self.read_value(stream, count),
             DeferredAction::TlsRead { stream, count } => self.tls_read_value(stream, count),
+            DeferredAction::SignalNext { stream } => self.signal_next_value(stream),
         }
+    }
+}
+
+fn std_stream_index(stream: HostStdStream) -> usize {
+    match stream {
+        HostStdStream::Input => 0,
+        HostStdStream::Output => 1,
+        HostStdStream::Error => 2,
     }
 }
 
@@ -1704,6 +1839,132 @@ impl RecordingHost {
                     HostStart::Completed(tls_closed())
                 }
             }
+            lm_abi::OP_TTY_IS_TERMINAL => {
+                let Some(HostArg::StdStream(stream)) = args.first() else {
+                    return HostStart::Failed("Tty.IsTerminal needs one stream".to_string());
+                };
+                HostStart::Completed(HostValue::Bool(
+                    self.terminal_streams[std_stream_index(*stream)],
+                ))
+            }
+            lm_abi::OP_TTY_SIZE => {
+                let Some(HostArg::StdStream(stream)) = args.first() else {
+                    return HostStart::Failed("Tty.Size needs one stream".to_string());
+                };
+                if !self.terminal_streams[std_stream_index(*stream)] {
+                    return HostStart::Completed(core_error(CoreCtor::TtyNotTerminal, None));
+                }
+                let (columns, rows) = self.terminal_size;
+                HostStart::Completed(core_ok(HostValue::Ctor(
+                    CoreCtor::TtySize,
+                    vec![HostValue::Int(columns), HostValue::Int(rows)],
+                )))
+            }
+            lm_abi::OP_TTY_ENTER_RAW => {
+                if self.raw_mode.is_some() {
+                    return HostStart::Completed(core_error(CoreCtor::TtyBusy, None));
+                }
+                if !self.terminal_streams[std_stream_index(HostStdStream::Input)] {
+                    return HostStart::Completed(core_error(CoreCtor::TtyNotTerminal, None));
+                }
+                let token = self.next_raw_mode;
+                let Some(next) = token.checked_add(1) else {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::TtyFailed,
+                        Some("the raw mode token space is exhausted"),
+                    ));
+                };
+                self.next_raw_mode = next;
+                self.raw_mode = Some(token);
+                HostStart::Completed(core_ok(HostValue::RawMode(token)))
+            }
+            lm_abi::OP_TTY_EXIT_RAW => {
+                let Some(HostArg::RawMode(token)) = args.first() else {
+                    return HostStart::Failed("Tty.ExitRaw needs one raw mode".to_string());
+                };
+                if self.raw_mode == Some(*token) {
+                    self.raw_mode = None;
+                    HostStart::Completed(core_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(core_error(CoreCtor::TtyClosed, None))
+                }
+            }
+            lm_abi::OP_SIGNAL_OPEN => {
+                let Some(HostArg::List(kinds)) = args.first() else {
+                    return HostStart::Failed("Signal.Open needs one signal list".to_string());
+                };
+                if kinds.is_empty() {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::SignalInvalidInput,
+                        Some("the signal list is empty"),
+                    ));
+                }
+                if self.signal_stream.is_some() {
+                    return HostStart::Completed(core_error(CoreCtor::SignalBusy, None));
+                }
+                let mut interrupt = false;
+                let mut terminate = false;
+                for kind in kinds {
+                    match kind {
+                        HostArg::SignalKind(HostSignalKind::Interrupt) => interrupt = true,
+                        HostArg::SignalKind(HostSignalKind::Terminate) => terminate = true,
+                        _ => {
+                            return HostStart::Failed(
+                                "Signal.Open needs signal values".to_string(),
+                            );
+                        }
+                    }
+                }
+                let token = self.next_signal_stream;
+                let Some(next) = token.checked_add(1) else {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::SignalLimitExceeded,
+                        Some("the signal stream token space is exhausted"),
+                    ));
+                };
+                self.next_signal_stream = next;
+                let mut queued = VecDeque::new();
+                for kind in self.signals_on_open.drain(..) {
+                    let requested = match kind {
+                        HostSignalKind::Interrupt => interrupt,
+                        HostSignalKind::Terminate => terminate,
+                    };
+                    if requested && !queued.contains(&kind) {
+                        queued.push_back(kind);
+                    }
+                }
+                self.signal_stream = Some(MemorySignalStream {
+                    token,
+                    interrupt,
+                    terminate,
+                    queued,
+                });
+                HostStart::Completed(core_ok(HostValue::SignalStream(token)))
+            }
+            lm_abi::OP_SIGNAL_NEXT => {
+                let Some(HostArg::SignalStream(stream)) = args.first() else {
+                    return HostStart::Failed("Signal.Next needs one signal stream".to_string());
+                };
+                match self.signal_next_value(*stream) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(key, DeferredAction::SignalNext { stream: *stream }),
+                }
+            }
+            lm_abi::OP_SIGNAL_CLOSE => {
+                let Some(HostArg::SignalStream(stream)) = args.first() else {
+                    return HostStart::Failed("Signal.Close needs one signal stream".to_string());
+                };
+                if self
+                    .signal_stream
+                    .as_ref()
+                    .is_some_and(|active| active.token == *stream)
+                {
+                    self.signal_stream = None;
+                    HostStart::Completed(core_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(core_error(CoreCtor::SignalClosed, None))
+                }
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -1738,6 +1999,14 @@ impl RecordingHost {
                 .map(|connection| (*listener, connection)),
             _ => None,
         };
+        let signal = match &action {
+            DeferredAction::SignalNext { stream } => self
+                .signal_stream
+                .as_ref()
+                .filter(|state| state.token == *stream)
+                .and_then(|state| state.queued.front().copied()),
+            _ => None,
+        };
         let value = self.deferred_value(token)?;
         let mut entry = self.pending.remove(&token)?;
         if entry.wait_source {
@@ -1765,7 +2034,7 @@ impl RecordingHost {
                     connection,
                 })
             } else {
-                None
+                signal.map(RetainedWait::Signal)
             };
             if let Some(retained) = entry.rollback.take().or(dynamic) {
                 self.retained_waits.insert(token, retained);
@@ -1823,6 +2092,13 @@ impl RecordingHost {
                     kind: HostTcpKind::Stream,
                     token: client,
                 });
+            }
+            RetainedWait::Signal(kind) => {
+                if let Some(stream) = &mut self.signal_stream {
+                    if !stream.queued.contains(&kind) {
+                        stream.queued.push_front(kind);
+                    }
+                }
             }
         }
     }
@@ -1968,6 +2244,12 @@ impl Host for RecordingHost {
                     None,
                 )
             }
+            lm_abi::OP_SIGNAL_NEXT => {
+                let Some(HostArg::SignalStream(stream)) = args.first() else {
+                    return HostStart::Failed("Signal.Next needs one signal stream".to_string());
+                };
+                self.defer_wait(key, DeferredAction::SignalNext { stream: *stream }, None)
+            }
             _ => self.start(key, op, args),
         }
     }
@@ -2033,6 +2315,28 @@ impl Host for RecordingHost {
     fn close_tls(&mut self, token: u64) -> bool {
         self.close_virtual_tls(token)
     }
+
+    fn close_raw_mode(&mut self, token: u64) -> bool {
+        if self.raw_mode == Some(token) {
+            self.raw_mode = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_signal_stream(&mut self, token: u64) -> bool {
+        if self
+            .signal_stream
+            .as_ref()
+            .is_some_and(|stream| stream.token == token)
+        {
+            self.signal_stream = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// A shared recording host, so a test keeps access to the buffers
@@ -2076,6 +2380,14 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_tls(&mut self, token: u64) -> bool {
         self.borrow_mut().close_tls(token)
+    }
+
+    fn close_raw_mode(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_raw_mode(token)
+    }
+
+    fn close_signal_stream(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_signal_stream(token)
     }
 }
 

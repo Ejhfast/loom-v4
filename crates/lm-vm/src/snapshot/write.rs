@@ -1185,6 +1185,8 @@ impl World {
                 Object::NativeTcpStream { .. } => Object::NativeTcpStream { resource: 0 },
                 Object::NativeTcpListener { .. } => Object::NativeTcpListener { resource: 0 },
                 Object::NativeTlsStream { .. } => Object::NativeTlsStream { resource: 0 },
+                Object::NativeRawMode { .. } => Object::NativeRawMode { resource: 0 },
+                Object::NativeSignalStream { .. } => Object::NativeSignalStream { resource: 0 },
                 Object::NativeHostResource { kind, .. } => Object::NativeHostResource {
                     kind: *kind,
                     resource: 0,

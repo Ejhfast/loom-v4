@@ -72,6 +72,10 @@ pub enum ResourceKind {
     TcpListener,
     /// One open TLS stream.
     TlsStream,
+    /// One active raw terminal mode.
+    RawMode,
+    /// One open process signal stream.
+    SignalStream,
     /// One opaque extension resource, by stable kind identity.
     Extension([u8; 32]),
 }
@@ -83,9 +87,11 @@ impl ResourceKind {
             // A live completion callback has no bytes to copy.
             ResourceKind::PendingOperation => SnapshotClass::HostAttachment,
             ResourceKind::File => SnapshotClass::HostAttachment,
-            ResourceKind::TcpStream | ResourceKind::TcpListener | ResourceKind::TlsStream => {
-                SnapshotClass::HostAttachment
-            }
+            ResourceKind::TcpStream
+            | ResourceKind::TcpListener
+            | ResourceKind::TlsStream
+            | ResourceKind::RawMode
+            | ResourceKind::SignalStream => SnapshotClass::HostAttachment,
             ResourceKind::Extension(_) => SnapshotClass::HostAttachment,
         }
     }

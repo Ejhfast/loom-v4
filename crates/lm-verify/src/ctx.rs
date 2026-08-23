@@ -1147,6 +1147,11 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::SyntaxTrivia => (self.core.syntax_trivia, "SyntaxTrivia"),
                     lm_abi::AbiCore::SyntaxBuilder => (self.core.syntax_builder, "SyntaxBuilder"),
                     lm_abi::AbiCore::SyntaxParse => (self.core.syntax_parse, "SyntaxParse"),
+                    lm_abi::AbiCore::StdStream => (self.core.std_stream, "StdStream"),
+                    lm_abi::AbiCore::TtySize => (self.core.tty_size, "TtySize"),
+                    lm_abi::AbiCore::TtyError => (self.core.tty_error, "TtyError"),
+                    lm_abi::AbiCore::SignalKind => (self.core.signal_kind, "SignalKind"),
+                    lm_abi::AbiCore::SignalError => (self.core.signal_error, "SignalError"),
                 };
                 self.plain_inst(slot, name)
             }
@@ -1160,6 +1165,10 @@ impl<'m> Ctx<'m> {
                     self.plain_inst(self.core.tcp_listener, "TcpListener")
                 }
                 lm_abi::AbiNative::TlsStream => self.plain_inst(self.core.tls_stream, "TlsStream"),
+                lm_abi::AbiNative::RawMode => self.plain_inst(self.core.raw_mode, "RawMode"),
+                lm_abi::AbiNative::SignalStream => {
+                    self.plain_inst(self.core.signal_stream, "SignalStream")
+                }
             },
             lm_abi::AbiType::Var(index) => Err(format!(
                 "the fixed ABI type names generic parameter {index}"

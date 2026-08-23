@@ -681,7 +681,9 @@ fn encode_object(out: &mut Out, object: &Object) {
         }
         Object::NativeTcpStream { resource }
         | Object::NativeTcpListener { resource }
-        | Object::NativeTlsStream { resource } => {
+        | Object::NativeTlsStream { resource }
+        | Object::NativeRawMode { resource }
+        | Object::NativeSignalStream { resource } => {
             out.u64(*resource);
         }
         Object::NativeHostResource { kind, resource } => {
@@ -2245,6 +2247,12 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             resource: cur.u64()?,
         },
         23 => Object::NativeTlsStream {
+            resource: cur.u64()?,
+        },
+        31 => Object::NativeRawMode {
+            resource: cur.u64()?,
+        },
+        32 => Object::NativeSignalStream {
             resource: cur.u64()?,
         },
         25 => Object::NativeRun {

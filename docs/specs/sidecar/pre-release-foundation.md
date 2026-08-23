@@ -1,6 +1,6 @@
 # Pre-release Host Effects
 
-Status: accepted plan. Stages 0 and 1 complete.
+Status: accepted plan. Stages 0 through 2 complete.
 
 This sidecar replaces the completed pre-release foundation plan.
 
@@ -371,17 +371,31 @@ The host removes duplicate kinds before it opens the stream.
 
 A stream gives guest signal delivery an explicit lifetime.
 
-Without a live stream, the host keeps its normal signal behavior.
+Without a live stream, the host keeps normal signal behavior unless raw mode is active.
 
-Opening a stream installs safe host notification handlers.
+Raw mode installs cleanup handlers for both supported signals.
 
-Closing one alias closes the stream and restores normal host behavior.
+Opening a stream reuses or installs safe host notification handlers.
 
-The host changes only the requested signal dispositions.
+Closing one alias closes the stream and removes guest signal delivery.
+
+The host terminates normally after it observes an unrequested signal.
+
+It restores every raw terminal resource before that termination.
 
 Only one signal stream can exist for one root host.
 
 A second open request returns `SignalError.Busy`.
+
+The command host permits one active platform signal service in one process.
+
+Another root host receives `Busy` while that service remains active.
+
+The current signal adapter supports Linux.
+
+Other platforms return `SignalError.Unsupported`.
+
+Raw mode also returns `TtyError.Unsupported` when signal cleanup is unavailable.
 
 `SignalError` is this closed family:
 
@@ -960,7 +974,7 @@ Gate: Machine death cancels mixed armed sources and releases every attachment.
 
 Gate: Direct operation benchmarks remain within normal noise.
 
-### Stage 2: Terminal and signals
+### Stage 2: Terminal and signals (complete)
 
 - Add terminal and signal manifest entries.
 - Add `RawMode` and `SignalStream` resource kinds.
@@ -972,6 +986,10 @@ Gate: Direct operation benchmarks remain within normal noise.
 Gate: Every normal exit and Loom fault restores the saved terminal state.
 
 Gate: A losing signal wait preserves its signal.
+
+Gate: Closing a signal stream completes every armed signal wait.
+
+Gate: Active raw mode keeps cleanup handlers for both supported signals.
 
 ### Stage 3: File-system completion
 

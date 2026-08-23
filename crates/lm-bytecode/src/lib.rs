@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 172;
+pub const CORE_ROLE_COUNT: usize = 196;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -1296,7 +1296,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 50 adds Float, byte literals, and prefixed numeric instructions.
 /// Version 51 adds text padding and Float text conversions.
 /// Version 52 adds selectable host-operation sources.
-pub const VERSION: u16 = 52;
+/// Version 53 adds terminal and signal core roles.
+pub const VERSION: u16 = 53;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.

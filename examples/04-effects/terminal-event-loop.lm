@@ -1,0 +1,47 @@
+# Select terminal input or one timer tick.
+# Raw mode returns to its original state when this function ends.
+
+use std.io.write_all
+use std.term.KeyDecode
+use std.term.TermKey
+use std.term.clear_screen
+use std.term.cursor_to
+use std.term.decode_key
+
+def key_name(bytes: Bytes): String
+  case decode_key(bytes, false)
+  in Decoded(TermKey.Text(text), _) then text
+  in Decoded(TermKey.Enter, _)      then "enter"
+  in Decoded(TermKey.Escape, _)     then "escape"
+  in Decoded(TermKey.Up, _)         then "up"
+  in Decoded(TermKey.Down, _)       then "down"
+  in Decoded(TermKey.Left, _)       then "left"
+  in Decoded(TermKey.Right, _)      then "right"
+  in Decoded(_, _)                  then "another key"
+  in NeedMore                       then "an incomplete key"
+  end
+end
+
+def one_event(): String with Tty, Io.ReadBytes, Io.Write, Clock.Sleep, Wait
+  tty = Tty()
+  size = tty.size(StdStream.Output).expect("standard output is a terminal")
+  raw = tty.enter_raw().expect("raw mode opens")
+
+  home = cursor_to(1, 1).expect("the home position is valid")
+  write_all(clear_screen() + home).expect("the terminal control writes")
+
+  event = select
+  in sys.io.read_bytes.wait(8) -> input
+    case input
+    in Ok(bytes) then key_name(bytes)
+    in Err(error) then display(error)
+    end
+  in sys.clock.sleep.wait(16_000_000) -> _
+    "timer tick"
+  end
+
+  raw.exit().expect("raw mode closes")
+  "#{size.columns}x#{size.rows} #{event}"
+end
+
+one_event()

@@ -652,6 +652,22 @@ impl World {
             {
                 self.pending_resource_of(vm, ResourceErrors::Tls)
             }
+            Some(lm_abi::OP_TTY_EXIT_RAW)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.tty_error_closed) =>
+            {
+                self.pending_resource_of(vm, ResourceErrors::Tty)
+            }
+            Some(lm_abi::OP_SIGNAL_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(
+                        vm,
+                        value,
+                        self.core.signal_error_closed,
+                    ) =>
+            {
+                self.pending_resource_of(vm, ResourceErrors::Signal)
+            }
             _ => None,
         };
         if let Err(code) = self.check_reply(vm, value) {

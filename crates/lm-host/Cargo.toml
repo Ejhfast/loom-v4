@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 getrandom = "0.2"
+libc = "0.2"
 lm-abi = { path = "../lm-abi" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-compiler = { path = "../lm-compiler" }

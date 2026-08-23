@@ -11,14 +11,18 @@
 mod compiler_service;
 mod io_service;
 mod network_service;
+mod signal_service;
+mod terminal;
 
 use compiler_service::{CompileRequest, CompilerService};
 use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
-    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostParseStatus, HostStart,
-    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, SharedBytes,
+    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostParseStatus, HostSignalKind,
+    HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel,
+    SharedBytes,
 };
 use network_service::{NetworkService, TcpRequest, TlsClientSettings, TlsRequest};
+use signal_service::{SignalService, SignalServiceError};
 use std::collections::HashMap;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,6 +41,9 @@ pub struct CliHost {
     compiler: Option<CompilerService>,
     starting_wait: bool,
     wait_services: HashMap<u64, WaitService>,
+    terminal: terminal::TerminalService,
+    signal: Option<SignalService>,
+    next_signal_stream: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +51,7 @@ enum WaitService {
     Input,
     Network,
     Sleep,
+    Signal,
 }
 
 impl CliHost {
@@ -67,6 +75,26 @@ impl CliHost {
             compiler: None,
             starting_wait: false,
             wait_services: HashMap::new(),
+            terminal: terminal::TerminalService::new(),
+            signal: None,
+            next_signal_stream: 1,
+        }
+    }
+
+    fn ensure_signal_guardian(&mut self) -> Result<(), SignalServiceError> {
+        if self.signal.is_none() {
+            self.signal = Some(SignalService::guardian()?);
+        }
+        Ok(())
+    }
+
+    fn prune_signal_guardian(&mut self) {
+        if self.terminal.raw_active() {
+            return;
+        }
+        let release = self.signal.as_mut().is_some_and(SignalService::can_release);
+        if release {
+            self.signal = None;
         }
     }
 
@@ -226,6 +254,40 @@ fn error_value(ctor: CoreCtor, message: Option<&str>) -> HostValue {
     HostValue::Ctor(CoreCtor::Err, vec![HostValue::Ctor(ctor, fields)])
 }
 
+fn tty_error(error: terminal::TerminalError) -> HostValue {
+    let (ctor, message) = match error {
+        terminal::TerminalError::Closed => (CoreCtor::TtyClosed, None),
+        terminal::TerminalError::NotTerminal => (CoreCtor::TtyNotTerminal, None),
+        terminal::TerminalError::Busy => (CoreCtor::TtyBusy, None),
+        terminal::TerminalError::PermissionDenied(message) => {
+            (CoreCtor::TtyPermissionDenied, Some(message))
+        }
+        #[cfg(not(target_os = "linux"))]
+        terminal::TerminalError::Unsupported(message) => (CoreCtor::TtyUnsupported, Some(message)),
+        terminal::TerminalError::Failed(message) => (CoreCtor::TtyFailed, Some(message)),
+    };
+    error_value(ctor, message.as_deref())
+}
+
+fn signal_service_error(error: SignalServiceError) -> HostValue {
+    let (ctor, message) = match error {
+        SignalServiceError::Busy => (CoreCtor::SignalBusy, None),
+        #[cfg(not(target_os = "linux"))]
+        SignalServiceError::Unsupported(message) => (CoreCtor::SignalUnsupported, Some(message)),
+        SignalServiceError::Failed(message) => (CoreCtor::SignalFailed, Some(message)),
+    };
+    error_value(ctor, message.as_deref())
+}
+
+fn signal_guard_error(error: SignalServiceError) -> terminal::TerminalError {
+    match error {
+        SignalServiceError::Busy => terminal::TerminalError::Busy,
+        #[cfg(not(target_os = "linux"))]
+        SignalServiceError::Unsupported(message) => terminal::TerminalError::Unsupported(message),
+        SignalServiceError::Failed(message) => terminal::TerminalError::Failed(message),
+    }
+}
+
 fn byte_list(value: &HostArg) -> Option<Vec<SharedBytes>> {
     let HostArg::List(values) = value else {
         return None;
@@ -369,6 +431,129 @@ impl Host for CliHost {
                     .map(|value| HostValue::Str(value.into()))
                     .collect(),
             )),
+            lm_abi::OP_TTY_IS_TERMINAL => {
+                let Some(HostArg::StdStream(stream)) = args.first() else {
+                    return HostStart::Failed("Tty.IsTerminal needs one stream".to_string());
+                };
+                HostStart::Completed(HostValue::Bool(self.terminal.is_terminal(*stream)))
+            }
+            lm_abi::OP_TTY_SIZE => {
+                let Some(HostArg::StdStream(stream)) = args.first() else {
+                    return HostStart::Failed("Tty.Size needs one stream".to_string());
+                };
+                match self.terminal.size(*stream) {
+                    Ok((columns, rows)) => HostStart::Completed(ok_value(HostValue::Ctor(
+                        CoreCtor::TtySize,
+                        vec![HostValue::Int(columns), HostValue::Int(rows)],
+                    ))),
+                    Err(error) => HostStart::Completed(tty_error(error)),
+                }
+            }
+            lm_abi::OP_TTY_ENTER_RAW => {
+                if let Err(error) = self.ensure_signal_guardian() {
+                    return HostStart::Completed(tty_error(signal_guard_error(error)));
+                }
+                let entered = self.terminal.enter_raw();
+                if entered.is_err() {
+                    self.prune_signal_guardian();
+                }
+                match entered {
+                    Ok(token) => HostStart::Completed(ok_value(HostValue::RawMode(token))),
+                    Err(error) => HostStart::Completed(tty_error(error)),
+                }
+            }
+            lm_abi::OP_TTY_EXIT_RAW => {
+                let Some(HostArg::RawMode(token)) = args.first() else {
+                    return HostStart::Failed("Tty.ExitRaw needs one raw mode".to_string());
+                };
+                let exited = self.terminal.exit_raw(*token);
+                if exited.is_ok() {
+                    self.prune_signal_guardian();
+                }
+                match exited {
+                    Ok(()) => HostStart::Completed(ok_value(HostValue::Unit)),
+                    Err(error) => HostStart::Completed(tty_error(error)),
+                }
+            }
+            lm_abi::OP_SIGNAL_OPEN => {
+                let Some(HostArg::List(kinds)) = args.first() else {
+                    return HostStart::Failed("Signal.Open needs one signal list".to_string());
+                };
+                if kinds.is_empty() {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::SignalInvalidInput,
+                        Some("the signal list is empty"),
+                    ));
+                }
+                let mut interrupt = false;
+                let mut terminate = false;
+                for kind in kinds {
+                    match kind {
+                        HostArg::SignalKind(HostSignalKind::Interrupt) => interrupt = true,
+                        HostArg::SignalKind(HostSignalKind::Terminate) => terminate = true,
+                        _ => {
+                            return HostStart::Failed(
+                                "Signal.Open needs signal values".to_string(),
+                            );
+                        }
+                    }
+                }
+                let stream = self.next_signal_stream;
+                let Some(next) = stream.checked_add(1) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::SignalLimitExceeded,
+                        Some("the signal stream token space is exhausted"),
+                    ));
+                };
+                let opened = match &mut self.signal {
+                    Some(signal) => signal.attach(stream, interrupt, terminate),
+                    None => match SignalService::open(stream, interrupt, terminate) {
+                        Ok(signal) => {
+                            self.signal = Some(signal);
+                            true
+                        }
+                        Err(error) => {
+                            return HostStart::Completed(signal_service_error(error));
+                        }
+                    },
+                };
+                if opened {
+                    self.next_signal_stream = next;
+                    HostStart::Completed(ok_value(HostValue::SignalStream(stream)))
+                } else {
+                    HostStart::Completed(error_value(CoreCtor::SignalBusy, None))
+                }
+            }
+            lm_abi::OP_SIGNAL_NEXT => {
+                let Some(HostArg::SignalStream(stream)) = args.first() else {
+                    return HostStart::Failed("Signal.Next needs one signal stream".to_string());
+                };
+                let Some(token) = self.take_token() else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::SignalLimitExceeded,
+                        Some("the completion token space is exhausted"),
+                    ));
+                };
+                match &mut self.signal {
+                    Some(signal) => signal.start_next(key, token, *stream, self.starting_wait),
+                    None => HostStart::Completed(error_value(CoreCtor::SignalClosed, None)),
+                }
+            }
+            lm_abi::OP_SIGNAL_CLOSE => {
+                let Some(HostArg::SignalStream(stream)) = args.first() else {
+                    return HostStart::Failed("Signal.Close needs one signal stream".to_string());
+                };
+                let closed = self
+                    .signal
+                    .as_mut()
+                    .is_some_and(|signal| signal.close(*stream));
+                if closed {
+                    self.prune_signal_guardian();
+                    HostStart::Completed(ok_value(HostValue::Unit))
+                } else {
+                    HostStart::Completed(error_value(CoreCtor::SignalClosed, None))
+                }
+            }
             lm_abi::OP_CLOCK_NOW => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -944,6 +1129,7 @@ impl Host for CliHost {
                 | lm_abi::OP_TCP_ACCEPT
                 | lm_abi::OP_TCP_READ
                 | lm_abi::OP_TLS_READ => Some(WaitService::Network),
+                lm_abi::OP_SIGNAL_NEXT => Some(WaitService::Signal),
                 _ => None,
             };
             if let Some(service) = service {
@@ -954,6 +1140,23 @@ impl Host for CliHost {
     }
 
     fn poll(&mut self) -> Option<HostCompletion> {
+        let signal_state = self
+            .signal
+            .as_mut()
+            .map(|signal| (signal.poll(), signal.forced_signal()));
+        if let Some((completion, forced)) = signal_state {
+            if let Some(kind) = forced {
+                self.terminal.restore_all();
+                self.signal
+                    .as_mut()
+                    .expect("the signal service exists")
+                    .force_signal(kind);
+            }
+            if completion.is_some() {
+                return completion;
+            }
+        }
+        self.prune_signal_guardian();
         if let Some(io) = &self.io {
             if let Some(completion) = io.poll() {
                 return Some(completion);
@@ -1014,7 +1217,7 @@ impl Host for CliHost {
                     }
                 },
                 None => {
-                    if deadline.is_none() {
+                    if deadline.is_none() && self.signal.is_none() {
                         if let Some(io) = &self.io {
                             return io.wait();
                         }
@@ -1030,27 +1233,39 @@ impl Host for CliHost {
     }
 
     fn cancel(&mut self, token: u64) -> bool {
-        self.sleeps.remove(&token).is_some()
+        let cancelled = self.sleeps.remove(&token).is_some()
             || self
                 .network
                 .as_ref()
                 .is_some_and(|network| network.cancel(token))
+            || self
+                .signal
+                .as_mut()
+                .is_some_and(|signal| signal.cancel(token));
+        self.prune_signal_guardian();
+        cancelled
     }
 
     fn commit_wait(&mut self, token: u64) -> bool {
-        match self.wait_services.remove(&token) {
+        let committed = match self.wait_services.remove(&token) {
             Some(WaitService::Input) => self.io.as_ref().is_some_and(|io| io.commit_wait(token)),
             Some(WaitService::Network) => self
                 .network
                 .as_ref()
                 .is_some_and(|network| network.commit_wait(token)),
             Some(WaitService::Sleep) => true,
+            Some(WaitService::Signal) => self
+                .signal
+                .as_mut()
+                .is_some_and(|signal| signal.commit_wait(token)),
             None => false,
-        }
+        };
+        self.prune_signal_guardian();
+        committed
     }
 
     fn cancel_wait(&mut self, token: u64) -> HostWaitCancel {
-        match self.wait_services.remove(&token) {
+        let cancelled = match self.wait_services.remove(&token) {
             Some(WaitService::Input) => self
                 .io
                 .as_ref()
@@ -1068,8 +1283,14 @@ impl Host for CliHost {
                     HostWaitCancel::ReadyRestored
                 }
             }
+            Some(WaitService::Signal) => self
+                .signal
+                .as_mut()
+                .map_or(HostWaitCancel::Missing, |signal| signal.cancel_wait(token)),
             None => HostWaitCancel::Missing,
-        }
+        };
+        self.prune_signal_guardian();
+        cancelled
     }
 
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
@@ -1082,6 +1303,28 @@ impl Host for CliHost {
         self.network
             .as_ref()
             .is_some_and(|network| network.force_close_tls(token))
+    }
+
+    fn close_raw_mode(&mut self, token: u64) -> bool {
+        let closed = self.terminal.force_close(token);
+        self.prune_signal_guardian();
+        closed
+    }
+
+    fn close_signal_stream(&mut self, token: u64) -> bool {
+        let closed = self
+            .signal
+            .as_mut()
+            .is_some_and(|signal| signal.close(token));
+        self.prune_signal_guardian();
+        closed
+    }
+}
+
+impl Drop for CliHost {
+    fn drop(&mut self) {
+        self.terminal.restore_all();
+        self.signal = None;
     }
 }
 

@@ -51,7 +51,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 23 adds Float to the primitive manifest types.
 /// Version 24 adds Float parsing and formatting intrinsics.
 /// Version 25 adds selectable host-operation sources.
-pub const ABI_VERSION: u32 = 25;
+/// Version 26 adds terminal and signal operations.
+pub const ABI_VERSION: u32 = 26;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -65,7 +66,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 25] = [
+pub const GROUPS: [&str; 27] = [
     "Io",
     "Fs",
     "Clock",
@@ -91,6 +92,8 @@ pub const GROUPS: [&str; 25] = [
     "Env",
     "Args",
     "Entropy",
+    "Tty",
+    "Signal",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -118,32 +121,34 @@ const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 25] = [
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
+pub const GROUP_MEMBERS: [&[&str]; 27] = [
+    &[], // Io
+    &[], // Fs
+    &[], // Clock
+    &[], // Rand
+    &[], // Net
+    &[], // Proc
+    &[], // Vm
+    &[], // Compiler
+    &[], // Reflect
+    &[], // Wait
+    &[], // Dns
+    &[], // Tcp
     TCP_STREAM_MEMBERS,
     TCP_LISTENER_MEMBERS,
     TCP_CLIENT_MEMBERS,
     TCP_SERVER_MEMBERS,
     HTTP_CLEARTEXT_MEMBERS,
-    &[],
+    &[], // Tls
     TLS_STREAM_MEMBERS,
     TLS_CLIENT_MEMBERS,
     HTTP_CLIENT_MEMBERS,
-    &[],
-    &[],
-    &[],
-    &[],
+    &[], // Choose
+    &[], // Env
+    &[], // Args
+    &[], // Entropy
+    &[], // Tty
+    &[], // Signal
 ];
 
 /// One primitive manifest type.
@@ -207,6 +212,11 @@ pub enum AbiCore {
     SyntaxTrivia,
     SyntaxBuilder,
     SyntaxParse,
+    StdStream,
+    TtySize,
+    TtyError,
+    SignalKind,
+    SignalError,
 }
 
 impl AbiCore {
@@ -242,6 +252,11 @@ impl AbiCore {
             AbiCore::SyntaxTrivia => "SyntaxTrivia",
             AbiCore::SyntaxBuilder => "SyntaxBuilder",
             AbiCore::SyntaxParse => "SyntaxParse",
+            AbiCore::StdStream => "StdStream",
+            AbiCore::TtySize => "TtySize",
+            AbiCore::TtyError => "TtyError",
+            AbiCore::SignalKind => "SignalKind",
+            AbiCore::SignalError => "SignalError",
         }
     }
 }
@@ -254,6 +269,8 @@ pub enum AbiNative {
     TcpStream,
     TcpListener,
     TlsStream,
+    RawMode,
+    SignalStream,
 }
 
 impl AbiNative {
@@ -264,6 +281,8 @@ impl AbiNative {
             AbiNative::TcpStream => "TcpStream",
             AbiNative::TcpListener => "TcpListener",
             AbiNative::TlsStream => "TlsStream",
+            AbiNative::RawMode => "RawMode",
+            AbiNative::SignalStream => "SignalStream",
         }
     }
 }
@@ -346,11 +365,18 @@ impl AbiType {
     pub const SYNTAX_TRIVIA: AbiType = AbiType::Core(AbiCore::SyntaxTrivia);
     pub const SYNTAX_BUILDER: AbiType = AbiType::Core(AbiCore::SyntaxBuilder);
     pub const SYNTAX_PARSE: AbiType = AbiType::Core(AbiCore::SyntaxParse);
+    pub const STD_STREAM: AbiType = AbiType::Core(AbiCore::StdStream);
+    pub const TTY_SIZE: AbiType = AbiType::Core(AbiCore::TtySize);
+    pub const TTY_ERROR: AbiType = AbiType::Core(AbiCore::TtyError);
+    pub const SIGNAL_KIND: AbiType = AbiType::Core(AbiCore::SignalKind);
+    pub const SIGNAL_ERROR: AbiType = AbiType::Core(AbiCore::SignalError);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
     pub const TCP_LISTENER: AbiType = AbiType::Native(AbiNative::TcpListener);
     pub const TLS_STREAM: AbiType = AbiType::Native(AbiNative::TlsStream);
+    pub const RAW_MODE: AbiType = AbiType::Native(AbiNative::RawMode);
+    pub const SIGNAL_STREAM: AbiType = AbiType::Native(AbiNative::SignalStream);
 
     pub const LIST_STR: AbiType = AbiType::List(&AbiType::STR);
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
@@ -444,6 +470,29 @@ impl AbiType {
     pub const RESULT_ARTIFACT_COMPILE_ERRORS: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::ARTIFACT, AbiType::COMPILE_ERRORS],
+    );
+    pub const RESULT_TTY_SIZE_TTY_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TTY_SIZE, AbiType::TTY_ERROR],
+    );
+    pub const RESULT_RAW_MODE_TTY_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::RAW_MODE, AbiType::TTY_ERROR],
+    );
+    pub const RESULT_UNIT_TTY_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::TTY_ERROR]);
+    pub const LIST_SIGNAL_KIND: AbiType = AbiType::List(&AbiType::SIGNAL_KIND);
+    pub const RESULT_SIGNAL_STREAM_SIGNAL_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::SIGNAL_STREAM, AbiType::SIGNAL_ERROR],
+    );
+    pub const RESULT_SIGNAL_KIND_SIGNAL_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::SIGNAL_KIND, AbiType::SIGNAL_ERROR],
+    );
+    pub const RESULT_UNIT_SIGNAL_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::UNIT, AbiType::SIGNAL_ERROR],
     );
 
     /// The canonical text of this complete type expression.
@@ -1956,6 +2005,7 @@ impl OpDef {
                 | ("Tcp", "Accept")
                 | ("Tcp", "Read")
                 | ("Tls", "Read")
+                | ("Signal", "Next")
         )
     }
 }
@@ -2076,9 +2126,16 @@ pub const OP_ENV_GET: OpSlot = 111;
 pub const OP_FS_CURRENT_DIR: OpSlot = 112;
 pub const OP_ENTROPY_BYTES: OpSlot = 113;
 pub const OP_ARGS_GET: OpSlot = 114;
+pub const OP_TTY_IS_TERMINAL: OpSlot = 115;
+pub const OP_TTY_SIZE: OpSlot = 116;
+pub const OP_TTY_ENTER_RAW: OpSlot = 117;
+pub const OP_TTY_EXIT_RAW: OpSlot = 118;
+pub const OP_SIGNAL_OPEN: OpSlot = 119;
+pub const OP_SIGNAL_NEXT: OpSlot = 120;
+pub const OP_SIGNAL_CLOSE: OpSlot = 121;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 115] = [
+pub const OPS: [OpDef; 122] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -3157,6 +3214,69 @@ pub const OPS: [OpDef; 115] = [
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Tty",
+        member: "IsTerminal",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STD_STREAM],
+        reply: AbiType::BOOL,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Tty",
+        member: "Size",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STD_STREAM],
+        reply: AbiType::RESULT_TTY_SIZE_TTY_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Tty",
+        member: "EnterRaw",
+        kind: OpKind::Fixed,
+        params: &[],
+        reply: AbiType::RESULT_RAW_MODE_TTY_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Tty",
+        member: "ExitRaw",
+        kind: OpKind::Fixed,
+        params: &[AbiType::RAW_MODE],
+        reply: AbiType::RESULT_UNIT_TTY_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Signal",
+        member: "Open",
+        kind: OpKind::Fixed,
+        params: &[AbiType::LIST_SIGNAL_KIND],
+        reply: AbiType::RESULT_SIGNAL_STREAM_SIGNAL_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Signal",
+        member: "Next",
+        kind: OpKind::Fixed,
+        params: &[AbiType::SIGNAL_STREAM],
+        reply: AbiType::RESULT_SIGNAL_KIND_SIGNAL_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Signal",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::SIGNAL_STREAM],
+        reply: AbiType::RESULT_UNIT_SIGNAL_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -3531,6 +3651,13 @@ mod tests {
         assert_eq!(op_by_name("Tcp.Close"), Some(OP_TCP_CLOSE));
         assert_eq!(op_by_name("Tls.Handshake"), Some(OP_TLS_HANDSHAKE));
         assert_eq!(op_by_name("Tls.Close"), Some(OP_TLS_CLOSE));
+        assert_eq!(op_by_name("Tty.IsTerminal"), Some(OP_TTY_IS_TERMINAL));
+        assert_eq!(op_by_name("Tty.Size"), Some(OP_TTY_SIZE));
+        assert_eq!(op_by_name("Tty.EnterRaw"), Some(OP_TTY_ENTER_RAW));
+        assert_eq!(op_by_name("Tty.ExitRaw"), Some(OP_TTY_EXIT_RAW));
+        assert_eq!(op_by_name("Signal.Open"), Some(OP_SIGNAL_OPEN));
+        assert_eq!(op_by_name("Signal.Next"), Some(OP_SIGNAL_NEXT));
+        assert_eq!(op_by_name("Signal.Close"), Some(OP_SIGNAL_CLOSE));
         assert_eq!(
             op_by_name("Vm.ServeTcpStream"),
             Some(OP_VM_SERVE_TCP_STREAM)
@@ -3731,6 +3858,7 @@ mod tests {
                 "Io.ReadBytes",
                 "Io.Write",
                 "Io.WriteError",
+                "Signal.Next",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

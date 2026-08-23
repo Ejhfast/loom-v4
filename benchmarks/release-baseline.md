@@ -258,3 +258,45 @@ This form prevents new drop code in the hot interpreter loop.
 The decoded instruction remains 16 bytes.
 
 The result keeps static execution within normal measurement noise.
+
+## Host-effects Stage 2
+
+The parent revision is `15eceec`.
+
+The manifest ABI version is 26.
+
+The bytecode version is 53.
+
+The snapshot format version is 30.
+
+| Core measurement | Stage 1 | Stage 2 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 209 | 235 | +12.4% |
+| HIR functions | 524 | 535 | +2.1% |
+| Bytecode functions | 733 | 770 | +5.0% |
+| Artifact size | 226,704 bytes | 235,172 bytes | +3.7% |
+| Core checking | 1.797 ms | 1.859 ms | +3.5% |
+| Core lowering | 0.815 ms | 0.839 ms | +2.9% |
+| Core compilation | 2.902 ms | 3.000 ms | +3.4% |
+| Core decoding | 0.334 ms | 0.343 ms | +2.7% |
+| Core verification | 1.127 ms | 1.145 ms | +1.6% |
+| Structural verification | 0.400 ms | 0.411 ms | +2.8% |
+| Verification hash | 0.113 ms | 0.116 ms | +2.7% |
+| Semantic identity | 1.986 ms | 2.092 ms | +5.3% |
+| Decoded loading | 1.269 ms | 1.291 ms | +1.7% |
+| Core loading | 1.613 ms | 1.645 ms | +2.0% |
+
+| Runtime measurement | Stage 1 | Stage 2 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 32.6 ns | 31.6 ns | -3.1% |
+| `direct_call` | 31.1 ns | 31.9 ns | +2.6% |
+| `direct_clock` | 105.4 ns | 104.9 ns | -0.5% |
+| Warm workspace suite | 35.27 seconds | 37.60 seconds | +6.6% |
+
+The suite result repeated at 37.76 and 37.60 seconds.
+
+Stage 2 adds 16 integration tests and two examples to the admission corpus.
+
+The larger core adds typed terminal and signal values to every program.
+
+Focused runtime remains within normal measurement noise.

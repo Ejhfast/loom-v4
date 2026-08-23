@@ -624,6 +624,20 @@ impl World {
                             format!("<TLS stream {resource}>")
                         }
                     }
+                    Object::NativeRawMode { resource } => {
+                        if *resource == 0 {
+                            "<raw terminal mode closed>".to_string()
+                        } else {
+                            format!("<raw terminal mode {resource}>")
+                        }
+                    }
+                    Object::NativeSignalStream { resource } => {
+                        if *resource == 0 {
+                            "<signal stream closed>".to_string()
+                        } else {
+                            format!("<signal stream {resource}>")
+                        }
+                    }
                     Object::NativeHostResource { kind, resource } => {
                         let name = self
                             .loaded

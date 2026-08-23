@@ -16,6 +16,8 @@ pub(super) enum ResourceErrors {
     Fs,
     Net,
     Tls,
+    Tty,
+    Signal,
 }
 
 /// The error family of one operation that takes a handle first.
@@ -44,6 +46,8 @@ pub(super) fn handle_op_errors(op: u32) -> Option<ResourceErrors> {
         | lm_abi::OP_TLS_LOCAL_ADDRESS
         | lm_abi::OP_TLS_PEER_ADDRESS
         | lm_abi::OP_TLS_CLOSE => Some(ResourceErrors::Tls),
+        lm_abi::OP_TTY_EXIT_RAW => Some(ResourceErrors::Tty),
+        lm_abi::OP_SIGNAL_NEXT | lm_abi::OP_SIGNAL_CLOSE => Some(ResourceErrors::Signal),
         _ => None,
     }
 }
@@ -56,6 +60,8 @@ fn object_errors(object: &Object) -> Option<ResourceErrors> {
             Some(ResourceErrors::Net)
         }
         Object::NativeTlsStream { .. } => Some(ResourceErrors::Tls),
+        Object::NativeRawMode { .. } => Some(ResourceErrors::Tty),
+        Object::NativeSignalStream { .. } => Some(ResourceErrors::Signal),
         _ => None,
     }
 }
@@ -67,6 +73,8 @@ fn object_resource(object: &Object) -> Option<u64> {
         | Object::NativeTcpStream { resource }
         | Object::NativeTcpListener { resource }
         | Object::NativeTlsStream { resource }
+        | Object::NativeRawMode { resource }
+        | Object::NativeSignalStream { resource }
         | Object::NativeHostResource { resource, .. } => Some(*resource),
         _ => None,
     }
@@ -140,6 +148,18 @@ impl World {
                 self.build_host_tcp(vm, *token, crate::ResourceKind::TcpListener)
             }
             HostValue::TlsStream(token) => self.build_host_tls(vm, *token),
+            HostValue::RawMode(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::RawMode,
+                lm_abi::OP_TTY_ENTER_RAW,
+            ),
+            HostValue::SignalStream(token) => self.build_host_standard_resource(
+                vm,
+                *token,
+                crate::ResourceKind::SignalStream,
+                lm_abi::OP_SIGNAL_OPEN,
+            ),
             HostValue::Resource(resource) => self.build_host_resource(vm, *resource),
             HostValue::Artifact { module, interface } => {
                 let valid = matches!(
@@ -214,6 +234,21 @@ impl World {
                     CoreCtor::TlsNetwork => self.core.tls_network,
                     CoreCtor::TlsClosed => self.core.tls_closed,
                     CoreCtor::TlsLimitExceeded => self.core.tls_limit_exceeded,
+                    CoreCtor::TtySize => self.core.tty_size,
+                    CoreCtor::TtyClosed => self.core.tty_error_closed,
+                    CoreCtor::TtyNotTerminal => self.core.tty_error_not_terminal,
+                    CoreCtor::TtyBusy => self.core.tty_error_busy,
+                    CoreCtor::TtyPermissionDenied => self.core.tty_error_permission_denied,
+                    CoreCtor::TtyUnsupported => self.core.tty_error_unsupported,
+                    CoreCtor::TtyFailed => self.core.tty_error_failed,
+                    CoreCtor::SignalInterrupt => self.core.signal_interrupt,
+                    CoreCtor::SignalTerminate => self.core.signal_terminate,
+                    CoreCtor::SignalClosed => self.core.signal_error_closed,
+                    CoreCtor::SignalInvalidInput => self.core.signal_error_invalid_input,
+                    CoreCtor::SignalBusy => self.core.signal_error_busy,
+                    CoreCtor::SignalUnsupported => self.core.signal_error_unsupported,
+                    CoreCtor::SignalLimitExceeded => self.core.signal_error_limit_exceeded,
+                    CoreCtor::SignalFailed => self.core.signal_error_failed,
                     CoreCtor::CompileErrors => self.core.compile_errors,
                 };
                 if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
@@ -550,6 +585,59 @@ impl World {
         }
     }
 
+    /// Register one terminal or signal resource and build its handle.
+    pub(super) fn build_host_standard_resource(
+        &mut self,
+        vm: VmId,
+        token: u64,
+        kind: crate::ResourceKind,
+        open_op: u32,
+    ) -> Result<Value, FaultCode> {
+        let close = |host: &mut Box<dyn Host>| match kind {
+            crate::ResourceKind::RawMode => host.close_raw_mode(token),
+            crate::ResourceKind::SignalStream => host.close_signal_stream(token),
+            _ => false,
+        };
+        if self.pending_op(vm) != Some(open_op) {
+            close(&mut self.host);
+            return Err(FaultCode::TypeMismatch);
+        }
+        let resource = self.next_resource;
+        let Some(next_resource) = resource.checked_add(1) else {
+            close(&mut self.host);
+            return Err(FaultCode::IntegerOverflow);
+        };
+        self.next_resource = next_resource;
+        if let Err(code) =
+            self.machines[vm as usize]
+                .resources
+                .register(kind, vm, resource, u64::MAX, open_op)
+        {
+            close(&mut self.host);
+            return Err(code);
+        }
+        self.bound_resources.insert(
+            resource,
+            BoundResource {
+                owner: vm,
+                kind,
+                backing: ResourceBacking::Host(token),
+            },
+        );
+        let object = match kind {
+            crate::ResourceKind::RawMode => Object::NativeRawMode { resource },
+            crate::ResourceKind::SignalStream => Object::NativeSignalStream { resource },
+            _ => return Err(FaultCode::MalformedState),
+        };
+        match self.machines[vm as usize].alloc(object) {
+            Ok(value) => Ok(value),
+            Err(code) => {
+                self.retire_resource(resource, true);
+                Err(code)
+            }
+        }
+    }
+
     /// Register one opaque host resource and build its guest handle.
     pub(super) fn build_host_resource(
         &mut self,
@@ -632,6 +720,12 @@ impl World {
                     crate::ResourceKind::TlsStream => {
                         self.host.close_tls(token);
                     }
+                    crate::ResourceKind::RawMode => {
+                        self.host.close_raw_mode(token);
+                    }
+                    crate::ResourceKind::SignalStream => {
+                        self.host.close_signal_stream(token);
+                    }
                     crate::ResourceKind::PendingOperation | crate::ResourceKind::Extension(_) => {}
                 },
                 ResourceBacking::Extension(resource) => {
@@ -705,6 +799,9 @@ impl World {
             | Object::NativeTcpStream { resource }
             | Object::NativeTcpListener { resource } => Some(*resource),
             Object::NativeTlsStream { resource } => Some(*resource),
+            Object::NativeRawMode { resource } | Object::NativeSignalStream { resource } => {
+                Some(*resource)
+            }
             _ => None,
         }
     }
@@ -796,7 +893,9 @@ impl World {
                     | Object::NativeResourceHandle { resource, .. }
                     | Object::NativeTcpStream { resource }
                     | Object::NativeTcpListener { resource } => *resource,
-                    Object::NativeTlsStream { resource } => *resource,
+                    Object::NativeTlsStream { resource }
+                    | Object::NativeRawMode { resource }
+                    | Object::NativeSignalStream { resource } => *resource,
                     _ => continue,
                 };
                 if self.bound_resources.contains_key(&resource) {
@@ -886,6 +985,8 @@ impl World {
             ResourceErrors::Fs => self.core.fs_error_closed,
             ResourceErrors::Net => self.core.net_closed,
             ResourceErrors::Tls => self.core.tls_closed,
+            ResourceErrors::Tty => self.core.tty_error_closed,
+            ResourceErrors::Signal => self.core.signal_error_closed,
         };
         let closed = self.make_instance(vm, arm, vec![])?;
         self.make_instance(vm, self.core.result_err, vec![closed])
@@ -908,6 +1009,12 @@ impl World {
             ResourceErrors::Tls => {
                 let network = self.make_instance(vm, self.core.net_failed, vec![text])?;
                 self.make_instance(vm, self.core.tls_network, vec![network])?
+            }
+            ResourceErrors::Tty => {
+                self.make_instance(vm, self.core.tty_error_failed, vec![text])?
+            }
+            ResourceErrors::Signal => {
+                self.make_instance(vm, self.core.signal_error_failed, vec![text])?
             }
         };
         self.make_instance(vm, self.core.result_err, vec![error])

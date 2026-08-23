@@ -1855,6 +1855,8 @@ impl Admit<'_> {
                     | Object::NativeTcpStream { resource }
                     | Object::NativeTcpListener { resource }
                     | Object::NativeTlsStream { resource }
+                    | Object::NativeRawMode { resource }
+                    | Object::NativeSignalStream { resource }
                     | Object::NativeHostResource { resource, .. }
                     if resource != 0
             ) {

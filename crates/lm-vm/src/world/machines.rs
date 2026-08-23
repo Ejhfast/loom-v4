@@ -1995,6 +1995,8 @@ impl World {
                                 crate::ResourceKind::TcpStream => "tcp-stream".to_string(),
                                 crate::ResourceKind::TcpListener => "tcp-listener".to_string(),
                                 crate::ResourceKind::TlsStream => "tls-stream".to_string(),
+                                crate::ResourceKind::RawMode => "raw-mode".to_string(),
+                                crate::ResourceKind::SignalStream => "signal-stream".to_string(),
                                 crate::ResourceKind::PendingOperation => {
                                     "pending-operation".to_string()
                                 }

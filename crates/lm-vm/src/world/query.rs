@@ -409,6 +409,8 @@ impl World {
                 crate::ResourceKind::TcpStream => "TCP stream".to_string(),
                 crate::ResourceKind::TcpListener => "TCP listener".to_string(),
                 crate::ResourceKind::TlsStream => "TLS stream".to_string(),
+                crate::ResourceKind::RawMode => "raw terminal mode".to_string(),
+                crate::ResourceKind::SignalStream => "signal stream".to_string(),
                 crate::ResourceKind::Extension(identity) => self
                     .loaded
                     .bundle()
@@ -429,6 +431,8 @@ impl World {
                 | Object::NativeTcpStream { resource }
                 | Object::NativeTcpListener { resource } => *resource,
                 Object::NativeTlsStream { resource }
+                | Object::NativeRawMode { resource }
+                | Object::NativeSignalStream { resource }
                 | Object::NativeHostResource { resource, .. } => *resource,
                 _ => return None,
             };
@@ -439,6 +443,8 @@ impl World {
                     crate::ResourceKind::TcpStream => "TCP stream".to_string(),
                     crate::ResourceKind::TcpListener => "TCP listener".to_string(),
                     crate::ResourceKind::TlsStream => "TLS stream".to_string(),
+                    crate::ResourceKind::RawMode => "raw terminal mode".to_string(),
+                    crate::ResourceKind::SignalStream => "signal stream".to_string(),
                     crate::ResourceKind::PendingOperation => "pending operation".to_string(),
                     crate::ResourceKind::Extension(identity) => self
                         .loaded

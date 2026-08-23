@@ -115,6 +115,11 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::SyntaxTrivia => "SyntaxTrivia",
                     lm_abi::AbiCore::SyntaxBuilder => "SyntaxBuilder",
                     lm_abi::AbiCore::SyntaxParse => "SyntaxParse",
+                    lm_abi::AbiCore::StdStream => "StdStream",
+                    lm_abi::AbiCore::TtySize => "TtySize",
+                    lm_abi::AbiCore::TtyError => "TtyError",
+                    lm_abi::AbiCore::SignalKind => "SignalKind",
+                    lm_abi::AbiCore::SignalError => "SignalError",
                 };
                 Self::core_class(ctx, name)
             }
@@ -124,6 +129,8 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiNative::TcpStream => Self::core_class(ctx, "TcpStream"),
                 lm_abi::AbiNative::TcpListener => Self::core_class(ctx, "TcpListener"),
                 lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
+                lm_abi::AbiNative::RawMode => Self::core_class(ctx, "RawMode"),
+                lm_abi::AbiNative::SignalStream => Self::core_class(ctx, "SignalStream"),
             },
             lm_abi::AbiType::Var(index) => vars
                 .get(index as usize)

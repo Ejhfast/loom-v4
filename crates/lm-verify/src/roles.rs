@@ -116,6 +116,27 @@ pub(crate) const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 152;
 pub(crate) const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 153;
 pub(crate) const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 154;
 pub(crate) const ROLE_ENTROPY_ERROR_FAILED: usize = 155;
+pub(crate) const ROLE_STD_STREAM: usize = 172;
+pub(crate) const ROLE_STD_STREAM_INPUT: usize = 173;
+pub(crate) const ROLE_STD_STREAM_OUTPUT: usize = 174;
+pub(crate) const ROLE_STD_STREAM_ERROR: usize = 175;
+pub(crate) const ROLE_TTY_ERROR: usize = 177;
+pub(crate) const ROLE_TTY_ERROR_CLOSED: usize = 178;
+pub(crate) const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 179;
+pub(crate) const ROLE_TTY_ERROR_BUSY: usize = 180;
+pub(crate) const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 181;
+pub(crate) const ROLE_TTY_ERROR_UNSUPPORTED: usize = 182;
+pub(crate) const ROLE_TTY_ERROR_FAILED: usize = 183;
+pub(crate) const ROLE_SIGNAL_KIND: usize = 185;
+pub(crate) const ROLE_SIGNAL_INTERRUPT: usize = 186;
+pub(crate) const ROLE_SIGNAL_TERMINATE: usize = 187;
+pub(crate) const ROLE_SIGNAL_ERROR: usize = 188;
+pub(crate) const ROLE_SIGNAL_ERROR_CLOSED: usize = 189;
+pub(crate) const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 190;
+pub(crate) const ROLE_SIGNAL_ERROR_BUSY: usize = 191;
+pub(crate) const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
+pub(crate) const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
+pub(crate) const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,7 +156,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 23] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 27] = [
     (
         ROLE_OPTION,
         1,
@@ -321,10 +342,52 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 23] = [
         ],
         "ParseStatus",
     ),
+    (
+        ROLE_STD_STREAM,
+        0,
+        &[
+            ROLE_STD_STREAM_INPUT,
+            ROLE_STD_STREAM_OUTPUT,
+            ROLE_STD_STREAM_ERROR,
+        ],
+        "StdStream",
+    ),
+    (
+        ROLE_TTY_ERROR,
+        0,
+        &[
+            ROLE_TTY_ERROR_CLOSED,
+            ROLE_TTY_ERROR_NOT_TERMINAL,
+            ROLE_TTY_ERROR_BUSY,
+            ROLE_TTY_ERROR_PERMISSION_DENIED,
+            ROLE_TTY_ERROR_UNSUPPORTED,
+            ROLE_TTY_ERROR_FAILED,
+        ],
+        "TtyError",
+    ),
+    (
+        ROLE_SIGNAL_KIND,
+        0,
+        &[ROLE_SIGNAL_INTERRUPT, ROLE_SIGNAL_TERMINATE],
+        "SignalKind",
+    ),
+    (
+        ROLE_SIGNAL_ERROR,
+        0,
+        &[
+            ROLE_SIGNAL_ERROR_CLOSED,
+            ROLE_SIGNAL_ERROR_INVALID_INPUT,
+            ROLE_SIGNAL_ERROR_BUSY,
+            ROLE_SIGNAL_ERROR_UNSUPPORTED,
+            ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED,
+            ROLE_SIGNAL_ERROR_FAILED,
+        ],
+        "SignalError",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 81] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 98] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -409,6 +472,23 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 81] = [
     (ROLE_PARSE_COMPLETE, &[]),
     (ROLE_PARSE_INCOMPLETE, &[]),
     (ROLE_PARSE_INVALID, &[]),
+    (ROLE_STD_STREAM_INPUT, &[]),
+    (ROLE_STD_STREAM_OUTPUT, &[]),
+    (ROLE_STD_STREAM_ERROR, &[]),
+    (ROLE_TTY_ERROR_CLOSED, &[]),
+    (ROLE_TTY_ERROR_NOT_TERMINAL, &[]),
+    (ROLE_TTY_ERROR_BUSY, &[]),
+    (ROLE_TTY_ERROR_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_TTY_ERROR_UNSUPPORTED, &[FieldShape::Str]),
+    (ROLE_TTY_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_SIGNAL_INTERRUPT, &[]),
+    (ROLE_SIGNAL_TERMINATE, &[]),
+    (ROLE_SIGNAL_ERROR_CLOSED, &[]),
+    (ROLE_SIGNAL_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_SIGNAL_ERROR_BUSY, &[]),
+    (ROLE_SIGNAL_ERROR_UNSUPPORTED, &[FieldShape::Str]),
+    (ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_SIGNAL_ERROR_FAILED, &[FieldShape::Str]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -660,6 +740,8 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_BYTE_BUFFER, "ByteBuffer"),
         (lm_bytecode::corepin::ROLE_CHAR, "Char"),
         (lm_bytecode::corepin::ROLE_TLS_STREAM, "TlsStream"),
+        (lm_bytecode::corepin::ROLE_RAW_MODE, "RawMode"),
+        (lm_bytecode::corepin::ROLE_SIGNAL_STREAM, "SignalStream"),
         (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
         (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
         (lm_bytecode::corepin::ROLE_CLASS_CODE, "ClassCode"),
@@ -682,6 +764,26 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             return Err(terr(format!(
                 "the core role `{name}` does not name a final stateless class"
             )));
+        }
+    }
+    if let Some(size) = slot(lm_bytecode::corepin::ROLE_TTY_SIZE) {
+        let class = &module.classes[size as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || !class.is_frozen
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !matches!(fields.as_slice(), [BcType::Int, BcType::Int])
+        {
+            return Err(terr(
+                "the TtySize role does not name its frozen value class".to_string(),
+            ));
         }
     }
     for (role, name, arity) in [

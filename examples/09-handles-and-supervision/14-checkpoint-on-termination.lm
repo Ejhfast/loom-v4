@@ -1,0 +1,43 @@
+# Close the signal stream before snapshot capture.
+# The closed stream has no host attachment in the saved image.
+
+def write_snapshot(file: FileHandle, bytes: Bytes): Result[(), FsError] with Fs.Write
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = bytes.slice(offset, count).expect("the snapshot suffix is valid")
+    written = file.write(part)?
+    if written <= 0 or written > part.len()
+      return Err(FsError.Failed("the snapshot file made invalid progress"))
+    end
+    offset = offset + written
+  end
+  Ok(())
+end
+
+def checkpoint(path: String): String with Signal, Wait, Vm, Fs
+  signals = Signal().open([SignalKind.Interrupt, SignalKind.Terminate]).expect("the signal stream opens")
+  received = signals.next_wait().wait().expect("the shutdown signal arrives")
+
+  signals.close().expect("the signal stream closes")
+  snapshot = sys.vm.snapshot_self().expect("the quiet world captures")
+  bytes = snapshot.to_bytes().expect("the snapshot encodes")
+
+  file = sys.fs.open(path, CreateTruncate).expect("the snapshot file opens")
+  write_snapshot(file, bytes).expect("the snapshot file writes")
+  file.flush().expect("the snapshot file flushes")
+  file.close().expect("the snapshot file closes")
+
+  kind = case received
+  in SignalKind.Interrupt then "interrupt"
+  in SignalKind.Terminate then "termination"
+  end
+  "saved #{bytes.len()} bytes after #{kind}"
+end
+
+checkpoint("shutdown.lms")

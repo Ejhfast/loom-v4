@@ -886,6 +886,22 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeRawMode { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_RAW_MODE];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeSignalStream { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_SIGNAL_STREAM];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 Object::NativeCode(code) => {
                     let role = match code.kind {
                         lm_heap::PortableCodeKind::Artifact => lm_bytecode::corepin::ROLE_ARTIFACT,

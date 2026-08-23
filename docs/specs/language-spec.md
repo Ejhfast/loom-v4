@@ -1182,7 +1182,7 @@ A select has at least two arms. Each arm expression has type `Wait[T]`.
 
 The arm name has type `T`. `_` discards that arm's result.
 
-The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 23.7 defines their operations.
+The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 23.8 defines their operations.
 
 The runtime tests ready arms in source order whenever the proc resumes.
 
@@ -3045,7 +3045,42 @@ Entropy.Bytes   (Int) -> Result[Bytes, EntropyError]
 
 Range validation is ordinary deterministic checking before host entropy use.
 
-### 23.4 Networking
+### 23.4 Terminals and process signals
+
+```text
+Tty.IsTerminal (StdStream) -> Bool
+Tty.Size       (StdStream) -> Result[TtySize, TtyError]
+Tty.EnterRaw   () -> Result[RawMode, TtyError]
+Tty.ExitRaw    (RawMode) -> Result[(), TtyError]
+
+Signal.Open    (List[SignalKind]) -> Result[SignalStream, SignalError]
+Signal.Next    (SignalStream) -> Result[SignalKind, SignalError]
+Signal.Close   (SignalStream) -> Result[(), SignalError]
+```
+
+`StdStream` contains `Input`, `Output`, and `Error`.
+
+`TtySize` contains positive `columns` and `rows` values.
+
+`RawMode` stores ownership of one standard-input raw mode.
+
+The host restores the exact saved terminal state when the resource closes.
+
+Machine completion and machine fault also close this resource.
+
+`SignalKind` contains `Interrupt` and `Terminate`.
+
+`SignalStream` delivers signals only at normal host boundaries.
+
+`Signal.Next` can create a wait source.
+
+Cancellation keeps a selected signal in its stream until another request commits it.
+
+Live `RawMode` and `SignalStream` resources block snapshot creation.
+
+The host-effects sidecar defines delivery, escalation, limits, and platform behavior.
+
+### 23.5 Networking
 
 ```text
 Dns.Resolve       (String, Int) -> Result[[SocketAddress], NetError]
@@ -3092,7 +3127,7 @@ It creates no runtime operation and hides no request from a driver.
 
 The network sidecar defines limits, ownership, errors, and HTTP/TLS layers.
 
-### 23.5 VM operations
+### 23.6 VM operations
 
 Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, `T` is the machine's terminal result, `R` is one pending operation's reply type, and `Fn[A,T,e]` is manifest metanotation for a callable with argument tuple `A`, result `T`, and row `e`.
 
@@ -3250,7 +3285,7 @@ Each `Serve` operation requires a compatible current typed call.
 `Vm.ResourceSame` matches two controls only while their shared entry
 is live. A closed control never matches.
 
-### 23.6 Proc operations
+### 23.7 Proc operations
 
 A proc handle carries both mailbox and terminal result types:
 
@@ -3274,7 +3309,7 @@ A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send`
 
 Fuel counts target-world instructions. Host completion time does not consume fuel.
 
-### 23.7 Wait operations
+### 23.8 Wait operations
 
 ```text
 Wait.Wait[T]          (Wait[T]) -> T
@@ -3294,7 +3329,7 @@ Cancellation keeps that input available to the same logical resource.
 
 `docs/specs/sidecar/pre-release-foundation.md` defines host-operation wait sources.
 
-### 23.8 Compiler and reflection
+### 23.9 Compiler and reflection
 
 ```text
 Compiler.Compile       (String, String, String, CompileEnv, CompileOptions)
@@ -3949,6 +3984,10 @@ Core network code defines DNS, TCP, and native TLS stream operations.
 `std.tls` wraps TLS configuration and client operations.
 
 `std.http` implements bounded HTTP/1.1 messages and direct clients.
+
+`std.term` contains pure terminal control bytes and bounded key decoding.
+
+Terminal input, output, timers, and size queries retain their exact operation rows.
 
 A live TCP or TLS handle is a host attachment and blocks snapshot creation.
 

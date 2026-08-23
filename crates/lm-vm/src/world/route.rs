@@ -763,20 +763,77 @@ impl World {
                             }
                         }
                     }
+                    Object::NativeRawMode { resource } => {
+                        let bound = self
+                            .bound_resources
+                            .get(resource)
+                            .ok_or(FaultCode::TypeMismatch)?;
+                        if bound.kind != crate::ResourceKind::RawMode {
+                            return Err(FaultCode::TypeMismatch);
+                        }
+                        match bound.backing {
+                            ResourceBacking::Host(token) => Ok(HostArg::RawMode(token)),
+                            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                                Err(FaultCode::TypeMismatch)
+                            }
+                        }
+                    }
+                    Object::NativeSignalStream { resource } => {
+                        let bound = self
+                            .bound_resources
+                            .get(resource)
+                            .ok_or(FaultCode::TypeMismatch)?;
+                        if bound.kind != crate::ResourceKind::SignalStream {
+                            return Err(FaultCode::TypeMismatch);
+                        }
+                        match bound.backing {
+                            ResourceBacking::Host(token) => Ok(HostArg::SignalStream(token)),
+                            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                                Err(FaultCode::TypeMismatch)
+                            }
+                        }
+                    }
                     Object::List { items, .. } => {
                         let mut values = Vec::with_capacity(items.len());
                         for item in items {
                             let Value::Obj(reference) = item else {
                                 return Err(FaultCode::TypeMismatch);
                             };
-                            let Object::Bytes(bytes) = m.vm.heap.get(*reference) else {
-                                return Err(FaultCode::TypeMismatch);
-                            };
-                            values.push(HostArg::Bytes(
-                                bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
-                            ));
+                            match m.vm.heap.get(*reference) {
+                                Object::Bytes(bytes) => values.push(HostArg::Bytes(
+                                    bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                                )),
+                                Object::Instance { class, fields, .. }
+                                    if Some(*class) == self.core.signal_interrupt
+                                        && fields.is_empty() =>
+                                {
+                                    values.push(HostArg::SignalKind(HostSignalKind::Interrupt));
+                                }
+                                Object::Instance { class, fields, .. }
+                                    if Some(*class) == self.core.signal_terminate
+                                        && fields.is_empty() =>
+                                {
+                                    values.push(HostArg::SignalKind(HostSignalKind::Terminate));
+                                }
+                                _ => return Err(FaultCode::TypeMismatch),
+                            }
                         }
                         Ok(HostArg::List(values))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.std_stream_input && fields.is_empty() =>
+                    {
+                        Ok(HostArg::StdStream(HostStdStream::Input))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.std_stream_output && fields.is_empty() =>
+                    {
+                        Ok(HostArg::StdStream(HostStdStream::Output))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.std_stream_error && fields.is_empty() =>
+                    {
+                        Ok(HostArg::StdStream(HostStdStream::Error))
                     }
                     Object::Instance { class, fields, .. }
                         if Some(*class) == self.core.socket_address =>

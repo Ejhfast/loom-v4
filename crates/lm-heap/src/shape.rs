@@ -504,6 +504,10 @@ pub enum Object {
     NativeTcpListener { resource: u64 },
     /// A TLS stream resource designator. Zero marks a closed handle.
     NativeTlsStream { resource: u64 },
+    /// A raw terminal mode designator. Zero marks a closed handle.
+    NativeRawMode { resource: u64 },
+    /// A process signal stream designator. Zero marks a closed handle.
+    NativeSignalStream { resource: u64 },
     /// An opaque extension resource. Zero marks a closed handle.
     NativeHostResource { kind: [u8; 32], resource: u64 },
     /// One value with its closed static type. Born frozen.
@@ -803,6 +807,26 @@ const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_RAW_MODE: ShapeDesc = ShapeDesc {
+    name: "RawMode",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_SIGNAL_STREAM: ShapeDesc = ShapeDesc {
+    name: "SignalStream",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 const SHAPE_HOST_RESOURCE: ShapeDesc = ShapeDesc {
     name: "HostResource",
     has_refs: false,
@@ -855,7 +879,7 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 31] = [
+pub const SHAPES: [&ShapeDesc; 33] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -887,6 +911,8 @@ pub const SHAPES: [&ShapeDesc; 31] = [
     &SHAPE_DYN_VALUE,
     &SHAPE_SLOT_CHANGE,
     &SHAPE_HOST_RESOURCE,
+    &SHAPE_RAW_MODE,
+    &SHAPE_SIGNAL_STREAM,
 ];
 
 impl Object {
@@ -1061,6 +1087,12 @@ impl Object {
             Object::NativeTlsStream { resource } => Object::NativeTlsStream {
                 resource: *resource,
             },
+            Object::NativeRawMode { resource } => Object::NativeRawMode {
+                resource: *resource,
+            },
+            Object::NativeSignalStream { resource } => Object::NativeSignalStream {
+                resource: *resource,
+            },
             Object::NativeHostResource { kind, resource } => Object::NativeHostResource {
                 kind: *kind,
                 resource: *resource,
@@ -1111,6 +1143,8 @@ impl Object {
             Object::DynValue { .. } => 28,
             Object::NativeSlotChange { .. } => 29,
             Object::NativeHostResource { .. } => 30,
+            Object::NativeRawMode { .. } => 31,
+            Object::NativeSignalStream { .. } => 32,
         }
     }
 
@@ -1156,7 +1190,10 @@ impl Object {
                 | Object::NativeWait { .. }
                 | Object::NativeTcpStream { .. }
                 | Object::NativeTcpListener { .. } => VALUE_COST,
-                Object::NativeTlsStream { .. } | Object::NativeHostResource { .. } => VALUE_COST,
+                Object::NativeTlsStream { .. }
+                | Object::NativeRawMode { .. }
+                | Object::NativeSignalStream { .. }
+                | Object::NativeHostResource { .. } => VALUE_COST,
                 Object::NativeFault { message, trace, .. } => message
                     .len()
                     .saturating_add(trace.len().saturating_mul(std::mem::size_of::<FaultSite>())),
@@ -1226,7 +1263,10 @@ impl Object {
             | Object::NativeWait { .. }
             | Object::NativeTcpStream { .. }
             | Object::NativeTcpListener { .. } => {}
-            Object::NativeTlsStream { .. } | Object::NativeHostResource { .. } => {}
+            Object::NativeTlsStream { .. }
+            | Object::NativeRawMode { .. }
+            | Object::NativeSignalStream { .. }
+            | Object::NativeHostResource { .. } => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
             Object::NativeSlotChange { target, .. } => visit(target),
@@ -1292,6 +1332,12 @@ impl Object {
                 resource: *resource,
             },
             Object::NativeTlsStream { resource } => Object::NativeTlsStream {
+                resource: *resource,
+            },
+            Object::NativeRawMode { resource } => Object::NativeRawMode {
+                resource: *resource,
+            },
+            Object::NativeSignalStream { resource } => Object::NativeSignalStream {
                 resource: *resource,
             },
             Object::Tuple { items } => Object::Tuple {
@@ -1365,6 +1411,7 @@ impl Object {
             | Object::NativeTcpStream { .. }
             | Object::NativeTcpListener { .. } => return None,
             Object::NativeTlsStream { .. } => return None,
+            Object::NativeRawMode { .. } | Object::NativeSignalStream { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -1591,6 +1638,8 @@ mod tests {
                 kind: [8; 32],
                 resource: 9,
             },
+            Object::NativeRawMode { resource: 10 },
+            Object::NativeSignalStream { resource: 11 },
         ]
     }
 
@@ -1791,6 +1840,8 @@ mod tests {
                 kind: [0; 32],
                 resource: 0,
             },
+            Object::NativeRawMode { resource: 0 },
+            Object::NativeSignalStream { resource: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1924,6 +1975,8 @@ mod tests {
                 "SnapshotRef",
                 "PortableCode",
                 "DynValue",
+                "RawMode",
+                "SignalStream",
             ]
         );
         // A builder holds a private mutable buffer.

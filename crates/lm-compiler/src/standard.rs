@@ -13,14 +13,17 @@ use lm_source::SourceFile;
 use std::sync::OnceLock;
 
 const IO_PATH: &str = "std.io";
+const TERM_PATH: &str = "std.term";
 const TLS_PATH: &str = "std.tls";
 const HTTP_PATH: &str = "std.http";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
+const TERM_SOURCE: &str = include_str!("../../../std/term.lm");
 const TLS_SOURCE: &str = include_str!("../../../std/tls.lm");
 const HTTP_SOURCE: &str = include_str!("../../../std/http.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
+static TERM: OnceLock<CompiledModule> = OnceLock::new();
 static TLS: OnceLock<CompiledModule> = OnceLock::new();
 static HTTP: OnceLock<CompiledModule> = OnceLock::new();
 
@@ -48,7 +51,7 @@ impl StandardCatalog {
 
     /// The module paths supplied by this catalog.
     pub fn paths(self) -> &'static [&'static str] {
-        &[IO_PATH, TLS_PATH, HTTP_PATH]
+        &[IO_PATH, TERM_PATH, TLS_PATH, HTTP_PATH]
     }
 
     /// Compile and return one bundled module.
@@ -57,6 +60,7 @@ impl StandardCatalog {
     pub fn module(self, path: &str) -> Option<&'static CompiledModule> {
         match path {
             IO_PATH => Some(io()),
+            TERM_PATH => Some(term()),
             TLS_PATH => Some(tls()),
             HTTP_PATH => Some(http()),
             _ => None,
@@ -66,11 +70,13 @@ impl StandardCatalog {
     /// Select a module and its dependencies in link order.
     pub fn select(self, paths: &[&str]) -> Result<Vec<&'static CompiledModule>, String> {
         let mut needs_io = false;
+        let mut needs_term = false;
         let mut needs_tls = false;
         let mut needs_http = false;
         for path in paths {
             match *path {
                 IO_PATH => needs_io = true,
+                TERM_PATH => needs_term = true,
                 TLS_PATH => needs_tls = true,
                 HTTP_PATH => {
                     needs_tls = true;
@@ -79,7 +85,9 @@ impl StandardCatalog {
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
-        Ok(selected_modules(needs_io, needs_tls, needs_http))
+        Ok(selected_modules(
+            needs_io, needs_term, needs_tls, needs_http,
+        ))
     }
 
     /// Bind selected standard interfaces into one compile environment.
@@ -124,25 +132,33 @@ fn io() -> &'static CompiledModule {
     IO.get_or_init(|| compile_bundled(IO_PATH, "std/io.lm", IO_SOURCE, &[]))
 }
 
+fn term() -> &'static CompiledModule {
+    TERM.get_or_init(|| compile_bundled(TERM_PATH, "std/term.lm", TERM_SOURCE, &[]))
+}
+
 fn http() -> &'static CompiledModule {
     HTTP.get_or_init(|| compile_bundled(HTTP_PATH, "std/http.lm", HTTP_SOURCE, &[tls()]))
 }
 
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
-    [IO_PATH, HTTP_PATH, TLS_PATH]
+    [IO_PATH, TERM_PATH, HTTP_PATH, TLS_PATH]
         .into_iter()
         .find(|module| text == *module || text.starts_with(&format!("{module}.")))
 }
 
 fn selected_modules(
     needs_io: bool,
+    needs_term: bool,
     needs_tls: bool,
     needs_http: bool,
 ) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
     if needs_io {
         modules.push(io());
+    }
+    if needs_term {
+        modules.push(term());
     }
     if needs_tls {
         modules.push(tls());
@@ -156,11 +172,13 @@ fn selected_modules(
 /// Select the standard-module closure named by source `use` paths.
 pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledModule> {
     let mut needs_io = false;
+    let mut needs_term = false;
     let mut needs_tls = false;
     let mut needs_http = false;
     for path in uses {
         match module_for_use(path) {
             Some(IO_PATH) => needs_io = true,
+            Some(TERM_PATH) => needs_term = true,
             Some(TLS_PATH) => needs_tls = true,
             Some(HTTP_PATH) => {
                 needs_tls = true;
@@ -169,7 +187,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
             _ => {}
         }
     }
-    selected_modules(needs_io, needs_tls, needs_http)
+    selected_modules(needs_io, needs_term, needs_tls, needs_http)
 }
 
 /// Compile one source module and link its requested standard modules.
@@ -269,7 +287,7 @@ mod tests {
     #[test]
     fn catalog_lists_selective_modules() {
         let catalog = StandardCatalog::bundled();
-        assert_eq!(catalog.paths(), &[IO_PATH, TLS_PATH, HTTP_PATH]);
+        assert_eq!(catalog.paths(), &[IO_PATH, TERM_PATH, TLS_PATH, HTTP_PATH]);
         assert!(modules_for_uses(&[]).is_empty());
         let selected = catalog.select(&[HTTP_PATH]).expect("the module exists");
         let paths: Vec<&str> = selected.iter().map(|module| module.path.as_str()).collect();
@@ -303,6 +321,12 @@ mod tests {
     fn io_source_selects_only_io() {
         let compiled = compile("use std.io.print\nprint(\"ready\")\n");
         assert_eq!(compiled.standard_modules, &[IO_PATH]);
+    }
+
+    #[test]
+    fn terminal_source_selects_only_terminal_helpers() {
+        let compiled = compile("use std.term.clear_screen\nclear_screen()\n");
+        assert_eq!(compiled.standard_modules, &[TERM_PATH]);
     }
 
     #[test]
