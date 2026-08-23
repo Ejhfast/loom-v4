@@ -2643,8 +2643,9 @@ pub(crate) fn step(
                         lm_abi::OP_VM_SERVE_TLS_STREAM => {
                             let call = pop(state)?;
                             pop_run(state)?;
-                            let args = ctx.op_args_view(lm_abi::OP_TLS_HANDSHAKE).map_err(&fail)?;
-                            let reply = ctx
+                            let client_args =
+                                ctx.op_args_view(lm_abi::OP_TLS_HANDSHAKE).map_err(&fail)?;
+                            let client_reply = ctx
                                 .abi_ty(
                                     ctx.bundle
                                         .op(lm_abi::OP_TLS_HANDSHAKE)
@@ -2652,9 +2653,23 @@ pub(crate) fn step(
                                         .reply,
                                 )
                                 .map_err(&fail)?;
-                            if ctx.ty(call) != BcType::PendingCall(args, reply) {
+                            let server_args = ctx
+                                .op_args_view(lm_abi::OP_TLS_SERVER_HANDSHAKE)
+                                .map_err(&fail)?;
+                            let server_reply = ctx
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_TLS_SERVER_HANDSHAKE)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
+                                .map_err(&fail)?;
+                            let found = ctx.ty(call);
+                            if found != BcType::PendingCall(client_args, client_reply)
+                                && found != BcType::PendingCall(server_args, server_reply)
+                            {
                                 return Err(fail(
-                                    "`Vm.ServeTlsStream` needs a Tls.Handshake call".to_string(),
+                                    "`Vm.ServeTlsStream` needs a TLS handshake call".to_string(),
                                 ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);

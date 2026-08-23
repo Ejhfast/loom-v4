@@ -645,7 +645,9 @@ impl World {
             {
                 self.pending_resource_of(vm, ResourceErrors::Net)
             }
-            Some(lm_abi::OP_TLS_HANDSHAKE) => self.pending_resource_of(vm, ResourceErrors::Net),
+            Some(lm_abi::OP_TLS_HANDSHAKE) | Some(lm_abi::OP_TLS_SERVER_HANDSHAKE) => {
+                self.pending_resource_of(vm, ResourceErrors::Net)
+            }
             Some(lm_abi::OP_TLS_CLOSE)
                 if self.value_is_result_ok(vm, value)
                     || self.value_is_result_error_class(vm, value, self.core.tls_closed) =>

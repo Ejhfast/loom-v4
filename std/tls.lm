@@ -33,6 +33,29 @@ final class TlsClientConfig
   end
 end
 
+final class TlsServerConfig
+  certificate_chain: [Bytes]
+  private_key: Bytes
+  alpn: [Bytes]
+  minimum_version: TlsVersion
+  max_buffer_bytes: Int
+
+  def init(
+    mut self,
+    certificate_chain: [Bytes],
+    private_key: Bytes,
+    alpn: [Bytes],
+    minimum_version: TlsVersion,
+    max_buffer_bytes: Int
+  )
+    self.certificate_chain = certificate_chain
+    self.private_key = private_key
+    self.alpn = alpn
+    self.minimum_version = minimum_version
+    self.max_buffer_bytes = max_buffer_bytes
+  end
+end
+
 final class Tls
   def default_config(self, server_name: String): TlsClientConfig
     TlsClientConfig(
@@ -135,6 +158,67 @@ final class Tls
         config.max_buffer_bytes
       )
     end
+  end
+
+  def validate_server_config(self, config: TlsServerConfig): Result[(), TlsError]
+    if config.certificate_chain.len() == 0 or config.certificate_chain.len() > 128
+      return Err(TlsError.InvalidConfig("the TLS certificate list size is invalid"))
+    end
+    total = 0
+    index = 0
+    while index < config.certificate_chain.len()
+      certificate = config.certificate_chain.at(index)
+      if certificate.len() == 0 or certificate.len() > 1048576
+        return Err(TlsError.InvalidConfig("a TLS certificate size is invalid"))
+      end
+      total = total + certificate.len()
+      if total > 4194304
+        return Err(TlsError.InvalidConfig("the TLS certificate data is too large"))
+      end
+      index = index + 1
+    end
+    if config.private_key.len() == 0 or config.private_key.len() > 1048576
+      return Err(TlsError.InvalidConfig("the TLS private key size is invalid"))
+    end
+    if config.max_buffer_bytes <= 0 or config.max_buffer_bytes > 1048576
+      return Err(TlsError.InvalidConfig("the TLS buffer limit is invalid"))
+    end
+    if config.alpn.len() > 32
+      return Err(TlsError.InvalidConfig("the TLS ALPN list is too large"))
+    end
+    total = 0
+    index = 0
+    while index < config.alpn.len()
+      protocol = config.alpn.at(index)
+      if protocol.len() == 0 or protocol.len() > 255
+        return Err(TlsError.InvalidConfig("a TLS ALPN value has an invalid length"))
+      end
+      total = total + protocol.len()
+      if total > 4096
+        return Err(TlsError.InvalidConfig("the TLS ALPN data is too large"))
+      end
+      index = index + 1
+    end
+    Ok(())
+  end
+
+  def server_handshake(
+    self,
+    stream: TcpStream,
+    config: TlsServerConfig
+  ): Result[TlsStream, TlsError] with Tls.ServerHandshake
+    minimum = case config.minimum_version
+    in TlsVersion.Tls12 then 12
+    in TlsVersion.Tls13 then 13
+    end
+    sys.tls.server_handshake(
+      stream,
+      config.certificate_chain,
+      config.private_key,
+      config.alpn,
+      minimum,
+      config.max_buffer_bytes
+    )
   end
 
   def connect_host(

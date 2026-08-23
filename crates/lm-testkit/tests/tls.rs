@@ -7,6 +7,7 @@ const LOOPBACK: &str = r#"
 use std.tls.Tls
 use std.tls.TlsClientConfig
 use std.tls.TlsRoots
+use std.tls.TlsServerConfig
 use std.tls.TlsVersion
 
 def loopback(port: Int): Result[SocketAddress, NetError]
@@ -29,6 +30,17 @@ end
 const HTTP_USES: &str = r#"use std.http.Http
 use std.http.HttpLimits
 
+"#;
+
+const SERVER_USES: &str = r#"def test_tls_server_config(): TlsServerConfig
+  TlsServerConfig(
+    [Bytes("test certificate")],
+    Bytes("test private key"),
+    [Bytes("loom/1")],
+    TlsVersion.Tls13,
+    65536
+  ).freeze()
+end
 "#;
 
 fn run(source: &str, grants: &[&str]) -> (String, usize) {
@@ -110,6 +122,65 @@ exchange()
     };
     let (outcome, resources) = run_with_config(&source, &["Tcp", "Tls"], tight);
     assert_eq!(outcome, "Done(\"hello\")");
+    assert_eq!(resources, 0);
+}
+
+#[test]
+fn compiled_tls_server_round_trips_through_the_virtual_host() {
+    let source = format!(
+        r#"{LOOPBACK}{SERVER_USES}
+def exchange(): String with Tcp, Tls.Server
+  address = loopback(0).expect("the loopback address is valid")
+  listener = Tcp().listen(address, 4).expect("the listener opens")
+  bound = listener.local_address().expect("the listener has an address")
+  client = Tcp().connect(bound).expect("the client connects")
+  server = listener.accept().expect("the server accepts")[0]
+  client.write_all(Bytes("hello")).expect("the client writes")
+  secure = Tls().server_handshake(server, test_tls_server_config()).expect("the handshake works")
+  received = secure.read_exact(5).expect("the server reads").text()
+  secure.close().expect("the TLS stream closes")
+  client.close().expect("the client closes")
+  listener.close().expect("the listener closes")
+  received
+end
+
+exchange()
+"#
+    );
+    let (outcome, resources) = run(&source, &["Tcp", "Tls.Server"]);
+    assert_eq!(outcome, "Done(\"hello\")");
+    assert_eq!(resources, 0);
+}
+
+#[test]
+fn a_tls_server_error_consumes_the_submitted_tcp_stream() {
+    let source = format!(
+        r#"{LOOPBACK}
+def exchange(): (Bool, Bool) with Tcp, Tls.ServerHandshake
+  address = loopback(0).expect("the loopback address is valid")
+  listener = Tcp().listen(address, 4).expect("the listener opens")
+  bound = listener.local_address().expect("the listener has an address")
+  client = Tcp().connect(bound).expect("the client connects")
+  server = listener.accept().expect("the server accepts")[0]
+  invalid = TlsServerConfig([], Bytes("key"), [], TlsVersion.Tls13, 65536).freeze()
+  rejected = case Tls().server_handshake(server, invalid)
+  in Err(TlsError.InvalidConfig(_)) then true
+  in _ then false
+  end
+  consumed = case server.close()
+  in Err(NetError.Closed) then true
+  in _ then false
+  end
+  client.close().expect("the client closes")
+  listener.close().expect("the listener closes")
+  (rejected, consumed)
+end
+
+exchange()
+"#
+    );
+    let (outcome, resources) = run(&source, &["Tcp", "Tls.ServerHandshake"]);
+    assert_eq!(outcome, "Done((true, true))");
     assert_eq!(resources, 0);
 }
 
@@ -423,4 +494,70 @@ end
 "#
     );
     assert_eq!(run(&source, &["Vm"]).0, "Done(5)");
+}
+
+#[test]
+fn a_driver_can_service_a_tls_server_handshake() {
+    let source = format!(
+        r#"{LOOPBACK}{SERVER_USES}
+def server(address: SocketAddress): Int with Tcp.Connect, Tls.ServerHandshake, Tls.Close
+  stream = Tcp().connect(address).expect("the stream opens")
+  secure = Tls().server_handshake(stream, test_tls_server_config()).expect("the handshake works")
+  secure.close().expect("the TLS stream closes")
+  7
+end
+
+def finish_server(child: Run[Int], secure: ResourceHandle): Int with Vm
+  case child.drive()
+  in Asked(request)
+    case request
+    in Call(Tls.Close, call, (stream,))
+      if not child.resource(stream).same_resource(secure)
+        return -1
+      end
+      child.answer(call, Ok(()))
+      case child.run()
+      in Done(value) then value
+      in _ then -2
+      end
+    in _ then -3
+    end
+  in _ then -4
+  end
+end
+
+def upgrade_server(child: Run[Int], tcp: ResourceHandle): Int with Vm
+  case child.drive()
+  in Asked(request)
+    case request
+    in Call(Tls.ServerHandshake, call, (stream, _, _, _, _, _))
+      if not child.resource(stream).same_resource(tcp)
+        return -5
+      end
+      secure = child.serve_tls_stream(call)
+      if tcp.is_open()
+        return -6
+      end
+      finish_server(child, secure)
+    in _ then -7
+    end
+  in _ then -8
+  end
+end
+
+address = loopback(8443).expect("the loopback address is valid")
+child = sys.vm.Vm().activate_or_fault(server, args: (address,))
+case child.drive()
+in Asked(request)
+  case request
+  in Call(Tcp.Connect, call, (peer,))
+    tcp = child.serve_tcp_stream(call, peer)
+    upgrade_server(child, tcp)
+  in _ then -9
+  end
+in _ then -10
+end
+"#
+    );
+    assert_eq!(run(&source, &["Vm"]).0, "Done(7)");
 }

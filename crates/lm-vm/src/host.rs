@@ -675,6 +675,7 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_TCP_PEER_ADDRESS
             | lm_abi::OP_TCP_CLOSE
             | lm_abi::OP_TLS_HANDSHAKE
+            | lm_abi::OP_TLS_SERVER_HANDSHAKE
             | lm_abi::OP_TLS_READ
             | lm_abi::OP_TLS_WRITE
             | lm_abi::OP_TLS_SHUTDOWN
@@ -2546,6 +2547,74 @@ impl RecordingHost {
                     return HostStart::Completed(tls_error(
                         CoreCtor::TlsInvalidConfig,
                         "the TLS client configuration is invalid",
+                    ));
+                }
+                self.tls_streams.insert(resource.token);
+                HostStart::Completed(tls_ok(HostValue::TlsStream(resource.token)))
+            }
+            lm_abi::OP_TLS_SERVER_HANDSHAKE => {
+                let (
+                    Some(HostArg::Tcp(resource)),
+                    Some(HostArg::List(certificates)),
+                    Some(HostArg::Bytes(private_key)),
+                    Some(HostArg::List(alpn)),
+                    Some(HostArg::Int(minimum)),
+                    Some(HostArg::Int(buffer_limit)),
+                ) = (
+                    args.first(),
+                    args.get(1),
+                    args.get(2),
+                    args.get(3),
+                    args.get(4),
+                    args.get(5),
+                )
+                else {
+                    return HostStart::Failed(
+                        "Tls.ServerHandshake needs its configuration".to_string(),
+                    );
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tls.ServerHandshake needs a TCP stream".to_string());
+                }
+                if !self.streams.contains_key(&resource.token)
+                    || self.tls_streams.contains(&resource.token)
+                {
+                    return HostStart::Completed(tls_closed());
+                }
+                let certificates_valid = certificates.iter().all(
+                    |value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 1_048_576),
+                );
+                let alpn_valid = alpn.iter().all(
+                    |value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 255),
+                );
+                let certificate_bytes = certificates.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let alpn_bytes = alpn.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let valid = !certificates.is_empty()
+                    && certificates.len() <= 128
+                    && certificates_valid
+                    && certificate_bytes <= 4_194_304
+                    && !private_key.is_empty()
+                    && private_key.len() <= 1_048_576
+                    && alpn.len() <= 32
+                    && alpn_valid
+                    && alpn_bytes <= 4_096
+                    && matches!(minimum, 12 | 13)
+                    && (1..=1_048_576).contains(buffer_limit);
+                if !valid {
+                    self.close_virtual_tcp(*resource);
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS server configuration is invalid",
                     ));
                 }
                 self.tls_streams.insert(resource.token);

@@ -824,6 +824,24 @@ The private key uses PKCS#8 DER encoding.
 
 The host repeats all count and byte checks before parsing.
 
+The certificate chain contains from 1 through 128 certificates.
+
+Each certificate contains from 1 through 1,048,576 bytes.
+
+The full certificate chain contains at most 4,194,304 bytes.
+
+The private key contains from 1 through 1,048,576 bytes.
+
+The ALPN list contains at most 32 values.
+
+Each ALPN value contains from 1 through 255 bytes.
+
+All ALPN values contain at most 4,096 bytes.
+
+The buffer limit is from 1 through 1,048,576 bytes.
+
+The minimum version value is 12 or 13.
+
 Submission consumes the TCP stream on every result.
 
 A successful call returns the existing `TlsStream` type.
@@ -1049,7 +1067,7 @@ Gate: A pipeline handles partial writes, end of input, and child failure.
 
 Gate: Live children and pipe ends report precise snapshot blockers.
 
-### Stage 6: TLS server handshake
+### Stage 6: TLS server handshake (complete)
 
 - Add the server configuration and operation.
 - Reuse the existing TLS stream resource.

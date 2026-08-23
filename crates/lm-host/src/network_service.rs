@@ -6,7 +6,7 @@ use lm_vm::{
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -80,10 +80,22 @@ pub(crate) struct TlsClientSettings {
     pub(crate) buffer_limit: usize,
 }
 
+pub(crate) struct TlsServerSettings {
+    pub(crate) certificates: Vec<SharedBytes>,
+    pub(crate) private_key: SharedBytes,
+    pub(crate) alpn: Vec<SharedBytes>,
+    pub(crate) minimum_version: i64,
+    pub(crate) buffer_limit: usize,
+}
+
 pub(crate) enum TlsRequest {
     Handshake {
         stream: u64,
         settings: TlsClientSettings,
+    },
+    ServerHandshake {
+        stream: u64,
+        settings: TlsServerSettings,
     },
     Read {
         stream: u64,
@@ -188,7 +200,7 @@ struct ListenerState {
 
 struct TlsState {
     socket: TcpStream,
-    connection: rustls::ClientConnection,
+    connection: rustls::Connection,
     registered: bool,
     handshake: Option<Pending>,
     reads: VecDeque<(Pending, usize)>,
@@ -262,10 +274,23 @@ impl TlsClientSettings {
     }
 }
 
+impl TlsServerSettings {
+    fn retained_bytes(&self) -> usize {
+        self.certificates.iter().chain(self.alpn.iter()).fold(
+            self.private_key
+                .retained_capacity()
+                .saturating_add(self.buffer_limit.saturating_mul(2))
+                .saturating_add(TLS_CONFIG_OVERHEAD),
+            |total, bytes| total.saturating_add(bytes.retained_capacity()),
+        )
+    }
+}
+
 impl TlsRequest {
     fn retained_bytes(&self) -> usize {
         match self {
             TlsRequest::Handshake { settings, .. } => settings.retained_bytes(),
+            TlsRequest::ServerHandshake { settings, .. } => settings.retained_bytes(),
             TlsRequest::Read { count, .. } => *count,
             TlsRequest::Write { bytes, .. } => bytes.retained_capacity(),
             _ => 0,
@@ -1144,13 +1169,13 @@ fn handle_tls_request(
     completions: &Sender<NetworkCompletion>,
     count: &AtomicUsize,
     retained: &Arc<AtomicUsize>,
-    mut pending: Pending,
+    pending: Pending,
     request: TlsRequest,
 ) {
     match request {
         TlsRequest::Handshake { stream, settings } => {
             let connection = match make_tls_client(settings) {
-                Ok(connection) => connection,
+                Ok(connection) => rustls::Connection::Client(connection),
                 Err(message) => {
                     close_entry(poll, entries, completions, count, stream);
                     complete(
@@ -1162,64 +1187,41 @@ fn handle_tls_request(
                     return;
                 }
             };
-            let mut state = match entries.remove(&stream) {
-                Some(Entry::Stream(state)) => state,
-                Some(entry) => {
-                    entries.insert(stream, entry);
-                    complete(completions, count, pending, tls_closed());
-                    return;
-                }
-                None => {
-                    complete(completions, count, pending, tls_closed());
-                    return;
-                }
-            };
-            if state.connect.is_some()
-                || !state.reads.is_empty()
-                || !state.writes.is_empty()
-                || state.read_shutdown
-                || state.write_shutdown
-            {
-                entries.insert(stream, Entry::Stream(state));
-                close_entry(poll, entries, completions, count, stream);
-                complete(
-                    completions,
-                    count,
-                    pending,
-                    tls_error(
-                        CoreCtor::TlsHandshake,
-                        "the TCP stream cannot start a TLS handshake",
-                    ),
-                );
-                return;
-            }
-            if state.registered {
-                let _ = poll.registry().deregister(&mut state.socket);
-            }
-            let live_retained = RetainedLease {
-                budget: Arc::clone(retained),
-                bytes: pending.retained,
-            };
-            pending.retained = 0;
-            entries.insert(
+            start_tls_handshake(
+                poll,
+                entries,
+                completions,
+                count,
+                retained,
+                pending,
                 stream,
-                Entry::Tls(Box::new(TlsState {
-                    socket: state.socket,
-                    connection,
-                    registered: false,
-                    handshake: Some(pending),
-                    reads: VecDeque::new(),
-                    read_buffer: VecDeque::new(),
-                    writes: VecDeque::new(),
-                    shutdowns: VecDeque::new(),
-                    peer_closed: false,
-                    socket_eof: false,
-                    write_shutdown: false,
-                    close_notify_sent: false,
-                    _retained: live_retained,
-                })),
+                connection,
             );
-            drive_tls(poll, entries, completions, count, stream, true, true);
+        }
+        TlsRequest::ServerHandshake { stream, settings } => {
+            let connection = match make_tls_server(settings) {
+                Ok(connection) => rustls::Connection::Server(connection),
+                Err(message) => {
+                    close_entry(poll, entries, completions, count, stream);
+                    complete(
+                        completions,
+                        count,
+                        pending,
+                        tls_error(CoreCtor::TlsInvalidConfig, message),
+                    );
+                    return;
+                }
+            };
+            start_tls_handshake(
+                poll,
+                entries,
+                completions,
+                count,
+                retained,
+                pending,
+                stream,
+                connection,
+            );
         }
         TlsRequest::Read {
             stream,
@@ -1306,6 +1308,77 @@ fn handle_tls_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn start_tls_handshake(
+    poll: &Poll,
+    entries: &mut HashMap<u64, Entry>,
+    completions: &Sender<NetworkCompletion>,
+    count: &AtomicUsize,
+    retained: &Arc<AtomicUsize>,
+    mut pending: Pending,
+    stream: u64,
+    connection: rustls::Connection,
+) {
+    let mut state = match entries.remove(&stream) {
+        Some(Entry::Stream(state)) => state,
+        Some(entry) => {
+            entries.insert(stream, entry);
+            complete(completions, count, pending, tls_closed());
+            return;
+        }
+        None => {
+            complete(completions, count, pending, tls_closed());
+            return;
+        }
+    };
+    if state.connect.is_some()
+        || !state.reads.is_empty()
+        || !state.writes.is_empty()
+        || state.read_shutdown
+        || state.write_shutdown
+    {
+        entries.insert(stream, Entry::Stream(state));
+        close_entry(poll, entries, completions, count, stream);
+        complete(
+            completions,
+            count,
+            pending,
+            tls_error(
+                CoreCtor::TlsHandshake,
+                "the TCP stream cannot start a TLS handshake",
+            ),
+        );
+        return;
+    }
+    if state.registered {
+        let _ = poll.registry().deregister(&mut state.socket);
+    }
+    let live_retained = RetainedLease {
+        budget: Arc::clone(retained),
+        bytes: pending.retained,
+    };
+    pending.retained = 0;
+    entries.insert(
+        stream,
+        Entry::Tls(Box::new(TlsState {
+            socket: state.socket,
+            connection,
+            registered: false,
+            handshake: Some(pending),
+            reads: VecDeque::new(),
+            read_buffer: VecDeque::new(),
+            writes: VecDeque::new(),
+            shutdowns: VecDeque::new(),
+            peer_closed: false,
+            socket_eof: false,
+            write_shutdown: false,
+            close_notify_sent: false,
+            _retained: live_retained,
+        })),
+    );
+    drive_tls(poll, entries, completions, count, stream, true, true);
+}
+
 fn make_tls_client(settings: TlsClientSettings) -> Result<rustls::ClientConnection, String> {
     validate_tls_client_settings(&settings)?;
     let mut roots = if settings.root_mode == 0 {
@@ -1349,6 +1422,40 @@ fn make_tls_client(settings: TlsClientSettings) -> Result<rustls::ClientConnecti
     Ok(connection)
 }
 
+fn make_tls_server(settings: TlsServerSettings) -> Result<rustls::ServerConnection, String> {
+    validate_tls_server_settings(&settings)?;
+    let versions: &[&'static rustls::SupportedProtocolVersion] = match settings.minimum_version {
+        12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
+        13 => &[&rustls::version::TLS13],
+        _ => return Err("the minimum TLS version is invalid".to_string()),
+    };
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(versions)
+        .map_err(bounded)?;
+    let certificates = settings
+        .certificates
+        .into_iter()
+        .map(|bytes| CertificateDer::from(bytes.as_slice().to_vec()))
+        .collect();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        settings.private_key.as_slice().to_vec(),
+    ));
+    let mut config = builder
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map_err(|_| "the TLS certificate or private key is invalid".to_string())?;
+    config.alpn_protocols = settings
+        .alpn
+        .into_iter()
+        .map(|bytes| bytes.as_slice().to_vec())
+        .collect();
+    let mut connection =
+        rustls::ServerConnection::new(std::sync::Arc::new(config)).map_err(bounded)?;
+    connection.set_buffer_limit(Some(settings.buffer_limit));
+    Ok(connection)
+}
+
 fn validate_tls_client_settings(settings: &TlsClientSettings) -> Result<(), String> {
     let name = settings.server_name.as_bytes();
     if name.is_empty() || name.len() > 253 || name.iter().any(|byte| *byte <= 32 || *byte >= 127) {
@@ -1374,6 +1481,49 @@ fn validate_tls_client_settings(settings: &TlsClientSettings) -> Result<(), Stri
         if root_bytes > 4_194_304 {
             return Err("the custom TLS root data is too large".to_string());
         }
+    }
+    if settings.alpn.len() > 32 {
+        return Err("the TLS ALPN list is too large".to_string());
+    }
+    let mut alpn_bytes = 0_usize;
+    for protocol in &settings.alpn {
+        if protocol.is_empty() || protocol.len() > 255 {
+            return Err("a TLS ALPN value has an invalid length".to_string());
+        }
+        alpn_bytes = alpn_bytes
+            .checked_add(protocol.len())
+            .ok_or_else(|| "the TLS ALPN data is too large".to_string())?;
+        if alpn_bytes > 4_096 {
+            return Err("the TLS ALPN data is too large".to_string());
+        }
+    }
+    if !matches!(settings.minimum_version, 12 | 13) {
+        return Err("the minimum TLS version is invalid".to_string());
+    }
+    if settings.buffer_limit == 0 || settings.buffer_limit > 1_048_576 {
+        return Err("the TLS buffer limit is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn validate_tls_server_settings(settings: &TlsServerSettings) -> Result<(), String> {
+    if settings.certificates.is_empty() || settings.certificates.len() > 128 {
+        return Err("the TLS certificate list size is invalid".to_string());
+    }
+    let mut certificate_bytes = 0_usize;
+    for certificate in &settings.certificates {
+        if certificate.is_empty() || certificate.len() > 1_048_576 {
+            return Err("a TLS certificate size is invalid".to_string());
+        }
+        certificate_bytes = certificate_bytes
+            .checked_add(certificate.len())
+            .ok_or_else(|| "the TLS certificate data is too large".to_string())?;
+        if certificate_bytes > 4_194_304 {
+            return Err("the TLS certificate data is too large".to_string());
+        }
+    }
+    if settings.private_key.is_empty() || settings.private_key.len() > 1_048_576 {
+        return Err("the TLS private key size is invalid".to_string());
     }
     if settings.alpn.len() > 32 {
         return Err("the TLS ALPN list is too large".to_string());

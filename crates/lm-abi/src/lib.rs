@@ -55,7 +55,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 27 completes the file-system operation group.
 /// Version 28 removes text console operations.
 /// Version 29 adds anonymous pipes and operating-system children.
-pub const ABI_VERSION: u32 = 29;
+/// Version 30 adds the TLS server handshake operation.
+pub const ABI_VERSION: u32 = 30;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -69,7 +70,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 29] = [
+pub const GROUPS: [&str; 30] = [
     "Io",
     "Fs",
     "Clock",
@@ -99,6 +100,7 @@ pub const GROUPS: [&str; 29] = [
     "Signal",
     "Pipe",
     "Exec",
+    "Tls.Server",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -123,10 +125,11 @@ const TLS_STREAM_MEMBERS: &[&str] = &[
     "Tls.Close",
 ];
 const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
+const TLS_SERVER_MEMBERS: &[&str] = &["Tls.ServerHandshake", "Tls.Stream"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 29] = [
+pub const GROUP_MEMBERS: [&[&str]; 30] = [
     &[], // Io
     &[], // Fs
     &[], // Clock
@@ -156,6 +159,7 @@ pub const GROUP_MEMBERS: [&[&str]; 29] = [
     &[], // Signal
     &[], // Pipe
     &[], // Exec
+    TLS_SERVER_MEMBERS,
 ];
 
 /// One primitive manifest type.
@@ -2243,9 +2247,10 @@ pub const OP_EXEC_WAIT: OpSlot = 132;
 pub const OP_EXEC_TERMINATE: OpSlot = 133;
 pub const OP_EXEC_KILL: OpSlot = 134;
 pub const OP_EXEC_CLOSE: OpSlot = 135;
+pub const OP_TLS_SERVER_HANDSHAKE: OpSlot = 136;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 136] = [
+pub const OPS: [OpDef; 137] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3513,6 +3518,22 @@ pub const OPS: [OpDef; 136] = [
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
+    OpDef {
+        group: "Tls",
+        member: "ServerHandshake",
+        kind: OpKind::Fixed,
+        params: &[
+            AbiType::TCP_STREAM,
+            AbiType::LIST_BYTES,
+            AbiType::BYTES,
+            AbiType::LIST_BYTES,
+            AbiType::INT,
+            AbiType::INT,
+        ],
+        reply: AbiType::RESULT_TLS_STREAM_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
 ];
 
 /// The number of exact operations.
@@ -3886,6 +3907,10 @@ mod tests {
         assert_eq!(op_by_name("Tcp.Connect"), Some(OP_TCP_CONNECT));
         assert_eq!(op_by_name("Tcp.Close"), Some(OP_TCP_CLOSE));
         assert_eq!(op_by_name("Tls.Handshake"), Some(OP_TLS_HANDSHAKE));
+        assert_eq!(
+            op_by_name("Tls.ServerHandshake"),
+            Some(OP_TLS_SERVER_HANDSHAKE)
+        );
         assert_eq!(op_by_name("Tls.Close"), Some(OP_TLS_CLOSE));
         assert_eq!(op_by_name("Tty.IsTerminal"), Some(OP_TTY_IS_TERMINAL));
         assert_eq!(op_by_name("Tty.Size"), Some(OP_TTY_SIZE));
@@ -3944,6 +3969,7 @@ mod tests {
         assert_eq!(group_by_name("Http.CleartextClient"), Some(16));
         assert_eq!(group_by_name("Tls.Stream"), Some(18));
         assert_eq!(group_by_name("Http.Client"), Some(20));
+        assert_eq!(group_by_name("Tls.Server"), Some(29));
     }
 
     #[test]
@@ -3969,6 +3995,11 @@ mod tests {
         assert!(group_contains_op(tls, OP_TLS_READ));
         assert!(!group_contains_op(tls, OP_TCP_CONNECT));
 
+        let tls_server = group_by_name("Tls.Server").unwrap();
+        assert!(group_contains_op(tls_server, OP_TLS_SERVER_HANDSHAKE));
+        assert!(group_contains_op(tls_server, OP_TLS_READ));
+        assert!(!group_contains_op(tls_server, OP_TLS_HANDSHAKE));
+
         let secure_http = group_by_name("Http.Client").unwrap();
         assert!(group_contains_op(secure_http, OP_DNS_RESOLVE));
         assert!(group_contains_op(secure_http, OP_TCP_CONNECT));
@@ -3985,6 +4016,8 @@ mod tests {
         assert!(!row_name_included("Tcp.Listen", "Tcp.Client"));
         assert!(row_name_included("Tls.Stream", "Tls.Client"));
         assert!(row_name_included("Tls.Handshake", "Http.Client"));
+        assert!(row_name_included("Tls.ServerHandshake", "Tls.Server"));
+        assert!(!row_name_included("Tls.Handshake", "Tls.Server"));
         assert!(row_name_included("Tcp.Client", "Http.Client"));
         assert!(!row_name_included("Http.Client", "Tls.Client"));
     }
@@ -4115,6 +4148,7 @@ mod tests {
                 "Exec.Terminate",
                 "Exec.Kill",
                 "Exec.Close",
+                "Tls.ServerHandshake",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

@@ -418,3 +418,43 @@ Stage 5 adds typed pipe ends and operating-system child handles.
 The stage adds eight integration tests and one checked example.
 
 The final performance pass must repeat the static runtime measurements.
+
+## Host-effects Stage 6
+
+The parent revision is `61b3b9e`.
+
+The manifest ABI version is 30.
+
+The bytecode version remains 54.
+
+The snapshot format version remains 30.
+
+| Core measurement | Stage 5 | Stage 6 | Change |
+| --- | ---: | ---: | ---: |
+| Classes | 294 | 294 | 0.0% |
+| HIR functions | 556 | 556 | 0.0% |
+| Bytecode functions | 850 | 850 | 0.0% |
+| Artifact size | 258,307 bytes | 258,307 bytes | 0.0% |
+| Core checking | 2.012 ms | 2.001 ms | -0.5% |
+| Core lowering | 0.923 ms | 0.907 ms | -1.7% |
+| Core compilation | 3.285 ms | 3.249 ms | -1.1% |
+| Core decoding | 0.383 ms | 0.382 ms | -0.3% |
+| Core verification | 1.248 ms | 1.249 ms | +0.1% |
+| Structural verification | 0.447 ms | 0.444 ms | -0.7% |
+| Verification hash | 0.187 ms | 0.125 ms | -33.2% |
+| Semantic identity | 2.368 ms | 2.343 ms | -1.1% |
+| Decoded loading | 1.466 ms | 1.429 ms | -2.5% |
+| Core loading | 1.848 ms | 1.817 ms | -1.7% |
+
+| Runtime measurement | Stage 5 | Stage 6 | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 33.7 ns | 31.8 ns | -5.6% |
+| `direct_call` | 35.6 ns | 32.0 ns | -10.1% |
+| `direct_clock` | 109.0 ns | 108.1 ns | -0.8% |
+| Warm workspace suite | 42.38 seconds | 42.38 seconds | 0.0% |
+
+Stage 6 adds no core class or function.
+
+The earlier Stage 5 runtime result did not repeat.
+
+The final pass will compare the parent and branch in one session.

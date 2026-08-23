@@ -1808,17 +1808,27 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 let call = self.synth_expr(ctx, &args[0])?;
-                let want_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
-                let reply = ctx
+                let client_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
+                let client_reply = ctx
                     .bundle
                     .op(lm_abi::OP_TLS_HANDSHAKE)
                     .expect("the standard operation exists")
                     .reply;
-                let want_reply = Self::abi_type_id(ctx, reply);
-                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                let client_reply = Self::abi_type_id(ctx, client_reply);
+                let server_args = Self::op_args_type(ctx, lm_abi::OP_TLS_SERVER_HANDSHAKE);
+                let server_reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_TLS_SERVER_HANDSHAKE)
+                    .expect("the standard operation exists")
+                    .reply;
+                let server_reply = Self::abi_type_id(ctx, server_reply);
+                let found = ctx.store.get(call.ty);
+                if found != &Type::PendingCall(client_args, client_reply)
+                    && found != &Type::PendingCall(server_args, server_reply)
+                {
                     return Err(Diagnostic::new(
                         "E1004",
-                        "`serve_tls_stream` needs a current Tls.Handshake call",
+                        "`serve_tls_stream` needs a current TLS handshake call",
                         args[0].span,
                     ));
                 }

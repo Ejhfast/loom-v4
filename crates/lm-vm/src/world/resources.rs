@@ -568,7 +568,14 @@ impl World {
 
     /// Register one host TLS stream and build its guest handle.
     pub(super) fn build_host_tls(&mut self, vm: VmId, token: u64) -> Result<Value, FaultCode> {
-        if self.pending_op(vm) != Some(lm_abi::OP_TLS_HANDSHAKE) {
+        let Some(handshake_op) = self.pending_op(vm) else {
+            self.host.close_tls(token);
+            return Err(FaultCode::TypeMismatch);
+        };
+        if !matches!(
+            handshake_op,
+            lm_abi::OP_TLS_HANDSHAKE | lm_abi::OP_TLS_SERVER_HANDSHAKE
+        ) {
             self.host.close_tls(token);
             return Err(FaultCode::TypeMismatch);
         }
@@ -599,7 +606,7 @@ impl World {
             vm,
             resource,
             u64::MAX,
-            lm_abi::OP_TLS_HANDSHAKE,
+            handshake_op,
         ) {
             self.host.close_tls(token);
             return Err(code);

@@ -1860,14 +1860,20 @@ impl World {
                     );
                     return;
                 };
-                let Some(sink) = self.reply_sink(
-                    vm,
-                    op,
-                    surface,
-                    token.0,
-                    token.1,
-                    Some(lm_abi::OP_TLS_HANDSHAKE),
-                ) else {
+                if !matches!(
+                    token.2,
+                    lm_abi::OP_TLS_HANDSHAKE | lm_abi::OP_TLS_SERVER_HANDSHAKE
+                ) {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the call token is not a TLS handshake",
+                    );
+                    return;
+                }
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, Some(token.2))
+                else {
                     return;
                 };
                 let Some(source) = self.pending_resource_of(sink.target, ResourceErrors::Net)
@@ -1900,7 +1906,7 @@ impl World {
                     sink.target,
                     vm,
                     crate::ResourceKind::TlsStream,
-                    lm_abi::OP_TLS_HANDSHAKE,
+                    token.2,
                 ) {
                     Ok(resource) => resource,
                     Err(code) => {
@@ -1936,7 +1942,7 @@ impl World {
                         vm,
                         op,
                         FaultCode::TypeMismatch,
-                        "the minted reply did not match Tls.Handshake",
+                        "the minted reply did not match the TLS handshake",
                     );
                     return;
                 }

@@ -22,7 +22,9 @@ use lm_vm::{
     HostParseStatus, HostSignalKind, HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource,
     HostValue, HostWaitCancel, SharedBytes,
 };
-use network_service::{NetworkService, TcpRequest, TlsClientSettings, TlsRequest};
+use network_service::{
+    NetworkService, TcpRequest, TlsClientSettings, TlsRequest, TlsServerSettings,
+};
 use process_service::{ProcessRequest, ProcessService};
 use signal_service::{SignalService, SignalServiceError};
 use std::collections::HashMap;
@@ -1291,6 +1293,66 @@ impl Host for CliHost {
                 }
                 result
             }
+            lm_abi::OP_TLS_SERVER_HANDSHAKE => {
+                let (
+                    Some(HostArg::Tcp(resource)),
+                    Some(certificates),
+                    Some(HostArg::Bytes(private_key)),
+                    Some(alpn),
+                    Some(HostArg::Int(minimum_version)),
+                    Some(HostArg::Int(buffer_limit)),
+                ) = (
+                    args.first(),
+                    args.get(1),
+                    args.get(2),
+                    args.get(3),
+                    args.get(4),
+                    args.get(5),
+                )
+                else {
+                    return HostStart::Failed(
+                        "Tls.ServerHandshake needs its configuration".to_string(),
+                    );
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tls.ServerHandshake needs a TCP stream".to_string());
+                }
+                let (Some(certificates), Some(alpn)) = (byte_list(certificates), byte_list(alpn))
+                else {
+                    return HostStart::Failed("Tls.ServerHandshake needs byte lists".to_string());
+                };
+                let Ok(buffer_limit) = usize::try_from(*buffer_limit) else {
+                    self.network().force_close(*resource);
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS buffer limit is invalid",
+                    ));
+                };
+                if buffer_limit == 0 || buffer_limit > 1_048_576 {
+                    self.network().force_close(*resource);
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS buffer limit is invalid",
+                    ));
+                }
+                let result = self.start_tls(
+                    key,
+                    TlsRequest::ServerHandshake {
+                        stream: resource.token,
+                        settings: TlsServerSettings {
+                            certificates,
+                            private_key: private_key.clone(),
+                            alpn,
+                            minimum_version: *minimum_version,
+                            buffer_limit,
+                        },
+                    },
+                );
+                if matches!(&result, HostStart::Completed(_)) {
+                    self.network().force_close(*resource);
+                }
+                result
+            }
             lm_abi::OP_TLS_READ => {
                 let (Some(HostArg::Tls(stream)), Some(HostArg::Int(count))) =
                     (args.first(), args.get(1))
@@ -1744,7 +1806,7 @@ mod tests {
         load_bytes, CoreCtor, HostOpenOptions, HostRenameMode, HostSeekFrom, VmConfig, World,
     };
     use rcgen::{generate_simple_self_signed, CertifiedKey};
-    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     use std::io::{Read, Write};
     use std::sync::Arc;
 
@@ -2406,6 +2468,186 @@ mod tests {
             HostValue::Unit
         );
         server.join().expect("the TLS server exits");
+    }
+
+    #[test]
+    fn tls_server_loopback_moves_data_and_consumes_the_tcp_stream() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["localhost".to_string()])
+                .expect("the test certificate generates");
+        let certificate = cert.der().as_ref().to_vec();
+        let private_key = signing_key.serialize_der();
+        let mut host = CliHost::new(1);
+        let listener = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_TCP_LISTEN,
+            vec![HostArg::SocketAddress(loopback(0)), HostArg::Int(16)],
+        )) {
+            HostValue::TcpListener(token) => token,
+            other => panic!("expected a listener, found {other:?}"),
+        };
+        let address = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_TCP_LOCAL_ADDRESS,
+            vec![tcp(HostTcpKind::Listener, listener)],
+        )) {
+            HostValue::SocketAddress(address) => address,
+            other => panic!("expected a socket address, found {other:?}"),
+        };
+        let client_certificate = certificate.clone();
+        let client = std::thread::spawn(move || {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(client_certificate))
+                .expect("the client accepts the test certificate");
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let mut config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                .expect("the TLS versions are valid")
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"loom/1".to_vec()];
+            let socket =
+                std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, address.port))
+                    .expect("the TLS client connects");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("the TLS client sets its read timeout");
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("the TLS client sets its write timeout");
+            let name = rustls::pki_types::ServerName::try_from("localhost".to_string())
+                .expect("the TLS server name is valid");
+            let connection = rustls::ClientConnection::new(Arc::new(config), name)
+                .expect("the TLS client starts");
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            stream
+                .write_all(b"ping")
+                .expect("the TLS client writes a request");
+            stream.flush().expect("the TLS client flushes its request");
+            let mut response = [0_u8; 4];
+            stream
+                .read_exact(&mut response)
+                .expect("the TLS client reads a response");
+            assert_eq!(&response, b"pong");
+            assert_eq!(stream.conn.alpn_protocol(), Some(b"loom/1".as_slice()));
+        });
+        let server = match net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_TCP_ACCEPT,
+            vec![tcp(HostTcpKind::Listener, listener)],
+        )) {
+            HostValue::Tuple(mut values) if values.len() == 2 => match values.remove(0) {
+                HostValue::TcpStream(token) => token,
+                other => panic!("expected a server stream, found {other:?}"),
+            },
+            other => panic!("expected an accepted tuple, found {other:?}"),
+        };
+        let tls = match tls_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_TLS_SERVER_HANDSHAKE,
+            vec![
+                tcp(HostTcpKind::Stream, server),
+                HostArg::List(vec![HostArg::Bytes(certificate.into())]),
+                HostArg::Bytes(private_key.into()),
+                HostArg::List(vec![HostArg::Bytes(b"loom/1".into())]),
+                HostArg::Int(12),
+                HostArg::Int(65_536),
+            ],
+        )) {
+            HostValue::TlsStream(token) => token,
+            other => panic!("expected a TLS stream, found {other:?}"),
+        };
+        assert_eq!(
+            tls_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TLS_READ,
+                vec![HostArg::Tls(tls), HostArg::Int(4)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(b"ping".into())]
+            )
+        );
+        assert_eq!(
+            tls_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TLS_WRITE,
+                vec![HostArg::Tls(tls), HostArg::Bytes(b"pong".into())],
+            )),
+            HostValue::Int(4)
+        );
+        assert_eq!(
+            tls_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TLS_CLOSE,
+                vec![HostArg::Tls(tls)],
+            )),
+            HostValue::Unit
+        );
+        assert!(matches!(
+            run_host(
+                &mut host,
+                lm_abi::OP_TCP_CLOSE,
+                vec![tcp(HostTcpKind::Stream, server)],
+            ),
+            HostValue::Ctor(CoreCtor::Err, ref values)
+                if matches!(values.as_slice(), [HostValue::Ctor(CoreCtor::NetClosed, _)])
+        ));
+        client.join().expect("the TLS client exits");
+        let _ = run_host(
+            &mut host,
+            lm_abi::OP_TCP_CLOSE,
+            vec![tcp(HostTcpKind::Listener, listener)],
+        );
+    }
+
+    #[test]
+    fn an_invalid_tls_server_config_consumes_the_tcp_stream() {
+        let mut host = CliHost::new(1);
+        let (listener, client, server) = connected_pair(&mut host);
+        let value = run_host(
+            &mut host,
+            lm_abi::OP_TLS_SERVER_HANDSHAKE,
+            vec![
+                tcp(HostTcpKind::Stream, server),
+                HostArg::List(vec![]),
+                HostArg::Bytes(b"invalid".into()),
+                HostArg::List(vec![]),
+                HostArg::Int(13),
+                HostArg::Int(65_536),
+            ],
+        );
+        assert!(matches!(
+            value,
+            HostValue::Ctor(CoreCtor::Err, ref values)
+                if matches!(values.as_slice(), [HostValue::Ctor(CoreCtor::TlsInvalidConfig, _)])
+        ));
+        assert!(matches!(
+            run_host(
+                &mut host,
+                lm_abi::OP_TCP_CLOSE,
+                vec![tcp(HostTcpKind::Stream, server)],
+            ),
+            HostValue::Ctor(CoreCtor::Err, ref values)
+                if matches!(values.as_slice(), [HostValue::Ctor(CoreCtor::NetClosed, _)])
+        ));
+        for resource in [
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: client,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Listener,
+                token: listener,
+            },
+        ] {
+            let _ = run_host(
+                &mut host,
+                lm_abi::OP_TCP_CLOSE,
+                vec![HostArg::Tcp(resource)],
+            );
+        }
     }
 
     #[test]
