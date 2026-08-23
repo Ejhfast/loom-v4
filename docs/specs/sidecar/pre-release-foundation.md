@@ -1085,7 +1085,7 @@ Gate: Success and failure both consume the submitted TCP stream.
 
 Gate: Selection never loses or truncates a datagram.
 
-### Stage 8: Release closure
+### Stage 8: Release closure (complete)
 
 - Pin console, DNS, and TCP delay semantics.
 - Update every normative operation table.

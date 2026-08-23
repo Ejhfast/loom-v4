@@ -1241,6 +1241,14 @@ The pair `(vm, run)` is the restored image and its distinguished run.
 
 The exact operation is `Vm.SnapshotVm`.
 
+`RunSnapshot[T].to_bytes()` returns `Result[Bytes, SnapshotError]`.
+
+Its exact operation is `Vm.RunSnapshotBytes`.
+
+`VmSnapshot.to_bytes()` returns `Result[Bytes, SnapshotError]`.
+
+Its exact operation is `Vm.SnapshotBytes`.
+
 `sys.vm.restore_vm(snapshot)` creates one stopped VM. The exact operation is `Vm.RestoreVm`.
 
 Restoring a VM snapshot does not select one run.

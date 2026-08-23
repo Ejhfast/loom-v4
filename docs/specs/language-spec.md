@@ -2135,8 +2135,8 @@ Editable snapshot data has no guest spelling. It never backs a guest value.
 VmSnapshot.result_type(self) -> TypeView
 VmSnapshot.cast_result[T](self, expected: Type[T])
   -> Result[RunSnapshot[T], SnapshotTypeError]
-VmSnapshot.to_bytes(self) -> Bytes
-RunSnapshot[T].to_bytes(self) -> Bytes
+VmSnapshot.to_bytes(self) -> Result[Bytes, SnapshotError]
+RunSnapshot[T].to_bytes(self) -> Result[Bytes, SnapshotError]
 ```
 
 `cast_result` requires a distinguished run marker. A full VM snapshot has no such marker.
@@ -3083,10 +3083,9 @@ The host-effects sidecar defines child inputs, ownership, limits, and cleanup.
 ```text
 Clock.Now       () -> Int             # UTC nanoseconds from Unix epoch
 Clock.Monotonic () -> Int             # host-monotonic nanoseconds
-Clock.Sleep     (Int) -> Result[(), ClockError]
+Clock.Sleep     (Int) -> ()
 
-Rand.Bytes      (Int) -> Result[Bytes, RandError]
-Rand.Int        (Int, Int) -> Result[Int, RandError]  # half-open [low, high)
+Rand.Int        (Int, Int) -> Int  # half-open [low, high)
 Entropy.Bytes   (Int) -> Result[Bytes, EntropyError]
 ```
 
@@ -3284,6 +3283,10 @@ Vm.ChangeProcess[M,R]          (Vm, Slot, Handle[M,R])
                                 -> Result[SlotChange, CodeError]
 Vm.ReplaceAll                  (Vm, List[SlotChange])
                                 -> Result[(), CodeError]
+Vm.RunSnapshotBytes[T]         (RunSnapshot[T])
+                                -> Result[Bytes, SnapshotError]
+Vm.SnapshotBytes               (VmSnapshot)
+                                -> Result[Bytes, SnapshotError]
 Vm.SnapshotVm                  (Vm)
                                 -> Result[VmSnapshot, SnapshotError]
 Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
@@ -3354,7 +3357,7 @@ A full VM snapshot has no distinguished run. `Vm.RestoreVm` restores that image 
 `Vm.Handles` returns controls for the live resources in the controlled
 machine world. A resource control stays with its holder.
 
-`Vm.Resource` accepts a file, TCP, or TLS resource value.
+`Vm.Resource` accepts every native host resource value.
 
 Each `Serve` operation requires a compatible current typed call.
 

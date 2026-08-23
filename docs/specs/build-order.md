@@ -299,7 +299,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 - Dense exact/group policy arrays with default block, transitive `pass`, pure `mock`, and live table editing.
 - Public native `Vm`/`Run[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
 - The typed request pattern `Call(op, call, args)`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
-- Initial host operations: `Io.Write`, `Io.WriteError`, `Io.ReadBytes`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.
+- Initial host operations include byte I/O, clocks, sleep, and deterministic `Rand.Int`.
 - Async completion channel with no Rust reference into guest memory.
 
 ### Runnable outputs

@@ -495,3 +495,34 @@ The snapshot format version remains 30.
 These paired runs used the same release mode and benchmark process shape.
 
 Each reported runtime is the median of nine measured runs.
+
+## Host-effects release closure
+
+The exact comparison parent is `59c49b9`.
+
+Two runtime pairs ran in opposite orders.
+
+Each runtime value is the median of nine measured runs.
+
+| Measurement | Parent range | Final range | Result |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 31.4–31.5 ns | 31.3–31.9 ns | overlap |
+| `direct_call` | 30.4–30.5 ns | 30.7–31.0 ns | within 2% |
+| `direct_clock` | 107.6–108.1 ns | 107.2–107.7 ns | overlap |
+| Warm workspace suite | 41.14 seconds | 41.67 seconds | +1.3% |
+
+The earlier 16.7% direct-call increase did not repeat.
+
+The Stage 4 suite takes 37.83 seconds in the same session.
+
+The final suite is 10.2% longer than Stage 4.
+
+The snapshot mutation target adds 1.48 seconds across that interval.
+
+The snapshot admission target adds 0.57 seconds across that interval.
+
+The two Stage 5 test targets add 0.21 seconds.
+
+Other targets and run variation contain the remaining difference.
+
+The final measurement uses the original worker count and full coverage.

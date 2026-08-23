@@ -1111,15 +1111,13 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
                     continue;
                 };
                 admitted_count += 1;
-                // A tight heap and fuel cap bound the run. The restored
-                // world takes the grants the capture ran under, so the
-                // mutant reaches the kernel instead of stopping at the
-                // policy table.
+                // The heap cap includes installed core objects.
+                // The fuel cap bounds mutant execution.
                 let mut world = lm_vm::World::new(
                     &loaded,
                     VmConfig {
                         fuel: 20_000,
-                        heap_bytes: 1 << 20,
+                        heap_bytes: 2 << 20,
                         max_children: 4_096,
                         ..VmConfig::default()
                     },
