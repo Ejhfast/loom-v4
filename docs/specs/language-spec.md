@@ -2986,6 +2986,8 @@ A snapshot barrier pauses the reachable machines at safepoints, closes the set o
 
 Asynchronous host operations receive a single-use completion sink containing only controlled-VM ID, pending ordinal, and typed reply encoder. Completion queues never hold Rust references into the guest heap. Pause/resume transfers scheduler ownership at an interpreter safepoint.
 
+`docs/specs/sidecar/multi-threaded-scheduler.md` defines the proposed parallel mode and the deterministic compatibility contract.
+
 Each VM also owns a host-side resource registry outside the guest heap. The registry records resource kind, scope identity, pending ordinal, and cleanup state. Snapshot preflight reads this registry and the guest graph to find live host attachments.
 
 ### 22.13 Unsafe-code policy
