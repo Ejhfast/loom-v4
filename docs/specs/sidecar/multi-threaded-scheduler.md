@@ -112,6 +112,26 @@ A nested VM transition returns to the coordinator before another machine runs.
 
 This rule preserves sequential held-VM semantics.
 
+### 4.4 Current host wait defect
+
+`CliHost` has separate readiness paths for I/O, network, process, compiler, signal, and sleep work.
+
+`CliHost::wait` polls those paths with a ten-millisecond quantum.
+
+It can block on the I/O receiver after a process timeout.
+
+A later process completion cannot wake that I/O receiver.
+
+Printing before one slow child wait can therefore deadlock the program.
+
+A live raw terminal also keeps the signal guardian active.
+
+That guardian prevents the only direct I/O blocking path.
+
+Interactive terminal reads therefore pay repeated ten-millisecond waits.
+
+This structure creates both a correctness defect and a measurement bias.
+
 ## 5. Design space
 
 | Design | Benefit | Main cost | Decision |
@@ -531,6 +551,100 @@ The host adapter remains coordinator-owned and can remain non-`Send`.
 
 Potentially blocking work stays in the existing bounded services.
 
+Stage 0.5 gives `CliHost` one shared readiness queue.
+
+This stage lands before any executor change.
+
+### 14.1 Readiness events
+
+The queue carries one private `HostReady` event type.
+
+It has these conceptual variants:
+
+```text
+Completion(HostCompletion)
+Network(NetworkCompletion)
+SignalReady
+```
+
+I/O, process, compiler, and network workers clone one shared sender.
+
+Each service keeps its request queue and cancellation state.
+
+It no longer keeps a private completion receiver.
+
+The queue remains host-private and changes no `Host` trait method.
+
+Existing service request limits bound the number of normal queued events.
+
+### 14.2 Network completion ownership
+
+`NetworkCompletion` carries one retained-byte release guard.
+
+Consuming or dropping the event releases that guard exactly once.
+
+This rule preserves wait cancellation and retained-byte limits.
+
+It also removes the current receiver-side release dependency.
+
+### 14.3 Signal notification
+
+The signal handler continues to write only one byte to its self-pipe.
+
+A signal forwarder owns the read end and blocks on it.
+
+The forwarder records the signal kind in one bounded inbox.
+
+It sends one coalesced `SignalReady` marker to the shared queue.
+
+`SignalService` consumes that inbox on the coordinator thread.
+
+It retains the current delivery, cancellation, escalation, and guardian rules.
+
+Dropping the signal service closes the pipe and joins the forwarder.
+
+The signal handler never touches a Rust channel or lock.
+
+### 14.4 Sleeps
+
+Sleeps stay in the coordinator's timer map.
+
+`wait()` computes the earliest deadline once per park.
+
+It uses `recv_timeout` until that deadline.
+
+It uses `recv` when no sleep exists.
+
+After a timeout, it checks expired sleeps without a polling quantum.
+
+An expired sleep cannot starve behind a continuing completion stream.
+
+`poll()` also checks one expired sleep before the next queued event.
+
+`ProcessService` keeps its internal two-millisecond progress tick in this stage.
+
+That tick is separate from cross-service readiness.
+
+### 14.5 Ordering
+
+One service sender preserves its own completion order.
+
+Different senders use the queue's accepted order.
+
+Parallel service completion order remains unspecified.
+
+Signals no longer have fixed priority over earlier accepted completions.
+
+The scheduler drains all ready host events before it runs another guest slice.
+
+The terminal guardian therefore handles a queued signal before more guest execution.
+
+Deterministic `RecordingHost` behavior does not change.
+
+Real host completion order was never part of deterministic replay.
+
+### 14.6 Future scheduler wake path
+
 Worker reports and host completions must wake one coordinator event source.
 
 The host adds a notifier registration or an equivalent wake sink.
@@ -789,7 +903,7 @@ No lower crate depends on `lm-proc`.
 
 ## 23. Instrumentation before refactoring
 
-Stage 0 records the current workload shape.
+Stages 0 and 0.5 record the current workload shape.
 
 The measurements include these counters:
 
@@ -804,6 +918,9 @@ The measurements include these counters:
 - native intrinsic duration;
 - per-machine GC duration;
 - host completions per slice;
+- host parks and wakeups;
+- host timeout wakeups;
+- shared readiness queue depth;
 - coordinator work per slice.
 
 The benchmark set includes these programs:
@@ -816,6 +933,8 @@ The benchmark set includes these programs:
 - a generic collection loop;
 - polymorphic recursion;
 - mixed host waits;
+- output followed by a slow child wait;
+- raw terminal input with a sleep source;
 - snapshot under load;
 - code replacement under load.
 
@@ -829,11 +948,29 @@ They decide detached transfer packets and a segmented type interner.
 
 Add the counters from section 23.
 
-Record deterministic runtime, allocation, and suite baselines.
+Record the existing polling and deadlock reproduction.
 
-Update `benchmarks/latest-baseline.md` with the accepted deterministic results.
+Do not accept scheduler performance baselines in this stage.
 
 Do not change scheduling behavior in this stage.
+
+### Stage 0.5: Unify host readiness
+
+Give all asynchronous `CliHost` services one shared readiness sender.
+
+Remove their private completion receivers and timeout wait methods.
+
+Add the signal forwarder and its bounded inbox.
+
+Replace the ten-millisecond loop with deadline-based queue waiting.
+
+Add the mixed I/O and child-process deadlock regression.
+
+Add mixed-source ordering and cancellation tests.
+
+Record deterministic runtime, allocation, host latency, and suite baselines.
+
+Update `benchmarks/latest-baseline.md` with the accepted results.
 
 ### Stage 1: Extract the executor boundary
 
@@ -931,6 +1068,11 @@ The implementation must pass these gates:
 - root termination drains all active leases;
 - worker failure never loses a machine silently;
 - host completion and worker report races lose no wake;
+- output before a slow child wait cannot deadlock;
+- compiler, process, and I/O completions wake the same host park;
+- a raw-terminal guardian causes no periodic polling;
+- signal forwarding preserves cancellation and escalation;
+- network retained-byte guards release exactly once;
 - deadlock detection waits for active reports;
 - old snapshots restore under both modes;
 - new snapshots restore under both modes.
@@ -938,6 +1080,10 @@ The implementation must pass these gates:
 Property tests cover the resident and leased state machine.
 
 Stress tests use scripted events instead of timing sleeps.
+
+A host-hub test enumerates every ordered pair of readiness sources.
+
+The real child regression uses a bounded harness timeout.
 
 The synchronization core can use a model checker if normal tests cannot cover an interleaving.
 
@@ -948,6 +1094,14 @@ Deterministic root-only execution must stay within normal benchmark noise.
 Deterministic proc execution can regress by at most five percent.
 
 The deterministic workspace suite must stay near its recorded baseline.
+
+The accepted baseline starts after Stage 0.5.
+
+An idle host park performs no periodic ten-millisecond wakeup.
+
+A completion without a timer causes one blocking receive wakeup.
+
+Sleep completion uses its exact remaining deadline.
 
 Parallel root-only execution must use the inline path when no second task can run.
 
