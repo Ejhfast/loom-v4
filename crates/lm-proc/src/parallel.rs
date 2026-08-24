@@ -3,8 +3,8 @@
 use super::*;
 use crate::pool::{PoolRegistration, SchedulerPool, WorkerEvent};
 use lm_vm::{
-    ParallelContinuation, ParallelFallback, ParallelJob, ParallelRequirement, ParallelReturned,
-    ParallelStep,
+    ParallelContinuation, ParallelDrive, ParallelJob, ParallelParked, ParallelRequirement,
+    ParallelReturned, ParallelStep,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -44,9 +44,11 @@ struct PendingContinuation {
     continuation: ParallelContinuation,
 }
 
-struct PendingFallback {
-    fallback: ParallelFallback,
-    starts_slice: bool,
+struct ParallelSnapshotWatch {
+    target: u32,
+    generation: u32,
+    remaining: u64,
+    members: BTreeSet<TaskKey>,
 }
 
 struct ParallelCoordinator<'a> {
@@ -63,7 +65,8 @@ struct ParallelCoordinator<'a> {
     active: BTreeMap<u64, ActiveJob>,
     returned: VecDeque<ParallelReturned>,
     continuations: VecDeque<PendingContinuation>,
-    fallbacks: VecDeque<PendingFallback>,
+    drives: VecDeque<ParallelDrive>,
+    snapshot_watches: BTreeMap<u32, ParallelSnapshotWatch>,
     scoped_stops: BTreeSet<TaskKey>,
     commit_quiescence: bool,
     next_lease: u64,
@@ -115,7 +118,8 @@ impl Scheduler {
             active: BTreeMap::new(),
             returned: VecDeque::new(),
             continuations: VecDeque::new(),
-            fallbacks: VecDeque::new(),
+            drives: VecDeque::new(),
+            snapshot_watches: BTreeMap::new(),
             scoped_stops: BTreeSet::new(),
             commit_quiescence: false,
             next_lease: 1,
@@ -139,6 +143,8 @@ impl ParallelCoordinator<'_> {
                 self.drain_wake_markers();
                 self.drain_worker_reports()?;
                 self.commit_ready_reports()?;
+                self.withdraw_ready_drives()?;
+                self.sync_snapshot_watches()?;
             }
 
             let root_vm = self.world.root();
@@ -171,6 +177,11 @@ impl ParallelCoordinator<'_> {
             }
 
             if !self.workers_enabled {
+                if self.scheduler.has_wide_parallel_wait(self.world) {
+                    self.ensure_pool()?;
+                    self.workers_enabled = true;
+                    continue;
+                }
                 if let Some(boundary_sparse) = self.run_one_serial_slice()? {
                     if boundary_sparse && self.parallel_work_count() > 1 {
                         self.ensure_pool()?;
@@ -180,34 +191,15 @@ impl ParallelCoordinator<'_> {
                 }
             }
 
-            if self.active.is_empty() {
-                if let Some(fallback) = self.fallbacks.pop_front() {
-                    self.park_retained_continuations()?;
-                    let task = fallback.fallback.task();
-                    if fallback.starts_slice {
-                        self.world.note_parallel_report(0, 0, true);
-                    }
-                    let exit = self
-                        .world
-                        .run_parallel_fallback(fallback.fallback)
-                        .map_err(|error| SchedulerError::new(error.to_string()))?;
-                    self.finish_slice(task, exit);
-                    continue;
-                }
-            }
-
-            let snapshot_waiting = self.world.has_snapshot_watchers();
-            if snapshot_waiting && self.active.is_empty() {
-                self.park_retained_continuations()?;
-                let _ = self.run_one_serial_slice()?;
-                continue;
-            }
-            let stopping = self.needs_quiescence() || snapshot_waiting;
-            if self.needs_global_recall() || snapshot_waiting {
+            let stopping = self.needs_quiescence();
+            if self.needs_global_recall() {
                 self.recall_all_active();
             }
             if !stopping {
-                if self.workers_enabled && self.active.is_empty() && self.parallel_work_count() == 1
+                if self.workers_enabled
+                    && self.active.is_empty()
+                    && self.parallel_work_count() == 1
+                    && !self.scheduler.has_wide_parallel_wait(self.world)
                 {
                     let _ = self.run_one_serial_slice()?;
                     continue;
@@ -281,6 +273,17 @@ impl ParallelCoordinator<'_> {
 
     fn dispatch_ready_work(&mut self) -> Result<(), SchedulerError> {
         while self.pool.is_some() && !self.needs_quiescence() {
+            if let Some(drive) = self.drives.pop_front() {
+                let lease = self.take_lease()?;
+                let drive = drive
+                    .with_quantum(self.parallel_snapshot_quantum(drive.task(), drive.quantum()));
+                let step = self
+                    .world
+                    .begin_parallel_drive(drive, lease)
+                    .map_err(|error| SchedulerError::new(error.to_string()))?;
+                self.accept_step(step, false)?;
+                continue;
+            }
             if let Some(pending) = self.continuations.pop_front() {
                 let lease = self.take_lease()?;
                 let step = self
@@ -290,10 +293,8 @@ impl ParallelCoordinator<'_> {
                 self.accept_step(step, false)?;
                 continue;
             }
-            let Some(task) = self
-                .scheduler
-                .next_parallel_ready(self.world, &self.scoped_stops)
-            else {
+            let stopped = self.stopped_tasks();
+            let Some(task) = self.scheduler.next_parallel_ready(self.world, &stopped) else {
                 break;
             };
             if task.vm == self.world.root() {
@@ -305,9 +306,10 @@ impl ParallelCoordinator<'_> {
             }
             self.scheduler.tasks.insert(task, IndexedState::Running);
             let lease = self.take_lease()?;
+            let quantum = self.parallel_snapshot_quantum(task, u32::MAX);
             let step = self
                 .world
-                .begin_parallel_slice(task, u32::MAX, lease)
+                .begin_parallel_slice(task, quantum, lease)
                 .map_err(|error| SchedulerError::new(error.to_string()))?;
             self.accept_step(step, true)?;
         }
@@ -362,10 +364,19 @@ impl ParallelCoordinator<'_> {
                 self.continuations
                     .push_back(PendingContinuation { continuation });
             }
-            ParallelStep::Fallback(fallback) => self.fallbacks.push_back(PendingFallback {
-                fallback,
-                starts_slice,
-            }),
+            ParallelStep::ArmWait(wait) => {
+                if starts_slice {
+                    self.world.note_parallel_report(0, 0, true);
+                }
+                let task = wait.task();
+                let key = wait.wait_set();
+                self.finish_slice(task, Some(SliceExit::Parked(key)));
+                self.drives.extend(wait.into_drives());
+            }
+            ParallelStep::DriveStopped(drive) => {
+                self.scheduler.consume_events(self.world);
+                self.scheduler.refresh(self.world, drive.task());
+            }
         }
         Ok(())
     }
@@ -413,6 +424,20 @@ impl ParallelCoordinator<'_> {
                         .map_err(|error| SchedulerError::new(error.to_string()))?;
                     self.world
                         .note_parallel_report(retired, growth, active.starts_slice);
+                    let task = returned.task();
+                    let stopped = returned.reached_boundary();
+                    let retired = returned.retired_instructions();
+                    let waiters: Vec<u32> = self
+                        .snapshot_watches
+                        .iter()
+                        .filter_map(|(waiter, watch)| {
+                            watch.members.contains(&task).then_some(*waiter)
+                        })
+                        .collect();
+                    for waiter in waiters {
+                        self.world
+                            .note_parallel_snapshot_progress(waiter, retired, stopped);
+                    }
                     self.returned.push_back(returned);
                 }
                 WorkerEvent::Failed { job: id } => {
@@ -537,11 +562,150 @@ impl ParallelCoordinator<'_> {
     }
 
     fn needs_quiescence(&self) -> bool {
-        self.commit_quiescence || !self.fallbacks.is_empty()
+        self.commit_quiescence
     }
 
     fn needs_global_recall(&self) -> bool {
-        self.commit_quiescence || !self.fallbacks.is_empty()
+        self.commit_quiescence
+    }
+
+    fn stopped_tasks(&self) -> BTreeSet<TaskKey> {
+        let mut stopped = self.scoped_stops.clone();
+        for wait in self.drive_waits_in_flight() {
+            stopped.insert(wait.owner);
+        }
+        stopped
+    }
+
+    fn drive_waits_in_flight(&self) -> BTreeSet<WaitSetKey> {
+        let mut waits = BTreeSet::new();
+        waits.extend(self.drives.iter().map(ParallelDrive::wait_set));
+        waits.extend(
+            self.continuations
+                .iter()
+                .filter_map(|pending| pending.continuation.wait_set()),
+        );
+        waits.extend(
+            self.active
+                .values()
+                .filter_map(|active| active.job.wait_set()),
+        );
+        waits.extend(self.returned.iter().filter_map(ParallelReturned::wait_set));
+        waits
+    }
+
+    fn withdraw_ready_drives(&mut self) -> Result<(), SchedulerError> {
+        let ready: BTreeSet<WaitSetKey> = self
+            .drive_waits_in_flight()
+            .into_iter()
+            .filter(|wait| {
+                matches!(
+                    self.scheduler.tasks.get(&wait.owner),
+                    Some(IndexedState::Queued(_))
+                )
+            })
+            .collect();
+        if ready.is_empty() {
+            return Ok(());
+        }
+        self.drives
+            .retain(|drive| !ready.contains(&drive.wait_set()));
+        let mut retained = VecDeque::new();
+        while let Some(pending) = self.continuations.pop_front() {
+            if pending
+                .continuation
+                .wait_set()
+                .is_some_and(|wait| ready.contains(&wait))
+            {
+                let parked = self
+                    .world
+                    .park_parallel_continuation(pending.continuation)
+                    .map_err(|error| SchedulerError::new(error.to_string()))?;
+                self.accept_parked(parked);
+            } else {
+                retained.push_back(pending);
+            }
+        }
+        self.continuations = retained;
+        let jobs: Vec<u64> = self
+            .active
+            .iter_mut()
+            .filter_map(|(id, active)| {
+                let wait = active.job.wait_set()?;
+                if !ready.contains(&wait) || active.recall_requested {
+                    return None;
+                }
+                active.recall_requested = true;
+                Some(*id)
+            })
+            .collect();
+        if let Some(pool) = &self.pool {
+            pool.recall(&jobs);
+        }
+        Ok(())
+    }
+
+    fn accept_parked(&mut self, parked: ParallelParked) {
+        match parked {
+            ParallelParked::Task { task, exit } => self.finish_slice(task, exit),
+            ParallelParked::Drive(drive) => {
+                self.scheduler.consume_events(self.world);
+                self.scheduler.refresh(self.world, drive.task());
+            }
+        }
+    }
+
+    fn parallel_snapshot_quantum(&self, task: TaskKey, requested: u32) -> u32 {
+        self.snapshot_watches
+            .values()
+            .filter(|watch| watch.members.contains(&task))
+            .fold(requested.max(1), |quantum, watch| {
+                let cap = watch.remaining.min(u64::from(u32::MAX)) as u32;
+                quantum.min(cap.max(1))
+            })
+    }
+
+    fn sync_snapshot_watches(&mut self) -> Result<(), SchedulerError> {
+        let records = self.world.parallel_snapshot_watchers();
+        let current: BTreeMap<u32, (u32, u32, u64, bool)> = records
+            .into_iter()
+            .map(|(waiter, target, generation, remaining, retry)| {
+                (waiter, (target, generation, remaining, retry))
+            })
+            .collect();
+        self.snapshot_watches.retain(|waiter, watch| {
+            current
+                .get(waiter)
+                .is_some_and(|(target, generation, remaining, retry)| {
+                    !retry
+                        && watch.target == *target
+                        && watch.generation == *generation
+                        && watch.remaining == *remaining
+                })
+        });
+        for (waiter, (target, generation, remaining, retry)) in current {
+            if retry || self.snapshot_watches.contains_key(&waiter) {
+                continue;
+            }
+            let members = self
+                .world
+                .parallel_snapshot_members(target)
+                .map_err(|code| {
+                    SchedulerError::new(format!("snapshot wait membership failed with {code:?}"))
+                })?
+                .into_iter()
+                .collect();
+            self.snapshot_watches.insert(
+                waiter,
+                ParallelSnapshotWatch {
+                    target,
+                    generation,
+                    remaining,
+                    members,
+                },
+            );
+        }
+        Ok(())
     }
 
     fn recall_machine(&mut self, key: TaskKey) {
@@ -586,11 +750,11 @@ impl ParallelCoordinator<'_> {
             retained.push_back(pending.continuation);
         }
         while let Some(continuation) = retained.pop_front() {
-            let (task, exit) = self
+            let parked = self
                 .world
                 .park_parallel_continuation(continuation)
                 .map_err(|error| SchedulerError::new(error.to_string()))?;
-            self.finish_slice(task, exit);
+            self.accept_parked(parked);
         }
         Ok(())
     }
@@ -609,11 +773,15 @@ impl ParallelCoordinator<'_> {
                         self.continuations
                             .push_back(PendingContinuation { continuation });
                     }
-                    ParallelStep::Fallback(fallback) => {
-                        self.fallbacks.push_back(PendingFallback {
-                            fallback,
-                            starts_slice: false,
-                        });
+                    ParallelStep::ArmWait(wait) => {
+                        let task = wait.task();
+                        let key = wait.wait_set();
+                        self.finish_slice(task, Some(SliceExit::Parked(key)));
+                        self.drives.extend(wait.into_drives());
+                    }
+                    ParallelStep::DriveStopped(drive) => {
+                        self.scheduler.consume_events(self.world);
+                        self.scheduler.refresh(self.world, drive.task());
                     }
                     ParallelStep::Dispatch(dispatch) => {
                         let (_, job) = dispatch.into_parts();
@@ -638,16 +806,16 @@ impl ParallelCoordinator<'_> {
         let Some(continuation) = continuation else {
             return Ok(false);
         };
-        let (task, exit) = self
+        let parked = self
             .world
             .park_parallel_continuation(continuation)
             .map_err(|error| SchedulerError::new(error.to_string()))?;
-        self.finish_slice(task, exit);
+        self.accept_parked(parked);
         Ok(true)
     }
 
     fn parallel_work_count(&self) -> usize {
-        let retained = self.continuations.len();
+        let retained = self.continuations.len().saturating_add(self.drives.len());
         let queued = self
             .scheduler
             .tasks
@@ -784,6 +952,12 @@ impl ParallelCoordinator<'_> {
 }
 
 impl Scheduler {
+    fn has_wide_parallel_wait(&self, world: &World) -> bool {
+        self.tasks.iter().any(|(task, state)| {
+            matches!(state, IndexedState::Queued(_)) && world.parallel_drive_width(*task) > 1
+        })
+    }
+
     fn next_parallel_ready(
         &mut self,
         world: &World,

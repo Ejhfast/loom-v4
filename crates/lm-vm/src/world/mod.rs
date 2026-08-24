@@ -20,8 +20,8 @@ mod sched;
 mod show;
 mod waits;
 pub use parallel::{
-    ParallelContinuation, ParallelDispatch, ParallelError, ParallelFallback, ParallelJob,
-    ParallelRequirement, ParallelReturned, ParallelStep,
+    ParallelContinuation, ParallelDispatch, ParallelDrive, ParallelError, ParallelJob,
+    ParallelParked, ParallelRequirement, ParallelReturned, ParallelStep, ParallelWait,
 };
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;

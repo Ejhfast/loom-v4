@@ -449,11 +449,12 @@ impl World {
     }
 
     pub(super) fn drive_wait_ready(&self, target: VmId) -> bool {
-        self.machines[target as usize].vm.routed.is_some()
-            || matches!(
-                self.machines[target as usize].vm.state,
-                MachineState::Asked | MachineState::Done | MachineState::Faulted
-            )
+        self.machines[target as usize].is_resident()
+            && (self.machines[target as usize].vm.routed.is_some()
+                || matches!(
+                    self.machines[target as usize].vm.state,
+                    MachineState::Asked | MachineState::Done | MachineState::Faulted
+                ))
     }
 
     pub(super) fn complete_ready_wait(&mut self, vm: VmId, token: u64) -> bool {

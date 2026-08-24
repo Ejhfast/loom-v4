@@ -903,6 +903,24 @@ Snapshot mode does not enter the image.
 
 A restored snapshot can use either scheduler mode.
 
+### 18.2 Snapshot waits
+
+`snapshot_wait` first uses the normal target barrier for its capture attempt.
+
+A failed resource check records the current target reachability set.
+
+Later worker leases use the remaining wait fuel as an instruction cap.
+
+The first matching worker report subtracts its retired instructions.
+
+That report wakes the waiter for another scoped capture attempt.
+
+Other target reports can finish while the capture barrier closes.
+
+Unrelated worker leases continue without a global stop.
+
+The next failed attempt refreshes the recorded reachability set.
+
 ## 19. Pause, resume, and replacement
 
 ### 19.1 Pause and resume

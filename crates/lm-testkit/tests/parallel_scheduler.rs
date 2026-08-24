@@ -895,6 +895,52 @@ end
 }
 
 #[test]
+fn two_armed_drive_waits_execute_on_parallel_workers() {
+    let source = r#"
+def work(answer: Int): Int
+  i = 0
+  total = answer
+  while i < 500000
+    total = total.wrapping_add(i)
+    i = i + 1
+  end
+  answer
+end
+
+class Supervisor < Proc
+  def on_spawn(self): Int with Proc, Vm, Wait
+    first = sys.vm.Vm().activate_or_fault(work, args: (1,))
+    second = sys.vm.Vm().activate_or_fault(work, args: (2,))
+    select
+    in first.drive_wait() -> event
+      case event
+      in Done(value) then value
+      in Asked(_) then -1
+      in Fault(_) then -2
+      end
+    in second.drive_wait() -> event
+      case event
+      in Done(value) then value
+      in Asked(_) then -3
+      in Fault(_) then -4
+      end
+    end
+  end
+end
+
+case Supervisor.spawn().done()
+in Ok(value) then value > 0
+in Err(_) then false
+end
+"#;
+    let (outcome, stats) = run_parallel_with(source, 3, &["Proc", "Vm", "Wait"])
+        .expect("the parallel drive wait runs");
+    assert_eq!(outcome, "Done(true)");
+    assert!(stats.max_active_leases >= 2, "{stats:?}");
+    assert_eq!(stats.global_quiescence, 0, "{stats:?}");
+}
+
+#[test]
 fn snapshot_control_uses_a_scoped_reachability_barrier() {
     let source = std::fs::read_to_string(
         lm_testkit::repo_root().join("examples/08-snapshots/machine-world.lm"),
@@ -903,6 +949,58 @@ fn snapshot_control_uses_a_scoped_reachability_barrier() {
     let (deterministic, parallel, _) =
         compare_modes(&source, &["Proc", "Vm"]).expect("both scheduler modes run");
     assert_eq!(parallel, deterministic);
+}
+
+#[test]
+fn snapshot_wait_tracks_worker_reports_without_a_global_stop() {
+    let source = r#"
+def index_file(file: FileHandle): Int with Fs.Read, Fs.Close
+  size = case file.read(1024)
+  in Ok(bytes) then bytes.len()
+  in Err(_) then return -1
+  end
+  file.close()
+  size
+end
+
+class Busy < Proc
+  def on_spawn(self): Int
+    i = 0
+    while i < 1000000
+      i = i + 1
+    end
+    i
+  end
+end
+
+busy = Busy.spawn()
+case sys.fs.open("message.txt", ReadOnly)
+in Ok(file)
+  child = sys.vm.Vm().activate_or_fault(index_file, args: (file,))
+  child.table().pass(Fs.Read)
+  child.table().pass(Fs.Close)
+  worker = sys.proc.run(child)
+  captured = worker.snapshot_wait(10000).is_ok()
+  result = worker.done().value_or(-1)
+  (captured, result, busy.done().value_or(-1))
+in Err(_) then (false, -1, busy.done().value_or(-1))
+end
+"#;
+    let bytes = compile_to_bytes("parallel-snapshot-wait.lm", source).expect("the source compiles");
+    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let mut host = RecordingHost::new(1);
+    host.set_file("message.txt", b"transient".to_vec());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Proc", "Vm", "Fs"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let mut scheduler = Scheduler::default();
+    let outcome = scheduler
+        .run_parallel(&mut world, 3)
+        .expect("the snapshot wait world runs");
+    assert_eq!(world.show_outcome(&outcome), "Done((true, 9, 1000000))");
+    assert!(scheduler.stats().max_active_leases >= 2);
+    assert_eq!(scheduler.stats().global_quiescence, 0);
 }
 
 #[test]

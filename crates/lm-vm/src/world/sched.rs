@@ -324,6 +324,33 @@ impl World {
         sources
     }
 
+    /// Count runnable held surfaces in one scheduler task's typed wait.
+    pub fn parallel_drive_width(&self, key: TaskKey) -> usize {
+        let Some(wait) = self.suspended.get(&key.vm).and_then(|saved| {
+            if let SuspendReason::Parked { wait, .. } = saved.reason {
+                Some(wait)
+            } else {
+                None
+            }
+        }) else {
+            return 0;
+        };
+        let Ok((leaves, _)) = self.wait_tree(wait.owner.vm, wait.token) else {
+            return 0;
+        };
+        leaves
+            .into_iter()
+            .filter(|leaf| {
+                let WaitLeaf::Drive { target } = leaf.leaf else {
+                    return false;
+                };
+                let mut sources = Vec::new();
+                let mut seen = vec![wait];
+                self.append_drive_sources(target, &mut sources, &mut seen)
+            })
+            .count()
+    }
+
     /// Add unavailable sources. Return true when one source can run.
     pub(super) fn append_wait_sources(
         &self,
@@ -384,6 +411,13 @@ impl World {
         let Some(machine) = self.machines.get(target as usize) else {
             return true;
         };
+        if !machine.is_resident() {
+            sources.push(WaitSourceKey::Wake(WakeKey::Asked(TaskKey {
+                vm: target,
+                generation: machine.generation(),
+            })));
+            return false;
+        }
         if machine.vm.routed.is_some()
             || matches!(
                 machine.vm.state,
@@ -757,16 +791,12 @@ impl World {
             .saturating_add(heap_growth as u64);
     }
 
-    /// True when one snapshot wait needs serial progress accounting.
-    pub fn has_snapshot_watchers(&self) -> bool {
-        self.all_machines_resident() && !self.snapshot_watchers().is_empty()
-    }
-
-    pub(super) fn snapshot_watchers(&self) -> Vec<(VmId, VmId, u32, u64, bool)> {
+    /// Return every resident snapshot wait record.
+    pub fn parallel_snapshot_watchers(&self) -> Vec<(VmId, VmId, u32, u64, bool)> {
         self.machines
             .iter()
             .enumerate()
-            .filter_map(|(vm, machine)| match machine.vm.block {
+            .filter_map(|(vm, slot)| match slot.resident.as_deref()?.vm.block {
                 Some(Block::Snapshot {
                     target,
                     generation,
@@ -776,6 +806,50 @@ impl World {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Return the current machine keys of one snapshot target world.
+    pub fn parallel_snapshot_members(&mut self, target: VmId) -> Result<Vec<TaskKey>, FaultCode> {
+        self.controlled_machines(target).map(|machines| {
+            machines
+                .into_iter()
+                .filter_map(|vm| self.task_key(vm))
+                .collect()
+        })
+    }
+
+    /// Record one worker report for a snapshot wait.
+    pub fn note_parallel_snapshot_progress(&mut self, waiter: VmId, retired: u32, stopped: bool) {
+        if retired == 0 && !stopped {
+            return;
+        }
+        let Some(Block::Snapshot {
+            target,
+            generation,
+            remaining,
+            retry,
+        }) = self
+            .machines
+            .get_mut(waiter as usize)
+            .and_then(|slot| slot.resident.as_deref_mut())
+            .and_then(|machine| machine.vm.block.as_mut())
+        else {
+            return;
+        };
+        if *retry {
+            return;
+        }
+        *remaining = remaining.saturating_sub(u64::from(retired));
+        *retry = true;
+        let wake = WakeKey::Snapshot(TaskKey {
+            vm: *target,
+            generation: *generation,
+        });
+        self.emit_wake(wake);
+    }
+
+    pub(super) fn snapshot_watchers(&self) -> Vec<(VmId, VmId, u32, u64, bool)> {
+        self.parallel_snapshot_watchers()
     }
 
     /// Drive one task for at most `quantum` guest instructions.

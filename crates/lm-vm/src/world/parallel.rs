@@ -16,6 +16,13 @@ pub struct ParallelContinuation {
     task: TaskKey,
     stack: Vec<Activation>,
     quantum: Option<u32>,
+    purpose: ParallelPurpose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParallelPurpose {
+    Task,
+    Drive(ParallelDrive),
 }
 
 impl ParallelContinuation {
@@ -27,6 +34,22 @@ impl ParallelContinuation {
     /// True when this continuation holds one named machine.
     pub fn contains_machine(&self, vm: VmId) -> bool {
         self.stack.iter().any(|activation| activation.vm == vm)
+    }
+
+    /// The typed wait that owns this transient drive.
+    pub fn wait_set(&self) -> Option<WaitSetKey> {
+        match self.purpose {
+            ParallelPurpose::Task => None,
+            ParallelPurpose::Drive(drive) => Some(drive.wait),
+        }
+    }
+
+    /// The transient drive record, when this continuation drives one.
+    pub fn drive(&self) -> Option<ParallelDrive> {
+        match self.purpose {
+            ParallelPurpose::Task => None,
+            ParallelPurpose::Drive(drive) => Some(drive),
+        }
     }
 }
 
@@ -58,6 +81,11 @@ impl ParallelJob {
             vm: self.vm,
             generation: self.token.generation,
         }
+    }
+
+    /// The typed wait that owns this transient drive.
+    pub fn wait_set(&self) -> Option<WaitSetKey> {
+        self.continuation.wait_set()
     }
 }
 
@@ -110,6 +138,21 @@ impl ParallelReturned {
         }
     }
 
+    /// The typed wait that owns this transient drive.
+    pub fn wait_set(&self) -> Option<WaitSetKey> {
+        self.continuation.wait_set()
+    }
+
+    /// The scheduler task instructions retired in this worker report.
+    pub fn retired_instructions(&self) -> u32 {
+        self.retired
+    }
+
+    /// True when the report stopped at one semantic world boundary.
+    pub fn reached_boundary(&self) -> bool {
+        self.reached_boundary
+    }
+
     /// True when this report has no semantic world action.
     pub fn can_commit_out_of_order(&self) -> bool {
         matches!(
@@ -119,16 +162,77 @@ impl ParallelReturned {
     }
 }
 
-/// One quiescent deterministic fallback for a complex wait tree.
-pub struct ParallelFallback {
-    key: TaskKey,
+/// One transient drive for an armed typed wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelDrive {
+    task: TaskKey,
+    wait: WaitSetKey,
+    surface: VmId,
     quantum: u32,
 }
 
-impl ParallelFallback {
-    /// The scheduler task that owns this fallback.
+impl ParallelDrive {
+    /// The scheduler task that owns this wait.
     pub fn task(&self) -> TaskKey {
-        self.key
+        self.task
+    }
+
+    /// The typed wait that owns this drive.
+    pub fn wait_set(&self) -> WaitSetKey {
+        self.wait
+    }
+
+    /// The held surface that this drive advances.
+    pub fn surface(&self) -> VmId {
+        self.surface
+    }
+
+    /// The remaining instruction bound for this drive turn.
+    pub fn quantum(&self) -> u32 {
+        self.quantum
+    }
+
+    /// Return this drive with a smaller instruction bound.
+    pub fn with_quantum(mut self, quantum: u32) -> ParallelDrive {
+        self.quantum = self.quantum.min(quantum.max(1));
+        self
+    }
+}
+
+/// The transient drives of one armed typed wait.
+pub struct ParallelWait {
+    task: TaskKey,
+    wait: WaitSetKey,
+    drives: Vec<ParallelDrive>,
+}
+
+/// One continuation parked without further guest execution.
+pub enum ParallelParked {
+    /// A normal scheduler task stopped.
+    Task {
+        /// The scheduler task.
+        task: TaskKey,
+        /// The task's scheduler exit.
+        exit: Option<SliceExit>,
+    },
+    /// A transient drive stopped.
+    Drive(ParallelDrive),
+}
+
+impl ParallelWait {
+    /// The scheduler task that owns this wait.
+    pub fn task(&self) -> TaskKey {
+        self.task
+    }
+
+    /// The typed wait identity.
+    pub fn wait_set(&self) -> WaitSetKey {
+        self.wait
+    }
+
+    /// Take every transient drive in source order.
+    pub fn into_drives(self) -> Vec<ParallelDrive> {
+        self.drives
     }
 }
 
@@ -147,8 +251,10 @@ pub enum ParallelStep {
     },
     /// Continue this slice after the coordinator committed one action.
     Continue(ParallelContinuation),
-    /// Quiesce active workers before one nested wait fallback.
-    Fallback(ParallelFallback),
+    /// Arm every runnable held surface in one typed wait.
+    ArmWait(ParallelWait),
+    /// One transient drive stopped at a worker boundary.
+    DriveStopped(ParallelDrive),
 }
 
 /// The machine residency needed before one report can commit.
@@ -228,22 +334,32 @@ impl World {
                 })
             }
             TaskStatus::Parked(wait) => {
-                if self
-                    .suspended
-                    .get(&key.vm)
-                    .is_some_and(|saved| matches!(saved.reason, SuspendReason::Parked { .. }))
-                {
-                    return Ok(ParallelStep::Fallback(ParallelFallback {
-                        key,
-                        quantum: quantum.max(1),
-                    }));
+                if self.suspended.get(&key.vm).is_some_and(
+                    |saved| matches!(saved.reason, SuspendReason::Parked { wait: held, .. } if held == wait),
+                ) {
+                    if let Some(step) = self.begin_parallel_wait(key, wait, quantum)? {
+                        return Ok(step);
+                    }
                 }
-                return Ok(ParallelStep::Complete {
-                    task: key,
-                    exit: Some(SliceExit::Parked(wait)),
-                });
+                if self.task_status(key) == TaskStatus::Parked(wait) {
+                    return Ok(ParallelStep::Complete {
+                        task: key,
+                        exit: Some(SliceExit::Parked(wait)),
+                    });
+                }
             }
             TaskStatus::Ready => {}
+        }
+        if let Some(wait) = self.suspended.get(&key.vm).and_then(|saved| {
+            if let SuspendReason::Parked { wait, .. } = saved.reason {
+                Some(wait)
+            } else {
+                None
+            }
+        }) {
+            if let Some(step) = self.begin_parallel_wait(key, wait, quantum)? {
+                return Ok(step);
+            }
         }
         if self.machines[key.vm as usize].vm.state == MachineState::Blocked
             && !self.suspended.contains_key(&key.vm)
@@ -310,10 +426,208 @@ impl World {
                 task: key,
                 stack,
                 quantum: Some(quantum.max(1)),
+                purpose: ParallelPurpose::Task,
             },
             lease,
             false,
         )
+    }
+
+    fn begin_parallel_wait(
+        &mut self,
+        key: TaskKey,
+        wait: WaitSetKey,
+        quantum: u32,
+    ) -> Result<Option<ParallelStep>, ParallelError> {
+        if self.complete_ready_wait(wait.owner.vm, wait.token) {
+            self.mark_wait_stack_ready(key.vm, wait);
+            return Ok(None);
+        }
+        let Ok((leaves, _)) = self.wait_tree(wait.owner.vm, wait.token) else {
+            let op = self.pending_op(wait.owner.vm);
+            self.machines[wait.owner.vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the wait tree is malformed",
+                op,
+            );
+            self.mark_wait_stack_ready(key.vm, wait);
+            return Ok(None);
+        };
+        let mut drives = Vec::new();
+        for leaf in leaves {
+            let WaitLeaf::Drive { target } = leaf.leaf else {
+                continue;
+            };
+            let mut sources = Vec::new();
+            let mut seen = vec![wait];
+            if self.append_drive_sources(target, &mut sources, &mut seen) {
+                drives.push(ParallelDrive {
+                    task: key,
+                    wait,
+                    surface: target,
+                    quantum: quantum.max(1),
+                });
+            }
+        }
+        if drives.is_empty() {
+            return Ok(Some(ParallelStep::Complete {
+                task: key,
+                exit: Some(SliceExit::Parked(wait)),
+            }));
+        }
+        Ok(Some(ParallelStep::ArmWait(ParallelWait {
+            task: key,
+            wait,
+            drives,
+        })))
+    }
+
+    /// Start one transient drive for an armed typed wait.
+    pub fn begin_parallel_drive(
+        &mut self,
+        drive: ParallelDrive,
+        lease: u64,
+    ) -> Result<ParallelStep, ParallelError> {
+        if self.poisoned {
+            return Err(ParallelError::Poisoned);
+        }
+        let valid = self
+            .wait_tree(drive.wait.owner.vm, drive.wait.token)
+            .is_ok_and(|(leaves, _)| {
+                leaves.into_iter().any(
+                    |leaf| matches!(leaf.leaf, WaitLeaf::Drive { target } if target == drive.surface),
+                )
+            });
+        if !valid {
+            return Ok(ParallelStep::DriveStopped(drive));
+        }
+        let Some(stack) = self.take_parallel_drive_stack(drive.surface, 0)? else {
+            return Ok(ParallelStep::DriveStopped(drive));
+        };
+        self.continue_parallel_slice(
+            ParallelContinuation {
+                task: drive.task,
+                stack,
+                quantum: Some(drive.quantum),
+                purpose: ParallelPurpose::Drive(drive),
+            },
+            lease,
+            false,
+        )
+    }
+
+    fn take_parallel_drive_stack(
+        &mut self,
+        surface: VmId,
+        depth: usize,
+    ) -> Result<Option<Vec<Activation>>, ParallelError> {
+        if depth >= self.machines.len() {
+            return Err(ParallelError::InvalidState);
+        }
+        if self.machines.get(surface as usize).is_none() {
+            return Err(ParallelError::InvalidState);
+        }
+        if let Some(wait) = self.suspended.get(&surface).and_then(|saved| {
+            if let SuspendReason::Parked { wait, .. } = saved.reason {
+                Some(wait)
+            } else {
+                None
+            }
+        }) {
+            if self.complete_ready_wait(wait.owner.vm, wait.token) {
+                self.mark_wait_stack_ready(surface, wait);
+            } else {
+                let Some(target) = self.parallel_nested_drive(wait)? else {
+                    return Ok(None);
+                };
+                return self.take_parallel_drive_stack(target, depth + 1);
+            }
+        }
+        if let Some(saved) = self.suspended.get(&surface) {
+            let available = match saved.reason {
+                SuspendReason::Yielded => true,
+                SuspendReason::Blocked { machine, .. } => self.block_ready(machine),
+                SuspendReason::Waiting { machine, .. } => {
+                    self.machines[machine as usize].vm.state != MachineState::Waiting
+                }
+                SuspendReason::Parked { .. } => false,
+            };
+            if !available {
+                return Ok(None);
+            }
+            let saved = self
+                .suspended
+                .remove(&surface)
+                .ok_or(ParallelError::InvalidState)?;
+            if saved.activations.is_empty() {
+                return Err(ParallelError::InvalidState);
+            }
+            return Ok(Some(saved.activations));
+        }
+        if self.machines[surface as usize].vm.routed.is_some()
+            || matches!(
+                self.machines[surface as usize].vm.state,
+                MachineState::Asked | MachineState::Done | MachineState::Faulted
+            )
+        {
+            return Ok(None);
+        }
+        if self.machines[surface as usize].vm.state == MachineState::Blocked {
+            if let Some(Block::Wait { token }) = self.machines[surface as usize].vm.block {
+                let wait = WaitSetKey {
+                    owner: TaskKey {
+                        vm: surface,
+                        generation: self.machines[surface as usize].generation(),
+                    },
+                    token,
+                };
+                if self.complete_ready_wait(surface, token) {
+                    return self.take_parallel_drive_stack(surface, depth + 1);
+                }
+                let Some(target) = self.parallel_nested_drive(wait)? else {
+                    return Ok(None);
+                };
+                return self.take_parallel_drive_stack(target, depth + 1);
+            }
+            if self.block_ready(surface) {
+                self.complete_blocked_machine(surface);
+                return self.take_parallel_drive_stack(surface, depth + 1);
+            }
+            return Ok(None);
+        }
+        if self.machines[surface as usize].vm.state != MachineState::Ready {
+            return Ok(None);
+        }
+        let mut stack = Vec::new();
+        self.push_activation(
+            &mut stack,
+            Activation {
+                vm: surface,
+                mode: StopMode::DriveToAsk,
+                family: Family::Drive,
+                reply_to: None,
+                retired: false,
+                fuel: None,
+            },
+        );
+        Ok(Some(stack))
+    }
+
+    fn parallel_nested_drive(&self, wait: WaitSetKey) -> Result<Option<VmId>, ParallelError> {
+        let (leaves, _) = self
+            .wait_tree(wait.owner.vm, wait.token)
+            .map_err(|_| ParallelError::InvalidState)?;
+        for leaf in leaves {
+            let WaitLeaf::Drive { target } = leaf.leaf else {
+                continue;
+            };
+            let mut sources = Vec::new();
+            let mut seen = vec![wait];
+            if self.append_drive_sources(target, &mut sources, &mut seen) {
+                return Ok(Some(target));
+            }
+        }
+        Ok(None)
     }
 
     /// Continue one restored scheduler slice.
@@ -327,13 +641,16 @@ impl World {
             return Err(ParallelError::Poisoned);
         }
         match self.advance_stack(&mut continuation.stack, &mut continuation.quantum) {
-            DriverStep::Event(event) => {
-                let exit = self.scheduler_event_exit(continuation.task, event);
-                Ok(ParallelStep::Complete {
-                    task: continuation.task,
-                    exit: Some(exit),
-                })
-            }
+            DriverStep::Event(event) => match continuation.purpose {
+                ParallelPurpose::Task => {
+                    let exit = self.scheduler_event_exit(continuation.task, event);
+                    Ok(ParallelStep::Complete {
+                        task: continuation.task,
+                        exit: Some(exit),
+                    })
+                }
+                ParallelPurpose::Drive(drive) => Ok(ParallelStep::DriveStopped(drive)),
+            },
             DriverStep::Execute { top_idx, vm, limit } => self.make_parallel_dispatch(
                 continuation,
                 top_idx,
@@ -805,24 +1122,18 @@ impl World {
             },
         );
         if let Some(event) = event {
-            let exit = self.scheduler_event_exit(returned.continuation.task, event);
-            return Ok(ParallelStep::Complete {
-                task: returned.continuation.task,
-                exit: Some(exit),
+            return Ok(match returned.continuation.purpose {
+                ParallelPurpose::Task => {
+                    let exit = self.scheduler_event_exit(returned.continuation.task, event);
+                    ParallelStep::Complete {
+                        task: returned.continuation.task,
+                        exit: Some(exit),
+                    }
+                }
+                ParallelPurpose::Drive(drive) => ParallelStep::DriveStopped(drive),
             });
         }
         Ok(ParallelStep::Continue(returned.continuation))
-    }
-
-    /// Execute one fallback after every worker returns.
-    pub fn run_parallel_fallback(
-        &mut self,
-        fallback: ParallelFallback,
-    ) -> Result<Option<SliceExit>, ParallelError> {
-        if !self.all_machines_resident() {
-            return Err(ParallelError::InvalidState);
-        }
-        Ok(self.drive_slice(fallback.key, fallback.quantum))
     }
 
     /// Run one retained continuation after global quiescence.
@@ -830,7 +1141,7 @@ impl World {
         &mut self,
         mut continuation: ParallelContinuation,
     ) -> Result<Option<SliceExit>, ParallelError> {
-        if !self.all_machines_resident() {
+        if !self.all_machines_resident() || continuation.purpose != ParallelPurpose::Task {
             return Err(ParallelError::InvalidState);
         }
         let event = self.drive_stack(&mut continuation.stack, continuation.quantum);
@@ -841,7 +1152,7 @@ impl World {
     pub fn park_parallel_continuation(
         &mut self,
         mut continuation: ParallelContinuation,
-    ) -> Result<(TaskKey, Option<SliceExit>), ParallelError> {
+    ) -> Result<ParallelParked, ParallelError> {
         if continuation.stack.is_empty()
             || continuation.stack.iter().any(|activation| {
                 !self
@@ -855,8 +1166,13 @@ impl World {
         let task = continuation.task;
         match self.advance_stack(&mut continuation.stack, &mut continuation.quantum) {
             DriverStep::Event(event) => {
-                let exit = self.scheduler_event_exit(task, event);
-                return Ok((task, Some(exit)));
+                return Ok(match continuation.purpose {
+                    ParallelPurpose::Task => ParallelParked::Task {
+                        task,
+                        exit: Some(self.scheduler_event_exit(task, event)),
+                    },
+                    ParallelPurpose::Drive(drive) => ParallelParked::Drive(drive),
+                });
             }
             DriverStep::Execute { .. } => {}
         }
@@ -877,7 +1193,13 @@ impl World {
                 },
             );
         }
-        Ok((task, Some(SliceExit::Yielded)))
+        Ok(match continuation.purpose {
+            ParallelPurpose::Task => ParallelParked::Task {
+                task,
+                exit: Some(SliceExit::Yielded),
+            },
+            ParallelPurpose::Drive(drive) => ParallelParked::Drive(drive),
+        })
     }
 
     /// Discard one uncommitted child action after root termination.

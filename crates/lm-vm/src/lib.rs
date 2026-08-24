@@ -38,9 +38,9 @@ pub use schedule::{
     WakeKey,
 };
 pub use world::{
-    MailboxMetrics, ParallelContinuation, ParallelDispatch, ParallelError, ParallelFallback,
-    ParallelJob, ParallelRequirement, ParallelReturned, ParallelStep, RootEvent, StopMode,
-    TraceBlock, TraceEvent, World, WorldMetrics,
+    MailboxMetrics, ParallelContinuation, ParallelDispatch, ParallelDrive, ParallelError,
+    ParallelJob, ParallelParked, ParallelRequirement, ParallelReturned, ParallelStep, ParallelWait,
+    RootEvent, StopMode, TraceBlock, TraceEvent, World, WorldMetrics,
 };
 
 /// The fault codes are manifest content, and the heap and the graph
