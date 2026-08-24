@@ -865,6 +865,10 @@ An unexpected transaction conflict is an invalid scheduler state.
 
 The scheduler reports that state. It does not run a hidden serial fallback.
 
+A cyclic policy chain is also an invalid scheduler state.
+
+The scheduler reports that state without a global stop.
+
 A parallel barrier first finds one target task set.
 
 The pending control commit prevents new leases for that set.
@@ -1446,6 +1450,10 @@ No message case can fall below 0.90 times deterministic throughput.
 The message-case aggregate must stay within five percent of deterministic throughput.
 
 Snapshot capture reports stop time separately from encoding time.
+
+An in-memory branch must not exceed one fresh snapshot and restore.
+
+The benchmark also reports reuse of one captured snapshot.
 
 Every baseline records processor count, worker count, build profile, and scheduler mode.
 

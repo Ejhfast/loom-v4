@@ -1142,7 +1142,7 @@ fn bench_proc_operations() {
 #[test]
 #[ignore]
 fn bench_in_memory_branch() {
-    let snapshot_restore = r#"
+    let snapshot_reuse = r#"
 def choose(): Int with Rand.Int
   sys.rand.int(0, 100)
 end
@@ -1171,6 +1171,48 @@ in Asked(_)
   total = 0
   index = 0
   while index < 100
+    copy = case sys.vm.Vm().restore(image)
+    in Ok(value) then value
+    in Err(error) then panic(display(error))
+    end
+    total = total + finish(copy, index)
+    index = index + 1
+  end
+  finish(original, 100)
+  total
+in Done(value) then value
+in Fault(fault) then raise(fault)
+end
+"#;
+    let snapshot_fresh = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 100)
+end
+
+def finish(run: Run[Int], answer: Int): Int with Vm
+  case run.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      run.answer(call, answer)
+      run.run().value_or(-1000)
+    in _ then -2000
+    end
+  in Done(value) then value
+  in Fault(_) then -3000
+  end
+end
+
+original = sys.vm.Vm().activate_or_fault(choose, args: ())
+case original.drive()
+in Asked(_)
+  total = 0
+  index = 0
+  while index < 100
+    image = case original.snapshot()
+    in Ok(value) then value
+    in Err(error) then panic(display(error))
+    end
     copy = case sys.vm.Vm().restore(image)
     in Ok(value) then value
     in Err(error) then panic(display(error))
@@ -1222,12 +1264,19 @@ in Done(value) then value
 in Fault(fault) then raise(fault)
 end
 "#;
-    let restored = time_world(snapshot_restore, &["Vm"], config(), "Done(4950)");
+    let reused = time_world(snapshot_reuse, &["Vm"], config(), "Done(4950)");
+    let fresh = time_world(snapshot_fresh, &["Vm"], config(), "Done(4950)");
     let branched = time_world(branch, &["Vm"], config(), "Done(4950)");
-    let ratio = branched.as_secs_f64() / restored.as_secs_f64();
+    let reuse_ratio = branched.as_secs_f64() / reused.as_secs_f64();
+    let fresh_ratio = branched.as_secs_f64() / fresh.as_secs_f64();
+    assert!(
+        fresh_ratio <= 1.0,
+        "an in-memory branch must beat a fresh snapshot and restore"
+    );
     println!(
-        "LOOM\tvm_branch\t100\t{:.3}\t{:.3}\t{ratio:.3}",
-        restored.as_secs_f64() * 1e3,
+        "LOOM\tvm_branch\t100\t{:.3}\t{:.3}\t{:.3}\t{reuse_ratio:.3}\t{fresh_ratio:.3}",
+        reused.as_secs_f64() * 1e3,
+        fresh.as_secs_f64() * 1e3,
         branched.as_secs_f64() * 1e3
     );
 }

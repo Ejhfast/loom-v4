@@ -457,10 +457,12 @@ impl ParallelCoordinator<'_> {
                 return Ok(());
             };
             let requirement = self.world.parallel_requirement(returned);
-            let needs_quiescence = matches!(
-                requirement,
-                ParallelRequirement::Quiescent | ParallelRequirement::Collection
-            );
+            if requirement == ParallelRequirement::InvalidState {
+                return Err(SchedulerError::new(
+                    "the parallel scheduler found a cyclic policy chain",
+                ));
+            }
+            let needs_quiescence = requirement == ParallelRequirement::Collection;
             if needs_quiescence && !self.active.is_empty() {
                 if !self.commit_quiescence {
                     self.scheduler.stats.global_quiescence =

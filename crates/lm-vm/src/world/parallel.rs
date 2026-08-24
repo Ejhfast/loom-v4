@@ -266,10 +266,10 @@ pub enum ParallelRequirement {
     Machine(TaskKey),
     /// The named machine must stop at a control safepoint.
     Safepoint(TaskKey),
-    /// Every machine must return first.
-    Quiescent,
     /// Every machine must return before machine collection.
     Collection,
+    /// The pending action found invalid world state.
+    InvalidState,
 }
 
 /// A scheduler boundary rejected invalid worker state.
@@ -949,7 +949,7 @@ impl World {
         ParallelRequirement::Ready
     }
 
-    fn policy_requirement(&self, vm: VmId) -> Option<ParallelRequirement> {
+    pub(super) fn policy_requirement(&self, vm: VmId) -> Option<ParallelRequirement> {
         let mut current = vm;
         for _ in 0..self.machines.len() {
             let parent = self.machines.get(current as usize)?.parent();
@@ -963,7 +963,7 @@ impl World {
             }
             current = parent;
         }
-        Some(ParallelRequirement::Quiescent)
+        Some(ParallelRequirement::InvalidState)
     }
 
     fn perform_machine_requirement(
@@ -1112,9 +1112,8 @@ impl World {
                     return Err(ParallelError::InvalidState);
                 }
             }
-            ParallelRequirement::Quiescent | ParallelRequirement::Collection
-                if self.all_machines_resident() => {}
-            ParallelRequirement::Quiescent | ParallelRequirement::Collection => {
+            ParallelRequirement::Collection if self.all_machines_resident() => {}
+            ParallelRequirement::Collection | ParallelRequirement::InvalidState => {
                 return Err(ParallelError::InvalidState);
             }
         }
@@ -1145,7 +1144,7 @@ impl World {
         Ok(ParallelStep::Continue(returned.continuation))
     }
 
-    /// Run one retained continuation after global quiescence.
+    /// Run one retained continuation after collection quiescence.
     pub fn run_parallel_continuation_inline(
         &mut self,
         mut continuation: ParallelContinuation,

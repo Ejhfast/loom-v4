@@ -1036,6 +1036,18 @@ mod tests {
     }
 
     #[test]
+    fn a_parallel_policy_cycle_is_an_invalid_requirement() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        world.machines[0].vm.parent = Some(0);
+
+        assert_eq!(
+            world.policy_requirement(0),
+            Some(ParallelRequirement::InvalidState)
+        );
+    }
+
+    #[test]
     fn a_resource_close_waits_for_its_leased_owner() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
