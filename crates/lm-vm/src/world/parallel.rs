@@ -9,9 +9,12 @@ use crate::executor::{
     ExecutionToken,
 };
 use crate::machine::operation_needs_global_quiescence;
+use std::collections::VecDeque;
 use std::fmt;
 
+/// The default byte trip point of one worker lease.
 const LEASE_HEAP_BYTES: usize = 64 << 10;
+/// The default object trip point of one worker lease.
 const LEASE_HEAP_OBJECTS: usize = 1_024;
 
 /// One scheduler continuation between worker jobs.
@@ -101,9 +104,14 @@ impl ParallelReturned {
         matches!(
             self.stop,
             ExecutionStop::QuantumExpired
-                | ExecutionStop::NeedsHeapRefill
+                | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         )
+    }
+
+    /// True when this report stopped before a global control operation.
+    pub fn needs_global_quiescence(&self) -> bool {
+        matches!(self.stop, ExecutionStop::NeedsQuiescence)
     }
 }
 
@@ -133,8 +141,6 @@ pub enum ParallelStep {
         /// The task's scheduler exit.
         exit: Option<SliceExit>,
     },
-    /// Quiesce active workers and retry one unchanged instruction.
-    Refill(ParallelContinuation),
     /// Quiesce active workers before one global operation.
     Quiesce(ParallelContinuation),
     /// Continue this slice after the coordinator committed one action.
@@ -150,6 +156,8 @@ pub enum ParallelRequirement {
     Ready,
     /// The named machine must return first.
     Machine(TaskKey),
+    /// The named machine must stop at a control safepoint.
+    Safepoint(TaskKey),
     /// Every machine must return first.
     Quiescent,
 }
@@ -311,7 +319,7 @@ impl World {
         &mut self,
         mut continuation: ParallelContinuation,
         lease: u64,
-        exclusive_heap: bool,
+        exclusive_world: bool,
     ) -> Result<ParallelStep, ParallelError> {
         if self.poisoned {
             return Err(ParallelError::Poisoned);
@@ -324,9 +332,14 @@ impl World {
                     exit: Some(exit),
                 })
             }
-            DriverStep::Execute { top_idx, vm, limit } => {
-                self.make_parallel_dispatch(continuation, top_idx, vm, limit, lease, exclusive_heap)
-            }
+            DriverStep::Execute { top_idx, vm, limit } => self.make_parallel_dispatch(
+                continuation,
+                top_idx,
+                vm,
+                limit,
+                lease,
+                exclusive_world,
+            ),
         }
     }
 
@@ -337,7 +350,7 @@ impl World {
         vm: VmId,
         limit: u32,
         lease: u64,
-        exclusive_heap: bool,
+        exclusive_world: bool,
     ) -> Result<ParallelStep, ParallelError> {
         if lease == 0
             || !self
@@ -370,17 +383,17 @@ impl World {
         let machine = self.machines[vm as usize].take_for_lease(token);
         let limits = ExecutionLimits {
             instructions: limit,
-            heap_growth_bytes: if exclusive_heap {
+            heap_trip_bytes: if exclusive_world {
                 usize::MAX
             } else {
                 LEASE_HEAP_BYTES
             },
-            heap_growth_objects: if exclusive_heap {
+            heap_trip_objects: if exclusive_world {
                 usize::MAX
             } else {
                 LEASE_HEAP_OBJECTS
             },
-            exclusive_heap,
+            exclusive_world,
         };
         let (worker, reservation) = ExecutionLease::new(
             token,
@@ -444,7 +457,7 @@ impl World {
         let reached_boundary = !matches!(
             stop,
             ExecutionStop::QuantumExpired
-                | ExecutionStop::NeedsHeapRefill
+                | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         );
         Ok(ParallelReturned {
@@ -458,7 +471,7 @@ impl World {
     }
 
     /// Return the residency needed by one report action.
-    pub fn parallel_requirement(&self, returned: &ParallelReturned) -> ParallelRequirement {
+    pub fn parallel_requirement(&mut self, returned: &ParallelReturned) -> ParallelRequirement {
         let ExecutionStop::Boundary(outcome) = &returned.stop else {
             return ParallelRequirement::Ready;
         };
@@ -469,6 +482,13 @@ impl World {
                 }
                 if let Some(requirement) = self.policy_requirement(returned.vm) {
                     return requirement;
+                }
+                if let Some(requirement) =
+                    self.control_operation_requirement(returned.vm, *op, args)
+                {
+                    if requirement != ParallelRequirement::Ready {
+                        return requirement;
+                    }
                 }
                 self.perform_machine_requirement(returned.vm, *op, args)
             }
@@ -526,6 +546,104 @@ impl World {
         }
     }
 
+    fn control_operation_requirement(
+        &mut self,
+        source: VmId,
+        op: u32,
+        args: &[Value],
+    ) -> Option<ParallelRequirement> {
+        let first = args.first().copied();
+        let roots = match op {
+            lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                vec![self.handle_run(source, first?)?]
+            }
+            lm_abi::OP_VM_SNAPSHOT_SELF => vec![source],
+            lm_abi::OP_PROC_SNAPSHOT_WAIT => {
+                let reference = first?.as_obj()?;
+                let Object::NativeHandle { proc, .. } =
+                    self.machines[source as usize].vm.heap.try_get(reference)?
+                else {
+                    return Some(ParallelRequirement::Ready);
+                };
+                vec![*proc]
+            }
+            lm_abi::OP_VM_SNAPSHOT_VM => {
+                let key = self.handle_vm(source, first?)?;
+                let live = self
+                    .vm_images
+                    .get(key.image as usize)
+                    .is_some_and(|image| image.live && image.generation == key.generation);
+                if !live {
+                    return Some(ParallelRequirement::Ready);
+                }
+                match self.vm_snapshot_roots(key) {
+                    Ok(roots) => roots,
+                    Err(_) => return Some(ParallelRequirement::Ready),
+                }
+            }
+            lm_abi::OP_VM_INSTALL
+            | lm_abi::OP_VM_INSTALL_WITH
+            | lm_abi::OP_VM_REPLACE_FUNCTION
+            | lm_abi::OP_VM_REPLACE_CLASS
+            | lm_abi::OP_VM_REPLACE_VALUE
+            | lm_abi::OP_VM_REPLACE_PROCESS
+            | lm_abi::OP_VM_REPLACE_ALL => {
+                let key = self.handle_vm(source, first?)?;
+                return Some(self.image_safepoint_requirement(source, key));
+            }
+            _ => return None,
+        };
+        Some(self.snapshot_safepoint_requirement(source, &roots))
+    }
+
+    fn snapshot_safepoint_requirement(
+        &mut self,
+        source: VmId,
+        roots: &[VmId],
+    ) -> ParallelRequirement {
+        let mut found = Vec::new();
+        let mut queue: VecDeque<VmId> = roots.iter().copied().collect();
+        while let Some(vm) = queue.pop_front() {
+            if found.contains(&vm) {
+                continue;
+            }
+            let Some(slot) = self.machines.get(vm as usize) else {
+                continue;
+            };
+            let generation = slot.generation();
+            if vm != source {
+                let requirement = self.machine_safepoint_requirement(vm, generation);
+                if requirement != ParallelRequirement::Ready {
+                    return requirement;
+                }
+            }
+            found.push(vm);
+            if !self.is_live_machine(vm) {
+                continue;
+            }
+            let references = match self.machine_references(vm) {
+                Ok(references) => references,
+                Err(_) => return ParallelRequirement::Ready,
+            };
+            queue.extend(references);
+        }
+        ParallelRequirement::Ready
+    }
+
+    fn image_safepoint_requirement(&self, source: VmId, key: VmImageKey) -> ParallelRequirement {
+        for (vm, slot) in self.machines.iter().enumerate() {
+            let vm = vm as VmId;
+            if vm == source || slot.image() != Some(key) {
+                continue;
+            }
+            let requirement = self.machine_safepoint_requirement(vm, slot.generation());
+            if requirement != ParallelRequirement::Ready {
+                return requirement;
+            }
+        }
+        ParallelRequirement::Ready
+    }
+
     fn policy_requirement(&self, vm: VmId) -> Option<ParallelRequirement> {
         let mut current = vm;
         for _ in 0..self.machines.len() {
@@ -551,7 +669,10 @@ impl World {
     ) -> ParallelRequirement {
         if matches!(
             op,
-            lm_abi::OP_PROC_SPAWN | lm_abi::OP_VM_ACTIVATE | lm_abi::OP_VM_ACTIVATE_OR_FAULT
+            lm_abi::OP_PROC_SPAWN
+                | lm_abi::OP_VM_ACTIVATE
+                | lm_abi::OP_VM_ACTIVATE_OR_FAULT
+                | lm_abi::OP_VM_ACTIVATE_DEF
         ) && self.child_reclamation_needed(source)
         {
             return ParallelRequirement::Quiescent;
@@ -663,7 +784,7 @@ impl World {
         if slot.is_resident() && slot.active() == 0 {
             ParallelRequirement::Ready
         } else {
-            ParallelRequirement::Machine(TaskKey { vm, generation })
+            ParallelRequirement::Safepoint(TaskKey { vm, generation })
         }
     }
 
@@ -674,7 +795,7 @@ impl World {
     ) -> Result<ParallelStep, ParallelError> {
         match self.parallel_requirement(&returned) {
             ParallelRequirement::Ready => {}
-            ParallelRequirement::Machine(key) => {
+            ParallelRequirement::Machine(key) | ParallelRequirement::Safepoint(key) => {
                 if !self
                     .machines
                     .get(key.vm as usize)
@@ -685,22 +806,6 @@ impl World {
             }
             ParallelRequirement::Quiescent if self.all_machines_resident() => {}
             ParallelRequirement::Quiescent => return Err(ParallelError::InvalidState),
-        }
-        if matches!(returned.stop, ExecutionStop::NeedsHeapRefill) {
-            let event = self.commit_execution_stop(
-                &mut returned.continuation.stack,
-                returned.top_idx,
-                returned.vm,
-                &mut returned.continuation.quantum,
-                ExecutionCommit {
-                    stop: returned.stop,
-                    retired: returned.retired,
-                    reached_boundary: false,
-                    charge_fuel: false,
-                },
-            );
-            debug_assert!(event.is_none());
-            return Ok(ParallelStep::Refill(returned.continuation));
         }
         if matches!(returned.stop, ExecutionStop::NeedsQuiescence) {
             let event = self.commit_execution_stop(
@@ -768,7 +873,14 @@ impl World {
         &mut self,
         mut continuation: ParallelContinuation,
     ) -> Result<(TaskKey, Option<SliceExit>), ParallelError> {
-        if !self.all_machines_resident() || continuation.stack.is_empty() {
+        if continuation.stack.is_empty()
+            || continuation.stack.iter().any(|activation| {
+                !self
+                    .machines
+                    .get(activation.vm as usize)
+                    .is_some_and(MachineSlot::is_resident)
+            })
+        {
             return Err(ParallelError::InvalidState);
         }
         let task = continuation.task;

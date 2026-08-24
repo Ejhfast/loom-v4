@@ -2976,9 +2976,9 @@ The default block action requires no allocation. Live edits replace one action u
 
 ### 22.12 Procs, snapshot barriers, and asynchronous host work
 
-A proc owns one `VmState` on one scheduler task. The baseline scheduler uses one deterministic FIFO ready queue. It runs each ready task for one fixed instruction quantum. Wake indexes name mailbox changes, terminal states, and host completions. A state change wakes only tasks in its matching index. The scheduler waits on the host only when no task is ready. One VM never executes concurrently.
+A proc owns one `VmState` on one scheduler task. The deterministic scheduler uses one FIFO ready queue. It runs each ready task for one fixed instruction quantum. Wake indexes name mailbox changes, terminal states, and host completions. A state change wakes only tasks in its matching index. The scheduler waits on the host only when no task is ready. One VM never executes concurrently.
 
-Task keys and wake keys contain plain identifiers and counters. A future worker or process scheduler can use the same records.
+Task keys and wake keys contain plain identifiers and counters. The parallel worker scheduler uses the same records.
 
 Each proc has a stable opaque reference with a generation for dead-proc detection. Handle transfer preserves the reference.
 
@@ -2986,7 +2986,7 @@ A snapshot barrier pauses the reachable machines at safepoints, closes the set o
 
 Asynchronous host operations receive a single-use completion sink containing only controlled-VM ID, pending ordinal, and typed reply encoder. Completion queues never hold Rust references into the guest heap. Pause/resume transfers scheduler ownership at an interpreter safepoint.
 
-`docs/specs/sidecar/multi-threaded-scheduler.md` defines the proposed parallel mode and the deterministic compatibility contract.
+`docs/specs/sidecar/multi-threaded-scheduler.md` defines parallel mode and the deterministic compatibility contract.
 
 Each VM also owns a host-side resource registry outside the guest heap. The registry records resource kind, scope identity, pending ordinal, and cleanup state. Snapshot preflight reads this registry and the guest graph to find live host attachments.
 

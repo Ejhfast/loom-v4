@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: Stages 0 through 4 are complete. Stages 5 through 8 remain planned.
+Status: Stages 0 through 6 are complete. Stages 7 and 8 remain planned.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -229,7 +229,9 @@ A paused proc remains holder-owned until `resume` transfers ownership.
 
 The ready queue provides weak fairness among resident ready tasks.
 
-A ready task eventually receives a worker while the scheduler continues.
+A ready task eventually receives execution time while the scheduler continues.
+
+After pool activation, a ready task receives a worker or the coordinator inline path.
 
 Parallel mode does not promise equal processor time.
 
@@ -238,6 +240,22 @@ The default parallel lease is 4,096 guest instructions.
 The deterministic quantum remains 1,024 guest instructions.
 
 The longer worker lease reduces coordinator traffic and keeps bounded stop delay.
+
+Parallel mode starts with one coordinator probe.
+
+The probe runs one deterministic quantum for one ready task.
+
+A full probe with at most one world boundary identifies useful worker work.
+
+The scheduler activates the pool when another task is also ready.
+
+Boundary-heavy programs stay on the coordinator fast path.
+
+This rule removes worker handoffs that cost more than the guest work.
+
+An idle pool does not change guest semantics.
+
+When only one task remains, the coordinator uses the inline path.
 
 ### 7.3 Mode selection
 
@@ -251,9 +269,9 @@ The CLI provides `--threads N` for parallel mode.
 
 Parallel mode uses available host parallelism when the user omits `N`.
 
-The release CLI defaults to parallel mode after all performance gates pass.
+The release CLI defaults to parallel mode because all Stage 6 performance gates pass.
 
-The implementation keeps the deterministic default before Stage 6.
+`--scheduler deterministic` selects the stable single-threaded mode.
 
 The test harness keeps deterministic mode as its default.
 
@@ -271,9 +289,13 @@ The CLI creates one pool for one command.
 
 An embedding host can inject one shared pool.
 
-Stage 3 creates one pool for each parallel run.
+`SchedulerConfig.parallel(N)` creates one pool for one run.
 
-Stage 6 exposes pool reuse and host injection through `SchedulerConfig`.
+`SchedulerConfig.parallel_with_pool(pool)` accepts one host-owned shared pool.
+
+The shared pool routes each result to its owning coordinator.
+
+An idle worker wakes every coordinator that waits for pool capacity.
 
 This rule prevents thread growth when one host runs many worlds.
 
@@ -298,7 +320,7 @@ A worker owns these values during one job:
 - one leased `Machine`;
 - one lease token;
 - one instruction budget;
-- one heap growth allowance;
+- one soft heap growth trip point;
 - immutable verified code;
 - immutable dispatch data;
 - one immutable image slot view;
@@ -387,7 +409,7 @@ The stop list includes these actions:
 - an image-slot edit;
 - a cross-machine value transfer;
 - a pause or snapshot request;
-- a heap lease refill;
+- a soft heap trip;
 - an instruction quantum expiry;
 - a guest terminal result or fault.
 
@@ -519,15 +541,13 @@ The coordinator serializes every normal aggregate update.
 
 A worker never charges those counters for each allocation.
 
-The coordinator grants bounded budget leases before dispatch.
+The coordinator reserves fuel before dispatch.
 
-The coordinator retains each aggregate reservation while its machine runs.
-
-A worker lease contains only local allowances.
+A worker lease contains local heap trip points.
 
 Dropping worker state never changes an aggregate ledger.
 
-The coordinator cancels the retained reservation after worker failure.
+The coordinator cancels each retained accounting ticket after worker failure.
 
 ### 13.1 Fuel
 
@@ -543,41 +563,49 @@ The quantum bounds instruction count. It does not bound one instruction's wall t
 
 ### 13.2 Heap
 
-The coordinator grants one bounded heap growth allowance.
+Each machine enforces its private byte cap during every instruction.
 
-The machine still enforces its local byte and object limits.
+This local cap remains exact in both scheduler modes.
 
-The report states live growth, released space, and unused allowance.
+Parallel workers do not update the aggregate world heap ledger.
 
-The coordinator applies those values to the aggregate budget.
+Each worker receives a soft byte trip point and a soft object trip point.
 
-A worker stops before an allocation-capable instruction when safe preflight is unavailable.
+The initial trip points are 64 KiB and 1,024 objects.
 
-The coordinator can grant another allowance or report the existing budget fault.
+The worker tests both trip points after each completed instruction.
 
-A lease shortage is not a guest `HeapLimit` fault.
+A crossed trip point ends the slice at that instruction boundary.
 
-The first implementation does not predict every intrinsic allocation size.
+The report states exact local growth and released space.
 
-It returns an internal refill report before the instruction changes visible state.
+The coordinator applies that delta to the aggregate ledger at report acceptance.
 
-The coordinator waits for active reservations to return.
+An aggregate overshoot changes that report into `HeapLimit`.
 
-It then retries the instruction with all available aggregate capacity.
+A slice with no positive heap growth can continue while the ledger is over its limit.
 
-It reports `HeapLimit` only when the real machine or world limit cannot satisfy the request.
+Further positive growth faults until collection or reclamation restores capacity.
 
-The instruction retries from its unchanged start state after a refill.
+The coordinator does not retry the completed instruction.
 
-This conservative retry serializes allocation-capable instruction batches.
+The coordinator does not stop unrelated workers for heap accounting.
 
-Stage 7 can add exact preflight for measured allocation-heavy workloads.
+Deterministic mode keeps exact direct aggregate accounting.
 
-Deterministic mode keeps direct aggregate accounting because it executes one slice inline.
+Parallel mode permits bounded transient aggregate overshoot.
 
-Stage 3 divides unused capacity between leases before it dispatches parallel work.
+One worker can exceed its trip point by at most one instruction's local allocation.
 
-The initial owned executor can request all unused capacity during Stage 2 tests.
+The private machine cap bounds that single-instruction allocation.
+
+The total slack scales with the active worker count.
+
+The aggregate ledger becomes exact again as returned reports commit.
+
+This rule treats the aggregate limit as a world containment limit.
+
+It does not make the aggregate limit a synchronous allocation barrier.
 
 ### 13.3 Resources
 
@@ -590,6 +618,14 @@ The coordinator owns the aggregate resource count.
 The aggregate resource ledger uses synchronized storage.
 
 Only coordinator operations access that storage.
+
+A completion can retire a resource whose owner has an active lease.
+
+The coordinator removes the host binding at that commit.
+
+The machine slot records the pending local registry close.
+
+Report restoration applies that close before another lease starts.
 
 ## 14. Host completions
 
@@ -721,6 +757,12 @@ Parallel tasks can race for aggregate fuel, heap, resource, and closed-type limi
 
 The failing task can differ when one shared limit becomes exhausted.
 
+Parallel heap accounting occurs at coordinator commits.
+
+Live heap use can exceed the aggregate limit between those commits.
+
+Section 13.2 bounds this transient slack.
+
 ### 15.2 Deterministic replay
 
 Deterministic mode preserves one repeatable scheduler trace.
@@ -785,7 +827,7 @@ Worker identifiers do not appear in the semantic trace.
 
 ## 18. Snapshot barriers
 
-### 18.1 Initial global quiescence
+### 18.1 Global restore fallback
 
 Stage 3 provides one global quiescence fallback.
 
@@ -795,17 +837,17 @@ Every lease returns within its remaining quantum, except during one long instruc
 
 The coordinator then applies the existing serial control operation.
 
-This fallback covers pause, snapshot, restore, and replacement.
+This fallback covers structural restore operations.
 
 Stage 4 uses target residency for sends and other ordinary world transactions.
 
-Stage 5 replaces global control stops with scoped barriers.
+Stage 5 uses scoped barriers for pause, snapshot, installation, and replacement.
 
 The fallback remains a correctness path for unexpected transaction conflicts.
 
-A parallel barrier first stops the target task set.
+A parallel barrier first finds one target task set.
 
-The coordinator marks each target task as stopping.
+The pending control commit prevents new leases for that set.
 
 It issues no new lease for those tasks.
 
@@ -831,7 +873,9 @@ Canonical encoding can run outside the coordinator after that image becomes inde
 
 The snapshot limits account for the detached image until encoding completes.
 
-Disjoint barriers can overlap their encoding work.
+The first coordinator executes one barrier at a time.
+
+Detached encoding can move to another service after measurement justifies it.
 
 Overlapping barriers serialize.
 
@@ -913,9 +957,11 @@ Pool creation failure returns a host runtime error before guest execution.
 
 ### 20.3 Shutdown
 
-The pool receives an explicit shutdown command.
+A private pool receives an explicit shutdown command.
 
-The coordinator joins all workers before returning the world result.
+The private pool joins its workers before the coordinator returns.
+
+A shared pool remains live until its final host owner drops it.
 
 Worker shutdown never depends on guest cleanup.
 
@@ -1057,7 +1103,7 @@ Match current deterministic traces exactly.
 
 ### Stage 2: Make execution leases thread-safe
 
-Replace shared aggregate counters with budget leases.
+Replace unsafe shared aggregate counters with transferable accounting state.
 
 Split the closed-type store from machine-local caches.
 
@@ -1083,9 +1129,9 @@ Reject a stale canonical import before any world mutation.
 
 Retry that import from its admitted source after quiescence.
 
-Keep heap and resource reservations on the coordinator.
+Keep fuel, heap, and resource accounting tickets on the coordinator.
 
-Add explicit commit and cancellation paths for each reservation.
+Add explicit commit and cancellation paths for each accounting ticket.
 
 Remove ambient clock reads from pure runtime crates.
 
@@ -1105,13 +1151,11 @@ Add resident and leased states to each machine slot.
 
 Add one combined wake path for reports and host completions.
 
-Grant bounded heap bytes and object counts to every lease.
+Give every worker lease soft heap trip points.
 
-Return `NeedsHeapRefill` before an allocation changes state.
+Keep the private machine heap cap exact during worker execution.
 
-Grant more capacity or produce `HeapLimit` from the real aggregate limit.
-
-Catch worker failure and cancel its retained coordinator reservations.
+Catch worker failure and cancel its retained coordinator accounting.
 
 Provide global quiescence for every operation that needs resident machines.
 
@@ -1133,7 +1177,27 @@ State every race outcome in tests.
 
 Stages 3 and 4 form one review milestone.
 
+### Stage 4.5: Run allocating workers
+
+Complete.
+
+Run every bounded guest allocation on the worker.
+
+Remove the allocation instruction classifier.
+
+Remove heap refill, retry, and allocation quiescence.
+
+Apply exact heap growth to the aggregate ledger at coordinator commit.
+
+Convert an aggregate overshoot into `HeapLimit` at that commit.
+
+Add a large native allocation gate and an aggregate overshoot gate.
+
+Add message benchmarks with allocated payloads.
+
 ### Stage 5: Add parallel barriers
+
+Complete.
 
 Implement snapshot stop sets and reachability closure.
 
@@ -1147,11 +1211,15 @@ Keep snapshot bytes canonical.
 
 ### Stage 6: Expose mode selection
 
+Complete.
+
 Add the Rust configuration API and CLI options.
 
 Keep tests deterministic by default.
 
-Change the CLI default only after the performance gates pass.
+Use the coordinator probe before the pool starts.
+
+Make parallel mode the CLI default after the performance gates pass.
 
 ### Stage 7: Stress and optimize
 
@@ -1177,9 +1245,11 @@ The implementation must pass these gates:
 
 - deterministic trace fixtures stay byte-for-byte equal;
 - stale canonical imports change no identifier or record;
-- coordinator cancellation releases a destroyed worker's full reservation;
+- coordinator cancellation releases a destroyed worker's full accounting charge;
 - pure runtime crates contain no ambient clock access;
 - each machine has at most one active lease;
+- a worker can allocate past one soft trip point without quiescence;
+- aggregate heap overshoot faults at coordinator commit;
 - stale and duplicate reports reject safely;
 - same-sender mailbox order stays exact;
 - multi-sender tests accept only documented orders;
@@ -1189,6 +1259,7 @@ The implementation must pass these gates:
 - pause completes during long pure computation;
 - snapshot closure can reach an active task;
 - replacement stops every task using one image;
+- installation stops every task using one image;
 - root termination drains all active leases;
 - worker failure never loses a machine silently;
 - host completion and worker report races lose no wake;
@@ -1250,6 +1321,14 @@ Message benchmarks report throughput and tail delay.
 
 They cover ping-pong, streams, independent pairs, and many senders.
 
+At least one message case copies an allocated payload.
+
+The Stage 6 default decision compares each case with deterministic mode.
+
+No message case can fall below 0.90 times deterministic throughput.
+
+The message-case aggregate must stay within five percent of deterministic throughput.
+
 Snapshot capture reports stop time separately from encoding time.
 
 Every baseline records processor count, worker count, build profile, and scheduler mode.
@@ -1260,9 +1339,17 @@ Parallel mode cannot reproduce one global interleaving without a replay log.
 
 The first coordinator can limit message-heavy programs before workers reach full use.
 
+Boundary-heavy tasks can remain on the coordinator for their complete run.
+
+This choice avoids thread handoffs when those handoffs reduce throughput.
+
 Deferred two-machine transactions can wait for one destination quantum.
 
-Allocation-capable instruction batches use global quiescence in the first implementation.
+Parallel aggregate heap accounting permits the bounded slack from section 13.2.
+
+A single large instruction can use its remaining private machine capacity.
+
+The first scheduler keeps structural restore as a global control operation.
 
 One global type interner lock can limit generic workloads with many new types.
 

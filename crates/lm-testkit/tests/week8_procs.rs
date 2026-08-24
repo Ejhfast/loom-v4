@@ -181,7 +181,9 @@ fn a_full_mailbox_blocks_the_sender_before_the_copy() {
     world.trace_procs();
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(Done(3))");
     // The proc mailbox never held more than its bound.
     let metrics = world.mailbox_metrics(1);
@@ -342,7 +344,9 @@ fn a_paused_proc_leaves_the_scheduler_run_set() {
     world.allow("Proc").expect("the grant names a group");
     world.allow("Vm").expect("the grant names a group");
     let mut scheduler = Scheduler::default();
-    scheduler.run(&mut world);
+    scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.owner_of(1), Ownership::Holder);
     assert!(world.runnable_procs().is_empty());
 }
@@ -376,7 +380,9 @@ fn a_quantum_boundary_accepts_a_pause() {
     world.allow("Proc").expect("the grant names a group");
     world.allow("Vm").expect("the grant names a group");
     let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 4);
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(1)");
     assert_eq!(world.owner_of(1), Ownership::Holder);
     assert_eq!(world.active_of(1), 0);
@@ -449,7 +455,9 @@ fn parent_death_closes_the_pass_through() {
     );
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::default();
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(1)");
     // The root is terminal now, so the proc pass-through is gone. Its
     // next receive faults with the default denial.
@@ -515,7 +523,9 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
         world.trace_procs();
         world.allow("Proc").expect("the grant names a group");
         let mut scheduler = Scheduler::default();
-        let outcome = scheduler.run(&mut world);
+        let outcome = scheduler
+            .run(&mut world)
+            .expect("the deterministic scheduler runs");
         (
             world.show_outcome(&outcome),
             world.trace().to_vec(),
@@ -545,7 +555,9 @@ fn quantum_expiry_is_not_a_semantic_boundary() {
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
-    let outcome = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 10).run(&mut world);
+    let outcome = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 10)
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
 
     assert_eq!(world.show_outcome(&outcome), "Done(1000)");
     assert!(world.metrics().slices > 1);
@@ -582,7 +594,9 @@ fn bounded_slices_let_a_later_short_proc_finish_first() {
     world.trace_procs();
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 8);
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done((Done(200), Done(1)))");
     let terminal: Vec<u32> = world
         .trace()
@@ -619,7 +633,9 @@ fn a_host_wait_does_not_stop_a_ready_task() {
     for grant in ["Proc", "Vm", "Clock"] {
         world.allow(grant).expect("the grant names a group");
     }
-    let outcome = Scheduler::default().run(&mut world);
+    let outcome = Scheduler::default()
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done((Done(1), Done(2)))");
     let terminal: Vec<u32> = world
         .trace()
@@ -660,7 +676,9 @@ fn host_completion_waits_for_its_controlling_task() {
     for grant in ["Proc", "Vm", "Clock"] {
         world.allow(grant).expect("the grant names a group");
     }
-    let outcome = Scheduler::default().run(&mut world);
+    let outcome = Scheduler::default()
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(Done(7))");
     assert_eq!(world.state_of(1), MachineState::Waiting);
     assert_eq!(world.resource_count(1), 1);
@@ -679,10 +697,14 @@ fn scheduler_statistics_reset_at_each_run() {
         Box::new(RecordingHost::new(1)),
     );
     let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 4);
-    let first = scheduler.run(&mut world);
+    let first = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&first), "Done(20)");
     assert!(scheduler.stats().root_slices > 1);
-    let second = scheduler.run(&mut world);
+    let second = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&second), "Done(20)");
     assert_eq!(scheduler.stats().root_slices, 0);
     assert_eq!(scheduler.stats().proc_slices, 0);
@@ -716,7 +738,9 @@ fn a_deadlock_faults_every_blocked_machine() {
     );
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::default();
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Fault(HostFault)");
     assert_eq!(scheduler.stop_reason(), Some(StopReason::Deadlock));
 }
@@ -1052,7 +1076,9 @@ fn a_spawn_reserves_a_child_from_the_parent_budget() {
     let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::default();
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Fault(InvalidVmState)");
     // The refused spawn created no machine.
     assert_eq!(world.machine_count(), 2);
@@ -1226,7 +1252,9 @@ fn a_proc_that_outlives_its_spawner_keeps_its_pass_through() {
     );
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
-    scheduler.run(&mut world);
+    scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.state_of(2), MachineState::Done);
 }
 
@@ -1292,7 +1320,9 @@ fn the_proc_dumps_are_readable_and_deterministic() {
         );
         world.trace_procs();
         world.allow("Proc").expect("the grant names a group");
-        let outcome = Scheduler::default().run(&mut world);
+        let outcome = Scheduler::default()
+            .run(&mut world)
+            .expect("the deterministic scheduler runs");
         (
             world.show_outcome(&outcome),
             world.dump_trace(),
@@ -1350,7 +1380,9 @@ fn a_message_past_the_boundary_limit_names_the_limit() {
     let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Fault(BoundaryLimit)");
     let fault = world.fault_of(0).expect("the sender faulted");
     assert_eq!(

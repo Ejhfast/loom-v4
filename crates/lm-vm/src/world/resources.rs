@@ -840,7 +840,7 @@ impl World {
             }
         }
         if let Some(machine) = self.machines.get_mut(bound.owner as usize) {
-            machine.resources.close_kind(bound.kind, resource);
+            machine.close_resource_or_defer(bound.kind, resource);
         }
         true
     }

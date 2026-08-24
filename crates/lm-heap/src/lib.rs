@@ -255,70 +255,58 @@ impl HeapBudget {
             .store(old_objects.saturating_sub(objects), Ordering::Relaxed);
     }
 
-    fn reserve_up_to(&self, max_bytes: usize, max_objects: usize) -> (usize, usize) {
-        let used_bytes = self.used_bytes();
-        let used_objects = self.live_objects();
-        let bytes = self.max_bytes.saturating_sub(used_bytes).min(max_bytes);
-        let objects = self
-            .max_objects
-            .saturating_sub(used_objects)
-            .min(max_objects);
-        self.state
-            .bytes
-            .store(used_bytes + bytes, Ordering::Relaxed);
-        self.state
-            .objects
-            .store(used_objects + objects, Ordering::Relaxed);
-        (bytes, objects)
+    fn apply_delta(
+        &self,
+        start_bytes: usize,
+        end_bytes: usize,
+        start_objects: usize,
+        end_objects: usize,
+    ) -> bool {
+        let bytes = if end_bytes >= start_bytes {
+            self.used_bytes().saturating_add(end_bytes - start_bytes)
+        } else {
+            self.used_bytes().saturating_sub(start_bytes - end_bytes)
+        };
+        let objects = if end_objects >= start_objects {
+            self.live_objects()
+                .saturating_add(end_objects - start_objects)
+        } else {
+            self.live_objects()
+                .saturating_sub(start_objects - end_objects)
+        };
+        self.state.bytes.store(bytes, Ordering::Relaxed);
+        self.state.objects.store(objects, Ordering::Relaxed);
+        let grew = end_bytes > start_bytes || end_objects > start_objects;
+        !grew || (bytes <= self.max_bytes && objects <= self.max_objects)
     }
 }
 
-/// One coordinator-owned reservation for a machine execution lease.
+/// One coordinator-owned ticket for a machine execution lease.
 ///
 /// This value never enters a worker job. The coordinator reconciles
 /// or cancels it after the worker returns.
 #[derive(Debug)]
-#[must_use = "the coordinator must reconcile or cancel this heap reservation"]
-pub struct HeapBudgetReservation {
+#[must_use = "the coordinator must reconcile or cancel this heap ticket"]
+pub struct HeapExecutionTicket {
     lease: u64,
     budget: HeapBudget,
     start_bytes: usize,
     start_objects: usize,
-    growth_bytes: usize,
-    growth_objects: usize,
+    trip_bytes: usize,
+    trip_objects: usize,
 }
 
-impl HeapBudgetReservation {
-    fn finish(self, end_bytes: usize, end_objects: usize) -> HeapBudget {
-        let limit_bytes = self
-            .start_bytes
-            .checked_add(self.growth_bytes)
-            .expect("a heap reservation byte limit fits usize");
-        let limit_objects = self
-            .start_objects
-            .checked_add(self.growth_objects)
-            .expect("a heap reservation object limit fits usize");
-        assert!(
-            end_bytes <= limit_bytes && end_objects <= limit_objects,
-            "a worker heap exceeded its reservation"
-        );
-        let release_bytes = limit_bytes - end_bytes;
-        let release_objects = limit_objects - end_objects;
-        self.budget.release(release_bytes, release_objects);
-        self.budget
+impl HeapExecutionTicket {
+    fn finish(self, end_bytes: usize, end_objects: usize) -> (HeapBudget, bool) {
+        let within_limit =
+            self.budget
+                .apply_delta(self.start_bytes, end_bytes, self.start_objects, end_objects);
+        (self.budget, within_limit)
     }
 
     /// Release a reservation after its machine was destroyed.
     pub fn cancel_destroyed(self) {
-        let bytes = self
-            .start_bytes
-            .checked_add(self.growth_bytes)
-            .expect("a heap reservation byte charge fits usize");
-        let objects = self
-            .start_objects
-            .checked_add(self.growth_objects)
-            .expect("a heap reservation object charge fits usize");
-        self.budget.release(bytes, objects);
+        self.budget.release(self.start_bytes, self.start_objects);
     }
 }
 
@@ -327,31 +315,14 @@ struct HeapLocalLease {
     lease: u64,
     start_bytes: usize,
     start_objects: usize,
-    growth_bytes: usize,
-    growth_objects: usize,
+    trip_bytes: usize,
+    trip_objects: usize,
 }
 
 impl HeapLocalLease {
-    fn unused(&self, end_bytes: usize, end_objects: usize) -> (usize, usize) {
-        let bytes = self
-            .growth_bytes
-            .saturating_add(self.start_bytes)
-            .saturating_sub(end_bytes);
-        let objects = self
-            .growth_objects
-            .saturating_add(self.start_objects)
-            .saturating_sub(end_objects);
-        (bytes, objects)
-    }
-
-    fn exceeds(&self, bytes: usize, objects: usize) -> bool {
-        self.start_bytes
-            .checked_add(self.growth_bytes)
-            .is_none_or(|limit| bytes > limit)
-            || self
-                .start_objects
-                .checked_add(self.growth_objects)
-                .is_none_or(|limit| objects > limit)
+    fn trip_reached(&self, end_bytes: usize, end_objects: usize) -> bool {
+        end_bytes.saturating_sub(self.start_bytes) >= self.trip_bytes
+            || end_objects.saturating_sub(self.start_objects) >= self.trip_objects
     }
 }
 
@@ -445,15 +416,15 @@ impl Heap {
         true
     }
 
-    /// Reserve bounded aggregate heap growth for one execution slice.
+    /// Start one worker slice with a soft heap-growth trip point.
     ///
     /// Allocations use local counters until `end_execution_lease`.
     pub fn begin_execution_lease(
         &mut self,
         lease: u64,
-        max_growth_bytes: usize,
-        max_growth_objects: usize,
-    ) -> HeapBudgetReservation {
+        trip_bytes: usize,
+        trip_objects: usize,
+    ) -> HeapExecutionTicket {
         assert_ne!(lease, 0, "an execution lease has a nonzero identity");
         let prior = std::mem::replace(&mut self.accounting, HeapAccounting::Detached);
         let budget = match prior {
@@ -463,57 +434,54 @@ impl Heap {
                 panic!("an execution lease starts once on a shared heap");
             }
         };
-        let (growth_bytes, growth_objects) =
-            budget.reserve_up_to(max_growth_bytes, max_growth_objects);
-        let reservation = HeapBudgetReservation {
+        let ticket = HeapExecutionTicket {
             lease,
             budget,
             start_bytes: self.used_bytes,
             start_objects: self.live,
-            growth_bytes,
-            growth_objects,
+            trip_bytes,
+            trip_objects,
         };
         self.accounting = HeapAccounting::Leased(HeapLocalLease {
             lease,
-            start_bytes: reservation.start_bytes,
-            start_objects: reservation.start_objects,
-            growth_bytes,
-            growth_objects,
+            start_bytes: ticket.start_bytes,
+            start_objects: ticket.start_objects,
+            trip_bytes,
+            trip_objects,
         });
-        reservation
+        ticket
     }
 
     /// Reconcile one execution slice with the aggregate heap ledger.
-    pub fn end_execution_lease(&mut self, reservation: HeapBudgetReservation) {
+    pub fn end_execution_lease(&mut self, ticket: HeapExecutionTicket) -> bool {
         let HeapAccounting::Leased(local) = &self.accounting else {
             panic!("an execution lease ends once on a leased heap");
         };
-        assert_eq!(
-            local.lease, reservation.lease,
-            "the heap lease identity matches"
-        );
+        assert_eq!(local.lease, ticket.lease, "the heap lease identity matches");
         assert_eq!(
             (local.start_bytes, local.start_objects),
-            (reservation.start_bytes, reservation.start_objects),
+            (ticket.start_bytes, ticket.start_objects),
             "the heap lease start matches"
         );
         assert_eq!(
-            (local.growth_bytes, local.growth_objects),
-            (reservation.growth_bytes, reservation.growth_objects),
-            "the heap lease allowance matches"
+            (local.trip_bytes, local.trip_objects),
+            (ticket.trip_bytes, ticket.trip_objects),
+            "the heap trip point matches"
         );
         let prior = std::mem::replace(&mut self.accounting, HeapAccounting::Detached);
         let HeapAccounting::Leased(_) = prior else {
             unreachable!("the checked heap accounting stays leased")
         };
-        self.accounting = HeapAccounting::Shared(reservation.finish(self.used_bytes, self.live));
+        let (budget, within_limit) = ticket.finish(self.used_bytes, self.live);
+        self.accounting = HeapAccounting::Shared(budget);
+        within_limit
     }
 
-    /// Return unused aggregate capacity from the active lease.
-    pub fn execution_lease_unused(&self) -> Option<(usize, usize)> {
+    /// Test whether one worker crossed its soft growth trip point.
+    pub fn execution_lease_trip_reached(&self) -> bool {
         match &self.accounting {
-            HeapAccounting::Leased(lease) => Some(lease.unused(self.used_bytes, self.live)),
-            _ => None,
+            HeapAccounting::Leased(lease) => lease.trip_reached(self.used_bytes, self.live),
+            _ => false,
         }
     }
 
@@ -614,7 +582,7 @@ impl Heap {
         match &self.accounting {
             HeapAccounting::Detached => false,
             HeapAccounting::Shared(budget) => budget.would_exceed(cost, 0),
-            HeapAccounting::Leased(lease) => lease.exceeds(self.used_bytes + cost, self.live),
+            HeapAccounting::Leased(_) => false,
         }
     }
 
@@ -631,9 +599,7 @@ impl Heap {
         match &self.accounting {
             HeapAccounting::Detached => false,
             HeapAccounting::Shared(budget) => budget.would_exceed(bytes, objects),
-            HeapAccounting::Leased(lease) => {
-                lease.exceeds(self.used_bytes + bytes, self.live.saturating_add(objects))
-            }
+            HeapAccounting::Leased(_) => false,
         }
     }
 
@@ -1409,26 +1375,27 @@ mod tests {
         let first = heap.alloc(str_obj("one"));
         assert_eq!(budget.used_bytes(), cost);
         let reservation = heap.begin_execution_lease(1, usize::MAX, usize::MAX);
-        assert_eq!(budget.used_bytes(), cost * 2);
+        assert_eq!(budget.used_bytes(), cost);
         let second = heap.alloc(str_obj("two"));
         heap.free(first);
-        assert_eq!(budget.used_bytes(), cost * 2);
-        heap.end_execution_lease(reservation);
+        assert_eq!(budget.used_bytes(), cost);
+        assert!(heap.end_execution_lease(reservation));
         assert_eq!(budget.used_bytes(), cost);
         heap.free(second);
         assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
-    fn a_bounded_heap_lease_reserves_only_its_grant() {
+    fn a_worker_heap_uses_a_soft_growth_trip_point() {
         let cost = str_obj("one").cost();
         let budget = HeapBudget::new(cost * 4, 4);
         let mut heap = Heap::with_budget(1 << 20, budget.clone());
         let reservation = heap.begin_execution_lease(1, cost, 1);
-        assert_eq!(budget.used_bytes(), cost);
+        assert_eq!(budget.used_bytes(), 0);
         heap.alloc(str_obj("one"));
-        assert!(heap.would_exceed(cost));
-        heap.end_execution_lease(reservation);
+        assert!(heap.execution_lease_trip_reached());
+        assert!(!heap.would_exceed(cost));
+        assert!(heap.end_execution_lease(reservation));
         assert_eq!(budget.used_bytes(), cost);
     }
 
@@ -1439,11 +1406,28 @@ mod tests {
         let mut heap = Heap::with_budget(1 << 20, budget.clone());
         heap.alloc(str_obj("one"));
         let reservation = heap.begin_execution_lease(1, cost, 1);
-        assert_eq!(budget.used_bytes(), cost * 2);
+        assert_eq!(budget.used_bytes(), cost);
         drop(heap);
-        assert_eq!(budget.used_bytes(), cost * 2);
+        assert_eq!(budget.used_bytes(), cost);
         reservation.cancel_destroyed();
         assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn a_worker_commit_reports_an_aggregate_limit_overshoot() {
+        let cost = str_obj("one").cost();
+        let budget = HeapBudget::new(cost, 1);
+        let mut heap = Heap::with_budget(1 << 20, budget.clone());
+        let ticket = heap.begin_execution_lease(1, cost * 2, 2);
+        heap.alloc(str_obj("one"));
+        heap.alloc(str_obj("two"));
+        assert!(!heap.end_execution_lease(ticket));
+        assert_eq!(budget.used_bytes(), cost * 2);
+
+        let mut idle = Heap::with_budget(1 << 20, budget.clone());
+        let idle_ticket = idle.begin_execution_lease(2, cost, 1);
+        assert!(idle.end_execution_lease(idle_ticket));
+        assert_eq!(budget.used_bytes(), cost * 2);
     }
 
     #[test]

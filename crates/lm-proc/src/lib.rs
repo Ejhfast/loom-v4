@@ -26,6 +26,7 @@ mod pool;
 
 pub use barrier::{Barrier, BarrierError, BarrierReport};
 pub use parallel::SchedulerError;
+pub use pool::SchedulerPool;
 
 use lm_vm::{
     CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
@@ -45,12 +46,89 @@ pub const DEFAULT_QUANTUM: u32 = 1_024;
 /// The default guest instruction count of one parallel worker lease.
 pub const DEFAULT_PARALLEL_QUANTUM: u32 = 4_096;
 
+/// The largest supported parallel worker count.
+pub const MAX_PARALLEL_WORKERS: usize = 256;
+
 /// How the scheduler picks the next machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulerMode {
     /// Use FIFO readiness and stable wake ordering.
     #[default]
     Deterministic,
+    /// Run independent machine slices on a bounded worker pool.
+    Parallel {
+        /// The fixed worker count.
+        workers: usize,
+    },
+}
+
+/// The public scheduler configuration.
+#[derive(Debug, Clone)]
+pub struct SchedulerConfig {
+    mode: SchedulerMode,
+    quantum: u32,
+    parallel_quantum: u32,
+    pool: Option<SchedulerPool>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> SchedulerConfig {
+        SchedulerConfig::deterministic()
+    }
+}
+
+impl SchedulerConfig {
+    /// Use stable FIFO scheduling on the coordinator thread.
+    pub const fn deterministic() -> SchedulerConfig {
+        SchedulerConfig {
+            mode: SchedulerMode::Deterministic,
+            quantum: DEFAULT_QUANTUM,
+            parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
+            pool: None,
+        }
+    }
+
+    /// Use one bounded parallel worker pool.
+    pub const fn parallel(workers: usize) -> SchedulerConfig {
+        SchedulerConfig {
+            mode: SchedulerMode::Parallel { workers },
+            quantum: DEFAULT_QUANTUM,
+            parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
+            pool: None,
+        }
+    }
+
+    /// Use one host-owned worker pool.
+    pub fn parallel_with_pool(pool: SchedulerPool) -> SchedulerConfig {
+        let workers = pool.worker_count();
+        SchedulerConfig {
+            mode: SchedulerMode::Parallel { workers },
+            quantum: DEFAULT_QUANTUM,
+            parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
+            pool: Some(pool),
+        }
+    }
+
+    /// Set both instruction quanta.
+    pub fn with_quanta(
+        mut self,
+        quantum: u32,
+        parallel_quantum: u32,
+    ) -> Result<SchedulerConfig, SchedulerError> {
+        if quantum == 0 || parallel_quantum == 0 {
+            return Err(SchedulerError::new(
+                "the scheduler instruction quantum must be greater than zero",
+            ));
+        }
+        self.quantum = quantum;
+        self.parallel_quantum = parallel_quantum;
+        Ok(self)
+    }
+
+    /// The selected scheduling mode.
+    pub const fn mode(&self) -> SchedulerMode {
+        self.mode
+    }
 }
 
 /// Why one scheduler run stopped.
@@ -73,6 +151,14 @@ pub struct SchedulerStats {
     pub unblocked: u64,
     /// The largest active worker lease count.
     pub max_active_leases: u32,
+    /// Worker leases stopped by the soft heap trip point.
+    pub heap_trips: u64,
+    /// Positive heap growth committed from worker leases.
+    pub worker_heap_growth_bytes: u64,
+    /// Operations that requested global coordinator quiescence.
+    pub global_quiescence: u64,
+    /// Scoped barriers that waited for one machine safepoint.
+    pub scoped_safepoint_waits: u64,
 }
 
 /// The proc scheduler.
@@ -80,6 +166,7 @@ pub struct Scheduler {
     mode: SchedulerMode,
     quantum: u32,
     parallel_quantum: u32,
+    pool: Option<SchedulerPool>,
     include_root: bool,
     stats: SchedulerStats,
     stop: Option<StopReason>,
@@ -357,25 +444,45 @@ impl TaskIndex {
 
 impl Default for Scheduler {
     fn default() -> Scheduler {
-        Scheduler::new(SchedulerMode::Deterministic)
+        Scheduler::from_config(SchedulerConfig::default())
     }
 }
 
 impl Scheduler {
     pub fn new(mode: SchedulerMode) -> Scheduler {
-        Scheduler::new_with_quanta(mode, DEFAULT_QUANTUM, DEFAULT_PARALLEL_QUANTUM)
+        let config = match mode {
+            SchedulerMode::Deterministic => SchedulerConfig::deterministic(),
+            SchedulerMode::Parallel { workers } => SchedulerConfig::parallel(workers),
+        };
+        Scheduler::from_config(config)
+    }
+
+    /// Create one scheduler from its complete public configuration.
+    pub fn from_config(config: SchedulerConfig) -> Scheduler {
+        Scheduler::new_with_quanta(
+            config.mode,
+            config.quantum,
+            config.parallel_quantum,
+            config.pool,
+        )
     }
 
     /// Create one scheduler with an explicit instruction quantum.
     pub fn new_with_quantum(mode: SchedulerMode, quantum: u32) -> Scheduler {
-        Scheduler::new_with_quanta(mode, quantum, quantum)
+        Scheduler::new_with_quanta(mode, quantum, quantum, None)
     }
 
-    fn new_with_quanta(mode: SchedulerMode, quantum: u32, parallel_quantum: u32) -> Scheduler {
+    fn new_with_quanta(
+        mode: SchedulerMode,
+        quantum: u32,
+        parallel_quantum: u32,
+        pool: Option<SchedulerPool>,
+    ) -> Scheduler {
         Scheduler {
             mode,
             quantum: quantum.max(1),
             parallel_quantum: parallel_quantum.max(1),
+            pool,
             include_root: true,
             stats: SchedulerStats::default(),
             stop: None,
@@ -412,8 +519,19 @@ impl Scheduler {
         self.stop
     }
 
-    /// Run one execution to the terminal result of its root VM.
-    pub fn run(&mut self, world: &mut World) -> Outcome {
+    /// Run one execution with the selected scheduling mode.
+    pub fn run(&mut self, world: &mut World) -> Result<Outcome, SchedulerError> {
+        match self.mode {
+            SchedulerMode::Deterministic => Ok(self.run_deterministic(world)),
+            SchedulerMode::Parallel { workers } => {
+                let pool = self.pool.clone();
+                self.run_parallel_with_pool(world, workers, pool)
+            }
+        }
+    }
+
+    /// Run one execution with stable FIFO scheduling.
+    fn run_deterministic(&mut self, world: &mut World) -> Outcome {
         self.reset(world, true);
         loop {
             self.consume_events(world);
@@ -592,6 +710,36 @@ impl Scheduler {
         self.index_status(world, task, world.task_status(task));
     }
 
+    /// Refresh states that changed between parallel report commits.
+    fn reconcile_parallel_states(&mut self, world: &World) -> bool {
+        let changed: Vec<TaskKey> = self
+            .tasks
+            .iter()
+            .filter_map(|(task, state)| {
+                let status = world.task_status(*task);
+                let matches = match (state, status) {
+                    (IndexedState::Queued(_), TaskStatus::Ready) => true,
+                    (IndexedState::Blocked(indexed), TaskStatus::Blocked(actual)) => {
+                        *indexed == actual
+                    }
+                    (IndexedState::Waiting(indexed), TaskStatus::Waiting(actual)) => {
+                        *indexed == actual
+                    }
+                    (IndexedState::Parked(indexed), TaskStatus::Parked(actual)) => {
+                        *indexed == actual
+                    }
+                    (IndexedState::Running, _) => false,
+                    _ => false,
+                };
+                (!matches).then_some(*task)
+            })
+            .collect();
+        for task in &changed {
+            self.refresh(world, *task);
+        }
+        !changed.is_empty()
+    }
+
     /// Apply changes produced by the last execution slice.
     fn consume_events(&mut self, world: &mut World) {
         if !world.swap_schedule_events(&mut self.events) {
@@ -751,7 +899,7 @@ impl Scheduler {
 /// Run one world to its root terminal result with the deterministic
 /// scheduler.
 pub fn run_world(world: &mut World) -> Outcome {
-    Scheduler::default().run(world)
+    Scheduler::default().run_deterministic(world)
 }
 
 /// Run one program on a worker thread with a bounded stack.
@@ -771,6 +919,17 @@ pub fn run_on_worker(
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
+    run_on_worker_with_scheduler(loaded, config, SchedulerConfig::default(), grants, host)
+}
+
+/// Run one program with an explicit scheduler configuration.
+pub fn run_on_worker_with_scheduler(
+    loaded: &lm_vm::LoadedModule,
+    config: lm_vm::VmConfig,
+    scheduler_config: SchedulerConfig,
+    grants: &[&str],
+    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
+) -> Result<WorkerOutcome, String> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
@@ -781,7 +940,9 @@ pub fn run_on_worker(
                         .allow(grant)
                         .map_err(|error| format!("--allow: {error}"))?;
                 }
-                let outcome = Scheduler::default().run(&mut world);
+                let outcome = Scheduler::from_config(scheduler_config)
+                    .run(&mut world)
+                    .map_err(|error| error.to_string())?;
                 let fault_context = world
                     .root_fault()
                     .map(|fault| world.fault_context(fault))
@@ -890,5 +1051,19 @@ mod tests {
         index.insert(new, key(2, 0));
         assert!(index.take(old).is_some());
         assert!(index.take(new).is_some());
+    }
+
+    #[test]
+    fn scheduler_configuration_rejects_zero_quanta() {
+        assert!(SchedulerConfig::deterministic().with_quanta(0, 1).is_err());
+        assert!(SchedulerConfig::deterministic().with_quanta(1, 0).is_err());
+    }
+
+    #[test]
+    fn parallel_configuration_keeps_its_worker_count() {
+        assert_eq!(
+            SchedulerConfig::parallel(7).mode(),
+            SchedulerMode::Parallel { workers: 7 }
+        );
     }
 }

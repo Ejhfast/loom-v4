@@ -30,7 +30,10 @@ fn run_parallel(source: &str, workers: usize) -> Result<(String, SchedulerStats)
     run_parallel_with(source, workers, &["Proc"])
 }
 
-fn compare_modes(source: &str, grants: &[&str]) -> Result<(String, String), String> {
+fn compare_modes(
+    source: &str,
+    grants: &[&str],
+) -> Result<(String, String, SchedulerStats), String> {
     let bytes = compile_to_bytes("parallel-compare.lm", source)?;
     let loaded = load_bytes(&bytes).map_err(|error| error.to_string())?;
     let make_world = || {
@@ -47,12 +50,14 @@ fn compare_modes(source: &str, grants: &[&str]) -> Result<(String, String), Stri
         parallel.allow(grant)?;
     }
     let expected = lm_proc::run_world(&mut deterministic);
-    let actual = Scheduler::default()
+    let mut scheduler = Scheduler::default();
+    let actual = scheduler
         .run_parallel(&mut parallel, 3)
         .map_err(|error| error.to_string())?;
     Ok((
         deterministic.show_outcome(&expected),
         parallel.show_outcome(&actual),
+        scheduler.stats(),
     ))
 }
 
@@ -168,6 +173,7 @@ spinner = Spinner.spawn()
         "Done((Done(14), Done(300000)))"
     );
     assert!(scheduler.stats().max_active_leases >= 2);
+    assert!(scheduler.stats().global_quiescence > 0);
 }
 
 #[test]
@@ -200,7 +206,7 @@ in Fault(_)
   -2
 end
 "#;
-    let (expected, actual) =
+    let (expected, actual, _) =
         compare_modes(source, &["Proc"]).expect("both parent lifetime programs run");
     assert_eq!(expected, "Done(3)");
     assert_eq!(actual, expected);
@@ -226,17 +232,18 @@ fn independent_cpu_procs_hold_two_worker_leases() {
 }
 
 #[test]
-fn allocation_refills_do_not_become_guest_heap_faults() {
+fn allocating_workers_cross_soft_trip_points_without_quiescence() {
     let source = r#"
 class Builder < Proc
   def on_spawn(self): Int
     values: [Int] = []
     i = 0
-    while i < 2000
+    while i < 6000
       values.push(i)
       i = i + 1
     end
-    values.len()
+    text = "x".pad_start(100000)
+    values.len() + text.len()
   end
 end
 
@@ -245,8 +252,11 @@ right = Builder.spawn()
 (left.done(), right.done())
 "#;
     let (outcome, stats) = run_parallel(source, 2).expect("the allocation world runs");
-    assert_eq!(outcome, "Done((Done(2000), Done(2000)))");
+    assert_eq!(outcome, "Done((Done(106000), Done(106000)))");
     assert_eq!(stats.max_active_leases, 2);
+    assert!(stats.heap_trips > 0);
+    assert!(stats.worker_heap_growth_bytes > 0);
+    assert_eq!(stats.global_quiescence, 0);
 }
 
 #[test]
@@ -317,6 +327,8 @@ fn a_pause_stops_an_active_worker_at_one_quantum_boundary() {
     let (outcome, stats) = run_parallel(source, 2).expect("the active proc pauses");
     assert_eq!(outcome, "Done(Done(true))");
     assert_eq!(stats.max_active_leases, 2);
+    assert!(stats.scoped_safepoint_waits > 0);
+    assert_eq!(stats.global_quiescence, 0);
 }
 
 #[test]
@@ -378,6 +390,85 @@ target.done()
         "Done(Done([10, 1, 2, 20]))",
     ];
     assert!(accepted.contains(&outcome.as_str()), "{outcome}");
+}
+
+#[test]
+fn many_senders_complete_against_one_mailbox() {
+    let mut source = r#"
+class ManySink < Proc[Int]
+  def on_spawn(self): Int with Proc
+    total = 0
+    loop do
+      case self.receive()
+      in Msg(value)
+        total = total + value
+      in Closed
+        return total
+      end
+    end
+  end
+end
+
+class ManySender < Proc
+  sink: Handle[Int, Int]
+
+  def init(mut self, sink: Handle[Int, Int])
+    self.sink = sink
+  end
+
+  def on_spawn(self): Int with Proc
+    i = 0
+    while i < 20
+      self.sink.send(1)
+      i = i + 1
+    end
+    i
+  end
+end
+
+sink = ManySink.spawn()
+"#
+    .to_string();
+    for sender in 0..8 {
+        source.push_str(&format!("sender{sender} = ManySender.spawn(sink)\n"));
+    }
+    for sender in 0..8 {
+        source.push_str(&format!("sender{sender}.done()\n"));
+    }
+    source.push_str("sink.close()\nsink.done()\n");
+    let (outcome, _) = run_parallel(&source, 4).expect("all concurrent senders finish");
+    assert_eq!(outcome, "Done(Done(160))");
+}
+
+#[test]
+fn boundary_heavy_tasks_stay_on_the_coordinator_fast_path() {
+    let source = r#"
+class Sink < Proc[Int]
+  def on_spawn(self): Int with Proc
+    total = 0
+    loop do
+      case self.receive()
+      in Msg(value)
+        total = total + value
+      in Closed then return total
+      end
+    end
+  end
+end
+
+sink = Sink.spawn()
+i = 0
+while i < 100
+  sink.send(1)
+  i = i + 1
+end
+sink.close()
+sink.done()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 4, &["Proc"]).expect("the message stream runs");
+    assert_eq!(outcome, "Done(Done(100))");
+    assert_eq!(stats.max_active_leases, 0);
 }
 
 #[test]
@@ -571,14 +662,165 @@ end
 }
 
 #[test]
-fn snapshot_control_uses_the_global_quiescence_fallback() {
+fn snapshot_control_uses_a_scoped_reachability_barrier() {
     let source = std::fs::read_to_string(
         lm_testkit::repo_root().join("examples/08-snapshots/machine-world.lm"),
     )
     .expect("the snapshot example reads");
-    let (deterministic, parallel) =
+    let (deterministic, parallel, _) =
         compare_modes(&source, &["Proc", "Vm"]).expect("both scheduler modes run");
     assert_eq!(parallel, deterministic);
+}
+
+#[test]
+fn snapshot_keeps_two_active_reachable_procs_at_scoped_safepoints() {
+    let source = r#"
+class Gate < Proc[Int]
+  def on_spawn(self): Int with Proc
+    self.receive()
+    self.receive()
+    2
+  end
+end
+
+class BusyChild < Proc
+  gate: Handle[Int, Int]
+
+  def init(mut self, gate: Handle[Int, Int])
+    self.gate = gate
+  end
+
+  def on_spawn(self): Int with Proc
+    self.gate.send(1)
+    value = 0
+    while value < 2000000
+      value = value + 1
+    end
+    value
+  end
+end
+
+class BusySnapshot < Proc
+  gate: Handle[Int, Int]
+  child: Handle[Never, Int]
+
+  def init(mut self, gate: Handle[Int, Int], child: Handle[Never, Int])
+    self.gate = gate
+    self.child = child
+  end
+
+  def on_spawn(self): Int with Proc
+    self.gate.send(1)
+    value = 0
+    while value < 2000000
+      value = value + 1
+    end
+    value
+  end
+end
+
+gate = Gate.spawn()
+child = BusyChild.spawn(gate)
+worker = BusySnapshot.spawn(gate, child)
+case gate.done()
+in Done(2) then ()
+in Done(_) then panic("the gate returned a bad count")
+in Fault(_) then panic("the gate faulted")
+end
+captured = worker.snapshot_wait(0).is_ok()
+worker_finished = case worker.done()
+in Done(value) then value == 2000000
+in Fault(_) then false
+end
+child_finished = case child.done()
+in Done(value) then value == 2000000
+in Fault(_) then false
+end
+captured and worker_finished and child_finished
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 3, &["Proc", "Vm"]).expect("the active capture runs");
+    assert_eq!(outcome, "Done(true)");
+    assert!(stats.max_active_leases >= 3);
+    assert!(stats.scoped_safepoint_waits >= 2);
+    assert_eq!(stats.global_quiescence, 0);
+}
+
+#[test]
+fn installation_stops_an_active_image_proc_at_one_scoped_safepoint() {
+    let source = r#"
+class Signal < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then 0
+    end
+  end
+end
+
+def spare(value: Int): Int
+  value + 1
+end
+
+class BusyInstall < Proc
+  signal: Handle[Int, Int]
+
+  def init(mut self, signal: Handle[Int, Int])
+    self.signal = signal
+  end
+
+  def on_spawn(self): Int with Proc
+    self.signal.send(1)
+    value = 0
+    while value < 500000
+      value = value + 1
+    end
+    value
+  end
+end
+
+def launch(signal: Handle[Int, Int]): Handle[Never, Int] with Proc
+  BusyInstall.spawn(signal)
+end
+
+def exercise(): Result[Bool, String] with Vm, Proc
+  signal = Signal.spawn()
+  image = sys.vm.Vm()
+  image.install(codeof(BusyInstall)).map_error() {
+    |error: CodeError| error.message
+  }?
+  launcher = image.install(launch).map_error() {
+    |error: CodeError| error.message
+  }?
+  run = image.activate(launcher, args: (signal,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  worker = case run.run()
+  in Done(handle) then handle
+  in Fault(_) then return Err("the launcher faulted")
+  end
+  case signal.done()
+  in Done(_) then ()
+  in Fault(_) then return Err("the start signal faulted")
+  end
+  image.install(spare).map_error() {
+    |error: CodeError| error.message
+  }?
+  case worker.done()
+  in Done(value) then Ok(value == 500000)
+  in Fault(_) then Err("the worker faulted")
+  end
+end
+
+exercise()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 3, &["Proc", "Vm"]).expect("the active installation runs");
+    assert_eq!(outcome, "Done(Ok(true))");
+    assert!(stats.max_active_leases >= 2);
+    assert!(stats.scoped_safepoint_waits > 0);
+    assert_eq!(stats.global_quiescence, 0);
 }
 
 #[test]
@@ -588,8 +830,102 @@ fn replacement_under_parallel_execution_matches_deterministic_execution() {
             .join("examples/15-compiler-and-hot-code-reloading/06-upgrade-a-running-proc.lm"),
     )
     .expect("the replacement example reads");
-    let (deterministic, parallel) =
+    let (deterministic, parallel, stats) =
         compare_modes(&source, &["Proc", "Vm"]).expect("both scheduler modes run");
     assert_eq!(parallel, deterministic);
     assert_eq!(parallel, "Done(Ok((20, 30, 2)))");
+    assert_eq!(stats.global_quiescence, 0);
+}
+
+#[test]
+fn replacement_stops_an_active_image_proc_at_one_scoped_safepoint() {
+    let source = r#"
+class Signal < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then 0
+    end
+  end
+end
+
+def rate(value: Int): Int
+  value + 1
+end
+
+def revised_rate(value: Int): Int
+  value + 2
+end
+
+class BusyWorker < Proc
+  signal: Handle[Int, Int]
+
+  def init(mut self, signal: Handle[Int, Int])
+    self.signal = signal
+  end
+
+  def on_spawn(self): Int with Proc
+    self.signal.send(1)
+    value = 0
+    i = 0
+    while i < 200000
+      value = rate(value)
+      i = i + 1
+    end
+    value
+  end
+end
+
+def launch(signal: Handle[Int, Int]): Handle[Never, Int] with Proc
+  BusyWorker.spawn(signal)
+end
+
+def exercise(): Result[Bool, String] with Vm, Proc
+  signal = Signal.spawn()
+  image = sys.vm.Vm()
+  worker_class = image.install(codeof(BusyWorker)).map_error() {
+    |error: CodeError| error.message
+  }?
+  instance = worker_class.instance().map_error() {
+    |error: CodeError| error.message
+  }?
+  launcher = image.install(launch).map_error() {
+    |error: CodeError| error.message
+  }?
+  original = instance.function_binding[(Int,), Int]("rate").map_error() {
+    |error: CodeError| error.message
+  }?
+  revision = image.install(revised_rate).map_error() {
+    |error: CodeError| error.message
+  }?
+  run = image.activate(launcher, args: (signal,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  worker = case run.run()
+  in Done(handle) then handle
+  in Fault(_) then return Err("the launcher faulted")
+  end
+  case signal.done()
+  in Done(_) then ()
+  in Fault(_) then return Err("the start signal faulted")
+  end
+  image.replace(original, revision).map_error() {
+    |error: CodeError| error.message
+  }?
+  total = case worker.done()
+  in Done(value) then value
+  in Fault(_) then return Err("the worker faulted")
+  end
+  Ok(total >= 200000 and total <= 400000)
+end
+
+exercise()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 3, &["Proc", "Vm"]).expect("the active upgrade runs");
+    assert_eq!(outcome, "Done(Ok(true))");
+    assert!(stats.max_active_leases >= 2);
+    assert!(stats.scoped_safepoint_waits > 0);
+    assert_eq!(stats.global_quiescence, 0);
 }

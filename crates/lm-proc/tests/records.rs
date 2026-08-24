@@ -34,7 +34,7 @@ fn every_record_is_plain_data() {
     // A machine identifier is one integer, so a whole trace event
     // stays small. A guest reference would not fit this budget.
     assert!(std::mem::size_of::<TraceEvent>() <= 16);
-    assert!(std::mem::size_of::<SchedulerStats>() <= 32);
+    assert!(std::mem::size_of::<SchedulerStats>() <= 64);
     // The barrier report names machines and counts only.
     let report = BarrierReport {
         set: vec![0, 1],

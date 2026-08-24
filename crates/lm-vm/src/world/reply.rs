@@ -88,7 +88,7 @@ impl World {
             if !self.completion_is_current(completion.key) {
                 continue;
             }
-            if accepts(completion.key) {
+            if accepts(completion.key) && self.completion_target_is_resident(completion.key) {
                 if let Some(key) = self.install_host_completion(completion) {
                     return Some(key);
                 }
@@ -117,7 +117,7 @@ impl World {
             if !self.completion_is_current(completion.key) {
                 continue;
             }
-            if accepts(completion.key) {
+            if accepts(completion.key) && self.completion_target_is_resident(completion.key) {
                 if let Some(key) = self.install_host_completion(completion) {
                     return Some(key);
                 }
@@ -134,11 +134,11 @@ impl World {
         &mut self,
         accepts: &mut impl FnMut(CompletionKey) -> bool,
     ) -> Option<HostCompletion> {
-        let key = self
-            .host_completions
-            .keys()
-            .copied()
-            .find(|key| accepts(*key) && !self.prepared_wait_exists(*key))?;
+        let key = self.host_completions.keys().copied().find(|key| {
+            accepts(*key)
+                && self.completion_target_is_resident(*key)
+                && !self.prepared_wait_exists(*key)
+        })?;
         self.host_completions.remove(&key)
     }
 
@@ -146,6 +146,15 @@ impl World {
     pub(super) fn prune_host_completions(&mut self) {
         let machines = &self.machines;
         self.host_completions.retain(|key, _| {
+            let Some(machine) = machines.get(key.machine.vm as usize) else {
+                return false;
+            };
+            if machine.generation() != key.machine.generation {
+                return false;
+            }
+            if !machine.is_resident() {
+                return true;
+            }
             let direct = machines
                 .get(key.machine.vm as usize)
                 .is_some_and(|machine| {
@@ -175,6 +184,15 @@ impl World {
 
     /// True when one completion still names its waiting request.
     pub(super) fn completion_is_current(&self, key: CompletionKey) -> bool {
+        let Some(machine) = self.machines.get(key.machine.vm as usize) else {
+            return false;
+        };
+        if machine.generation() != key.machine.generation {
+            return false;
+        }
+        if !machine.is_resident() {
+            return true;
+        }
         let direct = self
             .machines
             .get(key.machine.vm as usize)
@@ -190,12 +208,26 @@ impl World {
         direct || self.prepared_wait_exists(key)
     }
 
+    fn completion_target_is_resident(&self, key: CompletionKey) -> bool {
+        self.machines
+            .get(key.machine.vm as usize)
+            .is_some_and(|machine| {
+                machine.generation() == key.machine.generation && machine.is_resident()
+            })
+    }
+
     /// Install one host completion when its machine still waits.
     pub(super) fn install_host_completion(
         &mut self,
         completion: HostCompletion,
     ) -> Option<CompletionKey> {
         let key = completion.key;
+        if !self.completion_target_is_resident(key) {
+            if self.completion_is_current(key) {
+                self.host_completions.entry(key).or_insert(completion);
+            }
+            return None;
+        }
         if !self.completion_is_current(key) {
             return None;
         }

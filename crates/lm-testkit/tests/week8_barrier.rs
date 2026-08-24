@@ -61,7 +61,9 @@ fn the_barrier_set_closes_over_a_mailbox_handle() {
     assert!(report.objects > 0);
     // The barrier resumed the world, so the program still finishes.
     let mut scheduler = Scheduler::default();
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(Done(5))");
 }
 
@@ -130,7 +132,9 @@ fn a_frozen_mailbox_blocks_the_sender_instead_of_accepting() {
     world.freeze_mailbox(1, false);
     world.set_barrier(1, None);
     let mut scheduler = Scheduler::default();
-    let outcome = scheduler.run(&mut world);
+    let outcome = scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     assert_eq!(world.show_outcome(&outcome), "Done(Done(1))");
 }
 

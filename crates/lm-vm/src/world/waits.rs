@@ -519,9 +519,10 @@ impl World {
         let Some(machine) = self.machines.get(key.machine.vm as usize) else {
             return false;
         };
-        if machine.generation != key.machine.generation
-            || matches!(machine.vm.state, MachineState::Done | MachineState::Faulted)
-        {
+        if machine.generation() != key.machine.generation || !machine.is_resident() {
+            return false;
+        }
+        if matches!(machine.vm.state, MachineState::Done | MachineState::Faulted) {
             return false;
         }
         machine.vm.waits.values().any(|entry| {

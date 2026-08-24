@@ -201,20 +201,27 @@ impl World {
                 "the VM image handle is stale".to_string(),
             ));
         }
+        let roots = self.vm_snapshot_roots(target).map_err(|code| {
+            SnapshotFail::Fault(code, "a VM value-slot graph passed a limit".to_string())
+        })?;
+        self.capture_selected(barrier, &roots, None, Some(target), false, holder)
+    }
+
+    /// Find the machine roots of one complete VM image capture.
+    pub(crate) fn vm_snapshot_roots(&mut self, target: VmImageKey) -> Result<Vec<VmId>, FaultCode> {
         let mut roots: Vec<VmId> = self
             .machines
             .iter()
             .enumerate()
             .filter_map(|(vm, machine)| {
-                (machine.image == Some(target) && machine.vm.state != MachineState::Empty)
-                    .then_some(vm as VmId)
+                (machine.image() == Some(target) && machine.is_live()).then_some(vm as VmId)
             })
             .collect();
         let image = &mut self.vm_images[target.image as usize];
         for slot in image.slots.iter() {
             if let crate::machine::ImageSlotTarget::Process { proc, generation } = slot {
                 let live = self.machines.get(*proc as usize).is_some_and(|machine| {
-                    machine.generation == *generation && machine.vm.state != MachineState::Empty
+                    machine.generation() == *generation && machine.is_live()
                 });
                 if live && !roots.contains(proc) {
                     roots.push(*proc);
@@ -229,14 +236,12 @@ impl World {
                 _ => None,
             })
             .collect();
-        let order = lm_graph::snapshot_ordinals(&mut image.heap, &value_roots, &image.config.graph)
-            .map_err(|code| {
-                SnapshotFail::Fault(code, "a VM value-slot graph passed a limit".to_string())
-            })?;
+        let order =
+            lm_graph::snapshot_ordinals(&mut image.heap, &value_roots, &image.config.graph)?;
         for reference in order {
             if let Object::NativeHandle { proc, generation } = image.heap.get(reference) {
                 let live = self.machines.get(*proc as usize).is_some_and(|machine| {
-                    machine.generation == *generation && machine.vm.state != MachineState::Empty
+                    machine.generation() == *generation && machine.is_live()
                 });
                 if live && !roots.contains(proc) {
                     roots.push(*proc);
@@ -244,7 +249,7 @@ impl World {
             }
         }
         roots.sort_unstable();
-        self.capture_selected(barrier, &roots, None, Some(target), false, holder)
+        Ok(roots)
     }
 
     /// Capture one selected run or one selected persistent VM.

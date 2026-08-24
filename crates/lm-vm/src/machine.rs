@@ -567,37 +567,12 @@ pub enum ExecOutcome {
 /// Why one execution batch stopped without a world action.
 pub(crate) enum ExecError {
     Fault(FaultCode),
-    NeedsHeapRefill,
+    HeapTrip,
     NeedsQuiescence,
 }
 
 pub(crate) fn operation_needs_global_quiescence(op: u32) -> bool {
-    matches!(
-        op,
-        lm_abi::OP_VM_SNAPSHOT_HELD
-            | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
-            | lm_abi::OP_VM_SNAPSHOT_SELF
-            | lm_abi::OP_VM_SNAPSHOT_VM
-            | lm_abi::OP_VM_LOAD_SNAPSHOT
-            | lm_abi::OP_VM_RUN_SNAPSHOT_BYTES
-            | lm_abi::OP_VM_SNAPSHOT_BYTES
-            | lm_abi::OP_VM_RESTORE
-            | lm_abi::OP_VM_RESTORE_VM
-            | lm_abi::OP_PROC_SNAPSHOT_WAIT
-            | lm_abi::OP_COMPILER_VERIFY
-            | lm_abi::OP_VM_INSTALL
-            | lm_abi::OP_VM_INSTALL_WITH
-            | lm_abi::OP_VM_ACTIVATE_DEF
-            | lm_abi::OP_VM_REPLACE_FUNCTION
-            | lm_abi::OP_VM_REPLACE_CLASS
-            | lm_abi::OP_VM_REPLACE_VALUE
-            | lm_abi::OP_VM_REPLACE_PROCESS
-            | lm_abi::OP_VM_CHANGE_FUNCTION
-            | lm_abi::OP_VM_CHANGE_CLASS
-            | lm_abi::OP_VM_CHANGE_VALUE
-            | lm_abi::OP_VM_CHANGE_PROCESS
-            | lm_abi::OP_VM_REPLACE_ALL
-    )
+    matches!(op, lm_abi::OP_VM_RESTORE | lm_abi::OP_VM_RESTORE_VM)
 }
 
 fn instruction_needs_global_quiescence(instr: Instr, operands: &[Value]) -> bool {
@@ -611,33 +586,6 @@ fn instruction_needs_global_quiescence(instr: Instr, operands: &[Value]) -> bool
             .is_some_and(
                 |value| matches!(value, Value::Op(op) if operation_needs_global_quiescence(*op)),
             ),
-        _ => false,
-    }
-}
-
-fn instruction_can_grow_guest_heap(instr: Instr) -> bool {
-    match instr {
-        Instr::ConstStr(_)
-        | Instr::ConstBytes(_)
-        | Instr::Native(_)
-        | Instr::MakeClosure { .. }
-        | Instr::New(_)
-        | Instr::NewG { .. }
-        | Instr::TupleNew { .. }
-        | Instr::ListNew { .. }
-        | Instr::ListPush
-        | Instr::MapNew { .. }
-        | Instr::MapPut { .. }
-        | Instr::Extended(_) => true,
-        Instr::Numeric(instruction) => matches!(
-            instruction,
-            NumericInstr::SbAppendFloat
-                | NumericInstr::BytesBitAnd
-                | NumericInstr::BytesBitOr
-                | NumericInstr::BytesBitXor
-                | NumericInstr::BytesBitNot
-                | NumericInstr::FloatFixed
-        ),
         _ => false,
     }
 }
@@ -5559,13 +5507,8 @@ impl Machine {
                 cached_block = block;
             }
             let instr = code[ip as usize];
-            if RESTRICTED_LEASE {
-                if instruction_needs_global_quiescence(instr, &self.vm.operands) {
-                    break Err(ExecError::NeedsQuiescence);
-                }
-                if instruction_can_grow_guest_heap(instr) {
-                    break Err(ExecError::NeedsHeapRefill);
-                }
+            if RESTRICTED_LEASE && instruction_needs_global_quiescence(instr, &self.vm.operands) {
+                break Err(ExecError::NeedsQuiescence);
             }
             self.vm.fuel -= 1;
             let Some(frame) = self.vm.frames.last_mut() else {
@@ -5573,7 +5516,11 @@ impl Machine {
             };
             frame.ip += 1;
             match self.exec_instr(module, dispatch, envs, slots, instr) {
-                Ok(ExecOutcome::Continue) => {}
+                Ok(ExecOutcome::Continue) => {
+                    if RESTRICTED_LEASE && self.vm.heap.execution_lease_trip_reached() {
+                        break Err(ExecError::HeapTrip);
+                    }
+                }
                 Ok(outcome) => break Ok(outcome),
                 Err(code) => break Err(ExecError::Fault(code)),
             }
@@ -6293,9 +6240,13 @@ mod tests {
             perform,
             &[Value::Op(lm_abi::OP_PROC_SEND), Value::Unit]
         ));
-        assert!(instruction_needs_global_quiescence(
+        assert!(!instruction_needs_global_quiescence(
             perform,
             &[Value::Op(lm_abi::OP_VM_SNAPSHOT_SELF), Value::Unit]
+        ));
+        assert!(instruction_needs_global_quiescence(
+            perform,
+            &[Value::Op(lm_abi::OP_VM_RESTORE), Value::Unit]
         ));
     }
 

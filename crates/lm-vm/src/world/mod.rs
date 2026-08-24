@@ -528,6 +528,7 @@ pub(crate) struct MachineSlot {
     lease: Option<crate::executor::ExecutionToken>,
     leased: Option<LeasedMachineMetadata>,
     worker_envs: Option<Box<lm_bytecode::closed::TypeEnvs>>,
+    deferred_resource_closes: Vec<(crate::ResourceKind, u64)>,
 }
 
 impl MachineSlot {
@@ -537,11 +538,18 @@ impl MachineSlot {
             lease: None,
             leased: None,
             worker_envs: None,
+            deferred_resource_closes: Vec::new(),
         }
     }
 
     pub(crate) fn is_resident(&self) -> bool {
         self.resident.is_some()
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.resident
+            .as_ref()
+            .is_none_or(|machine| machine.vm.state != MachineState::Empty)
     }
 
     pub(crate) fn generation(&self) -> u32 {
@@ -592,13 +600,16 @@ impl MachineSlot {
     fn restore_from_lease(
         &mut self,
         token: crate::executor::ExecutionToken,
-        machine: Box<Machine>,
+        mut machine: Box<Machine>,
     ) -> Result<(), ()> {
         let Some(metadata) = self.leased else {
             return Err(());
         };
         if self.lease != Some(token) || LeasedMachineMetadata::from_machine(&machine) != metadata {
             return Err(());
+        }
+        for (kind, resource) in self.deferred_resource_closes.drain(..) {
+            machine.resources.close_kind(kind, resource);
         }
         self.resident = Some(machine);
         self.lease = None;
@@ -610,6 +621,15 @@ impl MachineSlot {
         if self.lease == Some(token) {
             self.lease = None;
             self.leased = None;
+            self.deferred_resource_closes.clear();
+        }
+    }
+
+    fn close_resource_or_defer(&mut self, kind: crate::ResourceKind, resource: u64) {
+        if let Some(machine) = self.resident.as_deref_mut() {
+            machine.resources.close_kind(kind, resource);
+        } else {
+            self.deferred_resource_closes.push((kind, resource));
         }
     }
 
@@ -1021,6 +1041,53 @@ mod tests {
         assert!(world.machines[0]
             .restore_from_lease(token, duplicate)
             .is_err());
+    }
+
+    #[test]
+    fn a_resource_close_waits_for_its_leased_owner() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let resource = 1;
+        world.machines[0]
+            .resources
+            .register(
+                crate::ResourceKind::File,
+                0,
+                resource,
+                u64::MAX,
+                lm_abi::OP_FS_OPEN,
+            )
+            .expect("the resource registers");
+        world.bound_resources.insert(
+            resource,
+            BoundResource {
+                owner: 0,
+                kind: crate::ResourceKind::File,
+                backing: ResourceBacking::Driver(0),
+            },
+        );
+        assert_eq!(world.budget.resources.used(), 1);
+
+        let key = world.task_key(0).expect("the root task exists");
+        let step = world
+            .begin_parallel_slice(key, 16, 1)
+            .expect("the root slice starts");
+        let ParallelStep::Dispatch(dispatch) = step else {
+            panic!("the root slice produces one dispatch")
+        };
+        let (lease, job) = dispatch.into_parts();
+        assert!(world.retire_resource(resource, false));
+        assert_eq!(world.budget.resources.used(), 1);
+
+        let report = crate::execute(lease);
+        let returned = world
+            .accept_parallel_report(job, report)
+            .expect("the report restores the resource owner");
+        assert_eq!(world.machines[0].resources.live_count(), 0);
+        assert_eq!(world.budget.resources.used(), 0);
+        world
+            .commit_parallel_report(returned)
+            .expect("the report commits after cleanup");
     }
 
     #[test]

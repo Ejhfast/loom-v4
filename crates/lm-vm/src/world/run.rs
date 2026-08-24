@@ -737,8 +737,10 @@ impl World {
             ExecutionStop::Fault(code) => {
                 self.machines[vm as usize].set_fault(code, execution_fault_message(code), None);
             }
-            ExecutionStop::QuantumExpired | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
-            ExecutionStop::NeedsHeapRefill | ExecutionStop::NeedsQuiescence => {}
+            ExecutionStop::QuantumExpired
+            | ExecutionStop::HeapTrip
+            | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
+            ExecutionStop::NeedsQuiescence => {}
             ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {
                 if self.machines[vm as usize].start_body.is_some() {
                     self.enter_proc_body(vm, value);

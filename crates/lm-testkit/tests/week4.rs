@@ -514,7 +514,9 @@ fn a_denied_fault_carries_its_reason_and_operation() {
     );
     world.allow("Vm").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
-    scheduler.run(&mut world);
+    scheduler
+        .run(&mut world)
+        .expect("the deterministic scheduler runs");
     let fault = world.fault_of(1).expect("the run faulted");
     assert_eq!(fault.code, lm_abi::FaultCode::PolicyDenied);
     assert_eq!(fault.message, "the clock is not permitted");

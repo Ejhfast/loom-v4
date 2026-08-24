@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 /// Rounds per case. One warm-up plus this many measured rounds.
 const ROUNDS: usize = 9;
+/// Measured rounds for message cases with high coordinator cost.
+const MESSAGE_ROUNDS: usize = 5;
 
 fn median(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
@@ -162,6 +164,66 @@ fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration
     median(runs)
 }
 
+fn sample_message_world(source: &str, expected: &str, workers: Option<usize>) -> Vec<Duration> {
+    let bytes = lm_testkit::compile_to_bytes("parallel-message-bench.lm", source)
+        .unwrap_or_else(|error| panic!("the message source must compile:\n{error}"));
+    let loaded = lm_vm::load_bytes(&bytes).expect("the message artifact must load");
+    let mut runs = Vec::with_capacity(MESSAGE_ROUNDS);
+    for round in 0..=MESSAGE_ROUNDS {
+        let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
+        let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+        world.allow("Proc").expect("the Proc grant must exist");
+        let start = Instant::now();
+        let outcome = match workers {
+            Some(workers) => lm_proc::Scheduler::default()
+                .run_parallel(&mut world, workers)
+                .expect("the parallel message benchmark must run"),
+            None => lm_proc::run_world(&mut world),
+        };
+        let elapsed = start.elapsed();
+        assert_eq!(world.show_outcome(&outcome), expected);
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    runs
+}
+
+fn p95(mut values: Vec<Duration>) -> Duration {
+    values.sort_unstable();
+    let index = values
+        .len()
+        .saturating_mul(95)
+        .div_ceil(100)
+        .saturating_sub(1);
+    values[index]
+}
+
+fn report_message_case(
+    name: &str,
+    messages: u64,
+    source: &str,
+    expected: &str,
+) -> (Duration, Duration) {
+    let deterministic = sample_message_world(source, expected, None);
+    let parallel = sample_message_world(source, expected, Some(4));
+    let deterministic_median = median(deterministic.clone());
+    let parallel_median = median(parallel.clone());
+    let ratio = deterministic_median.as_secs_f64() / parallel_median.as_secs_f64();
+    println!(
+        "LOOM\tparallel_message\t{name}\t{messages}\t4\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{ratio:.3}",
+        deterministic_median.as_secs_f64() * 1e3,
+        p95(deterministic).as_secs_f64() * 1e3,
+        parallel_median.as_secs_f64() * 1e3,
+        p95(parallel).as_secs_f64() * 1e3,
+    );
+    assert!(
+        ratio >= 0.90,
+        "{name} reached {ratio:.3}x deterministic throughput"
+    );
+    (deterministic_median, parallel_median)
+}
+
 fn parallel_cpu_source(tasks: usize, iterations: usize) -> (String, String) {
     let mut source = format!(
         "class Spinner < Proc\n  def on_spawn(self): Int\n    i = 0\n    \
@@ -183,6 +245,95 @@ fn parallel_cpu_source(tasks: usize, iterations: usize) -> (String, String) {
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("Done(({values}))"))
+}
+
+fn parallel_ping_source(pairs: usize, limit: usize) -> (String, String, u64) {
+    let mut source = format!(
+        r#"enum PongMessage
+  Connect(peer: Handle[PingMessage, Int])
+  Request(value: Int)
+  Stop(value: Int)
+end
+
+enum PingMessage
+  Begin
+  Reply(value: Int)
+end
+
+class Pong < Proc[PongMessage]
+  def on_spawn(self): Int with Proc
+    peer = case self.receive()
+    in Msg(Connect(handle)) then handle
+    in Msg(_) then panic("the first message was not Connect")
+    in Closed then panic("the Pong mailbox closed")
+    end
+    loop do
+      case self.receive()
+      in Msg(Request(value))
+        peer.send(Reply(value + 1))
+      in Msg(Stop(value))
+        return value
+      in Msg(Connect(_))
+        panic("the Pong proc received Connect twice")
+      in Closed
+        panic("the Pong mailbox closed")
+      end
+    end
+  end
+end
+
+class Ping < Proc[PingMessage]
+  pong: Handle[PongMessage, Int]
+
+  def init(mut self, pong: Handle[PongMessage, Int])
+    self.pong = pong
+  end
+
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(Begin) then ()
+    in Msg(_) then panic("the first message was not Begin")
+    in Closed then panic("the Ping mailbox closed")
+    end
+    self.pong.send(Request(0))
+    loop do
+      case self.receive()
+      in Msg(Reply(value))
+        if value >= {limit}
+          self.pong.send(Stop(value))
+          return value
+        end
+        self.pong.send(Request(value))
+      in Msg(Begin)
+        panic("the Ping proc received Begin twice")
+      in Closed
+        panic("the Ping mailbox closed")
+      end
+    end
+  end
+end
+
+"#
+    );
+    for pair in 0..pairs {
+        source.push_str(&format!(
+            "pong{pair} = Pong.spawn()\nping{pair} = Ping.spawn(pong{pair})\n\
+             pong{pair}.send(Connect(ping{pair}))\nping{pair}.send(Begin)\n"
+        ));
+    }
+    source.push('(');
+    let mut expected = Vec::new();
+    for pair in 0..pairs {
+        if pair > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("pong{pair}.done(), ping{pair}.done()"));
+        expected.push(format!("Done({limit})"));
+        expected.push(format!("Done({limit})"));
+    }
+    source.push_str(")\n");
+    let messages = (pairs as u64).saturating_mul((limit as u64).saturating_mul(2) + 3);
+    (source, format!("Done(({}))", expected.join(", ")), messages)
 }
 
 // ---------------------------------------------------------------
@@ -720,6 +871,180 @@ fn bench_parallel_cpu_scaling() {
         assert!(
             speedup >= gate,
             "{tasks} tasks reached {speedup:.3}x, below the {gate:.1}x gate"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_messages() {
+    println!(
+        "LOOM\tgroup\tcase\tmessages\tworkers\tdeterministic_ms\t\
+         deterministic_p95_ms\tparallel_ms\tparallel_p95_ms\tratio"
+    );
+
+    let mut deterministic_total = Duration::ZERO;
+    let mut parallel_total = Duration::ZERO;
+    let mut measured = 0;
+    let mut record = |result: (Duration, Duration)| {
+        deterministic_total += result.0;
+        parallel_total += result.1;
+        measured += 1;
+    };
+
+    let (ping, ping_expected, ping_messages) = parallel_ping_source(1, 2_000);
+    if selected("ping_pong") {
+        record(report_message_case(
+            "ping_pong",
+            ping_messages,
+            &ping,
+            &ping_expected,
+        ));
+    }
+
+    let stream = r#"
+class StreamSink < Proc[Int]
+  def on_spawn(self): Int with Proc
+    total = 0
+    loop do
+      case self.receive()
+      in Msg(value)
+        total = total + value
+      in Closed
+        return total
+      end
+    end
+  end
+end
+
+sink = StreamSink.spawn()
+i = 0
+while i < 500
+  sink.send(1)
+  i = i + 1
+end
+sink.close()
+sink.done()
+"#;
+    if selected("stream") {
+        record(report_message_case(
+            "stream",
+            500,
+            stream,
+            "Done(Done(500))",
+        ));
+    }
+
+    let (pairs, pairs_expected, pair_messages) = parallel_ping_source(4, 500);
+    if selected("independent_pairs") {
+        record(report_message_case(
+            "independent_pairs",
+            pair_messages,
+            &pairs,
+            &pairs_expected,
+        ));
+    }
+
+    let many_senders = r#"
+class ManySink < Proc[Int]
+  def on_spawn(self): Int with Proc
+    total = 0
+    loop do
+      case self.receive()
+      in Msg(value)
+        total = total + value
+      in Closed
+        return total
+      end
+    end
+  end
+end
+
+class ManySender < Proc
+  sink: Handle[Int, Int]
+
+  def init(mut self, sink: Handle[Int, Int])
+    self.sink = sink
+  end
+
+  def on_spawn(self): Int with Proc
+    i = 0
+    while i < 100
+      self.sink.send(1)
+      i = i + 1
+    end
+    i
+  end
+end
+
+sink = ManySink.spawn()
+s0 = ManySender.spawn(sink)
+s1 = ManySender.spawn(sink)
+s2 = ManySender.spawn(sink)
+s3 = ManySender.spawn(sink)
+s4 = ManySender.spawn(sink)
+s5 = ManySender.spawn(sink)
+s6 = ManySender.spawn(sink)
+s7 = ManySender.spawn(sink)
+s0.done()
+s1.done()
+s2.done()
+s3.done()
+s4.done()
+s5.done()
+s6.done()
+s7.done()
+sink.close()
+sink.done()
+"#;
+    if selected("many_senders") {
+        record(report_message_case(
+            "many_senders",
+            800,
+            many_senders,
+            "Done(Done(800))",
+        ));
+    }
+
+    let allocated = r#"
+class PayloadSink < Proc[[Int]]
+  def on_spawn(self): Int with Proc
+    total = 0
+    loop do
+      case self.receive()
+      in Msg(values)
+        total = total + values.len()
+      in Closed
+        return total
+      end
+    end
+  end
+end
+
+payload = list_repeated[Int](7, 32).freeze()
+sink = PayloadSink.spawn()
+i = 0
+while i < 200
+  sink.send(payload)
+  i = i + 1
+end
+sink.close()
+sink.done()
+"#;
+    if selected("allocated_stream") {
+        record(report_message_case(
+            "allocated_stream",
+            200,
+            allocated,
+            "Done(Done(6400))",
+        ));
+    }
+
+    if measured > 0 {
+        let aggregate = deterministic_total.as_secs_f64() / parallel_total.as_secs_f64();
+        assert!(
+            aggregate >= 0.95,
+            "message throughput reached {aggregate:.3}x in aggregate"
         );
     }
 }

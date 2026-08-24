@@ -50,6 +50,7 @@ const USAGE: &str = "usage:
   lm build [file.lm | package directory]
   lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
          [--fuel N] [--max-frames N] [--heap-bytes N]
+         [--scheduler deterministic|parallel] [--threads N]
          [file.lm | file.lma | package directory] [-- arguments...]
   (`lm build` and `lm run` default to the current directory)
   lm disasm <file.lm | file.lma>
@@ -445,9 +446,10 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
     let arguments = options.command_args;
-    let result = lm_proc::run_on_worker(
+    let result = lm_proc::run_on_worker_with_scheduler(
         &loaded,
         options.config,
+        options.scheduler,
         &grants,
         Box::new(move || Box::new(lm_host::CliHost::with_args(seed, arguments))),
     )
@@ -589,6 +591,7 @@ struct Options {
     allow: Vec<String>,
     rand_seed: u64,
     config: VmConfig,
+    scheduler: lm_proc::SchedulerConfig,
     /// The tokens after the `lm run` separator.
     command_args: Vec<String>,
 }
@@ -623,6 +626,8 @@ fn parse_options_mode(
     let mut allow = Vec::new();
     let mut rand_seed = 1;
     let mut config = VmConfig::default();
+    let mut scheduler_mode = None;
+    let mut threads = None;
     let mut command_args = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -654,6 +659,24 @@ fn parse_options_mode(
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
             "--max-frames" => config.max_frames = flag_value(&mut iter, "--max-frames")?,
             "--heap-bytes" => config.heap_bytes = flag_value(&mut iter, "--heap-bytes")?,
+            "--scheduler" if command_mode => {
+                if scheduler_mode.is_some() {
+                    return Err("error: `--scheduler` occurs more than once\n".to_string());
+                }
+                scheduler_mode = Some(
+                    iter.next()
+                        .ok_or_else(|| {
+                            "error: `--scheduler` needs `deterministic` or `parallel`\n".to_string()
+                        })?
+                        .clone(),
+                );
+            }
+            "--threads" if command_mode => {
+                if threads.is_some() {
+                    return Err("error: `--threads` occurs more than once\n".to_string());
+                }
+                threads = Some(flag_value(&mut iter, "--threads")?);
+            }
             other if other.starts_with("--") => {
                 return Err(format!("error: unknown option `{other}`\n{USAGE}\n"));
             }
@@ -675,6 +698,7 @@ fn parse_options_mode(
     let file = file
         .or_else(|| default_file.map(|f| f.to_string()))
         .ok_or_else(|| format!("error: no input file\n{USAGE}\n"))?;
+    let scheduler = parse_scheduler_options(scheduler_mode.as_deref(), threads)?;
     Ok(Options {
         file,
         extra,
@@ -685,8 +709,43 @@ fn parse_options_mode(
         allow,
         rand_seed,
         config,
+        scheduler,
         command_args,
     })
+}
+
+fn parse_scheduler_options(
+    mode: Option<&str>,
+    threads: Option<usize>,
+) -> Result<lm_proc::SchedulerConfig, String> {
+    match mode {
+        Some("deterministic") => {
+            if threads.is_some() {
+                return Err("error: `--threads` requires `--scheduler parallel`\n".to_string());
+            }
+            Ok(lm_proc::SchedulerConfig::deterministic())
+        }
+        Some("parallel") | None => {
+            let workers = threads.unwrap_or_else(default_parallel_workers);
+            if workers == 0 || workers > lm_proc::MAX_PARALLEL_WORKERS {
+                return Err(
+                    "error: `--threads` must be between 1 and 256 for parallel scheduling\n"
+                        .to_string(),
+                );
+            }
+            Ok(lm_proc::SchedulerConfig::parallel(workers))
+        }
+        Some(other) => Err(format!(
+            "error: unknown scheduler `{other}`; use `deterministic` or `parallel`\n"
+        )),
+    }
+}
+
+fn default_parallel_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(lm_proc::MAX_PARALLEL_WORKERS)
 }
 
 fn flag_value<T: std::str::FromStr>(
@@ -745,5 +804,70 @@ mod tests {
         assert_eq!(run_cli(&["-h".to_string()]), Ok(ExitCode::SUCCESS));
         assert_eq!(run_cli(&["--version".to_string()]), Ok(ExitCode::SUCCESS));
         assert_eq!(run_cli(&["-V".to_string()]), Ok(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn run_options_select_the_parallel_scheduler() {
+        let args = [
+            "--scheduler".to_string(),
+            "parallel".to_string(),
+            "--threads".to_string(),
+            "3".to_string(),
+            "program.lm".to_string(),
+        ];
+        let options = parse_run_options(&args, None).expect("the scheduler options parse");
+        assert_eq!(
+            options.scheduler.mode(),
+            lm_proc::SchedulerMode::Parallel { workers: 3 }
+        );
+    }
+
+    #[test]
+    fn run_options_default_to_parallel_scheduling() {
+        let options = parse_run_options(&["program.lm".to_string()], None)
+            .expect("the default scheduler option parses");
+        assert_eq!(
+            options.scheduler.mode(),
+            lm_proc::SchedulerMode::Parallel {
+                workers: default_parallel_workers()
+            }
+        );
+    }
+
+    #[test]
+    fn thread_options_require_valid_parallel_scheduling() {
+        let default_parallel = [
+            "--threads".to_string(),
+            "2".to_string(),
+            "program.lm".to_string(),
+        ];
+        let deterministic = [
+            "--scheduler".to_string(),
+            "deterministic".to_string(),
+            "--threads".to_string(),
+            "2".to_string(),
+            "program.lm".to_string(),
+        ];
+        let zero = [
+            "--scheduler".to_string(),
+            "parallel".to_string(),
+            "--threads".to_string(),
+            "0".to_string(),
+            "program.lm".to_string(),
+        ];
+        let unknown = [
+            "--scheduler".to_string(),
+            "random".to_string(),
+            "program.lm".to_string(),
+        ];
+        let options = parse_run_options(&default_parallel, None)
+            .expect("the default parallel scheduler accepts a worker count");
+        assert_eq!(
+            options.scheduler.mode(),
+            lm_proc::SchedulerMode::Parallel { workers: 2 }
+        );
+        assert!(parse_run_options(&deterministic, None).is_err());
+        assert!(parse_run_options(&zero, None).is_err());
+        assert!(parse_run_options(&unknown, None).is_err());
     }
 }
