@@ -116,6 +116,13 @@ fn many_class_dispatch_memory_smoke() {
         cells < dense / 10,
         "the dispatch table is near dense: {cells} of {dense}"
     );
+    let witnesses = loaded.interface_witness_entries();
+    let dense_witnesses = loaded.module().classes.len() * loaded.module().interfaces.len();
+    eprintln!("bench-smoke interface witnesses {witnesses} (dense equivalent {dense_witnesses})");
+    assert!(
+        witnesses < dense_witnesses / 10,
+        "the interface witness table is near dense: {witnesses} of {dense_witnesses}"
+    );
     let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(7)");

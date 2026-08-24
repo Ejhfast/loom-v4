@@ -57,6 +57,10 @@ An imported interface identifies each default through a hidden function binding.
 
 The binding is not a source name.
 
+Runtime dispatch stores sparse witnesses only for interfaces that contain defaults.
+
+Each subclass shares its inherited witness slice until it adds a conformance.
+
 ## 3. Generic interface methods
 
 An interface method can declare type and effect parameters.

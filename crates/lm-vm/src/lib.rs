@@ -190,6 +190,15 @@ impl fmt::Display for LoadError {
 /// The sentinel for an empty dispatch-table entry.
 const NO_METHOD: u32 = u32::MAX;
 
+/// One sparse default-method witness for a class and interface pair.
+#[derive(Debug, Clone)]
+struct InterfaceWitness {
+    /// The interface table index.
+    interface: u32,
+    /// True for each method that selects the class implementation.
+    method_overrides: std::sync::Arc<[bool]>,
+}
+
 /// The sealed dispatch row of one class: a dense table over the
 /// selector range the class answers.
 ///
@@ -203,8 +212,8 @@ pub struct DispatchRow {
     base: u32,
     /// Function indices for the selectors `base..base + len`.
     table: Vec<u32>,
-    /// Override selections by interface and method index.
-    interface_methods: Vec<Option<std::sync::Arc<[bool]>>>,
+    /// Sorted witnesses for interfaces that contain default methods.
+    interface_witnesses: Option<std::sync::Arc<[InterfaceWitness]>>,
 }
 
 impl DispatchRow {
@@ -229,11 +238,12 @@ impl DispatchRow {
     /// True when one interface call site selects a class override.
     #[inline]
     pub(crate) fn interface_override(&self, interface: u32, method: u32) -> Option<bool> {
-        self.interface_methods
-            .get(interface as usize)?
-            .as_ref()?
-            .get(method as usize)
-            .copied()
+        let witnesses = self.interface_witnesses.as_deref()?;
+        let witness = witnesses
+            .binary_search_by_key(&interface, |witness| witness.interface)
+            .ok()
+            .map(|index| &witnesses[index])?;
+        witness.method_overrides.get(method as usize).copied()
     }
 }
 
@@ -341,6 +351,14 @@ impl LoadedModule {
     /// The total dispatch-table cell count, for the memory gates.
     pub fn dispatch_cells(&self) -> usize {
         self.dispatch.iter().map(|row| row.table.len()).sum()
+    }
+
+    /// The number of sparse class-interface default witnesses.
+    pub fn interface_witness_entries(&self) -> usize {
+        self.dispatch
+            .iter()
+            .map(|row| row.interface_witnesses.as_deref().map_or(0, <[_]>::len))
+            .sum()
     }
 }
 
@@ -583,19 +601,35 @@ fn admit(
             Some(p) => resolved[p as usize].clone(),
             None => Vec::new(),
         };
-        let mut interface_methods = match class.parent() {
-            Some(parent) => dispatch[parent as usize].interface_methods.clone(),
-            None => vec![None; module.interfaces.len()],
-        };
+        let inherited_witnesses = class
+            .parent()
+            .and_then(|parent| dispatch[parent as usize].interface_witnesses.clone());
+        let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
         for conformance in conformances_by_class[class_index]
             .iter()
             .map(|index| &module.conformances[*index])
         {
             let interface = conformance.application.interface as usize;
             if interfaces_with_defaults[interface] {
-                interface_methods[interface] = Some(conformance.method_overrides.clone().into());
+                let interface = interface as u32;
+                let witnesses = changed_witnesses.get_or_insert_with(|| {
+                    inherited_witnesses
+                        .as_deref()
+                        .map_or_else(Vec::new, <[_]>::to_vec)
+                });
+                let witness = InterfaceWitness {
+                    interface,
+                    method_overrides: conformance.method_overrides.clone().into(),
+                };
+                match witnesses.binary_search_by_key(&interface, |item| item.interface) {
+                    Ok(index) => witnesses[index] = witness,
+                    Err(index) => witnesses.insert(index, witness),
+                }
             }
         }
+        let interface_witnesses = changed_witnesses
+            .map(std::sync::Arc::from)
+            .or(inherited_witnesses);
         for (sel, func) in &class.methods {
             match methods.iter_mut().find(|(s, _)| s == sel) {
                 Some(entry) => entry.1 = *func,
@@ -612,11 +646,11 @@ fn admit(
                 DispatchRow {
                     base,
                     table,
-                    interface_methods,
+                    interface_witnesses,
                 }
             }
             None => DispatchRow {
-                interface_methods,
+                interface_witnesses,
                 ..DispatchRow::default()
             },
         };

@@ -799,6 +799,14 @@ fn bench_language_operations() {
         base,
     );
 
+    // A generic interface call selects one default method.
+    report(
+        "interface_default",
+        1_000_000,
+        "interface Valued\n  def value(self): Int\n    7\n  end\nend\nfinal class Token implements Valued\nend\ndef read[T: Valued](value: T): Int\n  value.value()\nend\ntoken = Token()\ni = 0\nvalue = 0\nwhile i < 1000000\n  value = read(token)\n  i = i + 1\nend\nvalue\n",
+        base,
+    );
+
     // Conditional list equality compares all elements.
     report(
         "list_eq",
@@ -1681,12 +1689,14 @@ fn bench_core_compilation() {
     }
 
     let mut decoded_load_runs: Vec<Duration> = Vec::new();
+    let mut interface_witness_entries = 0;
     for round in 0..=ROUNDS {
         let module = decoded.clone();
         let start = Instant::now();
         let loaded = lm_vm::load(module).expect("the core image loads");
         let elapsed = start.elapsed();
         std::hint::black_box(loaded.dispatch_cells());
+        interface_witness_entries = loaded.interface_witness_entries();
         if round > 0 {
             decoded_load_runs.push(elapsed);
         }
@@ -1762,6 +1772,12 @@ fn bench_core_compilation() {
         module.classes.len(),
         module.funcs.len(),
         median(decoded_load_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_interface_witnesses\t{}\t{}\t{}\tentries",
+        module.classes.len(),
+        module.interfaces.len(),
+        interface_witness_entries
     );
     println!(
         "LOOM\tcore_load\t{}\t{}\t{:.3}\tms",

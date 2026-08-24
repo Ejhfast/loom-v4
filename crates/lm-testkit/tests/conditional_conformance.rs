@@ -578,6 +578,44 @@ fn interface_defaults_cross_module_boundaries() {
 }
 
 #[test]
+fn sparse_interface_witnesses_follow_class_inheritance() {
+    let module = compile_text(
+        "defaults.lm",
+        "interface Named\n  def name(self): String\n    \"default\"\n  end\nend\n\
+         class DefaultParent implements Named\nend\n\
+         final class DefaultChild < DefaultParent\nend\n\
+         class OverrideParent implements Named\n\
+         \x20 def name(self): String\n    \"parent\"\n  end\nend\n\
+         final class OverrideChild < OverrideParent\nend\n\
+         def name[T: Named](value: T): String\n  value.name()\nend\n\
+         \"#{name(DefaultChild())}:#{name(OverrideChild())}\"\n",
+    )
+    .expect("the inherited default program compiles");
+    let loaded = lm_vm::load(module).expect("the inherited default program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(\"default:parent\")");
+}
+
+#[test]
+fn sparse_interface_witnesses_select_multiple_defaults() {
+    let module = compile_text(
+        "defaults.lm",
+        "interface First\n  def first(self): Int\n    1\n  end\nend\n\
+         interface Second\n  def second(self): Int\n    2\n  end\nend\n\
+         final class Both implements First, Second\nend\n\
+         def first[T: First](value: T): Int\n  value.first()\nend\n\
+         def second[T: Second](value: T): Int\n  value.second()\nend\n\
+         (first(Both()), second(Both()))\n",
+    )
+    .expect("the multiple default program compiles");
+    let loaded = lm_vm::load(module).expect("the multiple default program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done((1, 2))");
+}
+
+#[test]
 fn a_mutable_interface_method_crosses_a_module_boundary() {
     let library = compile_module(
         "lib.domain",
