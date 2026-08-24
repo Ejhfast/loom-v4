@@ -1091,7 +1091,7 @@ Remove ambient clock reads from pure runtime crates.
 
 Release an idle signal guardian.
 
-Record the ledger update comparison and complete baseline metadata.
+Record the accepted ledger design and complete baseline metadata.
 
 ### Stage 3: Add the bounded worker pool
 
