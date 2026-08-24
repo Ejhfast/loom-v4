@@ -1086,7 +1086,7 @@ fn bench_parallel_allocation_churn() {
     report_parallel_counters("steady_allocation", &steady_source, 1, &steady_expected);
     report_parallel_counters("steady_allocation", &steady_source, 8, &steady_expected);
     assert!(
-        speedup >= 4.0,
+        speedup >= 5.0,
         "eight churn tasks reached {speedup:.3}x on eight workers"
     );
 }

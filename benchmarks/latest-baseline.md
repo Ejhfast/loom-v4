@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `1e9ac3c`.
+The measured source revision is `ed220d2`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -39,7 +39,7 @@ The snapshot format version is 30.
 
 ## Language operations
 
-Each result is the median of four benchmark processes.
+Each result is the median of at least three benchmark processes.
 
 Each process reports one nine-run median.
 
@@ -47,9 +47,9 @@ Each process reports one nine-run median.
 | --- | ---: |
 | `int_loop` | 33.4 ns |
 | `direct_call` | 31.9 ns |
-| `string_interp` | 254.2 ns |
+| `string_interp` | 205.9 ns |
 | `float_add` | 33.4 ns |
-| `string_builder` | 44.3 ns |
+| `string_builder` | 41.9 ns |
 | `byte_buffer` | 40.9 ns |
 | `direct_clock` | 110.3 ns |
 
@@ -57,7 +57,7 @@ String and interpreter measurements can vary with process placement.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 44.41 seconds.
+The warm debug workspace suite completed in 43.95 seconds.
 
 The suite used Cargo's default test concurrency and full coverage.
 
@@ -99,17 +99,22 @@ Each benchmark run uses nine measured executions after one warm execution.
 
 | Workload | Tasks | Workers | One worker | Stated workers | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Integer loop | 2 | 2 | 57.084 ms | 30.161 ms | 1.893x |
-| Integer loop | 4 | 4 | 111.908 ms | 30.097 ms | 3.718x |
-| Text building | 8 | 4 | 103.283 ms | 27.699 ms | 3.729x |
-| Text building | 8 | 8 | 103.283 ms | 14.447 ms | 7.149x |
-| Split n-queens | 12 | 12 | 210.004 ms | 24.947 ms | 8.418x |
+| Integer loop | 2 | 2 | 46.310 ms | 23.187 ms | 2.005x |
+| Integer loop | 4 | 4 | 90.844 ms | 24.077 ms | 3.773x |
+| Text building | 8 | 4 | 88.099 ms | 23.683 ms | 3.714x |
+| Text building | 8 | 8 | 88.099 ms | 14.102 ms | 6.250x |
+| Text churn | 8 | 8 | 679.415 ms | 103.645 ms | 6.556x |
+| Split n-queens | 12 | 12 | 179.176 ms | 19.635 ms | 9.006x |
 
 The pool starts only when a second task can run.
 
 A root-only parallel run uses the inline execution path.
 
 Boundary-heavy message tasks also remain on the coordinator fast path.
+
+The text-churn row creates one formatted string for each append.
+
+Adaptive local collection limits dead-object retention before the hard heap limit.
 
 ### Parallel messages
 
@@ -121,13 +126,13 @@ The ratio is deterministic time divided by parallel time.
 
 | Case | Messages | Workers | Deterministic | Deterministic p95 | Parallel | Parallel p95 | Ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ping-pong | 4,003 | 4 | 4.200 ms | 4.445 ms | 4.126 ms | 4.151 ms | 1.018x |
-| Stream | 500 | 4 | 0.179 ms | 0.184 ms | 0.181 ms | 0.184 ms | 0.989x |
-| Independent pairs | 4,012 | 4 | 4.251 ms | 4.261 ms | 4.267 ms | 4.299 ms | 0.996x |
-| Many senders | 800 | 4 | 0.335 ms | 0.339 ms | 0.333 ms | 0.336 ms | 1.006x |
-| Allocated stream | 200 | 4 | 0.153 ms | 0.159 ms | 0.153 ms | 0.163 ms | 1.000x |
+| Ping-pong | 4,003 | 4 | 4.223 ms | 4.391 ms | 4.116 ms | 4.173 ms | 1.026x |
+| Stream | 500 | 4 | 0.181 ms | 0.186 ms | 0.180 ms | 0.183 ms | 0.996x |
+| Independent pairs | 4,012 | 4 | 4.186 ms | 4.203 ms | 4.245 ms | 4.258 ms | 0.987x |
+| Many senders | 800 | 4 | 0.332 ms | 0.336 ms | 0.332 ms | 0.333 ms | 1.007x |
+| Allocated stream | 200 | 4 | 0.154 ms | 0.161 ms | 0.155 ms | 0.160 ms | 0.981x |
 
-The aggregate message ratio is 1.006x.
+The aggregate message ratio is 1.011x.
 
 ## Host readiness observations
 
@@ -139,4 +144,4 @@ A mixed output and child wait could block for more than 15 seconds.
 
 The shared completion queue removed all three conditions.
 
-The execution boundary now keeps every normal ledger writer on the coordinator.
+The execution boundary keeps resource registry updates on the coordinator.
