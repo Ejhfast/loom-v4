@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `ed220d2`.
+The measured source revision is `eb3e4d1`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -12,7 +12,7 @@ Release runtime benchmarks use deterministic scheduler mode and zero scheduler w
 
 The operating system selects processors for each benchmark process.
 
-The bytecode version is 55.
+The bytecode version is 56.
 
 The verifier version is 36.
 
@@ -22,20 +22,20 @@ The snapshot format version is 30.
 
 | Measurement | Result |
 | --- | ---: |
-| Classes | 302 |
-| HIR functions | 571 |
-| Bytecode functions | 873 |
-| Artifact size | 264,401 bytes |
-| Core checking | 2.125 ms |
-| Core lowering | 0.960 ms |
-| Core compilation | 3.430 ms |
-| Core decoding | 0.383 ms |
-| Core verification | 1.256 ms |
-| Structural verification | 0.451 ms |
-| Verification hash | 0.127 ms |
-| Semantic identity | 2.384 ms |
-| Decoded loading | 1.431 ms |
-| Core loading | 1.818 ms |
+| Classes | 296 |
+| HIR functions | 595 |
+| Bytecode functions | 891 |
+| Artifact size | 273,244 bytes |
+| Core checking | 2.424 ms |
+| Core lowering | 0.989 ms |
+| Core compilation | 3.816 ms |
+| Core decoding | 0.405 ms |
+| Core verification | 1.460 ms |
+| Structural verification | 0.533 ms |
+| Verification hash | 0.141 ms |
+| Semantic identity | 2.474 ms |
+| Decoded loading | 1.648 ms |
+| Core loading | 2.065 ms |
 
 ## Language operations
 
@@ -57,7 +57,7 @@ String and interpreter measurements can vary with process placement.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 43.95 seconds.
+The debug workspace suite completed in 54.84 seconds.
 
 The suite used Cargo's default test concurrency and full coverage.
 
@@ -133,6 +133,22 @@ The ratio is deterministic time divided by parallel time.
 | Allocated stream | 200 | 4 | 0.154 ms | 0.161 ms | 0.155 ms | 0.160 ms | 0.981x |
 
 The aggregate message ratio is 1.011x.
+
+## Structured parallelism
+
+Each result compares `Iterable.par_map` with an equivalent implementation.
+
+| Mode | Workers | Reference | `par_map` | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Parallel | 4 | 290.587 ms | 281.553 ms | 0.969x |
+| Parallel | 12 | 112.331 ms | 109.474 ms | 0.975x |
+| Deterministic | 1 | 990.630 ms | 985.786 ms | 0.995x |
+
+The parallel reference uses the same proc chunking policy.
+
+The deterministic reference uses `Iterable.map`.
+
+The acceptance limit is 1.08x for each ratio.
 
 ## Host readiness observations
 
