@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `ec6b9dd`.
+The measured source revision is `727a335`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -57,7 +57,7 @@ String and interpreter measurements can vary with process placement.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 44.40 seconds.
+The warm debug workspace suite completed in 44.60 seconds.
 
 The suite used Cargo's default test concurrency and full coverage.
 
@@ -91,16 +91,19 @@ The owned execution lease passes one real cross-thread execution test.
 
 ## Parallel scheduler
 
-These results use parallel scheduler mode and the default 4,096-instruction lease.
+These results use parallel scheduler mode and the default 4,096-instruction turn.
 
 Each result is the median of three complete benchmark runs.
 
 Each benchmark run uses nine measured executions after one warm execution.
 
-| Tasks | Workers | One worker | Stated workers | Speedup |
-| ---: | ---: | ---: | ---: | ---: |
-| 2 | 2 | 76.580 ms | 36.831 ms | 2.079x |
-| 4 | 4 | 149.266 ms | 39.217 ms | 3.806x |
+| Workload | Tasks | Workers | One worker | Stated workers | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Integer loop | 2 | 2 | 57.084 ms | 30.161 ms | 1.893x |
+| Integer loop | 4 | 4 | 111.908 ms | 30.097 ms | 3.718x |
+| Text building | 8 | 4 | 103.283 ms | 27.699 ms | 3.729x |
+| Text building | 8 | 8 | 103.283 ms | 14.447 ms | 7.149x |
+| Split n-queens | 12 | 12 | 210.004 ms | 24.947 ms | 8.418x |
 
 The pool starts only when a second task can run.
 
@@ -116,13 +119,13 @@ The ratio is deterministic time divided by parallel time.
 
 | Case | Messages | Workers | Deterministic | Deterministic p95 | Parallel | Parallel p95 | Ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ping-pong | 4,003 | 4 | 4.342 ms | 4.561 ms | 4.217 ms | 4.267 ms | 1.030x |
-| Stream | 500 | 4 | 0.183 ms | 0.211 ms | 0.180 ms | 0.190 ms | 1.016x |
-| Independent pairs | 4,012 | 4 | 4.330 ms | 4.350 ms | 4.332 ms | 4.360 ms | 1.000x |
-| Many senders | 800 | 4 | 0.329 ms | 0.334 ms | 0.330 ms | 0.338 ms | 0.997x |
-| Allocated stream | 200 | 4 | 0.155 ms | 0.158 ms | 0.157 ms | 0.161 ms | 0.988x |
+| Ping-pong | 4,003 | 4 | 4.255 ms | 4.266 ms | 4.280 ms | 4.313 ms | 0.994x |
+| Stream | 500 | 4 | 0.183 ms | 0.185 ms | 0.183 ms | 0.188 ms | 1.000x |
+| Independent pairs | 4,012 | 4 | 4.351 ms | 4.414 ms | 4.396 ms | 4.424 ms | 0.990x |
+| Many senders | 800 | 4 | 0.332 ms | 0.334 ms | 0.334 ms | 0.336 ms | 0.994x |
+| Allocated stream | 200 | 4 | 0.157 ms | 0.160 ms | 0.157 ms | 0.160 ms | 1.000x |
 
-The aggregate message ratio is 1.013x.
+The aggregate message ratio is 0.992x.
 
 ## Host readiness observations
 
