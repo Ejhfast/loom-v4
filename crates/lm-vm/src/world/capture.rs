@@ -203,14 +203,14 @@ impl World {
                             self.make_instance(vm, self.core.result_err, vec![error])
                         });
                 }
-                Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
                     self.discard_restore_reply(vm, reply);
                     self.rollback_run_target(vm, target);
                     self.fault_caller(
                         vm,
                         op,
                         FaultCode::BoundaryViolation,
-                        "the snapshot image was admitted against another program",
+                        "the snapshot image is incompatible with this machine world",
                     );
                     return;
                 }
@@ -313,12 +313,12 @@ impl World {
                     self.reply_or_fault(vm, op, built);
                     return;
                 }
-                Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
                     self.fault_caller(
                         vm,
                         op,
                         FaultCode::BoundaryViolation,
-                        "the snapshot is not a full VM image for this program",
+                        "the snapshot is not a compatible full VM image",
                     );
                     return;
                 }

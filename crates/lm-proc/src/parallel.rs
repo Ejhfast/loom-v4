@@ -37,7 +37,6 @@ impl std::error::Error for SchedulerError {}
 struct ActiveJob {
     job: ParallelJob,
     starts_slice: bool,
-    exclusive: bool,
     recall_requested: bool,
 }
 
@@ -64,7 +63,6 @@ struct ParallelCoordinator<'a> {
     active: BTreeMap<u64, ActiveJob>,
     returned: VecDeque<ParallelReturned>,
     continuations: VecDeque<PendingContinuation>,
-    quiescent: VecDeque<ParallelContinuation>,
     fallbacks: VecDeque<PendingFallback>,
     scoped_stops: BTreeSet<TaskKey>,
     commit_quiescence: bool,
@@ -117,7 +115,6 @@ impl Scheduler {
             active: BTreeMap::new(),
             returned: VecDeque::new(),
             continuations: VecDeque::new(),
-            quiescent: VecDeque::new(),
             fallbacks: VecDeque::new(),
             scoped_stops: BTreeSet::new(),
             commit_quiescence: false,
@@ -184,16 +181,6 @@ impl ParallelCoordinator<'_> {
             }
 
             if self.active.is_empty() {
-                if let Some(continuation) = self.quiescent.pop_front() {
-                    self.park_retained_continuations()?;
-                    let lease = self.take_lease()?;
-                    let step = self
-                        .world
-                        .continue_parallel_slice(continuation, lease, true)
-                        .map_err(|error| SchedulerError::new(error.to_string()))?;
-                    self.accept_step(step, false, true)?;
-                    continue;
-                }
                 if let Some(fallback) = self.fallbacks.pop_front() {
                     self.park_retained_continuations()?;
                     let task = fallback.fallback.task();
@@ -300,7 +287,7 @@ impl ParallelCoordinator<'_> {
                     .world
                     .continue_parallel_slice(pending.continuation, lease, false)
                     .map_err(|error| SchedulerError::new(error.to_string()))?;
-                self.accept_step(step, false, false)?;
+                self.accept_step(step, false)?;
                 continue;
             }
             let Some(task) = self
@@ -322,7 +309,7 @@ impl ParallelCoordinator<'_> {
                 .world
                 .begin_parallel_slice(task, u32::MAX, lease)
                 .map_err(|error| SchedulerError::new(error.to_string()))?;
-            self.accept_step(step, true, false)?;
+            self.accept_step(step, true)?;
         }
         Ok(())
     }
@@ -331,7 +318,6 @@ impl ParallelCoordinator<'_> {
         &mut self,
         step: ParallelStep,
         starts_slice: bool,
-        exclusive: bool,
     ) -> Result<(), SchedulerError> {
         match step {
             ParallelStep::Dispatch(dispatch) => {
@@ -357,7 +343,6 @@ impl ParallelCoordinator<'_> {
                     ActiveJob {
                         job,
                         starts_slice,
-                        exclusive,
                         recall_requested: false,
                     },
                 );
@@ -376,11 +361,6 @@ impl ParallelCoordinator<'_> {
             ParallelStep::Continue(continuation) => {
                 self.continuations
                     .push_back(PendingContinuation { continuation });
-            }
-            ParallelStep::Quiesce(continuation) => {
-                self.scheduler.stats.global_quiescence =
-                    self.scheduler.stats.global_quiescence.saturating_add(1);
-                self.quiescent.push_back(continuation);
             }
             ParallelStep::Fallback(fallback) => self.fallbacks.push_back(PendingFallback {
                 fallback,
@@ -535,7 +515,7 @@ impl ParallelCoordinator<'_> {
                     debug_assert_eq!(task, completed);
                     self.finish_slice(completed, exit);
                 }
-                other => self.accept_step(other, false, false)?,
+                other => self.accept_step(other, false)?,
             }
         }
     }
@@ -557,24 +537,11 @@ impl ParallelCoordinator<'_> {
     }
 
     fn needs_quiescence(&self) -> bool {
-        self.commit_quiescence
-            || !self.quiescent.is_empty()
-            || !self.fallbacks.is_empty()
-            || self.active.values().any(|active| active.exclusive)
-            || self
-                .returned
-                .iter()
-                .any(ParallelReturned::needs_global_quiescence)
+        self.commit_quiescence || !self.fallbacks.is_empty()
     }
 
     fn needs_global_recall(&self) -> bool {
-        self.commit_quiescence
-            || !self.quiescent.is_empty()
-            || !self.fallbacks.is_empty()
-            || self
-                .returned
-                .iter()
-                .any(ParallelReturned::needs_global_quiescence)
+        self.commit_quiescence || !self.fallbacks.is_empty()
     }
 
     fn recall_machine(&mut self, key: TaskKey) {
@@ -618,7 +585,6 @@ impl ParallelCoordinator<'_> {
         while let Some(pending) = self.continuations.pop_front() {
             retained.push_back(pending.continuation);
         }
-        retained.append(&mut self.quiescent);
         while let Some(continuation) = retained.pop_front() {
             let (task, exit) = self
                 .world
@@ -639,7 +605,7 @@ impl ParallelCoordinator<'_> {
                     .map_err(|error| SchedulerError::new(error.to_string()))?;
                 match step {
                     ParallelStep::Complete { task, exit } => self.finish_slice(task, exit),
-                    ParallelStep::Continue(continuation) | ParallelStep::Quiesce(continuation) => {
+                    ParallelStep::Continue(continuation) => {
                         self.continuations
                             .push_back(PendingContinuation { continuation });
                     }
@@ -668,8 +634,7 @@ impl ParallelCoordinator<'_> {
     }
 
     fn park_retained_machine(&mut self, key: TaskKey) -> Result<bool, SchedulerError> {
-        let continuation = take_continuation_for(&mut self.continuations, key.vm)
-            .or_else(|| take_parallel_continuation_for(&mut self.quiescent, key.vm));
+        let continuation = take_continuation_for(&mut self.continuations, key.vm);
         let Some(continuation) = continuation else {
             return Ok(false);
         };
@@ -852,14 +817,4 @@ fn take_continuation_for(
         .iter()
         .position(|pending| pending.continuation.contains_machine(vm))?;
     queue.remove(at).map(|pending| pending.continuation)
-}
-
-fn take_parallel_continuation_for(
-    queue: &mut VecDeque<ParallelContinuation>,
-    vm: lm_vm::VmId,
-) -> Option<ParallelContinuation> {
-    let at = queue
-        .iter()
-        .position(|continuation| continuation.contains_machine(vm))?;
-    queue.remove(at)
 }

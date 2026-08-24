@@ -740,13 +740,11 @@ pub enum SnapshotFail {
 pub enum RestoreFail {
     /// The restored world passed a machine, heap, or graph limit.
     LimitExceeded,
-    /// The image passed admission against another program than the one
-    /// this world runs.
+    /// The admitted image cannot resolve against this world's code.
     ///
-    /// Every function slot, class slot, and literal slot of an image
-    /// belongs to the program that admitted it. A restore into another
-    /// program would read those slots against the wrong tables.
-    OtherProgram,
+    /// The base identity, installed-code prefix, image role, and slot
+    /// contracts must match the restore target.
+    IncompatibleImage,
 }
 
 /// The stage that rejected one container.

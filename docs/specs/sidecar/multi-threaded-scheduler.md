@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: Stages 0 through 7 are complete. Stage 8 remains planned.
+Status: Stages 0 through 7 are complete. The reified-VM cleanup is accepted. Stage 8 remains planned.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -49,7 +49,7 @@ This work does not add shared-memory guest objects.
 
 This work does not make one VM execute concurrently.
 
-This work does not make held VMs independent scheduler tasks.
+This work does not schedule a held VM without an armed wait or an explicit ownership transfer.
 
 This work does not add distributed scheduling.
 
@@ -845,23 +845,25 @@ Worker identifiers do not appear in the semantic trace.
 
 ## 18. Snapshot barriers
 
-### 18.1 Global restore fallback
+### 18.1 Restore publication
 
-Stage 3 provides one global quiescence fallback.
+Restore uses no global stop.
 
-The coordinator stops new dispatch and waits for every active lease.
+A restore without new code changes coordinator-owned records only.
 
-Every recalled lease returns within its current turn, except during one long instruction.
+A code-carrying restore publishes an additive immutable execution view.
 
-The coordinator then applies the existing serial control operation.
+Existing function identifiers and existing slot targets do not change.
 
-This fallback covers structural restore operations.
+Active leases keep their pinned views.
 
-Stage 4 uses target residency for sends and other ordinary world transactions.
+Later leases can use the published view.
 
-Stage 5 uses scoped barriers for pause, snapshot, installation, and replacement.
+The coordinator serializes concurrent restore commits.
 
-The fallback remains a correctness path for unexpected transaction conflicts.
+An unexpected transaction conflict is an invalid scheduler state.
+
+The scheduler reports that state. It does not run a hidden serial fallback.
 
 A parallel barrier first finds one target task set.
 
@@ -939,6 +941,8 @@ Each execution lease pins one immutable module, dispatch, and slot-table version
 
 Installation builds and publishes a new immutable execution view.
 
+Additive installation uses no safepoint.
+
 Later leases use that view.
 
 An active lease can finish with its prior view.
@@ -946,6 +950,46 @@ An active lease can finish with its prior view.
 Any edit to an existing slot still uses the image safepoint.
 
 A compiled-code cache keys each entry by verified function identity and engine version.
+
+### 19.4 Armed held runs
+
+Each armed `drive_wait` leaf can execute as a transient scheduler task.
+
+The held run keeps holder ownership.
+
+Parallel mode can lease several armed runs at the same time.
+
+Selection commits one ready result and withdraws every losing leaf.
+
+A withdrawn run stops at its next worker boundary.
+
+Work completed before withdrawal remains visible in that run.
+
+Fixed `select` arms serve supervisors and other fixed wait sets.
+
+Runtime-sized multishot search uses explicit scheduler transfer instead.
+
+### 19.5 In-memory branches
+
+`Run.branch()` copies one admitted held machine world in memory.
+
+It writes no snapshot container and computes no container hash.
+
+It returns a held `Run` and performs no hidden scheduler submission.
+
+The caller can transfer that run through `sys.proc.run`.
+
+Several transferred branches can execute concurrently.
+
+A branch rejects a live host attachment.
+
+A branch also rejects a machine, image, heap, or graph limit.
+
+The operation shares immutable verified code and copies mutable machine state.
+
+The first implementation can reuse the admitted image representation.
+
+Performance gates determine whether a more direct graph copy adds value.
 
 ## 20. Termination and failure
 
@@ -1395,8 +1439,6 @@ Every machine-specific pending commit recalls its destination lease.
 A compute-heavy receiver can return once for each deferred transaction.
 
 This cost follows cross-machine traffic instead of ordinary compute turns.
-
-The first scheduler keeps structural restore as a global control operation.
 
 One global type interner lock can limit generic workloads with many new types.
 

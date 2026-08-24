@@ -719,7 +719,6 @@ impl World {
             ExecutionStop::QuantumExpired
             | ExecutionStop::Recalled
             | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
-            ExecutionStop::NeedsQuiescence => {}
             ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {
                 if self.machines[vm as usize].start_body.is_some() {
                     self.enter_proc_body(vm, value);

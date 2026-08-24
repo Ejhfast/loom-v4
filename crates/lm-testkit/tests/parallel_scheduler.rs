@@ -159,6 +159,82 @@ capture()
 }
 
 #[test]
+fn restore_does_not_stop_unrelated_active_workers() {
+    let source = r#"
+class Gate < Proc[Int]
+  def on_spawn(self): Int with Proc
+    first = case self.receive()
+    in Msg(value) then value
+    in Closed then 0
+    end
+    second = case self.receive()
+    in Msg(value) then value
+    in Closed then 0
+    end
+    first + second
+  end
+end
+
+class Spinner < Proc
+  gate: Handle[Int, Int]
+
+  def init(mut self, gate: Handle[Int, Int])
+    self.gate = gate
+  end
+
+  def on_spawn(self): Int with Proc
+    self.gate.send(1)
+    value = 0
+    while value < 2000000
+      value = value + 1
+    end
+    value
+  end
+end
+
+def answer(): Int
+  7
+end
+
+def exercise(): Bool with Proc, Vm
+  original = sys.vm.Vm().activate_or_fault(answer, args: ())
+  snapshot = case original.snapshot()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+
+  gate = Gate.spawn()
+  left = Spinner.spawn(gate)
+  right = Spinner.spawn(gate)
+  case gate.done()
+  in Ok(2) then ()
+  in Ok(_) then return false
+  in Err(_) then return false
+  end
+
+  restored = case sys.vm.Vm().restore(snapshot)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  restored_value = case restored.run()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  left_done = left.done().is_ok()
+  right_done = right.done().is_ok()
+  restored_value == 7 and left_done and right_done
+end
+
+exercise()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 3, &["Proc", "Vm"]).expect("the active restore runs");
+    assert_eq!(outcome, "Done(true)");
+    assert!(stats.max_active_leases >= 2);
+    assert_eq!(stats.global_quiescence, 0);
+}
+
+#[test]
 fn one_runnable_task_stays_on_the_inline_path() {
     let source = "i = 0\nwhile i < 10000\n  i = i + 1\nend\ni\n";
     let (outcome, stats) = run_parallel(source, 4).expect("the inline world runs");
@@ -904,7 +980,7 @@ captured and worker_finished and child_finished
 }
 
 #[test]
-fn installation_stops_an_active_image_proc_at_one_scoped_safepoint() {
+fn additive_installation_does_not_stop_an_active_image_proc() {
     let source = r#"
 class Signal < Proc[Int]
   def on_spawn(self): Int with Proc
@@ -976,7 +1052,7 @@ exercise()
         run_parallel_with(source, 3, &["Proc", "Vm"]).expect("the active installation runs");
     assert_eq!(outcome, "Done(Ok(true))");
     assert!(stats.max_active_leases >= 2);
-    assert!(stats.scoped_safepoint_waits > 0);
+    assert_eq!(stats.scoped_safepoint_waits, 0);
     assert_eq!(stats.global_quiescence, 0);
 }
 

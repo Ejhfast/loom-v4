@@ -81,7 +81,7 @@ impl World {
     ) -> Result<RestorePlan, RestoreFail> {
         let image = admitted.world();
         if image.distinguished != Some(0) || image.full_vm.is_some() {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         let target_image = self
             .machines
@@ -106,10 +106,10 @@ impl World {
     ) -> Result<VmRestorePlan, RestoreFail> {
         let image = admitted.world();
         let Some(source_image) = image.full_vm else {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         };
         if image.distinguished.is_some() {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         let target_image = self
             .new_vm_image(restorer)
@@ -190,22 +190,22 @@ impl World {
         let identity = admitted.identity();
         let base = self
             .base_identity()
-            .map_err(|_| RestoreFail::OtherProgram)?;
+            .map_err(|_| RestoreFail::IncompatibleImage)?;
         if identity.base_semantic != base.semantic_hash
             || identity.base_verification != self.base_verification_hash()
             || identity.bundle_digest != self.loaded.bundle().digest()
         {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         let aggregate_matches = identity.module_semantic
             == self
                 .identity()
-                .map_err(|_| RestoreFail::OtherProgram)?
+                .map_err(|_| RestoreFail::IncompatibleImage)?
                 .semantic_hash
             && identity.verification == self.verification_hash();
         let current_is_base = self.verification_hash() == self.base_verification_hash();
         if !aggregate_matches && !current_is_base {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         let loaded = (!aggregate_matches).then(|| admitted.loaded().clone());
         if aggregate_matches
@@ -216,7 +216,7 @@ impl World {
                     .zip(&admitted.world().installations)
                     .any(|(left, right)| left.as_slice() != right.as_slice()))
         {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         if self.machines.get(restorer as usize).is_none()
             || target.is_some_and(|target| {
@@ -230,7 +230,7 @@ impl World {
         let image = admitted.world();
         let count = image.machines.len();
         if (count == 0 && target.is_some()) || (count != 0 && target.is_none()) {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         let added = count.saturating_sub(usize::from(target.is_some()));
         if !self.has_machine_room(added) {
@@ -447,19 +447,19 @@ impl World {
         artifacts: &[SharedBytes],
     ) -> Result<PreparedImages, RestoreFail> {
         if reused_source.is_some() != target_key.is_some() {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         if reused_source.is_some_and(|source| source as usize >= image.vm_images.len()) {
-            return Err(RestoreFail::OtherProgram);
+            return Err(RestoreFail::IncompatibleImage);
         }
         if image.vm_images.len() == 1 && reused_source == Some(0) {
             let source = &image.vm_images[0];
-            let key = target_key.ok_or(RestoreFail::OtherProgram)?;
+            let key = target_key.ok_or(RestoreFail::IncompatibleImage)?;
             let config = clamp_image(&source.limits, ceiling);
             let target = self
                 .vm_images
                 .get(key.image as usize)
-                .ok_or(RestoreFail::OtherProgram)?;
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let reuses_pristine_image = target.live
                 && target.generation == key.generation
                 && same_image_slots(&target.slots, &source.slots)
@@ -555,10 +555,10 @@ impl World {
             for instance in &source.instances {
                 let artifact = artifacts
                     .get(instance.installation as usize)
-                    .ok_or(RestoreFail::OtherProgram)?;
+                    .ok_or(RestoreFail::IncompatibleImage)?;
                 let module =
                     lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
-                        .map_err(|_| RestoreFail::OtherProgram)?;
+                        .map_err(|_| RestoreFail::IncompatibleImage)?;
                 let mut exports = try_vec(module.exports.len())?;
                 for export in &module.exports {
                     if export.kind != lm_bytecode::ExportKind::Function {
@@ -567,7 +567,7 @@ impl World {
                     let function = *instance
                         .funcs
                         .get(export.def as usize)
-                        .ok_or(RestoreFail::OtherProgram)?;
+                        .ok_or(RestoreFail::IncompatibleImage)?;
                     let mut name = String::new();
                     name.try_reserve_exact(export.name.len())
                         .map_err(|_| RestoreFail::LimitExceeded)?;
@@ -587,17 +587,17 @@ impl World {
                             RuntimeSlotTarget::Function(
                                 *funcs
                                     .get(function as usize)
-                                    .ok_or(RestoreFail::OtherProgram)?,
+                                    .ok_or(RestoreFail::IncompatibleImage)?,
                             )
                         }
                         Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
                             RuntimeSlotTarget::Class {
                                 class: *classes
                                     .get(class as usize)
-                                    .ok_or(RestoreFail::OtherProgram)?,
+                                    .ok_or(RestoreFail::IncompatibleImage)?,
                                 constructor: *funcs
                                     .get(constructor as usize)
-                                    .ok_or(RestoreFail::OtherProgram)?,
+                                    .ok_or(RestoreFail::IncompatibleImage)?,
                             }
                         }
                         None => RuntimeSlotTarget::Empty,
@@ -876,7 +876,9 @@ fn restore_state(
     let mut frames = try_vec(source.frames.len())?;
     for frame in &source.frames {
         let closure = match frame.closure.map(object_value) {
-            Some(value) => Some(FrameCapture::from_value(value).ok_or(RestoreFail::OtherProgram)?),
+            Some(value) => {
+                Some(FrameCapture::from_value(value).ok_or(RestoreFail::IncompatibleImage)?)
+            }
             None => None,
         };
         frames.push(Frame {

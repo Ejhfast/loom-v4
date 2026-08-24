@@ -8,7 +8,6 @@ use crate::executor::{
     ExecutionCommit, ExecutionLease, ExecutionLimits, ExecutionReport, ExecutionReservation,
     ExecutionToken,
 };
-use crate::machine::operation_needs_global_quiescence;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -115,15 +114,8 @@ impl ParallelReturned {
     pub fn can_commit_out_of_order(&self) -> bool {
         matches!(
             self.stop,
-            ExecutionStop::QuantumExpired
-                | ExecutionStop::Recalled
-                | ExecutionStop::NeedsQuiescence
+            ExecutionStop::QuantumExpired | ExecutionStop::Recalled
         )
-    }
-
-    /// True when this report stopped before a global control operation.
-    pub fn needs_global_quiescence(&self) -> bool {
-        matches!(self.stop, ExecutionStop::NeedsQuiescence)
     }
 }
 
@@ -153,8 +145,6 @@ pub enum ParallelStep {
         /// The task's scheduler exit.
         exit: Option<SliceExit>,
     },
-    /// Quiesce active workers before one global operation.
-    Quiesce(ParallelContinuation),
     /// Continue this slice after the coordinator committed one action.
     Continue(ParallelContinuation),
     /// Quiesce active workers before one nested wait fallback.
@@ -452,9 +442,7 @@ impl World {
         self.machines[job.vm as usize].restore_worker_envs(envs);
         let reached_boundary = !matches!(
             stop,
-            ExecutionStop::QuantumExpired
-                | ExecutionStop::Recalled
-                | ExecutionStop::NeedsQuiescence
+            ExecutionStop::QuantumExpired | ExecutionStop::Recalled
         );
         let mut continuation = job.continuation;
         if matches!(stop, ExecutionStop::Recalled) {
@@ -478,9 +466,6 @@ impl World {
         };
         match outcome {
             ExecOutcome::Perform { op, args } => {
-                if operation_needs_global_quiescence(*op) {
-                    return ParallelRequirement::Quiescent;
-                }
                 if let Some(requirement) = self.policy_requirement(returned.vm) {
                     return requirement;
                 }
@@ -582,9 +567,7 @@ impl World {
                     Err(_) => return Some(ParallelRequirement::Ready),
                 }
             }
-            lm_abi::OP_VM_INSTALL
-            | lm_abi::OP_VM_INSTALL_WITH
-            | lm_abi::OP_VM_REPLACE_FUNCTION
+            lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
             | lm_abi::OP_VM_REPLACE_PROCESS
@@ -808,22 +791,6 @@ impl World {
             }
             ParallelRequirement::Quiescent if self.all_machines_resident() => {}
             ParallelRequirement::Quiescent => return Err(ParallelError::InvalidState),
-        }
-        if matches!(returned.stop, ExecutionStop::NeedsQuiescence) {
-            let event = self.commit_execution_stop(
-                &mut returned.continuation.stack,
-                returned.top_idx,
-                returned.vm,
-                &mut returned.continuation.quantum,
-                ExecutionCommit {
-                    stop: returned.stop,
-                    retired: returned.retired,
-                    reached_boundary: false,
-                    charge_fuel: false,
-                },
-            );
-            debug_assert!(event.is_none());
-            return Ok(ParallelStep::Quiesce(returned.continuation));
         }
         let event = self.commit_execution_stop(
             &mut returned.continuation.stack,

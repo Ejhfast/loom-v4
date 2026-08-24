@@ -578,26 +578,6 @@ pub enum ExecOutcome {
 /// Why one execution batch stopped without a world action.
 pub(crate) enum ExecError {
     Fault(FaultCode),
-    NeedsQuiescence,
-}
-
-pub(crate) fn operation_needs_global_quiescence(op: u32) -> bool {
-    matches!(op, lm_abi::OP_VM_RESTORE | lm_abi::OP_VM_RESTORE_VM)
-}
-
-fn instruction_needs_global_quiescence(instr: Instr, operands: &[Value]) -> bool {
-    match instr {
-        Instr::Perform { op, .. } => operation_needs_global_quiescence(op),
-        Instr::PerformValue { argc, .. } => usize::try_from(argc)
-            .ok()
-            .and_then(|argc| argc.checked_add(1))
-            .and_then(|width| operands.len().checked_sub(width))
-            .and_then(|index| operands.get(index))
-            .is_some_and(
-                |value| matches!(value, Value::Op(op) if operation_needs_global_quiescence(*op)),
-            ),
-        _ => false,
-    }
 }
 
 /// The serializable state of one machine.
@@ -5542,9 +5522,6 @@ impl Machine {
                 cached_block = block;
             }
             let instr = code[ip as usize];
-            if RESTRICTED_LEASE && instruction_needs_global_quiescence(instr, &self.vm.operands) {
-                break Err(ExecError::NeedsQuiescence);
-            }
             self.vm.fuel -= 1;
             let Some(frame) = self.vm.frames.last_mut() else {
                 break Err(ExecError::Fault(BAD_STATE));
@@ -6260,26 +6237,6 @@ fn is_decimal_float_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn first_class_operations_use_their_exact_quiescence_rule() {
-        let perform = Instr::PerformValue {
-            argc: 1,
-            reply_ty: 0,
-        };
-        assert!(!instruction_needs_global_quiescence(
-            perform,
-            &[Value::Op(lm_abi::OP_PROC_SEND), Value::Unit]
-        ));
-        assert!(!instruction_needs_global_quiescence(
-            perform,
-            &[Value::Op(lm_abi::OP_VM_SNAPSHOT_SELF), Value::Unit]
-        ));
-        assert!(instruction_needs_global_quiescence(
-            perform,
-            &[Value::Op(lm_abi::OP_VM_RESTORE), Value::Unit]
-        ));
-    }
 
     #[test]
     fn a_map_rebuilds_its_private_index_from_semantic_hashes() {

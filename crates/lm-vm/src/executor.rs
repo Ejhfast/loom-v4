@@ -208,7 +208,6 @@ impl ExecutionLease {
 pub(crate) enum ExecutionStop {
     QuantumExpired,
     Recalled,
-    NeedsQuiescence,
     Boundary(ExecOutcome),
     Fault(FaultCode),
 }
@@ -277,9 +276,7 @@ impl ExecutionReport {
     pub fn reached_boundary(&self) -> bool {
         !matches!(
             self.stop,
-            ExecutionStop::QuantumExpired
-                | ExecutionStop::Recalled
-                | ExecutionStop::NeedsQuiescence
+            ExecutionStop::QuantumExpired | ExecutionStop::Recalled
         )
     }
 
@@ -443,7 +440,6 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
         Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
-        Err(ExecError::NeedsQuiescence) => ExecutionStop::NeedsQuiescence,
     };
     ExecutionTurn::Report(lease.into_report(stop))
 }
@@ -478,9 +474,6 @@ pub(crate) fn execute_inline(
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
         Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
-        Err(ExecError::NeedsQuiescence) => {
-            unreachable!("inline execution is already coordinator-resident")
-        }
     };
     InlineExecutionReport {
         stop,
