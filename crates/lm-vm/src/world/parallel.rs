@@ -44,7 +44,7 @@ pub struct ParallelJob {
     vm: VmId,
     token: ExecutionToken,
     reservation: ExecutionReservation,
-    reserved_fuel: u32,
+    instruction_limit: u32,
 }
 
 impl ParallelJob {
@@ -56,6 +56,14 @@ impl ParallelJob {
     /// The machine returned by this report.
     pub fn machine(&self) -> VmId {
         self.vm
+    }
+
+    /// The leased machine identity and generation.
+    pub fn machine_key(&self) -> TaskKey {
+        TaskKey {
+            vm: self.vm,
+            generation: self.token.generation,
+        }
     }
 }
 
@@ -83,6 +91,7 @@ pub struct ParallelReturned {
     continuation: ParallelContinuation,
     top_idx: usize,
     vm: VmId,
+    generation: u32,
     stop: ExecutionStop,
     retired: u32,
     reached_boundary: bool,
@@ -99,11 +108,20 @@ impl ParallelReturned {
         self.vm
     }
 
+    /// The returned machine identity and generation.
+    pub fn machine_key(&self) -> TaskKey {
+        TaskKey {
+            vm: self.vm,
+            generation: self.generation,
+        }
+    }
+
     /// True when this report has no semantic world action.
     pub fn can_commit_out_of_order(&self) -> bool {
         matches!(
             self.stop,
             ExecutionStop::QuantumExpired
+                | ExecutionStop::Recalled
                 | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         )
@@ -394,6 +412,7 @@ impl World {
                 LEASE_HEAP_OBJECTS
             },
             exclusive_world,
+            fuel: Arc::clone(&self.budget.fuel),
         };
         let (worker, reservation) = ExecutionLease::new(
             token,
@@ -403,8 +422,6 @@ impl World {
             slots,
             limits,
         );
-        debug_assert!(u64::from(limit) <= self.budget.fuel);
-        self.budget.fuel -= u64::from(limit);
         Ok(ParallelStep::Dispatch(ParallelDispatch {
             lease: worker,
             job: ParallelJob {
@@ -413,7 +430,7 @@ impl World {
                 vm,
                 token,
                 reservation,
-                reserved_fuel: limit,
+                instruction_limit: limit,
             },
         }))
     }
@@ -426,14 +443,13 @@ impl World {
     ) -> Result<ParallelReturned, ParallelError> {
         let report_retired = report.retired_instructions();
         let valid = report.token() == job.token
-            && report_retired <= job.reserved_fuel
+            && report_retired <= job.instruction_limit
             && job.token.world == self.world_id
             && self
                 .machines
                 .get(job.vm as usize)
                 .is_some_and(|slot| slot.lease == Some(job.token));
         if !valid {
-            self.release_parallel_fuel(job.reserved_fuel, 0);
             job.reservation.cancel_destroyed();
             if let Some(slot) = self.machines.get_mut(job.vm as usize) {
                 slot.abandon_lease(job.token);
@@ -442,7 +458,6 @@ impl World {
             return Err(ParallelError::StaleReport);
         }
         let (token, machine, _code, mut envs, stop, retired) = report.into_parts(job.reservation);
-        self.release_parallel_fuel(job.reserved_fuel, retired);
         self.envs.merge_metrics(&mut envs);
         self.envs.sync_shared();
         envs.sync_shared();
@@ -457,13 +472,19 @@ impl World {
         let reached_boundary = !matches!(
             stop,
             ExecutionStop::QuantumExpired
+                | ExecutionStop::Recalled
                 | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         );
+        let mut continuation = job.continuation;
+        if matches!(stop, ExecutionStop::Recalled) {
+            continuation.quantum = Some(retired);
+        }
         Ok(ParallelReturned {
-            continuation: job.continuation,
+            continuation,
             top_idx: job.top_idx,
             vm: job.vm,
+            generation: job.token.generation,
             stop,
             retired,
             reached_boundary,
@@ -948,22 +969,12 @@ impl World {
 
     /// Cancel one job after its worker lost the machine.
     pub fn cancel_parallel_job(&mut self, job: ParallelJob) -> ParallelError {
-        self.release_parallel_fuel(job.reserved_fuel, 0);
         job.reservation.cancel_destroyed();
         if let Some(slot) = self.machines.get_mut(job.vm as usize) {
             slot.abandon_lease(job.token);
         }
         self.poisoned = true;
         ParallelError::WorkerFailed
-    }
-
-    fn release_parallel_fuel(&mut self, reserved: u32, retired: u32) {
-        debug_assert!(retired <= reserved);
-        self.budget.fuel = self
-            .budget
-            .fuel
-            .checked_add(u64::from(reserved.saturating_sub(retired)))
-            .expect("a returned fuel reservation fits its world limit");
     }
 
     /// True when every machine is coordinator-resident.

@@ -9,7 +9,92 @@ use crate::{DispatchRow, FaultCode};
 use lm_bytecode::closed::TypeEnvs;
 use lm_bytecode::Module;
 use lm_heap::HeapExecutionTicket;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// The exact instruction budget shared by one machine world.
+#[derive(Debug)]
+pub(crate) struct ExecutionFuel {
+    remaining: AtomicU64,
+}
+
+impl ExecutionFuel {
+    pub(crate) fn new(remaining: u64) -> ExecutionFuel {
+        ExecutionFuel {
+            remaining: AtomicU64::new(remaining),
+        }
+    }
+
+    pub(crate) fn remaining(&self) -> u64 {
+        self.remaining.load(Ordering::Relaxed)
+    }
+
+    fn claim(&self, limit: u32) -> u32 {
+        let mut current = self.remaining();
+        loop {
+            let claimed = current.min(u64::from(limit)) as u32;
+            if claimed == 0 {
+                return 0;
+            }
+            match self.remaining.compare_exchange_weak(
+                current,
+                current - u64::from(claimed),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return claimed,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn release(&self, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let result = self
+            .remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(u64::from(count))
+            });
+        assert!(result.is_ok(), "the world fuel counter cannot overflow");
+    }
+
+    pub(crate) fn charge(&self, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let result = self
+            .remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(u64::from(count))
+            });
+        assert!(result.is_ok(), "the world fuel counter cannot underflow");
+    }
+}
+
+struct ExecutionFuelClaim {
+    fuel: Arc<ExecutionFuel>,
+    claimed: u32,
+    retired: u32,
+}
+
+impl ExecutionFuelClaim {
+    fn new(fuel: Arc<ExecutionFuel>, limit: u32) -> ExecutionFuelClaim {
+        let claimed = fuel.claim(limit);
+        ExecutionFuelClaim {
+            fuel,
+            claimed,
+            retired: 0,
+        }
+    }
+}
+
+impl Drop for ExecutionFuelClaim {
+    fn drop(&mut self) {
+        self.fuel.release(self.claimed.saturating_sub(self.retired));
+    }
+}
 
 /// One immutable verified execution view.
 pub(crate) struct ExecutionCode {
@@ -40,16 +125,24 @@ pub struct ExecutionLease {
     code: Arc<ExecutionCode>,
     envs: Box<TypeEnvs>,
     slots: Option<Arc<Vec<ImageSlotTarget>>>,
+    fuel: Arc<ExecutionFuel>,
     instruction_limit: u32,
+    retired_instructions: u32,
+    turns: u32,
+    local_continuations: u32,
+    local_rotations: u32,
+    heap_before: usize,
+    objects_before: usize,
     restricted_world: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ExecutionLimits {
     pub(crate) instructions: u32,
     pub(crate) heap_trip_bytes: usize,
     pub(crate) heap_trip_objects: usize,
     pub(crate) exclusive_world: bool,
+    pub(crate) fuel: Arc<ExecutionFuel>,
 }
 
 /// Coordinator-owned accounting for one execution lease.
@@ -86,6 +179,8 @@ impl ExecutionLease {
             limits.heap_trip_objects,
         );
         let resources = machine.resources.begin_execution_lease(token.lease);
+        let heap_before = machine.vm.heap.used_bytes();
+        let objects_before = machine.vm.heap.stats().live;
         let reservation = ExecutionReservation {
             token,
             heap,
@@ -99,7 +194,14 @@ impl ExecutionLease {
                 code,
                 envs,
                 slots,
+                fuel: limits.fuel,
                 instruction_limit: limits.instructions,
+                retired_instructions: 0,
+                turns: 0,
+                local_continuations: 0,
+                local_rotations: 0,
+                heap_before,
+                objects_before,
                 restricted_world: !limits.exclusive_world,
             },
             reservation,
@@ -109,6 +211,7 @@ impl ExecutionLease {
 
 pub(crate) enum ExecutionStop {
     QuantumExpired,
+    Recalled,
     HeapTrip,
     NeedsQuiescence,
     Boundary(ExecOutcome),
@@ -131,7 +234,7 @@ impl InlineExecutionReport {
     pub(crate) fn into_commit(self) -> ExecutionCommit {
         let boundary = !matches!(
             self.stop,
-            ExecutionStop::QuantumExpired | ExecutionStop::HeapTrip
+            ExecutionStop::QuantumExpired | ExecutionStop::Recalled | ExecutionStop::HeapTrip
         );
         ExecutionCommit {
             stop: self.stop,
@@ -155,6 +258,9 @@ pub struct ExecutionReport {
     heap_after: usize,
     objects_before: usize,
     objects_after: usize,
+    turns: u32,
+    local_continuations: u32,
+    local_rotations: u32,
 }
 
 impl ExecutionReport {
@@ -177,6 +283,7 @@ impl ExecutionReport {
         !matches!(
             self.stop,
             ExecutionStop::QuantumExpired
+                | ExecutionStop::Recalled
                 | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         )
@@ -185,6 +292,26 @@ impl ExecutionReport {
     /// True when local heap growth crossed the soft trip point.
     pub fn stopped_at_heap_trip(&self) -> bool {
         matches!(self.stop, ExecutionStop::HeapTrip)
+    }
+
+    /// True when the pool recalled this lease.
+    pub fn stopped_by_recall(&self) -> bool {
+        matches!(self.stop, ExecutionStop::Recalled)
+    }
+
+    /// The worker-local turns in this lease.
+    pub fn turns(&self) -> u32 {
+        self.turns
+    }
+
+    /// The turns that continued without a queue rotation.
+    pub fn local_continuations(&self) -> u32 {
+        self.local_continuations
+    }
+
+    /// The turns that rotated this lease behind waiting work.
+    pub fn local_rotations(&self) -> u32 {
+        self.local_rotations
     }
 
     /// The positive local heap growth during this execution.
@@ -237,57 +364,118 @@ impl ExecutionReport {
     }
 }
 
-/// Execute one lease until a boundary or instruction limit.
-pub fn execute(lease: ExecutionLease) -> ExecutionReport {
-    let ExecutionLease {
-        token,
-        mut machine,
-        code,
-        mut envs,
-        slots,
-        instruction_limit,
-        restricted_world,
-    } = lease;
-    let heap_before = machine.vm.heap.used_bytes();
-    let objects_before = machine.vm.heap.stats().live;
-    let slots = slots.as_deref().map(Vec::as_slice);
-    let (outcome, retired_instructions) = if restricted_world {
-        machine.exec_for_quantum_restricted(
-            code.module.as_ref(),
-            code.dispatch.as_ref(),
-            &mut envs,
+impl ExecutionLease {
+    /// Record one turn that continued on the same worker.
+    pub fn note_local_continuation(&mut self) {
+        self.local_continuations = self.local_continuations.saturating_add(1);
+    }
+
+    /// Record one turn that moved behind waiting work.
+    pub fn note_local_rotation(&mut self) {
+        self.local_rotations = self.local_rotations.saturating_add(1);
+    }
+
+    fn into_report(self, stop: ExecutionStop) -> ExecutionReport {
+        let heap_after = self.machine.vm.heap.used_bytes();
+        let objects_after = self.machine.vm.heap.stats().live;
+        ExecutionReport {
+            token: self.token,
+            machine: self.machine,
+            code: self.code,
+            envs: self.envs,
+            stop,
+            retired_instructions: self.retired_instructions,
+            heap_before: self.heap_before,
+            heap_after,
+            objects_before: self.objects_before,
+            objects_after,
+            turns: self.turns,
+            local_continuations: self.local_continuations,
+            local_rotations: self.local_rotations,
+        }
+    }
+}
+
+/// The result of one worker-local execution turn.
+pub enum ExecutionTurn {
+    /// Keep the lease inside the worker pool.
+    Continue(ExecutionLease),
+    /// Return the lease to its world coordinator.
+    Report(ExecutionReport),
+}
+
+/// Execute one bounded worker-local turn.
+pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn {
+    let remaining = lease
+        .instruction_limit
+        .saturating_sub(lease.retired_instructions);
+    if remaining == 0 {
+        return ExecutionTurn::Report(lease.into_report(ExecutionStop::QuantumExpired));
+    }
+    let requested = remaining.min(turn_limit.max(1));
+    let mut claim = ExecutionFuelClaim::new(Arc::clone(&lease.fuel), requested);
+    if claim.claimed == 0 {
+        return ExecutionTurn::Report(
+            lease.into_report(ExecutionStop::Fault(FaultCode::OutOfFuel)),
+        );
+    }
+    let (outcome, retired) = {
+        let ExecutionLease {
+            machine,
+            code,
+            envs,
             slots,
-            instruction_limit,
-        )
-    } else {
-        machine.exec_for_quantum(
-            code.module.as_ref(),
-            code.dispatch.as_ref(),
-            &mut envs,
-            slots,
-            instruction_limit,
-        )
+            restricted_world,
+            ..
+        } = &mut lease;
+        let slots = slots.as_deref().map(Vec::as_slice);
+        let result = if *restricted_world {
+            machine.exec_for_quantum_restricted(
+                code.module.as_ref(),
+                code.dispatch.as_ref(),
+                envs,
+                slots,
+                claim.claimed,
+            )
+        } else {
+            machine.exec_for_quantum(
+                code.module.as_ref(),
+                code.dispatch.as_ref(),
+                envs,
+                slots,
+                claim.claimed,
+            )
+        };
+        claim.retired = result.1;
+        result
     };
-    let heap_after = machine.vm.heap.used_bytes();
-    let objects_after = machine.vm.heap.stats().live;
+    lease.retired_instructions = lease.retired_instructions.saturating_add(retired);
+    lease.turns = lease.turns.saturating_add(1);
     let stop = match outcome {
+        Ok(None) if lease.retired_instructions < lease.instruction_limit => {
+            return ExecutionTurn::Continue(lease);
+        }
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
         Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
         Err(ExecError::HeapTrip) => ExecutionStop::HeapTrip,
         Err(ExecError::NeedsQuiescence) => ExecutionStop::NeedsQuiescence,
     };
-    ExecutionReport {
-        token,
-        machine,
-        code,
-        envs,
-        stop,
-        retired_instructions,
-        heap_before,
-        heap_after,
-        objects_before,
-        objects_after,
+    ExecutionTurn::Report(lease.into_report(stop))
+}
+
+/// Return one lease at a pool recall point.
+pub fn recall(lease: ExecutionLease) -> ExecutionReport {
+    lease.into_report(ExecutionStop::Recalled)
+}
+
+/// Execute one lease until a boundary or instruction limit.
+pub fn execute(mut lease: ExecutionLease) -> ExecutionReport {
+    loop {
+        match execute_turn(lease, u32::MAX) {
+            ExecutionTurn::Continue(next) => lease = next,
+            ExecutionTurn::Report(report) => return report,
+        }
     }
 }
 
@@ -414,6 +602,7 @@ mod tests {
                 heap_trip_bytes: usize::MAX,
                 heap_trip_objects: usize::MAX,
                 exclusive_world: true,
+                fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
         );
         assert_eq!(budget.used_bytes(), 0);
@@ -497,6 +686,7 @@ mod tests {
                 heap_trip_bytes: usize::MAX,
                 heap_trip_objects: usize::MAX,
                 exclusive_world: false,
+                fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
         );
         let report = std::thread::spawn(move || execute(lease))
@@ -578,6 +768,7 @@ mod tests {
                 heap_trip_bytes: usize::MAX,
                 heap_trip_objects: usize::MAX,
                 exclusive_world: true,
+                fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
         );
         assert_eq!(heap_budget.used_bytes(), 0);

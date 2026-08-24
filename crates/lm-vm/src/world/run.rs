@@ -266,7 +266,7 @@ impl World {
 
     /// The instruction budget that remains for this world.
     pub fn world_fuel(&self) -> u64 {
-        self.budget.fuel
+        self.budget.fuel.remaining()
     }
 
     /// The decoded image storage held by the trusted cache.
@@ -396,7 +396,7 @@ impl World {
                     (machines.contains(&key.vm) && status == TaskStatus::Ready).then_some(key)
                 })
                 .collect();
-            let before = self.budget.fuel;
+            let before = self.budget.fuel.remaining();
             if ready.is_empty() {
                 // No proc of this world can move. Advance the held
                 // machine itself, so a resource that the held machine
@@ -408,7 +408,7 @@ impl World {
                     return Err(active);
                 }
                 let _ = self.control(root, StopMode::OneStep, Family::Step);
-                let retired = before.saturating_sub(self.budget.fuel);
+                let retired = before.saturating_sub(self.budget.fuel.remaining());
                 if retired == 0 {
                     let barrier = self.next_gate();
                     return self.capture_snapshot(barrier, root, false);
@@ -426,7 +426,7 @@ impl World {
             if exit == Some(SliceExit::Terminal) {
                 self.retire_scheduler_task(key);
             }
-            let retired = before.saturating_sub(self.budget.fuel);
+            let retired = before.saturating_sub(self.budget.fuel.remaining());
             if retired == 0 {
                 let barrier = self.next_gate();
                 return self.capture_snapshot(barrier, root, false);
@@ -722,7 +722,7 @@ impl World {
             self.metrics.boundary_exits = self.metrics.boundary_exits.saturating_add(1);
         }
         if charge_fuel {
-            self.budget.fuel -= u64::from(retired);
+            self.budget.fuel.charge(retired);
         }
         if let Some(remaining) = quantum {
             *remaining = remaining.saturating_sub(retired);
@@ -738,6 +738,7 @@ impl World {
                 self.machines[vm as usize].set_fault(code, execution_fault_message(code), None);
             }
             ExecutionStop::QuantumExpired
+            | ExecutionStop::Recalled
             | ExecutionStop::HeapTrip
             | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
             ExecutionStop::NeedsQuiescence => {}
@@ -1028,7 +1029,7 @@ impl World {
                         );
                         return DriverStep::Event(RootEvent::Ran);
                     }
-                    if self.budget.fuel == 0 {
+                    if self.budget.fuel.remaining() == 0 {
                         self.machines[act.vm as usize].set_fault(FaultCode::OutOfFuel, "", None);
                         continue;
                     }
@@ -1038,7 +1039,7 @@ impl World {
                         None if act.mode == StopMode::OneStep => 1,
                         None => u32::MAX,
                     };
-                    let available = self.budget.fuel.min(u64::from(u32::MAX)) as u32;
+                    let available = self.budget.fuel.remaining().min(u64::from(u32::MAX)) as u32;
                     // A bounded drive turn caps this batch, so the turn
                     // never retires past the bound its holder named.
                     let turn = stack

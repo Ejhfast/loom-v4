@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: Stages 0 through 6 are complete. Stages 7 and 8 remain planned.
+Status: Stages 0 through 7 are complete. Stage 8 remains planned.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -14,9 +14,9 @@ The coordinator owns the complete `World` and every cross-machine semantic commi
 
 A worker receives one exclusive execution lease for one machine.
 
-A worker runs guest instructions until a boundary or quantum limit.
+A worker runs guest instructions in bounded local turns.
 
-A worker then returns the complete machine and one execution report.
+A boundary, trip, fault, lease limit, or recall returns the machine.
 
 The coordinator applies sends, host requests, control operations, and terminal publication.
 
@@ -165,13 +165,13 @@ The resident machine table uses an explicit `Resident` or `Leased` state.
 
 ### 5.3 Why no work stealing first
 
-A central dispatcher is small and measurable.
+A shared pool FIFO is small and measurable.
 
-The fixed quantum already bounds every job.
+The fixed turn already bounds local scheduling delay.
 
 Work stealing adds local queues, stealing rules, affinity rules, and barrier coordination.
 
-The implementation adds work stealing only after coordinator measurements justify it.
+The implementation adds work stealing only after pool contention measurements justify it.
 
 ## 6. Terms
 
@@ -235,11 +235,23 @@ After pool activation, a ready task receives a worker or the coordinator inline 
 
 Parallel mode does not promise equal processor time.
 
-The default parallel lease is 4,096 guest instructions.
+The default parallel turn is 4,096 guest instructions.
+
+A worker lease can contain many parallel turns.
+
+Turn expiry stays inside the worker pool.
+
+The pool keeps one bounded FIFO of runnable leases.
+
+A worker continues its current lease when no other lease waits.
+
+A worker rotates its current lease when another lease waits.
+
+This local rotation does not commit world state.
 
 The deterministic quantum remains 1,024 guest instructions.
 
-The longer worker lease reduces coordinator traffic and keeps bounded stop delay.
+The local turn keeps bounded fairness and stop delay.
 
 Parallel mode starts with one coordinator probe.
 
@@ -293,9 +305,17 @@ An embedding host can inject one shared pool.
 
 `SchedulerConfig.parallel_with_pool(pool)` accepts one host-owned shared pool.
 
-The shared pool routes each result to its owning coordinator.
+The shared pool queues runnable leases from every coordinator.
 
-An idle worker wakes every coordinator that waits for pool capacity.
+A worker rotates leases in FIFO order after each bounded turn.
+
+An empty queue lets a worker continue its current lease.
+
+The shared queue gives weak fairness across coordinator Worlds.
+
+The queue contains only admitted machine leases.
+
+World machine limits bound its contribution to the queue.
 
 This rule prevents thread growth when one host runs many worlds.
 
@@ -311,22 +331,26 @@ The coordinator owns these values:
 - activation stacks;
 - ready and wait indexes;
 - VM images and current slot tables;
-- aggregate budgets;
+- aggregate heap and resource budgets;
 - snapshot barriers;
 - deferred world transactions.
 
-A worker owns these values during one job:
+A worker pool owns these values during one lease:
 
 - one leased `Machine`;
 - one lease token;
-- one instruction budget;
+- one remaining lease limit;
+- one parallel turn limit;
+- one shared world fuel ledger;
 - one soft heap growth trip point;
 - immutable verified code;
 - immutable dispatch data;
 - one immutable image slot view;
 - one closed-type access view.
 
-The worker returns all mutable values in one report.
+Local turn expiry keeps these values inside the pool.
+
+The pool returns all mutable values in one report.
 
 No worker stores a reference into `World`.
 
@@ -374,7 +398,8 @@ Conceptually, the boundary has this shape:
 
 ```text
 extract(task, limits) -> ExecutionLease
-execute(ExecutionLease) -> ExecutionReport
+execute_turn(ExecutionLease, turn) -> TurnResult
+return_lease(ExecutionLease, reason) -> ExecutionReport
 commit(ExecutionReport) -> ScheduleEvents
 ```
 
@@ -388,7 +413,9 @@ Both modes use one scheduler state machine and one report commit path.
 
 Deterministic mode uses borrowed synchronous transport.
 
-Parallel mode uses owned leases and queued reports.
+Parallel mode uses owned leases, a pool run queue, and queued reports.
+
+One lease can pass through many local turns before it produces a report.
 
 Deterministic mode never routes an inline slice through a worker queue.
 
@@ -410,12 +437,21 @@ The stop list includes these actions:
 - a cross-machine value transfer;
 - a pause or snapshot request;
 - a soft heap trip;
-- an instruction quantum expiry;
+- a pool recall;
+- an execution lease fuel limit;
 - a guest terminal result or fault.
 
 The report contains the retired instruction count and one optional action.
 
 The coordinator commits the action before it dispatches that task again.
+
+A parallel turn expiry stays inside the pool.
+
+The worker checks the pool queue after each turn.
+
+An empty queue lets the same lease continue without a coordinator report.
+
+A nonempty queue rotates the lease behind the waiting leases.
 
 ## 10. Cross-machine transactions
 
@@ -427,7 +463,11 @@ A cross-machine action returns its source machine before the transfer.
 
 If the destination is leased, the coordinator stores a deferred transaction.
 
-The destination returns within its bounded quantum.
+The pending transaction recalls the destination lease.
+
+The destination returns within one bounded parallel turn.
+
+This rule covers sends, closes, graph transfers, table edits, calls, requests, and policy parents.
 
 The coordinator then transfers the graph and updates the mailbox or reply state.
 
@@ -541,7 +581,7 @@ The coordinator serializes every normal aggregate update.
 
 A worker never charges those counters for each allocation.
 
-The coordinator reserves fuel before dispatch.
+Workers claim world fuel before each local turn.
 
 A worker lease contains local heap trip points.
 
@@ -551,15 +591,19 @@ The coordinator cancels each retained accounting ticket after worker failure.
 
 ### 13.1 Fuel
 
-The coordinator reserves the exact slice fuel before dispatch.
+The world fuel ledger supports atomic turn claims.
 
-The worker retires no instruction beyond that reservation.
+The worker claims at most one parallel turn before execution.
 
-The report returns unused fuel.
+The worker returns unused fuel after an early stop.
 
-The coordinator then updates the world fuel counter.
+The claim keeps the aggregate fuel limit exact.
 
-The quantum bounds instruction count. It does not bound one instruction's wall time.
+One atomic claim replaces one coordinator dispatch cycle.
+
+Deterministic mode updates the same ledger on its coordinator thread.
+
+The turn bounds instruction count. It does not bound one instruction's wall time.
 
 ### 13.2 Heap
 
@@ -575,7 +619,7 @@ The initial trip points are 64 KiB and 1,024 objects.
 
 The worker tests both trip points after each completed instruction.
 
-A crossed trip point ends the slice at that instruction boundary.
+A crossed trip point returns the lease at that instruction boundary.
 
 The report states exact local growth and released space.
 
@@ -833,7 +877,7 @@ Stage 3 provides one global quiescence fallback.
 
 The coordinator stops new dispatch and waits for every active lease.
 
-Every lease returns within its remaining quantum, except during one long instruction.
+Every recalled lease returns within its current turn, except during one long instruction.
 
 The coordinator then applies the existing serial control operation.
 
@@ -851,7 +895,7 @@ The pending control commit prevents new leases for that set.
 
 It issues no new lease for those tasks.
 
-Each active lease returns after its current instruction or remaining quantum.
+Each active lease returns after its current instruction or remaining turn.
 
 A native intrinsic or GC can extend this wall-clock delay.
 
@@ -889,7 +933,7 @@ A restored snapshot can use either scheduler mode.
 
 `pause` marks the proc task as stopping.
 
-An active lease returns after its current instruction or remaining quantum.
+An active lease returns after its current instruction or remaining turn.
 
 The coordinator returns the held VM only after the machine becomes resident.
 
@@ -972,7 +1016,7 @@ The executor boundary is also the future JIT boundary.
 The interpreter and JIT implement the same logical operation:
 
 ```text
-run_slice(ExecutionLease, SliceBudget) -> ExecutionReport
+run_turn(ExecutionLease, TurnBudget) -> TurnResult
 ```
 
 Compiled code is immutable and shared by verified function identity.
@@ -983,7 +1027,7 @@ No raw guest pointer survives a safepoint.
 
 The JIT materializes frames, values, roots, and program position before each safepoint.
 
-Safepoints include effects, allocation, yield, pause, barrier, replacement, fault, and quantum expiry.
+Safepoints include effects, allocation, yield, pause, barrier, replacement, fault, and turn expiry.
 
 Fuel remains defined in bytecode instructions.
 
@@ -1223,11 +1267,29 @@ Make parallel mode the CLI default after the performance gates pass.
 
 ### Stage 7: Stress and optimize
 
+Complete.
+
+Move ordinary parallel turn scheduling into the worker pool.
+
+Keep one machine lease in the pool across many turns.
+
+Queue runnable leases even when every worker is busy.
+
+Rotate waiting leases inside the pool after each turn.
+
+Return a lease only for a boundary, recall, trip, fault, terminal result, or lease limit.
+
+Recall every leased machine named by a pending commit requirement.
+
+Use the same recall path for barriers and shutdown.
+
+Keep aggregate fuel exact through worker turn claims.
+
 Run deterministic event scripts for every race class.
 
 Measure coordinator saturation, message delay, and type interner delay.
 
-Add work stealing only when the central dispatcher misses its gate.
+Add work stealing only when the shared FIFO misses its gate.
 
 Add transfer packets only when resident waits miss their gate.
 
@@ -1254,6 +1316,8 @@ The implementation must pass these gates:
 - same-sender mailbox order stays exact;
 - multi-sender tests accept only documented orders;
 - send and close races follow commit order;
+- a machine-specific pending commit recalls its leased target;
+- local turns rotate waiting compute tasks without a world commit;
 - mixed `select` sources commit one winner;
 - parent termination and child effects follow commit order;
 - pause completes during long pure computation;
@@ -1309,7 +1373,13 @@ Two independent CPU tasks target at least 1.7 times one-worker throughput.
 
 Four independent CPU tasks target at least 3.0 times one-worker throughput.
 
-This gate uses the default 4,096-instruction parallel lease.
+An eight-task allocating workload targets 3.0 times throughput on four workers.
+
+The same workload targets 5.0 times throughput on eight workers.
+
+A twelve-task split compute workload records its twelve-worker scaling.
+
+These gates use the default 4,096-instruction parallel turn.
 
 These scaling gates require dedicated hardware and several samples.
 
@@ -1343,7 +1413,13 @@ Boundary-heavy tasks can remain on the coordinator for their complete run.
 
 This choice avoids thread handoffs when those handoffs reduce throughput.
 
-Deferred two-machine transactions can wait for one destination quantum.
+Deferred two-machine transactions can wait for one destination turn.
+
+Every machine-specific pending commit recalls its destination lease.
+
+A compute-heavy receiver can return once for each deferred transaction.
+
+This cost follows cross-machine traffic instead of ordinary compute turns.
 
 Parallel aggregate heap accounting permits the bounded slack from section 13.2.
 
@@ -1353,13 +1429,13 @@ The first scheduler keeps structural restore as a global control operation.
 
 One global type interner lock can limit generic workloads with many new types.
 
-A stop request waits for at most the remaining quantum instructions.
+A recall waits for at most the remaining parallel turn instructions.
 
-The quantum does not bound wall-clock time.
+The turn does not bound wall-clock time.
 
 A long native intrinsic must provide an internal safepoint or remain below the latency gate.
 
-Per-machine GC can also extend one lease beyond its instruction quantum.
+Per-machine GC can also extend one turn beyond its instruction limit.
 
 The first implementation does not cancel or move a running GC.
 
@@ -1383,7 +1459,7 @@ Tokio documents the contention cost of one global queue for very short tasks.
 
 Wasmtime separates deterministic fuel from faster time-based interruption.
 
-These systems support Loom's private heaps, bounded slices, and measured central scheduling.
+These systems support Loom's private heaps, bounded turns, and worker-local rescheduling.
 
 References:
 

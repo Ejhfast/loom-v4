@@ -26,7 +26,7 @@ pub use parallel::{
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
-use crate::executor::ExecutionStop;
+use crate::executor::{ExecutionFuel, ExecutionStop};
 use crate::host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
@@ -199,7 +199,7 @@ struct WorldBudget {
     limits: WorldLimits,
     heap: HeapBudget,
     resources: crate::resource::ResourceBudget,
-    fuel: u64,
+    fuel: Arc<ExecutionFuel>,
 }
 
 /// One module installation inside one persistent VM image.
@@ -309,7 +309,7 @@ impl WorldBudget {
         WorldBudget {
             heap: HeapBudget::new(limits.max_heap_bytes, limits.max_heap_objects),
             resources: crate::resource::ResourceBudget::new(limits.max_resources),
-            fuel: limits.fuel,
+            fuel: Arc::new(ExecutionFuel::new(limits.fuel)),
             limits,
         }
     }
@@ -1091,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_parallel_job_reserves_and_reconciles_world_fuel_once() {
+    fn a_parallel_job_charges_exact_world_fuel_once() {
         let loaded = trivial_loaded();
         let limits = WorldLimits {
             fuel: 8,
@@ -1106,7 +1106,7 @@ mod tests {
         let ParallelStep::Dispatch(dispatch) = step else {
             panic!("the root slice produces one dispatch")
         };
-        assert_eq!(world.world_fuel(), 0);
+        assert_eq!(world.world_fuel(), 8);
         let (lease, job) = dispatch.into_parts();
         let report = crate::execute(lease);
         let retired = report.retired_instructions();
@@ -1134,6 +1134,7 @@ mod tests {
         };
         let (lease, job) = dispatch.into_parts();
         let mut report = crate::execute(lease);
+        let retired = report.retired_instructions();
         let token = report.token();
         report.replace_token_for_test(crate::executor::ExecutionToken {
             lease: token.lease + 1,
@@ -1144,7 +1145,7 @@ mod tests {
             Some(ParallelError::StaleReport)
         );
         assert!(world.is_poisoned());
-        assert_eq!(world.world_fuel(), fuel);
+        assert_eq!(world.world_fuel(), fuel - u64::from(retired));
         assert_eq!(world.budget.heap.used_bytes(), 0);
         assert_eq!(
             world.begin_parallel_slice(key, 16, 2).err(),

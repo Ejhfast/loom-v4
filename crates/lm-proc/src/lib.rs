@@ -43,7 +43,7 @@ pub const WORKER_STACK: usize = 8 << 20;
 /// The default guest instruction count of one scheduler slice.
 pub const DEFAULT_QUANTUM: u32 = 1_024;
 
-/// The default guest instruction count of one parallel worker lease.
+/// The default guest instruction count of one parallel worker turn.
 pub const DEFAULT_PARALLEL_QUANTUM: u32 = 4_096;
 
 /// The largest supported parallel worker count.
@@ -152,13 +152,19 @@ pub struct SchedulerStats {
     /// The largest active worker lease count.
     pub max_active_leases: u32,
     /// Worker leases stopped by the soft heap trip point.
-    pub heap_trips: u64,
+    pub heap_trips: u32,
     /// Positive heap growth committed from worker leases.
     pub worker_heap_growth_bytes: u64,
+    /// Worker leases returned by an explicit recall.
+    pub worker_recalls: u32,
+    /// Worker turns that continued without queue rotation.
+    pub local_continuations: u32,
+    /// Worker turns that rotated behind waiting work.
+    pub local_rotations: u32,
     /// Operations that requested global coordinator quiescence.
-    pub global_quiescence: u64,
+    pub global_quiescence: u32,
     /// Scoped barriers that waited for one machine safepoint.
-    pub scoped_safepoint_waits: u64,
+    pub scoped_safepoint_waits: u32,
 }
 
 /// The proc scheduler.

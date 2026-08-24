@@ -229,6 +229,75 @@ fn independent_cpu_procs_hold_two_worker_leases() {
     let (outcome, stats) = run_parallel(source, 2).expect("the parallel world runs");
     assert_eq!(outcome, "Done((Done(200000), Done(200000)))");
     assert_eq!(stats.max_active_leases, 2);
+    assert!(stats.local_continuations > 0);
+}
+
+#[test]
+fn worker_pool_rotates_compute_tasks_locally() {
+    let source = r#"
+class Spinner < Proc
+  def on_spawn(self): Int
+    i = 0
+    while i < 200000
+      i = i + 1
+    end
+    i
+  end
+end
+
+a = Spinner.spawn()
+b = Spinner.spawn()
+c = Spinner.spawn()
+d = Spinner.spawn()
+(a.done(), b.done(), c.done(), d.done())
+"#;
+    let (outcome, stats) = run_parallel(source, 2).expect("the local queue world runs");
+    assert_eq!(
+        outcome,
+        "Done((Done(200000), Done(200000), Done(200000), Done(200000)))"
+    );
+    assert!(stats.local_rotations > 0);
+}
+
+#[test]
+fn a_deferred_send_recalls_its_busy_target() {
+    let source = r#"
+class BusyTarget < Proc[Int]
+  def on_spawn(self): Int with Proc
+    i = 0
+    while i < 2000000
+      i = i + 1
+    end
+    case self.receive()
+    in Msg(value) then value + i
+    in Closed then -1
+    end
+  end
+end
+
+class Sender < Proc
+  target: Handle[Int, Int]
+
+  def init(mut self, target: Handle[Int, Int])
+    self.target = target
+  end
+
+  def on_spawn(self): Bool with Proc
+    i = 0
+    while i < 10000
+      i = i + 1
+    end
+    self.target.send(7).is_sent()
+  end
+end
+
+target = BusyTarget.spawn()
+sender = Sender.spawn(target)
+(sender.done(), target.done())
+"#;
+    let (outcome, stats) = run_parallel(source, 2).expect("the recalled target completes");
+    assert_eq!(outcome, "Done((Done(true), Done(2000007)))");
+    assert!(stats.worker_recalls > 0);
 }
 
 #[test]
@@ -299,7 +368,7 @@ right = Spinner.spawn()
 }
 
 #[test]
-fn a_pause_stops_an_active_worker_at_one_quantum_boundary() {
+fn a_pause_stops_an_active_worker_at_one_turn_boundary() {
     let source = "class Spinner < Proc\n\
                   \x20 def on_spawn(self): Int with Proc\n\
                   \x20   i = 0\n\

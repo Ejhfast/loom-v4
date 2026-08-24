@@ -89,7 +89,9 @@ fn a_shared_scheduler_pool_serves_two_worlds() {
                   end\n\
                   a = Counter.spawn()\n\
                   b = Counter.spawn()\n\
-                  (a.done(), b.done())\n";
+                  c = Counter.spawn()\n\
+                  d = Counter.spawn()\n\
+                  (a.done(), b.done(), c.done(), d.done())\n";
     let bytes = compile_to_bytes("shared-pool.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
     let pool = lm_proc::SchedulerPool::new(2).expect("the shared pool starts");
@@ -100,10 +102,14 @@ fn a_shared_scheduler_pool_serves_two_worlds() {
         let second = scope.spawn(|| run_shared_world(&loaded, second_pool, 2));
         let first = first.join().expect("the first host thread runs");
         let second = second.join().expect("the second host thread runs");
-        assert_eq!(first.0, "Done((Done(10000), Done(10000)))");
-        assert_eq!(second.0, "Done((Done(10000), Done(10000)))");
-        assert!(first.1 > 0);
-        assert!(second.1 > 0);
+        assert_eq!(
+            first.0,
+            "Done((Done(10000), Done(10000), Done(10000), Done(10000)))"
+        );
+        assert_eq!(second.0, first.0);
+        assert!(first.1.max_active_leases > 0);
+        assert!(second.1.max_active_leases > 0);
+        assert!(first.1.local_rotations + second.1.local_rotations > 0);
     });
 }
 
@@ -111,7 +117,7 @@ fn run_shared_world(
     loaded: &lm_vm::LoadedModule,
     pool: lm_proc::SchedulerPool,
     seed: u64,
-) -> (String, u32) {
+) -> (String, lm_proc::SchedulerStats) {
     let mut world = World::new(
         loaded,
         VmConfig::default(),
@@ -121,10 +127,7 @@ fn run_shared_world(
     let mut scheduler =
         lm_proc::Scheduler::from_config(lm_proc::SchedulerConfig::parallel_with_pool(pool));
     let outcome = scheduler.run(&mut world).expect("the shared world runs");
-    (
-        world.show_outcome(&outcome),
-        scheduler.stats().max_active_leases,
-    )
+    (world.show_outcome(&outcome), scheduler.stats())
 }
 
 /// Deep guest recursion inside a proc stays off the Rust stack, so

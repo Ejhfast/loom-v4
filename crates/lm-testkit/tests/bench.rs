@@ -247,6 +247,97 @@ fn parallel_cpu_source(tasks: usize, iterations: usize) -> (String, String) {
     (source, format!("Done(({values}))"))
 }
 
+fn parallel_allocating_source(tasks: usize, iterations: usize) -> (String, String) {
+    let mut source = format!(
+        "class TextBatch < Proc\n  def on_spawn(self): Int\n    builder = StringBuilder()\n    \
+         i = 0\n    while i < {iterations}\n      builder.append(\"abcd\")\n      \
+         i = i + 1\n    end\n    builder.build().len()\n  end\nend\n"
+    );
+    for task in 0..tasks {
+        source.push_str(&format!("p{task} = TextBatch.spawn()\n"));
+    }
+    source.push('(');
+    for task in 0..tasks {
+        if task > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("p{task}.done()"));
+    }
+    source.push_str(")\n");
+    let length = iterations.saturating_mul(4);
+    let values = (0..tasks)
+        .map(|_| format!("Done({length})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (source, format!("Done(({values}))"))
+}
+
+fn parallel_queens_source(size: usize) -> (String, String) {
+    let mut source = format!(
+        r#"def count_queens(columns: Int, left: Int, right: Int, mask: Int): Int
+  if columns == mask
+    return 1
+  end
+  available = mask & ~(columns | left | right)
+  total = 0
+  while available != 0
+    bit = available & (0 - available)
+    available = available ^ bit
+    total = total + count_queens(
+      columns | bit,
+      ((left | bit) << 1) & mask,
+      (right | bit) >>> 1,
+      mask
+    )
+  end
+  total
+end
+
+class QueenBranch < Proc
+  first: Int
+  mask: Int
+
+  def init(mut self, first: Int, mask: Int)
+    self.first = first
+    self.mask = mask
+  end
+
+  def on_spawn(self): Int
+    count_queens(
+      self.first,
+      (self.first << 1) & self.mask,
+      self.first >>> 1,
+      self.mask
+    )
+  end
+end
+
+mask = (1 << {size}) - 1
+"#
+    );
+    for branch in 0..size {
+        source.push_str(&format!(
+            "p{branch} = QueenBranch.spawn(1 << {branch}, mask)\n"
+        ));
+    }
+    source.push_str("total = 0\n");
+    for branch in 0..size {
+        source.push_str(&format!(
+            "total = total + case p{branch}.done()\n\
+             in Done(value) then value\n\
+             in Fault(_) then 0\n\
+             end\n"
+        ));
+    }
+    source.push_str("total\n");
+    let solutions = match size {
+        12 => 14_200,
+        13 => 73_712,
+        _ => panic!("the benchmark needs a recorded queen count"),
+    };
+    (source, format!("Done({solutions})"))
+}
+
 fn parallel_ping_source(pairs: usize, limit: usize) -> (String, String, u64) {
     let mut source = format!(
         r#"enum PongMessage
@@ -873,6 +964,42 @@ fn bench_parallel_cpu_scaling() {
             "{tasks} tasks reached {speedup:.3}x, below the {gate:.1}x gate"
         );
     }
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_allocating_scaling() {
+    let (source, expected) = parallel_allocating_source(8, 250_000);
+    let serial = time_parallel_world(&source, 1, &expected);
+    println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
+    for (workers, gate) in [(4, 3.0), (8, 5.0)] {
+        let parallel = time_parallel_world(&source, workers, &expected);
+        let speedup = serial.as_secs_f64() / parallel.as_secs_f64();
+        println!(
+            "LOOM\tparallel_allocating\t8\t{workers}\t{:.3}\t{:.3}\t{speedup:.3}",
+            serial.as_secs_f64() * 1e3,
+            parallel.as_secs_f64() * 1e3
+        );
+        assert!(
+            speedup >= gate,
+            "eight allocating tasks reached {speedup:.3}x on {workers} workers"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_split_queens() {
+    let (source, expected) = parallel_queens_source(12);
+    let serial = time_parallel_world(&source, 1, &expected);
+    let parallel = time_parallel_world(&source, 12, &expected);
+    let speedup = serial.as_secs_f64() / parallel.as_secs_f64();
+    println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
+    println!(
+        "LOOM\tparallel_split_queens\t12\t12\t{:.3}\t{:.3}\t{speedup:.3}",
+        serial.as_secs_f64() * 1e3,
+        parallel.as_secs_f64() * 1e3
+    );
 }
 
 #[test]

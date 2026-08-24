@@ -38,6 +38,7 @@ struct ActiveJob {
     job: ParallelJob,
     starts_slice: bool,
     exclusive: bool,
+    recall_requested: bool,
 }
 
 struct PendingContinuation {
@@ -167,6 +168,7 @@ impl ParallelCoordinator<'_> {
                         .ok_or_else(|| SchedulerError::new("the root machine is missing"))?;
                     return Ok(self.world.task_outcome(root));
                 }
+                self.recall_all_active();
                 self.park()?;
                 continue;
             }
@@ -207,13 +209,17 @@ impl ParallelCoordinator<'_> {
                 }
             }
 
-            let stopping = self.needs_quiescence();
+            let snapshot_waiting = self.world.has_snapshot_watchers();
+            if snapshot_waiting && self.active.is_empty() {
+                self.park_retained_continuations()?;
+                let _ = self.run_one_serial_slice()?;
+                continue;
+            }
+            let stopping = self.needs_quiescence() || snapshot_waiting;
+            if self.needs_global_recall() || snapshot_waiting {
+                self.recall_all_active();
+            }
             if !stopping {
-                if self.world.has_snapshot_watchers() && self.active.is_empty() {
-                    self.park_retained_continuations()?;
-                    let _ = self.run_one_serial_slice()?;
-                    continue;
-                }
                 if self.workers_enabled && self.active.is_empty() && self.parallel_work_count() == 1
                 {
                     let _ = self.run_one_serial_slice()?;
@@ -240,10 +246,6 @@ impl ParallelCoordinator<'_> {
                             return Err(SchedulerError::new(
                                 "the shared scheduler pool has no live worker",
                             ));
-                        }
-                        if !pool.has_idle() {
-                            self.park()?;
-                            continue;
                         }
                     }
                 }
@@ -291,7 +293,7 @@ impl ParallelCoordinator<'_> {
     }
 
     fn dispatch_ready_work(&mut self) -> Result<(), SchedulerError> {
-        while self.pool.as_ref().is_some_and(SchedulerPool::has_idle) && !self.needs_quiescence() {
+        while self.pool.is_some() && !self.needs_quiescence() {
             if let Some(pending) = self.continuations.pop_front() {
                 let lease = self.take_lease()?;
                 let step = self
@@ -318,7 +320,7 @@ impl ParallelCoordinator<'_> {
             let lease = self.take_lease()?;
             let step = self
                 .world
-                .begin_parallel_slice(task, self.scheduler.parallel_quantum(), lease)
+                .begin_parallel_slice(task, u32::MAX, lease)
                 .map_err(|error| SchedulerError::new(error.to_string()))?;
             self.accept_step(step, true, false)?;
         }
@@ -333,30 +335,30 @@ impl ParallelCoordinator<'_> {
     ) -> Result<(), SchedulerError> {
         match step {
             ParallelStep::Dispatch(dispatch) => {
-                let lease_id = dispatch.lease_id();
                 let (lease, job) = dispatch.into_parts();
-                if self.active.contains_key(&lease_id) {
-                    drop(lease);
-                    let error = self.world.cancel_parallel_job(job);
-                    return Err(SchedulerError::new(error.to_string()));
-                }
                 let pool = self
                     .pool
                     .as_ref()
                     .expect("parallel dispatch has a worker pool");
-                if let Err((message, lease)) =
-                    pool.dispatch(lease_id, lease, self.report_tx.clone())
-                {
-                    drop(lease);
-                    let _ = self.world.cancel_parallel_job(job);
-                    return Err(SchedulerError::new(message));
-                }
+                let pool_job = match pool.dispatch(
+                    lease,
+                    self.scheduler.parallel_quantum(),
+                    self.report_tx.clone(),
+                ) {
+                    Ok(pool_job) => pool_job,
+                    Err((message, lease)) => {
+                        drop(lease);
+                        let _ = self.world.cancel_parallel_job(job);
+                        return Err(SchedulerError::new(message));
+                    }
+                };
                 self.active.insert(
-                    lease_id,
+                    pool_job,
                     ActiveJob {
                         job,
                         starts_slice,
                         exclusive,
+                        recall_requested: false,
                     },
                 );
                 self.scheduler.stats.max_active_leases = self
@@ -407,6 +409,20 @@ impl ParallelCoordinator<'_> {
                     let retired = report.retired_instructions();
                     let growth = report.heap_growth_bytes();
                     let heap_trip = report.stopped_at_heap_trip();
+                    if report.stopped_by_recall() {
+                        self.scheduler.stats.worker_recalls =
+                            self.scheduler.stats.worker_recalls.saturating_add(1);
+                    }
+                    self.scheduler.stats.local_continuations = self
+                        .scheduler
+                        .stats
+                        .local_continuations
+                        .saturating_add(report.local_continuations());
+                    self.scheduler.stats.local_rotations = self
+                        .scheduler
+                        .stats
+                        .local_rotations
+                        .saturating_add(report.local_rotations());
                     self.scheduler.stats.worker_heap_growth_bytes = self
                         .scheduler
                         .stats
@@ -447,6 +463,7 @@ impl ParallelCoordinator<'_> {
                         self.scheduler.stats.global_quiescence.saturating_add(1);
                 }
                 self.commit_quiescence = true;
+                self.recall_all_active();
             } else if self.active.is_empty() {
                 self.commit_quiescence = false;
             }
@@ -465,10 +482,11 @@ impl ParallelCoordinator<'_> {
                 _ => None,
             };
             if let Some(key) = needed {
+                self.recall_machine(key);
                 if !self
                     .active
                     .values()
-                    .any(|active| active.job.machine() == key.vm)
+                    .any(|active| active.job.machine_key() == key)
                     && self.park_retained_machine(key)?
                 {
                     continue;
@@ -488,7 +506,7 @@ impl ParallelCoordinator<'_> {
                             let needed_machine = match requirement {
                                 ParallelRequirement::Machine(key)
                                 | ParallelRequirement::Safepoint(key) => {
-                                    returned.machine() == key.vm
+                                    returned.machine_key() == key
                                 }
                                 _ => false,
                             };
@@ -552,6 +570,52 @@ impl ParallelCoordinator<'_> {
                 .returned
                 .iter()
                 .any(ParallelReturned::needs_global_quiescence)
+    }
+
+    fn needs_global_recall(&self) -> bool {
+        self.commit_quiescence
+            || !self.quiescent.is_empty()
+            || !self.fallbacks.is_empty()
+            || self
+                .returned
+                .iter()
+                .any(ParallelReturned::needs_global_quiescence)
+    }
+
+    fn recall_machine(&mut self, key: TaskKey) {
+        let jobs: Vec<u64> = self
+            .active
+            .iter_mut()
+            .filter_map(|(id, active)| {
+                if active.job.machine_key() == key && !active.recall_requested {
+                    active.recall_requested = true;
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if let Some(pool) = &self.pool {
+            pool.recall(&jobs);
+        }
+    }
+
+    fn recall_all_active(&mut self) {
+        let jobs: Vec<u64> = self
+            .active
+            .iter_mut()
+            .filter_map(|(id, active)| {
+                if active.recall_requested {
+                    None
+                } else {
+                    active.recall_requested = true;
+                    Some(*id)
+                }
+            })
+            .collect();
+        if let Some(pool) = &self.pool {
+            pool.recall(&jobs);
+        }
     }
 
     fn park_retained_continuations(&mut self) -> Result<(), SchedulerError> {
@@ -736,6 +800,7 @@ impl ParallelCoordinator<'_> {
     }
 
     fn abort(&mut self) {
+        self.recall_all_active();
         while !self.active.is_empty() {
             match self.reports.recv() {
                 Ok(WorkerEvent::Report { job: id, report }) => {

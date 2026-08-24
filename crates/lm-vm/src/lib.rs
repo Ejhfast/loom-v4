@@ -19,7 +19,7 @@ pub mod snapshot;
 mod typecheck;
 mod world;
 
-pub use executor::{execute, ExecutionLease, ExecutionReport};
+pub use executor::{execute, execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
