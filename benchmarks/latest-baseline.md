@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `eb3e4d1`.
+The measured source revision is `7ca3ad7`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -10,7 +10,9 @@ The host has 16 physical cores and 32 logical processors.
 
 Release runtime benchmarks use deterministic scheduler mode and zero scheduler workers unless stated otherwise.
 
-The operating system selects processors for each benchmark process.
+Core phase and language operation benchmarks pin each process to logical processor zero.
+
+The operating system selects processors for scheduler benchmark processes.
 
 The bytecode version is 56.
 
@@ -24,18 +26,50 @@ The snapshot format version is 30.
 | --- | ---: |
 | Classes | 296 |
 | HIR functions | 595 |
+| HIR types | 562 |
 | Bytecode functions | 891 |
+| Bytecode instructions | 18,807 |
+| Decoded instruction width | 16 bytes |
 | Artifact size | 273,244 bytes |
-| Core checking | 2.424 ms |
-| Core lowering | 0.989 ms |
-| Core compilation | 3.816 ms |
-| Core decoding | 0.405 ms |
-| Core verification | 1.460 ms |
-| Structural verification | 0.533 ms |
+| Core checking | 2.397 ms |
+| Core lowering | 1.004 ms |
+| Core compilation | 3.792 ms |
+| Core decoding | 0.408 ms |
+| Core verification | 1.412 ms |
+| Structural verification | 0.510 ms |
 | Verification hash | 0.141 ms |
-| Semantic identity | 2.474 ms |
-| Decoded loading | 1.648 ms |
-| Core loading | 2.065 ms |
+| Semantic identity | 2.537 ms |
+| Decoded loading | 1.605 ms |
+| Core loading | 1.998 ms |
+
+### Growth from the scheduler foundation
+
+This comparison uses revision `308b55e` with the same processor placement.
+
+| Measurement | Foundation | Current | Change |
+| --- | ---: | ---: | ---: |
+| HIR functions | 571 | 595 | +4.2% |
+| HIR types | 534 | 562 | +5.2% |
+| Bytecode functions | 873 | 891 | +2.1% |
+| Bytecode instructions | 17,905 | 18,807 | +5.0% |
+| Artifact size | 264,401 bytes | 273,244 bytes | +3.3% |
+| Core checking | 2.065 ms | 2.397 ms | +16.1% |
+| Core lowering | 0.945 ms | 1.004 ms | +6.2% |
+| Core compilation | 3.335 ms | 3.792 ms | +13.7% |
+| Core verification | 1.278 ms | 1.412 ms | +10.5% |
+| Core loading | 1.837 ms | 1.998 ms | +8.8% |
+
+The larger core adds 0.332 milliseconds to core checking.
+
+Large checker inputs retain the prior scaling slope.
+
+Each row subtracts the smallest input from the largest input.
+
+| Checker shape | Sizes | Foundation growth | Current growth | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Method chain | 16 to 1,024 | 10.058 ms | 10.113 ms | +0.5% |
+| Interfaces | 16 to 256 | 1.777 ms | 1.819 ms | +2.4% |
+| Wide body | 64 to 1,024 | 0.776 ms | 0.736 ms | -5.2% |
 
 ## Language operations
 
@@ -45,19 +79,44 @@ Each process reports one nine-run median.
 
 | Operation | Result |
 | --- | ---: |
-| `int_loop` | 33.4 ns |
-| `direct_call` | 31.9 ns |
-| `string_interp` | 205.9 ns |
-| `float_add` | 33.4 ns |
-| `string_builder` | 41.9 ns |
-| `byte_buffer` | 40.9 ns |
-| `direct_clock` | 110.3 ns |
+| `int_loop` | 31.6 ns |
+| `direct_call` | 30.5 ns |
+| `string_interp` | 206.6 ns |
+| `float_add` | 32.9 ns |
+| `string_builder` | 41.0 ns |
+| `byte_buffer` | 36.7 ns |
+| `direct_clock` | 114.2 ns |
 
 String and interpreter measurements can vary with process placement.
 
+### Interface runtime gate
+
+This comparison uses three pinned processes for each revision.
+
+| Operation | Foundation | Current | Change |
+| --- | ---: | ---: | ---: |
+| `partial_eq` | 92.8 ns | 96.5 ns | +4.0% |
+| `list_eq` | 815.3 ns | 816.9 ns | +0.2% |
+| `list_hash` | 800.8 ns | 827.5 ns | +3.3% |
+| `tuple_hash` | 354.8 ns | 375.5 ns | +5.8% |
+| `map_hashable_lookup` | 205.8 ns | 214.7 ns | +4.3% |
+| `list_sort` | 19,162.1 ns | 19,679.6 ns | +2.7% |
+
+The largest measured interface delta is 5.8 percent.
+
 ## Workspace suite
 
-The debug workspace suite completed in 54.84 seconds.
+The warm debug workspace suite completed in 48.67 seconds.
+
+Revision `308b55e` completed in 43.95 seconds under the same settings.
+
+| Target | Foundation | Current | Change |
+| --- | ---: | ---: | ---: |
+| Full workspace | 43.95 s | 48.67 s | +10.7% |
+| Snapshot admission | 10.93 s | 11.84 s | +8.3% |
+| Source mutation | 11.48 s | 13.15 s | +14.5% |
+
+The feature suite took 50.48 seconds before this optimization pass.
 
 The suite used Cargo's default test concurrency and full coverage.
 
@@ -91,7 +150,7 @@ The owned execution lease passes one real cross-thread execution test.
 
 ## Parallel scheduler
 
-These results use parallel scheduler mode and the default 4,096-instruction turn.
+These results use parallel scheduler mode and local worker turns.
 
 Each result is the median of three complete benchmark runs.
 
@@ -136,15 +195,15 @@ The aggregate message ratio is 1.011x.
 
 ## Structured parallelism
 
-Each result compares `Iterable.par_map` with an equivalent implementation.
+Each result compares `Iterable.par_map` with equivalent parallel work or sequential `Iterable.map`.
 
-| Mode | Workers | Reference | `par_map` | Ratio |
-| --- | ---: | ---: | ---: | ---: |
-| Parallel | 4 | 290.587 ms | 281.553 ms | 0.969x |
-| Parallel | 12 | 112.331 ms | 109.474 ms | 0.975x |
-| Deterministic | 1 | 990.630 ms | 985.786 ms | 0.995x |
+| Mode | Workers | Reference | `par_map` | Ratio | Sequential speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Parallel | 4 | 274.114 ms | 271.932 ms | 0.992x | 3.50x |
+| Parallel | 12 | 113.984 ms | 107.529 ms | 0.943x | 8.86x |
+| Deterministic | 1 | 952.967 ms | 948.985 ms | 0.996x | 1.00x |
 
-The parallel reference uses the same proc chunking policy.
+The parallel reference uses hand-written procs with the same chunking policy.
 
 The deterministic reference uses `Iterable.map`.
 
