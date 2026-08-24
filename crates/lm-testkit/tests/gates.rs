@@ -98,6 +98,23 @@ fn live_data_past_the_cap_faults_with_heap_limit() {
 }
 
 #[test]
+fn short_lived_data_collects_before_the_hard_heap_limit() {
+    let source = "i = 0\ntext = \"\"\nwhile i < 100000\n  text = \"value #{i}\"\n  \
+                  i = i + 1\nend\ntext.len()\n";
+    let bytes = compile_to_bytes("heap-pace.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact loads");
+    let mut world = lm_vm::World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(lm_vm::RecordingHost::new(1)),
+    );
+    let outcome = world.run_root();
+    assert_eq!(world.show_outcome(&outcome), "Done(11)");
+    assert!(world.execution_metrics().collections > 0);
+    assert!(world.heap_of(0).stats().used_bytes < 8 << 20);
+}
+
+#[test]
 fn compilation_is_deterministic() {
     for example in [
         "examples/01-basics/factorial.lm",

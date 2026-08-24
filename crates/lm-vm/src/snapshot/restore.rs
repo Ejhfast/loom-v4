@@ -227,15 +227,6 @@ impl World {
         {
             return Err(RestoreFail::LimitExceeded);
         }
-        // Every restored machine takes the aggregate heap ledger, so
-        // the ledger must hold the storage of the root machine first.
-        // A caller reaches this method through `new_child` today, and
-        // that call attaches the ledger. This method is public, so it
-        // repeats the step instead of depending on the caller.
-        if !self.share_heap_budget() {
-            return Err(RestoreFail::LimitExceeded);
-        }
-
         let image = admitted.world();
         let count = image.machines.len();
         if (count == 0 && target.is_some()) || (count != 0 && target.is_none()) {

@@ -12,11 +12,6 @@ use crate::machine::operation_needs_global_quiescence;
 use std::collections::VecDeque;
 use std::fmt;
 
-/// The default byte trip point of one worker lease.
-const LEASE_HEAP_BYTES: usize = 64 << 10;
-/// The default object trip point of one worker lease.
-const LEASE_HEAP_OBJECTS: usize = 1_024;
-
 /// One scheduler continuation between worker jobs.
 pub struct ParallelContinuation {
     task: TaskKey,
@@ -122,7 +117,6 @@ impl ParallelReturned {
             self.stop,
             ExecutionStop::QuantumExpired
                 | ExecutionStop::Recalled
-                | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         )
     }
@@ -378,9 +372,6 @@ impl World {
         {
             return Err(ParallelError::InvalidState);
         }
-        if !self.share_heap_budget() {
-            return Err(ParallelError::InvalidState);
-        }
         let generation = self.machines[vm as usize].generation();
         let token = ExecutionToken {
             world: self.world_id,
@@ -401,16 +392,6 @@ impl World {
         let machine = self.machines[vm as usize].take_for_lease(token);
         let limits = ExecutionLimits {
             instructions: limit,
-            heap_trip_bytes: if exclusive_world {
-                usize::MAX
-            } else {
-                LEASE_HEAP_BYTES
-            },
-            heap_trip_objects: if exclusive_world {
-                usize::MAX
-            } else {
-                LEASE_HEAP_OBJECTS
-            },
             exclusive_world,
             fuel: Arc::clone(&self.budget.fuel),
         };
@@ -473,7 +454,6 @@ impl World {
             stop,
             ExecutionStop::QuantumExpired
                 | ExecutionStop::Recalled
-                | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         );
         let mut continuation = job.continuation;

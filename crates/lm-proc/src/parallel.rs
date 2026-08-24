@@ -408,7 +408,6 @@ impl ParallelCoordinator<'_> {
                     };
                     let retired = report.retired_instructions();
                     let growth = report.heap_growth_bytes();
-                    let heap_trip = report.stopped_at_heap_trip();
                     if report.stopped_by_recall() {
                         self.scheduler.stats.worker_recalls =
                             self.scheduler.stats.worker_recalls.saturating_add(1);
@@ -428,10 +427,6 @@ impl ParallelCoordinator<'_> {
                         .stats
                         .worker_heap_growth_bytes
                         .saturating_add(growth as u64);
-                    if heap_trip {
-                        self.scheduler.stats.heap_trips =
-                            self.scheduler.stats.heap_trips.saturating_add(1);
-                    }
                     let returned = self
                         .world
                         .accept_parallel_report(active.job, report)
@@ -734,7 +729,7 @@ impl ParallelCoordinator<'_> {
         let quantum = self.world.snapshot_wait_quantum(task, configured);
         let metrics_before = self.world.metrics();
         let before = self.world.world_fuel();
-        let heap_before = self.world.aggregate_heap_bytes();
+        let heap_before = self.world.heap_of(task.vm).used_bytes();
         let exit = self.world.drive_slice(task, quantum);
         let retired = before.saturating_sub(self.world.world_fuel());
         self.world

@@ -29,7 +29,7 @@ impl World {
         World::new_with_limits(loaded, config, WorldLimits::default(), host)
     }
 
-    /// Create a world with exact aggregate limits.
+    /// Create a world with exact structural and resource limits.
     pub fn new_with_limits(
         loaded: &LoadedModule,
         config: VmConfig,
@@ -38,19 +38,8 @@ impl World {
     ) -> World {
         let module = loaded.module_store();
         let budget = WorldBudget::new(limits);
-        let local_heap_is_aggregate = config.heap_bytes <= budget.limits.max_heap_bytes
-            && config.heap_bytes / lm_heap::MIN_OBJECT_COST <= budget.limits.max_heap_objects;
-        let mut root = if local_heap_is_aggregate {
-            Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone())
-        } else {
-            Machine::empty_with_budgets(
-                config,
-                None,
-                0,
-                budget.heap.clone(),
-                budget.resources.clone(),
-            )
-        };
+        let mut root =
+            Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone());
         root.table.set_bundle(loaded.bundle().clone());
         root.load_frame(
             &module,
@@ -90,7 +79,6 @@ impl World {
             next_resource: 1,
             config,
             budget,
-            heap_shared: !local_heap_is_aggregate,
             trace: None,
             cut: 0,
             gate: 0,
@@ -133,11 +121,6 @@ impl World {
             total.collections = total.collections.saturating_add(metrics.collections);
         }
         total
-    }
-
-    /// The aggregate live heap bytes in this world.
-    pub fn aggregate_heap_bytes(&self) -> usize {
-        self.budget.heap.used_bytes()
     }
 
     /// Turn the proc trace on. The trace records scheduler events in
@@ -237,26 +220,18 @@ impl World {
 
     /// The live heap bytes of all machines.
     pub fn world_heap_bytes(&self) -> usize {
-        if self.heap_shared {
-            self.budget.heap.used_bytes()
-        } else {
-            self.machines
-                .iter()
-                .map(|machine| machine.vm.heap.used_bytes())
-                .sum()
-        }
+        self.machines
+            .iter()
+            .map(|machine| machine.vm.heap.used_bytes())
+            .sum()
     }
 
     /// The live heap objects of all machines.
     pub fn world_heap_objects(&self) -> usize {
-        if self.heap_shared {
-            self.budget.heap.live_objects()
-        } else {
-            self.machines
-                .iter()
-                .map(|machine| machine.vm.heap.live_count())
-                .sum()
-        }
+        self.machines
+            .iter()
+            .map(|machine| machine.vm.heap.live_count())
+            .sum()
     }
 
     /// The live host resources of all machines.
@@ -743,7 +718,6 @@ impl World {
             }
             ExecutionStop::QuantumExpired
             | ExecutionStop::Recalled
-            | ExecutionStop::HeapTrip
             | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
             ExecutionStop::NeedsQuiescence => {}
             ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {

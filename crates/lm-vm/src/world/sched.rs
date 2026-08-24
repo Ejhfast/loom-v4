@@ -702,7 +702,11 @@ impl World {
         self.metrics.slices = self.metrics.slices.saturating_add(1);
         self.metrics.retired_instructions =
             self.metrics.retired_instructions.saturating_add(retired);
-        let growth = self.aggregate_heap_bytes().saturating_sub(heap_before);
+        let growth = self.machines[task.vm as usize]
+            .vm
+            .heap
+            .used_bytes()
+            .saturating_sub(heap_before);
         self.metrics.heap_growth_bytes =
             self.metrics.heap_growth_bytes.saturating_add(growth as u64);
         if retired == 0 && !stopped {

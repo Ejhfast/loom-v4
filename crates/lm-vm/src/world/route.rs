@@ -1685,15 +1685,6 @@ impl World {
         owner: VmId,
         closure: ObjRef,
     ) {
-        if !self.share_heap_budget() {
-            let op = self.pending_op(vm);
-            self.machines[vm as usize].set_fault(
-                FaultCode::HeapLimit,
-                "the aggregate heap cannot hold the root machine",
-                op,
-            );
-            return;
-        }
         let mock_config = VmConfig {
             fuel: MOCK_FUEL,
             ..self.config

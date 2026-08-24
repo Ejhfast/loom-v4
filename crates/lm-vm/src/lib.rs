@@ -135,17 +135,13 @@ impl Default for VmConfig {
     }
 }
 
-/// Aggregate resource limits for one machine world.
+/// Shared structural and resource limits for one machine world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldLimits {
     /// The largest machine record table.
     pub max_machines: u32,
     /// The largest live VM image record count.
     pub max_vm_images: u32,
-    /// The largest logical byte cost of all live heaps.
-    pub max_heap_bytes: usize,
-    /// The largest live object count of all heaps.
-    pub max_heap_objects: usize,
     /// The largest live host resource count.
     pub max_resources: usize,
     /// The instruction budget shared by all machines.
@@ -167,8 +163,6 @@ impl Default for WorldLimits {
         WorldLimits {
             max_machines: 4096,
             max_vm_images: 4096,
-            max_heap_bytes: 1 << 30,
-            max_heap_objects: 1 << 24,
             max_resources: 1 << 16,
             fuel: u64::MAX,
             max_trace_events: 1 << 20,

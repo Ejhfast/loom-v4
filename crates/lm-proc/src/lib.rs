@@ -151,9 +151,7 @@ pub struct SchedulerStats {
     pub unblocked: u64,
     /// The largest active worker lease count.
     pub max_active_leases: u32,
-    /// Worker leases stopped by the soft heap trip point.
-    pub heap_trips: u32,
-    /// Positive heap growth committed from worker leases.
+    /// Positive heap growth reported by worker leases.
     pub worker_heap_growth_bytes: u64,
     /// Worker leases returned by an explicit recall.
     pub worker_recalls: u32,
@@ -558,7 +556,7 @@ impl Scheduler {
                 self.tasks.insert(task, IndexedState::Running);
                 let quantum = world.snapshot_wait_quantum(task, self.quantum);
                 let before = world.world_fuel();
-                let heap_before = world.aggregate_heap_bytes();
+                let heap_before = world.heap_of(task.vm).used_bytes();
                 let exit = world.drive_slice(task, quantum);
                 let retired = before.saturating_sub(world.world_fuel());
                 world.note_scheduler_slice(task, retired, exit.is_some(), heap_before);

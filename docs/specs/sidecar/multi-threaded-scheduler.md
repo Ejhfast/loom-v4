@@ -88,9 +88,9 @@ This boundary becomes the worker execution boundary.
 
 ### 4.2 State that blocks direct movement
 
-Three current structures prevent `Machine` from moving safely between threads.
+Three original structures prevented `Machine` from moving safely between threads.
 
-`HeapBudget` and `ResourceBudget` use `Rc<Cell<_>>` for aggregate counters.
+`ResourceBudget` used `Rc<Cell<_>>` for aggregate counters.
 
 The closed-type table is mutable and shared by all machines.
 
@@ -331,7 +331,7 @@ The coordinator owns these values:
 - activation stacks;
 - ready and wait indexes;
 - VM images and current slot tables;
-- aggregate heap and resource budgets;
+- aggregate resource budgets;
 - snapshot barriers;
 - deferred world transactions.
 
@@ -342,7 +342,6 @@ A worker pool owns these values during one lease:
 - one remaining lease limit;
 - one parallel turn limit;
 - one shared world fuel ledger;
-- one soft heap growth trip point;
 - immutable verified code;
 - immutable dispatch data;
 - one immutable image slot view;
@@ -436,7 +435,6 @@ The stop list includes these actions:
 - an image-slot edit;
 - a cross-machine value transfer;
 - a pause or snapshot request;
-- a soft heap trip;
 - a pool recall;
 - an execution lease fuel limit;
 - a guest terminal result or fault.
@@ -575,19 +573,13 @@ A segmented interner remains deferred while total miss cost stays below two perc
 
 ## 13. Budgets
 
-Aggregate ledgers use atomic storage so their owners can transfer safely.
+Shared fuel uses atomic storage so workers can claim bounded turns.
 
-The coordinator serializes every normal aggregate update.
-
-A worker never charges those counters for each allocation.
+The coordinator serializes shared resource updates.
 
 Workers claim world fuel before each local turn.
 
-A worker lease contains local heap trip points.
-
-Dropping worker state never changes an aggregate ledger.
-
-The coordinator cancels each retained accounting ticket after worker failure.
+The coordinator cancels each retained resource ticket after worker failure.
 
 ### 13.1 Fuel
 
@@ -611,45 +603,33 @@ Each machine enforces its private byte cap during every instruction.
 
 This local cap remains exact in both scheduler modes.
 
-Parallel workers do not update the aggregate world heap ledger.
+Each persistent VM image also has one private byte cap.
 
-Each worker receives a soft byte trip point and a soft object trip point.
+The world has no aggregate heap limit.
 
-The initial trip points are 64 KiB and 1,024 objects.
+Allocation and collection remain local to the owning machine or image.
 
-The worker tests both trip points after each completed instruction.
+Each executing machine starts collection at 4 MiB or its lower hard limit.
 
-A crossed trip point returns the lease at that instruction boundary.
+After collection, the next threshold is twice the live byte count.
 
-The report states exact local growth and released space.
+The threshold never exceeds the local hard limit.
 
-The coordinator applies that delta to the aggregate ledger at report acceptance.
+This adaptive threshold limits dead-object retention without changing `HeapLimit` semantics.
 
-An aggregate overshoot changes that report into `HeapLimit`.
+Heap accounting never causes a worker return or coordinator action.
 
-A slice with no positive heap growth can continue while the ledger is over its limit.
+`HeapLimit` reports only a local heap-cap violation.
 
-Further positive growth faults until collection or reclamation restores capacity.
+Machine and image count limits bound the number of local heaps.
 
-The coordinator does not retry the completed instruction.
+Snapshot admission checks every restored heap against its receiving local cap.
 
-The coordinator does not stop unrelated workers for heap accounting.
+The embedder or operating system controls total process memory.
 
-Deterministic mode keeps exact direct aggregate accounting.
+Hostile worlds need process isolation or complete allocator-level accounting.
 
-Parallel mode permits bounded transient aggregate overshoot.
-
-One worker can exceed its trip point by at most one instruction's local allocation.
-
-The private machine cap bounds that single-instruction allocation.
-
-The total slack scales with the active worker count.
-
-The aggregate ledger becomes exact again as returned reports commit.
-
-This rule treats the aggregate limit as a world containment limit.
-
-It does not make the aggregate limit a synchronous allocation barrier.
+The former heap-only aggregate ledger did not provide complete process containment.
 
 ### 13.3 Resources
 
@@ -795,17 +775,11 @@ Loom separates semantic determinism from scheduler determinism.
 
 One isolated machine returns the same pure result under both scheduler modes.
 
-Independent machines also keep their results while no aggregate limit becomes exhausted.
+Independent machines also keep their results while no shared limit becomes exhausted.
 
-Parallel tasks can race for aggregate fuel, heap, resource, and closed-type limits.
+Parallel tasks can race for fuel, resource, and closed-type limits.
 
 The failing task can differ when one shared limit becomes exhausted.
-
-Parallel heap accounting occurs at coordinator commits.
-
-Live heap use can exceed the aggregate limit between those commits.
-
-Section 13.2 bounds this transient slack.
 
 ### 15.2 Deterministic replay
 
@@ -1147,7 +1121,7 @@ Match current deterministic traces exactly.
 
 ### Stage 2: Make execution leases thread-safe
 
-Replace unsafe shared aggregate counters with transferable accounting state.
+Replace non-transferable shared resource counters with transferable accounting state.
 
 Split the closed-type store from machine-local caches.
 
@@ -1173,9 +1147,9 @@ Reject a stale canonical import before any world mutation.
 
 Retry that import from its admitted source after quiescence.
 
-Keep fuel, heap, and resource accounting tickets on the coordinator.
+Keep resource accounting tickets on the coordinator.
 
-Add explicit commit and cancellation paths for each accounting ticket.
+Add explicit commit and cancellation paths for each resource ticket.
 
 Remove ambient clock reads from pure runtime crates.
 
@@ -1195,11 +1169,9 @@ Add resident and leased states to each machine slot.
 
 Add one combined wake path for reports and host completions.
 
-Give every worker lease soft heap trip points.
-
 Keep the private machine heap cap exact during worker execution.
 
-Catch worker failure and cancel its retained coordinator accounting.
+Catch worker failure and cancel its retained resource accounting.
 
 Provide global quiescence for every operation that needs resident machines.
 
@@ -1231,11 +1203,13 @@ Remove the allocation instruction classifier.
 
 Remove heap refill, retry, and allocation quiescence.
 
-Apply exact heap growth to the aggregate ledger at coordinator commit.
+Remove the aggregate heap ledger and its worker trip points.
 
-Convert an aggregate overshoot into `HeapLimit` at that commit.
+Keep each machine and image heap cap exact.
 
-Add a large native allocation gate and an aggregate overshoot gate.
+Add adaptive local collection before the hard cap.
+
+Add local heap-limit gates for workers and snapshot restore.
 
 Add message benchmarks with allocated payloads.
 
@@ -1307,11 +1281,12 @@ The implementation must pass these gates:
 
 - deterministic trace fixtures stay byte-for-byte equal;
 - stale canonical imports change no identifier or record;
-- coordinator cancellation releases a destroyed worker's full accounting charge;
+- coordinator cancellation releases a destroyed worker's resource charge;
 - pure runtime crates contain no ambient clock access;
 - each machine has at most one active lease;
-- a worker can allocate past one soft trip point without quiescence;
-- aggregate heap overshoot faults at coordinator commit;
+- each machine enforces its local heap cap in both scheduler modes;
+- allocation churn causes no worker return for heap accounting;
+- restore checks each machine heap against its local cap;
 - stale and duplicate reports reject safely;
 - same-sender mailbox order stays exact;
 - multi-sender tests accept only documented orders;
@@ -1420,10 +1395,6 @@ Every machine-specific pending commit recalls its destination lease.
 A compute-heavy receiver can return once for each deferred transaction.
 
 This cost follows cross-machine traffic instead of ordinary compute turns.
-
-Parallel aggregate heap accounting permits the bounded slack from section 13.2.
-
-A single large instruction can use its remaining private machine capacity.
 
 The first scheduler keeps structural restore as a global control operation.
 

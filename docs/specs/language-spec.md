@@ -1608,7 +1608,7 @@ A delayed host failure retains the source coordinate of its suspended `perform` 
 | `PolicyDenied` | blocked or ungranted operation |
 | `FrozenWrite` | write into a frozen object |
 | `OutOfFuel` | instruction/intrinsic budget exhausted |
-| `HeapLimit` | heap limit exceeded |
+| `HeapLimit` | local machine heap limit exceeded |
 | `StackLimit` | frame/operand limit exceeded |
 | `BoundaryLimit` | transfer/snapshot bound exceeded |
 | `InvalidVmState` | illegal control method/state |

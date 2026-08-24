@@ -97,7 +97,7 @@ fn report(name: &str, iterations: u64, source: &str, base: Duration) {
 /// Report one case that runs inside a `World`.
 ///
 /// The cases above build a bare `Vm`. Every tool builds a `World`,
-/// and a `World` adds the aggregate ledgers and the activation loop.
+/// and a `World` adds shared fuel, shared resources, and the activation loop.
 /// A program with no proc runs one machine there, so this case
 /// measures the path a plain `lm run` takes.
 fn report_world(name: &str, iterations: u64, source: &str, expected: &str) {
@@ -162,6 +162,56 @@ fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration
         }
     }
     median(runs)
+}
+
+/// Run one parallel sample and return its clock-free counters.
+fn sample_parallel_counters(
+    source: &str,
+    workers: usize,
+    expected: &str,
+) -> (
+    lm_proc::SchedulerStats,
+    lm_vm::WorldMetrics,
+    lm_vm::MachineExecutionMetrics,
+    lm_vm::TypeEnvMetrics,
+) {
+    let bytes = lm_testkit::compile_to_bytes("parallel-counter-bench.lm", source)
+        .unwrap_or_else(|error| panic!("the benchmark source must compile:\n{error}"));
+    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
+    let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
+    let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+    world.allow("Proc").expect("the Proc grant must exist");
+    let mut scheduler = lm_proc::Scheduler::default();
+    let outcome = scheduler
+        .run_parallel(&mut world, workers)
+        .expect("the parallel benchmark must run");
+    assert_eq!(world.show_outcome(&outcome), expected);
+    (
+        scheduler.stats(),
+        world.metrics(),
+        world.execution_metrics(),
+        world.type_metrics(),
+    )
+}
+
+fn report_parallel_counters(name: &str, source: &str, workers: usize, expected: &str) {
+    let (scheduler, world, execution, types) = sample_parallel_counters(source, workers, expected);
+    println!(
+        "LOOM\tparallel_counters\t{name}\t{workers}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        scheduler.proc_slices,
+        scheduler.local_continuations,
+        scheduler.local_rotations,
+        scheduler.worker_recalls,
+        scheduler.global_quiescence,
+        world.retired_instructions,
+        world.heap_growth_bytes,
+        execution.native_calls,
+        execution.collections,
+        types.close_hits,
+        types.close_misses,
+        types.derive_hits,
+        types.derive_misses,
+    );
 }
 
 fn sample_message_world(source: &str, expected: &str, workers: Option<usize>) -> Vec<Duration> {
@@ -265,6 +315,33 @@ fn parallel_allocating_source(tasks: usize, iterations: usize) -> (String, Strin
     }
     source.push_str(")\n");
     let length = iterations.saturating_mul(4);
+    let values = (0..tasks)
+        .map(|_| format!("Done({length})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (source, format!("Done(({values}))"))
+}
+
+fn parallel_churn_source(tasks: usize, iterations: usize) -> (String, String) {
+    let mut source = format!(
+        "class TextChurn < Proc\n  def on_spawn(self): Int\n    builder = StringBuilder()\n    \
+         i = 0\n    while i < {iterations}\n      builder.append(\"#{{i}}:\")\n      \
+         i = i + 1\n    end\n    builder.build().len()\n  end\nend\n"
+    );
+    for task in 0..tasks {
+        source.push_str(&format!("p{task} = TextChurn.spawn()\n"));
+    }
+    source.push('(');
+    for task in 0..tasks {
+        if task > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("p{task}.done()"));
+    }
+    source.push_str(")\n");
+    let length: usize = (0..iterations)
+        .map(|value| value.to_string().len() + 1)
+        .sum();
     let values = (0..tasks)
         .map(|_| format!("Done({length})"))
         .collect::<Vec<_>>()
@@ -833,8 +910,8 @@ fn bench_language_operations() {
     );
 
     // The two cases below run the same workload inside a `World`.
-    // The allocating case reports the heap ledger cost, and the
-    // integer case reports the activation loop cost alone.
+    // The allocating case reports local heap work. The integer case
+    // reports the activation loop cost alone.
     report_world(
         "world_class_init",
         500_000,
@@ -985,6 +1062,33 @@ fn bench_parallel_allocating_scaling() {
             "eight allocating tasks reached {speedup:.3}x on {workers} workers"
         );
     }
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_allocation_churn() {
+    let (source, expected) = parallel_churn_source(8, 250_000);
+    let serial = time_parallel_world(&source, 1, &expected);
+    let parallel = time_parallel_world(&source, 8, &expected);
+    let speedup = serial.as_secs_f64() / parallel.as_secs_f64();
+    println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
+    println!(
+        "LOOM\tparallel_allocation_churn\t8\t8\t{:.3}\t{:.3}\t{speedup:.3}",
+        serial.as_secs_f64() * 1e3,
+        parallel.as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tparallel_counters\tcase\tworkers\tproc_slices\tcontinuations\trotations\trecalls\tquiescence\tinstructions\theap_growth\tnative_calls\tcollections\tclose_hits\tclose_misses\tderive_hits\tderive_misses"
+    );
+    report_parallel_counters("allocation_churn", &source, 1, &expected);
+    report_parallel_counters("allocation_churn", &source, 8, &expected);
+    let (steady_source, steady_expected) = parallel_allocating_source(8, 250_000);
+    report_parallel_counters("steady_allocation", &steady_source, 1, &steady_expected);
+    report_parallel_counters("steady_allocation", &steady_source, 8, &steady_expected);
+    assert!(
+        speedup >= 4.0,
+        "eight churn tasks reached {speedup:.3}x on eight workers"
+    );
 }
 
 #[test]

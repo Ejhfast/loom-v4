@@ -46,7 +46,7 @@ use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcType, Module};
-use lm_heap::{Heap, HeapBudget, Object, SharedBytes, SharedText, StructuralEpoch};
+use lm_heap::{Heap, Object, SharedBytes, SharedText, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -197,7 +197,6 @@ struct ModuleCodes<'m> {
 /// The aggregate ledgers of one root VM and its spawned procs.
 struct WorldBudget {
     limits: WorldLimits,
-    heap: HeapBudget,
     resources: crate::resource::ResourceBudget,
     fuel: Arc<ExecutionFuel>,
 }
@@ -307,7 +306,6 @@ impl WorldBudget {
     fn new(mut limits: WorldLimits) -> WorldBudget {
         limits.max_machines = limits.max_machines.max(1);
         WorldBudget {
-            heap: HeapBudget::new(limits.max_heap_bytes, limits.max_heap_objects),
             resources: crate::resource::ResourceBudget::new(limits.max_resources),
             fuel: Arc::new(ExecutionFuel::new(limits.fuel)),
             limits,
@@ -737,13 +735,8 @@ pub struct World {
     /// The next resource identifier. Zero marks a closed handle.
     next_resource: u64,
     config: VmConfig,
-    /// Aggregate limits and current resource charges.
+    /// World limits and current resource charges.
     budget: WorldBudget,
-    /// True when each machine heap charges the aggregate ledger.
-    ///
-    /// One machine needs only its local counters. The world attaches
-    /// the shared ledger before it creates another machine.
-    heap_shared: bool,
     /// The proc trace, when tracing is on.
     trace: Option<Vec<TraceEvent>>,
     /// The monotone mailbox cut marker of this world.
@@ -895,7 +888,7 @@ pub struct WorldMetrics {
     pub retired_instructions: u64,
     /// Slices that reached a machine or world boundary.
     pub boundary_exits: u64,
-    /// Positive aggregate heap growth across scheduler slices.
+    /// Positive local heap growth across scheduler slices.
     pub heap_growth_bytes: u64,
     /// Proc send operations that reached runtime dispatch.
     pub sends: u64,
@@ -1036,7 +1029,6 @@ mod tests {
         world.machines[0]
             .restore_from_lease(token, machine)
             .expect("the first report restores the machine");
-        assert!(world.share_heap_budget());
         let duplicate = Box::new(world.empty_machine(VmConfig::default(), None, 0));
         assert!(world.machines[0]
             .restore_from_lease(token, duplicate)
@@ -1146,7 +1138,6 @@ mod tests {
         );
         assert!(world.is_poisoned());
         assert_eq!(world.world_fuel(), fuel - u64::from(retired));
-        assert_eq!(world.budget.heap.used_bytes(), 0);
         assert_eq!(
             world.begin_parallel_slice(key, 16, 2).err(),
             Some(ParallelError::Poisoned)
@@ -1154,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_failure_cancels_the_reserved_world_capacity() {
+    fn worker_failure_cancels_the_execution_reservation() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         let key = world.task_key(0).expect("the root task exists");
@@ -1170,7 +1161,6 @@ mod tests {
         assert_eq!(world.cancel_parallel_job(job), ParallelError::WorkerFailed);
         assert!(world.is_poisoned());
         assert_eq!(world.world_fuel(), fuel);
-        assert_eq!(world.budget.heap.used_bytes(), 0);
     }
 
     fn installable_artifact(value: i64) -> SharedBytes {
@@ -2051,7 +2041,6 @@ mod tests {
     fn a_self_send_rejects_a_holder_local_value() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        assert!(world.share_heap_budget());
         let mock = world.empty_machine(VmConfig::default(), None, 0);
         world.machines.push(mock.into());
         let handle = world.machines[0]
@@ -2137,7 +2126,6 @@ mod tests {
     fn a_retired_slot_takes_a_new_generation() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        assert!(world.share_heap_budget());
         let mock = world.empty_machine(VmConfig::default(), None, 0);
         world.machines.push(mock.into());
         assert_eq!(world.generation_of(1), 0);
@@ -2160,7 +2148,6 @@ mod tests {
     fn a_reclaimed_slot_takes_a_new_generation() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        assert!(world.share_heap_budget());
         let child = world.install_child(VmConfig::default(), 0);
         // An empty record is one the pass always keeps, because it
         // cannot tell a new machine from an abandoned one. This one
@@ -2244,49 +2231,38 @@ mod tests {
     }
 
     #[test]
-    fn two_machine_heaps_share_one_world_limit() {
+    fn machine_heaps_enforce_local_limits_independently() {
         let loaded = trivial_loaded();
         let object = Object::Str("one".into());
-        let limits = WorldLimits {
-            max_heap_bytes: object.cost(),
-            max_heap_objects: 1,
-            ..WorldLimits::default()
+        let bytes = object.cost();
+        let config = VmConfig {
+            heap_bytes: bytes,
+            ..VmConfig::default()
         };
-        let mut world =
-            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
-        world.machines[0]
+        let mut world = World::new(&loaded, config, Box::new(NullHost));
+        let root_value = world.machines[0]
             .alloc(object.clone())
-            .expect("the first heap charge fits");
+            .expect("the root heap charge fits");
+        world.machines[0]
+            .vm
+            .heap
+            .push_host_root(root_value.as_obj().expect("the root value is an object"));
         let child = world.new_child(0).expect("the child record fits");
+        let child_value = world.machines[child as usize]
+            .alloc(object.clone())
+            .expect("the child heap charge fits");
+        world.machines[child as usize]
+            .vm
+            .heap
+            .push_host_root(child_value.as_obj().expect("the child value is an object"));
+        assert_eq!(
+            world.machines[0].alloc(object.clone()),
+            Err(FaultCode::HeapLimit)
+        );
         assert_eq!(
             world.machines[child as usize].alloc(object),
             Err(FaultCode::HeapLimit)
         );
-        assert_eq!(world.world_heap_objects(), 1);
-    }
-
-    #[test]
-    fn a_second_machine_attaches_the_aggregate_heap_ledger() {
-        let loaded = trivial_loaded();
-        let object = Object::Str("one".into());
-        let bytes = object.cost();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-
-        assert!(!world.heap_shared);
-        world.machines[0]
-            .alloc(object.clone())
-            .expect("the root allocation fits");
-        assert_eq!(world.world_heap_bytes(), bytes);
-        assert_eq!(world.world_heap_objects(), 1);
-
-        let child = world.new_child(0).expect("the child record fits");
-        assert!(world.heap_shared);
-        assert_eq!(world.world_heap_bytes(), bytes);
-        assert_eq!(world.world_heap_objects(), 1);
-
-        world.machines[child as usize]
-            .alloc(object)
-            .expect("the child allocation fits");
         assert_eq!(world.world_heap_bytes(), bytes * 2);
         assert_eq!(world.world_heap_objects(), 2);
     }

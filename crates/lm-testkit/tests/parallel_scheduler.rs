@@ -301,7 +301,7 @@ sender = Sender.spawn(target)
 }
 
 #[test]
-fn allocating_workers_cross_soft_trip_points_without_quiescence() {
+fn allocating_workers_stay_inside_the_worker_pool() {
     let source = r#"
 class Builder < Proc
   def on_spawn(self): Int
@@ -323,8 +323,8 @@ right = Builder.spawn()
     let (outcome, stats) = run_parallel(source, 2).expect("the allocation world runs");
     assert_eq!(outcome, "Done((Done(106000), Done(106000)))");
     assert_eq!(stats.max_active_leases, 2);
-    assert!(stats.heap_trips > 0);
     assert!(stats.worker_heap_growth_bytes > 0);
+    assert!(stats.local_continuations > 0);
     assert_eq!(stats.global_quiescence, 0);
 }
 

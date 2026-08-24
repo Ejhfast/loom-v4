@@ -11,7 +11,7 @@ use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
 use lm_bytecode::{ExtendedInstr, Instr, Module, NumericInstr};
 use lm_heap::{
-    process_lookup_hash, FaultSite, Heap, HeapBudget, MapEntry, MapIndex, NativeByteBuffer,
+    process_lookup_hash, FaultSite, Heap, MapEntry, MapIndex, NativeByteBuffer,
     NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, Witness};
@@ -567,7 +567,6 @@ pub enum ExecOutcome {
 /// Why one execution batch stopped without a world action.
 pub(crate) enum ExecError {
     Fault(FaultCode),
-    HeapTrip,
     NeedsQuiescence,
 }
 
@@ -1050,58 +1049,33 @@ impl Machine {
     /// A machine without a loaded entry, at one slot generation.
     #[cfg(test)]
     pub fn empty_at(config: VmConfig, parent: Option<VmId>, generation: u32) -> Machine {
-        Machine::empty_with_optional_budgets(config, parent, generation, None, None)
+        Machine::empty_with_optional_resource_budget(config, parent, generation, None)
     }
 
-    /// Create an empty machine that charges the world ledgers.
-    pub(crate) fn empty_with_budgets(
-        config: VmConfig,
-        parent: Option<VmId>,
-        generation: u32,
-        heap_budget: HeapBudget,
-        resource_budget: ResourceBudget,
-    ) -> Machine {
-        Machine::empty_with_optional_budgets(
-            config,
-            parent,
-            generation,
-            Some(heap_budget),
-            Some(resource_budget),
-        )
-    }
-
-    /// Create an empty machine with local heap accounting.
-    ///
-    /// The resource ledger remains shared. The world attaches the
-    /// heap ledger before it creates a second machine.
+    /// Create an empty machine with one shared resource ledger.
     pub(crate) fn empty_with_resource_budget(
         config: VmConfig,
         parent: Option<VmId>,
         generation: u32,
         resource_budget: ResourceBudget,
     ) -> Machine {
-        Machine::empty_with_optional_budgets(
+        Machine::empty_with_optional_resource_budget(
             config,
             parent,
             generation,
-            None,
             Some(resource_budget),
         )
     }
 
-    fn empty_with_optional_budgets(
+    fn empty_with_optional_resource_budget(
         config: VmConfig,
         parent: Option<VmId>,
         generation: u32,
-        heap_budget: Option<HeapBudget>,
         resource_budget: Option<ResourceBudget>,
     ) -> Machine {
         Machine {
             vm: VmState {
-                heap: match heap_budget {
-                    Some(budget) => Heap::with_budget(config.heap_bytes, budget),
-                    None => Heap::new(config.heap_bytes),
-                },
+                heap: Heap::new(config.heap_bytes),
                 frames: Vec::new(),
                 locals: Vec::new(),
                 operands: Vec::new(),
@@ -1506,7 +1480,7 @@ impl Machine {
     /// collection because they are not yet reachable from the arenas.
     pub fn alloc(&mut self, object: Object) -> Result<Value, FaultCode> {
         let mut cost = self.vm.heap.allocation_cost(&object);
-        if self.vm.heap.would_exceed(cost) {
+        if self.vm.heap.collection_due(cost) {
             let mut extra = Vec::new();
             object.children(&mut extra);
             self.collect_garbage(&extra);
@@ -1521,7 +1495,7 @@ impl Machine {
     /// Make room for `delta` more bytes of growth on an existing
     /// object. `temps` holds values already popped from the arenas.
     fn reserve(&mut self, delta: usize, temps: &[Value]) -> Result<(), FaultCode> {
-        if self.vm.heap.would_exceed_growth(delta) {
+        if self.vm.heap.collection_due(delta) {
             let extra: Vec<ObjRef> = temps.iter().filter_map(|v| v.as_obj()).collect();
             self.collect_garbage(&extra);
             if self.vm.heap.would_exceed_growth(delta) {
@@ -5516,11 +5490,7 @@ impl Machine {
             };
             frame.ip += 1;
             match self.exec_instr(module, dispatch, envs, slots, instr) {
-                Ok(ExecOutcome::Continue) => {
-                    if RESTRICTED_LEASE && self.vm.heap.execution_lease_trip_reached() {
-                        break Err(ExecError::HeapTrip);
-                    }
-                }
+                Ok(ExecOutcome::Continue) => {}
                 Ok(outcome) => break Ok(outcome),
                 Err(code) => break Err(ExecError::Fault(code)),
             }

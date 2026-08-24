@@ -22,9 +22,6 @@ impl World {
     /// The local budget bounds tower depth per branch. `WorldBudget`
     /// bounds the total machine count and shared resources.
     pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
-        if !self.share_heap_budget() {
-            return None;
-        }
         if !self.can_reserve_child(parent) {
             // A dead record still holds a slot and a budget unit. Free
             // the dead records once, then answer the request again.
@@ -261,7 +258,7 @@ impl World {
             }
             record.live = false;
             record.generation = record.generation.wrapping_add(1);
-            record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
+            record.heap = Heap::new(record.config.heap_bytes);
             self.vm_image_free.push(image);
         }
     }
@@ -292,9 +289,6 @@ impl World {
             return None;
         }
         let config = self.machines.get(holder as usize)?.config;
-        if !self.share_heap_budget() {
-            return None;
-        }
         let mut slots = Vec::new();
         slots.try_reserve_exact(self.module.slots.len()).ok()?;
         for (index, slot) in self.module.slots.iter().enumerate() {
@@ -316,7 +310,7 @@ impl World {
             record.config = config;
             record.slots = Arc::new(slots);
             record.slot_versions = vec![0; record.slots.len()];
-            record.heap = Heap::with_budget(config.heap_bytes, self.budget.heap.clone());
+            record.heap = Heap::new(config.heap_bytes);
             record.instances.clear();
             return Some(VmImageKey {
                 image,
@@ -331,7 +325,7 @@ impl World {
             config,
             slot_versions: vec![0; slots.len()],
             slots: Arc::new(slots),
-            heap: Heap::with_budget(config.heap_bytes, self.budget.heap.clone()),
+            heap: Heap::new(config.heap_bytes),
             instances: Vec::new(),
         });
         Some(VmImageKey {
@@ -350,7 +344,7 @@ impl World {
         }
         record.live = false;
         record.generation = record.generation.wrapping_add(1);
-        record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
+        record.heap = Heap::new(record.config.heap_bytes);
         record.slot_versions.clear();
         record.instances.clear();
         self.vm_image_free.push(key.image);
@@ -967,48 +961,26 @@ impl World {
         }
     }
 
-    /// Attach the aggregate heap ledger before a second machine exists.
-    pub(crate) fn share_heap_budget(&mut self) -> bool {
-        if self.heap_shared {
-            return true;
-        }
-        if self.machines.len() != 1 {
-            return false;
-        }
-        if !self.machines[0]
-            .vm
-            .heap
-            .attach_budget(self.budget.heap.clone())
-        {
-            return false;
-        }
-        self.heap_shared = true;
-        true
-    }
-
-    /// Create one detached machine with the world ledgers.
+    /// Create one detached machine with the shared resource ledger.
     pub(crate) fn empty_machine(
         &self,
         config: VmConfig,
         parent: Option<VmId>,
         generation: u32,
     ) -> Machine {
-        debug_assert!(self.heap_shared);
-        let mut machine = Machine::empty_with_budgets(
+        let mut machine = Machine::empty_with_resource_budget(
             config,
             parent,
             generation,
-            self.budget.heap.clone(),
             self.budget.resources.clone(),
         );
         machine.table.set_bundle(self.loaded.bundle().clone());
         machine
     }
 
-    /// Create one image-owned heap with the world ledger.
+    /// Create one image-owned heap with its local limit.
     pub(crate) fn empty_image_heap(&self, config: VmConfig) -> Heap {
-        debug_assert!(self.heap_shared);
-        Heap::with_budget(config.heap_bytes, self.budget.heap.clone())
+        Heap::new(config.heap_bytes)
     }
 
     /// Enter the proc body after the constructor frame returned.

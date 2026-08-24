@@ -8,7 +8,6 @@ use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode};
 use lm_bytecode::closed::TypeEnvs;
 use lm_bytecode::Module;
-use lm_heap::HeapExecutionTicket;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -146,8 +145,6 @@ pub struct ExecutionLease {
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionLimits {
     pub(crate) instructions: u32,
-    pub(crate) heap_trip_bytes: usize,
-    pub(crate) heap_trip_objects: usize,
     pub(crate) exclusive_world: bool,
     pub(crate) fuel: Arc<ExecutionFuel>,
 }
@@ -158,7 +155,6 @@ pub(crate) struct ExecutionLimits {
 #[must_use = "the coordinator must commit or cancel this execution reservation"]
 pub(crate) struct ExecutionReservation {
     token: ExecutionToken,
-    heap: HeapExecutionTicket,
     resources: ResourceBudgetReservation,
     coordinator_only: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -167,7 +163,6 @@ impl ExecutionReservation {
     /// Release all charges after the worker machine was destroyed.
     pub(crate) fn cancel_destroyed(self) {
         self.resources.cancel_destroyed();
-        self.heap.cancel_destroyed();
     }
 }
 
@@ -180,17 +175,11 @@ impl ExecutionLease {
         slots: Option<Arc<Vec<ImageSlotTarget>>>,
         limits: ExecutionLimits,
     ) -> (ExecutionLease, ExecutionReservation) {
-        let heap = machine.vm.heap.begin_execution_lease(
-            token.lease,
-            limits.heap_trip_bytes,
-            limits.heap_trip_objects,
-        );
         let resources = machine.resources.begin_execution_lease(token.lease);
         let heap_before = machine.vm.heap.used_bytes();
         let objects_before = machine.vm.heap.stats().live;
         let reservation = ExecutionReservation {
             token,
-            heap,
             resources,
             coordinator_only: std::marker::PhantomData,
         };
@@ -219,7 +208,6 @@ impl ExecutionLease {
 pub(crate) enum ExecutionStop {
     QuantumExpired,
     Recalled,
-    HeapTrip,
     NeedsQuiescence,
     Boundary(ExecOutcome),
     Fault(FaultCode),
@@ -241,7 +229,7 @@ impl InlineExecutionReport {
     pub(crate) fn into_commit(self) -> ExecutionCommit {
         let boundary = !matches!(
             self.stop,
-            ExecutionStop::QuantumExpired | ExecutionStop::Recalled | ExecutionStop::HeapTrip
+            ExecutionStop::QuantumExpired | ExecutionStop::Recalled
         );
         ExecutionCommit {
             stop: self.stop,
@@ -291,14 +279,8 @@ impl ExecutionReport {
             self.stop,
             ExecutionStop::QuantumExpired
                 | ExecutionStop::Recalled
-                | ExecutionStop::HeapTrip
                 | ExecutionStop::NeedsQuiescence
         )
-    }
-
-    /// True when local heap growth crossed the soft trip point.
-    pub fn stopped_at_heap_trip(&self) -> bool {
-        matches!(self.stop, ExecutionStop::HeapTrip)
     }
 
     /// True when the pool recalled this lease.
@@ -353,10 +335,6 @@ impl ExecutionReport {
         u32,
     ) {
         debug_assert_eq!(self.token, reservation.token);
-        let within_heap_limit = self.machine.vm.heap.end_execution_lease(reservation.heap);
-        if !within_heap_limit {
-            self.stop = ExecutionStop::Fault(FaultCode::HeapLimit);
-        }
         self.machine
             .resources
             .end_execution_lease(reservation.resources);
@@ -465,7 +443,6 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
         Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
-        Err(ExecError::HeapTrip) => ExecutionStop::HeapTrip,
         Err(ExecError::NeedsQuiescence) => ExecutionStop::NeedsQuiescence,
     };
     ExecutionTurn::Report(lease.into_report(stop))
@@ -501,9 +478,6 @@ pub(crate) fn execute_inline(
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
         Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
-        Err(ExecError::HeapTrip) => {
-            unreachable!("inline execution has no heap trip point")
-        }
         Err(ExecError::NeedsQuiescence) => {
             unreachable!("inline execution is already coordinator-resident")
         }
@@ -520,7 +494,7 @@ mod tests {
     use crate::resource::ResourceBudget;
     use crate::VmConfig;
     use lm_bytecode::{BcType, Func, Instr, Module};
-    use lm_heap::{Heap, HeapBudget};
+    use lm_heap::Heap;
     use lm_value::{TypeEnvId, Value};
 
     fn assert_send<T: Send>() {}
@@ -542,8 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn heap_budget_leases_are_send() {
-        assert_send::<HeapBudget>();
+    fn local_heaps_are_send() {
         assert_send::<Heap>();
     }
 
@@ -584,12 +557,10 @@ mod tests {
             heap_bytes: 1024,
             ..VmConfig::default()
         };
-        let budget = HeapBudget::new(1024, 64);
-        let mut machine = Box::new(Machine::empty_with_budgets(
+        let mut machine = Box::new(Machine::empty_with_resource_budget(
             config,
             None,
             0,
-            budget.clone(),
             ResourceBudget::new(config.max_resources as usize),
         ));
         machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
@@ -606,13 +577,10 @@ mod tests {
             None,
             ExecutionLimits {
                 instructions: 16,
-                heap_trip_bytes: usize::MAX,
-                heap_trip_objects: usize::MAX,
                 exclusive_world: true,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
         );
-        assert_eq!(budget.used_bytes(), 0);
         let report = std::thread::spawn(move || execute(lease))
             .join()
             .expect("the worker returns one report");
@@ -622,17 +590,15 @@ mod tests {
         assert_eq!(report.heap_released_objects(), 0);
         let (_, machine, _, _, stop, retired) = report.into_parts(reservation);
         assert_eq!(retired, 2);
-        assert_eq!(budget.used_bytes(), 0);
         assert!(matches!(
             stop,
             ExecutionStop::Boundary(ExecOutcome::Terminal(Value::Int(42)))
         ));
         drop(machine);
-        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
-    fn a_worker_heap_overshoot_faults_at_coordinator_commit() {
+    fn a_worker_enforces_its_local_heap_limit() {
         let module = Arc::new(Module {
             strings: vec!["allocation".to_string()],
             bytes: vec![],
@@ -665,15 +631,13 @@ mod tests {
             debug: vec![],
         });
         let config = VmConfig {
-            heap_bytes: 1024,
+            heap_bytes: 1,
             ..VmConfig::default()
         };
-        let budget = HeapBudget::new(1, 64);
-        let mut machine = Box::new(Machine::empty_with_budgets(
+        let mut machine = Box::new(Machine::empty_with_resource_budget(
             config,
             None,
             0,
-            budget.clone(),
             ResourceBudget::new(config.max_resources as usize),
         ));
         machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
@@ -690,8 +654,6 @@ mod tests {
             None,
             ExecutionLimits {
                 instructions: 16,
-                heap_trip_bytes: usize::MAX,
-                heap_trip_objects: usize::MAX,
                 exclusive_world: false,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
@@ -699,13 +661,10 @@ mod tests {
         let report = std::thread::spawn(move || execute(lease))
             .join()
             .expect("the worker returns one report");
-        assert!(report.heap_growth_bytes() > 1);
         let (_, machine, _, _, stop, retired) = report.into_parts(reservation);
-        assert_eq!(retired, 2);
+        assert_eq!(retired, 1);
         assert!(matches!(stop, ExecutionStop::Fault(FaultCode::HeapLimit)));
-        assert!(budget.used_bytes() > 1);
         drop(machine);
-        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
@@ -745,13 +704,11 @@ mod tests {
             heap_bytes: 1024,
             ..VmConfig::default()
         };
-        let heap_budget = HeapBudget::new(1024, 64);
         let resource_budget = ResourceBudget::new(4);
-        let mut machine = Box::new(Machine::empty_with_budgets(
+        let mut machine = Box::new(Machine::empty_with_resource_budget(
             config,
             None,
             0,
-            heap_budget.clone(),
             resource_budget.clone(),
         ));
         machine
@@ -772,21 +729,16 @@ mod tests {
             None,
             ExecutionLimits {
                 instructions: 16,
-                heap_trip_bytes: usize::MAX,
-                heap_trip_objects: usize::MAX,
                 exclusive_world: true,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
             },
         );
-        assert_eq!(heap_budget.used_bytes(), 0);
         assert_eq!(resource_budget.used(), 1);
         std::thread::spawn(move || drop(lease))
             .join()
             .expect("the worker exits");
-        assert_eq!(heap_budget.used_bytes(), 0);
         assert_eq!(resource_budget.used(), 1);
         reservation.cancel_destroyed();
-        assert_eq!(heap_budget.used_bytes(), 0);
         assert_eq!(resource_budget.used(), 0);
     }
 }

@@ -9,9 +9,7 @@ use lm_testkit::{compile_to_bytes, repo_root, run_allowed, run_world};
 use lm_vm::snapshot::{
     codec, ImagePolicyCursor, ImageReason, ImageState, LoadLimits, RestoreFail, SnapshotFail,
 };
-use lm_vm::{
-    load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World, WorldLimits,
-};
+use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World};
 
 fn program(source: &str) -> LoadedModule {
     let bytes = compile_to_bytes("snapshot.lm", source).expect("the program compiles");
@@ -549,7 +547,7 @@ fn a_failed_restore_exposes_no_partial_world() {
 }
 
 #[test]
-fn a_mid_build_heap_failure_releases_the_restore_plan() {
+fn a_local_heap_failure_releases_the_restore_plan() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
     let first_heap: usize = image.world().machines[0]
@@ -559,16 +557,11 @@ fn a_mid_build_heap_failure_releases_the_restore_plan() {
         .sum();
     assert!(first_heap > 0);
     assert!(!image.world().machines[1].objects.is_empty());
-    let limits = WorldLimits {
-        max_heap_bytes: first_heap,
-        ..WorldLimits::default()
+    let config = VmConfig {
+        heap_bytes: first_heap - 1,
+        ..VmConfig::default()
     };
-    let mut world = World::new_with_limits(
-        &loaded,
-        VmConfig::default(),
-        limits,
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
     let target = world.new_child(0).expect("the target record fits");
     assert_eq!(
         world.restore_image(0, target, &image),
