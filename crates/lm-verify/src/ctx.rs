@@ -587,24 +587,8 @@ impl<'m> Ctx<'m> {
         interface: u32,
         assoc: u32,
     ) -> Option<(u32, u32, u32)> {
-        let iterable = self
-            .module
-            .interfaces
-            .iter()
-            .position(|item| item.key == "core.Iterable")? as u32;
-        let iterator = self
-            .module
-            .interfaces
-            .iter()
-            .position(|item| item.key == "core.Iterator")? as u32;
-        if interface != iterator {
-            return None;
-        }
-        let iterator_item = self.module.interfaces[iterator as usize]
-            .associated
-            .iter()
-            .position(|item| item.name == "Item")? as u32;
-        if assoc != iterator_item {
+        let layout = self.iterable_layout?;
+        if interface != layout.iterator || assoc != layout.iterator_item {
             return None;
         }
         let BcType::Projection {
@@ -615,18 +599,10 @@ impl<'m> Ctx<'m> {
         else {
             return None;
         };
-        let iterable_iter = self.module.interfaces[iterable as usize]
-            .associated
-            .iter()
-            .position(|item| item.name == "Iter")? as u32;
-        if owner != iterable || iter_assoc != iterable_iter {
+        if owner != layout.iterable || iter_assoc != layout.iterable_iter {
             return None;
         }
-        let iterable_item = self.module.interfaces[iterable as usize]
-            .associated
-            .iter()
-            .position(|item| item.name == "Item")? as u32;
-        Some((source, iterable, iterable_item))
+        Some((source, layout.iterable, layout.iterable_item))
     }
 
     pub(crate) fn interface_application(
@@ -636,24 +612,25 @@ impl<'m> Ctx<'m> {
         interface: u32,
         depth: u32,
     ) -> Option<BcInterfaceUse> {
-        for contract in &self.module.interfaces {
-            for method in &contract.methods {
-                if method.default != func {
-                    continue;
-                }
-                if let Some(bound) = method
-                    .premises
-                    .iter()
-                    .find(|premise| premise.subject == ty)
-                    .and_then(|premise| {
-                        premise
-                            .bounds
-                            .iter()
-                            .find(|bound| bound.interface == interface)
-                    })
-                {
-                    return Some(bound.clone());
-                }
+        if let Some((owner, method)) = self
+            .interface_defaults
+            .get(func as usize)
+            .copied()
+            .flatten()
+        {
+            let method = &self.module.interfaces[owner as usize].methods[method as usize];
+            if let Some(bound) = method
+                .premises
+                .iter()
+                .find(|premise| premise.subject == ty)
+                .and_then(|premise| {
+                    premise
+                        .bounds
+                        .iter()
+                        .find(|bound| bound.interface == interface)
+                })
+            {
+                return Some(bound.clone());
             }
         }
         let bounds = self.module.func_bounds.get(func as usize)?;
@@ -662,10 +639,10 @@ impl<'m> Ctx<'m> {
 
     /// Return true when a function is an interface-owned default.
     pub(crate) fn is_interface_default(&self, func: u32) -> bool {
-        self.module
-            .interfaces
-            .iter()
-            .any(|contract| contract.methods.iter().any(|method| method.default == func))
+        self.interface_defaults
+            .get(func as usize)
+            .and_then(|owner| *owner)
+            .is_some()
     }
 
     /// Resolve one interface application from an explicit bound table.

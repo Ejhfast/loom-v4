@@ -223,6 +223,7 @@ impl<'a> Materializer<'a> {
                 })
                 .collect(),
             methods: Vec::new(),
+            method_index: Vec::new(),
         });
         self.pending_interfaces.push(PendingInterface {
             id,
@@ -553,6 +554,7 @@ impl<'a> Materializer<'a> {
                 info.parents = parents;
                 info.type_bounds = type_bounds;
                 info.associated = associated;
+                info.method_index = crate::check::index_interface_methods(&methods);
                 info.methods = methods;
             }
             for (method, declaration) in item.interface.methods.iter().enumerate() {

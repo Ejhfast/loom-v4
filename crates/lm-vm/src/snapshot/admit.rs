@@ -227,14 +227,13 @@ fn prove_inner(
     let module = aggregate.module();
     check_identity(image, identity)?;
     let tables = resolve_type_tables(image, module, aggregate.bundle())?;
-    let closure_bodies = closure_body_flags(module)?;
     let admit = Admit {
         image,
         module,
         bundle: aggregate.bundle(),
         identity,
         installations,
-        closure_bodies,
+        closure_bodies: aggregate,
         witness: tables,
     };
     admit.run()?;
@@ -626,26 +625,9 @@ struct Admit<'m> {
     identity: &'m ModuleIdentity,
     installations: &'m [InstallationProof],
     /// Functions that verified code can construct as closures.
-    closure_bodies: Vec<bool>,
+    closure_bodies: &'m LoadedModule,
     /// The witness tables the image carries.
     witness: WitnessTables,
-}
-
-/// Mark every function that verified code can construct as a closure.
-fn closure_body_flags(module: &lm_bytecode::Module) -> Result<Vec<bool>, ImageError> {
-    let mut found = work_vec(module.funcs.len())?;
-    found.resize(module.funcs.len(), false);
-    for function in &module.funcs {
-        for instruction in function.blocks.iter().flatten() {
-            if let Instr::MakeClosure { func, .. } = instruction {
-                let Some(slot) = found.get_mut(*func as usize) else {
-                    return fail(ImageReason::Code, "a closure instruction names no function");
-                };
-                *slot = true;
-            }
-        }
-    }
-    Ok(found)
 }
 
 /// Resolve the closed type table and the environment table of one
@@ -3127,10 +3109,7 @@ impl Admit<'_> {
         let Some(func) = machine.body_func else {
             return false;
         };
-        self.closure_bodies
-            .get(func as usize)
-            .copied()
-            .unwrap_or(false)
+        self.closure_bodies.is_closure_body(func)
             && self.module.funcs[func as usize].params.is_empty()
     }
 

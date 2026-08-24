@@ -1434,30 +1434,6 @@ impl TypeEnvs {
         self.env_of(types, own_rows).map(Some)
     }
 
-    /// Select the verified witness for one interface method.
-    pub fn interface_method_override(
-        &self,
-        module: &Module,
-        interface: u32,
-        method: u32,
-        runtime_class: u32,
-    ) -> Option<bool> {
-        let mut class = runtime_class;
-        let mut steps = 0usize;
-        loop {
-            if let Some(conformance) = module.conformances.iter().find(|candidate| {
-                candidate.class == class && candidate.application.interface == interface
-            }) {
-                return conformance.method_overrides.get(method as usize).copied();
-            }
-            steps += 1;
-            if steps > module.classes.len() {
-                return None;
-            }
-            class = module.classes.get(class as usize)?.parent()?;
-        }
-    }
-
     /// Build the environment of one interface-owned default function.
     pub fn interface_default_env(
         &mut self,

@@ -171,12 +171,15 @@ pub struct ClassMeta {
 }
 
 /// An interning store for types plus the class table.
+const TYPE_FACT_TYPE_VAR: u8 = 1;
+const TYPE_FACT_EFFECT_VAR: u8 = 2;
+const TYPE_FACT_CALLBACK: u8 = 4;
+const TYPE_FACT_PROJECTION: u8 = 8;
+
 pub struct TypeStore {
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
     types: Vec<Type>,
-    type_variables: Vec<bool>,
-    effect_variables: Vec<bool>,
-    callbacks: Vec<bool>,
+    facts: Vec<u8>,
     index: HashMap<Type, TypeId>,
     classes: Vec<ClassMeta>,
     row_names: Vec<String>,
@@ -207,9 +210,7 @@ impl TypeStore {
         let mut store = TypeStore {
             bundle,
             types: Vec::new(),
-            type_variables: Vec::new(),
-            effect_variables: Vec::new(),
-            callbacks: Vec::new(),
+            facts: Vec::new(),
             index: HashMap::new(),
             classes: Vec::new(),
             row_names: Vec::new(),
@@ -246,77 +247,65 @@ impl TypeStore {
         self.classes.reserve(additional);
     }
 
+    /// Reserve type facts and interner entries for one checker pass.
+    pub fn reserve_types(&mut self, additional: usize) {
+        self.types.reserve(additional);
+        self.facts.reserve(additional);
+        self.index.reserve(additional);
+    }
+
+    /// Return the number of interned types.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
     /// Intern a type and return its stable identifier.
     pub fn intern(&mut self, ty: Type) -> TypeId {
         if let Some(id) = self.index.get(&ty) {
             return *id;
         }
-        let type_variable = match &ty {
-            Type::Var(_) => true,
-            Type::Projection { base, .. }
-            | Type::List(base)
-            | Type::Run(base)
-            | Type::Wait(base)
-            | Type::RunSnapshot(base) => self.type_variables[base.0 as usize],
-            Type::Inst(_, args) | Type::Tuple(args) => {
-                args.iter().any(|item| self.type_variables[item.0 as usize])
+        let child = |id: TypeId| self.facts[id.0 as usize];
+        let children = |items: &[TypeId]| items.iter().fold(0, |facts, item| facts | child(*item));
+        let facts = match &ty {
+            Type::Var(_) => TYPE_FACT_TYPE_VAR,
+            Type::Projection { base, .. } => child(*base) | TYPE_FACT_PROJECTION,
+            Type::List(item) | Type::Run(item) | Type::Wait(item) | Type::RunSnapshot(item) => {
+                child(*item)
             }
+            Type::Op(_, item) => child(*item) & (TYPE_FACT_CALLBACK | TYPE_FACT_PROJECTION),
+            Type::Inst(_, args) | Type::Tuple(args) => children(args),
             Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
-                self.type_variables[left.0 as usize] || self.type_variables[right.0 as usize]
+                child(*left) | child(*right)
             }
-            Type::Fn(params, _, ret, _) | Type::Callback(params, _, ret, _) => {
-                self.type_variables[ret.0 as usize]
-                    || params
-                        .iter()
-                        .any(|item| self.type_variables[item.0 as usize])
+            Type::Fn(params, _, ret, row) => {
+                let parameter_facts = children(params) & !TYPE_FACT_CALLBACK;
+                let row_facts = if row.iter().any(|item| matches!(item, RowElem::Var(_))) {
+                    TYPE_FACT_EFFECT_VAR
+                } else {
+                    0
+                };
+                parameter_facts | child(*ret) | row_facts
             }
-            _ => false,
-        };
-        let effect_variable = match &ty {
-            Type::Projection { base, .. }
-            | Type::List(base)
-            | Type::Run(base)
-            | Type::Wait(base)
-            | Type::RunSnapshot(base) => self.effect_variables[base.0 as usize],
-            Type::Inst(_, args) | Type::Tuple(args) => args
-                .iter()
-                .any(|item| self.effect_variables[item.0 as usize]),
-            Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
-                self.effect_variables[left.0 as usize] || self.effect_variables[right.0 as usize]
+            Type::Callback(params, _, ret, row) => {
+                let row_facts = if row.iter().any(|item| matches!(item, RowElem::Var(_))) {
+                    TYPE_FACT_EFFECT_VAR
+                } else {
+                    0
+                };
+                children(params) | child(*ret) | row_facts | TYPE_FACT_CALLBACK
             }
-            Type::Fn(params, _, ret, row) | Type::Callback(params, _, ret, row) => {
-                row.iter().any(|item| matches!(item, RowElem::Var(_)))
-                    || self.effect_variables[ret.0 as usize]
-                    || params
-                        .iter()
-                        .any(|item| self.effect_variables[item.0 as usize])
-            }
-            _ => false,
-        };
-        let callback = match &ty {
-            Type::Callback(..) => true,
-            Type::Inst(_, args) | Type::Tuple(args) => {
-                args.iter().any(|item| self.callbacks[item.0 as usize])
-            }
-            Type::List(item)
-            | Type::Projection { base: item, .. }
-            | Type::Run(item)
-            | Type::Wait(item)
-            | Type::RunSnapshot(item)
-            | Type::Op(_, item)
-            | Type::Fn(_, _, item, _) => self.callbacks[item.0 as usize],
-            Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
-                self.callbacks[left.0 as usize] || self.callbacks[right.0 as usize]
-            }
-            _ => false,
+            _ => 0,
         };
         let id = TypeId(self.types.len() as u32);
         self.types.push(ty.clone());
-        self.type_variables.push(type_variable);
-        self.effect_variables.push(effect_variable);
-        self.callbacks.push(callback);
+        self.facts.push(facts);
         self.index.insert(ty, id);
         id
+    }
+
+    /// True when one type contains an associated projection.
+    pub fn has_projection(&self, ty: TypeId) -> bool {
+        self.facts[ty.0 as usize] & TYPE_FACT_PROJECTION != 0
     }
 
     /// Intern a function type. `muts` marks the `mut` parameters and
@@ -830,7 +819,7 @@ impl TypeStore {
 
     /// Return true when one value position contains a callback.
     pub fn contains_callback(&self, id: TypeId) -> bool {
-        self.callbacks[id.0 as usize]
+        self.facts[id.0 as usize] & TYPE_FACT_CALLBACK != 0
     }
 
     /// True when the type names a holder-local native class.
@@ -959,13 +948,13 @@ impl TypeStore {
 
     /// Return true when the type contains a type variable.
     pub fn contains_var(&self, ty: TypeId) -> bool {
-        self.type_variables[ty.0 as usize]
+        self.facts[ty.0 as usize] & TYPE_FACT_TYPE_VAR != 0
     }
 
     /// Return true when the type contains an effect variable inside a
     /// function-type row.
     pub fn contains_effect_var(&self, ty: TypeId) -> bool {
-        self.effect_variables[ty.0 as usize]
+        self.facts[ty.0 as usize] & TYPE_FACT_EFFECT_VAR != 0
     }
 
     /// Render one row for diagnostics.
@@ -1203,6 +1192,22 @@ mod tests {
         let t1 = store.intern(Type::Tuple(vec![INT, BOOL]));
         let t2 = store.intern(Type::Tuple(vec![INT, BOOL]));
         assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn projection_facts_follow_nested_types() {
+        let mut store = TypeStore::new();
+        let projected = store.intern(Type::Projection {
+            base: INT,
+            interface: InterfaceId(0),
+            assoc: 0,
+        });
+        let list = store.intern(Type::List(projected));
+        let function = store.intern_fn(vec![STRING], vec![false], list, vec![]);
+        assert!(!store.has_projection(INT));
+        assert!(store.has_projection(projected));
+        assert!(store.has_projection(list));
+        assert!(store.has_projection(function));
     }
 
     #[test]

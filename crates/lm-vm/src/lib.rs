@@ -203,6 +203,8 @@ pub struct DispatchRow {
     base: u32,
     /// Function indices for the selectors `base..base + len`.
     table: Vec<u32>,
+    /// Override selections by interface and method index.
+    interface_methods: Vec<Option<std::sync::Arc<[bool]>>>,
 }
 
 impl DispatchRow {
@@ -223,6 +225,16 @@ impl DispatchRow {
             Some(func) => Some(func),
         }
     }
+
+    /// True when one interface call site selects a class override.
+    #[inline]
+    pub(crate) fn interface_override(&self, interface: u32, method: u32) -> Option<bool> {
+        self.interface_methods
+            .get(interface as usize)?
+            .as_ref()?
+            .get(method as usize)
+            .copied()
+    }
 }
 
 /// A module that passed the independent verifier, plus the resolved
@@ -237,6 +249,8 @@ pub struct LoadedModule {
     module: std::sync::Arc<Module>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
     dispatch: std::sync::Arc<[DispatchRow]>,
+    /// Functions that verified code can construct as closures.
+    closure_bodies: std::sync::Arc<std::sync::OnceLock<Vec<bool>>>,
     core: lm_bytecode::corepin::CoreLayout,
     /// The verifier input hash.
     ///
@@ -289,6 +303,25 @@ impl LoadedModule {
 
     pub(crate) fn dispatch_store(&self) -> std::sync::Arc<[DispatchRow]> {
         self.dispatch.clone()
+    }
+
+    /// True when verified code can construct one function as a closure.
+    pub(crate) fn is_closure_body(&self, function: u32) -> bool {
+        self.closure_bodies
+            .get_or_init(|| {
+                let mut bodies = vec![false; self.module.funcs.len()];
+                for body in &self.module.funcs {
+                    for instruction in body.blocks.iter().flatten() {
+                        if let lm_bytecode::Instr::MakeClosure { func, .. } = instruction {
+                            bodies[*func as usize] = true;
+                        }
+                    }
+                }
+                bodies
+            })
+            .get(function as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Return the canonical verified bytes that supplied this module.
@@ -531,11 +564,38 @@ fn admit(
     // memory follows the methods, not classes times selectors.
     let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(module.classes.len());
     let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(module.classes.len());
-    for class in &module.classes {
+    let mut conformances_by_class = vec![Vec::new(); module.classes.len()];
+    for (index, conformance) in module.conformances.iter().enumerate() {
+        conformances_by_class[conformance.class as usize].push(index);
+    }
+    let interfaces_with_defaults: Vec<bool> = module
+        .interfaces
+        .iter()
+        .map(|interface| {
+            interface
+                .methods
+                .iter()
+                .any(|method| method.default != lm_bytecode::NO_FUNC)
+        })
+        .collect();
+    for (class_index, class) in module.classes.iter().enumerate() {
         let mut methods: Vec<(u32, u32)> = match class.parent() {
             Some(p) => resolved[p as usize].clone(),
             None => Vec::new(),
         };
+        let mut interface_methods = match class.parent() {
+            Some(parent) => dispatch[parent as usize].interface_methods.clone(),
+            None => vec![None; module.interfaces.len()],
+        };
+        for conformance in conformances_by_class[class_index]
+            .iter()
+            .map(|index| &module.conformances[*index])
+        {
+            let interface = conformance.application.interface as usize;
+            if interfaces_with_defaults[interface] {
+                interface_methods[interface] = Some(conformance.method_overrides.clone().into());
+            }
+        }
         for (sel, func) in &class.methods {
             match methods.iter_mut().find(|(s, _)| s == sel) {
                 Some(entry) => entry.1 = *func,
@@ -549,9 +609,16 @@ fn admit(
                 for (sel, func) in &methods {
                     table[(*sel - base) as usize] = *func;
                 }
-                DispatchRow { base, table }
+                DispatchRow {
+                    base,
+                    table,
+                    interface_methods,
+                }
             }
-            None => DispatchRow::default(),
+            None => DispatchRow {
+                interface_methods,
+                ..DispatchRow::default()
+            },
         };
         resolved.push(methods);
         dispatch.push(row);
@@ -560,6 +627,7 @@ fn admit(
         module: std::sync::Arc::new(module),
         bundle,
         dispatch: dispatch.into(),
+        closure_bodies: std::sync::Arc::new(std::sync::OnceLock::new()),
         core,
         verification,
         identity: std::sync::Arc::new(std::sync::OnceLock::new()),

@@ -380,6 +380,30 @@ pub(crate) struct InterfaceInfo {
     pub(crate) type_bounds: Vec<Vec<InterfaceUse>>,
     pub(crate) associated: Vec<AssociatedInfo>,
     pub(crate) methods: Vec<Rc<InterfaceMethodSig>>,
+    pub(crate) method_index: Vec<usize>,
+}
+
+impl InterfaceInfo {
+    /// Find one method by its surface name.
+    pub(crate) fn find_method(&self, name: &str) -> Option<usize> {
+        if self.method_index.is_empty() {
+            self.methods.iter().position(|method| method.name == name)
+        } else {
+            self.method_index
+                .binary_search_by(|index| self.methods[*index].name.as_str().cmp(name))
+                .ok()
+                .map(|position| self.method_index[position])
+        }
+    }
+}
+
+pub(crate) fn index_interface_methods(methods: &[Rc<InterfaceMethodSig>]) -> Vec<usize> {
+    if methods.len() < 8 {
+        return Vec::new();
+    }
+    let mut index: Vec<usize> = (0..methods.len()).collect();
+    index.sort_unstable_by(|left, right| methods[*left].name.cmp(&methods[*right].name));
+    index
 }
 
 /// One explicit class conformance.
@@ -819,6 +843,8 @@ pub(crate) struct Ctx {
     pub(crate) interfaces: Vec<InterfaceInfo>,
     pub(crate) user_interfaces: HashMap<String, u32>,
     pub(crate) core_interfaces: HashMap<String, u32>,
+    /// Default methods grouped by their surface name.
+    interface_defaults: HashMap<String, Rc<[(u32, u32)]>>,
     pub(crate) prelude: bool,
     pub(crate) func_index: HashMap<String, u32>,
     pub(crate) core_func_index: HashMap<String, u32>,
@@ -1331,6 +1357,9 @@ impl Ctx {
 
     /// Resolve associated projections that have concrete conformances.
     pub(crate) fn normalize_associated(&mut self, env: &TyEnv, ty: TypeId) -> TypeId {
+        if !self.store.has_projection(ty) {
+            return ty;
+        }
         self.normalize_associated_depth(env, ty, 0)
     }
 
@@ -1612,7 +1641,7 @@ impl Ctx {
         let mut found: Option<ResolvedInterfaceMethod> = None;
         for application in applications {
             let contract = &self.interfaces[application.interface as usize];
-            if let Some(method) = contract.methods.iter().position(|item| item.name == name) {
+            if let Some(method) = contract.find_method(name) {
                 let requirement = Rc::clone(&contract.methods[method]);
                 let candidate = (
                     application.clone(),
@@ -1644,20 +1673,17 @@ impl Ctx {
         name: &str,
         span: Span,
     ) -> Result<Option<ResolvedInterfaceMethod>, Diagnostic> {
+        let Some(candidates) = self.interface_defaults.get(name).cloned() else {
+            return Ok(None);
+        };
         let mut found: Option<ResolvedInterfaceMethod> = None;
-        for interface in 0..self.interfaces.len() as u32 {
+        for &(interface, method) in candidates.iter() {
             let Some(application) = self.type_conformance(env, ty, interface) else {
                 continue;
             };
-            let Some(method) = self.interfaces[interface as usize]
-                .methods
-                .iter()
-                .position(|item| item.name == name && item.default_binding.is_some())
-            else {
-                continue;
-            };
-            let requirement = Rc::clone(&self.interfaces[interface as usize].methods[method]);
-            let candidate = (application, interface, method as u32, requirement);
+            let requirement =
+                Rc::clone(&self.interfaces[interface as usize].methods[method as usize]);
+            let candidate = (application, interface, method, requirement);
             if let Some(first) = &found {
                 if first.3.default_binding != candidate.3.default_binding {
                     return Err(Diagnostic::new(
@@ -2336,6 +2362,25 @@ fn interface_default_binding(interface: &str, method: &str) -> String {
     format!("$default.{interface}.{method}")
 }
 
+/// Index each interface default after all interfaces resolve.
+fn index_interface_defaults(ctx: &mut Ctx) {
+    let mut defaults: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+    for (interface, contract) in ctx.interfaces.iter().enumerate() {
+        for (method, requirement) in contract.methods.iter().enumerate() {
+            if requirement.default_binding.is_some() {
+                defaults
+                    .entry(requirement.name.clone())
+                    .or_default()
+                    .push((interface as u32, method as u32));
+            }
+        }
+    }
+    ctx.interface_defaults = defaults
+        .into_iter()
+        .map(|(name, methods)| (name, Rc::from(methods)))
+        .collect();
+}
+
 /// Check a parsed module and produce typed HIR with the default
 /// options.
 pub fn check_module(module: &ast::Module) -> Result<HirModule, Diagnostic> {
@@ -2378,11 +2423,25 @@ pub fn check_module_with(
                 .map(|item| item.methods.len())
                 .sum::<usize>()
     };
+    let interface_default_count = |module: &ast::Module| {
+        module
+            .interfaces
+            .iter()
+            .flat_map(|interface| &interface.methods)
+            .filter(|method| method.body.is_some())
+            .count()
+    };
     let total_classes = class_count(core) + class_count(module);
-    let total_funcs =
-        core.funcs.len() + module.funcs.len() + method_count(core) + method_count(module) + 1;
+    let total_funcs = core.funcs.len()
+        + module.funcs.len()
+        + method_count(core)
+        + method_count(module)
+        + interface_default_count(core)
+        + interface_default_count(module)
+        + 1;
     let mut store = TypeStore::new_with_bundle(options.bundle.clone());
     store.reserve_classes(total_classes);
+    store.reserve_types(total_funcs);
     let mut ctx = Ctx {
         bundle: options.bundle.clone(),
         store,
@@ -2392,6 +2451,7 @@ pub fn check_module_with(
         interfaces: Vec::with_capacity(core.interfaces.len() + module.interfaces.len()),
         user_interfaces: HashMap::with_capacity(module.interfaces.len()),
         core_interfaces: HashMap::with_capacity(core.interfaces.len()),
+        interface_defaults: HashMap::new(),
         prelude: options.prelude,
         func_index: HashMap::with_capacity(module.funcs.len()),
         core_func_index: HashMap::with_capacity(core.funcs.len()),
@@ -2445,6 +2505,7 @@ pub fn check_module_with(
     resolve_all_interfaces(&mut ctx, core, true).map_err(core_defect)?;
     materializer.finish_interfaces(&mut ctx, import_span)?;
     resolve_all_interfaces(&mut ctx, module, false)?;
+    index_interface_defaults(&mut ctx);
     let option_class = ctx.core_types["Option"];
     let partial_eq_interface = ctx.core_interfaces["PartialEq"];
     let hashable_interface = ctx.core_interfaces["Hashable"];
@@ -3245,6 +3306,7 @@ fn register_interface_names(
             type_bounds: Vec::new(),
             associated: Vec::new(),
             methods: Vec::new(),
+            method_index: Vec::new(),
         });
     }
     Ok(())
@@ -3661,11 +3723,13 @@ fn resolve_all_interfaces(
                     .map(|_| interface_default_binding(&declaration.name, &method.name)),
             }));
         }
+        let method_index = index_interface_methods(&methods);
         let info = &mut ctx.interfaces[interface as usize];
         info.type_params = type_names;
         info.effect_params = effect_names;
         info.type_bounds = bounds;
         info.methods = methods;
+        info.method_index = method_index;
     }
     for declaration in &module.interfaces {
         let interface = if is_core {
@@ -4417,6 +4481,48 @@ fn interface_override_error(
         || method.own_effect_params.len() != requirement.own_effect_params.len()
     {
         return Some("the generic parameter counts differ".to_string());
+    }
+    if requirement.own_type_params.is_empty()
+        && requirement.own_effect_params.is_empty()
+        && requirement.premises.is_empty()
+    {
+        if !bounds_imply(&env.type_bounds, &method.class_type_bounds) {
+            return Some("the method needs an undeclared premise".to_string());
+        }
+        if method.mut_self != requirement.mut_self {
+            let required = if requirement.mut_self {
+                "`mut self`"
+            } else {
+                "`self`"
+            };
+            return Some(format!("the contract requires {required}"));
+        }
+        let parameters_match = method.params.len() == requirement.params.len()
+            && method.param_muts == requirement.param_muts
+            && method
+                .params
+                .iter()
+                .zip(&requirement.params)
+                .zip(&requirement.param_muts)
+                .all(|((implementation, required), mutable)| {
+                    let required = ctx.store.substitute(*required, types, rows);
+                    let required = ctx.normalize_associated(env, required);
+                    if *mutable {
+                        *implementation == required
+                    } else {
+                        ctx.store.compatible(*implementation, required)
+                    }
+                });
+        let required_ret = ctx.store.substitute(requirement.ret, types, rows);
+        let required_ret = ctx.normalize_associated(env, required_ret);
+        if !parameters_match || !ctx.store.compatible(required_ret, method.ret) {
+            return Some("the parameter or result types differ".to_string());
+        }
+        let required_row = ctx.store.substitute_row(&requirement.row, rows);
+        if !ctx.store.row_included(&method.row, &required_row) {
+            return Some("the effect row is too wide".to_string());
+        }
+        return None;
     }
     let class_count = ctx.classes[class_id as usize].type_params.len();
     let own_types: Vec<TypeId> = (0..requirement.own_type_params.len())

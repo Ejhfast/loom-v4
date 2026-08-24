@@ -250,6 +250,43 @@ pub(crate) fn verify_tables(
     for ty in &module.types {
         facts.push(type_facts(ty, &facts));
     }
+    let mut interface_defaults = vec![None; module.funcs.len()];
+    for (interface, contract) in module.interfaces.iter().enumerate() {
+        for (method, requirement) in contract.methods.iter().enumerate() {
+            if let Some(owner) = interface_defaults.get_mut(requirement.default as usize) {
+                *owner = Some((interface as u32, method as u32));
+            }
+        }
+    }
+    let iterable_layout = (|| {
+        let iterable = module
+            .interfaces
+            .iter()
+            .position(|item| item.key == "core.Iterable")?;
+        let iterator = module
+            .interfaces
+            .iter()
+            .position(|item| item.key == "core.Iterator")?;
+        let iterable_item = module.interfaces[iterable]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")?;
+        let iterable_iter = module.interfaces[iterable]
+            .associated
+            .iter()
+            .position(|item| item.name == "Iter")?;
+        let iterator_item = module.interfaces[iterator]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")?;
+        Some(super::IterableLayout {
+            iterable: iterable as u32,
+            iterator: iterator as u32,
+            iterable_item: iterable_item as u32,
+            iterable_iter: iterable_iter as u32,
+            iterator_item: iterator_item as u32,
+        })
+    })();
     let ctx = Ctx {
         module,
         bundle,
@@ -257,6 +294,8 @@ pub(crate) fn verify_tables(
         conformance_index,
         constructor_classes,
         class_constructors,
+        interface_defaults,
+        iterable_layout,
         uni: RefCell::new(Universe {
             types: module.types.clone(),
             index,
@@ -1481,6 +1520,90 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 .ok_or_else(|| merr("the implementation owner is not an ancestor"))?;
             let method = &module.funcs[target as usize];
             let owner_type_count = module.classes[owner as usize].type_params;
+            if requirement.type_params == 0
+                && requirement.effect_params == 0
+                && requirement.premises.is_empty()
+            {
+                if method.type_params != owner_type_count || method.effect_params != 0 {
+                    return Err(merr("the generic parameter counts differ"));
+                }
+                let class_bound_count = owner_type_count as usize;
+                let Some(method_bounds) = module.func_bounds.get(target as usize) else {
+                    return Err(merr("the implementation has no generic bound table"));
+                };
+                let Some(class_method_bounds) = method_bounds.get(..class_bound_count) else {
+                    return Err(merr("the implementation has incomplete class bounds"));
+                };
+                if method_bounds.len() != class_bound_count {
+                    return Err(merr("the generic bounds differ"));
+                }
+                let bounds_hold = if owner == conformance.class {
+                    conformance_bounds_imply(&conformance_bounds, class_method_bounds)
+                } else {
+                    ctx.type_arguments_meet_bounds(
+                        &owner_args,
+                        &[],
+                        class_method_bounds,
+                        &conformance_bounds,
+                    )
+                };
+                if !bounds_hold {
+                    return Err(merr("the implementation needs an undeclared premise"));
+                }
+                if method.params.len() != requirement.params.len() + 1 {
+                    return Err(merr("the parameter count differs"));
+                }
+                if method.param_muts.len() != method.params.len() {
+                    return Err(merr("the implementation has invalid parameter mutability"));
+                }
+                if method.param_muts.first().copied() != Some(requirement.mut_self) {
+                    let receiver = if requirement.mut_self {
+                        "`mut self`"
+                    } else {
+                        "`self`"
+                    };
+                    return Err(merr(&format!("the contract requires {receiver}")));
+                }
+                if method.param_muts[1..] != requirement.param_muts[..] {
+                    return Err(merr("parameter mutability differs"));
+                }
+                let params_match = method.params[1..]
+                    .iter()
+                    .zip(&requirement.params)
+                    .zip(&requirement.param_muts)
+                    .all(|((implementation, required), mutable)| {
+                        let implementation = ctx.subst(*implementation, &owner_args, &[]);
+                        let required = ctx.subst_with_bounds(
+                            *required,
+                            &contract_types,
+                            &conformance.application.rows,
+                            &conformance_bounds,
+                        );
+                        if *mutable {
+                            implementation == required
+                        } else {
+                            ctx.is_subtype(required, implementation)
+                        }
+                    });
+                if !params_match {
+                    return Err(merr("parameter types differ"));
+                }
+                let actual_ret = ctx.subst(method.ret, &owner_args, &[]);
+                let required_ret = ctx.subst_with_bounds(
+                    requirement.ret,
+                    &contract_types,
+                    &conformance.application.rows,
+                    &conformance_bounds,
+                );
+                if !ctx.is_subtype(actual_ret, required_ret) {
+                    return Err(merr("the result type is too wide"));
+                }
+                let required_row = ctx.row_subst(&requirement.row, &conformance.application.rows);
+                if !ctx.row_included(&method.row, &required_row) {
+                    return Err(merr("the effect row is too wide"));
+                }
+                continue;
+            }
             let own_types: Vec<u32> = (0..requirement.type_params)
                 .map(|generic_index| ctx.intern(BcType::Var(class.type_params + generic_index)))
                 .collect();

@@ -1618,6 +1618,12 @@ fn bench_core_compilation() {
     }
 
     let module = lm_hir::core_image();
+    let instruction_count: usize = module
+        .funcs
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .map(Vec::len)
+        .sum();
     let bytes = lm_bytecode::encode(&module);
     let mut decode_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
@@ -1703,6 +1709,7 @@ fn bench_core_compilation() {
         hir.funcs.len(),
         median(check_runs).as_secs_f64() * 1e3
     );
+    println!("LOOM\tcore_hir_types\t{}", hir.store.type_count());
     println!(
         "LOOM\tcore_lower\t{}\t{}\t{:.3}\tms",
         hir.classes.len(),
@@ -1714,6 +1721,11 @@ fn bench_core_compilation() {
         module.classes.len(),
         module.funcs.len(),
         median(compile_runs).as_secs_f64() * 1e3
+    );
+    println!("LOOM\tcore_instructions\t{instruction_count}");
+    println!(
+        "LOOM\tcore_instruction_width\t{}\tbytes",
+        std::mem::size_of::<lm_bytecode::Instr>()
     );
     println!(
         "LOOM\tcore_decode\t{}\t{}\t{:.3}\tms",

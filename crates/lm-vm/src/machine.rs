@@ -1224,6 +1224,27 @@ impl Machine {
         self.compact_terminal_proc();
     }
 
+    /// Read one stored fault for an explicit re-raise.
+    #[cold]
+    #[inline(never)]
+    fn pop_fault_record(&mut self) -> Result<FaultRec, FaultCode> {
+        let reference = self.pop_obj()?;
+        match self.vm.heap.get(reference) {
+            Object::NativeFault {
+                code,
+                message,
+                op,
+                trace,
+            } => Ok(FaultRec {
+                code: *code,
+                message: message.clone(),
+                op: *op,
+                trace: trace.to_vec(),
+            }),
+            _ => Err(BAD_TYPE),
+        }
+    }
+
     /// Capture the current bounded execution trace.
     pub(crate) fn execution_trace(&self) -> Vec<FaultSite> {
         self.execution_trace_from(false)
@@ -1951,9 +1972,14 @@ impl Machine {
         } else {
             envs.derive(module, parent, call.app).map_err(env_fault)?
         };
-        let selected = envs
-            .interface_method_override(module, call.interface, call.method, class)
-            .ok_or(BAD_TYPE)?;
+        let selected = if default == lm_bytecode::NO_FUNC {
+            true
+        } else {
+            dispatch
+                .get(class as usize)
+                .and_then(|row| row.interface_override(call.interface, call.method))
+                .ok_or(BAD_TYPE)?
+        };
         let (target, env) = if selected {
             let target = dispatch
                 .get(class as usize)
@@ -5230,22 +5256,7 @@ impl Machine {
                 return Ok(ExecOutcome::Raise { code, message });
             }
             Instr::RaiseFault => {
-                let reference = self.pop_obj()?;
-                let fault = match self.vm.heap.get(reference) {
-                    Object::NativeFault {
-                        code,
-                        message,
-                        op,
-                        trace,
-                    } => FaultRec {
-                        code: *code,
-                        message: message.clone(),
-                        op: *op,
-                        trace: trace.to_vec(),
-                    },
-                    _ => return Err(BAD_TYPE),
-                };
-                return Ok(ExecOutcome::Reraise(fault));
+                return Ok(ExecOutcome::Reraise(self.pop_fault_record()?));
             }
         }
         Ok(ExecOutcome::Continue)

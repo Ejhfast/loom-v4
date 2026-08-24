@@ -199,6 +199,16 @@ fn include_parameter_type_facts(facts: &mut TypeFacts, known: &[TypeFacts], chil
     facts.max_effect_var = facts.max_effect_var.max(child.max_effect_var);
 }
 
+/// Core interface indices for the iterable projection alias.
+#[derive(Clone, Copy)]
+struct IterableLayout {
+    iterable: u32,
+    iterator: u32,
+    iterable_item: u32,
+    iterable_iter: u32,
+    iterator_item: u32,
+}
+
 /// Shared lookup context for one module.
 struct Ctx<'m> {
     module: &'m Module,
@@ -212,6 +222,10 @@ struct Ctx<'m> {
     constructor_classes: Vec<Option<u32>>,
     /// Constructor functions grouped by their class.
     class_constructors: Vec<Vec<u32>>,
+    /// Interface and method indices for default functions.
+    interface_defaults: Vec<Option<(u32, u32)>>,
+    /// Core indices for the iterable projection alias.
+    iterable_layout: Option<IterableLayout>,
     uni: RefCell<Universe>,
     /// The resolved pinned core definitions of this module.
     core: CoreLayout,
