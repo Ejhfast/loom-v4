@@ -722,7 +722,11 @@ impl World {
             self.metrics.boundary_exits = self.metrics.boundary_exits.saturating_add(1);
         }
         if charge_fuel {
-            self.budget.fuel.charge(retired);
+            if let Some(fuel) = Arc::get_mut(&mut self.budget.fuel) {
+                fuel.charge_unique(retired);
+            } else {
+                self.budget.fuel.charge(retired);
+            }
         }
         if let Some(remaining) = quantum {
             *remaining = remaining.saturating_sub(retired);

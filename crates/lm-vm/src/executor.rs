@@ -71,6 +71,13 @@ impl ExecutionFuel {
             });
         assert!(result.is_ok(), "the world fuel counter cannot underflow");
     }
+
+    pub(crate) fn charge_unique(&mut self, count: u32) {
+        let remaining = self.remaining.get_mut();
+        *remaining = remaining
+            .checked_sub(u64::from(count))
+            .expect("the world fuel counter cannot underflow");
+    }
 }
 
 struct ExecutionFuelClaim {
