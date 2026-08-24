@@ -24,18 +24,6 @@ enum SendResult
   end
 end
 
-enum ProcResult[R]
-  Done(value: R)
-  Fault(fault: Fault)
-
-  def is_done(self): Bool
-    case self
-    in Done(_)  then true
-    in Fault(_) then false
-    end
-  end
-end
-
 # The ordinary error of a control call on a proc.
 enum ProcError implements Error
   Dead

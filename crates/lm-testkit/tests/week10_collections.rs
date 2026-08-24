@@ -513,7 +513,7 @@ copy_box = copy(box)
          final class Bad implements Cloneable\n  def clone(self): String\n    \"bad\"\n  end\nend\n1\n",
     );
     assert!(
-        bad.contains("does not match interface `Cloneable`"),
+        bad.contains("does not satisfy interface `Cloneable`"),
         "{bad}"
     );
 
@@ -1308,6 +1308,7 @@ filtered_map = values.filter_map[Int]() { |value: Int|
     None
   end
 }
+
 folded = values.fold[Int](0) { |sum: Int, value: Int| sum + value }
 sorted = [4, 1, 3, 2]
 sorted.sort_by() { |left: Int, right: Int|
@@ -1335,6 +1336,37 @@ sorted.sort_by() { |left: Int, right: Int|
     assert_eq!(
         outcome(source),
         "Done((15, Some(2), Some(4), [2, 4, 6, 8, 10], [1, 3, 5], [20, 40], 15, true, true, [1, 2, 3, 4]))"
+    );
+}
+
+#[test]
+fn list_map_keeps_its_explicit_override() {
+    let module = compile_text(
+        "collections.lm",
+        "[1, 2, 3].map(do |value: Int|: Int value + 1 end)\n",
+    )
+    .expect("the source compiles");
+    let entry = &module.funcs[module.entry as usize];
+    let called: Vec<&str> = entry
+        .blocks
+        .iter()
+        .flatten()
+        .filter_map(|instruction| match instruction {
+            Instr::Call(func) | Instr::CallG { func, .. } => {
+                Some(module.funcs[*func as usize].name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        called.iter().any(|name| name.ends_with("List.map")),
+        "the call targets were {called:?}"
+    );
+    assert!(
+        called
+            .iter()
+            .all(|name| !name.contains("$default.Iterable.map")),
+        "the List call selected an interface default"
     );
 }
 
@@ -1680,10 +1712,7 @@ end
 Key()
 "#;
     let failure = error(effectful);
-    assert!(
-        failure.contains("has effects outside interface `Hashable`"),
-        "{failure}"
-    );
+    assert!(failure.contains("the effect row is too wide"), "{failure}");
 }
 
 #[test]

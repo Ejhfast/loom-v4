@@ -4,6 +4,10 @@ def panic(message: String): Never
   intrinsic("control.panic", message)
 end
 
+def raise(fault: Fault): Never
+  intrinsic("control.raise_fault", fault)
+end
+
 def assert(condition: Bool)
   if condition
     ()

@@ -1,0 +1,10 @@
+interface Named
+  def name(self): String
+    "default"
+  end
+end
+
+final class Item implements Named
+end
+
+Item().name()

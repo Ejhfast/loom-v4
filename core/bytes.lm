@@ -15,7 +15,7 @@ enum HexError implements Error
   end
 end
 
-final class Bytes implements Hashable, Comparable
+final class Bytes implements Hashable, Comparable, Add
   def len(self): Int
     intrinsic("bytes.len", self)
   end

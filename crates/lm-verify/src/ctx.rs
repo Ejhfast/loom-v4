@@ -562,10 +562,71 @@ impl<'m> Ctx<'m> {
         assoc: u32,
         bounds: &[Vec<BcInterfaceUse>],
     ) -> Option<u32> {
+        if let Some((source, iterable, item)) = self.iterable_item_alias(base, interface, assoc) {
+            return Some(
+                self.projected_type_with_bounds(source, iterable, item, bounds)
+                    .unwrap_or_else(|| {
+                        self.intern(BcType::Projection {
+                            base: source,
+                            interface: iterable,
+                            assoc: item,
+                        })
+                    }),
+            );
+        }
         let (conformance, args) =
             self.concrete_conformance_with_bounds(base, interface, bounds, 0)?;
         let template = *conformance.associated.get(assoc as usize)?;
         Some(self.subst(template, &args, &[]))
+    }
+
+    /// Return the core Iterable item alias for one iterator projection.
+    fn iterable_item_alias(
+        &self,
+        base: u32,
+        interface: u32,
+        assoc: u32,
+    ) -> Option<(u32, u32, u32)> {
+        let iterable = self
+            .module
+            .interfaces
+            .iter()
+            .position(|item| item.key == "core.Iterable")? as u32;
+        let iterator = self
+            .module
+            .interfaces
+            .iter()
+            .position(|item| item.key == "core.Iterator")? as u32;
+        if interface != iterator {
+            return None;
+        }
+        let iterator_item = self.module.interfaces[iterator as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")? as u32;
+        if assoc != iterator_item {
+            return None;
+        }
+        let BcType::Projection {
+            base: source,
+            interface: owner,
+            assoc: iter_assoc,
+        } = self.ty(base)
+        else {
+            return None;
+        };
+        let iterable_iter = self.module.interfaces[iterable as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Iter")? as u32;
+        if owner != iterable || iter_assoc != iterable_iter {
+            return None;
+        }
+        let iterable_item = self.module.interfaces[iterable as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")? as u32;
+        Some((source, iterable, iterable_item))
     }
 
     pub(crate) fn interface_application(
@@ -575,8 +636,36 @@ impl<'m> Ctx<'m> {
         interface: u32,
         depth: u32,
     ) -> Option<BcInterfaceUse> {
+        for contract in &self.module.interfaces {
+            for method in &contract.methods {
+                if method.default != func {
+                    continue;
+                }
+                if let Some(bound) = method
+                    .premises
+                    .iter()
+                    .find(|premise| premise.subject == ty)
+                    .and_then(|premise| {
+                        premise
+                            .bounds
+                            .iter()
+                            .find(|bound| bound.interface == interface)
+                    })
+                {
+                    return Some(bound.clone());
+                }
+            }
+        }
         let bounds = self.module.func_bounds.get(func as usize)?;
         self.interface_application_with_bounds(ty, interface, bounds, depth)
+    }
+
+    /// Return true when a function is an interface-owned default.
+    pub(crate) fn is_interface_default(&self, func: u32) -> bool {
+        self.module
+            .interfaces
+            .iter()
+            .any(|contract| contract.methods.iter().any(|method| method.default == func))
     }
 
     /// Resolve one interface application from an explicit bound table.
@@ -718,6 +807,42 @@ impl<'m> Ctx<'m> {
         for (actual, bounds) in actual_types.iter().zip(required_bounds) {
             for bound in bounds {
                 let required = self.subst_interface_use(bound, actual_types, actual_rows);
+                let found = self.interface_application_with_bounds(
+                    *actual,
+                    required.interface,
+                    scope_bounds,
+                    0,
+                );
+                if found.as_ref() != Some(&required) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Test method-owned arguments against bounds with an outer prefix.
+    pub(crate) fn method_arguments_meet_bounds(
+        &self,
+        actual_types: &[u32],
+        actual_rows: &[Vec<BcRow>],
+        required_bounds: &[Vec<BcInterfaceUse>],
+        prefix_types: &[u32],
+        prefix_rows: &[Vec<BcRow>],
+        scope_bounds: &[Vec<BcInterfaceUse>],
+    ) -> bool {
+        if actual_types.len() != required_bounds.len() {
+            return false;
+        }
+        let mut types = Vec::with_capacity(prefix_types.len() + actual_types.len());
+        types.extend_from_slice(prefix_types);
+        types.extend_from_slice(actual_types);
+        let mut rows = Vec::with_capacity(prefix_rows.len() + actual_rows.len());
+        rows.extend_from_slice(prefix_rows);
+        rows.extend_from_slice(actual_rows);
+        for (actual, bounds) in actual_types.iter().zip(required_bounds) {
+            for bound in bounds {
+                let required = self.subst_interface_use(bound, &types, &rows);
                 let found = self.interface_application_with_bounds(
                     *actual,
                     required.interface,
@@ -1121,6 +1246,7 @@ impl<'m> Ctx<'m> {
                 lm_abi::AbiPrimitive::String => Ok(TY_STR),
                 lm_abi::AbiPrimitive::Bytes => Ok(self.intern(BcType::Bytes)),
                 lm_abi::AbiPrimitive::VmSnapshot => Ok(self.intern(BcType::VmSnapshot)),
+                lm_abi::AbiPrimitive::Fault => Ok(self.intern(BcType::Fault)),
             },
             lm_abi::AbiType::Core(core) => {
                 let (slot, name) = match core {
@@ -1278,7 +1404,7 @@ impl<'m> Ctx<'m> {
         Ok(self.intern(BcType::Tuple(elems)))
     }
 
-    /// One VM event instance type, for example `RunResult[t]`.
+    /// One VM event instance type, for example `StepEvent[t]`.
     /// The instance type of one core family without type parameters.
     pub(crate) fn plain_inst(&self, parent: Option<u32>, what: &str) -> Result<u32, String> {
         let Some(parent) = parent else {

@@ -1,0 +1,36 @@
+range = Range(0, 6)
+mapped = range.map(do |value: Int|: Int value * 2 end)
+filtered = range.filter(do |value: Int|: Bool value % 2 == 0 end)
+folded = range.fold(0, do |sum: Int, value: Int|: Int sum + value end)
+indexed = range.map_indexed(
+  do |index: Int, value: Int|: Int index + value end
+)
+parts = range.chunks(4)
+
+table = {"a": 1, "b": 2}
+pairs = table.to_list()
+table.each(do |key: String, value: Int|
+  assert(key.len() + value > 0)
+end)
+pair_count = table.len()
+
+text_map = "ab".map(do |value: Char|: Char value end)
+joined = [1, 2, 3].join("-")
+
+(
+  mapped,
+  filtered,
+  folded,
+  indexed,
+  range.take(2),
+  range.drop(4),
+  parts,
+  range.min(),
+  range.max(),
+  range.any(do |value: Int|: Bool value == 4 end),
+  range.all(do |value: Int|: Bool value < 6 end),
+  range.find(do |value: Int|: Bool value > 3 end),
+  range.position(do |value: Int|: Bool value == 3 end),
+  range.count_where(do |value: Int|: Bool value % 2 == 0 end),
+  (pairs.len(), pair_count, text_map, joined)
+)

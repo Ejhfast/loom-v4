@@ -106,8 +106,6 @@ fn core_layout_resolves_by_hash_in_a_user_module() {
         (layout.result_ok, "Result.Ok"),
         (layout.result_err, "Result.Err"),
         (layout.io_error_failed, "IoError.Failed"),
-        (layout.run_done, "RunResult.Done"),
-        (layout.run_fault, "RunResult.Fault"),
         (layout.step_done, "StepEvent.Done"),
         (layout.drive_asked, "DriveEvent.Asked"),
     ] {

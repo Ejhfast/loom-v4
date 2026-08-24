@@ -192,6 +192,8 @@ impl<'o> FnChecker<'o> {
                 interface,
                 method,
                 selector: "__eq__".to_string(),
+                own_targs: Vec::new(),
+                own_rowargs: Vec::new(),
                 args: checked,
             },
         };

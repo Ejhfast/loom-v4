@@ -57,7 +57,9 @@ pub use hash::{hash256, hash256_hex};
 /// Version 29 adds anonymous pipes and operating-system children.
 /// Version 30 adds the TLS server handshake operation.
 /// Version 31 adds UDP datagram operations.
-pub const ABI_VERSION: u32 = 31;
+/// Version 32 adds exact fault re-raising.
+/// Version 33 adds direct closure proc launch.
+pub const ABI_VERSION: u32 = 33;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -185,6 +187,7 @@ pub enum AbiPrimitive {
     String,
     Bytes,
     VmSnapshot,
+    Fault,
 }
 
 impl AbiPrimitive {
@@ -198,6 +201,7 @@ impl AbiPrimitive {
             AbiPrimitive::String => "String",
             AbiPrimitive::Bytes => "Bytes",
             AbiPrimitive::VmSnapshot => "VmSnapshot",
+            AbiPrimitive::Fault => "Fault",
         }
     }
 }
@@ -392,6 +396,7 @@ impl AbiType {
     pub const STR: AbiType = AbiType::Primitive(AbiPrimitive::String);
     pub const BYTES: AbiType = AbiType::Primitive(AbiPrimitive::Bytes);
     pub const VM_SNAPSHOT: AbiType = AbiType::Primitive(AbiPrimitive::VmSnapshot);
+    pub const FAULT: AbiType = AbiType::Primitive(AbiPrimitive::Fault);
     pub const TEXT: AbiType = AbiType::Core(AbiCore::Text);
     pub const SUBSTRING: AbiType = AbiType::Core(AbiCore::Substring);
     pub const CHAR: AbiType = AbiType::Core(AbiCore::Char);
@@ -686,7 +691,7 @@ impl AbiType {
 /// Version 19 uses BLAKE3-256 for intrinsic identities.
 /// Version 20 adds Float and bitwise numeric operations.
 /// Version 21 adds text padding and Float text conversions.
-pub const INTRINSIC_ABI_VERSION: u32 = 21;
+pub const INTRINSIC_ABI_VERSION: u32 = 22;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -882,9 +887,10 @@ pub const INTRINSIC_TEXT_PAD_END: IntrinsicSlot = 177;
 pub const INTRINSIC_TEXT_PARSE_FLOAT_STATUS: IntrinsicSlot = 178;
 pub const INTRINSIC_TEXT_PARSE_FLOAT_VALUE: IntrinsicSlot = 179;
 pub const INTRINSIC_FLOAT_FIXED: IntrinsicSlot = 180;
+pub const INTRINSIC_RAISE_FAULT: IntrinsicSlot = 181;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 181] = [
+pub const INTRINSICS: [IntrinsicDef; 182] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2015,6 +2021,12 @@ pub const INTRINSICS: [IntrinsicDef; 181] = [
         reply: AbiType::STR,
         semantic_revision: 1,
     },
+    IntrinsicDef {
+        name: "control.raise_fault",
+        params: &[AbiType::FAULT],
+        reply: AbiType::NEVER,
+        semantic_revision: 1,
+    },
 ];
 
 /// The number of pure intrinsic slots.
@@ -2280,9 +2292,10 @@ pub const OP_UDP_SEND_TO: OpSlot = 138;
 pub const OP_UDP_RECV_FROM: OpSlot = 139;
 pub const OP_UDP_LOCAL_ADDRESS: OpSlot = 140;
 pub const OP_UDP_CLOSE: OpSlot = 141;
+pub const OP_PROC_RUN_CLOSURE: OpSlot = 142;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 142] = [
+pub const OPS: [OpDef; 143] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -2370,7 +2383,7 @@ pub const OPS: [OpDef; 142] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Run[T]) -> RunResult[T]",
+        schema: "[T](Run[T]) -> Result[T, Fault]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2483,7 +2496,7 @@ pub const OPS: [OpDef; 142] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[M,R](Handle[M,R]) -> ProcResult[R]",
+        schema: "[M,R](Handle[M,R]) -> Result[R, Fault]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3610,6 +3623,15 @@ pub const OPS: [OpDef; 142] = [
         reply: AbiType::RESULT_UNIT_NET_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Proc",
+        member: "RunClosure",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[R,e](() -> R with e) -> Handle[Never,R]",
+        snapshot: SnapshotClass::MachineState,
     },
 ];
 

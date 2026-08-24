@@ -9,6 +9,269 @@ interface Iterable
   type Item
   type Iter: Iterator
   def iterator(self): Self.Iter
+
+  def each[effect e](self, f: (Self.Item) -> () with e): () with e
+    for value in self
+      f(value)
+    end
+  end
+
+  def map[U, effect e](self, f: (Self.Item) -> U with e): List[U] with e
+    result = List[U]()
+    for value in self
+      result.push(f(value))
+    end
+    result
+  end
+
+  def filter[effect e](
+    self,
+    keep: (Self.Item) -> Bool with e
+  ): List[Self.Item] with e
+    result = List[Self.Item]()
+    for value in self
+      if keep(value)
+        result.push(value)
+      end
+    end
+    result
+  end
+
+  def fold[A, effect e](
+    self,
+    start: A,
+    f: (A, Self.Item) -> A with e
+  ): A with e
+    result = start
+    for value in self
+      result = f(result, value)
+    end
+    result
+  end
+
+  def to_list(self): List[Self.Item]
+    result = List[Self.Item]()
+    for value in self
+      result.push(value)
+    end
+    result
+  end
+
+  def any[effect e](self, f: (Self.Item) -> Bool with e): Bool with e
+    for value in self
+      if f(value)
+        return true
+      end
+    end
+    false
+  end
+
+  def all[effect e](self, f: (Self.Item) -> Bool with e): Bool with e
+    for value in self
+      if not f(value)
+        return false
+      end
+    end
+    true
+  end
+
+  def find[effect e](self, f: (Self.Item) -> Bool with e): Option[Self.Item] with e
+    for value in self
+      if f(value)
+        return Some(value)
+      end
+    end
+    None[Self.Item]()
+  end
+
+  def position[effect e](self, f: (Self.Item) -> Bool with e): Option[Int] with e
+    index = 0
+    for value in self
+      if f(value)
+        return Some(index)
+      end
+      index = index + 1
+    end
+    None[Int]()
+  end
+
+  def count_where[effect e](self, f: (Self.Item) -> Bool with e): Int with e
+    count = 0
+    for value in self
+      if f(value)
+        count = count + 1
+      end
+    end
+    count
+  end
+
+  def each_indexed[effect e](
+    self,
+    f: (Int, Self.Item) -> () with e
+  ): () with e
+    index = 0
+    for value in self
+      f(index, value)
+      index = index + 1
+    end
+  end
+
+  def map_indexed[U, effect e](
+    self,
+    f: (Int, Self.Item) -> U with e
+  ): List[U] with e
+    result = List[U]()
+    index = 0
+    for value in self
+      result.push(f(index, value))
+      index = index + 1
+    end
+    result
+  end
+
+  def take(self, count: Int): List[Self.Item]
+    if count < 0
+      panic("take needs a nonnegative count")
+    end
+    result = List[Self.Item]()
+    index = 0
+    for value in self
+      if index >= count
+        return result
+      end
+      result.push(value)
+      index = index + 1
+    end
+    result
+  end
+
+  def drop(self, count: Int): List[Self.Item]
+    if count < 0
+      panic("drop needs a nonnegative count")
+    end
+    result = List[Self.Item]()
+    index = 0
+    for value in self
+      if index >= count
+        result.push(value)
+      end
+      index = index + 1
+    end
+    result
+  end
+
+  def chunks(self, size: Int): List[List[Self.Item]]
+    if size <= 0
+      panic("chunks needs a positive size")
+    end
+    result = List[List[Self.Item]]()
+    chunk = List[Self.Item]()
+    for value in self
+      chunk.push(value)
+      if chunk.len() == size
+        result.push(chunk)
+        chunk = List[Self.Item]()
+      end
+    end
+    if not chunk.is_empty()
+      result.push(chunk)
+    end
+    result
+  end
+
+  def min(self): Option[Self.Item] when Self.Item: Comparable
+    result = None[Self.Item]()
+    for value in self
+      result = case result
+      in Some(current)
+        if value.compare(current).is_less()
+          Some(value)
+        else
+          Some(current)
+        end
+      in None
+        Some(value)
+      end
+    end
+    result
+  end
+
+  def max(self): Option[Self.Item] when Self.Item: Comparable
+    result = None[Self.Item]()
+    for value in self
+      result = case result
+      in Some(current)
+        if value.compare(current).is_greater()
+          Some(value)
+        else
+          Some(current)
+        end
+      in None
+        Some(value)
+      end
+    end
+    result
+  end
+
+  def join(self, separator: Text): String when Self.Item: Display
+    builder = StringBuilder()
+    first = true
+    for value in self
+      if first
+        first = false
+      else
+        builder.append(separator)
+      end
+      value.append_to(builder)
+    end
+    builder.finish()
+  end
+
+  def sum(self, start: Self.Item): Self.Item when Self.Item: Add
+    result = start
+    for value in self
+      result = result.__add__(value)
+    end
+    result
+  end
+
+  def par_map[U](
+    self,
+    escaping task: (Self.Item) -> U
+  ): List[U] with Proc
+    values = self.to_list()
+    if values.is_empty()
+      return List[U]()
+    end
+    if values.len() <= 16
+      handles = List[Handle[Never, U]]()
+      for value in values
+        handles.push(sys.proc.run(do ||: U
+          task(value)
+        end))
+      end
+      result = List[U]()
+      result.reserve(values.len())
+      for handle in handles
+        result.push(handle.done().value())
+      end
+      return result
+    end
+    chunk_count = values.len().min(16)
+    chunk_size = (values.len() + chunk_count - 1) / chunk_count
+    handles = List[Handle[Never, List[U]]]()
+    for chunk in values.chunks(chunk_size)
+      handles.push(sys.proc.run(do ||: List[U]
+        chunk.map(task)
+      end))
+    end
+    result = List[U]()
+    result.reserve(values.len())
+    for handle in handles
+      result.extend(handle.done().value())
+    end
+    result
+  end
 end
 
 interface Counted

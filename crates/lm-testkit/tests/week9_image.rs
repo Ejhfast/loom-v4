@@ -816,8 +816,8 @@ fn an_accepted_message_that_drops_its_object_rejects_as_non_canonical() {
 /// the closed result type that body derives.
 ///
 /// The value itself is not a structural fact, so a terminal value of
-/// another shape admits. The holder reads it through `RunResult[T]` or
-/// `ProcResult[R]`, and the boundary check of the world proves it
+/// another shape admits. The holder reads it through `Result[T, Fault]`,
+/// and the boundary check of the world proves it
 /// there. The two records around it stay structural rules.
 #[test]
 fn a_terminal_machine_states_a_body_and_a_header_result_type() {
@@ -827,8 +827,8 @@ def go(): Int with Vm
     \"answer\"
   end, args: ())
   case vm.run()
-  in Done(_)  then 0
-  in Fault(_) then 0
+  in Ok(_)  then 0
+  in Err(_) then 0
   end
   case vm.snapshot()
   in Ok(_)  then 1
@@ -889,8 +889,8 @@ def go(): Int with Vm
     \"answer\"
   end, args: ())
   case vm.run()
-  in Done(_)  then 0
-  in Fault(_) then 0
+  in Ok(_)  then 0
+  in Err(_) then 0
   end
   case vm.snapshot()
   in Ok(_)  then 1
@@ -1100,8 +1100,8 @@ fn a_terminal_machine_with_a_frame_or_a_frameless_operand_rejects() {
 def go(): Int with Vm
   vm = sys.vm.Vm().activate_or_fault({ ||: Int 7 }, args: ())
   case vm.run()
-  in Done(_)  then 0
-  in Fault(_) then 0
+  in Ok(_)  then 0
+  in Err(_) then 0
   end
   case vm.snapshot()
   in Ok(_)  then 1

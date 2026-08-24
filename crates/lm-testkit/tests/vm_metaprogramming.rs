@@ -72,8 +72,8 @@ def execute(): Bool with Vm
   in Err(_) then return false
   end
   case run.run()
-  in Done(_) then false
-  in Fault(fault)
+  in Ok(_) then false
+  in Err(fault)
     case fault.site()
     in None then false
     in Some(site)
@@ -115,8 +115,8 @@ def execute(): Bool with Vm
   in Err(_) then return false
   end
   case run.run()
-  in Done(_) then false
-  in Fault(fault)
+  in Ok(_) then false
+  in Err(fault)
     case fault.site()
     in None then false
     in Some(site)
@@ -189,8 +189,8 @@ def execute(): Bool with Vm
   in Err(_) then return false
   end
   case run.run()
-  in Done(_) then false
-  in Fault(fault)
+  in Ok(_) then false
+  in Err(fault)
     case fault.site()
     in None then false
     in Some(site)
@@ -252,8 +252,8 @@ def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the installed function faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the installed function faulted")
   end
 end
 
@@ -281,8 +281,8 @@ def execute(): Int with Vm
   in Err(_) then return -2
   end
   case run.run()
-  in Done(value) then value
-  in Fault(_) then -3
+  in Ok(value) then value
+  in Err(_) then -3
   end
 end
 
@@ -311,8 +311,8 @@ def call(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(result) then Ok(result)
-  in Fault(_) then Err("the installed function faulted")
+  in Ok(result) then Ok(result)
+  in Err(_) then Err("the installed function faulted")
   end
 end
 
@@ -325,8 +325,8 @@ def call_target(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(result) then Ok(result)
-  in Fault(_) then Err("the installed target faulted")
+  in Ok(result) then Ok(result)
+  in Err(_) then Err("the installed target faulted")
   end
 end
 
@@ -434,8 +434,8 @@ def call_add(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the edited function faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the edited function faulted")
   end
 end
 
@@ -569,8 +569,8 @@ def run_entry(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the entry faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the entry faulted")
   end
 end
 
@@ -626,8 +626,8 @@ def run_read(image: Vm, function: FunctionBinding[(), Int]): Result[Int, String]
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the read faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the read faulted")
   end
 end
 
@@ -777,8 +777,8 @@ def call_total(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(result) then Ok(result)
-  in Fault(_) then Err("the total faulted")
+  in Ok(result) then Ok(result)
+  in Err(_) then Err("the total faulted")
   end
 end
 
@@ -873,8 +873,8 @@ def run_price(
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the price function faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the price function faulted")
   end
 end
 
@@ -1152,8 +1152,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
   in Err(_) then -5
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -5
+    in Ok(value) then value
+    in Err(_) then -5
     end
   end
 end
@@ -1289,8 +1289,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   in Err(_) then -8
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -8
+    in Ok(value) then value
+    in Err(_) then -8
     end
   end
 end
@@ -1349,8 +1349,8 @@ def execute(): Bool with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseS
   in Err(_) then false
   in Ok(run)
     case run.run()
-    in Done(value) then value.render() == "[1, 2, 3]"
-    in Fault(_) then false
+    in Ok(value) then value.render() == "[1, 2, 3]"
+    in Err(_) then false
     end
   end
 end
@@ -1411,8 +1411,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   in Err(_) then -8
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -8
+    in Ok(value) then value
+    in Err(_) then -8
     end
   end
 end
@@ -1463,8 +1463,8 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_) then -5
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -5
+    in Ok(value) then value
+    in Err(_) then -5
     end
   end
 end
@@ -1504,8 +1504,8 @@ def run_entry(image: Vm, entry: FunctionDef[(), Int]): Result[Int, String] with 
     |error: CodeError| error.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the run faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the run faulted")
   end
 end
 
@@ -1663,8 +1663,8 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_) then -8
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -8
+    in Ok(value) then value
+    in Err(_) then -8
     end
   end
 end
@@ -1759,8 +1759,8 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_) then -8
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -8
+    in Ok(value) then value
+    in Err(_) then -8
     end
   end
 end
@@ -1921,8 +1921,8 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
         in Err(_) then -4
         in Ok(run)
           case run.run()
-          in Done(value) then value
-          in Fault(_) then -4
+          in Ok(value) then value
+          in Err(_) then -4
           end
         end
       end
@@ -2029,8 +2029,8 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
   in Err(_) then return false
   end
   case run.run()
-  in Done(_) then false
-  in Fault(fault)
+  in Ok(_) then false
+  in Err(fault)
     case fault.site()
     in None then false
     in Some(site)
@@ -2270,8 +2270,8 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
     return (-6, -6)
   end
   before = case before_run.run()
-  in Done(value) then value
-  in Fault(_)
+  in Ok(value) then value
+  in Err(_)
     return (-6, -6)
   end
   spec = case first.slot_spec("step")
@@ -2297,8 +2297,8 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
     in Err(_) then -10
     in Ok(run)
       case run.run()
-      in Done(value) then value
-      in Fault(_) then -10
+      in Ok(value) then value
+      in Err(_) then -10
       end
     end
     (before, after)
@@ -2337,8 +2337,8 @@ def run_entry(image: Vm, entry: FunctionDef[(), Int]): Int with Vm
   in Err(_) then -20
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -21
+    in Ok(value) then value
+    in Err(_) then -21
     end
   end
 end
@@ -2400,8 +2400,8 @@ def execute(): (Int, Int, Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compile
     in Err(_) then return (before, second_own, after, -13)
     end
     restored_value = case restored.run()
-    in Done(value) then value
-    in Fault(_) then -14
+    in Ok(value) then value
+    in Err(_) then -14
     end
     (before, second_own, after, restored_value)
   end
@@ -2449,8 +2449,8 @@ def start_worker(
   }?
   run.table().pass(Proc)
   case run.run()
-  in Done(worker) then Ok(worker)
-  in Fault(_) then Err("the worker entry faulted")
+  in Ok(worker) then Ok(worker)
+  in Err(_) then Err("the worker entry faulted")
   end
 end
 
@@ -2460,8 +2460,8 @@ def finish_worker(worker: Handle[Never, Int]): Result[Int, String] with Proc
   in Err(_) then return Err("the worker did not resume")
   end
   case worker.done()
-  in Done(result) then Ok(result)
-  in Fault(_) then Err("the worker faulted")
+  in Ok(result) then Ok(result)
+  in Err(_) then Err("the worker faulted")
   end
 end
 
@@ -2543,8 +2543,8 @@ def start_worker(
   }?
   run.table().pass(Proc)
   case run.run()
-  in Done(worker) then Ok(worker)
-  in Fault(_) then Err("the worker entry faulted")
+  in Ok(worker) then Ok(worker)
+  in Err(_) then Err("the worker entry faulted")
   end
 end
 
@@ -2554,8 +2554,8 @@ def finish_worker(worker: Handle[Never, Int]): Result[Int, String] with Proc
   in Err(_) then return Err("the worker did not resume")
   end
   case worker.done()
-  in Done(result) then Ok(result)
-  in Fault(_) then Err("the worker faulted")
+  in Ok(result) then Ok(result)
+  in Err(_) then Err("the worker faulted")
   end
 end
 
@@ -2687,8 +2687,8 @@ def start_worker(
   }?
   run.table().pass(Proc)
   case run.run()
-  in Done(worker) then Ok(worker)
-  in Fault(_) then Err("the worker entry faulted")
+  in Ok(worker) then Ok(worker)
+  in Err(_) then Err("the worker entry faulted")
   end
 end
 
@@ -2703,8 +2703,8 @@ def ask(
   in Fault(_) then return Err("the worker send faulted")
   end
   case collector.done()
-  in Done(answer) then Ok(answer)
-  in Fault(_) then Err("the collector faulted")
+  in Ok(answer) then Ok(answer)
+  in Err(_) then Err("the collector faulted")
   end
 end
 
@@ -2811,8 +2811,8 @@ def ask(
   in Fault(_) then return Err("the worker send faulted")
   end
   case collector.done()
-  in Done(answer) then Ok(answer)
-  in Fault(_) then Err("the collector faulted")
+  in Ok(answer) then Ok(answer)
+  in Err(_) then Err("the collector faulted")
   end
 end
 
@@ -2840,8 +2840,8 @@ def execute(): Result[(Int, Int), String] with Vm, Proc
   }?
   run.table().pass(Proc)
   worker = case run.run()
-  in Done(value) then value
-  in Fault(_) then return Err("the launcher faulted")
+  in Ok(value) then value
+  in Err(_) then return Err("the launcher faulted")
   end
   worker.resume().map_error() { |_: ProcError| "the worker did not resume" }?
   before = ask(worker, 10)?
@@ -3208,11 +3208,11 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   first = Worker.spawn(7)
   second = Worker.spawn(9)
   case first.done()
-  in Done(7) then ()
+  in Ok(7) then ()
   in _ then return false
   end
   case second.done()
-  in Done(9) then ()
+  in Ok(9) then ()
   in _ then return false
   end
 
@@ -3501,8 +3501,8 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_) then -4
   in Ok(run)
     case run.run()
-    in Done(value) then value
-    in Fault(_) then -4
+    in Ok(value) then value
+    in Err(_) then -4
     end
   end
 end
@@ -3632,8 +3632,8 @@ def execute(): Int with Vm
   in Err(_) then return -9
   end
   case run.run()
-  in Done(value) then value
-  in Fault(_) then -10
+  in Ok(value) then value
+  in Err(_) then -10
   end
 end
 

@@ -56,7 +56,7 @@ fn the_vm_constructor_keeps_its_capital() {
     assert_eq!(
         allowed(
             "def go(): Int with Vm\n  m = sys.vm.Vm().activate_or_fault({ || 21 }, args: ())\n  \
-             case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
+             case m.run()\n  in Ok(v) then v\n  in Err(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
         "Done(21)"
@@ -76,7 +76,7 @@ fn descriptors_keep_initial_capitals() {
         "def go(): Int with Vm, Io.Write\n  \
          m = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    print(\"in\\n\")\n    7\n  \
          end, args: ())\n  m.table().pass(Io.Write)\n  \
-         case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
+         case m.run()\n  in Ok(v) then v\n  in Err(_) then 0\n  end\nend\ngo()\n",
         &["Vm", "Io.Write"],
         VmConfig::default(),
     )
@@ -95,7 +95,7 @@ fn use_binds_a_sys_group() {
         allowed(
             "use sys.vm\n\ndef go(): Int with Vm\n  \
              m = vm.Vm().activate_or_fault({ || 21 }, args: ())\n  \
-             case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
+             case m.run()\n  in Ok(v) then v\n  in Err(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
         "Done(21)"
@@ -116,7 +116,7 @@ fn use_binds_the_vm_constructor() {
         allowed(
             "use sys.vm.Vm\n\ndef go(): Int with Vm\n  \
              m = Vm().activate_or_fault({ || 42 }, args: ())\n  \
-             case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
+             case m.run()\n  in Ok(v) then v\n  in Err(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
         "Done(42)"
@@ -247,7 +247,7 @@ fn a_request_pattern_answers_through_its_call() {
              m = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  \
              end, args: ())\n  case m.drive()\n  in Asked(q)\n    \
              case q\n    in Call(Clock.Now, call, ())\n      m.answer(call, 99)\n      \
-             case m.run()\n      in Done(v) then v\n      in Fault(_) then 0\n      end\n    \
+             case m.run()\n      in Ok(v) then v\n      in Err(_) then 0\n      end\n    \
              in _ then 0\n    end\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),

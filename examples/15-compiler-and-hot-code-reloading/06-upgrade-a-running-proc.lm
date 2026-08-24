@@ -78,8 +78,8 @@ def ask(
   in Fault(_) then return Err("the worker send faulted")
   end
   case reply.done()
-  in Done(answer) then Ok(answer)
-  in Fault(_) then Err("the collector faulted")
+  in Ok(answer) then Ok(answer)
+  in Err(_) then Err("the collector faulted")
   end
 end
 
@@ -103,8 +103,8 @@ def serve(): Result[(Int, Int, Int), String] with Vm, Proc
   }?
   run.table().pass(Proc)
   worker = case run.run()
-  in Done(handle) then handle
-  in Fault(_) then return Err("the launcher faulted")
+  in Ok(handle) then handle
+  in Err(_) then return Err("the launcher faulted")
   end
 
   worker.resume().map_error() { |_: ProcError| "the worker did not start" }?
@@ -118,8 +118,8 @@ def serve(): Result[(Int, Int, Int), String] with Vm, Proc
   after = ask(worker, 10)?
   worker.close()
   served = case worker.done()
-  in Done(count) then count
-  in Fault(_) then 0
+  in Ok(count) then count
+  in Err(_) then 0
   end
   Ok((before, after, served))
 end

@@ -253,7 +253,7 @@ Loud() == Loud()
 ";
     let error = compile_text("effectful_eq.lm", effectful).expect_err("the method rejects");
     assert!(
-        error.contains("has effects outside interface `PartialEq`"),
+        error.contains("does not satisfy interface `PartialEq`: the effect row is too wide"),
         "{error}"
     );
 }

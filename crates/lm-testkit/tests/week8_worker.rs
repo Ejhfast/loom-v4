@@ -38,7 +38,7 @@ fn a_worker_thread_runs_the_whole_world() {
     )
     .expect("the worker runs");
     assert!(!outcome.faulted);
-    assert_eq!(outcome.text, "Done(Done(42))");
+    assert_eq!(outcome.text, "Done(Ok(42))");
     // The same program on the host thread agrees, so the mode changes
     // no semantics.
     let mut world = World::new(
@@ -72,7 +72,7 @@ fn a_worker_thread_accepts_parallel_scheduler_configuration() {
         Box::new(|| Box::new(RecordingHost::new(1))),
     )
     .expect("the parallel scheduler runs");
-    assert_eq!(outcome.text, "Done((Done(21), Done(21)))");
+    assert_eq!(outcome.text, "Done((Ok(21), Ok(21)))");
 }
 
 /// One host-owned pool can serve two worlds at the same time.
@@ -104,7 +104,7 @@ fn a_shared_scheduler_pool_serves_two_worlds() {
         let second = second.join().expect("the second host thread runs");
         assert_eq!(
             first.0,
-            "Done((Done(10000), Done(10000), Done(10000), Done(10000)))"
+            "Done((Ok(10000), Ok(10000), Ok(10000), Ok(10000)))"
         );
         assert_eq!(second.0, first.0);
         assert!(first.1.max_active_leases > 0);
@@ -160,7 +160,7 @@ fn a_worker_thread_carries_deep_guest_recursion() {
         Box::new(|| Box::new(RecordingHost::new(1))),
     )
     .expect("the worker runs");
-    assert_eq!(outcome.text, "Done(Done(0))");
+    assert_eq!(outcome.text, "Done(Ok(0))");
 }
 
 /// A bad grant reports through the worker instead of panicking.

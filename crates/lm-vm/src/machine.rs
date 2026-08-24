@@ -57,6 +57,15 @@ fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Resu
         .ok_or(BAD_TYPE)
 }
 
+/// One verified interface call site.
+#[derive(Debug, Clone, Copy)]
+struct InterfaceCallSite {
+    interface: u32,
+    method: u32,
+    recv_ty: u32,
+    app: u32,
+}
+
 /// Encode one map epoch and optional index slot as an opaque `Int`.
 fn map_probe_token(epoch: u32, slot: Option<u32>) -> Result<i64, FaultCode> {
     let low = match slot {
@@ -512,6 +521,8 @@ pub enum ExecOutcome {
     Terminal(Value),
     /// Guest code stopped itself with a message.
     Raise { code: FaultCode, message: String },
+    /// Guest code re-raised one complete stored fault.
+    Reraise(FaultRec),
     /// A perform: the arguments are recorded in `Pending` by the
     /// driver.
     Perform { op: u32, args: Vec<Value> },
@@ -669,23 +680,22 @@ pub struct Machine {
     pub barrier: Option<u32>,
     /// The body function of this machine, as a function slot.
     ///
-    /// The declared result type of the machine is the result type of
-    /// this function, and the first parameter of this function is the
-    /// proc instance of a proc. A machine drops its body closure and
-    /// its frames, so the record is the one lasting evidence of both
-    /// types. A machine that never loaded a frame records `None`.
+    /// The function result type is the machine result type.
+    /// A class proc body takes its proc instance first.
+    /// A closure proc body is nullary.
+    /// This record remains after the machine drops its frames.
     pub body_func: Option<FunctionVersionId>,
     /// The type environment of the machine body activation.
     ///
     /// The machine witness. The two types above close through it, so a
     /// machine past its constructor still names both.
     pub witness: TypeEnvId,
-    /// True when `Proc.Spawn` launched this machine.
+    /// True when a proc launch operation launched this machine.
     ///
-    /// The flag names the machines that received the birth grant of
-    /// specification 18.3, so a restore mints exactly the same grant.
-    /// It is not derived from the ownership, because `Proc.Run`
-    /// transfers a plain machine to the scheduler and mints no grant.
+    /// The flag names machines that received a proc birth grant.
+    /// Restore rebuilds the proc control grant.
+    /// Ownership does not determine this flag.
+    /// `Proc.Run` transfers a plain machine and mints no grant.
     pub is_proc: bool,
     /// The persistent image that owns this run.
     ///
@@ -1193,12 +1203,17 @@ impl Machine {
 
     pub fn set_fault(&mut self, code: FaultCode, message: impl Into<String>, op: Option<u32>) {
         let trace = self.execution_trace_from(code == FaultCode::OutOfFuel);
-        self.vm.terminal = Some(Terminal::Fault(FaultRec {
+        self.set_fault_record(FaultRec {
             code,
             message: message.into(),
             op,
             trace,
-        }));
+        });
+    }
+
+    /// Stop this machine with one complete stored fault.
+    pub fn set_fault_record(&mut self, fault: FaultRec) {
+        self.vm.terminal = Some(Terminal::Fault(fault));
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
         self.preparing_wait = None;
@@ -1905,14 +1920,22 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
-        selector: u32,
-        argc: u32,
-        recv_ty: u32,
+        call: InterfaceCallSite,
     ) -> Result<(), FaultCode> {
+        let requirement = module
+            .interfaces
+            .get(call.interface as usize)
+            .and_then(|contract| contract.methods.get(call.method as usize))
+            .ok_or(BAD_STATE)?;
+        let selector = requirement.selector;
+        let argc = u32::try_from(requirement.params.len()).map_err(|_| BAD_STATE)?;
+        let default = requirement.default;
         let argc = argc as usize;
         let recv = self.peek(argc)?;
         let parent = self.frame_env();
-        let receiver = envs.close(module, recv_ty, parent).map_err(env_fault)?;
+        let receiver = envs
+            .close(module, call.recv_ty, parent)
+            .map_err(env_fault)?;
         let option = module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
         let static_class = match envs.ty(receiver) {
             Some(ClosedType::Class(class) | ClosedType::Inst(class, _)) => Some(*class),
@@ -1923,11 +1946,34 @@ impl Machine {
             (Some(class), Value::EmptyCase { .. }) => class,
             _ => self.virtual_class(module, recv)?,
         };
-        let target = method_of(dispatch, class, selector)?;
-        let env = envs
-            .interface_method_env(module, target, class, receiver)
-            .map_err(env_fault)?
+        let own = if call.app == lm_bytecode::NO_APP {
+            TypeEnvId::EMPTY
+        } else {
+            envs.derive(module, parent, call.app).map_err(env_fault)?
+        };
+        let selected = envs
+            .interface_method_override(module, call.interface, call.method, class)
             .ok_or(BAD_TYPE)?;
+        let (target, env) = if selected {
+            let target = dispatch
+                .get(class as usize)
+                .and_then(|row| row.method(selector))
+                .ok_or(BAD_TYPE)?;
+            let env = envs
+                .interface_method_env(module, target, class, receiver, own)
+                .map_err(env_fault)?
+                .ok_or(BAD_TYPE)?;
+            (target, env)
+        } else {
+            if default == lm_bytecode::NO_FUNC {
+                return Err(BAD_TYPE);
+            }
+            let env = envs
+                .interface_default_env(module, call.interface, class, receiver, own)
+                .map_err(env_fault)?
+                .ok_or(BAD_TYPE)?;
+            (default, env)
+        };
         self.push_frame(module, target, argc + 1, None, env)
     }
 
@@ -3587,27 +3633,6 @@ impl Machine {
         Ok(())
     }
 
-    /// Execute one interface call outside the base dispatch body.
-    #[inline(never)]
-    fn exec_interface_call(
-        &mut self,
-        module: &Module,
-        dispatch: &[crate::DispatchRow],
-        envs: &mut TypeEnvs,
-        interface: u32,
-        method: u32,
-        recv_ty: u32,
-    ) -> Result<(), FaultCode> {
-        let requirement = module
-            .interfaces
-            .get(interface as usize)
-            .and_then(|contract| contract.methods.get(method as usize))
-            .ok_or(BAD_STATE)?;
-        let selector = requirement.selector;
-        let argc = u32::try_from(requirement.params.len()).map_err(|_| BAD_STATE)?;
-        self.call_interface(module, dispatch, envs, selector, argc, recv_ty)
-    }
-
     /// Read and validate one syntax tree value.
     fn syntax_tree_parts(
         &self,
@@ -4762,12 +4787,19 @@ impl Machine {
                 let want = matches!(instr, Instr::EqValue);
                 self.push(Value::Bool(equal == want))?;
             }
-            Instr::CallInterface {
-                interface,
-                method,
-                recv_ty,
-            } => {
-                self.exec_interface_call(module, dispatch, envs, interface, method, recv_ty)?;
+            Instr::CallInterface { site, recv_ty, app } => {
+                let (interface, method) = lm_bytecode::unpack_interface_call_site(site);
+                self.call_interface(
+                    module,
+                    dispatch,
+                    envs,
+                    InterfaceCallSite {
+                        interface,
+                        method,
+                        recv_ty,
+                        app,
+                    },
+                )?;
             }
             Instr::Extended(instr) => {
                 let outcome = self.exec_extended(module, envs, slots, instr)?;
@@ -5196,6 +5228,24 @@ impl Machine {
                     FaultCode::AssertionFailed
                 };
                 return Ok(ExecOutcome::Raise { code, message });
+            }
+            Instr::RaiseFault => {
+                let reference = self.pop_obj()?;
+                let fault = match self.vm.heap.get(reference) {
+                    Object::NativeFault {
+                        code,
+                        message,
+                        op,
+                        trace,
+                    } => FaultRec {
+                        code: *code,
+                        message: message.clone(),
+                        op: *op,
+                        trace: trace.to_vec(),
+                    },
+                    _ => return Err(BAD_TYPE),
+                };
+                return Ok(ExecOutcome::Reraise(fault));
             }
         }
         Ok(ExecOutcome::Continue)

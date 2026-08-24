@@ -1291,11 +1291,12 @@ impl TypeEnvs {
         callee: u32,
         runtime_class: u32,
         receiver: ClosedTypeId,
+        own: TypeEnvId,
     ) -> Result<Option<TypeEnvId>, TypeEnvFull> {
         let Some(body) = module.funcs.get(callee as usize) else {
             return Ok(None);
         };
-        if body.type_params == 0 {
+        if body.type_params == 0 && body.effect_params == 0 {
             return Ok(Some(TypeEnvId::EMPTY));
         }
         let role = |index: usize| {
@@ -1417,14 +1418,127 @@ impl TypeEnvs {
             }
             _ => return Ok(None),
         };
-        let types = match self.ancestor_args(module, runtime_class, &runtime_args, owner) {
+        let mut types = match self.ancestor_args(module, runtime_class, &runtime_args, owner) {
             Some(types) => types,
             None => return Ok(None),
         };
-        if types.len() != body.type_params as usize {
+        let (own_types, own_rows) = self
+            .env(own)
+            .map(|env| (env.types.clone(), env.rows.clone()))
+            .unwrap_or_default();
+        types.extend(own_types);
+        if types.len() != body.type_params as usize || own_rows.len() != body.effect_params as usize
+        {
             return Ok(None);
         }
-        self.env_of(types, Vec::new()).map(Some)
+        self.env_of(types, own_rows).map(Some)
+    }
+
+    /// Select the verified witness for one interface method.
+    pub fn interface_method_override(
+        &self,
+        module: &Module,
+        interface: u32,
+        method: u32,
+        runtime_class: u32,
+    ) -> Option<bool> {
+        let mut class = runtime_class;
+        let mut steps = 0usize;
+        loop {
+            if let Some(conformance) = module.conformances.iter().find(|candidate| {
+                candidate.class == class && candidate.application.interface == interface
+            }) {
+                return conformance.method_overrides.get(method as usize).copied();
+            }
+            steps += 1;
+            if steps > module.classes.len() {
+                return None;
+            }
+            class = module.classes.get(class as usize)?.parent()?;
+        }
+    }
+
+    /// Build the environment of one interface-owned default function.
+    pub fn interface_default_env(
+        &mut self,
+        module: &Module,
+        interface: u32,
+        runtime_class: u32,
+        receiver: ClosedTypeId,
+        own: TypeEnvId,
+    ) -> Result<Option<TypeEnvId>, TypeEnvFull> {
+        let Some((static_class, static_args)) = self.closed_instance(module, receiver) else {
+            return Ok(None);
+        };
+        let runtime_args = if static_class == runtime_class {
+            static_args.clone()
+        } else {
+            let Some(runtime) = module.classes.get(runtime_class as usize) else {
+                return Ok(None);
+            };
+            if runtime.kind == BcClassKind::Case
+                && runtime.type_params as usize == static_args.len()
+            {
+                static_args.clone()
+            } else if runtime.type_params == 0 {
+                Vec::new()
+            } else {
+                return Ok(None);
+            }
+        };
+        if self.ancestor_args(module, runtime_class, &runtime_args, static_class)
+            != Some(static_args)
+        {
+            return Ok(None);
+        }
+
+        let mut class = runtime_class;
+        let mut class_args = runtime_args;
+        let mut steps = 0usize;
+        loop {
+            if let Some(conformance) = module.conformances.iter().find(|candidate| {
+                candidate.class == class && candidate.application.interface == interface
+            }) {
+                let owner = self.env_of(class_args, Vec::new())?;
+                let mut types = Vec::with_capacity(1 + conformance.application.types.len());
+                types.push(receiver);
+                for ty in &conformance.application.types {
+                    types.push(self.close(module, *ty, owner)?);
+                }
+                let mut rows: Vec<ClosedRow> = conformance
+                    .application
+                    .rows
+                    .iter()
+                    .map(|row| self.close_row(module, row, owner))
+                    .collect();
+                if let Some(environment) = self.env(own) {
+                    types.extend_from_slice(&environment.types);
+                    rows.extend_from_slice(&environment.rows);
+                }
+                return self.env_of(types, rows).map(Some);
+            }
+            steps += 1;
+            if steps > module.classes.len() {
+                return Ok(None);
+            }
+            let Some(entry) = module.classes.get(class as usize) else {
+                return Ok(None);
+            };
+            let Some(parent) = entry.parent() else {
+                return Ok(None);
+            };
+            if !entry.parent_args.is_empty() {
+                let owner = self.env_of(class_args, Vec::new())?;
+                let mut parent_args = Vec::with_capacity(entry.parent_args.len());
+                for ty in &entry.parent_args {
+                    parent_args.push(self.close(module, *ty, owner)?);
+                }
+                class_args = parent_args;
+            } else if module.classes[parent as usize].type_params == 0 {
+                class_args.clear();
+            }
+            class = parent;
+        }
     }
 
     /// Build one environment from an explicit closed argument list.

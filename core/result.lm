@@ -92,3 +92,11 @@ enum Result[T, E] implements Display when T: Display, E: Display,
     end
   end
 end
+
+# The checker exposes this helper as `Result[T, Fault].value()`.
+def _result_fault_value[T](result: Result[T, Fault]): T
+  case result
+  in Ok(value) then value
+  in Err(fault) then raise(fault)
+  end
+end

@@ -227,12 +227,14 @@ fn prove_inner(
     let module = aggregate.module();
     check_identity(image, identity)?;
     let tables = resolve_type_tables(image, module, aggregate.bundle())?;
+    let closure_bodies = closure_body_flags(module)?;
     let admit = Admit {
         image,
         module,
         bundle: aggregate.bundle(),
         identity,
         installations,
+        closure_bodies,
         witness: tables,
     };
     admit.run()?;
@@ -623,8 +625,27 @@ struct Admit<'m> {
     bundle: &'m std::sync::Arc<lm_abi::AbiBundle>,
     identity: &'m ModuleIdentity,
     installations: &'m [InstallationProof],
+    /// Functions that verified code can construct as closures.
+    closure_bodies: Vec<bool>,
     /// The witness tables the image carries.
     witness: WitnessTables,
+}
+
+/// Mark every function that verified code can construct as a closure.
+fn closure_body_flags(module: &lm_bytecode::Module) -> Result<Vec<bool>, ImageError> {
+    let mut found = work_vec(module.funcs.len())?;
+    found.resize(module.funcs.len(), false);
+    for function in &module.funcs {
+        for instruction in function.blocks.iter().flatten() {
+            if let Instr::MakeClosure { func, .. } = instruction {
+                let Some(slot) = found.get_mut(*func as usize) else {
+                    return fail(ImageReason::Code, "a closure instruction names no function");
+                };
+                *slot = true;
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Resolve the closed type table and the environment table of one
@@ -3022,9 +3043,9 @@ impl Admit<'_> {
     /// terminal machine holds neither, and the witness stands alone
     /// there.
     ///
-    /// A machine that claims the proc birth grant must name a proc
-    /// class through the first parameter of its body. The rule reads
-    /// the class table alone, so it derives no type from the image.
+    /// A class proc body takes its proc instance as the first parameter.
+    /// A closure proc body is nullary.
+    /// The rule reads verified function signatures only.
     fn check_machine_witness(&self) -> Result<(), ImageError> {
         for (vm, machine) in self.image.machines.iter().enumerate() {
             let at = |what: &str| format!("machine {vm}: {what}");
@@ -3062,10 +3083,10 @@ impl Admit<'_> {
                     at("a machine with no body function names an environment"),
                 );
             }
-            if machine.is_proc && !self.body_takes_a_proc(machine) {
+            if machine.is_proc && !self.has_valid_proc_body(machine) {
                 return fail(
                     ImageReason::Mailbox,
-                    at("a machine that claims the proc grant names no proc class"),
+                    at("a proc body is neither nullary nor a method of a Proc class"),
                 );
             }
         }
@@ -3096,6 +3117,21 @@ impl Admit<'_> {
             _ => return false,
         };
         self.class_extends(class, proc_class)
+    }
+
+    /// True when one machine has a valid class or closure proc body.
+    fn has_valid_proc_body(&self, machine: &ImageMachine) -> bool {
+        if self.body_takes_a_proc(machine) {
+            return true;
+        }
+        let Some(func) = machine.body_func else {
+            return false;
+        };
+        self.closure_bodies
+            .get(func as usize)
+            .copied()
+            .unwrap_or(false)
+            && self.module.funcs[func as usize].params.is_empty()
     }
 
     /// The core `Proc` class slot the artifact declares.

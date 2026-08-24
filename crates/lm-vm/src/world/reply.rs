@@ -452,7 +452,7 @@ impl World {
     /// machine fault at `make_instance`.
     pub(super) fn done_arm(&self, family: Family) -> Option<u32> {
         match family {
-            Family::Run => self.core.run_done,
+            Family::Run => self.core.result_ok,
             Family::Step => self.core.step_done,
             Family::Drive | Family::DriveFor => self.core.drive_done,
             Family::Mock => None,
@@ -461,7 +461,7 @@ impl World {
 
     pub(super) fn fault_arm(&self, family: Family) -> Option<u32> {
         match family {
-            Family::Run => self.core.run_fault,
+            Family::Run => self.core.result_err,
             Family::Step => self.core.step_fault,
             Family::Drive | Family::DriveFor => self.core.drive_fault,
             Family::Mock => None,

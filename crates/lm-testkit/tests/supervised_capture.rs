@@ -44,8 +44,8 @@ def app(): Int with Vm, Proc, Io.Write
   h = sys.proc.run(w)
   print("[app]")
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -101,12 +101,12 @@ def app(): Int with Vm, Proc, Io.Write
   ha = sys.proc.run(a)
   hb = sys.proc.run(b)
   first = case ha.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
   second = case hb.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
   first + second
 end

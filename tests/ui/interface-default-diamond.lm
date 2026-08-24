@@ -1,0 +1,16 @@
+interface Left
+  def name(self): String
+    "left"
+  end
+end
+
+interface Right
+  def name(self): String
+    "right"
+  end
+end
+
+final class Item implements Left, Right
+end
+
+Item().name()

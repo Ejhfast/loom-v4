@@ -149,8 +149,8 @@ impl<'o> FnChecker<'o> {
         Err(Diagnostic::new(
             "E1046",
             format!(
-                "this call needs the effect row `{}`, but the declared row \
-                 of the enclosing callable is {declared}",
+                "this call needs effect row `{}`, but the enclosing callable declares \
+                 {declared}. Add the row to the enclosing callable's `with` clause",
                 ctx.display_row(&self.env, row)
             ),
             span,
@@ -303,14 +303,23 @@ impl<'o> FnChecker<'o> {
                 params,
                 ret,
                 row,
+                row_explicit: _,
                 body,
             } => {
                 let expected_ret = match (ret, ctx.store.get(expected)) {
                     (None, Type::Fn(_, _, r, _) | Type::Callback(_, _, r, _)) => Some(*r),
                     _ => None,
                 };
-                let found =
-                    self.check_closure(ctx, params, ret, row, expected_ret, body, expr.span)?;
+                let found = self.check_closure(
+                    ctx,
+                    params,
+                    ret,
+                    row,
+                    expected_ret,
+                    false,
+                    body,
+                    expr.span,
+                )?;
                 self.expect_compatible(ctx, expected, found, expr.span)
             }
             ExprKind::Name(name) => {

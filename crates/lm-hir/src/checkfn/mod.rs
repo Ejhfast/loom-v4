@@ -28,7 +28,9 @@ use crate::hir::*;
 use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
-use lm_types::{ClassId, ClassKind, Row, Type, TypeId, BOOL, DIGEST, INT, NEVER, STRING, UNIT};
+use lm_types::{
+    ClassId, ClassKind, Row, Type, TypeId, BOOL, DIGEST, FAULT, INT, NEVER, STRING, UNIT,
+};
 use std::collections::HashSet;
 
 /// The work budget for one pattern usefulness analysis.

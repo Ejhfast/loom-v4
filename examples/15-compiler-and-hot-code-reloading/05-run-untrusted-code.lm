@@ -44,8 +44,8 @@ def score(text: String): Result[Int, CodeError] with Compiler, Vm
   # nothing through, so any operation the guest performs stops here.
   run = image.activate(entry, args: ())?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(problem) then Err(CodeError(problem.code()))
+  in Ok(value) then Ok(value)
+  in Err(problem) then Err(CodeError(problem.code()))
   end
 end
 

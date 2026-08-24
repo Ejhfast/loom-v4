@@ -73,8 +73,6 @@ pub struct CoreLayout {
     pub entropy_error_limit_exceeded: Option<u32>,
     pub entropy_error_unavailable: Option<u32>,
     pub entropy_error_failed: Option<u32>,
-    pub run_done: Option<u32>,
-    pub run_fault: Option<u32>,
     pub step_ran: Option<u32>,
     pub step_waiting: Option<u32>,
     pub step_done: Option<u32>,
@@ -89,8 +87,6 @@ pub struct CoreLayout {
     pub send_sent: Option<u32>,
     pub send_closed: Option<u32>,
     pub send_fault: Option<u32>,
-    pub proc_done: Option<u32>,
-    pub proc_fault: Option<u32>,
     pub proc_error_dead: Option<u32>,
     pub proc_error_not_paused: Option<u32>,
     pub proc_error_already_paused: Option<u32>,
@@ -101,13 +97,11 @@ pub struct CoreLayout {
     pub io_error: Option<u32>,
     pub env_error: Option<u32>,
     pub entropy_error: Option<u32>,
-    pub run_result: Option<u32>,
     pub step_event: Option<u32>,
     pub drive_event: Option<u32>,
     pub recv: Option<u32>,
     pub choice: Option<u32>,
     pub send_result: Option<u32>,
-    pub proc_result: Option<u32>,
     pub proc_error: Option<u32>,
     /// The core class `Proc`, the parent of every proc class.
     pub proc_class: Option<u32>,
@@ -293,7 +287,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 257] = [
+pub const PINNED_LABELS: [&str; 251] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -302,9 +296,6 @@ pub const PINNED_LABELS: [&str; 257] = [
     "Result.Err",
     "IoError",
     "IoError.Failed",
-    "RunResult",
-    "RunResult.Done",
-    "RunResult.Fault",
     "StepEvent",
     "StepEvent.Ran",
     "StepEvent.Waiting",
@@ -321,9 +312,6 @@ pub const PINNED_LABELS: [&str; 257] = [
     "SendResult.Sent",
     "SendResult.Closed",
     "SendResult.Fault",
-    "ProcResult",
-    "ProcResult.Done",
-    "ProcResult.Fault",
     "ProcError",
     "ProcError.Dead",
     "ProcError.NotPaused",
@@ -554,7 +542,7 @@ pub const PINNED_LABELS: [&str; 257] = [
 ];
 
 /// The core role of immediate integer values.
-pub const ROLE_INT: usize = 59;
+pub const ROLE_INT: usize = 53;
 
 /// The core role of the native `Option` family.
 pub const ROLE_OPTION: usize = 0;
@@ -566,220 +554,220 @@ pub const ROLE_OPTION_SOME: usize = 1;
 pub const ROLE_OPTION_NONE: usize = 2;
 
 /// The core role of immediate Boolean values.
-pub const ROLE_BOOL: usize = 60;
+pub const ROLE_BOOL: usize = 54;
 
 /// The core role of immutable String values.
-pub const ROLE_STRING: usize = 61;
+pub const ROLE_STRING: usize = 55;
 
 /// The core role of immutable Bytes values.
-pub const ROLE_BYTES: usize = 62;
+pub const ROLE_BYTES: usize = 56;
 
 /// The core role of StringBuilder values.
-pub const ROLE_STRING_BUILDER: usize = 63;
+pub const ROLE_STRING_BUILDER: usize = 57;
 
 /// The core role of ByteBuffer values.
-pub const ROLE_BYTE_BUFFER: usize = 64;
+pub const ROLE_BYTE_BUFFER: usize = 58;
 
 /// The core role of the sealed Text parent.
-pub const ROLE_TEXT: usize = 65;
+pub const ROLE_TEXT: usize = 59;
 
 /// The core role of shared Substring values.
-pub const ROLE_SUBSTRING: usize = 66;
+pub const ROLE_SUBSTRING: usize = 60;
 
 /// The core role of immediate Unicode scalar values.
-pub const ROLE_CHAR: usize = 67;
+pub const ROLE_CHAR: usize = 61;
 
-pub const ROLE_TUPLE2: usize = 68;
-pub const ROLE_IP_ADDRESS: usize = 69;
-pub const ROLE_IP_V4: usize = 70;
-pub const ROLE_IP_V6: usize = 71;
-pub const ROLE_SOCKET_ADDRESS: usize = 72;
-pub const ROLE_NET_ERROR: usize = 73;
-pub const ROLE_NET_INVALID_INPUT: usize = 74;
-pub const ROLE_NET_NAME_NOT_FOUND: usize = 75;
-pub const ROLE_NET_UNAVAILABLE: usize = 76;
-pub const ROLE_NET_PERMISSION_DENIED: usize = 77;
-pub const ROLE_NET_ADDRESS_IN_USE: usize = 78;
-pub const ROLE_NET_CONNECTION_REFUSED: usize = 79;
-pub const ROLE_NET_CONNECTION_RESET: usize = 80;
-pub const ROLE_NET_NOT_CONNECTED: usize = 81;
-pub const ROLE_NET_TIMED_OUT: usize = 82;
-pub const ROLE_NET_CLOSED: usize = 83;
-pub const ROLE_NET_LIMIT_EXCEEDED: usize = 84;
-pub const ROLE_NET_UNSUPPORTED: usize = 85;
-pub const ROLE_NET_FAILED: usize = 86;
-pub const ROLE_TCP_READ: usize = 87;
-pub const ROLE_TCP_READ_DATA: usize = 88;
-pub const ROLE_TCP_READ_END: usize = 89;
-pub const ROLE_SHUTDOWN: usize = 90;
-pub const ROLE_SHUTDOWN_READ: usize = 91;
-pub const ROLE_SHUTDOWN_WRITE: usize = 92;
-pub const ROLE_SHUTDOWN_BOTH: usize = 93;
-pub const ROLE_TCP_RESOURCE: usize = 94;
-pub const ROLE_TCP_STREAM: usize = 95;
-pub const ROLE_TCP_LISTENER: usize = 96;
-pub const ROLE_TLS_ERROR: usize = 97;
-pub const ROLE_TLS_INVALID_CONFIG: usize = 98;
-pub const ROLE_TLS_HANDSHAKE: usize = 99;
-pub const ROLE_TLS_CERTIFICATE: usize = 100;
-pub const ROLE_TLS_PROTOCOL: usize = 101;
-pub const ROLE_TLS_NETWORK: usize = 102;
-pub const ROLE_TLS_CLOSED: usize = 103;
-pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
-pub const ROLE_TLS_STREAM: usize = 105;
-pub const ROLE_LIST: usize = 106;
-pub const ROLE_MAP: usize = 107;
-pub const ROLE_ARTIFACT: usize = 108;
-pub const ROLE_VERIFIED_MODULE: usize = 109;
-pub const ROLE_SLOT_SPEC: usize = 110;
-pub const ROLE_INSTANCE: usize = 111;
-pub const ROLE_SLOT: usize = 112;
-pub const ROLE_FUNCTION_DEF: usize = 113;
-pub const ROLE_CODE_ERROR: usize = 114;
-pub const ROLE_LINK_ENV: usize = 115;
-pub const ROLE_COMPILE_ENV: usize = 116;
-pub const ROLE_COMPILE_OPTIONS: usize = 117;
-pub const ROLE_COMPILE_ERRORS: usize = 118;
-pub const ROLE_SYNTAX_TREE: usize = 119;
-pub const ROLE_SYNTAX_ELEMENT: usize = 120;
-pub const ROLE_SYNTAX_NODE: usize = 121;
-pub const ROLE_SYNTAX_TOKEN: usize = 122;
-pub const ROLE_SYNTAX_TRIVIA: usize = 123;
-pub const ROLE_SYNTAX_BUILDER: usize = 124;
-pub const ROLE_PARSE_STATUS: usize = 125;
-pub const ROLE_PARSE_COMPLETE: usize = 126;
-pub const ROLE_PARSE_INCOMPLETE: usize = 127;
-pub const ROLE_PARSE_INVALID: usize = 128;
-pub const ROLE_SYNTAX_DIAGNOSTIC: usize = 129;
-pub const ROLE_SYNTAX_PARSE: usize = 130;
-pub const ROLE_DYN_VALUE: usize = 131;
-pub const ROLE_CLASS_DEF: usize = 132;
-pub const ROLE_FUNCTION_CODE: usize = 133;
-pub const ROLE_CLASS_CODE: usize = 134;
-pub const ROLE_DEFINITION_SOURCE: usize = 135;
-pub const ROLE_SOURCE_RANGE: usize = 136;
-pub const ROLE_CODE_LOCATION: usize = 137;
-pub const ROLE_FUNCTION_BINDING: usize = 138;
-pub const ROLE_CLASS_BINDING: usize = 139;
-pub const ROLE_DEFINITION_SPEC: usize = 140;
-pub const ROLE_SLOT_CHANGE: usize = 141;
-pub const ROLE_DEFINITION_IDENTITY: usize = 142;
-pub const ROLE_IO_ERROR_BROKEN_PIPE: usize = 143;
-pub const ROLE_IO_ERROR_INVALID_INPUT: usize = 144;
-pub const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 145;
-pub const ROLE_ENV_ERROR: usize = 146;
-pub const ROLE_ENV_ERROR_INVALID_NAME: usize = 147;
-pub const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 148;
-pub const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 149;
-pub const ROLE_ENV_ERROR_FAILED: usize = 150;
-pub const ROLE_ENTROPY_ERROR: usize = 151;
-pub const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 152;
-pub const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 153;
-pub const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 154;
-pub const ROLE_ENTROPY_ERROR_FAILED: usize = 155;
-pub const ROLE_TUPLE3: usize = 156;
-pub const ROLE_TUPLE4: usize = 157;
-pub const ROLE_TUPLE5: usize = 158;
-pub const ROLE_TUPLE6: usize = 159;
-pub const ROLE_TUPLE7: usize = 160;
-pub const ROLE_TUPLE8: usize = 161;
-pub const ROLE_TUPLE9: usize = 162;
-pub const ROLE_TUPLE10: usize = 163;
-pub const ROLE_TUPLE11: usize = 164;
-pub const ROLE_TUPLE12: usize = 165;
-pub const ROLE_TUPLE13: usize = 166;
-pub const ROLE_TUPLE14: usize = 167;
-pub const ROLE_TUPLE15: usize = 168;
-pub const ROLE_TUPLE16: usize = 169;
-pub const ROLE_UNIT: usize = 170;
+pub const ROLE_TUPLE2: usize = 62;
+pub const ROLE_IP_ADDRESS: usize = 63;
+pub const ROLE_IP_V4: usize = 64;
+pub const ROLE_IP_V6: usize = 65;
+pub const ROLE_SOCKET_ADDRESS: usize = 66;
+pub const ROLE_NET_ERROR: usize = 67;
+pub const ROLE_NET_INVALID_INPUT: usize = 68;
+pub const ROLE_NET_NAME_NOT_FOUND: usize = 69;
+pub const ROLE_NET_UNAVAILABLE: usize = 70;
+pub const ROLE_NET_PERMISSION_DENIED: usize = 71;
+pub const ROLE_NET_ADDRESS_IN_USE: usize = 72;
+pub const ROLE_NET_CONNECTION_REFUSED: usize = 73;
+pub const ROLE_NET_CONNECTION_RESET: usize = 74;
+pub const ROLE_NET_NOT_CONNECTED: usize = 75;
+pub const ROLE_NET_TIMED_OUT: usize = 76;
+pub const ROLE_NET_CLOSED: usize = 77;
+pub const ROLE_NET_LIMIT_EXCEEDED: usize = 78;
+pub const ROLE_NET_UNSUPPORTED: usize = 79;
+pub const ROLE_NET_FAILED: usize = 80;
+pub const ROLE_TCP_READ: usize = 81;
+pub const ROLE_TCP_READ_DATA: usize = 82;
+pub const ROLE_TCP_READ_END: usize = 83;
+pub const ROLE_SHUTDOWN: usize = 84;
+pub const ROLE_SHUTDOWN_READ: usize = 85;
+pub const ROLE_SHUTDOWN_WRITE: usize = 86;
+pub const ROLE_SHUTDOWN_BOTH: usize = 87;
+pub const ROLE_TCP_RESOURCE: usize = 88;
+pub const ROLE_TCP_STREAM: usize = 89;
+pub const ROLE_TCP_LISTENER: usize = 90;
+pub const ROLE_TLS_ERROR: usize = 91;
+pub const ROLE_TLS_INVALID_CONFIG: usize = 92;
+pub const ROLE_TLS_HANDSHAKE: usize = 93;
+pub const ROLE_TLS_CERTIFICATE: usize = 94;
+pub const ROLE_TLS_PROTOCOL: usize = 95;
+pub const ROLE_TLS_NETWORK: usize = 96;
+pub const ROLE_TLS_CLOSED: usize = 97;
+pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 98;
+pub const ROLE_TLS_STREAM: usize = 99;
+pub const ROLE_LIST: usize = 100;
+pub const ROLE_MAP: usize = 101;
+pub const ROLE_ARTIFACT: usize = 102;
+pub const ROLE_VERIFIED_MODULE: usize = 103;
+pub const ROLE_SLOT_SPEC: usize = 104;
+pub const ROLE_INSTANCE: usize = 105;
+pub const ROLE_SLOT: usize = 106;
+pub const ROLE_FUNCTION_DEF: usize = 107;
+pub const ROLE_CODE_ERROR: usize = 108;
+pub const ROLE_LINK_ENV: usize = 109;
+pub const ROLE_COMPILE_ENV: usize = 110;
+pub const ROLE_COMPILE_OPTIONS: usize = 111;
+pub const ROLE_COMPILE_ERRORS: usize = 112;
+pub const ROLE_SYNTAX_TREE: usize = 113;
+pub const ROLE_SYNTAX_ELEMENT: usize = 114;
+pub const ROLE_SYNTAX_NODE: usize = 115;
+pub const ROLE_SYNTAX_TOKEN: usize = 116;
+pub const ROLE_SYNTAX_TRIVIA: usize = 117;
+pub const ROLE_SYNTAX_BUILDER: usize = 118;
+pub const ROLE_PARSE_STATUS: usize = 119;
+pub const ROLE_PARSE_COMPLETE: usize = 120;
+pub const ROLE_PARSE_INCOMPLETE: usize = 121;
+pub const ROLE_PARSE_INVALID: usize = 122;
+pub const ROLE_SYNTAX_DIAGNOSTIC: usize = 123;
+pub const ROLE_SYNTAX_PARSE: usize = 124;
+pub const ROLE_DYN_VALUE: usize = 125;
+pub const ROLE_CLASS_DEF: usize = 126;
+pub const ROLE_FUNCTION_CODE: usize = 127;
+pub const ROLE_CLASS_CODE: usize = 128;
+pub const ROLE_DEFINITION_SOURCE: usize = 129;
+pub const ROLE_SOURCE_RANGE: usize = 130;
+pub const ROLE_CODE_LOCATION: usize = 131;
+pub const ROLE_FUNCTION_BINDING: usize = 132;
+pub const ROLE_CLASS_BINDING: usize = 133;
+pub const ROLE_DEFINITION_SPEC: usize = 134;
+pub const ROLE_SLOT_CHANGE: usize = 135;
+pub const ROLE_DEFINITION_IDENTITY: usize = 136;
+pub const ROLE_IO_ERROR_BROKEN_PIPE: usize = 137;
+pub const ROLE_IO_ERROR_INVALID_INPUT: usize = 138;
+pub const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 139;
+pub const ROLE_ENV_ERROR: usize = 140;
+pub const ROLE_ENV_ERROR_INVALID_NAME: usize = 141;
+pub const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 142;
+pub const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 143;
+pub const ROLE_ENV_ERROR_FAILED: usize = 144;
+pub const ROLE_ENTROPY_ERROR: usize = 145;
+pub const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 146;
+pub const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 147;
+pub const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 148;
+pub const ROLE_ENTROPY_ERROR_FAILED: usize = 149;
+pub const ROLE_TUPLE3: usize = 150;
+pub const ROLE_TUPLE4: usize = 151;
+pub const ROLE_TUPLE5: usize = 152;
+pub const ROLE_TUPLE6: usize = 153;
+pub const ROLE_TUPLE7: usize = 154;
+pub const ROLE_TUPLE8: usize = 155;
+pub const ROLE_TUPLE9: usize = 156;
+pub const ROLE_TUPLE10: usize = 157;
+pub const ROLE_TUPLE11: usize = 158;
+pub const ROLE_TUPLE12: usize = 159;
+pub const ROLE_TUPLE13: usize = 160;
+pub const ROLE_TUPLE14: usize = 161;
+pub const ROLE_TUPLE15: usize = 162;
+pub const ROLE_TUPLE16: usize = 163;
+pub const ROLE_UNIT: usize = 164;
 
 /// The core role of immediate floating-point values.
-pub const ROLE_FLOAT: usize = 171;
-pub const ROLE_STD_STREAM: usize = 172;
-pub const ROLE_STD_STREAM_INPUT: usize = 173;
-pub const ROLE_STD_STREAM_OUTPUT: usize = 174;
-pub const ROLE_STD_STREAM_ERROR: usize = 175;
-pub const ROLE_TTY_SIZE: usize = 176;
-pub const ROLE_TTY_ERROR: usize = 177;
-pub const ROLE_TTY_ERROR_CLOSED: usize = 178;
-pub const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 179;
-pub const ROLE_TTY_ERROR_BUSY: usize = 180;
-pub const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 181;
-pub const ROLE_TTY_ERROR_UNSUPPORTED: usize = 182;
-pub const ROLE_TTY_ERROR_FAILED: usize = 183;
-pub const ROLE_RAW_MODE: usize = 184;
-pub const ROLE_SIGNAL_KIND: usize = 185;
-pub const ROLE_SIGNAL_INTERRUPT: usize = 186;
-pub const ROLE_SIGNAL_TERMINATE: usize = 187;
-pub const ROLE_SIGNAL_ERROR: usize = 188;
-pub const ROLE_SIGNAL_ERROR_CLOSED: usize = 189;
-pub const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 190;
-pub const ROLE_SIGNAL_ERROR_BUSY: usize = 191;
-pub const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
-pub const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
-pub const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
-pub const ROLE_SIGNAL_STREAM: usize = 195;
-pub const ROLE_IO_ERROR_UNSUPPORTED: usize = 196;
-pub const ROLE_FS_ERROR_INVALID_INPUT: usize = 197;
-pub const ROLE_FS_ERROR_INVALID_ENCODING: usize = 198;
-pub const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 199;
-pub const ROLE_FS_ERROR_NOT_FOUND: usize = 200;
-pub const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 201;
-pub const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 202;
-pub const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 203;
-pub const ROLE_FS_ERROR_IS_DIRECTORY: usize = 204;
-pub const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 205;
-pub const ROLE_FS_ERROR_CROSS_DEVICE: usize = 206;
-pub const ROLE_FS_ERROR_UNSUPPORTED: usize = 207;
-pub const ROLE_OPEN_CREATE_NEW: usize = 208;
-pub const ROLE_FILE_KIND: usize = 209;
-pub const ROLE_FILE_KIND_FILE: usize = 210;
-pub const ROLE_FILE_KIND_DIRECTORY: usize = 211;
-pub const ROLE_FILE_KIND_SYMLINK: usize = 212;
-pub const ROLE_FILE_KIND_OTHER: usize = 213;
-pub const ROLE_FILE_INFO: usize = 214;
-pub const ROLE_DIR_ENTRY: usize = 215;
-pub const ROLE_RENAME_MODE: usize = 216;
-pub const ROLE_RENAME_NO_REPLACE: usize = 217;
-pub const ROLE_RENAME_REPLACE: usize = 218;
-pub const ROLE_PIPE_ERROR: usize = 219;
-pub const ROLE_PIPE_ERROR_CLOSED: usize = 220;
-pub const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 221;
-pub const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 222;
-pub const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 223;
-pub const ROLE_PIPE_ERROR_FAILED: usize = 224;
-pub const ROLE_PIPE_END: usize = 225;
-pub const ROLE_PIPE_READER: usize = 226;
-pub const ROLE_PIPE_WRITER: usize = 227;
-pub const ROLE_CHILD_INPUT: usize = 228;
-pub const ROLE_CHILD_INPUT_INHERIT: usize = 229;
-pub const ROLE_CHILD_INPUT_NULL: usize = 230;
-pub const ROLE_CHILD_INPUT_PIPE: usize = 231;
-pub const ROLE_CHILD_OUTPUT: usize = 232;
-pub const ROLE_CHILD_OUTPUT_INHERIT: usize = 233;
-pub const ROLE_CHILD_OUTPUT_NULL: usize = 234;
-pub const ROLE_CHILD_OUTPUT_PIPE: usize = 235;
-pub const ROLE_CHILD_ENV: usize = 236;
-pub const ROLE_CHILD_ENV_INHERIT: usize = 237;
-pub const ROLE_CHILD_ENV_EXACT: usize = 238;
-pub const ROLE_EXEC_SPEC: usize = 239;
-pub const ROLE_CHILD_STATUS: usize = 240;
-pub const ROLE_CHILD_STATUS_EXITED: usize = 241;
-pub const ROLE_CHILD_STATUS_TERMINATED: usize = 242;
-pub const ROLE_EXEC_ERROR: usize = 243;
-pub const ROLE_EXEC_ERROR_CLOSED: usize = 244;
-pub const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 245;
-pub const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 246;
-pub const ROLE_EXEC_ERROR_NOT_FOUND: usize = 247;
-pub const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 248;
-pub const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
-pub const ROLE_EXEC_ERROR_FAILED: usize = 250;
-pub const ROLE_CHILD: usize = 251;
-pub const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
-pub const ROLE_UDP_DATAGRAM: usize = 253;
-pub const ROLE_UDP_SOCKET: usize = 254;
-pub const ROLE_CHILD_ENV_OVERLAY: usize = 255;
-pub const ROLE_FILE_HANDLE: usize = 256;
+pub const ROLE_FLOAT: usize = 165;
+pub const ROLE_STD_STREAM: usize = 166;
+pub const ROLE_STD_STREAM_INPUT: usize = 167;
+pub const ROLE_STD_STREAM_OUTPUT: usize = 168;
+pub const ROLE_STD_STREAM_ERROR: usize = 169;
+pub const ROLE_TTY_SIZE: usize = 170;
+pub const ROLE_TTY_ERROR: usize = 171;
+pub const ROLE_TTY_ERROR_CLOSED: usize = 172;
+pub const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 173;
+pub const ROLE_TTY_ERROR_BUSY: usize = 174;
+pub const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 175;
+pub const ROLE_TTY_ERROR_UNSUPPORTED: usize = 176;
+pub const ROLE_TTY_ERROR_FAILED: usize = 177;
+pub const ROLE_RAW_MODE: usize = 178;
+pub const ROLE_SIGNAL_KIND: usize = 179;
+pub const ROLE_SIGNAL_INTERRUPT: usize = 180;
+pub const ROLE_SIGNAL_TERMINATE: usize = 181;
+pub const ROLE_SIGNAL_ERROR: usize = 182;
+pub const ROLE_SIGNAL_ERROR_CLOSED: usize = 183;
+pub const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 184;
+pub const ROLE_SIGNAL_ERROR_BUSY: usize = 185;
+pub const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 186;
+pub const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 187;
+pub const ROLE_SIGNAL_ERROR_FAILED: usize = 188;
+pub const ROLE_SIGNAL_STREAM: usize = 189;
+pub const ROLE_IO_ERROR_UNSUPPORTED: usize = 190;
+pub const ROLE_FS_ERROR_INVALID_INPUT: usize = 191;
+pub const ROLE_FS_ERROR_INVALID_ENCODING: usize = 192;
+pub const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 193;
+pub const ROLE_FS_ERROR_NOT_FOUND: usize = 194;
+pub const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 195;
+pub const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 196;
+pub const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 197;
+pub const ROLE_FS_ERROR_IS_DIRECTORY: usize = 198;
+pub const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 199;
+pub const ROLE_FS_ERROR_CROSS_DEVICE: usize = 200;
+pub const ROLE_FS_ERROR_UNSUPPORTED: usize = 201;
+pub const ROLE_OPEN_CREATE_NEW: usize = 202;
+pub const ROLE_FILE_KIND: usize = 203;
+pub const ROLE_FILE_KIND_FILE: usize = 204;
+pub const ROLE_FILE_KIND_DIRECTORY: usize = 205;
+pub const ROLE_FILE_KIND_SYMLINK: usize = 206;
+pub const ROLE_FILE_KIND_OTHER: usize = 207;
+pub const ROLE_FILE_INFO: usize = 208;
+pub const ROLE_DIR_ENTRY: usize = 209;
+pub const ROLE_RENAME_MODE: usize = 210;
+pub const ROLE_RENAME_NO_REPLACE: usize = 211;
+pub const ROLE_RENAME_REPLACE: usize = 212;
+pub const ROLE_PIPE_ERROR: usize = 213;
+pub const ROLE_PIPE_ERROR_CLOSED: usize = 214;
+pub const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 215;
+pub const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 216;
+pub const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 217;
+pub const ROLE_PIPE_ERROR_FAILED: usize = 218;
+pub const ROLE_PIPE_END: usize = 219;
+pub const ROLE_PIPE_READER: usize = 220;
+pub const ROLE_PIPE_WRITER: usize = 221;
+pub const ROLE_CHILD_INPUT: usize = 222;
+pub const ROLE_CHILD_INPUT_INHERIT: usize = 223;
+pub const ROLE_CHILD_INPUT_NULL: usize = 224;
+pub const ROLE_CHILD_INPUT_PIPE: usize = 225;
+pub const ROLE_CHILD_OUTPUT: usize = 226;
+pub const ROLE_CHILD_OUTPUT_INHERIT: usize = 227;
+pub const ROLE_CHILD_OUTPUT_NULL: usize = 228;
+pub const ROLE_CHILD_OUTPUT_PIPE: usize = 229;
+pub const ROLE_CHILD_ENV: usize = 230;
+pub const ROLE_CHILD_ENV_INHERIT: usize = 231;
+pub const ROLE_CHILD_ENV_EXACT: usize = 232;
+pub const ROLE_EXEC_SPEC: usize = 233;
+pub const ROLE_CHILD_STATUS: usize = 234;
+pub const ROLE_CHILD_STATUS_EXITED: usize = 235;
+pub const ROLE_CHILD_STATUS_TERMINATED: usize = 236;
+pub const ROLE_EXEC_ERROR: usize = 237;
+pub const ROLE_EXEC_ERROR_CLOSED: usize = 238;
+pub const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 239;
+pub const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 240;
+pub const ROLE_EXEC_ERROR_NOT_FOUND: usize = 241;
+pub const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 242;
+pub const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 243;
+pub const ROLE_EXEC_ERROR_FAILED: usize = 244;
+pub const ROLE_CHILD: usize = 245;
+pub const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 246;
+pub const ROLE_UDP_DATAGRAM: usize = 247;
+pub const ROLE_UDP_SOCKET: usize = 248;
+pub const ROLE_CHILD_ENV_OVERLAY: usize = 249;
+pub const ROLE_FILE_HANDLE: usize = 250;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -880,9 +868,6 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "EntropyError.LimitExceeded" => &mut layout.entropy_error_limit_exceeded,
         "EntropyError.Unavailable" => &mut layout.entropy_error_unavailable,
         "EntropyError.Failed" => &mut layout.entropy_error_failed,
-        "RunResult" => &mut layout.run_result,
-        "RunResult.Done" => &mut layout.run_done,
-        "RunResult.Fault" => &mut layout.run_fault,
         "StepEvent" => &mut layout.step_event,
         "StepEvent.Ran" => &mut layout.step_ran,
         "StepEvent.Waiting" => &mut layout.step_waiting,
@@ -902,9 +887,6 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SendResult.Sent" => &mut layout.send_sent,
         "SendResult.Closed" => &mut layout.send_closed,
         "SendResult.Fault" => &mut layout.send_fault,
-        "ProcResult" => &mut layout.proc_result,
-        "ProcResult.Done" => &mut layout.proc_done,
-        "ProcResult.Fault" => &mut layout.proc_fault,
         "ProcError" => &mut layout.proc_error,
         "ProcError.Dead" => &mut layout.proc_error_dead,
         "ProcError.NotPaused" => &mut layout.proc_error_not_paused,

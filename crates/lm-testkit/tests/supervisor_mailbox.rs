@@ -38,8 +38,8 @@ in Ok(m)
   h.resume()
   h.send(Stop)
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then -9
+  in Ok(v)  then v
+  in Err(_) then -9
   end
 in Err(_)
   -8

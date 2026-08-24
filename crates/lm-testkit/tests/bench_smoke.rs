@@ -213,7 +213,7 @@ fn perform_block_smoke() {
     // the fault. This times the block path plus machine creation.
     let source = "def one(): String with Vm\n  \
                   vm = sys.vm.Vm().activate_or_fault(do || with Io.Write\n    print(\"x\")\n  end, args: ())\n  \
-                  case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\n\
+                  case vm.run()\n  in Ok(_) then \"done\"\n  in Err(f) then f.code()\n  end\nend\n\
                   def go(): Int with Vm\n  i = 0\n  while i < 300\n    one()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
     timed_world("perform_block_300", source, &["Vm"], "Done(300)");
 }
@@ -224,7 +224,7 @@ fn perform_mock_smoke() {
                   vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    \
                   i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
                   vm.table().mock(Clock.Now, { ||: Int 1 })\n  \
-                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\ngo()\n";
+                  case vm.run()\n  in Ok(v) then v\n  in Err(_) then -1\n  end\nend\ngo()\n";
     timed_world("perform_mock_5k", source, &["Vm"], "Done(5000)");
 }
 
@@ -271,8 +271,8 @@ inner = do ||: Int with Vm, Clock.Now
   end, args: ())
   b.table().pass(Clock.Now)
   case b.run()
-  in Done(value) then value
-  in Fault(_) then -3
+  in Ok(value) then value
+  in Err(_) then -3
   end
 end
 
@@ -294,7 +294,7 @@ fn nested_vm_run_smoke() {
     let source = "def tower(n: Int): Int with Vm\n  if n <= 0\n    1\n  else\n    \
                   vm = sys.vm.Vm().activate_or_fault(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
                   vm.table().pass(Vm)\n    \
-                  case vm.run()\n    in Done(v) then v + 1\n    in Fault(_) then -1\n    end\n  end\nend\ntower(40)\n";
+                  case vm.run()\n    in Ok(v) then v + 1\n    in Err(_) then -1\n    end\n  end\nend\ntower(40)\n";
     timed_world("nested_vm_run_40", source, &["Vm"], "Done(41)");
 }
 
@@ -304,7 +304,7 @@ fn async_wait_smoke() {
                   vm = sys.vm.Vm().activate_or_fault(do || with Clock.Sleep\n    \
                   i = 0\n    while i < 50\n      sys.clock.sleep(1)\n      i = i + 1\n    end\n    i\n  end, args: ())\n  \
                   vm.table().pass(Clock.Sleep)\n  \
-                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\ngo()\n";
+                  case vm.run()\n  in Ok(v) then v\n  in Err(_) then -1\n  end\nend\ngo()\n";
     timed_world("async_wait_50", source, &["Vm", "Clock.Sleep"], "Done(50)");
 }
 
@@ -328,7 +328,7 @@ fn boundary_transfer_smoke() {
                   vm = sys.vm.Vm().activate_or_fault(do ||: [[Int]]\n    \
                   xs: [[Int]] = []\n    i = 0\n    while i < 20000\n      xs.push([i])\n      i = i + 1\n    end\n    \
                   xs.freeze()\n  end, args: ())\n  \
-                  case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then -1\n  end\nend\ngo()\n";
+                  case vm.run()\n  in Ok(xs) then xs.len()\n  in Err(_) then -1\n  end\nend\ngo()\n";
     timed_world("transfer_graph_20k", source, &["Vm"], "Done(20000)");
 }
 
@@ -388,8 +388,8 @@ fn proc_send_receive_smoke() {
                   while i < 20000\n  h.send(1)\n  i = i + 1\nend\n\
                   h.close()\n\
                   case h.done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then -1\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then -1\n\
                   end\n";
     timed_world("proc_send_receive_20k", source, &["Proc"], "Done(20000)");
 }
@@ -408,8 +408,8 @@ fn proc_spawn_smoke() {
                   while i < 500\n\
                   \x20 h = Quick.spawn()\n\
                   \x20 got = case h.done()\n\
-                  \x20 in Done(v)  then v\n\
-                  \x20 in Fault(_) then 0\n\
+                  \x20 in Ok(v)  then v\n\
+                  \x20 in Err(_) then 0\n\
                   \x20 end\n\
                   \x20 total = total + got\n\
                   \x20 i = i + 1\n\
@@ -450,8 +450,8 @@ fn proc_pause_resume_smoke() {
                   end\n\
                   h.close()\n\
                   case h.done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then -1\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then -1\n\
                   end\n";
     timed_world("proc_pause_resume_5k", source, &["Proc"], "Done(0)");
 }
@@ -476,8 +476,8 @@ fn proc_terminal_publication_smoke() {
                   while i < 200\n\
                   \x20 h = Maker.spawn()\n\
                   \x20 got = case h.done()\n\
-                  \x20 in Done(xs) then xs.len()\n\
-                  \x20 in Fault(_) then 0\n\
+                  \x20 in Ok(xs) then xs.len()\n\
+                  \x20 in Err(_) then 0\n\
                   \x20 end\n\
                   \x20 total = total + got\n\
                   \x20 i = i + 1\n\

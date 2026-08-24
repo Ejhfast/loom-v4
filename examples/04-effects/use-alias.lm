@@ -12,8 +12,8 @@ end
 def run_child(): Int with Vm
   m = vm.Vm().activate_or_fault({ || 40 + 2 }, args: ())
   case m.run()
-  in Done(v) then v
-  in Fault(_) then panic("the greeting program faulted")
+  in Ok(v) then v
+  in Err(_) then panic("the greeting program faulted")
   end
 end
 

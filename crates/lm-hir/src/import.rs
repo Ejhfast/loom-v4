@@ -104,6 +104,15 @@ struct PendingInterface {
     interface: IfaceInterface,
 }
 
+/// One hidden default function waiting for phase B.
+struct PendingDefault {
+    interface: u32,
+    method: u32,
+    module: String,
+    binding: String,
+    iface_hash: [u8; 32],
+}
+
 /// The import materializer of one module.
 pub(crate) struct Materializer<'a> {
     env: &'a ImportEnv,
@@ -112,6 +121,7 @@ pub(crate) struct Materializer<'a> {
     interfaces: HashMap<(String, String), u32>,
     pending: Vec<PendingClass>,
     pending_interfaces: Vec<PendingInterface>,
+    pending_defaults: Vec<PendingDefault>,
     pending_funcs: Vec<PendingFunc>,
 }
 
@@ -127,6 +137,7 @@ impl<'a> Materializer<'a> {
             interfaces: HashMap::new(),
             pending: Vec::new(),
             pending_interfaces: Vec::new(),
+            pending_defaults: Vec::new(),
             pending_funcs: Vec::new(),
         }
     }
@@ -176,6 +187,18 @@ impl<'a> Materializer<'a> {
                 format!("`{module}.{name}` is not an interface"),
             ));
         };
+        if ctx.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize {
+            return Err(error(
+                span,
+                "the module has too many interfaces for compact calls",
+            ));
+        }
+        if interface.methods.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
+            return Err(error(
+                span,
+                "the imported interface has too many methods for compact calls",
+            ));
+        }
         let id = ctx.interfaces.len() as u32;
         self.interfaces.insert(key, id);
         ctx.interfaces.push(InterfaceInfo {
@@ -222,6 +245,17 @@ impl<'a> Materializer<'a> {
             }
         }
         for method in &interface.methods {
+            for bounds in &method.type_bounds {
+                for bound in bounds {
+                    self.reserve_interface_use(ctx, bound, span)?;
+                }
+            }
+            for premise in &method.premises {
+                self.reserve_type(ctx, &premise.subject, span)?;
+                for bound in &premise.bounds {
+                    self.reserve_interface_use(ctx, bound, span)?;
+                }
+            }
             for ty in method.params.iter().chain([&method.ret]) {
                 self.reserve_type(ctx, ty, span)?;
             }
@@ -483,21 +517,65 @@ impl<'a> Materializer<'a> {
                     Ok(Rc::new(InterfaceMethodSig {
                         name: method.name.clone(),
                         mut_self: method.mut_self,
+                        own_type_params: (0..method.type_params)
+                            .map(|index| format!("${index}"))
+                            .collect(),
+                        own_type_bounds: self.resolve_bounds(ctx, &method.type_bounds, span)?,
+                        own_effect_params: (0..method.effect_params)
+                            .map(|index| format!("e{index}"))
+                            .collect(),
+                        premises: method
+                            .premises
+                            .iter()
+                            .map(|premise| {
+                                Ok(crate::check::TypePremise {
+                                    subject: self.resolve_type(ctx, &premise.subject, span)?,
+                                    bounds: premise
+                                        .bounds
+                                        .iter()
+                                        .map(|bound| self.resolve_interface_use(ctx, bound, span))
+                                        .collect::<Result<Vec<_>, _>>()?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, Diagnostic>>()?,
                         params,
                         param_muts: method.param_muts.clone(),
                         param_names: method.param_names.clone(),
                         ret: self.resolve_type(ctx, &method.ret, span)?,
                         row: self.resolve_row(ctx, &method.row, span)?,
+                        default_func: None,
+                        default_binding: method.default.clone(),
                     }))
                 })
                 .collect::<Result<_, Diagnostic>>()?;
-            let info = &mut ctx.interfaces[item.id as usize];
-            info.parents = parents;
-            info.type_bounds = type_bounds;
-            info.associated = associated;
-            info.methods = methods;
+            {
+                let info = &mut ctx.interfaces[item.id as usize];
+                info.parents = parents;
+                info.type_bounds = type_bounds;
+                info.associated = associated;
+                info.methods = methods;
+            }
+            for (method, declaration) in item.interface.methods.iter().enumerate() {
+                let Some(binding) = &declaration.default else {
+                    continue;
+                };
+                let export = self.export(&item.module, binding, span)?;
+                if !matches!(export.item, IfaceItem::Func(_)) {
+                    return Err(error(
+                        span,
+                        format!("the default binding `{binding}` is not a function"),
+                    ));
+                }
+                self.pending_defaults.push(PendingDefault {
+                    interface: item.id,
+                    method: method as u32,
+                    module: item.module.clone(),
+                    binding: binding.clone(),
+                    iface_hash: export.iface_hash,
+                });
+            }
             debug_assert_eq!(
-                info.origin.as_ref(),
+                ctx.interfaces[item.id as usize].origin.as_ref(),
                 Some(&(item.module.clone(), item.name.clone()))
             );
         }
@@ -576,6 +654,77 @@ impl<'a> Materializer<'a> {
                     .expect("an imported method signature is not shared yet")
                     .func = func;
             }
+        }
+        let defaults = std::mem::take(&mut self.pending_defaults);
+        for item in defaults {
+            let contract = ctx.interfaces[item.interface as usize].clone();
+            let requirement = Rc::clone(&contract.methods[item.method as usize]);
+            let self_ty = ctx.store.intern(Type::Var(0));
+            let mut type_params = Vec::with_capacity(
+                1 + contract.type_params.len() + requirement.own_type_params.len(),
+            );
+            type_params.push("Self".to_string());
+            type_params.extend(contract.type_params.iter().cloned());
+            type_params.extend(requirement.own_type_params.iter().cloned());
+            let application = InterfaceUse {
+                interface: item.interface,
+                type_args: (0..contract.type_params.len())
+                    .map(|at| ctx.store.intern(Type::Var(at as u32 + 1)))
+                    .collect(),
+                row_args: (0..contract.effect_params.len())
+                    .map(|at| vec![RowElem::Var(at as u32)])
+                    .collect(),
+            };
+            let mut type_bounds = vec![vec![application]];
+            type_bounds.extend(contract.type_bounds.iter().cloned());
+            type_bounds.extend(requirement.own_type_bounds.iter().cloned());
+            let mut effect_params = contract.effect_params.clone();
+            effect_params.extend(requirement.own_effect_params.iter().cloned());
+            let mut params = vec![self_ty];
+            params.extend(requirement.params.iter().copied());
+            let mut param_muts = vec![requirement.mut_self];
+            param_muts.extend(requirement.param_muts.iter().copied());
+            let mut param_names = vec!["self".to_string()];
+            param_names.extend(requirement.param_names.iter().cloned());
+            let sig = FnSig {
+                type_params,
+                type_bounds,
+                effect_params,
+                params,
+                param_muts,
+                param_names,
+                ret: requirement.ret,
+                row: requirement.row.clone(),
+            };
+            let func = ctx.push_func(
+                HirFunc {
+                    source_span: None,
+                    name: item.binding.clone(),
+                    type_params: sig.type_params.len() as u32,
+                    type_bounds: crate::check::hir_bounds(&sig.type_bounds),
+                    effect_params: sig.effect_params.len() as u32,
+                    params: sig.params.clone(),
+                    param_muts: sig.param_muts.clone(),
+                    ret: sig.ret,
+                    row: sig.row.clone(),
+                    captures: vec![],
+                    locals: sig.params.clone(),
+                    body: vec![],
+                    imported: true,
+                },
+                sig,
+            );
+            ctx.imports.push(HirImport {
+                module: item.module,
+                name: item.binding,
+                kind: ImportKind::Func,
+                def: HirImportDef::Func(func),
+                hash: item.iface_hash,
+            });
+            Rc::make_mut(
+                &mut ctx.interfaces[item.interface as usize].methods[item.method as usize],
+            )
+            .default_func = Some(func);
         }
         let funcs = std::mem::take(&mut self.pending_funcs);
         for item in &funcs {
@@ -696,6 +845,7 @@ impl<'a> Materializer<'a> {
                     application,
                     premises,
                     associated,
+                    method_overrides: conformance.method_overrides.clone(),
                 }))
             })
             .collect::<Result<_, Diagnostic>>()?;

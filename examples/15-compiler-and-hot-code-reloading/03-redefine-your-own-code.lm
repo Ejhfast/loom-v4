@@ -35,8 +35,8 @@ def run_read(image: Vm, f: FunctionBinding[(), Int]): Result[Int, String] with V
     |e: CodeError| e.message
   }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the read faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the read faulted")
   end
 end
 

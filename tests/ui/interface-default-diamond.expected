@@ -1,0 +1,2 @@
+error[E1053]: the method `name` has defaults from `Left` and `Right`; add an explicit override
+  --> tests/ui/interface-default-diamond.lm:13:13

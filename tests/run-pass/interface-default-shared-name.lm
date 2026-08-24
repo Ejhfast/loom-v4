@@ -1,0 +1,17 @@
+interface Named
+  def name(self): String
+    "default"
+  end
+end
+
+final class Item implements Named
+  def name(self, suffix: Int): String
+    "item #{suffix}"
+  end
+end
+
+def read[T: Named](value: T): String
+  value.name()
+end
+
+(read(Item()), Item().name(7))

@@ -53,6 +53,6 @@ supervisor = Supervisor.spawn()
 supervisor.send(Stop)
 
 case supervisor.done()
-in Done(message) then message
-in Fault(fault)  then fault.code()
+in Ok(message)  then message
+in Err(fault)   then fault.code()
 end

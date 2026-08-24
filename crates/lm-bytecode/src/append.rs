@@ -179,6 +179,9 @@ pub fn append_resolved(
             interfaces[index] = existing;
             shared_interfaces.push(index);
         } else {
+            if merged.interfaces.len() > crate::MAX_INTERFACE_CALL_INDEX as usize {
+                return Err(fail("the merged module has too many interfaces"));
+            }
             let target = merged.interfaces.len() as u32;
             merged.interfaces.push(BcInterface {
                 name: item.name.clone(),
@@ -847,6 +850,21 @@ fn reloc_interface(source: &BcInterface, reloc: &AppendReloc) -> BcInterface {
             .map(|method| BcInterfaceMethod {
                 selector: reloc.selectors[method.selector as usize],
                 mut_self: method.mut_self,
+                type_params: method.type_params,
+                type_bounds: reloc_bounds(&method.type_bounds, reloc),
+                effect_params: method.effect_params,
+                premises: method
+                    .premises
+                    .iter()
+                    .map(|premise| crate::BcTypePremise {
+                        subject: reloc.types[premise.subject as usize],
+                        bounds: premise
+                            .bounds
+                            .iter()
+                            .map(|bound| reloc_interface_use(bound, reloc))
+                            .collect(),
+                    })
+                    .collect(),
                 params: method
                     .params
                     .iter()
@@ -855,6 +873,11 @@ fn reloc_interface(source: &BcInterface, reloc: &AppendReloc) -> BcInterface {
                 param_muts: method.param_muts.clone(),
                 ret: reloc.types[method.ret as usize],
                 row: reloc_row(&method.row, &reloc.strings),
+                default: if method.default == crate::NO_FUNC {
+                    crate::NO_FUNC
+                } else {
+                    reloc.funcs[method.default as usize]
+                },
             })
             .collect(),
     }
@@ -881,6 +904,7 @@ fn reloc_conformance(source: &BcConformance, reloc: &AppendReloc) -> BcConforman
             .iter()
             .map(|ty| reloc.types[*ty as usize])
             .collect(),
+        method_overrides: source.method_overrides.clone(),
     }
 }
 
@@ -985,15 +1009,16 @@ fn reloc_instr(instruction: &Instr, reloc: &AppendReloc) -> Instr {
             op: *op,
             ty: reloc.types[*ty as usize],
         },
-        Instr::CallInterface {
-            interface,
-            method,
-            recv_ty,
-        } => Instr::CallInterface {
-            interface: reloc.interfaces[*interface as usize],
-            method: *method,
-            recv_ty: reloc.types[*recv_ty as usize],
-        },
+        Instr::CallInterface { site, recv_ty, app } => {
+            let (interface, method) = crate::unpack_interface_call_site(*site);
+            let relocated = reloc.interfaces[interface as usize];
+            Instr::CallInterface {
+                site: crate::pack_interface_call_site(relocated, method)
+                    .expect("the append interface count was checked"),
+                recv_ty: reloc.types[*recv_ty as usize],
+                app: reloc_app(*app, reloc),
+            }
+        }
         Instr::Extended(instruction) => Instr::Extended(reloc_extended(instruction, reloc)),
         Instr::ConstUnit
         | Instr::ConstBool(_)
@@ -1047,6 +1072,7 @@ fn reloc_instr(instruction: &Instr, reloc: &AppendReloc) -> Instr {
         | Instr::FaultDenied
         | Instr::RaiseUserPanic
         | Instr::RaiseAssertionFailed
+        | Instr::RaiseFault
         | Instr::RequestOp
         | Instr::Unreachable
         | Instr::Native(_) => *instruction,

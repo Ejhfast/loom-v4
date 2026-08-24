@@ -345,7 +345,7 @@ xs.at(index: 0) + m.at(key: \"a\") + extra
 #[test]
 fn activate_labels_follow_the_general_rule() {
     let program = "def child(a: Int, b: Int): Int\n  a + b\nend\n";
-    let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then -1\nend\n";
+    let tail = "case vm.run()\nin Ok(v) then v\nin Err(_) then -1\nend\n";
     for call in [
         "sys.vm.Vm().activate_or_fault(child, args: (3, 4))",
         "sys.vm.Vm().activate_or_fault(child, (3, 4))",
@@ -375,8 +375,8 @@ fn vm_and_run_have_distinct_type_forms() {
     );
     let source = "def finish(run: Run[Int]): Int with Vm\n\
         \x20 case run.run()\n\
-        \x20 in Done(value) then value\n\
-        \x20 in Fault(_) then -1\n\
+        \x20 in Ok(value) then value\n\
+        \x20 in Err(_) then -1\n\
         \x20 end\n\
         end\n\
         image: Vm = sys.vm.Vm()\n\
@@ -409,7 +409,7 @@ fn labels_work_on_the_continuation_methods() {
         in _\n    \
         vm.dispatch(request)\n  \
         end\n  \
-        case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\n\
+        case vm.run()\n  in Ok(v) then v\n  in Err(_) then -1\n  end\n\
         in Done(_) then -2\n\
         in Fault(_) then -3\n\
         end\n";

@@ -1,0 +1,16 @@
+interface Chooses
+  type Item
+  def smaller(self, left: Self.Item, right: Self.Item): Self.Item when Self.Item: Comparable
+    if left.compare(right).is_less()
+      left
+    else
+      right
+    end
+  end
+end
+
+final class IntChooser implements Chooses
+  type Item = Int
+end
+
+IntChooser().smaller(7, 3)

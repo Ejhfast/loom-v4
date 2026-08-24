@@ -131,8 +131,8 @@ def answer_with(snap: RunSnapshot[Int], choice: Int): Int with Vm
       in Call(Choose.Pick, call, (_,))
         restored.answer(call, choice)
         case restored.run()
-        in Done(value) then value
-        in Fault(_)    then -1
+        in Ok(value) then value
+        in Err(_)    then -1
         end
       in _ then -2
       end

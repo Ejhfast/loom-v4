@@ -116,10 +116,22 @@ pub struct HirAssociated {
 pub struct HirInterfaceMethod {
     pub selector: String,
     pub mut_self: bool,
+    pub type_params: u32,
+    pub type_bounds: Vec<Vec<HirInterfaceUse>>,
+    pub effect_params: u32,
+    pub premises: Vec<HirTypePremise>,
     pub params: Vec<TypeId>,
     pub param_muts: Vec<bool>,
     pub ret: TypeId,
     pub row: Row,
+    pub default: Option<u32>,
+    pub default_binding: Option<String>,
+}
+
+/// One checked type premise in a bytecode-ready interface method.
+pub struct HirTypePremise {
+    pub subject: TypeId,
+    pub bounds: Vec<HirInterfaceUse>,
 }
 
 /// One nominal interface before bytecode lowering.
@@ -147,6 +159,9 @@ pub struct HirConformance {
     pub application: HirInterfaceUse,
     pub premises: Vec<HirConformancePremise>,
     pub associated: Vec<TypeId>,
+    /// One entry per interface method.
+    /// True selects compatible class dispatch. False selects the default.
+    pub method_overrides: Vec<bool>,
 }
 
 /// How instances of one class are constructed.
@@ -528,6 +543,8 @@ pub enum HExprKind {
         interface: u32,
         method: u32,
         selector: String,
+        own_targs: Vec<TypeId>,
+        own_rowargs: Vec<Row>,
         args: Vec<HExpr>,
     },
     /// `receiver.field` with a resolved layout index.

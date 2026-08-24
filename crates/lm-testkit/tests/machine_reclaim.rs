@@ -21,8 +21,8 @@ fn a_driver_outlives_its_child_budget() {
     x + 1
   end, args: (n,))
   case vm.run()
-  in Done(value) then value
-  in Fault(_)    then -1
+  in Ok(value) then value
+  in Err(_)    then -1
   end
 end
 
@@ -54,8 +54,8 @@ fn a_search_driver_restores_past_its_child_budget() {
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()
-    in Done(value) then value
-    in Fault(_)    then -1
+    in Ok(value) then value
+    in Err(_)    then -1
     end
   in Err(_) then -2
   end

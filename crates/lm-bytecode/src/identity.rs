@@ -109,7 +109,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 44 lowers tombstone-aware map traversal.
 /// Version 45 uses BLAKE3-256 for bytecode identities.
 /// Version 46 lowers text padding and Float text conversions.
-pub const COMPILER_ABI_VERSION: u32 = 46;
+pub const COMPILER_ABI_VERSION: u32 = 47;
 
 /// The refinement work budget of one component.
 ///
@@ -530,7 +530,27 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                     )));
                 }
             }
+            for bounds in &method.type_bounds {
+                for bound in bounds {
+                    check_use(&format!("interface {iidx}"), bound)?;
+                }
+            }
+            for premise in &method.premises {
+                if premise.subject as usize >= s.types {
+                    return Err(fail(format!(
+                        "interface {iidx}: premise type index out of range"
+                    )));
+                }
+                for bound in &premise.bounds {
+                    check_use(&format!("interface {iidx}"), bound)?;
+                }
+            }
             check_row(&format!("interface {iidx}"), &method.row)?;
+            if method.default != crate::NO_FUNC && method.default as usize >= module.funcs.len() {
+                return Err(fail(format!(
+                    "interface {iidx}: default function index out of range"
+                )));
+            }
         }
     }
     let mut pending: Vec<usize> = module
@@ -922,6 +942,7 @@ fn preflight_instr(
         | Instr::FaultDenied
         | Instr::RaiseUserPanic
         | Instr::RaiseAssertionFailed
+        | Instr::RaiseFault
         | Instr::RequestOp
         | Instr::Unreachable => Ok(()),
         Instr::ConstStr(idx) => {
@@ -1031,19 +1052,19 @@ fn preflight_instr(
             }
             Ok(())
         }
-        Instr::CallInterface {
-            interface,
-            method,
-            recv_ty,
-        } => {
-            let Some(contract) = module.interfaces.get(*interface as usize) else {
+        Instr::CallInterface { site, recv_ty, app } => {
+            let (interface, method) = crate::unpack_interface_call_site(*site);
+            let Some(contract) = module.interfaces.get(interface as usize) else {
                 return Err(bad("interface"));
             };
-            if *method as usize >= contract.methods.len() {
+            if method as usize >= contract.methods.len() {
                 return Err(bad("interface method"));
             }
             if *recv_ty as usize >= s.types {
                 return Err(bad("receiver type"));
+            }
+            if *app != crate::NO_APP && *app as usize >= s.apps {
+                return Err(bad("type application"));
             }
             Ok(())
         }
@@ -1197,6 +1218,14 @@ fn push_interface_type_edges(module: &Module, space: &Space, interface: u32, out
         for ty in method.params.iter().chain([&method.ret]) {
             out.push(space.type_node(*ty));
         }
+        for premise in &method.premises {
+            out.push(space.type_node(premise.subject));
+            for bound in &premise.bounds {
+                for ty in &bound.types {
+                    out.push(space.type_node(*ty));
+                }
+            }
+        }
     }
 }
 
@@ -1346,8 +1375,11 @@ impl Graph {
                             called[*f as usize] = true;
                         }
                         Instr::CallVirtualG { app, .. } => list.push(s.app_node(*app)),
-                        Instr::CallInterface { recv_ty, .. } => {
+                        Instr::CallInterface { recv_ty, app, .. } => {
                             list.push(s.type_node(*recv_ty));
+                            if *app != crate::NO_APP {
+                                list.push(s.app_node(*app));
+                            }
                         }
                         Instr::MakeClosure { func: f, .. } => {
                             list.push(s.func_node(*f));
@@ -1757,6 +1789,17 @@ impl<'a> Resolver<'a> {
         for method in &contract.methods {
             write_str(&mut out, &self.module.selectors[method.selector as usize]);
             out.push(u8::from(method.mut_self));
+            out.extend_from_slice(&method.type_params.to_le_bytes());
+            self.bounds_bytes(&mut out, &method.type_bounds, false);
+            out.extend_from_slice(&method.effect_params.to_le_bytes());
+            out.extend_from_slice(&(method.premises.len() as u32).to_le_bytes());
+            for premise in &method.premises {
+                out.extend_from_slice(&self.type_digest(premise.subject));
+                out.extend_from_slice(&(premise.bounds.len() as u32).to_le_bytes());
+                for bound in &premise.bounds {
+                    self.interface_use_bytes(&mut out, bound, false);
+                }
+            }
             out.extend_from_slice(&(method.params.len() as u32).to_le_bytes());
             for ty in &method.params {
                 out.extend_from_slice(&self.type_digest(*ty));
@@ -1766,6 +1809,7 @@ impl<'a> Resolver<'a> {
             }
             out.extend_from_slice(&self.type_digest(method.ret));
             self.row_bytes(&mut out, &method.row);
+            out.push(u8::from(method.default != crate::NO_FUNC));
         }
         hash256(&out)
     }
@@ -2007,6 +2051,10 @@ impl<'a> Resolver<'a> {
             for ty in &conformance.associated {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
+            out.extend_from_slice(&(conformance.method_overrides.len() as u32).to_le_bytes());
+            for selected in &conformance.method_overrides {
+                out.push(u8::from(*selected));
+            }
         }
         // An abstract enum parent carries its closed arm set, in arm
         // order.
@@ -2222,6 +2270,7 @@ impl<'a> Resolver<'a> {
             Instr::RequestOp => 0x89,
             Instr::RaiseUserPanic => 0xeb,
             Instr::RaiseAssertionFailed => 0xec,
+            Instr::RaiseFault => 0x07,
             Instr::Extended(instr) => Self::extended_instr_tag(instr),
         }
     }
@@ -2358,14 +2407,17 @@ impl<'a> Resolver<'a> {
                 u(out, *argc);
                 out.extend_from_slice(&self.app_digest(*app));
             }
-            Instr::CallInterface {
-                interface,
-                method,
-                recv_ty,
-            } => {
-                write_str(out, &self.module.interfaces[*interface as usize].key);
+            Instr::CallInterface { site, recv_ty, app } => {
+                let (interface, method) = crate::unpack_interface_call_site(*site);
+                write_str(out, &self.module.interfaces[interface as usize].key);
                 out.extend_from_slice(&method.to_le_bytes());
                 out.extend_from_slice(&self.type_digest(*recv_ty));
+                if *app == crate::NO_APP {
+                    out.push(0);
+                } else {
+                    out.push(1);
+                    out.extend_from_slice(&self.app_digest(*app));
+                }
             }
             Instr::CallValue { argc } => {
                 u(out, *argc);
@@ -2571,6 +2623,7 @@ impl<'a> Resolver<'a> {
             | Instr::FaultDenied
             | Instr::RaiseUserPanic
             | Instr::RaiseAssertionFailed
+            | Instr::RaiseFault
             | Instr::RequestOp => {}
             Instr::Extended(instr) => self.extended_instr_bytes(out, instr),
         }

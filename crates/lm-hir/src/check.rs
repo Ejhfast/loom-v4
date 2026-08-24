@@ -73,7 +73,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 141] = [
+pub const PRELUDE_TYPES: [&str; 139] = [
     "Option",
     "Result",
     "Ordering",
@@ -94,13 +94,11 @@ pub const PRELUDE_TYPES: [&str; 141] = [
     "Tuple15",
     "Tuple16",
     "Range",
-    "RunResult",
     "StepEvent",
     "DriveEvent",
     "Proc",
     "Recv",
     "SendResult",
-    "ProcResult",
     "ProcError",
     "Choice",
     "SnapshotError",
@@ -344,11 +342,29 @@ pub(crate) struct AssociatedInfo {
 pub(crate) struct InterfaceMethodSig {
     pub(crate) name: String,
     pub(crate) mut_self: bool,
+    pub(crate) own_type_params: Vec<String>,
+    pub(crate) own_type_bounds: Vec<Vec<InterfaceUse>>,
+    pub(crate) own_effect_params: Vec<String>,
+    pub(crate) premises: Vec<TypePremise>,
     pub(crate) params: Vec<TypeId>,
     pub(crate) param_muts: Vec<bool>,
     pub(crate) param_names: Vec<String>,
     pub(crate) ret: TypeId,
     pub(crate) row: Row,
+    /// The verified default function, when this module can call it.
+    pub(crate) default_func: Option<u32>,
+    /// The stable hidden binding of the default function.
+    pub(crate) default_binding: Option<String>,
+}
+
+/// One resolved method from an interface bound or default.
+pub(crate) type ResolvedInterfaceMethod = (InterfaceUse, u32, u32, Rc<InterfaceMethodSig>);
+
+/// One checked type premise on an interface method.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TypePremise {
+    pub(crate) subject: TypeId,
+    pub(crate) bounds: Vec<InterfaceUse>,
 }
 
 /// One declared nominal interface.
@@ -379,6 +395,9 @@ pub(crate) struct ConformanceInfo {
     pub(crate) application: InterfaceUse,
     pub(crate) premises: Vec<ConformancePremise>,
     pub(crate) associated: Vec<TypeId>,
+    /// One entry per interface method.
+    /// True selects compatible class dispatch. False selects the default.
+    pub(crate) method_overrides: Vec<bool>,
 }
 
 fn hir_interface_use(application: &InterfaceUse) -> HirInterfaceUse {
@@ -776,6 +795,8 @@ fn resolve_uses(
 pub(crate) struct TyEnv {
     pub(crate) type_names: Vec<String>,
     pub(crate) type_bounds: Vec<Vec<InterfaceUse>>,
+    /// Bounds on types that are not direct type parameters.
+    pub(crate) extra_bounds: Vec<TypePremise>,
     pub(crate) effect_names: Vec<String>,
     /// The first type-variable index used by `type_names`.
     pub(crate) type_offset: u32,
@@ -1110,6 +1131,36 @@ impl Ctx {
         Rc::new(InterfaceMethodSig {
             name: method.name.clone(),
             mut_self: method.mut_self,
+            own_type_params: method.own_type_params.clone(),
+            own_type_bounds: method
+                .own_type_bounds
+                .iter()
+                .map(|bounds| {
+                    bounds
+                        .iter()
+                        .map(|bound| {
+                            self.substitute_interface_use(bound, &types, &application.row_args)
+                        })
+                        .collect()
+                })
+                .collect(),
+            own_effect_params: method.own_effect_params.clone(),
+            premises: method
+                .premises
+                .iter()
+                .map(|premise| TypePremise {
+                    subject: self
+                        .store
+                        .substitute(premise.subject, &types, &application.row_args),
+                    bounds: premise
+                        .bounds
+                        .iter()
+                        .map(|bound| {
+                            self.substitute_interface_use(bound, &types, &application.row_args)
+                        })
+                        .collect(),
+                })
+                .collect(),
             params: method
                 .params
                 .iter()
@@ -1123,6 +1174,8 @@ impl Ctx {
             row: self
                 .store
                 .substitute_row(&method.row, &application.row_args),
+            default_func: method.default_func,
+            default_binding: method.default_binding.clone(),
         })
     }
 
@@ -1226,6 +1279,19 @@ impl Ctx {
         if depth >= 128 {
             return None;
         }
+        if let Some(bound) = env
+            .extra_bounds
+            .iter()
+            .find(|premise| premise.subject == ty)
+            .and_then(|premise| {
+                premise
+                    .bounds
+                    .iter()
+                    .find(|bound| bound.interface == interface)
+            })
+        {
+            return Some(bound.clone());
+        }
         match self.store.get(ty).clone() {
             Type::Var(index) if index >= env.type_offset => env
                 .type_bounds
@@ -1261,6 +1327,145 @@ impl Ctx {
         required: &InterfaceUse,
     ) -> bool {
         self.type_conforms_depth(env, ty, required, 0)
+    }
+
+    /// Resolve associated projections that have concrete conformances.
+    pub(crate) fn normalize_associated(&mut self, env: &TyEnv, ty: TypeId) -> TypeId {
+        self.normalize_associated_depth(env, ty, 0)
+    }
+
+    fn normalize_associated_depth(&mut self, env: &TyEnv, ty: TypeId, depth: u32) -> TypeId {
+        if depth >= 128 {
+            return ty;
+        }
+        match self.store.get(ty).clone() {
+            Type::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let base = self.normalize_associated_depth(env, base, depth + 1);
+                if let Some(alias) = self.iterable_item_alias(base, interface, assoc) {
+                    return self.normalize_associated_depth(env, alias, depth + 1);
+                }
+                match self.conformance_associated(env, base, interface.0, assoc) {
+                    Some(resolved) if resolved != ty => {
+                        self.normalize_associated_depth(env, resolved, depth + 1)
+                    }
+                    _ => self.store.project(base, interface, assoc),
+                }
+            }
+            Type::Inst(class, args) => {
+                let args = args
+                    .into_iter()
+                    .map(|item| self.normalize_associated_depth(env, item, depth + 1))
+                    .collect();
+                self.store.intern(Type::Inst(class, args))
+            }
+            Type::List(item) => {
+                let item = self.normalize_associated_depth(env, item, depth + 1);
+                self.store.intern(Type::List(item))
+            }
+            Type::Map(key, value) => {
+                let key = self.normalize_associated_depth(env, key, depth + 1);
+                let value = self.normalize_associated_depth(env, value, depth + 1);
+                self.store.intern(Type::Map(key, value))
+            }
+            Type::Tuple(items) => {
+                let items = items
+                    .into_iter()
+                    .map(|item| self.normalize_associated_depth(env, item, depth + 1))
+                    .collect();
+                self.store.intern(Type::Tuple(items))
+            }
+            Type::Fn(params, muts, ret, row) => {
+                let params = params
+                    .into_iter()
+                    .map(|item| self.normalize_associated_depth(env, item, depth + 1))
+                    .collect();
+                let ret = self.normalize_associated_depth(env, ret, depth + 1);
+                self.store.intern(Type::Fn(params, muts, ret, row))
+            }
+            Type::Callback(params, muts, ret, row) => {
+                let params = params
+                    .into_iter()
+                    .map(|item| self.normalize_associated_depth(env, item, depth + 1))
+                    .collect();
+                let ret = self.normalize_associated_depth(env, ret, depth + 1);
+                self.store.intern(Type::Callback(params, muts, ret, row))
+            }
+            Type::Run(item) => {
+                let item = self.normalize_associated_depth(env, item, depth + 1);
+                self.store.intern(Type::Run(item))
+            }
+            Type::Wait(item) => {
+                let item = self.normalize_associated_depth(env, item, depth + 1);
+                self.store.intern(Type::Wait(item))
+            }
+            Type::PendingCall(argument, reply) => {
+                let argument = self.normalize_associated_depth(env, argument, depth + 1);
+                let reply = self.normalize_associated_depth(env, reply, depth + 1);
+                self.store.intern(Type::PendingCall(argument, reply))
+            }
+            Type::Handle(message, result) => {
+                let message = self.normalize_associated_depth(env, message, depth + 1);
+                let result = self.normalize_associated_depth(env, result, depth + 1);
+                self.store.intern(Type::Handle(message, result))
+            }
+            Type::RunSnapshot(item) => {
+                let item = self.normalize_associated_depth(env, item, depth + 1);
+                self.store.intern(Type::RunSnapshot(item))
+            }
+            Type::Op(operation, function) => {
+                let function = self.normalize_associated_depth(env, function, depth + 1);
+                self.store.intern(Type::Op(operation, function))
+            }
+            _ => ty,
+        }
+    }
+
+    /// Normalize the checked item equality of the core iteration interfaces.
+    fn iterable_item_alias(
+        &mut self,
+        base: TypeId,
+        interface: InterfaceId,
+        assoc: u32,
+    ) -> Option<TypeId> {
+        let iterable = *self.core_interfaces.get("Iterable")?;
+        let iterator = *self.core_interfaces.get("Iterator")?;
+        if interface.0 != iterator {
+            return None;
+        }
+        let iterator_item = self.interfaces[iterator as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")? as u32;
+        if assoc != iterator_item {
+            return None;
+        }
+        let Type::Projection {
+            base: source,
+            interface: owner,
+            assoc: iter_assoc,
+        } = self.store.get(base).clone()
+        else {
+            return None;
+        };
+        let iterable_iter = self.interfaces[iterable as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Iter")? as u32;
+        if owner.0 != iterable || iter_assoc != iterable_iter {
+            return None;
+        }
+        let iterable_item = self.interfaces[iterable as usize]
+            .associated
+            .iter()
+            .position(|item| item.name == "Item")? as u32;
+        Some(
+            self.store
+                .project(source, InterfaceId(iterable), iterable_item),
+        )
     }
 
     /// Find the first failed premise of one conditional conformance.
@@ -1349,7 +1554,7 @@ impl Ctx {
         ty: TypeId,
         name: &str,
         span: Span,
-    ) -> Result<Option<(u32, u32, Rc<InterfaceMethodSig>)>, Diagnostic> {
+    ) -> Result<Option<ResolvedInterfaceMethod>, Diagnostic> {
         enum BoundSource {
             Variable(u32),
             Projection(InterfaceId, u32),
@@ -1364,19 +1569,33 @@ impl Ctx {
         };
         match source {
             BoundSource::Variable(index) => {
-                let applications = env
+                let mut applications = env
                     .type_bounds
                     .get((index - env.type_offset) as usize)
-                    .map(Vec::as_slice)
+                    .cloned()
                     .unwrap_or_default();
-                self.bound_method_in(applications, ty, name, span)
+                for premise in env
+                    .extra_bounds
+                    .iter()
+                    .filter(|premise| premise.subject == ty)
+                {
+                    applications.extend(premise.bounds.iter().cloned());
+                }
+                self.bound_method_in(&applications, ty, name, span)
             }
             BoundSource::Projection(interface, assoc) => {
-                let applications = self.interfaces[interface.0 as usize]
+                let mut applications = self.interfaces[interface.0 as usize]
                     .associated
                     .get(assoc as usize)
                     .map(|item| item.bounds.clone())
                     .unwrap_or_default();
+                for premise in env
+                    .extra_bounds
+                    .iter()
+                    .filter(|premise| premise.subject == ty)
+                {
+                    applications.extend(premise.bounds.iter().cloned());
+                }
                 self.bound_method_in(&applications, ty, name, span)
             }
             BoundSource::None => Ok(None),
@@ -1386,19 +1605,23 @@ impl Ctx {
     fn bound_method_in(
         &mut self,
         applications: &[InterfaceUse],
-        ty: TypeId,
+        _ty: TypeId,
         name: &str,
         span: Span,
-    ) -> Result<Option<(u32, u32, Rc<InterfaceMethodSig>)>, Diagnostic> {
-        let mut found: Option<(u32, u32, Rc<InterfaceMethodSig>)> = None;
+    ) -> Result<Option<ResolvedInterfaceMethod>, Diagnostic> {
+        let mut found: Option<ResolvedInterfaceMethod> = None;
         for application in applications {
             let contract = &self.interfaces[application.interface as usize];
             if let Some(method) = contract.methods.iter().position(|item| item.name == name) {
                 let requirement = Rc::clone(&contract.methods[method]);
-                let requirement = self.instantiate_interface_method(ty, application, &requirement);
-                let candidate = (application.interface, method as u32, requirement);
+                let candidate = (
+                    application.clone(),
+                    application.interface,
+                    method as u32,
+                    requirement,
+                );
                 if let Some(first) = &found {
-                    if *first.2 != *candidate.2 {
+                    if *first.3 != *candidate.3 {
                         return Err(Diagnostic::new(
                             "E1053",
                             format!("the interface method `{name}` is ambiguous"),
@@ -1408,6 +1631,47 @@ impl Ctx {
                 } else {
                     found = Some(candidate);
                 }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Find one interface default for a concrete receiver.
+    pub(crate) fn default_method(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<ResolvedInterfaceMethod>, Diagnostic> {
+        let mut found: Option<ResolvedInterfaceMethod> = None;
+        for interface in 0..self.interfaces.len() as u32 {
+            let Some(application) = self.type_conformance(env, ty, interface) else {
+                continue;
+            };
+            let Some(method) = self.interfaces[interface as usize]
+                .methods
+                .iter()
+                .position(|item| item.name == name && item.default_binding.is_some())
+            else {
+                continue;
+            };
+            let requirement = Rc::clone(&self.interfaces[interface as usize].methods[method]);
+            let candidate = (application, interface, method as u32, requirement);
+            if let Some(first) = &found {
+                if first.3.default_binding != candidate.3.default_binding {
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "the method `{name}` has defaults from `{}` and `{}`; add an explicit override",
+                            self.interfaces[first.1 as usize].name,
+                            self.interfaces[candidate.1 as usize].name
+                        ),
+                        span,
+                    ));
+                }
+            } else {
+                found = Some(candidate);
             }
         }
         Ok(found)
@@ -2068,6 +2332,10 @@ fn split_generics(generics: &[ast::GenericParam]) -> (Vec<String>, Vec<String>) 
     (type_names, effect_names)
 }
 
+fn interface_default_binding(interface: &str, method: &str) -> String {
+    format!("$default.{interface}.{method}")
+}
+
 /// Check a parsed module and produce typed HIR with the default
 /// options.
 pub fn check_module(module: &ast::Module) -> Result<HirModule, Diagnostic> {
@@ -2210,6 +2478,7 @@ pub fn check_module_with(
         let mut env = TyEnv {
             type_names: type_names.clone(),
             type_bounds: vec![Vec::new(); type_names.len()],
+            extra_bounds: Vec::new(),
             effect_names: effect_names.clone(),
             type_offset: 0,
             self_interface: None,
@@ -2243,6 +2512,7 @@ pub fn check_module_with(
         let mut env = TyEnv {
             type_names: type_names.clone(),
             type_bounds: vec![Vec::new(); type_names.len()],
+            extra_bounds: Vec::new(),
             effect_names: effect_names.clone(),
             type_offset: 0,
             self_interface: None,
@@ -2267,6 +2537,8 @@ pub fn check_module_with(
         ctx.sigs.push(sig);
         ctx.funcs.push(None);
     }
+    reserve_interface_defaults(&mut ctx, core, true).map_err(core_defect)?;
+    reserve_interface_defaults(&mut ctx, module, false)?;
     // The class table is index addressed from here on. Registration
     // fixed every index, so a later pass may fill the entries in any
     // order. The core resolves first, because a user class may name a
@@ -2326,6 +2598,7 @@ pub fn check_module_with(
         let env = TyEnv {
             type_names: std::mem::take(&mut sig.type_params),
             type_bounds: std::mem::take(&mut sig.type_bounds),
+            extra_bounds: Vec::new(),
             effect_names: std::mem::take(&mut sig.effect_params),
             type_offset: 0,
             self_interface: None,
@@ -2375,6 +2648,7 @@ pub fn check_module_with(
         let env = TyEnv {
             type_names: std::mem::take(&mut sig.type_params),
             type_bounds: std::mem::take(&mut sig.type_bounds),
+            extra_bounds: Vec::new(),
             effect_names: std::mem::take(&mut sig.effect_params),
             type_offset: 0,
             self_interface: None,
@@ -2421,6 +2695,8 @@ pub fn check_module_with(
     // Pass 5: check user method bodies, then core method bodies.
     check_all_methods(&mut ctx, module, false)?;
     check_all_methods(&mut ctx, core, true).map_err(core_defect)?;
+    check_interface_defaults(&mut ctx, module, false)?;
+    check_interface_defaults(&mut ctx, core, true).map_err(core_defect)?;
     // Pass 6: check the entry statements.
     let entry_span = module
         .entry
@@ -2483,6 +2759,12 @@ fn collect_exports(
             interface.name.clone(),
             ctx.user_interfaces[&interface.name],
         ));
+        let info = &ctx.interfaces[ctx.user_interfaces[&interface.name] as usize];
+        for method in &info.methods {
+            if let (Some(binding), Some(func)) = (&method.default_binding, method.default_func) {
+                out.push((lm_bytecode::ExportKind::Function, binding.clone(), func));
+            }
+        }
     }
     for class in &module.classes {
         out.push((
@@ -2518,6 +2800,74 @@ fn collect_exports(
             item: naming.item(kind, def),
         })
         .collect())
+}
+
+/// Reserve one verified function for each local interface default.
+fn reserve_interface_defaults(
+    ctx: &mut Ctx,
+    module: &ast::Module,
+    is_core: bool,
+) -> Result<(), Diagnostic> {
+    for declaration in &module.interfaces {
+        let interface = if is_core {
+            ctx.core_interfaces[&declaration.name]
+        } else {
+            ctx.user_interfaces[&declaration.name]
+        };
+        let contract = ctx.interfaces[interface as usize].clone();
+        for (index, method) in declaration.methods.iter().enumerate() {
+            if method.body.is_none() {
+                continue;
+            }
+            let requirement = Rc::clone(&contract.methods[index]);
+            let self_ty = ctx.store.intern(Type::Var(0));
+            let mut type_names = Vec::with_capacity(
+                1 + contract.type_params.len() + requirement.own_type_params.len(),
+            );
+            type_names.push("Self".to_string());
+            type_names.extend(contract.type_params.iter().cloned());
+            type_names.extend(requirement.own_type_params.iter().cloned());
+            let application = InterfaceUse {
+                interface,
+                type_args: (0..contract.type_params.len())
+                    .map(|at| ctx.store.intern(Type::Var(at as u32 + 1)))
+                    .collect(),
+                row_args: (0..contract.effect_params.len())
+                    .map(|at| vec![RowElem::Var(at as u32)])
+                    .collect(),
+            };
+            let mut type_bounds = Vec::with_capacity(type_names.len());
+            type_bounds.push(vec![application]);
+            type_bounds.extend(contract.type_bounds.iter().cloned());
+            type_bounds.extend(requirement.own_type_bounds.iter().cloned());
+            let mut effect_names = contract.effect_params.clone();
+            effect_names.extend(requirement.own_effect_params.iter().cloned());
+            let mut params = Vec::with_capacity(requirement.params.len() + 1);
+            params.push(self_ty);
+            params.extend(requirement.params.iter().copied());
+            let mut param_muts = Vec::with_capacity(requirement.param_muts.len() + 1);
+            param_muts.push(requirement.mut_self);
+            param_muts.extend(requirement.param_muts.iter().copied());
+            let mut param_names = Vec::with_capacity(requirement.param_names.len() + 1);
+            param_names.push("self".to_string());
+            param_names.extend(requirement.param_names.iter().cloned());
+            let func = ctx.funcs.len() as u32;
+            ctx.sigs.push(FnSig {
+                type_params: type_names,
+                type_bounds,
+                effect_params: effect_names,
+                params,
+                param_muts,
+                param_names,
+                ret: requirement.ret,
+                row: requirement.row.clone(),
+            });
+            ctx.funcs.push(None);
+            Rc::make_mut(&mut ctx.interfaces[interface as usize].methods[index]).default_func =
+                Some(func);
+        }
+    }
+    Ok(())
 }
 
 /// A defect in the pinned core sources is an implementation defect,
@@ -2644,6 +2994,7 @@ fn assemble(
                     })
                     .collect(),
                 associated: conformance.associated,
+                method_overrides: conformance.method_overrides,
             });
         }
         hir_classes.push(HirClass {
@@ -2723,10 +3074,27 @@ fn assemble(
                     HirInterfaceMethod {
                         selector: method.name,
                         mut_self: method.mut_self,
+                        type_params: method.own_type_params.len() as u32,
+                        type_bounds: into_hir_bounds(method.own_type_bounds),
+                        effect_params: method.own_effect_params.len() as u32,
+                        premises: method
+                            .premises
+                            .into_iter()
+                            .map(|premise| crate::hir::HirTypePremise {
+                                subject: premise.subject,
+                                bounds: premise
+                                    .bounds
+                                    .into_iter()
+                                    .map(into_hir_interface_use)
+                                    .collect(),
+                            })
+                            .collect(),
                         params: method.params,
                         param_muts: method.param_muts,
                         ret: method.ret,
                         row: method.row,
+                        default: method.default_func,
+                        default_binding: method.default_binding,
                     }
                 })
                 .collect(),
@@ -2776,6 +3144,26 @@ fn assemble(
             class: lm_bytecode::NO_CLASS,
         });
     }
+    for interface in &interfaces {
+        for method in &interface.methods {
+            let (Some(func), Some(binding)) = (method.default, &method.default_binding) else {
+                continue;
+            };
+            if funcs[func as usize].imported {
+                continue;
+            }
+            let module = if interface.key.starts_with("core.") {
+                lm_bytecode::CORE_MODULE
+            } else {
+                module_path
+            };
+            bindings.push(lm_bytecode::FuncBinding {
+                key: lm_bytecode::qualified_key(module, binding),
+                func,
+                class: lm_bytecode::NO_CLASS,
+            });
+        }
+    }
     for class in &hir_classes {
         if class.imported {
             continue;
@@ -2820,6 +3208,13 @@ fn register_interface_names(
     is_core: bool,
 ) -> Result<(), Diagnostic> {
     for interface in &module.interfaces {
+        if ctx.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize {
+            return Err(Diagnostic::new(
+                "E1024",
+                "the module has too many interfaces for compact calls",
+                interface.name_span,
+            ));
+        }
         let map = if is_core {
             &mut ctx.core_interfaces
         } else {
@@ -3108,9 +3503,17 @@ fn resolve_all_interfaces(
             ctx.user_interfaces[&declaration.name]
         };
         let (type_names, effect_names) = split_generics(&declaration.generics);
+        if declaration.methods.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
+            return Err(Diagnostic::new(
+                "E1024",
+                "the interface has too many methods for compact calls",
+                declaration.name_span,
+            ));
+        }
         let mut env = TyEnv {
             type_names: type_names.clone(),
             type_bounds: vec![Vec::new(); type_names.len()],
+            extra_bounds: Vec::new(),
             effect_names: effect_names.clone(),
             type_offset: 1,
             self_interface: Some(interface),
@@ -3184,27 +3587,78 @@ fn resolve_all_interfaces(
                     method.name_span,
                 ));
             }
+            let (own_type_params, own_effect_params) = split_generics(&method.generics);
+            for name in own_type_params.iter().chain(&own_effect_params) {
+                if env.type_names.contains(name) || env.effect_names.contains(name) {
+                    return Err(Diagnostic::new(
+                        "E1014",
+                        format!("duplicate generic parameter name `{name}`"),
+                        method.name_span,
+                    ));
+                }
+            }
+            let interface_type_count = env.type_names.len();
+            let mut method_env = env.clone();
+            method_env
+                .type_names
+                .extend(own_type_params.iter().cloned());
+            method_env
+                .type_bounds
+                .extend(vec![Vec::new(); own_type_params.len()]);
+            method_env
+                .effect_names
+                .extend(own_effect_params.iter().cloned());
+            let mut own_type_bounds = Vec::with_capacity(own_type_params.len());
+            let mut own_index = 0usize;
+            for generic in &method.generics {
+                if generic.is_effect {
+                    continue;
+                }
+                let direct = resolve_interface_bounds(ctx, &method_env, &generic.bounds)?;
+                let base = ctx.store.intern(Type::Var(
+                    1 + interface_type_count as u32 + own_index as u32,
+                ));
+                own_type_bounds.push(expand_interface_bounds(ctx, base, direct, generic.span)?);
+                own_index += 1;
+            }
+            method_env.type_bounds[interface_type_count..].clone_from_slice(&own_type_bounds);
+            let mut premises = Vec::with_capacity(method.premises.len());
+            for declaration in &method.premises {
+                let subject = resolve_type(ctx, &method_env, &declaration.subject)?;
+                let direct = resolve_interface_bounds(ctx, &method_env, &declaration.bounds)?;
+                let bounds = expand_interface_bounds(ctx, subject, direct, declaration.span)?;
+                premises.push(TypePremise { subject, bounds });
+            }
             let mut params = Vec::with_capacity(method.params.len());
             let mut param_muts = Vec::with_capacity(method.params.len());
             let mut param_names = Vec::with_capacity(method.params.len());
             for param in &method.params {
-                params.push(resolve_param_type(ctx, &env, param)?);
+                params.push(resolve_param_type(ctx, &method_env, param)?);
                 param_muts.push(param.mutable);
                 param_names.push(param.name.clone());
             }
             methods.push(Rc::new(InterfaceMethodSig {
                 name: method.name.clone(),
                 mut_self: method.mut_self,
+                own_type_params,
+                own_type_bounds,
+                own_effect_params,
+                premises,
                 params,
                 param_muts,
                 param_names,
                 ret: method
                     .ret
                     .as_ref()
-                    .map(|ty| resolve_type(ctx, &env, ty))
+                    .map(|ty| resolve_type(ctx, &method_env, ty))
                     .transpose()?
                     .unwrap_or(UNIT),
-                row: resolve_row(ctx, &env, &method.row)?,
+                row: resolve_row(ctx, &method_env, &method.row)?,
+                default_func: None,
+                default_binding: method
+                    .body
+                    .as_ref()
+                    .map(|_| interface_default_binding(&declaration.name, &method.name)),
             }));
         }
         let info = &mut ctx.interfaces[interface as usize];
@@ -3694,6 +4148,7 @@ fn resolve_method_sig(
             bounds.extend(vec![Vec::new(); own_type.len()]);
             bounds
         },
+        extra_bounds: Vec::new(),
         effect_names: own_effect.clone(),
         type_offset: 0,
         self_interface: None,
@@ -3846,6 +4301,7 @@ fn resolve_conformance_shapes(
                     premises.clone()
                 },
                 associated,
+                method_overrides: Vec::new(),
             }));
         }
     }
@@ -3947,6 +4403,122 @@ fn add_premises(env: &mut TyEnv, premises: &[ConformancePremise]) {
     }
 }
 
+/// Return the reason that one class method cannot override one requirement.
+fn interface_override_error(
+    ctx: &mut Ctx,
+    env: &TyEnv,
+    class_id: u32,
+    method: &MethodSig,
+    requirement: &InterfaceMethodSig,
+    types: &[TypeId],
+    rows: &[Row],
+) -> Option<String> {
+    if method.own_type_params.len() != requirement.own_type_params.len()
+        || method.own_effect_params.len() != requirement.own_effect_params.len()
+    {
+        return Some("the generic parameter counts differ".to_string());
+    }
+    let class_count = ctx.classes[class_id as usize].type_params.len();
+    let own_types: Vec<TypeId> = (0..requirement.own_type_params.len())
+        .map(|index| ctx.store.intern(Type::Var((class_count + index) as u32)))
+        .collect();
+    let mut required_types = types.to_vec();
+    required_types.extend(own_types.iter().copied());
+    let own_rows: Vec<Row> = (0..requirement.own_effect_params.len())
+        .map(|index| vec![RowElem::Var(index as u32)])
+        .collect();
+    let mut required_rows = rows.to_vec();
+    required_rows.extend(own_rows.iter().cloned());
+    let mut method_env = env.clone();
+    for premise in &requirement.premises {
+        let subject = ctx
+            .store
+            .substitute(premise.subject, &required_types, &required_rows);
+        let subject = ctx.normalize_associated(&method_env, subject);
+        let bounds: Vec<InterfaceUse> = premise
+            .bounds
+            .iter()
+            .map(|bound| ctx.substitute_interface_use(bound, &required_types, &required_rows))
+            .collect();
+        match ctx.store.get(subject) {
+            Type::Var(index) if *index >= method_env.type_offset => {
+                if let Some(target) = method_env
+                    .type_bounds
+                    .get_mut((*index - method_env.type_offset) as usize)
+                {
+                    for bound in bounds {
+                        if !target.contains(&bound) {
+                            target.push(bound);
+                        }
+                    }
+                }
+            }
+            _ => method_env
+                .extra_bounds
+                .push(TypePremise { subject, bounds }),
+        }
+    }
+    if !bounds_imply(&method_env.type_bounds, &method.class_type_bounds) {
+        return Some("the method needs an undeclared premise".to_string());
+    }
+    let required_params: Vec<TypeId> = requirement
+        .params
+        .iter()
+        .map(|item| {
+            let ty = ctx.store.substitute(*item, &required_types, &required_rows);
+            ctx.normalize_associated(&method_env, ty)
+        })
+        .collect();
+    let required_ret = ctx
+        .store
+        .substitute(requirement.ret, &required_types, &required_rows);
+    let required_ret = ctx.normalize_associated(&method_env, required_ret);
+    let required_row = ctx.store.substitute_row(&requirement.row, &required_rows);
+    if method.mut_self != requirement.mut_self {
+        let required = if requirement.mut_self {
+            "`mut self`"
+        } else {
+            "`self`"
+        };
+        return Some(format!("the contract requires {required}"));
+    }
+    let parameters_match = method.params.len() == required_params.len()
+        && method
+            .params
+            .iter()
+            .zip(&required_params)
+            .zip(&requirement.param_muts)
+            .all(|((implementation, required), mutable)| {
+                if *mutable {
+                    implementation == required
+                } else {
+                    ctx.store.compatible(*implementation, *required)
+                }
+            });
+    let same_shape = parameters_match
+        && method.param_muts == requirement.param_muts
+        && method.own_type_bounds.len() == requirement.own_type_bounds.len()
+        && method
+            .own_type_bounds
+            .iter()
+            .zip(&requirement.own_type_bounds)
+            .all(|(actual, required)| {
+                actual.len() == required.len()
+                    && required.iter().all(|bound| {
+                        let bound =
+                            ctx.substitute_interface_use(bound, &required_types, &required_rows);
+                        actual.contains(&bound)
+                    })
+            });
+    if !same_shape || !ctx.store.compatible(required_ret, method.ret) {
+        return Some("the parameter or result types differ".to_string());
+    }
+    if !ctx.store.row_included(&method.row, &required_row) {
+        return Some("the effect row is too wide".to_string());
+    }
+    None
+}
+
 /// Check every method and associated bound of one class conformance.
 fn check_class_conformances(
     ctx: &mut Ctx,
@@ -3959,6 +4531,7 @@ fn check_class_conformances(
     let mut env = TyEnv {
         type_names: info_type_names,
         type_bounds: ctx.classes[class_id as usize].type_bounds.clone(),
+        extra_bounds: Vec::new(),
         effect_names: Vec::new(),
         type_offset: 0,
         self_interface: None,
@@ -3968,7 +4541,8 @@ fn check_class_conformances(
     let base_bound_lengths: Vec<usize> = env.type_bounds.iter().map(Vec::len).collect();
     let self_ty = ctx.classes[class_id as usize].self_ty;
     let conformances = ctx.classes[class_id as usize].conformances.clone();
-    for conformance in conformances {
+    let mut selected_defaults: HashMap<String, (String, String)> = HashMap::new();
+    for (conformance_index, conformance) in conformances.into_iter().enumerate() {
         add_premises(&mut env, &conformance.premises);
         let contract = ctx.interfaces[conformance.application.interface as usize].clone();
         let class_info = &ctx.classes[class_id as usize];
@@ -4047,92 +4621,49 @@ fn check_class_conformances(
                 ));
             }
         }
+        let mut method_overrides = Vec::with_capacity(contract.methods.len());
         for requirement in &contract.methods {
-            let Some((method, _, _)) = ctx.find_method_owner(class_id, &requirement.name) else {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the conformance to `{}` needs method `{}`",
-                        contract.name, requirement.name
-                    ),
-                    declaration_span,
-                ));
-            };
-            if !bounds_imply(&env.type_bounds, &method.class_type_bounds) {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the method `{}` needs a premise outside conformance `{}`",
-                        requirement.name, contract.name
-                    ),
-                    declaration_span,
-                ));
-            }
-            let required_params: Vec<TypeId> = requirement
-                .params
-                .iter()
-                .map(|item| ctx.store.substitute(*item, &types, &rows))
-                .collect();
-            let required_ret = ctx.store.substitute(requirement.ret, &types, &rows);
-            let required_row = ctx.store.substitute_row(&requirement.row, &rows);
-            if method.mut_self != requirement.mut_self {
-                let required = if requirement.mut_self {
-                    "`mut self`"
-                } else {
-                    "`self`"
+            let candidate = ctx.find_method_owner(class_id, &requirement.name);
+            let mismatch = candidate.as_ref().and_then(|(method, _, _)| {
+                interface_override_error(ctx, &env, class_id, method, requirement, &types, &rows)
+            });
+            let selected = candidate.is_some() && mismatch.is_none();
+            if !selected {
+                let Some(binding) = &requirement.default_binding else {
+                    let reason = mismatch.unwrap_or_else(|| "the implementation is missing".into());
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "the method `{}` does not satisfy interface `{}`: {reason}",
+                            requirement.name, contract.name
+                        ),
+                        declaration_span,
+                    ));
                 };
-                let found = if method.mut_self {
-                    "`mut self`"
+                if let Some((seen_binding, seen_interface)) =
+                    selected_defaults.get(&requirement.name)
+                {
+                    if seen_binding != binding {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            format!(
+                                "the method `{}` has defaults from `{seen_interface}` and `{}`; add an explicit override",
+                                requirement.name, contract.name
+                            ),
+                            declaration_span,
+                        ));
+                    }
                 } else {
-                    "`self`"
-                };
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the method `{}` uses {found}, but interface `{}` requires {required}",
-                        requirement.name, contract.name
-                    ),
-                    declaration_span,
-                ));
+                    selected_defaults.insert(
+                        requirement.name.clone(),
+                        (binding.clone(), contract.name.clone()),
+                    );
+                }
             }
-            let parameters_match = method.params.len() == required_params.len()
-                && method
-                    .params
-                    .iter()
-                    .zip(&required_params)
-                    .zip(&requirement.param_muts)
-                    .all(|((implementation, required), mutable)| {
-                        if *mutable {
-                            implementation == required
-                        } else {
-                            ctx.store.compatible(*implementation, *required)
-                        }
-                    });
-            let same_shape = parameters_match
-                && method.param_muts == requirement.param_muts
-                && method.own_type_params.is_empty()
-                && method.own_effect_params.is_empty();
-            if !same_shape || !ctx.store.compatible(required_ret, method.ret) {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the method `{}` does not match interface `{}`",
-                        requirement.name, contract.name
-                    ),
-                    declaration_span,
-                ));
-            }
-            if !ctx.store.row_included(&method.row, &required_row) {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the method `{}` has effects outside interface `{}`",
-                        requirement.name, contract.name
-                    ),
-                    declaration_span,
-                ));
-            }
+            method_overrides.push(selected);
         }
+        Rc::make_mut(&mut ctx.classes[class_id as usize].conformances[conformance_index])
+            .method_overrides = method_overrides;
         for (bounds, base_len) in env.type_bounds.iter_mut().zip(&base_bound_lengths) {
             bounds.truncate(*base_len);
         }
@@ -4362,6 +4893,7 @@ fn resolve_class(
     let mut env = TyEnv {
         type_names: type_names.clone(),
         type_bounds: vec![Vec::new(); type_names.len()],
+        extra_bounds: Vec::new(),
         effect_names: vec![],
         type_offset: 0,
         self_interface: None,
@@ -4609,6 +5141,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     let mut env = TyEnv {
         type_names: type_names.clone(),
         type_bounds: vec![Vec::new(); type_names.len()],
+        extra_bounds: Vec::new(),
         effect_names: vec![],
         type_offset: 0,
         self_interface: None,
@@ -4764,6 +5297,7 @@ fn check_defaults(
                     let env = TyEnv {
                         type_names: ctx.classes[idx].type_params.clone(),
                         type_bounds: ctx.classes[idx].type_bounds.clone(),
+                        extra_bounds: Vec::new(),
                         effect_names: vec![],
                         type_offset: 0,
                         self_interface: None,
@@ -4842,6 +5376,85 @@ fn check_all_methods(ctx: &mut Ctx, module: &ast::Module, is_core: bool) -> Resu
     Ok(())
 }
 
+/// Check each interface default as one interface-owned function.
+fn check_interface_defaults(
+    ctx: &mut Ctx,
+    module: &ast::Module,
+    is_core: bool,
+) -> Result<(), Diagnostic> {
+    for declaration in &module.interfaces {
+        let interface = if is_core {
+            ctx.core_interfaces[&declaration.name]
+        } else {
+            ctx.user_interfaces[&declaration.name]
+        };
+        for (index, method) in declaration.methods.iter().enumerate() {
+            let Some(body) = &method.body else {
+                continue;
+            };
+            let requirement = Rc::clone(&ctx.interfaces[interface as usize].methods[index]);
+            let func = requirement
+                .default_func
+                .expect("each local default reserves a function");
+            let mut sig = ctx.sigs[func as usize].clone();
+            let type_param_count = sig.type_params.len() as u32;
+            let effect_param_count = sig.effect_params.len() as u32;
+            let self_ty = ctx.store.intern(Type::Var(0));
+            let env = TyEnv {
+                type_names: std::mem::take(&mut sig.type_params),
+                type_bounds: std::mem::take(&mut sig.type_bounds),
+                extra_bounds: requirement.premises.clone(),
+                effect_names: std::mem::take(&mut sig.effect_params),
+                type_offset: 0,
+                self_interface: Some(interface),
+                self_ty: Some(self_ty),
+                core_scope: is_core,
+            };
+            let mut checker = FnChecker::top_level(RetKind::Known(sig.ret), env, sig.row.clone());
+            checker.reserve_parameters(sig.params.len());
+            for (slot, ((ty, mutable), name)) in sig
+                .params
+                .iter()
+                .zip(&sig.param_muts)
+                .zip(&sig.param_names)
+                .enumerate()
+            {
+                checker.locals.push((*ty, *mutable));
+                if checker.scopes[0]
+                    .insert(name.clone(), slot as u32)
+                    .is_some()
+                {
+                    return Err(Diagnostic::new(
+                        "E1014",
+                        format!("duplicate parameter name `{name}`"),
+                        method.span,
+                    ));
+                }
+            }
+            let checked = checker.check_callable(ctx, body, sig.ret, method.span)?;
+            ctx.funcs[func as usize] = Some(HirFunc {
+                imported: false,
+                source_span: (!is_core).then_some(method.span),
+                name: requirement
+                    .default_binding
+                    .clone()
+                    .expect("each default has one hidden binding"),
+                type_params: type_param_count,
+                type_bounds: into_hir_bounds(checked.type_bounds),
+                effect_params: effect_param_count,
+                params: sig.params,
+                param_muts: sig.param_muts,
+                ret: sig.ret,
+                row: sig.row,
+                captures: vec![],
+                locals: checked.locals,
+                body: checked.body,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Check one method body, with constructor tracking for `init`.
 fn check_method(
     ctx: &mut Ctx,
@@ -4872,6 +5485,7 @@ fn check_method(
     let env = TyEnv {
         type_names,
         type_bounds: checker_bounds,
+        extra_bounds: Vec::new(),
         effect_names: sig.own_effect_params.clone(),
         type_offset: 0,
         self_interface: None,

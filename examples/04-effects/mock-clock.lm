@@ -7,8 +7,8 @@ def run_mocked(): Int with Vm
   end, args: ())
   vm.table().mock(Clock.Now, { ||: Int 122 })
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then panic("the clock program faulted")
+  in Ok(v)  then v
+  in Err(_) then panic("the clock program faulted")
   end
 end
 

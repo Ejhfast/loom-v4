@@ -1,0 +1,10 @@
+interface Applies
+  def apply[U, effect e](self, value: Int, f: (Int) -> U with e): U with e
+    f(value)
+  end
+end
+
+final class DefaultApplier implements Applies
+end
+
+DefaultApplier().apply(21, do |value: Int|: Int value * 2 end)

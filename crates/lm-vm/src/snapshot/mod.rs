@@ -341,21 +341,21 @@ pub struct ImageMachine {
     pub paused: bool,
     /// The body function of this machine, as a function slot.
     ///
-    /// The machine witness, with `witness` below. The declared result
-    /// type of the machine is the result type of this function, and
-    /// the first parameter of this function is the proc instance of a
-    /// proc. A terminal machine keeps no frame and no body closure, so
-    /// the record is the one lasting evidence of both types.
+    /// The machine witness uses `witness` below.
+    /// The function result type is the machine result type.
+    /// A class proc body takes its proc instance first.
+    /// A closure proc body is nullary.
+    /// This record remains after a terminal machine drops its frames.
     pub body_func: Option<u32>,
     /// The type environment of the machine body activation, as an
     /// ordinal of the environment table of the image.
     pub witness: u32,
-    /// True when `Proc.Spawn` launched this machine.
+    /// True when a proc launch operation launched this machine.
     ///
-    /// The flag survives the root normalization of specification
-    /// 17.5, so a restored proc world still knows which machines take
-    /// the birth grant of specification 18.3. Admission proves it: the
-    /// witness of a proc must name a proc class.
+    /// The flag survives root normalization.
+    /// A restored world uses it to rebuild proc control grants.
+    /// Admission proves this rule:
+    /// A proc witness must name a class proc body or a nullary body.
     pub is_proc: bool,
     pub generation: u32,
     /// The remaining instruction budget.

@@ -295,7 +295,7 @@ fn a_recursive_message_type_is_accepted() {
                   h.done()\n";
     assert_eq!(
         run_allowed("t.lm", source, &["Proc"]).expect("the program compiles"),
-        "Done(Done(4))"
+        "Done(Ok(4))"
     );
 }
 

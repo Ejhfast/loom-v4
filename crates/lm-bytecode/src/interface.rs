@@ -30,7 +30,8 @@ const MAGIC: &[u8; 4] = b"LMIF";
 // Version 17 binds each interface to one immutable ABI bundle.
 // Version 18 adds interface inheritance and bare `Self` contracts.
 // Version 21 adds the binary64 Float type.
-const VERSION: u16 = 21;
+// Version 22 adds generic methods and interface default bindings.
+const VERSION: u16 = 22;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -171,11 +172,24 @@ pub struct IfaceAssociated {
 pub struct IfaceInterfaceMethod {
     pub name: String,
     pub mut_self: bool,
+    pub type_params: u32,
+    pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
+    pub effect_params: u32,
+    pub premises: Vec<IfaceTypePremise>,
     pub params: Vec<IfaceType>,
     pub param_muts: Vec<bool>,
     pub param_names: Vec<String>,
     pub ret: IfaceType,
     pub row: Vec<IfaceRow>,
+    /// The hidden export name of the default function.
+    pub default: Option<String>,
+}
+
+/// One type premise on an exported interface method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceTypePremise {
+    pub subject: IfaceType,
+    pub bounds: Vec<IfaceInterfaceUse>,
 }
 
 /// The exported surface of one nominal interface.
@@ -203,6 +217,9 @@ pub struct IfaceConformance {
     pub application: IfaceInterfaceUse,
     pub premises: Vec<IfaceConformancePremise>,
     pub associated: Vec<IfaceType>,
+    /// One entry per interface method.
+    /// True selects compatible class dispatch. False selects the default.
+    pub method_overrides: Vec<bool>,
 }
 
 /// One method of an exported class.
@@ -742,6 +759,10 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
                 for ty in &conformance.associated {
                     encode_type(out, ty);
                 }
+                write_u32(out, conformance.method_overrides.len() as u32);
+                for selected in &conformance.method_overrides {
+                    out.push(u8::from(*selected));
+                }
             }
             match &class.parent {
                 None => out.push(0),
@@ -808,6 +829,17 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             for method in &interface.methods {
                 write_str(out, &method.name);
                 out.push(u8::from(method.mut_self));
+                write_u32(out, method.type_params);
+                encode_bounds(out, &method.type_bounds);
+                write_u32(out, method.effect_params);
+                write_u32(out, method.premises.len() as u32);
+                for premise in &method.premises {
+                    encode_type(out, &premise.subject);
+                    write_u32(out, premise.bounds.len() as u32);
+                    for bound in &premise.bounds {
+                        encode_interface_use(out, bound);
+                    }
+                }
                 write_u32(out, method.params.len() as u32);
                 for ty in &method.params {
                     encode_type(out, ty);
@@ -822,6 +854,13 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
                 }
                 encode_type(out, &method.ret);
                 encode_row(out, &method.row);
+                match &method.default {
+                    None => out.push(0),
+                    Some(binding) => {
+                        out.push(1);
+                        write_str(out, binding);
+                    }
+                }
             }
         }
     }
@@ -1106,10 +1145,19 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 for _ in 0..associated_count {
                     associated.push(decode_type(cur, 0)?);
                 }
+                let method_count = cur.len()?;
+                if method_count > cur.remaining() {
+                    return Err(DecodeError::BadLength);
+                }
+                let mut method_overrides = Vec::with_capacity(method_count);
+                for _ in 0..method_count {
+                    method_overrides.push(cur.flag()?);
+                }
                 conformances.push(IfaceConformance {
                     application,
                     premises,
                     associated,
+                    method_overrides,
                 });
             }
             let parent = match cur.u8()? {
@@ -1211,6 +1259,20 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             for _ in 0..method_count {
                 let name = cur.string()?;
                 let mut_self = cur.flag()?;
+                let type_params = cur.u32()?;
+                let type_bounds = decode_bounds(cur)?;
+                let effect_params = cur.u32()?;
+                let premise_count = cur.len()?;
+                let mut premises = Vec::with_capacity(premise_count);
+                for _ in 0..premise_count {
+                    let subject = decode_type(cur, 0)?;
+                    let bound_count = cur.len()?;
+                    let mut bounds = Vec::with_capacity(bound_count);
+                    for _ in 0..bound_count {
+                        bounds.push(decode_interface_use(cur)?);
+                    }
+                    premises.push(IfaceTypePremise { subject, bounds });
+                }
                 let param_count = cur.len()?;
                 let mut params = Vec::with_capacity(param_count);
                 for _ in 0..param_count {
@@ -1232,14 +1294,24 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 }
                 let ret = decode_type(cur, 0)?;
                 let row = decode_row(cur)?;
+                let default = match cur.u8()? {
+                    0 => None,
+                    1 => Some(cur.string()?),
+                    other => return Err(DecodeError::BadTypeTag(other)),
+                };
                 methods.push(IfaceInterfaceMethod {
                     name,
                     mut_self,
+                    type_params,
+                    type_bounds,
+                    effect_params,
+                    premises,
                     params,
                     param_muts,
                     param_names,
                     ret,
                     row,
+                    default,
                 });
             }
             Ok(IfaceItem::Interface(IfaceInterface {

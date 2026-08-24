@@ -324,7 +324,7 @@ impl Parser<'_> {
         })
     }
 
-    /// Parse a `when` clause with type parameter premises.
+    /// Parse a `when` clause with type premises.
     fn premise_clause(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
         if !matches!(self.peek(), Tok::KwWhen) {
             return Ok(Vec::new());
@@ -332,8 +332,8 @@ impl Parser<'_> {
         self.pos += 1;
         let mut premises = Vec::new();
         loop {
-            let (name, span) = self.ident("a type parameter name")?;
-            self.expect(Tok::Colon, "`:` after the type parameter name")?;
+            let (name, span) = self.ident("a type premise subject")?;
+            self.expect(Tok::Colon, "`:` after the type premise subject")?;
             let mut bounds = vec![self.interface_ref()?];
             while matches!(self.peek(), Tok::Plus) {
                 self.pos += 1;
@@ -345,7 +345,7 @@ impl Parser<'_> {
             {
                 return Err(Diagnostic::new(
                     "E1053",
-                    format!("duplicate premise for type parameter `{name}`"),
+                    format!("duplicate premise for type `{name}`"),
                     span,
                 ));
             }
@@ -358,6 +358,52 @@ impl Parser<'_> {
             if matches!(self.peek(), Tok::Comma)
                 && matches!(self.peek_at(1), Tok::Ident(_))
                 && matches!(self.peek_at(2), Tok::Colon)
+            {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(premises)
+    }
+
+    /// Parse method premises whose subjects can be associated types.
+    fn interface_premise_clause(&mut self) -> Result<Vec<TypePremise>, Diagnostic> {
+        if !matches!(self.peek(), Tok::KwWhen) {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        let mut premises = Vec::new();
+        loop {
+            let subject = self.type_expr()?;
+            self.expect(Tok::Colon, "`:` after the type premise subject")?;
+            let mut bounds = vec![self.interface_ref()?];
+            while matches!(self.peek(), Tok::Plus) {
+                self.pos += 1;
+                bounds.push(self.interface_ref()?);
+            }
+            if premises
+                .iter()
+                .any(|premise: &TypePremise| premise.subject == subject)
+            {
+                return Err(Diagnostic::new(
+                    "E1053",
+                    "a method premise repeats one type",
+                    subject.span,
+                ));
+            }
+            let end = bounds
+                .last()
+                .map(|bound| bound.span)
+                .unwrap_or(subject.span);
+            let span = subject.span.to(end);
+            premises.push(TypePremise {
+                subject,
+                bounds,
+                span,
+            });
+            if matches!(self.peek(), Tok::Comma)
+                && matches!(self.peek_at(1), Tok::Ident(_) | Tok::KwSelf)
             {
                 self.pos += 1;
             } else {
@@ -486,6 +532,7 @@ impl Parser<'_> {
     fn interface_method(&mut self) -> Result<InterfaceMethod, Diagnostic> {
         let start = self.expect(Tok::KwDef, "`def`")?;
         let (name, name_span) = self.ident("a method name")?;
+        let generics = self.generic_params()?;
         self.expect(Tok::LParen, "`(`")?;
         let mut_self = match self.peek() {
             Tok::KwSelf => {
@@ -513,19 +560,33 @@ impl Parser<'_> {
             None
         };
         let row = self.row_clause()?;
-        let end = row
+        let premises = self.interface_premise_clause()?;
+        let signature_end = premises
             .last()
             .map(|item| item.span)
+            .or_else(|| row.last().map(|item| item.span))
             .or_else(|| ret.as_ref().map(|item| item.span))
             .unwrap_or(name_span);
         self.expect_terminator()?;
+        self.skip_newlines();
+        let (body, end) = if matches!(self.peek(), Tok::KwType | Tok::KwDef | Tok::KwEnd) {
+            (None, signature_end)
+        } else {
+            let body = self.block(&[Tok::KwEnd])?;
+            let end = self.expect(Tok::KwEnd, "`end`")?.span;
+            self.expect_terminator()?;
+            (Some(body), end)
+        };
         Ok(InterfaceMethod {
             name,
             name_span,
+            generics,
             mut_self,
             params,
             ret,
             row,
+            premises,
+            body,
             span: start.span.to(end),
         })
     }
@@ -538,6 +599,23 @@ impl Parser<'_> {
             return Ok(Vec::new());
         }
         self.pos += 1;
+        if matches!(self.peek(), Tok::LParen) {
+            self.pos += 1;
+            let mut items = Vec::new();
+            if matches!(self.peek(), Tok::RParen) {
+                self.pos += 1;
+                return Ok(items);
+            }
+            loop {
+                items.push(self.row_item()?);
+                if !matches!(self.peek(), Tok::Comma) {
+                    break;
+                }
+                self.pos += 1;
+            }
+            self.expect(Tok::RParen, "`)` after the effect row")?;
+            return Ok(items);
+        }
         let mut items = Vec::new();
         let first = self.row_item()?;
         items.push(first);
@@ -1990,6 +2068,7 @@ impl Parser<'_> {
         } else {
             None
         };
+        let row_explicit = matches!(self.peek(), Tok::KwWith);
         let row = self.row_clause()?;
         let body = self.block(std::slice::from_ref(&close))?;
         let end_tok = self.expect(close, close_what)?;
@@ -1998,6 +2077,7 @@ impl Parser<'_> {
                 params,
                 ret,
                 row,
+                row_explicit,
                 body,
             },
             span: open.span.to(end_tok.span),
@@ -2370,6 +2450,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_parenthesized_effect_rows() {
+        assert!(parse("t = do || with ()\n  42\nend\nt()\n").is_ok());
+        assert!(parse("def f() with (Io.Write, Clock.Now)\nend\n1\n").is_ok());
+    }
+
+    #[test]
     fn parses_field_assignment_targets() {
         let module = parse("class A\n  x: Int = 0\nend\na = A()\na.x = 3\na.x\n").unwrap();
         assert!(matches!(module.entry[1].kind, StmtKind::AssignField { .. }));
@@ -2588,6 +2674,29 @@ end
         assert_eq!(conformance.premises[0].bounds.len(), 1);
         assert_eq!(module.classes[0].methods[0].premises.len(), 1);
         assert_eq!(module.classes[0].methods[0].premises[0].bounds.len(), 2);
+    }
+
+    #[test]
+    fn parses_interface_requirements_and_bounded_defaults() {
+        let source = "interface Display\nend\n\
+                      interface Mapper[effect outer]\n\
+                      \x20 type Item\n\
+                      \x20 def required(self): Self.Item\n\
+                      \x20 def map[U, effect e](\n\
+                      \x20   self, f: (Self.Item) -> U with e\n\
+                      \x20 ): U with e when Self.Item: Display\n\
+                      \x20   f(self.required())\n\
+                      \x20 end\n\
+                      end\n1\n";
+        let module = parse(source).expect("the interface defaults parse");
+        let interface = &module.interfaces[1];
+        assert!(interface.methods[0].body.is_none());
+        let default = &interface.methods[1];
+        assert!(default.body.is_some());
+        assert_eq!(default.generics.len(), 2);
+        assert!(default.generics[1].is_effect);
+        assert_eq!(default.row.len(), 1);
+        assert_eq!(default.premises.len(), 1);
     }
 
     #[test]

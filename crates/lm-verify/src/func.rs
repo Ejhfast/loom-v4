@@ -41,6 +41,7 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_VM_CHANGE_VALUE
             | lm_abi::OP_VM_CHANGE_PROCESS => 3,
             lm_abi::OP_PROC_RUN
+            | lm_abi::OP_PROC_RUN_CLOSURE
             | lm_abi::OP_PROC_CLOSE
             | lm_abi::OP_PROC_DONE
             | lm_abi::OP_PROC_PAUSE
@@ -210,6 +211,12 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     if !target.captures.is_empty() {
                         return Err(err(fidx, at("direct call to a function with captures")));
                     }
+                    if ctx.is_interface_default(*callee) {
+                        return Err(err(
+                            fidx,
+                            at("an interface default needs interface dispatch"),
+                        ));
+                    }
                     if target.type_params != 0 || target.effect_params != 0 {
                         return Err(err(fidx, at("a generic callee needs a type application")));
                     }
@@ -220,6 +227,12 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     };
                     if !target.captures.is_empty() {
                         return Err(err(fidx, at("direct call to a function with captures")));
+                    }
+                    if ctx.is_interface_default(*callee) {
+                        return Err(err(
+                            fidx,
+                            at("an interface default needs interface dispatch"),
+                        ));
                     }
                     if target.type_params == 0 && target.effect_params == 0 {
                         return Err(err(fidx, at("a type application on a non-generic callee")));
@@ -404,17 +417,14 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                         ));
                     }
                 }
-                Instr::CallInterface {
-                    interface,
-                    method,
-                    recv_ty,
-                } => {
-                    let Some(contract) = module.interfaces.get(*interface as usize) else {
+                Instr::CallInterface { site, recv_ty, app } => {
+                    let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+                    let Some(contract) = module.interfaces.get(interface as usize) else {
                         return Err(err(fidx, at("interface index out of range")));
                     };
-                    if contract.methods.get(*method as usize).is_none() {
+                    let Some(requirement) = contract.methods.get(method as usize) else {
                         return Err(err(fidx, at("interface method index out of range")));
-                    }
+                    };
                     if !ctx.vars_bounded(*recv_ty, func.type_params, func.effect_params) {
                         return Err(err(
                             fidx,
@@ -426,6 +436,30 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                             fidx,
                             at("interface receiver type uses an unproven associated type"),
                         ));
+                    }
+                    if requirement.type_params == 0 && requirement.effect_params == 0 {
+                        if *app != lm_bytecode::NO_APP {
+                            return Err(err(
+                                fidx,
+                                at("a non-generic interface method has a type application"),
+                            ));
+                        }
+                    } else {
+                        if *app == lm_bytecode::NO_APP {
+                            return Err(err(
+                                fidx,
+                                at("a generic interface method needs a type application"),
+                            ));
+                        }
+                        check_app(
+                            ctx,
+                            func,
+                            fidx,
+                            at_dyn,
+                            *app,
+                            requirement.type_params,
+                            requirement.effect_params,
+                        )?;
                     }
                 }
                 Instr::Extended(instr) => match instr {

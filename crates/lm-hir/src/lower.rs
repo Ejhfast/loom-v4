@@ -25,6 +25,12 @@ fn extended(instr: ExtendedInstr) -> Instr {
     Instr::Extended(instr)
 }
 
+fn interface_call(interface: u32, method: u32, recv_ty: u32, app: u32) -> Instr {
+    let site = lm_bytecode::pack_interface_call_site(interface, method)
+        .expect("the checker limits interface call indices");
+    Instr::CallInterface { site, recv_ty, app }
+}
+
 /// Module-wide interning state during lowering.
 struct ModLowerer<'m> {
     store: &'m TypeStore,
@@ -424,10 +430,26 @@ pub fn lower_module_with_linkage(
                 .map(|method| BcInterfaceMethod {
                     selector: m.selector(&method.selector),
                     mut_self: method.mut_self,
+                    type_params: method.type_params,
+                    type_bounds: m.bounds(&method.type_bounds),
+                    effect_params: method.effect_params,
+                    premises: method
+                        .premises
+                        .iter()
+                        .map(|premise| lm_bytecode::BcTypePremise {
+                            subject: m.bc_ty(premise.subject),
+                            bounds: premise
+                                .bounds
+                                .iter()
+                                .map(|bound| m.interface_use(bound))
+                                .collect(),
+                        })
+                        .collect(),
                     params: method.params.iter().map(|item| m.bc_ty(*item)).collect(),
                     param_muts: method.param_muts.clone(),
                     ret: m.bc_ty(method.ret),
                     row: m.bc_row(&method.row),
+                    default: method.default.unwrap_or(lm_bytecode::NO_FUNC),
                 })
                 .collect(),
         })
@@ -455,6 +477,7 @@ pub fn lower_module_with_linkage(
                 .iter()
                 .map(|item| m.bc_ty(*item))
                 .collect(),
+            method_overrides: conformance.method_overrides.clone(),
         })
         .collect();
     let mut func_bounds: Vec<Vec<Vec<BcInterfaceUse>>> = hir
@@ -759,11 +782,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     fn lower_hash_call(&mut self, key: u32, key_ty: TypeId) {
         self.emit(Instr::LoadLocal(key));
         let recv_ty = self.m.bc_ty(key_ty);
-        self.emit(Instr::CallInterface {
-            interface: self.m.core.hashable_interface,
-            method: self.m.core.hashable_method,
+        self.emit(interface_call(
+            self.m.core.hashable_interface,
+            self.m.core.hashable_method,
             recv_ty,
-        });
+            lm_bytecode::NO_APP,
+        ));
     }
 
     /// Emit a `PartialEq.__eq__` call for one stored and query key.
@@ -773,11 +797,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.emit(extended(ExtendedInstr::MapProbeKey));
         self.emit(Instr::LoadLocal(key));
         let recv_ty = self.m.bc_ty(key_ty);
-        self.emit(Instr::CallInterface {
-            interface: self.m.core.partial_eq_interface,
-            method: self.m.core.partial_eq_method,
+        self.emit(interface_call(
+            self.m.core.partial_eq_interface,
+            self.m.core.partial_eq_method,
             recv_ty,
-        });
+            lm_bytecode::NO_APP,
+        ));
     }
 
     /// Lower one map operation whose key strategy uses verified interfaces.
@@ -1543,6 +1568,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 interface,
                 method,
                 selector: _,
+                own_targs,
+                own_rowargs,
                 args,
                 ..
             } => {
@@ -1551,11 +1578,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.lower_expr(arg);
                 }
                 let recv_ty = self.m.bc_ty(recv.ty);
-                self.emit(Instr::CallInterface {
-                    interface: *interface,
-                    method: *method,
-                    recv_ty,
-                });
+                let app = if own_targs.is_empty() && own_rowargs.is_empty() {
+                    lm_bytecode::NO_APP
+                } else {
+                    self.m.app_of(own_targs, own_rowargs)
+                };
+                self.emit(interface_call(*interface, *method, recv_ty, app));
             }
             HExprKind::FieldGet { recv, field } => {
                 self.lower_expr(recv);
@@ -1867,11 +1895,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                             self.lower_expr(value);
                             self.emit(Instr::LoadLocal(*builder));
                             let recv_ty = self.m.bc_ty(value.ty);
-                            self.emit(Instr::CallInterface {
-                                interface: *interface,
-                                method: *method,
+                            self.emit(interface_call(
+                                *interface,
+                                *method,
                                 recv_ty,
-                            });
+                                lm_bytecode::NO_APP,
+                            ));
                             self.emit(Instr::Pop);
                         }
                     }
@@ -2358,6 +2387,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_SYNTAX_TO_TREE => extended(ExtendedInstr::SyntaxToTree),
             lm_abi::INTRINSIC_PANIC => Instr::RaiseUserPanic,
             lm_abi::INTRINSIC_ASSERT_FAIL => Instr::RaiseAssertionFailed,
+            lm_abi::INTRINSIC_RAISE_FAULT => Instr::RaiseFault,
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -3636,12 +3666,11 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::FaultCode => (1, 1),
         Instr::FaultDenied => (1, 1),
         Instr::RequestOp => (1, 1),
-        Instr::RaiseUserPanic | Instr::RaiseAssertionFailed => (1, 0),
+        Instr::RaiseUserPanic | Instr::RaiseAssertionFailed | Instr::RaiseFault => (1, 0),
         Instr::Unreachable => (0, 0),
-        Instr::CallInterface {
-            interface, method, ..
-        } => {
-            let argc = module.interfaces[*interface as usize].methods[*method as usize]
+        Instr::CallInterface { site, .. } => {
+            let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+            let argc = module.interfaces[interface as usize].methods[method as usize]
                 .params
                 .len();
             (argc + 1, 1)
@@ -3977,13 +4006,13 @@ fn instr_text(instr: &Instr) -> String {
         Instr::FaultDenied => "FaultDenied".to_string(),
         Instr::RaiseUserPanic => "RaiseUserPanic".to_string(),
         Instr::RaiseAssertionFailed => "RaiseAssertionFailed".to_string(),
+        Instr::RaiseFault => "RaiseFault".to_string(),
         Instr::RequestOp => "RequestOp".to_string(),
         Instr::Unreachable => "Unreachable".to_string(),
-        Instr::CallInterface {
-            interface,
-            method,
-            recv_ty,
-        } => format!("CallInterface interface{interface} method{method} type{recv_ty}"),
+        Instr::CallInterface { site, recv_ty, app } => {
+            let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+            format!("CallInterface interface{interface} method{method} type{recv_ty} app{app}")
+        }
         Instr::Extended(instr) => extended_instr_text(instr),
     }
 }

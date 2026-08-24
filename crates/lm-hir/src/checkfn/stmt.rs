@@ -311,7 +311,7 @@ impl<'o> FnChecker<'o> {
                 span,
             );
         }
-        let Some((interface, method, requirement)) =
+        let Some((application, interface, method, requirement)) =
             ctx.bound_method(&self.env, recv.ty, name, span)?
         else {
             return Err(Diagnostic::new(
@@ -323,6 +323,7 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         };
+        let requirement = ctx.instantiate_interface_method(recv.ty, &application, &requirement);
         if requirement.mut_self && !recv.mutable {
             return Err(Diagnostic::new(
                 "E1035",
@@ -341,14 +342,17 @@ impl<'o> FnChecker<'o> {
             ));
         }
         self.charge_row(ctx, &requirement.row, span)?;
+        let ret = ctx.normalize_associated(&self.env, requirement.ret);
         Ok(HExpr {
-            ty: requirement.ret,
+            ty: ret,
             mutable: true,
             kind: HExprKind::InterfaceCall {
                 recv: Box::new(recv),
                 interface,
                 method,
                 selector: name.to_string(),
+                own_targs: Vec::new(),
+                own_rowargs: Vec::new(),
                 args: Vec::new(),
             },
         })

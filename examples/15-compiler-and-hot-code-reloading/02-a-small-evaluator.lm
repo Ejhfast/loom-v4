@@ -60,8 +60,8 @@ def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler, Vm
   instance = image.install(module)?
   entry = instance.entry[(), DynValue]()?
   case image.activate(entry, args: ())?.run()
-  in Done(value) then Ok(value.render())
-  in Fault(_) then Err(CodeError("the program faulted"))
+  in Ok(value) then Ok(value.render())
+  in Err(_) then Err(CodeError("the program faulted"))
   end
 end
 

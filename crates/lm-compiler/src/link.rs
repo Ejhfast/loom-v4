@@ -511,6 +511,11 @@ fn relocate(
             shared_interfaces.push(idx as u32);
             continue;
         }
+        if merged.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize {
+            return Err(fail(format!(
+                "the linked program has too many interfaces after `{path}`"
+            )));
+        }
         let at = merged.interfaces.len() as u32;
         merged.interfaces.push(BcInterface {
             name: source.name.clone(),
@@ -1335,6 +1340,21 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
             .map(|method| BcInterfaceMethod {
                 selector: reloc.selectors[method.selector as usize],
                 mut_self: method.mut_self,
+                type_params: method.type_params,
+                type_bounds: reloc_bounds(&method.type_bounds, reloc),
+                effect_params: method.effect_params,
+                premises: method
+                    .premises
+                    .iter()
+                    .map(|premise| lm_bytecode::BcTypePremise {
+                        subject: reloc.types[premise.subject as usize],
+                        bounds: premise
+                            .bounds
+                            .iter()
+                            .map(|bound| reloc_interface_use(bound, reloc))
+                            .collect(),
+                    })
+                    .collect(),
                 params: method
                     .params
                     .iter()
@@ -1343,6 +1363,11 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
                 param_muts: method.param_muts.clone(),
                 ret: reloc.types[method.ret as usize],
                 row: reloc_row(&method.row, &reloc.strings),
+                default: if method.default == lm_bytecode::NO_FUNC {
+                    lm_bytecode::NO_FUNC
+                } else {
+                    reloc.funcs[method.default as usize]
+                },
             })
             .collect(),
     }
@@ -1369,6 +1394,7 @@ fn reloc_conformance(source: &BcConformance, reloc: &Reloc) -> BcConformance {
             .iter()
             .map(|item| reloc.types[*item as usize])
             .collect(),
+        method_overrides: source.method_overrides.clone(),
     }
 }
 
@@ -1605,6 +1631,7 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::FaultDenied
         | Instr::RaiseUserPanic
         | Instr::RaiseAssertionFailed
+        | Instr::RaiseFault
         | Instr::RequestOp
         | Instr::Unreachable => *instr,
         Instr::Digest { ty } => Instr::Digest {
@@ -1614,15 +1641,20 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
             op: *op,
             ty: reloc.types[*ty as usize],
         },
-        Instr::CallInterface {
-            interface,
-            method,
-            recv_ty,
-        } => Instr::CallInterface {
-            interface: reloc.interfaces[*interface as usize],
-            method: *method,
-            recv_ty: reloc.types[*recv_ty as usize],
-        },
+        Instr::CallInterface { site, recv_ty, app } => {
+            let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+            let relocated = reloc.interfaces[interface as usize];
+            Instr::CallInterface {
+                site: lm_bytecode::pack_interface_call_site(relocated, method)
+                    .expect("the linked interface count was checked"),
+                recv_ty: reloc.types[*recv_ty as usize],
+                app: if *app == lm_bytecode::NO_APP {
+                    lm_bytecode::NO_APP
+                } else {
+                    reloc.apps[*app as usize]
+                },
+            }
+        }
         Instr::Extended(instr) => Instr::Extended(reloc_extended(instr, reloc)),
     }
 }

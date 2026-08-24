@@ -1036,8 +1036,8 @@ def go(): Int with Vm
     \"answer\"
   end, args: ())
   case a.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -1113,8 +1113,8 @@ def go(): Int with Vm
     41
   end, args: ())
   case loaded.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -1155,8 +1155,8 @@ def go(): Int with Vm
     \"answer\"
   end, args: ())
   case vm.run()
-  in Done(_)  then 1
-  in Fault(_) then 0
+  in Ok(_)  then 1
+  in Err(_) then 0
   end
 end
 
@@ -1240,8 +1240,8 @@ def go(): Int with Proc
   outer = Outer.spawn()
   outer.send(inner)
   case inner.done()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -1489,8 +1489,8 @@ def go(): String with Vm
     print(\"hi\\n\")
   end, args: ())
   case vm.run()
-  in Done(_)  then \"done\"
-  in Fault(f) then f.code()
+  in Ok(_)  then \"done\"
+  in Err(f) then f.code()
   end
 end
 
@@ -1826,8 +1826,8 @@ def go(): Int with Vm, Io
   end, args: ())
   held.table().pass(Io)
   case held.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -2114,8 +2114,8 @@ end
 def go(): Int with Vm
   vm = hold(41)
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -2150,8 +2150,8 @@ def go(): Int with Proc
   h = Worker.spawn()
   h.send(7)
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -2165,8 +2165,8 @@ def go(): Int with Proc, Vm
   vm = sys.vm.Vm().activate_or_fault({ ||: Int 41 + 1 }, args: ())
   h = sys.proc.run(vm)
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 

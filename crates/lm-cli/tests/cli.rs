@@ -172,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, c404dfaf)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 8fcd2cc9)\n"
     );
 }
 
@@ -188,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, f56d65e0)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, c4a96778)\n"
     );
 }
 
@@ -463,7 +463,7 @@ fn a_file_named_core_compiles_through_every_single_file_command() {
 }
 
 #[test]
-fn run_the_worker_example_prints_done_done_42() {
+fn run_the_worker_example_prints_done_ok_42() {
     let out = lm(&[
         "run",
         "--show-result",
@@ -472,7 +472,7 @@ fn run_the_worker_example_prints_done_done_42() {
         "Proc",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "Done(Done(42))\n");
+    assert_eq!(stdout(&out), "Done(Ok(42))\n");
     // The scheduler reads no clock, so a second run agrees.
     let again = lm(&[
         "run",
@@ -499,7 +499,7 @@ fn a_proc_program_runs_from_its_artifact() {
         "Proc",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "Done(Done(42))\n");
+    assert_eq!(stdout(&out), "Done(Ok(42))\n");
 }
 
 /// A proc program builds and runs through the package path as well.
@@ -522,7 +522,7 @@ fn a_proc_package_builds_and_runs() {
          in Closed\n      0\n    \
          end\n  end\nend\n\n\
          h = Worker.spawn()\nh.send(21)\nh.close()\n\
-         case h.done()\nin Done(v)  then v\nin Fault(_) then 0\nend\n",
+         case h.done()\nin Ok(v)  then v\nin Err(_) then 0\nend\n",
     )
     .expect("the source writes");
     let path = root.display().to_string();

@@ -21,9 +21,9 @@ class Worker < Proc[Handle[Int, Int]]
     in Msg(helper)
       helper.send(5)
       case helper.done()
-      in Done(v)
+      in Ok(v)
         v
-      in Fault(_)
+      in Err(_)
         -1
       end
     in Closed

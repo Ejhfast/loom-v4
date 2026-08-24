@@ -269,7 +269,7 @@ fn the_loaded_module_carries_the_hash_resolved_core_layout() {
     let core = loaded.core_layout();
     assert!(core.option_some.is_some());
     assert!(core.option_none.is_some());
-    assert!(core.run_done.is_some());
+    assert!(core.result_ok.is_some());
     assert!(core.drive_asked.is_some());
 }
 

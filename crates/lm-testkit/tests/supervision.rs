@@ -44,8 +44,8 @@ def child(): Int with Vm, Proc, Io.Write
   h = sys.proc.run(worker)
   print("[child]")
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -101,8 +101,8 @@ def child(): Int with Vm, Proc, Io.Write
     end, args: ())
     g = sys.proc.run(inner)
     case g.done()
-    in Done(v)  then v + 1
-    in Fault(_) then -1
+    in Ok(v)  then v + 1
+    in Err(_) then -1
     end
   end, args: ())
   outer.table().pass(Vm)
@@ -110,8 +110,8 @@ def child(): Int with Vm, Proc, Io.Write
   h = sys.proc.run(outer)
   print("[child]")
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -152,8 +152,8 @@ class Waiter < Proc[Handle[Never, Int]]
     case self.receive()
     in Msg(h)
       case h.done()
-      in Done(v)  then v
-      in Fault(_) then -1
+      in Ok(v)  then v
+      in Err(_) then -1
       end
     in Closed
       -2
@@ -179,8 +179,8 @@ case p.pause()
 in Ok(machine)
   machine.run()
   case q.done()
-  in Done(v)  then v
-  in Fault(_) then -3
+  in Ok(v)  then v
+  in Err(_) then -3
   end
 in Err(_)
   -4
@@ -242,8 +242,8 @@ case p.pause()
 in Ok(machine)
   machine.run()
   case q.done()
-  in Done(v)  then v
-  in Fault(_) then -4
+  in Ok(v)  then v
+  in Err(_) then -4
   end
 in Err(_)
   -5
@@ -272,12 +272,12 @@ def app(): Int with Vm, Proc, Io.Write
   hb = sys.proc.run(b)
   print("[app]")
   first = case ha.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
   second = case hb.done()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
   first + second
 end

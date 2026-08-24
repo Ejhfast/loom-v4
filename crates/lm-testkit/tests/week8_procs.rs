@@ -54,7 +54,7 @@ fn a_mailbox_delivers_in_fifo_order() {
                   h.send(3)\n\
                   h.close()\n\
                   h.done()\n";
-    assert_eq!(run(source), "Done(Done([1, 2, 3]))");
+    assert_eq!(run(source), "Done(Ok([1, 2, 3]))");
 }
 
 /// `close` prevents later acceptance and preserves the queue.
@@ -70,7 +70,7 @@ fn close_stops_acceptance_and_drains_the_queue() {
          after = h.send(6)\n\
          (first, second, after, h.done())\n"
     );
-    assert_eq!(run(&source), "Done((Sent, Closed, Closed, Done(9)))");
+    assert_eq!(run(&source), "Done((Sent, Closed, Closed, Ok(9)))");
 }
 
 /// A send to a terminal proc is a dead-peer result, not a fault.
@@ -86,7 +86,7 @@ fn a_send_to_a_dead_proc_returns_a_fault_result() {
                   after = h.send(1)\n\
                   closed = h.close()\n\
                   (done, after.is_sent(), closed.is_sent())\n";
-    assert_eq!(run(source), "Done((Done(7), false, false))");
+    assert_eq!(run(source), "Done((Ok(7), false, false))");
 }
 
 /// A send copies the message (specification 18.4). The receiver owns
@@ -112,7 +112,7 @@ fn a_mutable_message_copies_and_the_two_graphs_diverge() {
                   (sent, xs.len())\n";
     // The receiver counted two elements and added one of its own.
     // The sender counted three. Neither write reached the other.
-    assert_eq!(run(source), "Done((Done(3), 3))");
+    assert_eq!(run(source), "Done((Ok(3), 3))");
 }
 
 /// A proc that holds its own handle sends to itself. The message
@@ -145,7 +145,7 @@ fn a_self_send_copies_the_message_inside_one_heap() {
                   h.send(Own(h))\n\
                   h.done()\n";
     // The received list holds the two elements it had at the send.
-    assert_eq!(run(source), "Done(Done(2))");
+    assert_eq!(run(source), "Done(Ok(2))");
 }
 
 /// A terminal proc result crosses as a copy. The holder receives a
@@ -158,10 +158,10 @@ fn a_mutable_terminal_proc_result_crosses_as_a_mutable_copy() {
                   \x20 end\n\
                   end\n\
                   case Maker.spawn().done()\n\
-                  in Done(xs)\n\
+                  in Ok(xs)\n\
                   \x20 xs.push(4)\n\
                   \x20 xs.len()\n\
-                  in Fault(_) then -1\n\
+                  in Err(_) then -1\n\
                   end\n";
     assert_eq!(run(source), "Done(4)");
 }
@@ -184,7 +184,7 @@ fn a_full_mailbox_blocks_the_sender_before_the_copy() {
     let outcome = scheduler
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done(Done(3))");
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(3))");
     // The proc mailbox never held more than its bound.
     let metrics = world.mailbox_metrics(1);
     assert_eq!(metrics.limit, 1);
@@ -210,7 +210,7 @@ fn a_full_mailbox_blocks_the_sender_before_the_copy() {
 fn a_handle_keeps_its_target_across_a_transfer() {
     let text = std::fs::read_to_string(repo_root().join("examples/07-procs/mailbox-handle.lm"))
         .expect("the example reads");
-    assert_eq!(run(&text), "Done((Done(1), Done(12)))");
+    assert_eq!(run(&text), "Done((Ok(1), Ok(12)))");
 }
 
 /// A proc with no mailbox has no callable `send`.
@@ -247,7 +247,7 @@ fn the_handle_types_follow_the_proc_class() {
                   h: Handle[Int, String] = Named.spawn()\n\
                   h.close()\n\
                   h.done()\n";
-    assert_eq!(run(source), "Done(Done(\"done\"))");
+    assert_eq!(run(source), "Done(Ok(\"done\"))");
     let wrong = "class Named < Proc[Int]\n\
                  \x20 def on_spawn(self): String with Proc\n\
                  \x20   \"done\"\n\
@@ -321,7 +321,7 @@ fn pause_and_resume_move_execution_ownership() {
                   end\n";
     assert_eq!(
         run_allowed("proc.lm", source, &["Proc", "Vm"]).expect("the program compiles"),
-        "Done((true, true, true, Done(2)))"
+        "Done((true, true, true, Ok(2)))"
     );
 }
 
@@ -422,7 +422,7 @@ fn a_proc_can_pause_after_one_receive_cycle() {
                   answer = collector.done()\n\
                   after = worker.pause()\n\
                   (fresh.is_ok(), answer, after.is_ok())\n";
-    assert_eq!(run(source), "Done((true, Done(20), true))");
+    assert_eq!(run(source), "Done((true, Ok(20), true))");
 }
 
 // ---------------------------------------------------------------
@@ -492,7 +492,7 @@ fn a_revoked_group_denies_the_next_receive() {
                   h.done()\n";
     assert_eq!(
         run_allowed("proc.lm", source, &["Proc", "Vm"]).expect("the program compiles"),
-        "Done(Fault(PolicyDenied))"
+        "Done(Err(PolicyDenied))"
     );
 }
 
@@ -535,7 +535,7 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
     };
     let first = trace_of();
     let second = trace_of();
-    assert_eq!(first.0, "Done((Done(1), Done(2)))");
+    assert_eq!(first.0, "Done((Ok(1), Ok(2)))");
     assert_eq!(first.0, second.0);
     assert_eq!(first.1, second.1);
     assert_eq!(first.2, second.2);
@@ -597,7 +597,7 @@ fn bounded_slices_let_a_later_short_proc_finish_first() {
     let outcome = scheduler
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done((Done(200), Done(1)))");
+    assert_eq!(world.show_outcome(&outcome), "Done((Ok(200), Ok(1)))");
     let terminal: Vec<u32> = world
         .trace()
         .iter()
@@ -636,7 +636,7 @@ fn a_host_wait_does_not_stop_a_ready_task() {
     let outcome = Scheduler::default()
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done((Done(1), Done(2)))");
+    assert_eq!(world.show_outcome(&outcome), "Done((Ok(1), Ok(2)))");
     let terminal: Vec<u32> = world
         .trace()
         .iter()
@@ -679,7 +679,7 @@ fn host_completion_waits_for_its_controlling_task() {
     let outcome = Scheduler::default()
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done(Done(7))");
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(7))");
     assert_eq!(world.state_of(1), MachineState::Waiting);
     assert_eq!(world.resource_count(1), 1);
     assert_eq!(world.world_resource_count(), 1);
@@ -794,12 +794,12 @@ fn one_machine_runs_at_a_time() {
 fn week8_examples_have_checked_output() {
     let read =
         |path: &str| std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
-    assert_eq!(run(&read("examples/07-procs/worker.lm")), "Done(Done(42))");
+    assert_eq!(run(&read("examples/07-procs/worker.lm")), "Done(Ok(42))");
     assert_eq!(
         run(&read("examples/07-procs/mailbox-handle.lm")),
-        "Done((Done(1), Done(12)))"
+        "Done((Ok(1), Ok(12)))"
     );
-    assert_eq!(run(&read("examples/07-procs/barrier.lm")), "Done(Done(5))");
+    assert_eq!(run(&read("examples/07-procs/barrier.lm")), "Done(Ok(5))");
 }
 
 /// A bare `Proc` parent is sugar for `Proc[Never]`: the proc takes no
@@ -817,8 +817,8 @@ fn a_bare_proc_parent_takes_no_message() {
                   end\n\
                   h: Handle[Never, Int] = Doubler.spawn(21)\n\
                   case h.done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then 0\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then 0\n\
                   end\n";
     assert_eq!(run(source), "Done(42)");
 }
@@ -874,7 +874,7 @@ fn the_spawner_charges_the_declared_row_of_the_body() {
                   h.send(4)\n\
                   h.close()\n\
                   h.done()\n";
-    assert_eq!(run(source), "Done(Done(4))");
+    assert_eq!(run(source), "Done(Ok(4))");
 }
 
 /// A handle is sendable data, so one proc may reach another proc that
@@ -911,7 +911,7 @@ fn a_proc_reaches_a_peer_it_learned_from_a_message() {
                   s.send(e)\n\
                   s.close()\n\
                   (s.done(), e.done())\n";
-    assert_eq!(run(source), "Done((Done(1), Done(3)))");
+    assert_eq!(run(source), "Done((Ok(1), Ok(3)))");
 }
 
 // ---------------------------------------------------------------
@@ -932,7 +932,7 @@ fn no_proc_operation_erases_its_types() {
         assert!(!def.schema.contains("Any"), "{}", def.schema);
         assert!(!def.schema.is_empty(), "{}.{}", def.group, def.member);
     }
-    assert_eq!(seen, 10, "the manifest declares ten proc operations");
+    assert_eq!(seen, 11, "the manifest declares eleven proc operations");
 }
 
 /// A transfer keeps the exact proc reference: the copy carries the
@@ -995,10 +995,133 @@ fn a_proc_fault_publishes_as_a_terminal_value() {
                   \x20 end\n\
                   end\n\
                   case Bad.spawn().done()\n\
-                  in Done(v)  then \"#{v}\"\n\
-                  in Fault(f) then f.code()\n\
+                  in Ok(v)  then \"#{v}\"\n\
+                  in Err(f) then f.code()\n\
                   end\n";
     assert_eq!(run(source), "Done(\"DivideByZero\")");
+}
+
+/// A closure proc transfers its captures and returns a common Result.
+#[test]
+fn a_closure_can_run_as_a_proc() {
+    let source = r#"
+def launch(): Result[Int, Fault] with Proc
+  base = 40
+  handle = sys.proc.run(do ||: Int
+    base + 2
+  end)
+  handle.done()
+end
+launch()
+"#;
+    assert_eq!(run(source), "Done(Ok(42))");
+}
+
+/// `Result.value` returns a value or raises the stored fault.
+#[test]
+fn a_proc_result_uses_the_common_result_helpers() {
+    let good = r#"
+def launch(): Int with Proc
+  sys.proc.run(do ||: Int
+    42
+  end).done().value()
+end
+launch()
+"#;
+    assert_eq!(run(good), "Done(42)");
+
+    let bad = r#"
+def launch(): Int with Proc
+  sys.proc.run(do ||: Int
+    panic("child failed")
+  end).done().value()
+end
+launch()
+"#;
+    assert_eq!(run(bad), "Fault(UserPanic)");
+
+    let wrong = compile_to_bytes("result-value.lm", "Ok[Int, String](1).value()\n")
+        .expect_err("a non-fault Result has no value helper");
+    assert!(wrong.contains("needs Result[T, Fault]"), "{wrong}");
+}
+
+/// A higher-order call infers one closure effect row from its body.
+#[test]
+fn a_contextual_closure_infers_its_effect_row() {
+    let source = r#"
+def invoke[effect e](task: () -> Int with e): Int with e
+  task()
+end
+def launch(): Int with Proc
+  invoke(do ||: Int
+    handle = sys.proc.run(do ||: Int
+      42
+    end)
+    case handle.done()
+    in Ok(value) then value
+    in Err(fault) then raise(fault)
+    end
+  end)
+end
+launch()
+"#;
+    assert_eq!(run(source), "Done(42)");
+
+    let explicit_empty = r#"
+def invoke[effect e](task: () -> Int with e): Int with e
+  task()
+end
+def launch(): Int with Proc
+  invoke(do ||: Int with ()
+    sys.proc.run(do ||: Int 42 end).done().value()
+  end)
+end
+launch()
+"#;
+    let error = compile_to_bytes("closure-row.lm", explicit_empty)
+        .expect_err("an explicit empty row stays empty");
+    assert!(error.contains("E1046"), "{error}");
+    assert!(error.contains("`with` clause"), "{error}");
+}
+
+/// `par_map` preserves source order for lists and ranges.
+#[test]
+fn par_map_returns_ordered_values() {
+    let source = r#"
+def parallel_values(): ([Int], [Int]) with Proc
+  values = [1, 2, 3, 4, 5]
+  mapped = values.par_map(do |value: Int|: Int
+    value * value
+  end)
+  ranged = Range(0, 5).par_map(do |value: Int|: Int
+    value + 10
+  end)
+  (mapped, ranged)
+end
+parallel_values()
+"#;
+    assert_eq!(
+        run(source),
+        "Done(([1, 4, 9, 16, 25], [10, 11, 12, 13, 14]))"
+    );
+}
+
+/// `raise` preserves the code of one child fault.
+#[test]
+fn a_child_fault_can_be_raised_again() {
+    let source = r#"
+def launch(): Int with Proc
+  handle = sys.proc.run(do ||: Int
+    panic("child failed")
+  end)
+  case handle.done()
+  in Ok(value) then value
+  in Err(fault) then raise(fault)
+  end
+end
+launch()
+"#;
+    assert_eq!(run(source), "Fault(UserPanic)");
 }
 
 /// The birth grant carries the declared row of `on_spawn`. The
@@ -1013,8 +1136,8 @@ fn the_birth_grant_carries_the_declared_row() {
                    \x20 end\n\
                    end\n\
                    case Talker.spawn().done()\n\
-                   in Done(v)  then \"#{v}\"\n\
-                   in Fault(f) then f.code()\n\
+                   in Ok(v)  then \"#{v}\"\n\
+                   in Err(f) then f.code()\n\
                    end\n";
     assert_eq!(
         run_allowed("proc.lm", spawned, &["Proc", "Io"]).expect("the program compiles"),
@@ -1030,8 +1153,8 @@ fn the_birth_grant_carries_the_declared_row() {
                  end\n\
                  def launch(): Int with Proc\n\
                  \x20 case Talker.spawn().done()\n\
-                 \x20 in Done(v)  then v\n\
-                 \x20 in Fault(_) then -1\n\
+                 \x20 in Ok(v)  then v\n\
+                 \x20 in Err(_) then -1\n\
                  \x20 end\n\
                  end\n\
                  launch()\n";
@@ -1046,8 +1169,8 @@ fn the_birth_grant_carries_the_declared_row() {
                     vm.table().pass(Io.Write)\n\
                     h = sys.proc.run(vm)\n\
                     case h.done()\n\
-                    in Done(v)  then \"#{v}\"\n\
-                    in Fault(f) then f.code()\n\
+                    in Ok(v)  then \"#{v}\"\n\
+                    in Err(f) then f.code()\n\
                     end\n";
     assert_eq!(
         run_allowed("proc.lm", explicit, &["Proc", "Io", "Vm"]).expect("the program compiles"),
@@ -1096,14 +1219,14 @@ fn a_proc_may_spawn_a_proc() {
                   class Outer < Proc\n\
                   \x20 def on_spawn(self): Int with Proc\n\
                   \x20   case Inner.spawn().done()\n\
-                  \x20   in Done(v)  then v + 1\n\
-                  \x20   in Fault(_) then 0\n\
+                  \x20   in Ok(v)  then v + 1\n\
+                  \x20   in Err(_) then 0\n\
                   \x20   end\n\
                   \x20 end\n\
                   end\n\
                   case Outer.spawn().done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then -1\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then -1\n\
                   end\n";
     assert_eq!(run(source), "Done(6)");
 }
@@ -1128,14 +1251,14 @@ fn a_nested_machine_may_block_on_a_proc() {
                   h.close()\n\
                   vm = sys.vm.Vm().activate_or_fault(do ||: Int with Proc\n\
                   \x20 case h.done()\n\
-                  \x20 in Done(v)  then v\n\
-                  \x20 in Fault(_) then -2\n\
+                  \x20 in Ok(v)  then v\n\
+                  \x20 in Err(_) then -2\n\
                   \x20 end\n\
                   end, args: ())\n\
                   vm.table().pass(Proc)\n\
                   case vm.run()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then -1\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then -1\n\
                   end\n";
     assert_eq!(
         run_allowed("proc.lm", source, &["Proc", "Vm"]).expect("the program compiles"),
@@ -1164,7 +1287,7 @@ fn a_closure_may_capture_a_handle() {
                   first = f()\n\
                   h.close()\n\
                   (first, h.done())\n";
-    assert_eq!(run(source), "Done((Sent, Done(4)))");
+    assert_eq!(run(source), "Done((Sent, Ok(4)))");
 }
 
 /// `on_spawn` may come from an ancestor of the proc class. The body
@@ -1188,7 +1311,7 @@ fn a_proc_class_may_inherit_its_on_spawn() {
                   d.send(6)\n\
                   d.close()\n\
                   d.done()\n";
-    assert_eq!(run(source), "Done(Done(6))");
+    assert_eq!(run(source), "Done(Ok(6))");
 }
 
 /// `spawn` works inside a generic callable. The construction function
@@ -1205,8 +1328,8 @@ fn spawn_works_inside_a_generic_function() {
                   \x20 W.spawn()\n\
                   end\n\
                   case launch(1).done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then 0\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then 0\n\
                   end\n";
     assert_eq!(run(source), "Done(1)");
 }
@@ -1231,14 +1354,14 @@ fn a_proc_that_outlives_its_spawner_keeps_its_pass_through() {
                   \x20 end\n\
                   end\n\
                   case Maker.spawn().done()\n\
-                  in Done(h)\n\
+                  in Ok(h)\n\
                   \x20 first = h.send(3)\n\
                   \x20 second = h.close()\n\
                   \x20 case h.done()\n\
-                  \x20 in Done(v)  then \"done #{v}\"\n\
-                  \x20 in Fault(f) then \"#{f.code()} #{first.is_sent()} #{second.is_sent()}\"\n\
+                  \x20 in Ok(v)  then \"done #{v}\"\n\
+                  \x20 in Err(f) then \"#{f.code()} #{first.is_sent()} #{second.is_sent()}\"\n\
                   \x20 end\n\
-                  in Fault(f)\n\
+                  in Err(f)\n\
                   \x20 f.code()\n\
                   end\n";
     assert_eq!(run(source), "Done(\"done 3\")");
@@ -1292,8 +1415,8 @@ fn a_proc_runs_under_its_own_fuel_budget() {
                   \x20 end\n\
                   end\n\
                   case Spin.spawn().done()\n\
-                  in Done(v)  then \"#{v}\"\n\
-                  in Fault(f) then f.code()\n\
+                  in Ok(v)  then \"#{v}\"\n\
+                  in Err(f) then f.code()\n\
                   end\n";
     let config = VmConfig {
         fuel: 400,
@@ -1330,7 +1453,7 @@ fn the_proc_dumps_are_readable_and_deterministic() {
         )
     };
     let (outcome, trace, mailboxes) = dumps();
-    assert_eq!(outcome, "Done(Done(3))");
+    assert_eq!(outcome, "Done(Ok(3))");
     assert!(
         trace.starts_with("spawn parent 0 proc 1 gen 0\n"),
         "{trace}"

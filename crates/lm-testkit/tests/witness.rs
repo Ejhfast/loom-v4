@@ -195,8 +195,8 @@ end
 def go(): Int with Vm
   vm = hold(41)
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -387,8 +387,8 @@ def go(): Int with Proc
   h = Worker.spawn()
   h.send(7)
   case h.done()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -528,8 +528,8 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()
-    in Done(value) then value
-    in Fault(_)    then -1
+    in Ok(value) then value
+    in Err(_)    then -1
     end
   in Err(_) then -2
   end

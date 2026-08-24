@@ -15,186 +15,180 @@ pub(crate) const ROLE_RESULT_OK: usize = 4;
 pub(crate) const ROLE_RESULT_ERR: usize = 5;
 pub(crate) const ROLE_IO_ERROR: usize = 6;
 pub(crate) const ROLE_IO_ERROR_FAILED: usize = 7;
-pub(crate) const ROLE_RUN_RESULT: usize = 8;
-pub(crate) const ROLE_RUN_DONE: usize = 9;
-pub(crate) const ROLE_RUN_FAULT: usize = 10;
-pub(crate) const ROLE_STEP_EVENT: usize = 11;
-pub(crate) const ROLE_STEP_RAN: usize = 12;
-pub(crate) const ROLE_STEP_WAITING: usize = 13;
-pub(crate) const ROLE_STEP_DONE: usize = 14;
-pub(crate) const ROLE_STEP_FAULT: usize = 15;
-pub(crate) const ROLE_DRIVE_EVENT: usize = 16;
-pub(crate) const ROLE_DRIVE_ASKED: usize = 17;
-pub(crate) const ROLE_DRIVE_DONE: usize = 18;
-pub(crate) const ROLE_DRIVE_FAULT: usize = 19;
-pub(crate) const ROLE_RECV: usize = 20;
-pub(crate) const ROLE_RECV_MSG: usize = 21;
-pub(crate) const ROLE_RECV_CLOSED: usize = 22;
-pub(crate) const ROLE_SEND_RESULT: usize = 23;
-pub(crate) const ROLE_SEND_SENT: usize = 24;
-pub(crate) const ROLE_SEND_CLOSED: usize = 25;
-pub(crate) const ROLE_SEND_FAULT: usize = 26;
-pub(crate) const ROLE_PROC_RESULT: usize = 27;
-pub(crate) const ROLE_PROC_DONE: usize = 28;
-pub(crate) const ROLE_PROC_FAULT: usize = 29;
-pub(crate) const ROLE_PROC_ERROR: usize = 30;
-pub(crate) const ROLE_PROC_ERROR_DEAD: usize = 31;
-pub(crate) const ROLE_PROC_ERROR_NOT_PAUSED: usize = 32;
-pub(crate) const ROLE_PROC_ERROR_ALREADY_PAUSED: usize = 33;
-pub(crate) const ROLE_PROC_ERROR_IN_USE: usize = 34;
-pub(crate) const ROLE_PROC_CLASS: usize = 35;
-pub(crate) const ROLE_SNAPSHOT_ERROR: usize = 36;
-pub(crate) const ROLE_SNAPSHOT_RESOURCE_ACTIVE: usize = 37;
-pub(crate) const ROLE_SNAPSHOT_LIMIT_EXCEEDED: usize = 38;
-pub(crate) const ROLE_SNAPSHOT_BAD_IMAGE: usize = 39;
-pub(crate) const ROLE_RESTORE_ERROR: usize = 40;
-pub(crate) const ROLE_RESTORE_LIMIT_EXCEEDED: usize = 41;
-pub(crate) const ROLE_FS_ERROR: usize = 42;
-pub(crate) const ROLE_FS_ERROR_CLOSED: usize = 43;
-pub(crate) const ROLE_FS_ERROR_FAILED: usize = 44;
-pub(crate) const ROLE_OPEN_OPTIONS: usize = 45;
-pub(crate) const ROLE_OPEN_READ_ONLY: usize = 46;
-pub(crate) const ROLE_OPEN_WRITE_ONLY: usize = 47;
-pub(crate) const ROLE_OPEN_READ_WRITE: usize = 48;
-pub(crate) const ROLE_OPEN_CREATE: usize = 49;
-pub(crate) const ROLE_OPEN_CREATE_TRUNCATE: usize = 50;
-pub(crate) const ROLE_OPEN_APPEND: usize = 51;
-pub(crate) const ROLE_SEEK_FROM: usize = 52;
-pub(crate) const ROLE_SEEK_START: usize = 53;
-pub(crate) const ROLE_SEEK_CURRENT: usize = 54;
-pub(crate) const ROLE_SEEK_END: usize = 55;
-pub(crate) const ROLE_IP_ADDRESS: usize = 69;
-pub(crate) const ROLE_IP_V4: usize = 70;
-pub(crate) const ROLE_IP_V6: usize = 71;
-pub(crate) const ROLE_SOCKET_ADDRESS: usize = 72;
-pub(crate) const ROLE_NET_ERROR: usize = 73;
-pub(crate) const ROLE_NET_INVALID_INPUT: usize = 74;
-pub(crate) const ROLE_NET_NAME_NOT_FOUND: usize = 75;
-pub(crate) const ROLE_NET_UNAVAILABLE: usize = 76;
-pub(crate) const ROLE_NET_PERMISSION_DENIED: usize = 77;
-pub(crate) const ROLE_NET_ADDRESS_IN_USE: usize = 78;
-pub(crate) const ROLE_NET_CONNECTION_REFUSED: usize = 79;
-pub(crate) const ROLE_NET_CONNECTION_RESET: usize = 80;
-pub(crate) const ROLE_NET_NOT_CONNECTED: usize = 81;
-pub(crate) const ROLE_NET_TIMED_OUT: usize = 82;
-pub(crate) const ROLE_NET_CLOSED: usize = 83;
-pub(crate) const ROLE_NET_LIMIT_EXCEEDED: usize = 84;
-pub(crate) const ROLE_NET_UNSUPPORTED: usize = 85;
-pub(crate) const ROLE_NET_FAILED: usize = 86;
-pub(crate) const ROLE_TCP_READ: usize = 87;
-pub(crate) const ROLE_TCP_READ_DATA: usize = 88;
-pub(crate) const ROLE_TCP_READ_END: usize = 89;
-pub(crate) const ROLE_SHUTDOWN: usize = 90;
-pub(crate) const ROLE_SHUTDOWN_READ: usize = 91;
-pub(crate) const ROLE_SHUTDOWN_WRITE: usize = 92;
-pub(crate) const ROLE_SHUTDOWN_BOTH: usize = 93;
-pub(crate) const ROLE_TCP_RESOURCE: usize = 94;
-pub(crate) const ROLE_TCP_STREAM: usize = 95;
-pub(crate) const ROLE_TCP_LISTENER: usize = 96;
-pub(crate) const ROLE_TLS_ERROR: usize = 97;
-pub(crate) const ROLE_TLS_INVALID_CONFIG: usize = 98;
-pub(crate) const ROLE_TLS_HANDSHAKE: usize = 99;
-pub(crate) const ROLE_TLS_CERTIFICATE: usize = 100;
-pub(crate) const ROLE_TLS_PROTOCOL: usize = 101;
-pub(crate) const ROLE_TLS_NETWORK: usize = 102;
-pub(crate) const ROLE_TLS_CLOSED: usize = 103;
-pub(crate) const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
-pub(crate) const ROLE_PARSE_STATUS: usize = 125;
-pub(crate) const ROLE_PARSE_COMPLETE: usize = 126;
-pub(crate) const ROLE_PARSE_INCOMPLETE: usize = 127;
-pub(crate) const ROLE_PARSE_INVALID: usize = 128;
-pub(crate) const ROLE_IO_ERROR_BROKEN_PIPE: usize = 143;
-pub(crate) const ROLE_IO_ERROR_INVALID_INPUT: usize = 144;
-pub(crate) const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 145;
-pub(crate) const ROLE_ENV_ERROR: usize = 146;
-pub(crate) const ROLE_ENV_ERROR_INVALID_NAME: usize = 147;
-pub(crate) const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 148;
-pub(crate) const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 149;
-pub(crate) const ROLE_ENV_ERROR_FAILED: usize = 150;
-pub(crate) const ROLE_ENTROPY_ERROR: usize = 151;
-pub(crate) const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 152;
-pub(crate) const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 153;
-pub(crate) const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 154;
-pub(crate) const ROLE_ENTROPY_ERROR_FAILED: usize = 155;
-pub(crate) const ROLE_STD_STREAM: usize = 172;
-pub(crate) const ROLE_STD_STREAM_INPUT: usize = 173;
-pub(crate) const ROLE_STD_STREAM_OUTPUT: usize = 174;
-pub(crate) const ROLE_STD_STREAM_ERROR: usize = 175;
-pub(crate) const ROLE_TTY_ERROR: usize = 177;
-pub(crate) const ROLE_TTY_ERROR_CLOSED: usize = 178;
-pub(crate) const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 179;
-pub(crate) const ROLE_TTY_ERROR_BUSY: usize = 180;
-pub(crate) const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 181;
-pub(crate) const ROLE_TTY_ERROR_UNSUPPORTED: usize = 182;
-pub(crate) const ROLE_TTY_ERROR_FAILED: usize = 183;
-pub(crate) const ROLE_SIGNAL_KIND: usize = 185;
-pub(crate) const ROLE_SIGNAL_INTERRUPT: usize = 186;
-pub(crate) const ROLE_SIGNAL_TERMINATE: usize = 187;
-pub(crate) const ROLE_SIGNAL_ERROR: usize = 188;
-pub(crate) const ROLE_SIGNAL_ERROR_CLOSED: usize = 189;
-pub(crate) const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 190;
-pub(crate) const ROLE_SIGNAL_ERROR_BUSY: usize = 191;
-pub(crate) const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 192;
-pub(crate) const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 193;
-pub(crate) const ROLE_SIGNAL_ERROR_FAILED: usize = 194;
-pub(crate) const ROLE_IO_ERROR_UNSUPPORTED: usize = 196;
-pub(crate) const ROLE_FS_ERROR_INVALID_INPUT: usize = 197;
-pub(crate) const ROLE_FS_ERROR_INVALID_ENCODING: usize = 198;
-pub(crate) const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 199;
-pub(crate) const ROLE_FS_ERROR_NOT_FOUND: usize = 200;
-pub(crate) const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 201;
-pub(crate) const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 202;
-pub(crate) const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 203;
-pub(crate) const ROLE_FS_ERROR_IS_DIRECTORY: usize = 204;
-pub(crate) const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 205;
-pub(crate) const ROLE_FS_ERROR_CROSS_DEVICE: usize = 206;
-pub(crate) const ROLE_FS_ERROR_UNSUPPORTED: usize = 207;
-pub(crate) const ROLE_OPEN_CREATE_NEW: usize = 208;
-pub(crate) const ROLE_FILE_KIND: usize = 209;
-pub(crate) const ROLE_FILE_KIND_FILE: usize = 210;
-pub(crate) const ROLE_FILE_KIND_DIRECTORY: usize = 211;
-pub(crate) const ROLE_FILE_KIND_SYMLINK: usize = 212;
-pub(crate) const ROLE_FILE_KIND_OTHER: usize = 213;
-pub(crate) const ROLE_FILE_INFO: usize = 214;
-pub(crate) const ROLE_DIR_ENTRY: usize = 215;
-pub(crate) const ROLE_RENAME_MODE: usize = 216;
-pub(crate) const ROLE_RENAME_NO_REPLACE: usize = 217;
-pub(crate) const ROLE_RENAME_REPLACE: usize = 218;
-pub(crate) const ROLE_PIPE_ERROR: usize = 219;
-pub(crate) const ROLE_PIPE_ERROR_CLOSED: usize = 220;
-pub(crate) const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 221;
-pub(crate) const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 222;
-pub(crate) const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 223;
-pub(crate) const ROLE_PIPE_ERROR_FAILED: usize = 224;
-pub(crate) const ROLE_PIPE_END: usize = 225;
-pub(crate) const ROLE_PIPE_READER: usize = 226;
-pub(crate) const ROLE_PIPE_WRITER: usize = 227;
-pub(crate) const ROLE_CHILD_INPUT: usize = 228;
-pub(crate) const ROLE_CHILD_INPUT_INHERIT: usize = 229;
-pub(crate) const ROLE_CHILD_INPUT_NULL: usize = 230;
-pub(crate) const ROLE_CHILD_INPUT_PIPE: usize = 231;
-pub(crate) const ROLE_CHILD_OUTPUT: usize = 232;
-pub(crate) const ROLE_CHILD_OUTPUT_INHERIT: usize = 233;
-pub(crate) const ROLE_CHILD_OUTPUT_NULL: usize = 234;
-pub(crate) const ROLE_CHILD_OUTPUT_PIPE: usize = 235;
-pub(crate) const ROLE_CHILD_ENV: usize = 236;
-pub(crate) const ROLE_CHILD_ENV_INHERIT: usize = 237;
-pub(crate) const ROLE_CHILD_ENV_EXACT: usize = 238;
-pub(crate) const ROLE_EXEC_SPEC: usize = 239;
-pub(crate) const ROLE_CHILD_STATUS: usize = 240;
-pub(crate) const ROLE_CHILD_STATUS_EXITED: usize = 241;
-pub(crate) const ROLE_CHILD_STATUS_TERMINATED: usize = 242;
-pub(crate) const ROLE_EXEC_ERROR: usize = 243;
-pub(crate) const ROLE_EXEC_ERROR_CLOSED: usize = 244;
-pub(crate) const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 245;
-pub(crate) const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 246;
-pub(crate) const ROLE_EXEC_ERROR_NOT_FOUND: usize = 247;
-pub(crate) const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 248;
-pub(crate) const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 249;
-pub(crate) const ROLE_EXEC_ERROR_FAILED: usize = 250;
-pub(crate) const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 252;
-pub(crate) const ROLE_CHILD_ENV_OVERLAY: usize = 255;
-pub(crate) const ROLE_FILE_HANDLE: usize = 256;
+pub(crate) const ROLE_STEP_EVENT: usize = 8;
+pub(crate) const ROLE_STEP_RAN: usize = 9;
+pub(crate) const ROLE_STEP_WAITING: usize = 10;
+pub(crate) const ROLE_STEP_DONE: usize = 11;
+pub(crate) const ROLE_STEP_FAULT: usize = 12;
+pub(crate) const ROLE_DRIVE_EVENT: usize = 13;
+pub(crate) const ROLE_DRIVE_ASKED: usize = 14;
+pub(crate) const ROLE_DRIVE_DONE: usize = 15;
+pub(crate) const ROLE_DRIVE_FAULT: usize = 16;
+pub(crate) const ROLE_RECV: usize = 17;
+pub(crate) const ROLE_RECV_MSG: usize = 18;
+pub(crate) const ROLE_RECV_CLOSED: usize = 19;
+pub(crate) const ROLE_SEND_RESULT: usize = 20;
+pub(crate) const ROLE_SEND_SENT: usize = 21;
+pub(crate) const ROLE_SEND_CLOSED: usize = 22;
+pub(crate) const ROLE_SEND_FAULT: usize = 23;
+pub(crate) const ROLE_PROC_ERROR: usize = 24;
+pub(crate) const ROLE_PROC_ERROR_DEAD: usize = 25;
+pub(crate) const ROLE_PROC_ERROR_NOT_PAUSED: usize = 26;
+pub(crate) const ROLE_PROC_ERROR_ALREADY_PAUSED: usize = 27;
+pub(crate) const ROLE_PROC_ERROR_IN_USE: usize = 28;
+pub(crate) const ROLE_PROC_CLASS: usize = 29;
+pub(crate) const ROLE_SNAPSHOT_ERROR: usize = 30;
+pub(crate) const ROLE_SNAPSHOT_RESOURCE_ACTIVE: usize = 31;
+pub(crate) const ROLE_SNAPSHOT_LIMIT_EXCEEDED: usize = 32;
+pub(crate) const ROLE_SNAPSHOT_BAD_IMAGE: usize = 33;
+pub(crate) const ROLE_RESTORE_ERROR: usize = 34;
+pub(crate) const ROLE_RESTORE_LIMIT_EXCEEDED: usize = 35;
+pub(crate) const ROLE_FS_ERROR: usize = 36;
+pub(crate) const ROLE_FS_ERROR_CLOSED: usize = 37;
+pub(crate) const ROLE_FS_ERROR_FAILED: usize = 38;
+pub(crate) const ROLE_OPEN_OPTIONS: usize = 39;
+pub(crate) const ROLE_OPEN_READ_ONLY: usize = 40;
+pub(crate) const ROLE_OPEN_WRITE_ONLY: usize = 41;
+pub(crate) const ROLE_OPEN_READ_WRITE: usize = 42;
+pub(crate) const ROLE_OPEN_CREATE: usize = 43;
+pub(crate) const ROLE_OPEN_CREATE_TRUNCATE: usize = 44;
+pub(crate) const ROLE_OPEN_APPEND: usize = 45;
+pub(crate) const ROLE_SEEK_FROM: usize = 46;
+pub(crate) const ROLE_SEEK_START: usize = 47;
+pub(crate) const ROLE_SEEK_CURRENT: usize = 48;
+pub(crate) const ROLE_SEEK_END: usize = 49;
+pub(crate) const ROLE_IP_ADDRESS: usize = 63;
+pub(crate) const ROLE_IP_V4: usize = 64;
+pub(crate) const ROLE_IP_V6: usize = 65;
+pub(crate) const ROLE_SOCKET_ADDRESS: usize = 66;
+pub(crate) const ROLE_NET_ERROR: usize = 67;
+pub(crate) const ROLE_NET_INVALID_INPUT: usize = 68;
+pub(crate) const ROLE_NET_NAME_NOT_FOUND: usize = 69;
+pub(crate) const ROLE_NET_UNAVAILABLE: usize = 70;
+pub(crate) const ROLE_NET_PERMISSION_DENIED: usize = 71;
+pub(crate) const ROLE_NET_ADDRESS_IN_USE: usize = 72;
+pub(crate) const ROLE_NET_CONNECTION_REFUSED: usize = 73;
+pub(crate) const ROLE_NET_CONNECTION_RESET: usize = 74;
+pub(crate) const ROLE_NET_NOT_CONNECTED: usize = 75;
+pub(crate) const ROLE_NET_TIMED_OUT: usize = 76;
+pub(crate) const ROLE_NET_CLOSED: usize = 77;
+pub(crate) const ROLE_NET_LIMIT_EXCEEDED: usize = 78;
+pub(crate) const ROLE_NET_UNSUPPORTED: usize = 79;
+pub(crate) const ROLE_NET_FAILED: usize = 80;
+pub(crate) const ROLE_TCP_READ: usize = 81;
+pub(crate) const ROLE_TCP_READ_DATA: usize = 82;
+pub(crate) const ROLE_TCP_READ_END: usize = 83;
+pub(crate) const ROLE_SHUTDOWN: usize = 84;
+pub(crate) const ROLE_SHUTDOWN_READ: usize = 85;
+pub(crate) const ROLE_SHUTDOWN_WRITE: usize = 86;
+pub(crate) const ROLE_SHUTDOWN_BOTH: usize = 87;
+pub(crate) const ROLE_TCP_RESOURCE: usize = 88;
+pub(crate) const ROLE_TCP_STREAM: usize = 89;
+pub(crate) const ROLE_TCP_LISTENER: usize = 90;
+pub(crate) const ROLE_TLS_ERROR: usize = 91;
+pub(crate) const ROLE_TLS_INVALID_CONFIG: usize = 92;
+pub(crate) const ROLE_TLS_HANDSHAKE: usize = 93;
+pub(crate) const ROLE_TLS_CERTIFICATE: usize = 94;
+pub(crate) const ROLE_TLS_PROTOCOL: usize = 95;
+pub(crate) const ROLE_TLS_NETWORK: usize = 96;
+pub(crate) const ROLE_TLS_CLOSED: usize = 97;
+pub(crate) const ROLE_TLS_LIMIT_EXCEEDED: usize = 98;
+pub(crate) const ROLE_PARSE_STATUS: usize = 119;
+pub(crate) const ROLE_PARSE_COMPLETE: usize = 120;
+pub(crate) const ROLE_PARSE_INCOMPLETE: usize = 121;
+pub(crate) const ROLE_PARSE_INVALID: usize = 122;
+pub(crate) const ROLE_IO_ERROR_BROKEN_PIPE: usize = 137;
+pub(crate) const ROLE_IO_ERROR_INVALID_INPUT: usize = 138;
+pub(crate) const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 139;
+pub(crate) const ROLE_ENV_ERROR: usize = 140;
+pub(crate) const ROLE_ENV_ERROR_INVALID_NAME: usize = 141;
+pub(crate) const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 142;
+pub(crate) const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 143;
+pub(crate) const ROLE_ENV_ERROR_FAILED: usize = 144;
+pub(crate) const ROLE_ENTROPY_ERROR: usize = 145;
+pub(crate) const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 146;
+pub(crate) const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 147;
+pub(crate) const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 148;
+pub(crate) const ROLE_ENTROPY_ERROR_FAILED: usize = 149;
+pub(crate) const ROLE_STD_STREAM: usize = 166;
+pub(crate) const ROLE_STD_STREAM_INPUT: usize = 167;
+pub(crate) const ROLE_STD_STREAM_OUTPUT: usize = 168;
+pub(crate) const ROLE_STD_STREAM_ERROR: usize = 169;
+pub(crate) const ROLE_TTY_ERROR: usize = 171;
+pub(crate) const ROLE_TTY_ERROR_CLOSED: usize = 172;
+pub(crate) const ROLE_TTY_ERROR_NOT_TERMINAL: usize = 173;
+pub(crate) const ROLE_TTY_ERROR_BUSY: usize = 174;
+pub(crate) const ROLE_TTY_ERROR_PERMISSION_DENIED: usize = 175;
+pub(crate) const ROLE_TTY_ERROR_UNSUPPORTED: usize = 176;
+pub(crate) const ROLE_TTY_ERROR_FAILED: usize = 177;
+pub(crate) const ROLE_SIGNAL_KIND: usize = 179;
+pub(crate) const ROLE_SIGNAL_INTERRUPT: usize = 180;
+pub(crate) const ROLE_SIGNAL_TERMINATE: usize = 181;
+pub(crate) const ROLE_SIGNAL_ERROR: usize = 182;
+pub(crate) const ROLE_SIGNAL_ERROR_CLOSED: usize = 183;
+pub(crate) const ROLE_SIGNAL_ERROR_INVALID_INPUT: usize = 184;
+pub(crate) const ROLE_SIGNAL_ERROR_BUSY: usize = 185;
+pub(crate) const ROLE_SIGNAL_ERROR_UNSUPPORTED: usize = 186;
+pub(crate) const ROLE_SIGNAL_ERROR_LIMIT_EXCEEDED: usize = 187;
+pub(crate) const ROLE_SIGNAL_ERROR_FAILED: usize = 188;
+pub(crate) const ROLE_IO_ERROR_UNSUPPORTED: usize = 190;
+pub(crate) const ROLE_FS_ERROR_INVALID_INPUT: usize = 191;
+pub(crate) const ROLE_FS_ERROR_INVALID_ENCODING: usize = 192;
+pub(crate) const ROLE_FS_ERROR_LIMIT_EXCEEDED: usize = 193;
+pub(crate) const ROLE_FS_ERROR_NOT_FOUND: usize = 194;
+pub(crate) const ROLE_FS_ERROR_ALREADY_EXISTS: usize = 195;
+pub(crate) const ROLE_FS_ERROR_PERMISSION_DENIED: usize = 196;
+pub(crate) const ROLE_FS_ERROR_NOT_DIRECTORY: usize = 197;
+pub(crate) const ROLE_FS_ERROR_IS_DIRECTORY: usize = 198;
+pub(crate) const ROLE_FS_ERROR_DIRECTORY_NOT_EMPTY: usize = 199;
+pub(crate) const ROLE_FS_ERROR_CROSS_DEVICE: usize = 200;
+pub(crate) const ROLE_FS_ERROR_UNSUPPORTED: usize = 201;
+pub(crate) const ROLE_OPEN_CREATE_NEW: usize = 202;
+pub(crate) const ROLE_FILE_KIND: usize = 203;
+pub(crate) const ROLE_FILE_KIND_FILE: usize = 204;
+pub(crate) const ROLE_FILE_KIND_DIRECTORY: usize = 205;
+pub(crate) const ROLE_FILE_KIND_SYMLINK: usize = 206;
+pub(crate) const ROLE_FILE_KIND_OTHER: usize = 207;
+pub(crate) const ROLE_FILE_INFO: usize = 208;
+pub(crate) const ROLE_DIR_ENTRY: usize = 209;
+pub(crate) const ROLE_RENAME_MODE: usize = 210;
+pub(crate) const ROLE_RENAME_NO_REPLACE: usize = 211;
+pub(crate) const ROLE_RENAME_REPLACE: usize = 212;
+pub(crate) const ROLE_PIPE_ERROR: usize = 213;
+pub(crate) const ROLE_PIPE_ERROR_CLOSED: usize = 214;
+pub(crate) const ROLE_PIPE_ERROR_BROKEN_PIPE: usize = 215;
+pub(crate) const ROLE_PIPE_ERROR_INVALID_INPUT: usize = 216;
+pub(crate) const ROLE_PIPE_ERROR_LIMIT_EXCEEDED: usize = 217;
+pub(crate) const ROLE_PIPE_ERROR_FAILED: usize = 218;
+pub(crate) const ROLE_PIPE_END: usize = 219;
+pub(crate) const ROLE_PIPE_READER: usize = 220;
+pub(crate) const ROLE_PIPE_WRITER: usize = 221;
+pub(crate) const ROLE_CHILD_INPUT: usize = 222;
+pub(crate) const ROLE_CHILD_INPUT_INHERIT: usize = 223;
+pub(crate) const ROLE_CHILD_INPUT_NULL: usize = 224;
+pub(crate) const ROLE_CHILD_INPUT_PIPE: usize = 225;
+pub(crate) const ROLE_CHILD_OUTPUT: usize = 226;
+pub(crate) const ROLE_CHILD_OUTPUT_INHERIT: usize = 227;
+pub(crate) const ROLE_CHILD_OUTPUT_NULL: usize = 228;
+pub(crate) const ROLE_CHILD_OUTPUT_PIPE: usize = 229;
+pub(crate) const ROLE_CHILD_ENV: usize = 230;
+pub(crate) const ROLE_CHILD_ENV_INHERIT: usize = 231;
+pub(crate) const ROLE_CHILD_ENV_EXACT: usize = 232;
+pub(crate) const ROLE_EXEC_SPEC: usize = 233;
+pub(crate) const ROLE_CHILD_STATUS: usize = 234;
+pub(crate) const ROLE_CHILD_STATUS_EXITED: usize = 235;
+pub(crate) const ROLE_CHILD_STATUS_TERMINATED: usize = 236;
+pub(crate) const ROLE_EXEC_ERROR: usize = 237;
+pub(crate) const ROLE_EXEC_ERROR_CLOSED: usize = 238;
+pub(crate) const ROLE_EXEC_ERROR_INVALID_INPUT: usize = 239;
+pub(crate) const ROLE_EXEC_ERROR_LIMIT_EXCEEDED: usize = 240;
+pub(crate) const ROLE_EXEC_ERROR_NOT_FOUND: usize = 241;
+pub(crate) const ROLE_EXEC_ERROR_PERMISSION_DENIED: usize = 242;
+pub(crate) const ROLE_EXEC_ERROR_UNSUPPORTED: usize = 243;
+pub(crate) const ROLE_EXEC_ERROR_FAILED: usize = 244;
+pub(crate) const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 246;
+pub(crate) const ROLE_CHILD_ENV_OVERLAY: usize = 249;
+pub(crate) const ROLE_FILE_HANDLE: usize = 250;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -217,7 +211,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 33] = [
     (
         ROLE_OPTION,
         1,
@@ -260,12 +254,6 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
         "EntropyError",
     ),
     (
-        ROLE_RUN_RESULT,
-        1,
-        &[ROLE_RUN_DONE, ROLE_RUN_FAULT],
-        "RunResult",
-    ),
-    (
         ROLE_STEP_EVENT,
         1,
         &[
@@ -288,12 +276,6 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
         0,
         &[ROLE_SEND_SENT, ROLE_SEND_CLOSED, ROLE_SEND_FAULT],
         "SendResult",
-    ),
-    (
-        ROLE_PROC_RESULT,
-        1,
-        &[ROLE_PROC_DONE, ROLE_PROC_FAULT],
-        "ProcResult",
     ),
     (
         ROLE_PROC_ERROR,
@@ -544,7 +526,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 141] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 137] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -562,8 +544,6 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 141] = [
     (ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
     (ROLE_ENTROPY_ERROR_UNAVAILABLE, &[FieldShape::Str]),
     (ROLE_ENTROPY_ERROR_FAILED, &[FieldShape::Str]),
-    (ROLE_RUN_DONE, &[FieldShape::Var(0)]),
-    (ROLE_RUN_FAULT, &[FieldShape::Fault]),
     (ROLE_STEP_RAN, &[]),
     (ROLE_STEP_WAITING, &[]),
     (ROLE_STEP_DONE, &[FieldShape::Var(0)]),
@@ -576,8 +556,6 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 141] = [
     (ROLE_SEND_SENT, &[]),
     (ROLE_SEND_CLOSED, &[]),
     (ROLE_SEND_FAULT, &[FieldShape::Fault]),
-    (ROLE_PROC_DONE, &[FieldShape::Var(0)]),
-    (ROLE_PROC_FAULT, &[FieldShape::Fault]),
     (ROLE_PROC_ERROR_DEAD, &[]),
     (ROLE_PROC_ERROR_NOT_PAUSED, &[]),
     (ROLE_PROC_ERROR_ALREADY_PAUSED, &[]),

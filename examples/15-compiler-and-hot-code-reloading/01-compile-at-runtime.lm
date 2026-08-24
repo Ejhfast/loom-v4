@@ -57,8 +57,8 @@ def evaluate(text: String): Result[Int, CodeError] with Compiler, Vm
   # ordinary error when the entry carries another type.
   entry = instance.entry[(), Int]()?
   case image.activate(entry, args: ())?.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err(CodeError("the program faulted"))
+  in Ok(value) then Ok(value)
+  in Err(_) then Err(CodeError("the program faulted"))
   end
 end
 

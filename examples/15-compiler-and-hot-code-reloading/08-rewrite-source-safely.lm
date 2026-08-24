@@ -51,8 +51,8 @@ end
 def run_it(image: Vm, f: FunctionBinding[(), Int]): Result[Int, String] with Vm
   run = image.activate(f, args: ()).map_error() { |e: CodeError| e.message }?
   case run.run()
-  in Done(value) then Ok(value)
-  in Fault(_) then Err("the definition faulted")
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the definition faulted")
   end
 end
 

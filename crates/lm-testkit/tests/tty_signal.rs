@@ -252,8 +252,8 @@ def go(): String with Vm, Tty, Signal
   run.table().pass(Tty)
   run.table().pass(Signal)
   case run.run()
-  in Done(value) then value
-  in Fault(fault) then fault.code()
+  in Ok(value) then value
+  in Err(fault) then fault.code()
   end
 end
 go()

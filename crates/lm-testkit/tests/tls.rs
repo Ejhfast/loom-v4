@@ -517,7 +517,7 @@ def finish_server(child: Run[Int], secure: ResourceHandle): Int with Vm
       end
       child.answer(call, Ok(()))
       case child.run()
-      in Done(value) then value
+      in Ok(value) then value
       in _ then -2
       end
     in _ then -3

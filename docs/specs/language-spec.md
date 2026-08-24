@@ -410,7 +410,7 @@ Version 0.2 has four statically resolved namespaces:
 1. **types:** classes, enums, generic parameters, and fixed types;
 2. **ordinary values:** locals, functions, class values, imports, and `sys`;
 3. **effect descriptors:** groups such as `Vm` and identities such as `Clock.Now`;
-4. **enum constructors:** canonically qualified names such as `Option.Some` and `RunResult.Fault`.
+4. **enum constructors:** canonically qualified names such as `Option.Some` and `Result.Err`.
 
 An unqualified enum constructor is accepted only when the expected enum or case scrutinee selects one arm unambiguously.
 
@@ -497,7 +497,7 @@ The type universe has four strata.
 
 **Core-image nominal types** are ordinary source definitions with pinned hashes.
 
-The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Range`, tuple carriers, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, and `ProcResult`.
+The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Range`, tuple carriers, `StepEvent`, `DriveEvent`, and `Recv`.
 
 It also includes `Set` and the core collection interfaces.
 
@@ -606,6 +606,18 @@ Each inherited method and associated requirement remains part of the child contr
 Identical method contracts from several bounds merge into one callable requirement.
 
 Different contracts with one method name remain ambiguous.
+
+An interface method can provide a default body.
+
+A declaration without a body remains a required method.
+
+The default can declare type parameters, effect parameters, and a `when` clause.
+
+A conforming class method with the same complete contract replaces the default.
+
+Two unrelated defaults with one selector require an explicit class override.
+
+The compiler uses no implicit interface linearization order.
 
 Bare `Self` names the conforming type inside an interface contract.
 
@@ -800,6 +812,10 @@ A nonescaping parameter can be called or passed to another nonescaping parameter
 
 It cannot be returned, stored, captured, or used inside a type argument.
 
+An unannotated closure can infer an expected polymorphic effect row from its body.
+
+A standalone or ambiguous effectful closure requires an explicit `with` clause.
+
 Generic inference and literal/branch joining never invent `Any` merely because two types are unrelated; source must request an explicit dynamic boundary. No implicit numeric conversion, truthiness conversion, string conversion, or user-defined coercion exists. A failed local constraint produces one diagnostic at the smallest expression whose expected and synthesized types disagree.
 
 ### 5.10 Flow refinement, patterns, and exhaustiveness
@@ -925,7 +941,13 @@ increment = { |x: Int|: Int x + 1 }
 thunk = { || 42 }
 ```
 
-Both forms lower to the same typed HIR node and bytecode form. They have identical capture, result, row, and evaluation rules. A closure is a sealed function object containing code identity and captures. Omitting `with` means empty row.
+Both forms lower to the same typed HIR node and bytecode form. They have identical capture, result, row, and evaluation rules.
+
+A closure is a sealed function object containing code identity and captures.
+
+Omitting `with` means an empty row unless contextual polymorphic row inference applies.
+
+An explicit `with ()` always declares an empty row.
 
 A monomorphic top-level function name produces a zero-capture function value.
 A generic function name needs a direct call in this version.
@@ -1642,8 +1664,8 @@ A child VM is the recovery boundary:
 
 ```lm
 case child.run()
-in Done(v)  then use(v)
-in Fault(f) then recover(f)
+in Ok(v)  then use(v)
+in Err(f) then recover(f)
 end
 ```
 
@@ -1731,7 +1753,6 @@ The public families preserve the final result type:
 Vm
 Run[T]
 StepEvent[T]
-RunResult[T]
 DriveEvent[T]
 RunSnapshot[T]
 VmSnapshot
@@ -1797,11 +1818,6 @@ enum StepEvent[T]
   Fault(fault: Fault)
 end
 
-enum RunResult[T]
-  Done(value: T)
-  Fault(fault: Fault)
-end
-
 enum DriveEvent[T]
   Asked(request: Request)
   Done(value: T)
@@ -1829,6 +1845,8 @@ If called while still waiting and no completion is ready, `step` returns the sam
 ### 14.6 `run`
 
 `run()` is valid from `ready` and `waiting`. It uses automatic table dispatch, waits for accepted blocking host operations, and continues to `done` or `faulted`. It enters one dedicated interpreter loop; it is not implemented as repeated public `step()` calls and allocates no event per instruction.
+
+`run()` returns `Result[T, Fault]`.
 
 ### 14.7 `drive`
 
@@ -1995,8 +2013,8 @@ Nesting is ordinary composition of functions that use `Vm`:
 ```lm
 def f2(): Int with Vm
   case sys.vm.Vm().activate_or_fault(do || 21 end, args: ()).run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -2009,8 +2027,8 @@ def f1(e: () -> Int with Vm): Int with Vm
   vm = sys.vm.Vm().activate_or_fault(expr, args: ())
   vm.table().pass(Vm)
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then 0
+  in Ok(v)  then v
+  in Err(_) then 0
   end
 end
 
@@ -2313,8 +2331,8 @@ end
 
 h: Handle[Never, Int] = Doubler.spawn(21)
 case h.done()
-in Done(v)  then v
-in Fault(_) then 0
+in Ok(v)  then v
+in Err(_) then 0
 end
 ```
 
@@ -2332,6 +2350,10 @@ h: Handle[Never, ()] = sys.proc.run(vm)
 
 `Proc.Run` with no mailbox argument chooses `M = Never`. The mailbox-bearing native form accepts an explicit `MailboxType[M]` created by proc-class lowering. `Proc.Run` atomically transfers execution ownership to the scheduler. The original VM handle becomes dormant; execution/inspection through it faults until `pause()` returns ownership. These methods are operations and therefore carry their exact `Proc.*` rows; table edits remain legal for revocation.
 
+`sys.proc.run` also accepts a sendable nullary closure.
+
+This form returns `Handle[Never,R]` and uses the closure row as the child birth grant.
+
 ### 18.3 `spawn` sugar and birth grant
 
 `Class.spawn(args...)` is compiler sugar available only for a subclass with a valid `on_spawn`. It constructs a VM from the proc class and a typed argument tuple, transfers code/data through the codec, grants the child `Proc` group, creates the declared mailbox, and invokes `Proc.Run`. The return type is `Handle[M,R]` inferred from the proc superclass and `on_spawn` result.
@@ -2346,14 +2368,9 @@ The birth grant is required so mailbox-bearing procs can receive. Since `spawn` 
 
 ### 18.4 Handles and terminal results
 
-The core image defines the supervisory values explicitly:
+The core image defines mailbox delivery results explicitly:
 
 ```lm
-enum ProcResult[R]
-  Done(value: R)
-  Fault(fault: Fault)
-end
-
 enum SendResult
   Sent
   Closed
@@ -2368,7 +2385,7 @@ end
 A `Handle[M,R]` supports:
 
 ```lm
-h.done(): ProcResult[R] with Proc.Done
+h.done(): Result[R, Fault] with Proc.Done
 h.pause(): Result[Run[R], ProcError] with Proc.Pause
 h.resume(): Result[(), ProcError] with Proc.Resume
 h.close(): SendResult with Proc.Close
@@ -2809,6 +2826,8 @@ Verified `Code`, class definitions, source maps, and core-image data are immutab
 
 A decoded instruction is a fixed 16-byte record containing opcode/flags and up to three `u32` operands. Loading resolves constant, code, class, type, selector, field, intrinsic, and operation hashes once. The interpreter does not parse variable-length bytecode or hash names in its hot loop.
 
+One interface call packs 16-bit interface and method indices into one operand. Each related table can contain at most 65,536 addressable entries.
+
 Class slots contain field offsets and a flattened selector-to-code table. Virtual dispatch is two indexed loads: runtime class slot, then selector slot. Generic applications share code and object layout but have distinct interned `TypeId` records containing argument type IDs for reflection and boundary validation.
 
 ### 22.6 Frames, locals, and operands
@@ -3233,7 +3252,7 @@ Vm.New                         () -> Vm
 Vm.Activate[A,T,e]             (Vm, Fn[A,T,e], control A)
                                 -> Result[Run[T], CodeError]
 Vm.ActivateOrFault[A,T,e]      (Vm, Fn[A,T,e], control A) -> Run[T]
-Vm.Run[T]                      (Run[T]) -> RunResult[T]
+Vm.Run[T]                      (Run[T]) -> Result[T, Fault]
 Vm.Step[T]                     (Run[T]) -> StepEvent[T]
 Vm.Drive[T]                    (Run[T]) -> DriveEvent[T]
 Vm.Answer[T,A,R]               (Run[T], PendingCall[A,R], R) -> ()
@@ -3392,12 +3411,13 @@ A proc handle carries both mailbox and terminal result types:
 
 ```text
 Proc.Run[R]         (Run[R]) -> Handle[Never,R]
+Proc.RunClosure[R,e] (() -> R with e) -> Handle[Never,R]
 Proc.Spawn[M,R,A]   (Class[Proc[M]], control A) -> Handle[M,R]
 Proc.Send[M,R]      (Handle[M,R], M) -> SendResult
 Proc.Close[M,R]     (Handle[M,R]) -> SendResult
 Proc.Recv[M]        (proc self) -> Recv[M]
 Proc.RecvWait[M]    (proc self) -> Wait[Recv[M]]
-Proc.Done[M,R]      (Handle[M,R]) -> ProcResult[R]
+Proc.Done[M,R]      (Handle[M,R]) -> Result[R,Fault]
 Proc.Pause[M,R]     (Handle[M,R]) -> Result[Run[R], ProcError]
 Proc.Resume[M,R]    (Handle[M,R]) -> Result[(), ProcError]
 Proc.SnapshotWait[M,R] (Handle[M,R], Int)
@@ -3530,7 +3550,7 @@ The prelude introduces the pinned value and resource surface:
 ```text
 (), Never, Bool, Int, Float, Byte, List, Map
 Option, Some, None, Result, Ok, Err, Ordering, Unit, Tuple2, ..., Tuple16, Range
-RunResult, StepEvent, DriveEvent, Proc, Recv, SendResult, ProcResult, ProcError
+StepEvent, DriveEvent, Proc, Recv, SendResult, ProcError
 Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
 FileKind, FileInfo, DirEntry, RenameMode
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
@@ -3538,7 +3558,8 @@ TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
 Text, String, Substring, Char, Utf8Error, IndexError, HexError, ParseIntError, ParseFloatError, FloatToIntError, Bytes
 StringBuilder, ByteBuffer
-Display, PartialEq, Hashable, Comparable, Copyable, Error, ByteReader, ByteWriter
+Display, PartialEq, Hashable, Comparable, Copyable, Add, Error
+Iterator, Iterable, Counted, ByteReader, ByteWriter
 identity, display, hash_of, hash_combine, assert, assert_message
 ```
 
@@ -3571,6 +3592,9 @@ Result[T,E]
   map_error[F,e]((E) -> F with e) -> Result[T,F] with e
   and_then[U,e]((T) -> Result[U,E] with e) -> Result[U,E] with e
   option() -> Option[T]
+
+Result[T,Fault]
+  value() -> T
 ```
 
 Postfix `?` propagates a `Result` error from the nearest callable.
@@ -3582,6 +3606,10 @@ The enclosing callable must return `Result[U,E]`. The error types must be equal.
 The top level cannot use `?`. A closure that uses `?` must declare its `Result` type.
 
 `Result.map`, `map_error`, and `and_then` support explicit error conversion and staged pipelines.
+
+`Result.value()` returns the success value or raises the stored fault.
+
+`raise(fault: Fault): Never` raises an existing fault without replacing its trace.
 
 ### 24.4 Native `List[T]`
 
@@ -3635,6 +3663,14 @@ Faulting index methods use `IndexOutOfBounds`; allocation failure obeys heap lim
 `List[T]` conditionally implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
 
 It implements `Copyable` for every element type.
+
+`Iterable` provides eager defaults from one required `iterator()` method.
+
+The defaults include mapping, filtering, folding, queries, indexed operations, slicing, chunks, bounds, joining, and parallel mapping.
+
+`par_map` uses pure escaping callbacks and the `Proc` effect.
+
+It returns values in source order and raises child faults in source chunk order.
 
 ### 24.5 Maps and sets
 
@@ -4457,7 +4493,8 @@ parameter_modifier = "mut" | "escaping" ;
 field_parameters= field_parameter, { ",", field_parameter } ;
 field_parameter = IDENT, ":", type ;
 
-effect_clause   = "with", row_item, { ",", row_item } ;
+effect_clause   = "with", ( row_item, { ",", row_item }
+                             | "(", [ row_items ], ")" ) ;
 row_items       = row_item, { ",", row_item } ;
 row_item        = qualified_name | IDENT ;
 
@@ -4616,7 +4653,7 @@ Canonical artifact rows expand groups to exact ABI operation identities and sort
 ```lm
 def supervise(
   program: () -> String with Io.Write, Clock.Now
-): RunResult[String] with Vm, Io.Write
+): Result[String, Fault] with Vm, Io.Write
   vm = sys.vm.Vm().activate_or_fault(program, args: ())
   captured: [String] = []
 
@@ -4635,9 +4672,9 @@ def supervise(
       end
     in Done(value)
       print("captured #{captured.len()} writes\n").expect("the output writes")
-      return Done(value)
+      return Ok(value)
     in Fault(fault)
-      return Fault(fault)
+      return Err(fault)
     end
   end
 end

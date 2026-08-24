@@ -413,6 +413,11 @@ fn verify_applications(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
 /// The nominal interface contracts.
 fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
     let module = ctx.module;
+    if module.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
+        return Err(terr(
+            "the module has too many interfaces for compact calls".to_string(),
+        ));
+    }
     // Validate nominal interface contracts before any bound uses them.
     let mut interface_keys: HashMap<&str, usize> = HashMap::new();
     for (iidx, contract) in module.interfaces.iter().enumerate() {
@@ -452,6 +457,11 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
                 "the type-bound table does not match the type arity".to_string(),
             ));
         }
+        if contract.methods.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
+            return Err(ierr(
+                "the interface has too many methods for compact calls".to_string(),
+            ));
+        }
         let self_application = BcInterfaceUse {
             interface: iidx as u32,
             types: (0..contract.type_params)
@@ -461,7 +471,7 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
                 .map(|parameter| vec![BcRow::Var(parameter)])
                 .collect(),
         };
-        let mut self_bounds = vec![self_application];
+        let mut self_bounds = vec![self_application.clone()];
         let mut parent_ids = HashSet::new();
         for parent in &contract.parents {
             ctx.check_interface_use(parent, contract.type_params + 1, contract.effect_params)
@@ -544,14 +554,68 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
                     "method mut markers do not match the parameters".to_string(),
                 ));
             }
+            if method.type_bounds.len() != method.type_params as usize {
+                return Err(ierr(
+                    "a method type-bound table does not match its type arity".to_string(),
+                ));
+            }
+            let method_type_count = contract.type_params + method.type_params + 1;
+            let method_effect_count = contract.effect_params + method.effect_params;
+            let mut method_scope = interface_scope.clone();
+            method_scope.extend(method.type_bounds.clone());
+            for (parameter, bounds) in method.type_bounds.iter().enumerate() {
+                let mut seen = HashSet::new();
+                for bound in bounds {
+                    ctx.check_interface_use(bound, method_type_count, method_effect_count)
+                        .map_err(&ierr)?;
+                    if !seen.insert(bound.interface) {
+                        return Err(ierr(
+                            "one method type parameter repeats an interface bound".to_string(),
+                        ));
+                    }
+                    let receiver =
+                        ctx.intern(BcType::Var(contract.type_params + parameter as u32 + 1));
+                    if !ctx.interface_arguments_meet_bounds(receiver, bound, &method_scope) {
+                        return Err(ierr(
+                            "a method bound has arguments outside their bounds".to_string(),
+                        ));
+                    }
+                }
+            }
+            let mut premise_subjects = HashSet::new();
+            for premise in &method.premises {
+                if !premise_subjects.insert(premise.subject) {
+                    return Err(ierr("a method premise repeats one type".to_string()));
+                }
+                if premise.subject as usize >= module.types.len()
+                    || !ctx.vars_bounded(premise.subject, method_type_count, method_effect_count)
+                {
+                    return Err(ierr("a method premise has an invalid type".to_string()));
+                }
+                if !ctx.projections_proven(premise.subject, &method_scope) {
+                    return Err(ierr(
+                        "a method premise uses an unproven associated type".to_string(),
+                    ));
+                }
+                let mut seen = HashSet::new();
+                for bound in &premise.bounds {
+                    ctx.check_interface_use(bound, method_type_count, method_effect_count)
+                        .map_err(&ierr)?;
+                    if !seen.insert(bound.interface) {
+                        return Err(ierr(
+                            "one method premise repeats an interface bound".to_string(),
+                        ));
+                    }
+                }
+            }
             for ty in method.params.iter().chain([&method.ret]) {
                 if *ty as usize >= module.types.len() {
                     return Err(ierr("a method type is out of range".to_string()));
                 }
-                if !ctx.vars_bounded(*ty, contract.type_params + 1, contract.effect_params) {
+                if !ctx.vars_bounded(*ty, method_type_count, method_effect_count) {
                     return Err(ierr("a method type uses an unbound variable".to_string()));
                 }
-                if !ctx.projections_proven(*ty, &interface_scope) {
+                if !ctx.projections_proven(*ty, &method_scope) {
                     return Err(ierr(
                         "a method type uses an associated type without its interface bound"
                             .to_string(),
@@ -568,7 +632,7 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
             if ctx.stores_callback(method.ret) {
                 return Err(ierr("a method cannot return a callback".to_string()));
             }
-            if !ctx.row_vars_bounded(&method.row, contract.effect_params) {
+            if !ctx.row_vars_bounded(&method.row, method_effect_count) {
                 return Err(ierr("a method row uses an unbound variable".to_string()));
             }
             for element in &method.row {
@@ -583,6 +647,44 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
             }
             if !ctx.row_canonical(&method.row) {
                 return Err(ierr("a method row is not canonical".to_string()));
+            }
+            if method.default != lm_bytecode::NO_FUNC {
+                let Some(default) = module.funcs.get(method.default as usize) else {
+                    return Err(ierr(
+                        "a method default is outside the function table".to_string(),
+                    ));
+                };
+                if !default.captures.is_empty() {
+                    return Err(ierr("a method default cannot capture a value".to_string()));
+                }
+                if default.type_params != method_type_count
+                    || default.effect_params != method_effect_count
+                {
+                    return Err(ierr(
+                        "a method default has different generic parameters".to_string(),
+                    ));
+                }
+                if default.params.len() != method.params.len() + 1
+                    || default.param_muts.len() != default.params.len()
+                    || default.params.first().copied() != Some(self_ty)
+                    || default.param_muts.first().copied() != Some(method.mut_self)
+                    || default.params[1..] != method.params
+                    || default.param_muts[1..] != method.param_muts
+                    || default.ret != method.ret
+                    || default.row != method.row
+                {
+                    return Err(ierr(
+                        "a method default has a different signature".to_string(),
+                    ));
+                }
+                let mut expected_bounds = vec![vec![self_application.clone()]];
+                expected_bounds.extend(contract.type_bounds.clone());
+                expected_bounds.extend(method.type_bounds.clone());
+                if module.func_bounds.get(method.default as usize) != Some(&expected_bounds) {
+                    return Err(ierr(
+                        "a method default has different generic bounds".to_string(),
+                    ));
+                }
             }
         }
     }
@@ -1164,6 +1266,18 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 "the associated bindings do not match the contract".to_string(),
             ));
         }
+        if conformance.method_overrides.len() != contract.methods.len() {
+            return Err(cerr(
+                "the method witness table does not match the contract".to_string(),
+            ));
+        }
+        for (selected, method) in conformance.method_overrides.iter().zip(&contract.methods) {
+            if !selected && method.default == lm_bytecode::NO_FUNC {
+                return Err(cerr(
+                    "a method witness selects a missing default".to_string(),
+                ));
+            }
+        }
         if conformance
             .associated
             .iter()
@@ -1182,6 +1296,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
         .iter()
         .position(|interface| interface.key == "core.Iterator");
     let mut conformance_keys = HashSet::new();
+    let mut selected_defaults = HashMap::new();
     for (index, conformance) in module.conformances.iter().enumerate() {
         let cerr = |message: String| {
             terr(format!(
@@ -1332,7 +1447,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
         let class_args: Vec<u32> = (0..class.type_params)
             .map(|item| ctx.intern(BcType::Var(item)))
             .collect();
-        for requirement in &contract.methods {
+        for (requirement, selected) in contract.methods.iter().zip(&conformance.method_overrides) {
             let merr = |message: &str| {
                 let method_name = module
                     .selectors
@@ -1345,19 +1460,69 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                     class.name, contract.name
                 ))
             };
-            let (owner, target) = ctx
-                .method_resolution(conformance.class, requirement.selector)
-                .ok_or_else(|| merr("the implementation is missing"))?;
+            if !selected {
+                let key = (conformance.class, requirement.selector);
+                if let Some(previous) = selected_defaults.insert(key, requirement.default) {
+                    if previous != requirement.default {
+                        return Err(merr(
+                            "two interface defaults need one explicit class override",
+                        ));
+                    }
+                }
+                continue;
+            }
+            let Some((owner, target)) =
+                ctx.method_resolution(conformance.class, requirement.selector)
+            else {
+                return Err(merr("the implementation is missing"));
+            };
             let owner_args = ctx
                 .ancestor_args(conformance.class, &class_args, owner)
                 .ok_or_else(|| merr("the implementation owner is not an ancestor"))?;
             let method = &module.funcs[target as usize];
-            if method.type_params != module.classes[owner as usize].type_params
-                || method.effect_params != 0
-            {
-                return Err(merr("the implementation adds generic parameters"));
+            let owner_type_count = module.classes[owner as usize].type_params;
+            let own_types: Vec<u32> = (0..requirement.type_params)
+                .map(|generic_index| ctx.intern(BcType::Var(class.type_params + generic_index)))
+                .collect();
+            let own_rows: Vec<Vec<BcRow>> = (0..requirement.effect_params)
+                .map(|generic_index| vec![BcRow::Var(generic_index)])
+                .collect();
+            let mut required_types = contract_types.clone();
+            required_types.extend_from_slice(&own_types);
+            let mut required_rows = conformance.application.rows.clone();
+            required_rows.extend(own_rows.iter().cloned());
+            let mut requirement_bounds = conformance_bounds.clone();
+            for premise in &requirement.premises {
+                let subject = ctx.subst_with_bounds(
+                    premise.subject,
+                    &required_types,
+                    &required_rows,
+                    &conformance_bounds,
+                );
+                let BcType::Var(parameter) = ctx.ty(subject) else {
+                    continue;
+                };
+                let Some(bounds) = requirement_bounds.get_mut(parameter as usize) else {
+                    continue;
+                };
+                for bound in &premise.bounds {
+                    let bound = ctx.subst_interface_use_with_bounds(
+                        bound,
+                        &required_types,
+                        &required_rows,
+                        &conformance_bounds,
+                    );
+                    if !bounds.contains(&bound) {
+                        bounds.push(bound);
+                    }
+                }
             }
-            let class_bound_count = module.classes[owner as usize].type_params as usize;
+            if method.type_params != owner_type_count + requirement.type_params
+                || method.effect_params != requirement.effect_params
+            {
+                return Err(merr("the generic parameter counts differ"));
+            }
+            let class_bound_count = owner_type_count as usize;
             let Some(method_bounds) = module.func_bounds.get(target as usize) else {
                 return Err(merr("the implementation has no generic bound table"));
             };
@@ -1365,7 +1530,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 return Err(merr("the implementation has incomplete class bounds"));
             };
             let bounds_hold = if owner == conformance.class {
-                conformance_bounds_imply(&conformance_bounds, class_method_bounds)
+                conformance_bounds_imply(&requirement_bounds, class_method_bounds)
             } else {
                 ctx.type_arguments_meet_bounds(
                     &owner_args,
@@ -1376,6 +1541,37 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
             };
             if !bounds_hold {
                 return Err(merr("the implementation needs an undeclared premise"));
+            }
+            let mut implementation_types = owner_args.clone();
+            implementation_types.extend_from_slice(&own_types);
+            let implementation_own_bounds = &method_bounds[class_bound_count..];
+            if implementation_own_bounds.len() != requirement.type_bounds.len() {
+                return Err(merr("the generic bounds differ"));
+            }
+            for (actual, required) in implementation_own_bounds
+                .iter()
+                .zip(&requirement.type_bounds)
+            {
+                let actual: Vec<BcInterfaceUse> = actual
+                    .iter()
+                    .map(|bound| ctx.subst_interface_use(bound, &implementation_types, &own_rows))
+                    .collect();
+                let required: Vec<BcInterfaceUse> = required
+                    .iter()
+                    .map(|bound| {
+                        ctx.subst_interface_use_with_bounds(
+                            bound,
+                            &required_types,
+                            &required_rows,
+                            &conformance_bounds,
+                        )
+                    })
+                    .collect();
+                if actual.len() != required.len()
+                    || actual.iter().any(|bound| !required.contains(bound))
+                {
+                    return Err(merr("the generic bounds differ"));
+                }
             }
             if method.params.len() != requirement.params.len() + 1 {
                 return Err(merr("the parameter count differs"));
@@ -1399,11 +1595,12 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                 .zip(&requirement.params)
                 .zip(&requirement.param_muts)
                 .all(|((implementation, required), mutable)| {
-                    let implementation = ctx.subst(*implementation, &owner_args, &[]);
+                    let implementation =
+                        ctx.subst(*implementation, &implementation_types, &own_rows);
                     let required = ctx.subst_with_bounds(
                         *required,
-                        &contract_types,
-                        &conformance.application.rows,
+                        &required_types,
+                        &required_rows,
                         &conformance_bounds,
                     );
                     if *mutable {
@@ -1415,18 +1612,19 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
             if !params_match {
                 return Err(merr("parameter types differ"));
             }
-            let actual_ret = ctx.subst(method.ret, &owner_args, &[]);
+            let actual_ret = ctx.subst(method.ret, &implementation_types, &own_rows);
             let required_ret = ctx.subst_with_bounds(
                 requirement.ret,
-                &contract_types,
-                &conformance.application.rows,
+                &required_types,
+                &required_rows,
                 &conformance_bounds,
             );
             if !ctx.is_subtype(actual_ret, required_ret) {
                 return Err(merr("the result type is too wide"));
             }
-            let required_row = ctx.row_subst(&requirement.row, &conformance.application.rows);
-            if !ctx.row_included(&method.row, &required_row) {
+            let actual_row = ctx.row_subst(&method.row, &own_rows);
+            let required_row = ctx.row_subst(&requirement.row, &required_rows);
+            if !ctx.row_included(&actual_row, &required_row) {
                 return Err(merr("the effect row is too wide"));
             }
         }

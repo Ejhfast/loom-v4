@@ -51,8 +51,8 @@ def resume(image: RunSnapshot[String]): String with Vm, Fs
     # A restored machine starts default-deny. Grant it again.
     restored.table().pass(Fs)
     case restored.run()
-    in Done(value) then value
-    in Fault(_)    then "the restored child faulted"
+    in Ok(value) then value
+    in Err(_)    then "the restored child faulted"
     end
   in Err(_) then "the snapshot did not restore"
   end

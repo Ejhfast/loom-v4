@@ -73,6 +73,7 @@ impl<'o> FnChecker<'o> {
                     &sig.type_bounds,
                     sig.effect_params.len(),
                     vec![None; sig.type_params.len()],
+                    vec![None; sig.effect_params.len()],
                     0,
                     type_args,
                     &sig.params,
@@ -199,6 +200,7 @@ impl<'o> FnChecker<'o> {
                     &type_bounds,
                     0,
                     vec![None; type_names.len()],
+                    Vec::new(),
                     0,
                     type_args,
                     &params,
@@ -454,7 +456,7 @@ impl<'o> FnChecker<'o> {
             if matches!(res, NameRes::Capture(_, ty, _) if ctx.store.contains_callback(ty)) {
                 return Err(Diagnostic::new(
                     "E1064",
-                    "a closure cannot capture a nonescaping callback",
+                    "a closure cannot capture a nonescaping callback; declare the callback parameter as `escaping`",
                     name_span,
                 ));
             }
@@ -730,6 +732,7 @@ impl<'o> FnChecker<'o> {
         type_bounds: &[Vec<InterfaceUse>],
         effect_count: usize,
         pre_bound: Vec<Option<TypeId>>,
+        pre_bound_rows: Vec<Option<Row>>,
         own_start: usize,
         explicit: &[ast::TypeExpr],
         decl_params: &[TypeId],
@@ -754,7 +757,8 @@ impl<'o> FnChecker<'o> {
         let args = arrange_args(args, param_names, what)?;
         let mut targs: Vec<Option<TypeId>> = pre_bound;
         debug_assert_eq!(targs.len(), type_names.len());
-        let mut rowargs: Vec<Option<Row>> = vec![None; effect_count];
+        let mut rowargs = pre_bound_rows;
+        debug_assert_eq!(rowargs.len(), effect_count);
         if !explicit.is_empty() {
             let own = type_names.len() - own_start;
             if explicit.len() != own {
@@ -786,7 +790,38 @@ impl<'o> FnChecker<'o> {
             if (ctx.store.contains_var(part) || ctx.store.contains_effect_var(part))
                 && self.can_synth(ctx, arg)
             {
-                let h = self.synth_expr(ctx, arg)?;
+                let h = match (&arg.kind, ctx.store.get(part).clone()) {
+                    (
+                        ExprKind::Closure {
+                            params,
+                            ret,
+                            row,
+                            row_explicit,
+                            body,
+                        },
+                        Type::Fn(_, _, expected_ret, expected_row)
+                        | Type::Callback(_, _, expected_ret, expected_row),
+                    ) if !*row_explicit
+                        && row.is_empty()
+                        && expected_row
+                            .iter()
+                            .any(|item| matches!(item, lm_types::RowElem::Var(_))) =>
+                    {
+                        let expected_ret =
+                            (!ctx.store.contains_var(expected_ret)).then_some(expected_ret);
+                        self.check_closure(
+                            ctx,
+                            params,
+                            ret,
+                            row,
+                            expected_ret,
+                            true,
+                            body,
+                            arg.span,
+                        )?
+                    }
+                    _ => self.synth_expr(ctx, arg)?,
+                };
                 unify(ctx, part, h.ty, &mut targs, &mut rowargs, true);
                 pre.push(Some(h));
             } else {

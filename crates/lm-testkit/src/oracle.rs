@@ -550,9 +550,23 @@ impl<'m> Oracle<'m> {
                 selector,
                 args,
                 ..
+            } => {
+                let recv_v = self.eval(recv, frame, depth)?;
+                let mut values = Vec::with_capacity(args.len() + 1);
+                values.push(recv_v.clone());
+                for arg in args {
+                    values.push(self.eval(arg, frame, depth)?);
+                }
+                let class = self.value_class(&recv_v)?;
+                let func = self
+                    .find_method(class, selector)
+                    .ok_or(Stop::Limit("unknown selector"))?;
+                self.call(func, values, vec![], depth + 1)
             }
-            | HExprKind::InterfaceCall {
+            HExprKind::InterfaceCall {
                 recv,
+                interface,
+                method,
                 selector,
                 args,
                 ..
@@ -563,20 +577,18 @@ impl<'m> Oracle<'m> {
                 for arg in args {
                     values.push(self.eval(arg, frame, depth)?);
                 }
-                let class = match self.native_class(&recv_v) {
-                    Some(class) => class,
-                    None => {
-                        let obj = self.as_obj(&recv_v)?;
-                        let class = match &obj.borrow().kind {
-                            OKind::Instance { class, .. } => *class,
-                            _ => return Err(Stop::Limit("method call on a non-instance")),
-                        };
-                        class
-                    }
+                let class = self.value_class(&recv_v)?;
+                let selected = self
+                    .interface_method_override(class, *interface, *method)
+                    .ok_or(Stop::Limit("missing interface witness"))?;
+                let func = if selected {
+                    self.find_method(class, selector)
+                        .ok_or(Stop::Limit("unknown selector"))?
+                } else {
+                    self.m.interfaces[*interface as usize].methods[*method as usize]
+                        .default
+                        .ok_or(Stop::Limit("missing interface default"))?
                 };
-                let func = self
-                    .find_method(class, selector)
-                    .ok_or(Stop::Limit("unknown selector"))?;
                 self.call(func, values, vec![], depth + 1)
             }
             HExprKind::FieldGet { recv, field } => {
@@ -810,6 +822,34 @@ impl<'m> Oracle<'m> {
             .iter()
             .position(|class| class.native_repr == Some(want))
             .map(|index| index as u32)
+    }
+
+    fn value_class(&self, value: &OV) -> Result<u32, Stop> {
+        if let Some(class) = self.native_class(value) {
+            return Ok(class);
+        }
+        let object = self.as_obj(value)?;
+        let class = match &object.borrow().kind {
+            OKind::Instance { class, .. } => *class,
+            _ => return Err(Stop::Limit("method call on a non-instance")),
+        };
+        Ok(class)
+    }
+
+    fn interface_method_override(
+        &self,
+        mut class: u32,
+        interface: u32,
+        method: u32,
+    ) -> Option<bool> {
+        loop {
+            if let Some(conformance) = self.m.conformances.iter().find(|candidate| {
+                candidate.class == class && candidate.application.interface == interface
+            }) {
+                return conformance.method_overrides.get(method as usize).copied();
+            }
+            class = self.m.classes.get(class as usize)?.parent?;
+        }
     }
 
     fn find_method(&self, mut class: u32, selector: &str) -> Option<u32> {
@@ -2073,6 +2113,20 @@ impl<'m> Oracle<'m> {
                     _ => return Err(Stop::Limit("map op on a non-map")),
                 };
                 Ok(OV::Int(length as i64))
+            }
+            lm_abi::INTRINSIC_MAP_NEXT_INDEX => {
+                let map = self.as_obj(&values[0])?;
+                let cursor = self.as_int(&values[1])?;
+                let length = match &map.borrow().kind {
+                    OKind::Map(entries) => entries.len(),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                let position = if cursor >= 0 && (cursor as usize) < length {
+                    cursor
+                } else {
+                    -1
+                };
+                Ok(OV::Int(position))
             }
             lm_abi::INTRINSIC_MAP_KEY_AT | lm_abi::INTRINSIC_MAP_VALUE_AT => {
                 let map = self.as_obj(&values[0])?;

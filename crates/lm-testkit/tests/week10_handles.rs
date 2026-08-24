@@ -159,8 +159,8 @@ in Ok(parent_file)
     Ok(())
   end)
   child_closed = case child.run()
-  in Done(value) then value
-  in Fault(_)    then false
+  in Ok(value) then value
+  in Err(_)    then false
   end
   (child_closed, parent_file.read(1).is_err())
 in Err(_) then (false, false)

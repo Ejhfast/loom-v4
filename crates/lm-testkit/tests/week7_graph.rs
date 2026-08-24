@@ -56,8 +56,8 @@ def go(): Int with Vm
     end
   end, args: (a,))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -90,8 +90,8 @@ def go(): Bool with Vm
     end
   end, args: (a,))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then false
+  in Ok(v)  then v
+  in Err(_) then false
   end
 end
 
@@ -116,7 +116,7 @@ def go(): Int with Vm
     a.freeze()
   end, args: ())
   case vm.run()
-  in Done(n)
+  in Ok(n)
     case n.next
     in Some(m)
       case m.next
@@ -125,7 +125,7 @@ def go(): Int with Vm
       end
     in None then 0
     end
-  in Fault(_) then -1
+  in Err(_) then -1
   end
 end
 
@@ -159,8 +159,8 @@ def go(): Int with Vm
   end, args: (a,))
   a.value = 9
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -219,8 +219,8 @@ def go(): Bool with Vm
     g.a.left == g.a.right and g.a.left == g.b.right and g.a.left.tag == 3
   end, args: (d,))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then false
+  in Ok(v)  then v
+  in Err(_) then false
   end
 end
 
@@ -249,8 +249,8 @@ def go(): Bool with Vm
     pair.freeze()
   end, args: ())
   case vm.run()
-  in Done(p)  then p[0] == p[1] and p[0].tag == 9
-  in Fault(_) then false
+  in Ok(p)  then p[0] == p[1] and p[0].tag == 9
+  in Err(_) then false
   end
 end
 
@@ -349,7 +349,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(d031bdc1a552c48894a24a3608a5bebf8c0f0a27ab5ccb63e79d7afdf958c8e5)"
+        "Done(fc79dfb1942054d15279c7f26d32e39a45051dc1052dbf5e3e3d75ff31960614)"
     );
     assert_eq!(
         run(
@@ -474,8 +474,8 @@ def go(): Bool with Vm
     p[0] == p[1]
   end, args: (pair,))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then false
+  in Ok(v)  then v
+  in Err(_) then false
   end
 end
 
@@ -494,8 +494,8 @@ def go(): Bool with Vm
     p == q
   end, args: (a, a))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then false
+  in Ok(v)  then v
+  in Err(_) then false
   end
 end
 

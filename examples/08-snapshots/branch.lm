@@ -8,8 +8,8 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()
-    in Done(value) then value
-    in Fault(_)    then panic("the restored run faulted")
+    in Ok(value) then value
+    in Err(_)    then panic("the restored run faulted")
     end
   in Err(_) then panic("the snapshot restore failed")
   end

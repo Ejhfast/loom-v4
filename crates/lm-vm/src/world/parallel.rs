@@ -671,6 +671,7 @@ impl World {
         if matches!(
             op,
             lm_abi::OP_PROC_SPAWN
+                | lm_abi::OP_PROC_RUN_CLOSURE
                 | lm_abi::OP_VM_ACTIVATE
                 | lm_abi::OP_VM_ACTIVATE_OR_FAULT
                 | lm_abi::OP_VM_ACTIVATE_DEF

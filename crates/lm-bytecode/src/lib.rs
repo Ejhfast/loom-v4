@@ -21,6 +21,9 @@ use std::fmt;
 /// The sentinel that encodes "no parent class".
 pub const NO_PARENT: u32 = u32::MAX;
 
+/// Sentinel for an interface method without a default function.
+pub const NO_FUNC: u32 = u32::MAX;
+
 /// The reserved module path of the pinned core image.
 ///
 /// Every module embeds one copy of the core, and every copy carries
@@ -33,9 +36,26 @@ pub const NO_ROLE: u32 = u32::MAX;
 /// The sentinel for a slot instruction without a type application.
 pub const NO_APP: u32 = u32::MAX;
 
+/// The largest interface or method index in one interface call site.
+pub const MAX_INTERFACE_CALL_INDEX: u32 = u16::MAX as u32;
+
+/// Pack one interface index and one method index into one call site.
+pub const fn pack_interface_call_site(interface: u32, method: u32) -> Option<u32> {
+    if interface > MAX_INTERFACE_CALL_INDEX || method > MAX_INTERFACE_CALL_INDEX {
+        None
+    } else {
+        Some((interface << 16) | method)
+    }
+}
+
+/// Unpack one interface call site into its interface and method indices.
+pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
+    (site >> 16, site & MAX_INTERFACE_CALL_INDEX)
+}
+
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 257;
+pub const CORE_ROLE_COUNT: usize = 251;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -216,10 +236,25 @@ pub struct BcAssociated {
 pub struct BcInterfaceMethod {
     pub selector: u32,
     pub mut_self: bool,
+    /// Method-owned type parameters.
+    pub type_params: u32,
+    pub type_bounds: Vec<Vec<BcInterfaceUse>>,
+    /// Method-owned effect parameters.
+    pub effect_params: u32,
+    pub premises: Vec<BcTypePremise>,
     pub params: Vec<u32>,
     pub param_muts: Vec<bool>,
     pub ret: u32,
     pub row: Vec<BcRow>,
+    /// The interface-owned default function, or `NO_FUNC`.
+    pub default: u32,
+}
+
+/// One type premise on an interface method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcTypePremise {
+    pub subject: u32,
+    pub bounds: Vec<BcInterfaceUse>,
 }
 
 /// One nominal interface contract.
@@ -250,6 +285,9 @@ pub struct BcConformance {
     pub application: BcInterfaceUse,
     pub premises: Vec<BcConformancePremise>,
     pub associated: Vec<u32>,
+    /// One entry per interface method.
+    /// True selects compatible class dispatch. False selects the default.
+    pub method_overrides: Vec<bool>,
 }
 
 /// One callable contract used by a late-bound slot.
@@ -530,6 +568,8 @@ pub enum Instr {
     RaiseUserPanic,
     /// Pop a message and stop with `AssertionFailed`.
     RaiseAssertionFailed,
+    /// Pop a Fault and stop with its complete stored record.
+    RaiseFault,
     /// The runtime backstop behind a proven-exhaustive `case`. It
     /// faults if executed. Ends the block.
     Unreachable,
@@ -539,10 +579,12 @@ pub enum Instr {
     NeValue,
     /// Call one method through a verified nominal interface bound.
     CallInterface {
-        interface: u32,
-        method: u32,
+        /// The packed interface and method indices.
+        site: u32,
         /// The static receiver type under the active environment.
         recv_ty: u32,
+        /// The method-owned generic application, or `NO_APP`.
+        app: u32,
     },
     /// Run one instruction from an added bytecode family.
     Extended(ExtendedInstr),
@@ -958,6 +1000,7 @@ impl Instr {
                 | Instr::Return
                 | Instr::RaiseUserPanic
                 | Instr::RaiseAssertionFailed
+                | Instr::RaiseFault
                 | Instr::Unreachable
         )
     }
@@ -1299,7 +1342,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 53 adds terminal and signal core roles.
 /// Version 54 adds file-system boundary roles.
 /// Version 55 adds stream roles and child environment overlays.
-pub const VERSION: u16 = 55;
+/// Version 56 adds interface defaults and compact interface calls.
+pub const VERSION: u16 = 56;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1315,6 +1359,7 @@ const OP_CONST_STR: u8 = 0x03;
 const OP_LOAD_LOCAL: u8 = 0x04;
 const OP_STORE_LOCAL: u8 = 0x05;
 const OP_POP: u8 = 0x06;
+const OP_RAISE_FAULT: u8 = 0x07;
 const OP_ADD: u8 = 0x10;
 const OP_SUB: u8 = 0x11;
 const OP_MUL: u8 = 0x12;
@@ -1677,6 +1722,17 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         for method in &interface.methods {
             write_u32(&mut out, method.selector);
             out.push(u8::from(method.mut_self));
+            write_u32(&mut out, method.type_params);
+            encode_type_bounds(&mut out, &method.type_bounds);
+            write_u32(&mut out, method.effect_params);
+            write_u32(&mut out, method.premises.len() as u32);
+            for premise in &method.premises {
+                write_u32(&mut out, premise.subject);
+                write_u32(&mut out, premise.bounds.len() as u32);
+                for bound in &premise.bounds {
+                    encode_interface_use(&mut out, bound);
+                }
+            }
             write_u32(&mut out, method.params.len() as u32);
             for param in &method.params {
                 write_u32(&mut out, *param);
@@ -1687,6 +1743,7 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             }
             write_u32(&mut out, method.ret);
             encode_row(&mut out, &method.row);
+            write_u32(&mut out, method.default);
         }
     }
     write_u32(&mut out, module.conformances.len() as u32);
@@ -1704,6 +1761,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         write_u32(&mut out, conformance.associated.len() as u32);
         for associated in &conformance.associated {
             write_u32(&mut out, *associated);
+        }
+        write_u32(&mut out, conformance.method_overrides.len() as u32);
+        for selected in &conformance.method_overrides {
+            out.push(u8::from(*selected));
         }
     }
     write_u32(&mut out, module.class_bounds.len() as u32);
@@ -2159,15 +2220,11 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::EqRef => out.push(OP_EQ_REF),
         Instr::EqValue => out.push(OP_EQ_VALUE),
         Instr::NeValue => out.push(OP_NE_VALUE),
-        Instr::CallInterface {
-            interface,
-            method,
-            recv_ty,
-        } => {
+        Instr::CallInterface { site, recv_ty, app } => {
             out.push(OP_CALL_INTERFACE);
-            write_u32(out, *interface);
-            write_u32(out, *method);
+            write_u32(out, *site);
             write_u32(out, *recv_ty);
+            encode_optional_index(out, *app);
         }
         Instr::Extended(instr) => encode_extended(out, *instr),
         Instr::NeRef => out.push(OP_NE_REF),
@@ -2357,6 +2414,7 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::FaultDenied => out.push(OP_FAULT_DENIED),
         Instr::RaiseUserPanic => out.push(OP_RAISE_USER_PANIC),
         Instr::RaiseAssertionFailed => out.push(OP_RAISE_ASSERTION_FAILED),
+        Instr::RaiseFault => out.push(OP_RAISE_FAULT),
         Instr::RequestOp => out.push(OP_REQUEST_OP),
         Instr::Unreachable => out.push(OP_UNREACHABLE),
     }
@@ -3009,6 +3067,20 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..method_count {
             let selector = cur.u32()?;
             let mut_self = cur.flag()?;
+            let type_params = cur.u32()?;
+            let type_bounds = decode_type_bounds(&mut cur)?;
+            let effect_params = cur.u32()?;
+            let premise_count = cur.len()?;
+            let mut premises = Vec::with_capacity(premise_count);
+            for _ in 0..premise_count {
+                let subject = cur.u32()?;
+                let bound_count = cur.len()?;
+                let mut bounds = Vec::with_capacity(bound_count);
+                for _ in 0..bound_count {
+                    bounds.push(decode_interface_use(&mut cur)?);
+                }
+                premises.push(BcTypePremise { subject, bounds });
+            }
             let param_count = cur.len()?;
             if param_count > cur.remaining() / 4 {
                 return Err(DecodeError::BadLength);
@@ -3027,13 +3099,19 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             }
             let ret = cur.u32()?;
             let row = decode_row(&mut cur)?;
+            let default = cur.u32()?;
             methods.push(BcInterfaceMethod {
                 selector,
                 mut_self,
+                type_params,
+                type_bounds,
+                effect_params,
+                premises,
                 params,
                 param_muts,
                 ret,
                 row,
+                default,
             });
         }
         interfaces.push(BcInterface {
@@ -3078,11 +3156,20 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..associated_count {
             associated.push(cur.u32()?);
         }
+        let method_count = cur.len()?;
+        if method_count > cur.remaining() {
+            return Err(DecodeError::BadLength);
+        }
+        let mut method_overrides = Vec::with_capacity(method_count);
+        for _ in 0..method_count {
+            method_overrides.push(cur.flag()?);
+        }
         conformances.push(BcConformance {
             class,
             application,
             premises,
             associated,
+            method_overrides,
         });
     }
     let class_bound_count = cur.len()?;
@@ -3500,9 +3587,9 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             app: cur.u32()?,
         },
         OP_CALL_INTERFACE => Instr::CallInterface {
-            interface: cur.u32()?,
-            method: cur.u32()?,
+            site: cur.u32()?,
             recv_ty: cur.u32()?,
+            app: decode_optional_index(cur)?,
         },
         OP_CALL_VALUE => Instr::CallValue { argc: cur.u32()? },
         OP_MAKE_CLOSURE => Instr::MakeClosure {
@@ -3694,6 +3781,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_FAULT_DENIED => Instr::FaultDenied,
         OP_RAISE_USER_PANIC => Instr::RaiseUserPanic,
         OP_RAISE_ASSERTION_FAILED => Instr::RaiseAssertionFailed,
+        OP_RAISE_FAULT => Instr::RaiseFault,
         OP_REQUEST_OP => Instr::RequestOp,
         OP_UNREACHABLE => Instr::Unreachable,
         other => return Err(DecodeError::BadOpcode(other)),
@@ -3841,6 +3929,18 @@ mod tests {
     #[test]
     fn decoded_instruction_form_is_fixed_size() {
         assert_eq!(std::mem::size_of::<Instr>(), 16);
+    }
+
+    #[test]
+    fn interface_call_site_uses_two_sixteen_bit_indices() {
+        let site = pack_interface_call_site(MAX_INTERFACE_CALL_INDEX, MAX_INTERFACE_CALL_INDEX)
+            .expect("both indices fit");
+        assert_eq!(
+            unpack_interface_call_site(site),
+            (MAX_INTERFACE_CALL_INDEX, MAX_INTERFACE_CALL_INDEX)
+        );
+        assert!(pack_interface_call_site(MAX_INTERFACE_CALL_INDEX + 1, 0).is_none());
+        assert!(pack_interface_call_site(0, MAX_INTERFACE_CALL_INDEX + 1).is_none());
     }
 
     #[test]
@@ -4052,9 +4152,9 @@ mod tests {
                 app: 0,
             },
             Instr::CallInterface {
-                interface: 0,
-                method: 0,
+                site: pack_interface_call_site(0, 0).expect("the call site fits"),
                 recv_ty: 4,
+                app: NO_APP,
             },
             Instr::CallValue { argc: 2 },
             Instr::MakeClosure {

@@ -266,6 +266,9 @@ pub(crate) fn attach_source_debug(
 
     let mut definitions = Vec::new();
     for export in &module.exports {
+        if export.name.starts_with("$default.") {
+            continue;
+        }
         let (kind, span, syntax_kind) = match export.kind {
             lm_bytecode::ExportKind::Function => {
                 let span = function_spans.get(export.name.as_str()).ok_or_else(|| {

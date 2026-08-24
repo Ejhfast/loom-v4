@@ -730,6 +730,9 @@ impl World {
             ExecutionStop::Boundary(ExecOutcome::Raise { code, message }) => {
                 self.machines[vm as usize].set_fault(code, message, None);
             }
+            ExecutionStop::Boundary(ExecOutcome::Reraise(fault)) => {
+                self.machines[vm as usize].set_fault_record(fault);
+            }
             ExecutionStop::Boundary(ExecOutcome::Perform { op, args }) => {
                 return self.handle_perform(stack, vm, op, args);
             }

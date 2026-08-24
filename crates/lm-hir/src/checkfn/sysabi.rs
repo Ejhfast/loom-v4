@@ -82,6 +82,7 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiPrimitive::String => STRING,
                 lm_abi::AbiPrimitive::Bytes => lm_types::BYTES,
                 lm_abi::AbiPrimitive::VmSnapshot => lm_types::VM_SNAPSHOT,
+                lm_abi::AbiPrimitive::Fault => lm_types::FAULT,
             },
             lm_abi::AbiType::Core(core) => {
                 let name = match core {
@@ -458,9 +459,8 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        // `sys.proc.run(run)` transfers one active run to the
-        // scheduler. The mailbox-bearing form comes from proc-class
-        // lowering, so this surface chooses `M = Never`.
+        // `sys.proc.run(value)` transfers one active run or launches
+        // one nullary closure. Both forms use `M = Never`.
         if group == "Proc" && member == "run" {
             if args.len() != 1 {
                 return Err(Diagnostic::new(
@@ -470,23 +470,30 @@ impl<'o> FnChecker<'o> {
                 ));
             }
             let run = self.synth_expr(ctx, &args[0])?;
-            let Type::Run(result) = ctx.store.get(run.ty).clone() else {
-                return Err(Diagnostic::new(
-                    "E1004",
-                    format!(
-                        "`sys.proc.run` needs an active run, found {}",
-                        ctx.display_type(&self.env, run.ty)
-                    ),
-                    args[0].span,
-                ));
+            let (op, result, row) = match ctx.store.get(run.ty).clone() {
+                Type::Run(result) => (lm_abi::OP_PROC_RUN, result, Vec::new()),
+                Type::Fn(params, _, result, row) if params.is_empty() => {
+                    (lm_abi::OP_PROC_RUN_CLOSURE, result, row)
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`sys.proc.run` needs an active run or a nullary closure, found {}",
+                            ctx.display_type(&self.env, run.ty)
+                        ),
+                        args[0].span,
+                    ));
+                }
             };
-            self.charge_op(ctx, lm_abi::OP_PROC_RUN, span)?;
+            self.charge_op(ctx, op, span)?;
+            self.charge_row(ctx, &row, span)?;
             let ty = ctx.store.intern(Type::Handle(NEVER, result));
             return Ok(HExpr {
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
-                    op: lm_abi::OP_PROC_RUN,
+                    op,
                     args: vec![run],
                 },
             });
@@ -1539,13 +1546,22 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let (op, event) = match name {
-                    "run" => (lm_abi::OP_VM_RUN, "RunResult"),
-                    "step" => (lm_abi::OP_VM_STEP, "StepEvent"),
-                    _ => (lm_abi::OP_VM_DRIVE, "DriveEvent"),
+                let op = match name {
+                    "run" => lm_abi::OP_VM_RUN,
+                    "step" => lm_abi::OP_VM_STEP,
+                    _ => lm_abi::OP_VM_DRIVE,
                 };
                 self.charge_op(ctx, op, span)?;
-                let ty = Self::core_inst(ctx, event, vec![t]);
+                let ty = if name == "run" {
+                    Self::core_inst(ctx, "Result", vec![t, lm_types::FAULT])
+                } else {
+                    let event = if name == "step" {
+                        "StepEvent"
+                    } else {
+                        "DriveEvent"
+                    };
+                    Self::core_inst(ctx, event, vec![t])
+                };
                 HExpr {
                     ty,
                     mutable: true,
@@ -2049,7 +2065,7 @@ impl<'o> FnChecker<'o> {
             (Type::Handle(_, r), "done") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_PROC_DONE, span)?;
-                let ty = Self::core_inst(ctx, "ProcResult", vec![r]);
+                let ty = Self::core_inst(ctx, "Result", vec![r, lm_types::FAULT]);
                 HExpr {
                     ty,
                     mutable: true,

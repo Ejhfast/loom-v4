@@ -49,8 +49,8 @@ def run_checkout(
     |e: CodeError| e.message
   }?
   case run.run()
-  in Done(pair) then Ok(pair)
-  in Fault(_) then Err("the checkout faulted")
+  in Ok(pair) then Ok(pair)
+  in Err(_) then Err("the checkout faulted")
   end
 end
 

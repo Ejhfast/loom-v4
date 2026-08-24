@@ -39,6 +39,14 @@ pub struct GenericParam {
     pub span: Span,
 }
 
+/// One type premise on an interface method.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypePremise {
+    pub subject: TypeExpr,
+    pub bounds: Vec<InterfaceRef>,
+    pub span: Span,
+}
+
 /// One nominal interface application.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceRef {
@@ -78,10 +86,14 @@ pub struct AssociatedType {
 pub struct InterfaceMethod {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub mut_self: bool,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub row: Vec<RowItem>,
+    pub premises: Vec<TypePremise>,
+    /// `None` marks a required method. `Some` marks one default body.
+    pub body: Option<Vec<Stmt>>,
     pub span: Span,
 }
 
@@ -476,6 +488,8 @@ pub enum ExprKind {
         /// `None` requests result inference from the body.
         ret: Option<TypeExpr>,
         row: Vec<RowItem>,
+        /// True when the source contains a `with` clause.
+        row_explicit: bool,
         body: Vec<Stmt>,
     },
     /// `if ... elsif ... else ... end` as an expression.
@@ -932,6 +946,7 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             params,
             ret,
             row,
+            row_explicit: _,
             body,
         } => {
             let _ = writeln!(

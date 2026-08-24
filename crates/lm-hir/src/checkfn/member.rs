@@ -243,6 +243,41 @@ impl<'o> FnChecker<'o> {
         }
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
+        if name == "value" {
+            if let Type::Inst(class, arguments) = ctx.store.get(recv_ty).clone() {
+                if class.0 == ctx.core_types["Result"] && arguments.len() == 2 {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`Result.value` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    Self::expect_no_args("Result.value", args, span)?;
+                    if arguments[1] != FAULT {
+                        return Err(Diagnostic::new(
+                            "E1026",
+                            format!(
+                                "`Result.value` needs Result[T, Fault], found {}",
+                                ctx.display_type(&self.env, recv_ty)
+                            ),
+                            name_span,
+                        ));
+                    }
+                    let func = ctx.core_func_index["_result_fault_value"];
+                    return Ok(HExpr {
+                        ty: arguments[0],
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func,
+                            targs: vec![arguments[0]],
+                            rowargs: Vec::new(),
+                            args: vec![recv_h],
+                        },
+                    });
+                }
+            }
+        }
         if let Type::Op(op, fn_ty) = ctx.store.get(recv_ty).clone() {
             if name != "wait" {
                 return Err(Diagnostic::new(
@@ -389,6 +424,24 @@ impl<'o> FnChecker<'o> {
                     }
                 }
             }
+            if let Some((application, interface, method, requirement)) =
+                ctx.default_method(&self.env, recv_ty, name, name_span)?
+            {
+                return self.check_interface_method_call(
+                    ctx,
+                    recv_h,
+                    application,
+                    interface,
+                    method,
+                    requirement,
+                    name,
+                    name_span,
+                    type_args,
+                    args,
+                    expected,
+                    span,
+                );
+            }
             return Err(Diagnostic::new(
                 "E1026",
                 format!(
@@ -398,47 +451,23 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
-        if let Some((interface, method, requirement)) =
+        if let Some((application, interface, method, requirement)) =
             ctx.bound_method(&self.env, recv_ty, name, name_span)?
         {
-            if !type_args.is_empty() {
-                return Err(Diagnostic::new(
-                    "E1024",
-                    "an interface method does not take type arguments",
-                    name_span,
-                ));
-            }
-            if requirement.mut_self && !recv_h.mutable {
-                return Err(Diagnostic::new(
-                    "E1035",
-                    format!("the method `{name}` needs a mutable receiver"),
-                    name_span,
-                ));
-            }
-            if requirement.mut_self {
-                self.guard_iterated_mutation(&recv_h, name_span)?;
-            }
-            let checked = self.check_args_simple(
+            return self.check_interface_method_call(
                 ctx,
-                args,
-                &requirement.params,
-                &requirement.param_muts,
-                &requirement.param_names,
+                recv_h,
+                application,
+                interface,
+                method,
+                requirement,
                 name,
+                name_span,
+                type_args,
+                args,
+                expected,
                 span,
-            )?;
-            self.charge_row(ctx, &requirement.row, span)?;
-            return Ok(HExpr {
-                ty: requirement.ret,
-                mutable: true,
-                kind: HExprKind::InterfaceCall {
-                    recv: Box::new(recv_h),
-                    interface,
-                    method,
-                    selector: name.to_string(),
-                    args: checked,
-                },
-            });
+            );
         }
         if !type_args.is_empty() {
             return Err(Diagnostic::new(
@@ -448,6 +477,103 @@ impl<'o> FnChecker<'o> {
             ));
         }
         self.check_native_method(ctx, recv_h, recv_ty, name, name_span, args, span)
+    }
+
+    /// Check one generic or monomorphic interface method call.
+    #[allow(clippy::too_many_arguments)]
+    fn check_interface_method_call(
+        &mut self,
+        ctx: &mut Ctx,
+        recv: HExpr,
+        application: InterfaceUse,
+        interface: u32,
+        method: u32,
+        requirement: std::rc::Rc<crate::check::InterfaceMethodSig>,
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        expected: Option<TypeId>,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if requirement.mut_self && !recv.mutable {
+            return Err(Diagnostic::new(
+                "E1035",
+                format!("the method `{name}` needs a mutable receiver"),
+                name_span,
+            ));
+        }
+        if requirement.mut_self {
+            self.guard_iterated_mutation(&recv, name_span)?;
+        }
+        let contract = ctx.interfaces[interface as usize].clone();
+        let type_prefix = 1 + contract.type_params.len();
+        let row_prefix = contract.effect_params.len();
+        let mut type_names = Vec::with_capacity(type_prefix + requirement.own_type_params.len());
+        type_names.push("Self".to_string());
+        type_names.extend(contract.type_params.iter().cloned());
+        type_names.extend(requirement.own_type_params.iter().cloned());
+        let mut type_bounds = vec![Vec::new()];
+        type_bounds.extend(contract.type_bounds.iter().cloned());
+        type_bounds.extend(requirement.own_type_bounds.iter().cloned());
+        let mut pre_bound = Vec::with_capacity(type_names.len());
+        pre_bound.push(Some(recv.ty));
+        pre_bound.extend(application.type_args.iter().copied().map(Some));
+        pre_bound.extend(vec![None; requirement.own_type_params.len()]);
+        let mut pre_bound_rows: Vec<Option<lm_types::Row>> =
+            application.row_args.iter().cloned().map(Some).collect();
+        pre_bound_rows.extend(vec![None; requirement.own_effect_params.len()]);
+        let out = self.check_poly_call(
+            ctx,
+            name,
+            span,
+            &type_names,
+            &type_bounds,
+            row_prefix + requirement.own_effect_params.len(),
+            pre_bound,
+            pre_bound_rows,
+            type_prefix,
+            type_args,
+            &requirement.params,
+            &requirement.param_muts,
+            &requirement.param_names,
+            requirement.ret,
+            &requirement.row,
+            args,
+            expected,
+        )?;
+        for premise in &requirement.premises {
+            let subject = ctx
+                .store
+                .substitute(premise.subject, &out.targs, &out.rowargs);
+            let subject = ctx.normalize_associated(&self.env, subject);
+            for bound in &premise.bounds {
+                let required = ctx.substitute_interface_use(bound, &out.targs, &out.rowargs);
+                if !ctx.type_conforms(&self.env, subject, &required) {
+                    let found = ctx.display_type(&self.env, subject);
+                    let contract = &ctx.interfaces[required.interface as usize].name;
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!("the method `{name}` needs `{found}` to conform to `{contract}`"),
+                        name_span,
+                    ));
+                }
+            }
+        }
+        let ret = ctx.normalize_associated(&self.env, out.ret);
+        Ok(HExpr {
+            ty: ret,
+            mutable: true,
+            kind: HExprKind::InterfaceCall {
+                recv: Box::new(recv),
+                interface,
+                method,
+                selector: name.to_string(),
+                own_targs: out.targs[type_prefix..].to_vec(),
+                own_rowargs: out.rowargs[row_prefix..].to_vec(),
+                args: out.args,
+            },
+        })
     }
 
     /// Check a call of one method the class declares.
@@ -556,6 +682,7 @@ impl<'o> FnChecker<'o> {
                     },
                     sig.own_effect_params.len(),
                     pre_bound,
+                    vec![None; sig.own_effect_params.len()],
                     own_start,
                     type_args,
                     &sig.params,
@@ -1000,6 +1127,7 @@ impl<'o> FnChecker<'o> {
             &bounds,
             sig.own_effect_params.len(),
             pre_bound,
+            vec![None; sig.own_effect_params.len()],
             class_names.len(),
             &[],
             &sig.params,
@@ -1180,6 +1308,7 @@ impl<'o> FnChecker<'o> {
         ret: &Option<ast::TypeExpr>,
         row: &[ast::RowItem],
         expected_ret: Option<TypeId>,
+        infer_row: bool,
         body: &[ast::Stmt],
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
@@ -1232,7 +1361,7 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env: env.clone(),
             declared_row: declared_row.clone(),
-            collect_row: false,
+            collect_row: infer_row,
         };
         let (body_h, body_ty) = match declared_ret {
             Some(t) => {
@@ -1249,6 +1378,11 @@ impl<'o> FnChecker<'o> {
                 let ty = if ty == NEVER { UNIT } else { ty };
                 (b, ty)
             }
+        };
+        let closure_row = if infer_row {
+            child.declared_row.clone()
+        } else {
+            declared_row
         };
         let locals: Vec<TypeId> = child.locals.iter().map(|(t, _)| *t).collect();
         let capture_tys: Vec<TypeId> = child.captures.iter().map(|c| c.ty).collect();
@@ -1291,7 +1425,7 @@ impl<'o> FnChecker<'o> {
                 params: ptys.clone(),
                 param_muts: pmuts.clone(),
                 ret: body_ty,
-                row: declared_row.clone(),
+                row: closure_row.clone(),
                 captures: capture_tys,
                 locals,
                 body: body_h,
@@ -1304,10 +1438,10 @@ impl<'o> FnChecker<'o> {
                 param_muts: pmuts.clone(),
                 param_names,
                 ret: body_ty,
-                row: declared_row.clone(),
+                row: closure_row.clone(),
             },
         );
-        let fn_ty = ctx.store.intern_fn(ptys, pmuts, body_ty, declared_row);
+        let fn_ty = ctx.store.intern_fn(ptys, pmuts, body_ty, closure_row);
         Ok(HExpr {
             ty: fn_ty,
             mutable: true,

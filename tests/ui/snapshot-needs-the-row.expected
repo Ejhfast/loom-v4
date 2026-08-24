@@ -1,2 +1,2 @@
-error[E1046]: this call needs the effect row `Vm.SnapshotHeld`, but the declared row of the enclosing callable is empty
+error[E1046]: this call needs effect row `Vm.SnapshotHeld`, but the enclosing callable declares empty. Add the row to the enclosing callable's `with` clause
   --> tests/ui/snapshot-needs-the-row.lm:2:8

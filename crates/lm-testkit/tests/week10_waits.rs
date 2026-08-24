@@ -93,8 +93,8 @@ end
 supervisor = Supervisor.spawn()
 supervisor.send(Stop)
 case supervisor.done()
-in Done(value) then value
-in Fault(fault) then fault.code()
+in Ok(value) then value
+in Err(fault) then fault.code()
 end
 "#;
 
@@ -290,8 +290,8 @@ in Err(_) then ()
 end
 supervisor.send(Ping)
 case supervisor.done()
-in Done(value) then value
-in Fault(_) then -5
+in Ok(value) then value
+in Err(_) then -5
 end
 "#;
 
@@ -319,8 +319,8 @@ in Ok(vm)
 in Err(_) then ()
 end
 case probe.done()
-in Done(_) then "unexpected success"
-in Fault(fault) then fault.code()
+in Ok(_) then "unexpected success"
+in Err(fault) then fault.code()
 end
 "#;
 

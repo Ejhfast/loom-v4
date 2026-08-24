@@ -62,6 +62,103 @@ fn compare_modes(
 }
 
 #[test]
+fn par_map_matches_map_in_both_scheduler_modes() {
+    let source = r#"
+def work(value: Int): Int
+  total = value
+  i = 0
+  while i < 1000
+    total = total.wrapping_add(i)
+    i = i + 1
+  end
+  total
+end
+
+def compare(): (Bool, Bool, Bool) with Proc
+  values = Range(0, 64).to_list()
+  sequential = values.map(work)
+  from_list = values.par_map(work)
+  from_range = Range(0, 64).par_map(work)
+  empty = List[Int]().par_map(work)
+  (from_list == sequential, from_range == sequential, empty.is_empty())
+end
+
+compare()
+"#;
+    let (deterministic, parallel, stats) =
+        compare_modes(source, &["Proc"]).expect("both scheduler modes run");
+    assert_eq!(deterministic, "Done((true, true, true))");
+    assert_eq!(parallel, deterministic);
+    assert!(stats.max_active_leases > 1);
+
+    let faulting = r#"
+def fail(): List[Int] with Proc
+  Range(0, 32).par_map(do |value: Int|: Int
+    if value == 17
+      panic("parallel failure")
+    end
+    value
+  end)
+end
+fail()
+"#;
+    let (deterministic, parallel, _) =
+        compare_modes(faulting, &["Proc"]).expect("both fault paths run");
+    assert_eq!(deterministic, "Fault(UserPanic)");
+    assert_eq!(parallel, deterministic);
+}
+
+#[test]
+fn a_running_closure_proc_produces_admissible_snapshot_bytes() {
+    let source = r#"
+class Gate < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then 0
+    end
+  end
+end
+
+def capture(): String with Proc, Vm
+  offset = 7
+  gate = Gate.spawn()
+  worker = sys.proc.run(do ||: Int with Proc
+    gate.send(1)
+    value = 0
+    while value < 2000000
+      value = value + 1
+    end
+    value + offset
+  end)
+  gate.done().value()
+  admitted = case worker.snapshot_wait(0)
+  in Ok(snapshot)
+    case snapshot.to_bytes()
+    in Ok(bytes)
+      case sys.vm.load_snapshot(bytes)
+      in Ok(_) then "admitted"
+      in Err(error) then "load: #{error}"
+      end
+    in Err(error) then "encode: #{error}"
+    end
+  in Err(error) then "capture: #{error}"
+  end
+  if worker.done().value() == 2000007
+    admitted
+  else
+    "bad result"
+  end
+end
+capture()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 2, &["Proc", "Vm"]).expect("the closure snapshot runs");
+    assert_eq!(outcome, "Done(\"admitted\")");
+    assert!(stats.scoped_safepoint_waits > 0);
+}
+
+#[test]
 fn one_runnable_task_stays_on_the_inline_path() {
     let source = "i = 0\nwhile i < 10000\n  i = i + 1\nend\ni\n";
     let (outcome, stats) = run_parallel(source, 4).expect("the inline world runs");
@@ -95,7 +192,7 @@ fn parallel_procs_preserve_mailbox_results() {
                   (a.done(), b.done())\n";
     assert_eq!(
         run_parallel(source, 3).expect("the parallel world runs").0,
-        "Done((Done(3), Done(30)))"
+        "Done((Ok(3), Ok(30)))"
     );
 }
 
@@ -111,8 +208,8 @@ end
 def run_leaf(): Int with Proc
   child = Leaf.spawn()
   case child.done()
-  in Done(value) then value
-  in Fault(_) then -1
+  in Ok(value) then value
+  in Err(_) then -1
   end
 end
 
@@ -152,10 +249,7 @@ spinner = Spinner.spawn()
     );
     world.allow("Proc").expect("the Proc grant exists");
     let expected = lm_proc::run_world(&mut world);
-    assert_eq!(
-        world.show_outcome(&expected),
-        "Done((Done(14), Done(300000)))"
-    );
+    assert_eq!(world.show_outcome(&expected), "Done((Ok(14), Ok(300000)))");
 
     let mut world = World::new_with_limits(
         &loaded,
@@ -168,10 +262,7 @@ spinner = Spinner.spawn()
     let outcome = scheduler
         .run_parallel(&mut world, 3)
         .expect("the nested spawn world runs");
-    assert_eq!(
-        world.show_outcome(&outcome),
-        "Done((Done(14), Done(300000)))"
-    );
+    assert_eq!(world.show_outcome(&outcome), "Done((Ok(14), Ok(300000)))");
     assert!(scheduler.stats().max_active_leases >= 2);
     assert!(scheduler.stats().global_quiescence > 0);
 }
@@ -195,14 +286,14 @@ class Maker < Proc
 end
 
 case Maker.spawn().done()
-in Done(child)
+in Ok(child)
   child.send(3)
   child.close()
   case child.done()
-  in Done(value) then value
-  in Fault(_) then -1
+  in Ok(value) then value
+  in Err(_) then -1
   end
-in Fault(_)
+in Err(_)
   -2
 end
 "#;
@@ -227,7 +318,7 @@ fn independent_cpu_procs_hold_two_worker_leases() {
                   b = Spinner.spawn()\n\
                   (a.done(), b.done())\n";
     let (outcome, stats) = run_parallel(source, 2).expect("the parallel world runs");
-    assert_eq!(outcome, "Done((Done(200000), Done(200000)))");
+    assert_eq!(outcome, "Done((Ok(200000), Ok(200000)))");
     assert_eq!(stats.max_active_leases, 2);
     assert!(stats.local_continuations > 0);
 }
@@ -254,7 +345,7 @@ d = Spinner.spawn()
     let (outcome, stats) = run_parallel(source, 2).expect("the local queue world runs");
     assert_eq!(
         outcome,
-        "Done((Done(200000), Done(200000), Done(200000), Done(200000)))"
+        "Done((Ok(200000), Ok(200000), Ok(200000), Ok(200000)))"
     );
     assert!(stats.local_rotations > 0);
 }
@@ -296,7 +387,7 @@ sender = Sender.spawn(target)
 (sender.done(), target.done())
 "#;
     let (outcome, stats) = run_parallel(source, 2).expect("the recalled target completes");
-    assert_eq!(outcome, "Done((Done(true), Done(2000007)))");
+    assert_eq!(outcome, "Done((Ok(true), Ok(2000007)))");
     assert!(stats.worker_recalls > 0);
 }
 
@@ -321,7 +412,7 @@ right = Builder.spawn()
 (left.done(), right.done())
 "#;
     let (outcome, stats) = run_parallel(source, 2).expect("the allocation world runs");
-    assert_eq!(outcome, "Done((Done(106000), Done(106000)))");
+    assert_eq!(outcome, "Done((Ok(106000), Ok(106000)))");
     assert_eq!(stats.max_active_leases, 2);
     assert!(stats.worker_heap_growth_bytes > 0);
     assert!(stats.local_continuations > 0);
@@ -394,7 +485,7 @@ fn a_pause_stops_an_active_worker_at_one_turn_boundary() {
                   pauser = Pauser.spawn(spinner)\n\
                   pauser.done()\n";
     let (outcome, stats) = run_parallel(source, 2).expect("the active proc pauses");
-    assert_eq!(outcome, "Done(Done(true))");
+    assert_eq!(outcome, "Done(Ok(true))");
     assert_eq!(stats.max_active_leases, 2);
     assert!(stats.scoped_safepoint_waits > 0);
     assert_eq!(stats.global_quiescence, 0);
@@ -451,12 +542,12 @@ target.done()
 "#;
     let (outcome, _) = run_parallel(source, 4).expect("the concurrent senders finish");
     let accepted = [
-        "Done(Done([1, 2, 10, 20]))",
-        "Done(Done([1, 10, 2, 20]))",
-        "Done(Done([1, 10, 20, 2]))",
-        "Done(Done([10, 20, 1, 2]))",
-        "Done(Done([10, 1, 20, 2]))",
-        "Done(Done([10, 1, 2, 20]))",
+        "Done(Ok([1, 2, 10, 20]))",
+        "Done(Ok([1, 10, 2, 20]))",
+        "Done(Ok([1, 10, 20, 2]))",
+        "Done(Ok([10, 20, 1, 2]))",
+        "Done(Ok([10, 1, 20, 2]))",
+        "Done(Ok([10, 1, 2, 20]))",
     ];
     assert!(accepted.contains(&outcome.as_str()), "{outcome}");
 }
@@ -506,7 +597,7 @@ sink = ManySink.spawn()
     }
     source.push_str("sink.close()\nsink.done()\n");
     let (outcome, _) = run_parallel(&source, 4).expect("all concurrent senders finish");
-    assert_eq!(outcome, "Done(Done(160))");
+    assert_eq!(outcome, "Done(Ok(160))");
 }
 
 #[test]
@@ -536,7 +627,7 @@ sink.done()
 "#;
     let (outcome, stats) =
         run_parallel_with(source, 4, &["Proc"]).expect("the message stream runs");
-    assert_eq!(outcome, "Done(Done(100))");
+    assert_eq!(outcome, "Done(Ok(100))");
     assert_eq!(stats.max_active_leases, 0);
 }
 
@@ -589,7 +680,7 @@ target.done()
         .run_parallel(&mut world, 4)
         .expect("the race world runs");
     let shown = world.show_outcome(&outcome);
-    assert!(matches!(shown.as_str(), "Done(Done(0))" | "Done(Done(7))"));
+    assert!(matches!(shown.as_str(), "Done(Ok(0))" | "Done(Ok(7))"));
     let send = world
         .trace()
         .iter()
@@ -685,10 +776,7 @@ timer = Timer.spawn()
     let outcome = Scheduler::default()
         .run_parallel(&mut world, 2)
         .expect("the mixed wake world runs");
-    assert_eq!(
-        world.show_outcome(&outcome),
-        "Done((Done(300000), Done(2)))"
-    );
+    assert_eq!(world.show_outcome(&outcome), "Done((Ok(300000), Ok(2)))");
 }
 
 #[test]
@@ -721,8 +809,8 @@ end
 supervisor = Supervisor.spawn()
 supervisor.send(Stop)
 case supervisor.done()
-in Done(value) then value
-in Fault(fault) then fault.code()
+in Ok(value) then value
+in Err(fault) then fault.code()
 end
 "#;
     let (outcome, _) = run_parallel_with(source, 3, &["Proc", "Vm", "Wait", "Clock"])
@@ -792,18 +880,18 @@ gate = Gate.spawn()
 child = BusyChild.spawn(gate)
 worker = BusySnapshot.spawn(gate, child)
 case gate.done()
-in Done(2) then ()
-in Done(_) then panic("the gate returned a bad count")
-in Fault(_) then panic("the gate faulted")
+in Ok(2) then ()
+in Ok(_) then panic("the gate returned a bad count")
+in Err(_) then panic("the gate faulted")
 end
 captured = worker.snapshot_wait(0).is_ok()
 worker_finished = case worker.done()
-in Done(value) then value == 2000000
-in Fault(_) then false
+in Ok(value) then value == 2000000
+in Err(_) then false
 end
 child_finished = case child.done()
-in Done(value) then value == 2000000
-in Fault(_) then false
+in Ok(value) then value == 2000000
+in Err(_) then false
 end
 captured and worker_finished and child_finished
 "#;
@@ -866,19 +954,19 @@ def exercise(): Result[Bool, String] with Vm, Proc
   }?
   run.table().pass(Proc)
   worker = case run.run()
-  in Done(handle) then handle
-  in Fault(_) then return Err("the launcher faulted")
+  in Ok(handle) then handle
+  in Err(_) then return Err("the launcher faulted")
   end
   case signal.done()
-  in Done(_) then ()
-  in Fault(_) then return Err("the start signal faulted")
+  in Ok(_) then ()
+  in Err(_) then return Err("the start signal faulted")
   end
   image.install(spare).map_error() {
     |error: CodeError| error.message
   }?
   case worker.done()
-  in Done(value) then Ok(value == 500000)
-  in Fault(_) then Err("the worker faulted")
+  in Ok(value) then Ok(value == 500000)
+  in Err(_) then Err("the worker faulted")
   end
 end
 
@@ -972,19 +1060,19 @@ def exercise(): Result[Bool, String] with Vm, Proc
   }?
   run.table().pass(Proc)
   worker = case run.run()
-  in Done(handle) then handle
-  in Fault(_) then return Err("the launcher faulted")
+  in Ok(handle) then handle
+  in Err(_) then return Err("the launcher faulted")
   end
   case signal.done()
-  in Done(_) then ()
-  in Fault(_) then return Err("the start signal faulted")
+  in Ok(_) then ()
+  in Err(_) then return Err("the start signal faulted")
   end
   image.replace(original, revision).map_error() {
     |error: CodeError| error.message
   }?
   total = case worker.done()
-  in Done(value) then value
-  in Fault(_) then return Err("the worker faulted")
+  in Ok(value) then value
+  in Err(_) then return Err("the worker faulted")
   end
   Ok(total >= 200000 and total <= 400000)
 end

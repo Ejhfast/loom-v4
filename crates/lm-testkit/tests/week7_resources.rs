@@ -132,14 +132,14 @@ def go(): Int with Vm
       7
     end, args: ())
     case inner.run()
-    in Done(v)  then v
-    in Fault(_) then -1
+    in Ok(v)  then v
+    in Err(_) then -1
     end
   end, args: ())
   outer.table().pass(Vm)
   case outer.run()
-  in Done(v)  then v
-  in Fault(_) then -2
+  in Ok(v)  then v
+  in Err(_) then -2
   end
 end
 
@@ -214,8 +214,8 @@ def go(): Int with Vm
     p.len() + q.len() + r.len()
   end, args: (a, b, c))
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 
@@ -258,8 +258,8 @@ def go(count: Int): Int with Vm, Clock.Now
     1
   end)
   case vm.run()
-  in Done(v)  then v
-  in Fault(_) then -1
+  in Ok(v)  then v
+  in Err(_) then -1
   end
 end
 

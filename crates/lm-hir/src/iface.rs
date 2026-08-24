@@ -270,6 +270,7 @@ impl Naming<'_> {
                         .iter()
                         .map(|ty| self.ty(*ty))
                         .collect(),
+                    method_overrides: conformance.method_overrides.clone(),
                 })
                 .collect(),
             parent: info.parent.map(|p| self.qual(p)),
@@ -327,11 +328,27 @@ impl Naming<'_> {
                 .map(|method| IfaceInterfaceMethod {
                     name: method.name.clone(),
                     mut_self: method.mut_self,
+                    type_params: method.own_type_params.len() as u32,
+                    type_bounds: self.bounds(&method.own_type_bounds),
+                    effect_params: method.own_effect_params.len() as u32,
+                    premises: method
+                        .premises
+                        .iter()
+                        .map(|premise| lm_bytecode::interface::IfaceTypePremise {
+                            subject: self.ty(premise.subject),
+                            bounds: premise
+                                .bounds
+                                .iter()
+                                .map(|bound| self.interface_use(bound))
+                                .collect(),
+                        })
+                        .collect(),
                     params: method.params.iter().map(|ty| self.ty(*ty)).collect(),
                     param_muts: method.param_muts.clone(),
                     param_names: method.param_names.clone(),
                     ret: self.ty(method.ret),
                     row: self.row(&method.row),
+                    default: method.default_binding.clone(),
                 })
                 .collect(),
         }

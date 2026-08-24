@@ -1390,8 +1390,7 @@ impl World {
             state,
             scheduler_owned: record.owner == crate::machine::Ownership::Scheduler,
             paused: record.paused,
-            // The flag names the machines that `Proc.Spawn` launched,
-            // so a restore mints exactly the grant the launch minted.
+            // The flag names machines from class and closure proc launches.
             is_proc: record.is_proc,
             body_func: record.body_func,
             // The world environment identifier. `build_type_tables`

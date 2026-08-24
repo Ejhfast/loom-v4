@@ -9,6 +9,13 @@ fn run(source: &str) -> Result<String, String> {
     run_allowed("conditional.lm", source, &[])
 }
 
+fn verify_rejection(module: &lm_bytecode::Module, needle: &str) {
+    let bytes = lm_bytecode::encode(module);
+    let decoded = lm_bytecode::decode(&bytes).expect("the forged module decodes");
+    let error = lm_verify::verify_module(&decoded).expect_err("the verifier rejects the forgery");
+    assert!(error.message.contains(needle), "{error:?}");
+}
+
 #[test]
 fn a_conditional_conformance_uses_its_premise() {
     let source = r##"
@@ -127,7 +134,7 @@ Fixed()
     .expect_err("the receiver mismatch must reject");
     assert!(
         error.contains(
-            "error[E1053]: the method `next` uses `self`, but interface `Cursor` requires `mut self`"
+            "error[E1053]: the method `next` does not satisfy interface `Cursor`: the contract requires `mut self`"
         ),
         "{error}"
     );
@@ -378,6 +385,74 @@ end
 }
 
 #[test]
+fn the_verifier_checks_interface_default_witnesses() {
+    let mut short = compile_text(
+        "defaults.lm",
+        "interface Named\n  def name(self): String\n    \"default\"\n  end\nend\n\
+         final class Item implements Named\nend\nItem().name()\n",
+    )
+    .expect("the default program compiles");
+    let item = short
+        .classes
+        .iter()
+        .position(|class| class.name == "Item")
+        .expect("Item exists") as u32;
+    short
+        .conformances
+        .iter_mut()
+        .find(|item_conformance| item_conformance.class == item)
+        .expect("Item conforms")
+        .method_overrides
+        .clear();
+    verify_rejection(&short, "method witness table does not match");
+
+    let mut missing = compile_text(
+        "required.lm",
+        "interface Named\n  def name(self): String\nend\n\
+         final class Item implements Named\n\
+         \x20 def name(self): String\n    \"item\"\n  end\nend\nItem().name()\n",
+    )
+    .expect("the required method program compiles");
+    let item = missing
+        .classes
+        .iter()
+        .position(|class| class.name == "Item")
+        .expect("Item exists") as u32;
+    missing
+        .conformances
+        .iter_mut()
+        .find(|item_conformance| item_conformance.class == item)
+        .expect("Item conforms")
+        .method_overrides[0] = false;
+    verify_rejection(&missing, "selects a missing default");
+
+    let mut diamond = compile_text(
+        "diamond.lm",
+        "interface Left\n  def name(self): String\n    \"left\"\n  end\nend\n\
+         interface Right\n  def name(self): String\n    \"right\"\n  end\nend\n\
+         final class Item implements Left, Right\n\
+         \x20 def name(self): String\n    \"item\"\n  end\nend\nItem().name()\n",
+    )
+    .expect("the explicit diamond override compiles");
+    let item = diamond
+        .classes
+        .iter()
+        .position(|class| class.name == "Item")
+        .expect("Item exists") as u32;
+    for conformance in diamond
+        .conformances
+        .iter_mut()
+        .filter(|conformance| conformance.class == item)
+    {
+        conformance.method_overrides[0] = false;
+    }
+    verify_rejection(
+        &diamond,
+        "two interface defaults need one explicit class override",
+    );
+}
+
+#[test]
 fn conditional_conformances_cross_module_boundaries() {
     let library_source = r##"
 interface Labeled
@@ -451,6 +526,55 @@ end
     let mut vm = Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"box word\")");
+}
+
+#[test]
+fn interface_defaults_cross_module_boundaries() {
+    let library = compile_module(
+        "lib.defaults",
+        &SourceFile::new(
+            "defaults.lm",
+            "interface Named\n  def name(self): String\n    \"default\"\n  end\nend\n\
+             final class Box implements Named\nend\n",
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the default library compiles");
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    compile_env
+        .bind_root("defaults", "lib.defaults")
+        .expect("the root binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "main.lm",
+            "use defaults\n\
+             def name[T: defaults.Named](value: T): String\n  value.name()\nend\n\
+             \"#{defaults.Box().name()}:#{name(defaults.Box())}\"\n",
+        ),
+        &compile_env.freeze(),
+        true,
+    )
+    .expect("the default caller compiles");
+    let mut link_env = LinkEnv::new();
+    for module in [&library, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: module.path.clone(),
+                module: module.module.clone(),
+                interface: module.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(\"default:default\")");
 }
 
 #[test]

@@ -134,8 +134,8 @@ def main(): String with Proc, Tcp.Server, Tcp.Connect
   missing = call(http, limits, port, HttpRequest("GET", "/nowhere", [], Bytes("")))
 
   report = case server.done()
-  in Done(text) then text
-  in Fault(_)   then "the server proc faulted"
+  in Ok(text) then text
+  in Err(_)   then "the server proc faulted"
   end
   "#{health} | #{echo} | #{missing} | #{report}"
 end

@@ -291,7 +291,7 @@ fn parallel_cpu_source(tasks: usize, iterations: usize) -> (String, String) {
     }
     source.push_str(")\n");
     let values = (0..tasks)
-        .map(|_| format!("Done({iterations})"))
+        .map(|_| format!("Ok({iterations})"))
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("Done(({values}))"))
@@ -316,7 +316,7 @@ fn parallel_allocating_source(tasks: usize, iterations: usize) -> (String, Strin
     source.push_str(")\n");
     let length = iterations.saturating_mul(4);
     let values = (0..tasks)
-        .map(|_| format!("Done({length})"))
+        .map(|_| format!("Ok({length})"))
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("Done(({values}))"))
@@ -343,7 +343,7 @@ fn parallel_churn_source(tasks: usize, iterations: usize) -> (String, String) {
         .map(|value| value.to_string().len() + 1)
         .sum();
     let values = (0..tasks)
-        .map(|_| format!("Done({length})"))
+        .map(|_| format!("Ok({length})"))
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("Done(({values}))"))
@@ -401,12 +401,120 @@ mask = (1 << {size}) - 1
     for branch in 0..size {
         source.push_str(&format!(
             "total = total + case p{branch}.done()\n\
-             in Done(value) then value\n\
-             in Fault(_) then 0\n\
+             in Ok(value) then value\n\
+             in Err(_) then 0\n\
              end\n"
         ));
     }
     source.push_str("total\n");
+    let solutions = match size {
+        12 => 14_200,
+        13 => 73_712,
+        _ => panic!("the benchmark needs a recorded queen count"),
+    };
+    (source, format!("Done({solutions})"))
+}
+
+fn iterable_queens_source(size: usize, parallel: bool) -> (String, String) {
+    let mapping = if parallel { "par_map" } else { "map" };
+    let source = format!(
+        r#"def count_queens(columns: Int, left: Int, right: Int, mask: Int): Int
+  if columns == mask
+    return 1
+  end
+  available = mask & ~(columns | left | right)
+  total = 0
+  while available != 0
+    bit = available & (0 - available)
+    available = available ^ bit
+    total = total + count_queens(
+      columns | bit,
+      ((left | bit) << 1) & mask,
+      (right | bit) >>> 1,
+      mask
+    )
+  end
+  total
+end
+
+mask = (1 << {size}) - 1
+counts = Range(0, {size}).{mapping}(do |branch: Int|: Int
+  bit = 1 << branch
+  count_queens(
+    bit,
+    (bit << 1) & mask,
+    bit >>> 1,
+    mask
+  )
+end)
+counts.sum(0)
+"#
+    );
+    let solutions = match size {
+        12 => 14_200,
+        13 => 73_712,
+        _ => panic!("the benchmark needs a recorded queen count"),
+    };
+    (source, format!("Done({solutions})"))
+}
+
+fn manual_par_map_queens_source(size: usize) -> (String, String) {
+    let source = format!(
+        r#"def count_queens(columns: Int, left: Int, right: Int, mask: Int): Int
+  if columns == mask
+    return 1
+  end
+  available = mask & ~(columns | left | right)
+  total = 0
+  while available != 0
+    bit = available & (0 - available)
+    available = available ^ bit
+    total = total + count_queens(
+      columns | bit,
+      ((left | bit) << 1) & mask,
+      (right | bit) >>> 1,
+      mask
+    )
+  end
+  total
+end
+
+class QueenChunk < Proc
+  branches: List[Int]
+  mask: Int
+
+  def init(mut self, branches: List[Int], mask: Int)
+    self.branches = branches
+    self.mask = mask
+  end
+
+  def on_spawn(self): List[Int]
+    self.branches.map(do |branch: Int|: Int
+      bit = 1 << branch
+      count_queens(
+        bit,
+        (bit << 1) & self.mask,
+        bit >>> 1,
+        self.mask
+      )
+    end)
+  end
+end
+
+values = Range(0, {size}).to_list()
+chunk_count = values.len().min(16)
+chunk_size = (values.len() + chunk_count - 1) / chunk_count
+handles = List[Handle[Never, List[Int]]]()
+for chunk in values.chunks(chunk_size)
+  handles.push(QueenChunk.spawn(chunk, (1 << {size}) - 1))
+end
+counts = List[Int]()
+for handle in handles
+  counts.extend(handle.done().value())
+end
+counts.sum(0)
+"#
+    );
     let solutions = match size {
         12 => 14_200,
         13 => 73_712,
@@ -496,8 +604,8 @@ end
             source.push_str(", ");
         }
         source.push_str(&format!("pong{pair}.done(), ping{pair}.done()"));
-        expected.push(format!("Done({limit})"));
-        expected.push(format!("Done({limit})"));
+        expected.push(format!("Ok({limit})"));
+        expected.push(format!("Ok({limit})"));
     }
     source.push_str(")\n");
     let messages = (pairs as u64).saturating_mul((limit as u64).saturating_mul(2) + 3);
@@ -1011,8 +1119,8 @@ fn bench_proc_operations() {
                   while i < 20000\n  h.send(1)\n  i = i + 1\nend\n\
                   h.close()\n\
                   case h.done()\n\
-                  in Done(v)  then v\n\
-                  in Fault(_) then -1\n\
+                  in Ok(v)  then v\n\
+                  in Err(_) then -1\n\
                   end\n";
     let elapsed = time_world(source, &["Proc"], config(), "Done(20000)");
     println!(
@@ -1108,6 +1216,43 @@ fn bench_parallel_split_queens() {
 
 #[test]
 #[ignore]
+fn bench_parallel_par_map_queens() {
+    let (manual, expected) = manual_par_map_queens_source(13);
+    let (library, library_expected) = iterable_queens_source(13, true);
+    assert_eq!(library_expected, expected);
+    println!("LOOM\tcase\tworkers\tmanual_ms\tpar_map_ms\tratio");
+    for workers in [4, 12] {
+        let manual_time = time_parallel_world(&manual, workers, &expected);
+        let library_time = time_parallel_world(&library, workers, &expected);
+        let ratio = library_time.as_secs_f64() / manual_time.as_secs_f64();
+        println!(
+            "LOOM\tpar_map_queens\t{workers}\t{:.3}\t{:.3}\t{ratio:.3}",
+            manual_time.as_secs_f64() * 1e3,
+            library_time.as_secs_f64() * 1e3
+        );
+        assert!(
+            ratio <= 1.08,
+            "par_map took {ratio:.3} times the manual implementation"
+        );
+    }
+
+    let (sequential, sequential_expected) = iterable_queens_source(13, false);
+    let map_time = time_world(&sequential, &[], config(), &sequential_expected);
+    let par_map_time = time_world(&library, &["Proc"], config(), &expected);
+    let ratio = par_map_time.as_secs_f64() / map_time.as_secs_f64();
+    println!(
+        "LOOM\tpar_map_deterministic\t1\t{:.3}\t{:.3}\t{ratio:.3}",
+        map_time.as_secs_f64() * 1e3,
+        par_map_time.as_secs_f64() * 1e3
+    );
+    assert!(
+        ratio <= 1.08,
+        "deterministic par_map took {ratio:.3} times sequential map"
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_parallel_messages() {
     println!(
         "LOOM\tgroup\tcase\tmessages\tworkers\tdeterministic_ms\t\
@@ -1158,12 +1303,7 @@ sink.close()
 sink.done()
 "#;
     if selected("stream") {
-        record(report_message_case(
-            "stream",
-            500,
-            stream,
-            "Done(Done(500))",
-        ));
+        record(report_message_case("stream", 500, stream, "Done(Ok(500))"));
     }
 
     let (pairs, pairs_expected, pair_messages) = parallel_ping_source(4, 500);
@@ -1233,7 +1373,7 @@ sink.done()
             "many_senders",
             800,
             many_senders,
-            "Done(Done(800))",
+            "Done(Ok(800))",
         ));
     }
 
@@ -1267,7 +1407,7 @@ sink.done()
             "allocated_stream",
             200,
             allocated,
-            "Done(Done(6400))",
+            "Done(Ok(6400))",
         ));
     }
 

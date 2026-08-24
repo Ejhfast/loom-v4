@@ -378,16 +378,16 @@ in Ok(snap)
   first = restore_list(snap)
   second = restore_list(snap)
   a = case first.run()
-      in Done(xs) then xs.len()
-      in Fault(_) then -1
+      in Ok(xs) then xs.len()
+      in Err(_) then -1
       end
   b = case second.run()
-      in Done(xs) then xs.len()
-      in Fault(_) then -1
+      in Ok(xs) then xs.len()
+      in Err(_) then -1
       end
   c = case vm.run()
-      in Done(xs) then xs.len()
-      in Fault(_) then -1
+      in Ok(xs) then xs.len()
+      in Err(_) then -1
       end
   (a, b, c)
 in Err(_) then (-3, -3, -3)
@@ -739,8 +739,8 @@ def go(): Int with Vm, Io.Write
     end, args: ())
     b.table().pass(Io.Write)
     case b.run()
-    in Done(value) then value
-    in Fault(_) then -3
+    in Ok(value) then value
+    in Err(_) then -3
     end
   end
 
@@ -756,8 +756,8 @@ def go(): Int with Vm, Io.Write
         in Ok(snap)
           a.answer(call, Ok(bytes.len()))
           original = case a.run()
-                     in Done(value) then value
-                     in Fault(_) then -4
+                     in Ok(value) then value
+                     in Err(_) then -4
                      end
           case sys.vm.Vm().restore(snap)
           in Ok(restored)
@@ -886,16 +886,16 @@ fn a_terminal_capture_restores_with_its_result() {
 def go(): Int with Vm
   vm = sys.vm.Vm().activate_or_fault({ ||: Int 41 + 1 }, args: ())
   case vm.run()
-  in Done(_)  then 0
-  in Fault(_) then -1
+  in Ok(_)  then 0
+  in Err(_) then -1
   end
   case vm.snapshot()
   in Ok(snap)
     case sys.vm.Vm().restore(snap)
     in Ok(again)
       case again.run()
-      in Done(v)  then v
-      in Fault(_) then -2
+      in Ok(v)  then v
+      in Err(_) then -2
       end
     in Err(_) then -3
     end

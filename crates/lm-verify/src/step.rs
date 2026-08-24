@@ -663,12 +663,13 @@ pub(crate) fn step(
             push(state, ret)?;
         }
         Instr::CallInterface {
-            interface,
-            method,
+            site,
             recv_ty: declared_recv_ty,
+            app,
         } => {
-            let contract = &module.interfaces[*interface as usize];
-            let requirement = &contract.methods[*method as usize];
+            let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+            let contract = &module.interfaces[interface as usize];
+            let requirement = &contract.methods[method as usize];
             let argc = requirement.params.len();
             if state.stack.len() < argc + 1 {
                 return Err(fail("interface call on a short stack".to_string()));
@@ -680,21 +681,73 @@ pub(crate) fn step(
                 return Err(fail("interface receiver type mismatch".to_string()));
             }
             let application = ctx
-                .interface_application(fidx, recv_ty, *interface, 0)
+                .interface_application(fidx, recv_ty, interface, 0)
                 .ok_or_else(|| fail("interface call lacks a proven receiver bound".to_string()))?;
-            let mut types = Vec::with_capacity(application.types.len() + 1);
-            types.push(recv_ty);
-            types.extend_from_slice(&application.types);
-            let row = ctx.row_subst(&requirement.row, &application.rows);
+            let method_application = if *app == lm_bytecode::NO_APP {
+                None
+            } else {
+                Some(&module.apps[*app as usize])
+            };
+            let own_types = method_application
+                .map(|application| application.types.as_slice())
+                .unwrap_or(&[]);
+            let own_rows = method_application
+                .map(|application| application.rows.as_slice())
+                .unwrap_or(&[]);
+            let mut prefix_types = Vec::with_capacity(application.types.len() + 1);
+            prefix_types.push(recv_ty);
+            prefix_types.extend_from_slice(&application.types);
+            if !ctx.method_arguments_meet_bounds(
+                own_types,
+                own_rows,
+                &requirement.type_bounds,
+                &prefix_types,
+                &application.rows,
+                &module.func_bounds[fidx as usize],
+            ) {
+                return Err(fail(
+                    "an interface call type argument does not meet its interface bounds"
+                        .to_string(),
+                ));
+            }
+            let mut types = Vec::with_capacity(prefix_types.len() + own_types.len());
+            types.extend_from_slice(&prefix_types);
+            types.extend_from_slice(own_types);
+            let mut rows = Vec::with_capacity(application.rows.len() + own_rows.len());
+            rows.extend_from_slice(&application.rows);
+            rows.extend_from_slice(own_rows);
+            for premise in &requirement.premises {
+                let subject = ctx.subst_with_bounds(
+                    premise.subject,
+                    &types,
+                    &rows,
+                    &module.func_bounds[fidx as usize],
+                );
+                for bound in &premise.bounds {
+                    let required = ctx.subst_interface_use_with_bounds(
+                        bound,
+                        &types,
+                        &rows,
+                        &module.func_bounds[fidx as usize],
+                    );
+                    let found = ctx.interface_application(fidx, subject, required.interface, 0);
+                    if found.as_ref() != Some(&required) {
+                        return Err(fail(
+                            "an interface method premise is not satisfied".to_string(),
+                        ));
+                    }
+                }
+            }
+            let row = ctx.row_subst(&requirement.row, &rows);
             charge_row(&row)?;
             let params: Vec<u32> = requirement
                 .params
                 .iter()
-                .map(|param| ctx.subst(*param, &types, &application.rows))
+                .map(|param| ctx.subst(*param, &types, &rows))
                 .collect();
             pop_args(state, &params)?;
             pop_expect(state, recv_ty)?;
-            let ret = ctx.subst(requirement.ret, &types, &application.rows);
+            let ret = ctx.subst(requirement.ret, &types, &rows);
             push(state, ret)?;
         }
         Instr::CallValue { argc } => {
@@ -2513,12 +2566,17 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
                             let t = pop_run(state)?;
-                            let (parent, what) = match op {
-                                lm_abi::OP_VM_RUN => (ctx.core.run_result, "RunResult"),
-                                lm_abi::OP_VM_STEP => (ctx.core.step_event, "StepEvent"),
-                                _ => (ctx.core.drive_event, "DriveEvent"),
+                            let event = if op == lm_abi::OP_VM_RUN {
+                                let fault = ctx.intern(BcType::Fault);
+                                ctx.result_inst(t, fault).map_err(&fail)?
+                            } else {
+                                let (parent, what) = if op == lm_abi::OP_VM_STEP {
+                                    (ctx.core.step_event, "StepEvent")
+                                } else {
+                                    (ctx.core.drive_event, "DriveEvent")
+                                };
+                                ctx.event_inst(parent, what, t).map_err(&fail)?
                             };
-                            let event = ctx.event_inst(parent, what, t).map_err(&fail)?;
                             push(state, event)?;
                         }
                         lm_abi::OP_VM_DRIVE_WAIT => {
@@ -2754,6 +2812,19 @@ pub(crate) fn step(
                             let handle = ctx.intern(BcType::Handle(TY_UNIT, t));
                             push(state, handle)?;
                         }
+                        lm_abi::OP_PROC_RUN_CLOSURE => {
+                            let body = pop(state)?;
+                            let BcType::Fn(params, _, result, _) = ctx.ty(body) else {
+                                return Err(fail("`Proc.RunClosure` needs a closure".to_string()));
+                            };
+                            if !params.is_empty() {
+                                return Err(fail(
+                                    "`Proc.RunClosure` needs a nullary closure".to_string(),
+                                ));
+                            }
+                            let handle = ctx.intern(BcType::Handle(TY_UNIT, result));
+                            push(state, handle)?;
+                        }
                         lm_abi::OP_PROC_SPAWN => {
                             let args_ty = pop(state)?;
                             let body = pop(state)?;
@@ -2832,9 +2903,8 @@ pub(crate) fn step(
                             let BcType::Handle(_, result) = ctx.ty(handle) else {
                                 return Err(fail("`Proc.Done` needs a proc handle".to_string()));
                             };
-                            let event = ctx
-                                .event_inst(ctx.core.proc_result, "ProcResult", result)
-                                .map_err(&fail)?;
+                            let fault = ctx.intern(BcType::Fault);
+                            let event = ctx.result_inst(result, fault).map_err(&fail)?;
                             push(state, event)?;
                         }
                         lm_abi::OP_PROC_PAUSE | lm_abi::OP_PROC_RESUME => {
@@ -3179,6 +3249,12 @@ pub(crate) fn step(
         }
         Instr::RaiseUserPanic | Instr::RaiseAssertionFailed => {
             pop_expect(state, TY_STR)?;
+        }
+        Instr::RaiseFault => {
+            let fault = pop(state)?;
+            if ctx.ty(fault) != BcType::Fault {
+                return Err(fail(format!("fault raise on non-fault type {fault}")));
+            }
         }
         Instr::RequestOp => {
             let request = pop(state)?;

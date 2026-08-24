@@ -51,7 +51,7 @@ impl<'o> FnChecker<'o> {
                     {
                         return Err(Diagnostic::new(
                             "E1064",
-                            "a closure cannot capture a nonescaping callback",
+                            "a closure cannot capture a nonescaping callback; declare the callback parameter as `escaping`",
                             expr.span,
                         ));
                     }
@@ -339,8 +339,9 @@ impl<'o> FnChecker<'o> {
                 params,
                 ret,
                 row,
+                row_explicit: _,
                 body,
-            } => self.check_closure(ctx, params, ret, row, None, body, expr.span),
+            } => self.check_closure(ctx, params, ret, row, None, false, body, expr.span),
             ExprKind::If { arms, else_body } => {
                 self.check_if(ctx, arms, else_body, BlockMode::Synth, expr.span)
             }
@@ -774,6 +775,7 @@ impl<'o> FnChecker<'o> {
             &type_bounds,
             0,
             vec![None; type_names.len()],
+            Vec::new(),
             0,
             explicit,
             &field_tys,

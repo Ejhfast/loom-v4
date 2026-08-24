@@ -132,6 +132,7 @@ impl World {
         match op {
             lm_abi::OP_PROC_SPAWN => self.proc_spawn(vm, op, args),
             lm_abi::OP_PROC_RUN => self.proc_run(vm, op, args),
+            lm_abi::OP_PROC_RUN_CLOSURE => self.proc_run_closure(vm, op, args),
             lm_abi::OP_PROC_SEND => self.proc_send(vm, op, args),
             lm_abi::OP_PROC_CLOSE => self.proc_close(vm, op, args),
             lm_abi::OP_PROC_RECV => self.proc_recv(vm, op),
@@ -374,6 +375,109 @@ impl World {
         }
     }
 
+    /// Launch one nullary closure as a mailbox-free proc.
+    pub(super) fn proc_run_closure(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let child_config = match self.reserve_child(vm) {
+            Some(config) => config,
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "the parent has no child budget left",
+                );
+                return;
+            }
+        };
+        let child = self.machines.len() as VmId;
+        if let Err(code) = self.prepare_scheduler_proc(child) {
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(vm, op, code, "the scheduler has no task capacity");
+            return;
+        }
+        let mut machine = self.empty_machine(child_config, Some(vm), 0);
+        machine.image = self.machines[vm as usize].image;
+        self.machines.push(machine.into());
+        let body = match self.transfer(vm, child, args[0]) {
+            Ok(value) => value,
+            Err(code) => {
+                self.machines.pop();
+                self.machines[vm as usize].children -= 1;
+                self.fault_caller(vm, op, code, "the proc closure is not sendable");
+                return;
+            }
+        };
+        let Some(reference) = body.as_obj() else {
+            self.machines.pop();
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "the proc body is not a closure",
+            );
+            return;
+        };
+        let (func, env) = match self.machines[child as usize].vm.heap.get(reference) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
+            _ => {
+                self.machines.pop();
+                self.machines[vm as usize].children -= 1;
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the proc body is not a closure",
+                );
+                return;
+            }
+        };
+        if let Err(code) = self.check_frame_args(child, func, env, &[]) {
+            self.machines.pop();
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(vm, op, code, "the proc closure is not nullary");
+            return;
+        }
+        let (birth_ops, birth_groups) = self.declared_grants(func);
+        {
+            let child_machine = &mut self.machines[child as usize];
+            for operation in birth_ops {
+                child_machine.table.set_exact(operation, Some(Action::Pass));
+            }
+            for group in birth_groups {
+                child_machine.table.set_group(group, Some(Action::Pass));
+            }
+            let limit = child_machine.config.mailbox_limit;
+            child_machine.vm.mailbox = Mailbox::new(limit);
+            child_machine.owner = Ownership::Scheduler;
+            child_machine.is_proc = true;
+            child_machine.body_func = Some(func);
+            child_machine.witness = env;
+            child_machine.load_frame(&self.module, func, Vec::new(), Some(reference), env);
+        }
+        let generation = self.machines[child as usize].generation;
+        let built = self.machines[vm as usize].alloc(Object::NativeHandle {
+            proc: child,
+            generation,
+        });
+        match built {
+            Ok(handle) => {
+                self.activate_scheduler_proc_prepared(child);
+                self.record(TraceEvent::Spawn {
+                    parent: vm,
+                    proc: child,
+                    generation,
+                });
+                self.install_value_reply(vm, handle);
+            }
+            Err(code) => {
+                self.machines.pop();
+                self.machines[vm as usize].children -= 1;
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+            }
+        }
+    }
+
     /// `h.send(message)`.
     ///
     /// The mailbox limit is checked before the copy, so a refused
@@ -535,7 +639,7 @@ impl World {
         if !self.proc_alive(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the proc reference is stale")
-                .and_then(|fault| self.make_instance(vm, self.core.proc_fault, vec![fault]));
+                .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault]));
             self.reply_or_fault(vm, op, built);
             return;
         }
@@ -652,7 +756,7 @@ impl World {
         false
     }
 
-    /// Build and install `ProcResult` for one terminal proc.
+    /// Build and install `Result` for one terminal proc.
     pub(super) fn publish_terminal(&mut self, vm: VmId, op: u32, proc: VmId) {
         enum T {
             Done(Value),
@@ -670,10 +774,10 @@ impl World {
         };
         let built = match t {
             T::Done(value) => match self.transfer(proc, vm, value) {
-                Ok(value) => self.make_instance(vm, self.core.proc_done, vec![value]),
+                Ok(value) => self.make_instance(vm, self.core.result_ok, vec![value]),
                 Err(code) => self
                     .make_fault(vm, code, "the terminal value did not cross the boundary")
-                    .and_then(|fault| self.make_instance(vm, self.core.proc_fault, vec![fault])),
+                    .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault])),
             },
             T::Fault(rec) => self.machines[vm as usize]
                 .alloc(Object::NativeFault {
@@ -682,7 +786,7 @@ impl World {
                     op: rec.op,
                     trace: rec.trace.clone().into_boxed_slice(),
                 })
-                .and_then(|fault| self.make_instance(vm, self.core.proc_fault, vec![fault])),
+                .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault])),
         };
         self.reply_or_fault(vm, op, built);
     }

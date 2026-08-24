@@ -20,6 +20,10 @@ interface Copyable
   def copy(self): Self
 end
 
+interface Add
+  def __add__(self, other: Self): Self
+end
+
 interface Error: Display
 end
 
@@ -37,13 +41,29 @@ def hash_combine(seed: Int, value: Int): Int
   intrinsic("hash.combine", seed, value)
 end
 
-final class Int implements Display, Hashable, Comparable
+final class Int implements Display, Hashable, Comparable, Add
   def append_to(self, mut builder: StringBuilder)
     builder.append_int(self)
   end
 
   def abs(self): Int
     intrinsic("int.abs", self)
+  end
+
+  def min(self, other: Int): Int
+    if self < other
+      self
+    else
+      other
+    end
+  end
+
+  def max(self, other: Int): Int
+    if self > other
+      self
+    else
+      other
+    end
   end
 
   def __neg__(self): Int
@@ -185,7 +205,7 @@ final class Int implements Display, Hashable, Comparable
   end
 end
 
-final class Float implements Display, Hashable, Comparable
+final class Float implements Display, Hashable, Comparable, Add
   def append_to(self, mut builder: StringBuilder)
     builder.append_float(self)
   end

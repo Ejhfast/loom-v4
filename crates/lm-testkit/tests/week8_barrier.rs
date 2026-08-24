@@ -64,7 +64,7 @@ fn the_barrier_set_closes_over_a_mailbox_handle() {
     let outcome = scheduler
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done(Done(5))");
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(5))");
 }
 
 /// The barrier records one cut marker, and every mailbox of the set
@@ -135,7 +135,7 @@ fn a_frozen_mailbox_blocks_the_sender_instead_of_accepting() {
     let outcome = scheduler
         .run(&mut world)
         .expect("the deterministic scheduler runs");
-    assert_eq!(world.show_outcome(&outcome), "Done(Done(1))");
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(1))");
 }
 
 /// Barriers over overlapping worlds serialize. The second barrier
@@ -283,8 +283,8 @@ fn the_set_closes_over_every_machine_reference_shape() {
                   \x20 table = sys.vm.Vm().activate_or_fault({ ||: Int 1 }, args: ()).table()\n\
                   \x20 table.pass(Clock.Now)\n\
                   \x20 case sys.vm.Vm().activate_or_fault({ ||: Int 2 }, args: ()).run()\n\
-                  \x20 in Done(v)  then v\n\
-                  \x20 in Fault(_) then 0\n\
+                  \x20 in Ok(v)  then v\n\
+                  \x20 in Err(_) then 0\n\
                   \x20 end\n\
                   end\n\
                   go()\n";

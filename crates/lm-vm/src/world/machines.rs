@@ -2179,6 +2179,7 @@ impl World {
             | lm_abi::OP_WAIT_CHOOSE
             | lm_abi::OP_WAIT_CANCEL => self.wait_exec(vm, op, args),
             lm_abi::OP_PROC_RUN
+            | lm_abi::OP_PROC_RUN_CLOSURE
             | lm_abi::OP_PROC_SPAWN
             | lm_abi::OP_PROC_SEND
             | lm_abi::OP_PROC_CLOSE
