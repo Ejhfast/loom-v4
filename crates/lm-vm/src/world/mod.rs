@@ -9,6 +9,7 @@
 mod capture;
 mod code;
 mod machines;
+mod parallel;
 mod procs;
 mod query;
 mod reply;
@@ -18,6 +19,10 @@ mod run;
 mod sched;
 mod show;
 mod waits;
+pub use parallel::{
+    ParallelContinuation, ParallelDispatch, ParallelError, ParallelFallback, ParallelJob,
+    ParallelRequirement, ParallelReturned, ParallelStep,
+};
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
@@ -43,6 +48,7 @@ use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcType, Module};
 use lm_heap::{Heap, HeapBudget, Object, SharedBytes, SharedText, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 /// The fuel budget of one mock handler run.
@@ -163,6 +169,15 @@ pub enum RootEvent {
     Blocked,
     Done(Value),
     Fault(FaultRec),
+}
+
+enum DriverStep {
+    Execute {
+        top_idx: usize,
+        vm: VmId,
+        limit: u32,
+    },
+    Event(RootEvent),
 }
 
 /// The verified semantic identity of the loaded code, for the
@@ -484,13 +499,168 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LeasedMachineMetadata {
+    generation: u32,
+    owner: Ownership,
+    image: Option<VmImageKey>,
+    parent: Option<VmId>,
+    is_proc: bool,
+    active: u32,
+}
+
+impl LeasedMachineMetadata {
+    fn from_machine(machine: &Machine) -> LeasedMachineMetadata {
+        LeasedMachineMetadata {
+            generation: machine.generation,
+            owner: machine.owner,
+            image: machine.image,
+            parent: machine.vm.parent,
+            is_proc: machine.is_proc,
+            active: machine.active,
+        }
+    }
+}
+
+/// One resident or leased machine table entry.
+pub(crate) struct MachineSlot {
+    resident: Option<Box<Machine>>,
+    lease: Option<crate::executor::ExecutionToken>,
+    leased: Option<LeasedMachineMetadata>,
+    worker_envs: Option<Box<lm_bytecode::closed::TypeEnvs>>,
+}
+
+impl MachineSlot {
+    fn new(machine: Machine) -> MachineSlot {
+        MachineSlot {
+            resident: Some(Box::new(machine)),
+            lease: None,
+            leased: None,
+            worker_envs: None,
+        }
+    }
+
+    pub(crate) fn is_resident(&self) -> bool {
+        self.resident.is_some()
+    }
+
+    pub(crate) fn generation(&self) -> u32 {
+        self.resident
+            .as_ref()
+            .map(|machine| machine.generation)
+            .or_else(|| self.leased.map(|metadata| metadata.generation))
+            .expect("a machine slot has resident or leased metadata")
+    }
+
+    pub(crate) fn image(&self) -> Option<VmImageKey> {
+        self.resident
+            .as_ref()
+            .and_then(|machine| machine.image)
+            .or_else(|| self.leased.and_then(|metadata| metadata.image))
+    }
+
+    pub(crate) fn parent(&self) -> Option<VmId> {
+        self.resident
+            .as_ref()
+            .and_then(|machine| machine.vm.parent)
+            .or_else(|| self.leased.and_then(|metadata| metadata.parent))
+    }
+
+    pub(crate) fn active(&self) -> u32 {
+        self.resident
+            .as_ref()
+            .map(|machine| machine.active)
+            .or_else(|| self.leased.map(|metadata| metadata.active))
+            .expect("a machine slot has resident or leased metadata")
+    }
+
+    fn take_for_lease(&mut self, token: crate::executor::ExecutionToken) -> Box<Machine> {
+        assert!(self.lease.is_none(), "a machine has at most one lease");
+        let machine = self
+            .resident
+            .take()
+            .expect("an execution lease takes a resident machine");
+        assert_eq!(
+            machine.generation, token.generation,
+            "the execution token names the current generation"
+        );
+        self.leased = Some(LeasedMachineMetadata::from_machine(&machine));
+        self.lease = Some(token);
+        machine
+    }
+
+    fn restore_from_lease(
+        &mut self,
+        token: crate::executor::ExecutionToken,
+        machine: Box<Machine>,
+    ) -> Result<(), ()> {
+        let Some(metadata) = self.leased else {
+            return Err(());
+        };
+        if self.lease != Some(token) || LeasedMachineMetadata::from_machine(&machine) != metadata {
+            return Err(());
+        }
+        self.resident = Some(machine);
+        self.lease = None;
+        self.leased = None;
+        Ok(())
+    }
+
+    fn abandon_lease(&mut self, token: crate::executor::ExecutionToken) {
+        if self.lease == Some(token) {
+            self.lease = None;
+            self.leased = None;
+        }
+    }
+
+    fn take_worker_envs(&mut self) -> Option<Box<lm_bytecode::closed::TypeEnvs>> {
+        self.worker_envs.take()
+    }
+
+    fn restore_worker_envs(&mut self, envs: Box<lm_bytecode::closed::TypeEnvs>) {
+        assert!(
+            self.worker_envs.replace(envs).is_none(),
+            "one machine slot keeps one worker type view"
+        );
+    }
+}
+
+impl From<Machine> for MachineSlot {
+    fn from(machine: Machine) -> MachineSlot {
+        MachineSlot::new(machine)
+    }
+}
+
+impl Deref for MachineSlot {
+    type Target = Machine;
+
+    #[inline(always)]
+    fn deref(&self) -> &Machine {
+        self.resident
+            .as_deref()
+            .expect("coordinator code needs a resident machine")
+    }
+}
+
+impl DerefMut for MachineSlot {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Machine {
+        self.resident
+            .as_deref_mut()
+            .expect("coordinator code needs a resident machine")
+    }
+}
+
 /// The world: the loaded code plus every machine.
 pub struct World {
+    /// The process-local identity used by execution lease tokens.
+    world_id: u64,
     /// The verified module that started this world.
     base_loaded: LoadedModule,
     pub(crate) loaded: LoadedModule,
     pub(crate) module: std::sync::Arc<Module>,
     pub(crate) dispatch: std::sync::Arc<[crate::DispatchRow]>,
+    execution_code: std::sync::Arc<crate::executor::ExecutionCode>,
     pub(crate) core: CoreLayout,
     /// Slots present when this world started.
     ///
@@ -499,7 +669,7 @@ pub struct World {
     base_slot_count: usize,
     /// Artifacts in successful installation order.
     pub(crate) installations: Vec<SharedBytes>,
-    pub(crate) machines: Vec<Machine>,
+    pub(crate) machines: Vec<MachineSlot>,
     /// Persistent VM images, separate from run machine records.
     pub(crate) vm_images: Vec<VmImageRecord>,
     /// Reclaimed VM image entries.
@@ -629,6 +799,8 @@ pub struct World {
     check: crate::typecheck::BoundaryScratch,
     /// Low-cost counters for scheduler measurements.
     metrics: WorldMetrics,
+    /// True after one worker failed or returned an invalid report.
+    poisoned: bool,
 }
 
 /// One recorded scheduler event. A trace record names machines by
@@ -823,6 +995,116 @@ mod tests {
         .expect("the trivial module verifies")
     }
 
+    #[test]
+    fn machine_slots_reject_stale_and_duplicate_restores() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let token = crate::executor::ExecutionToken {
+            world: world.world_id,
+            machine: 0,
+            generation: 0,
+            lease: 1,
+        };
+        let machine = world.machines[0].take_for_lease(token);
+        let stale = crate::executor::ExecutionToken { lease: 2, ..token };
+        assert!(world.machines[0]
+            .restore_from_lease(stale, machine)
+            .is_err());
+
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let machine = world.machines[0].take_for_lease(token);
+        world.machines[0]
+            .restore_from_lease(token, machine)
+            .expect("the first report restores the machine");
+        assert!(world.share_heap_budget());
+        let duplicate = Box::new(world.empty_machine(VmConfig::default(), None, 0));
+        assert!(world.machines[0]
+            .restore_from_lease(token, duplicate)
+            .is_err());
+    }
+
+    #[test]
+    fn a_parallel_job_reserves_and_reconciles_world_fuel_once() {
+        let loaded = trivial_loaded();
+        let limits = WorldLimits {
+            fuel: 8,
+            ..WorldLimits::default()
+        };
+        let mut world =
+            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+        let key = world.task_key(0).expect("the root task exists");
+        let step = world
+            .begin_parallel_slice(key, 16, 1)
+            .expect("the root slice starts");
+        let ParallelStep::Dispatch(dispatch) = step else {
+            panic!("the root slice produces one dispatch")
+        };
+        assert_eq!(world.world_fuel(), 0);
+        let (lease, job) = dispatch.into_parts();
+        let report = crate::execute(lease);
+        let retired = report.retired_instructions();
+        let returned = world
+            .accept_parallel_report(job, report)
+            .expect("the report returns its unused fuel");
+        assert_eq!(world.world_fuel(), 8 - u64::from(retired));
+        world
+            .commit_parallel_report(returned)
+            .expect("the report commits once");
+        assert_eq!(world.world_fuel(), 8 - u64::from(retired));
+    }
+
+    #[test]
+    fn a_stale_parallel_report_poisons_the_world_and_releases_its_reservation() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let key = world.task_key(0).expect("the root task exists");
+        let fuel = world.world_fuel();
+        let step = world
+            .begin_parallel_slice(key, 16, 1)
+            .expect("the root slice starts");
+        let ParallelStep::Dispatch(dispatch) = step else {
+            panic!("the root slice produces one dispatch")
+        };
+        let (lease, job) = dispatch.into_parts();
+        let mut report = crate::execute(lease);
+        let token = report.token();
+        report.replace_token_for_test(crate::executor::ExecutionToken {
+            lease: token.lease + 1,
+            ..token
+        });
+        assert_eq!(
+            world.accept_parallel_report(job, report).err(),
+            Some(ParallelError::StaleReport)
+        );
+        assert!(world.is_poisoned());
+        assert_eq!(world.world_fuel(), fuel);
+        assert_eq!(world.budget.heap.used_bytes(), 0);
+        assert_eq!(
+            world.begin_parallel_slice(key, 16, 2).err(),
+            Some(ParallelError::Poisoned)
+        );
+    }
+
+    #[test]
+    fn worker_failure_cancels_the_reserved_world_capacity() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let key = world.task_key(0).expect("the root task exists");
+        let fuel = world.world_fuel();
+        let step = world
+            .begin_parallel_slice(key, 16, 1)
+            .expect("the root slice starts");
+        let ParallelStep::Dispatch(dispatch) = step else {
+            panic!("the root slice produces one dispatch")
+        };
+        let (lease, job) = dispatch.into_parts();
+        drop(lease);
+        assert_eq!(world.cancel_parallel_job(job), ParallelError::WorkerFailed);
+        assert!(world.is_poisoned());
+        assert_eq!(world.world_fuel(), fuel);
+        assert_eq!(world.budget.heap.used_bytes(), 0);
+    }
+
     fn installable_artifact(value: i64) -> SharedBytes {
         let contract = BcCallableContract {
             type_params: 0,
@@ -938,7 +1220,7 @@ mod tests {
         proc.is_proc = true;
         proc.active = 1;
         proc.vm.state = MachineState::Ready;
-        world.machines.push(proc);
+        world.machines.push(proc.into());
 
         assert_eq!(
             world.replace_function_slot(image, 0, target),
@@ -1493,12 +1775,12 @@ mod tests {
         good.is_proc = true;
         good.body_func = Some(1);
         good.vm.state = MachineState::Ready;
-        world.machines.push(good);
+        world.machines.push(good.into());
         let mut bad = world.empty_machine(VmConfig::default(), Some(0), 0);
         bad.is_proc = true;
         bad.body_func = Some(2);
         bad.vm.state = MachineState::Ready;
-        world.machines.push(bad);
+        world.machines.push(bad.into());
         let good_handle = world.machines[0]
             .alloc(Object::NativeHandle {
                 proc: 1,
@@ -1544,7 +1826,7 @@ mod tests {
         let mut child = Machine::empty(VmConfig::default(), Some(0));
         child.vm.state = MachineState::Ready;
         child.active = 1;
-        world.machines.push(child);
+        world.machines.push(child.into());
         arm_pending(&mut world, lm_abi::OP_VM_RUN, vec![], 1);
         let mut stack = Vec::new();
         world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_RUN, DispatchMode::Continue);
@@ -1570,7 +1852,7 @@ mod tests {
             args: vec![],
             ordinal: 7,
         });
-        world.machines.push(child);
+        world.machines.push(child.into());
         // A call token with a stale ordinal.
         let token = world.machines[0]
             .alloc(Object::NativeCall {
@@ -1615,7 +1897,7 @@ mod tests {
                 args: vec![],
                 ordinal: 1,
             });
-            world.machines.push(child);
+            world.machines.push(child.into());
         }
         // The token belongs to machine 2, the receiver is machine 1.
         let token = world.machines[0]
@@ -1703,7 +1985,7 @@ mod tests {
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         assert!(world.share_heap_budget());
         let mock = world.empty_machine(VmConfig::default(), None, 0);
-        world.machines.push(mock);
+        world.machines.push(mock.into());
         let handle = world.machines[0]
             .alloc(Object::NativeVm {
                 image: 1,
@@ -1770,7 +2052,7 @@ mod tests {
         let mut proc = Machine::empty_at(VmConfig::default(), Some(0), 3);
         proc.vm.state = MachineState::Ready;
         proc.owner = crate::machine::Ownership::Scheduler;
-        world.machines.push(proc);
+        world.machines.push(proc.into());
         assert!(world.proc_alive(1, 3));
         assert!(world.proc_running(1, 3));
         // A reference minted before the slot moved on is stale.
@@ -1789,7 +2071,7 @@ mod tests {
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         assert!(world.share_heap_budget());
         let mock = world.empty_machine(VmConfig::default(), None, 0);
-        world.machines.push(mock);
+        world.machines.push(mock.into());
         assert_eq!(world.generation_of(1), 0);
         world.retire_mock(1);
         assert_eq!(world.generation_of(1), 1);

@@ -8,6 +8,10 @@
 use crate::CompletionKey;
 use lm_heap::{SharedBytes, SharedText};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
+
+/// One scheduler wake callback for asynchronous host readiness.
+pub type HostWake = Arc<dyn Fn() + Send + Sync>;
 
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
@@ -435,6 +439,12 @@ pub trait Host {
     fn poll(&mut self) -> Option<HostCompletion>;
     /// Wait for the next completion.
     fn wait(&mut self) -> Option<HostCompletion>;
+    /// Set the wake callback used by a parallel scheduler.
+    fn set_scheduler_wake(&mut self, _wake: Option<HostWake>) {}
+    /// Return nanoseconds until the next host-managed timer expires.
+    fn scheduler_wait_nanos(&self) -> Option<u64> {
+        None
+    }
     /// Close one file token during forced resource cleanup.
     fn close_file(&mut self, _token: u64) -> bool {
         false

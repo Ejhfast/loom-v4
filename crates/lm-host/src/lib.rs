@@ -20,7 +20,7 @@ use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
     CompletionKey, CoreCtor, Host, HostArg, HostChildEnv, HostCompletion, HostExecSpec,
     HostParseStatus, HostSignalKind, HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource,
-    HostValue, HostWaitCancel, SharedBytes,
+    HostValue, HostWaitCancel, HostWake, SharedBytes,
 };
 use network_service::{
     NetworkService, TcpRequest, TlsClientSettings, TlsRequest, TlsServerSettings, UdpRequest,
@@ -44,6 +44,38 @@ struct ReadySender {
     sender: Sender<HostReady>,
     depth: Arc<AtomicUsize>,
     max_depth: Arc<AtomicUsize>,
+    wake: Arc<SchedulerWake>,
+}
+
+#[derive(Default)]
+struct SchedulerWake {
+    active: std::sync::atomic::AtomicBool,
+    callback: std::sync::Mutex<Option<HostWake>>,
+}
+
+impl SchedulerWake {
+    fn set(&self, wake: Option<HostWake>) {
+        let active = wake.is_some();
+        *self
+            .callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = wake;
+        self.active.store(active, Ordering::Release);
+    }
+
+    fn notify(&self) {
+        if !self.active.load(Ordering::Acquire) {
+            return;
+        }
+        let wake = self
+            .callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
 }
 
 impl ReadySender {
@@ -51,6 +83,7 @@ impl ReadySender {
         let depth = self.depth.fetch_add(1, Ordering::Relaxed) + 1;
         self.max_depth.fetch_max(depth, Ordering::Relaxed);
         if self.sender.send(ready).is_ok() {
+            self.wake.notify();
             true
         } else {
             self.depth.fetch_sub(1, Ordering::Relaxed);
@@ -85,6 +118,7 @@ fn ready_channel() -> (
             sender,
             depth: Arc::clone(&depth),
             max_depth: Arc::clone(&max_depth),
+            wake: Arc::new(SchedulerWake::default()),
         },
         receiver,
         depth,
@@ -645,6 +679,18 @@ fn validate_exec_spec(spec: &HostExecSpec) -> Option<HostValue> {
 }
 
 impl Host for CliHost {
+    fn set_scheduler_wake(&mut self, wake: Option<HostWake>) {
+        self.ready_sender.wake.set(wake);
+    }
+
+    fn scheduler_wait_nanos(&self) -> Option<u64> {
+        self.sleeps
+            .values()
+            .map(|(_, deadline)| deadline.saturating_duration_since(Instant::now()))
+            .min()
+            .map(|duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64)
+    }
+
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
         match op {
             lm_abi::OP_IO_READ_BYTES => {

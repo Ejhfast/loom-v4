@@ -1701,7 +1701,7 @@ impl World {
         // Reuse a retired mock slot before the table grows.
         let id = match self.mock_free.pop() {
             Some(id) => {
-                self.machines[id as usize] = self.empty_machine(mock_config, None, 0);
+                self.machines[id as usize] = self.empty_machine(mock_config, None, 0).into();
                 id
             }
             None => {
@@ -1716,7 +1716,7 @@ impl World {
                 }
                 let id = self.machines.len() as VmId;
                 let machine = self.empty_machine(mock_config, None, 0);
-                self.machines.push(machine);
+                self.machines.push(machine.into());
                 id
             }
         };

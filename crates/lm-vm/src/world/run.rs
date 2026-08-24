@@ -4,6 +4,15 @@
 //! state these methods read.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_world_id() -> u64 {
+    let id = NEXT_WORLD_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "the world identity space is not exhausted");
+    id
+}
 
 fn execution_fault_message(code: FaultCode) -> &'static str {
     match code {
@@ -50,15 +59,22 @@ impl World {
             None,
             lm_value::TypeEnvId::EMPTY,
         );
+        let dispatch = loaded.dispatch_store();
+        let execution_code = Arc::new(crate::executor::ExecutionCode::new(
+            module.clone(),
+            dispatch.clone(),
+        ));
         World {
+            world_id: next_world_id(),
             base_loaded: loaded.clone(),
             loaded: loaded.clone(),
             module,
-            dispatch: loaded.dispatch_store(),
+            dispatch,
+            execution_code,
             core: loaded.core_layout(),
             base_slot_count: loaded.module().slots.len(),
             installations: Vec::new(),
-            machines: vec![root],
+            machines: vec![root.into()],
             vm_images: Vec::new(),
             vm_image_free: Vec::new(),
             mock_free: Vec::new(),
@@ -88,6 +104,7 @@ impl World {
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
             metrics: WorldMetrics::default(),
+            poisoned: false,
         }
     }
 
@@ -467,13 +484,14 @@ impl World {
         match self.vm_free.pop() {
             Some(id) => {
                 let generation = self.machines[id as usize].generation;
-                self.machines[id as usize] = self.empty_machine(config, Some(parent), generation);
+                self.machines[id as usize] =
+                    self.empty_machine(config, Some(parent), generation).into();
                 id
             }
             None => {
                 let id = self.machines.len() as VmId;
                 let machine = self.empty_machine(config, Some(parent), 0);
-                self.machines.push(machine);
+                self.machines.push(machine.into());
                 id
             }
         }
@@ -686,19 +704,26 @@ impl World {
         )
     }
 
-    fn commit_execution_report(
+    pub(super) fn commit_execution_stop(
         &mut self,
         stack: &mut Vec<Activation>,
         top_idx: usize,
         vm: VmId,
         quantum: &mut Option<u32>,
-        report: crate::executor::InlineExecutionReport,
+        commit: crate::executor::ExecutionCommit,
     ) -> Option<RootEvent> {
-        let (stop, retired, reached_boundary) = report.into_parts();
+        let crate::executor::ExecutionCommit {
+            stop,
+            retired,
+            reached_boundary,
+            charge_fuel,
+        } = commit;
         if reached_boundary {
             self.metrics.boundary_exits = self.metrics.boundary_exits.saturating_add(1);
         }
-        self.budget.fuel -= u64::from(retired);
+        if charge_fuel {
+            self.budget.fuel -= u64::from(retired);
+        }
         if let Some(remaining) = quantum {
             *remaining = remaining.saturating_sub(retired);
         }
@@ -713,6 +738,7 @@ impl World {
                 self.machines[vm as usize].set_fault(code, execution_fault_message(code), None);
             }
             ExecutionStop::QuantumExpired | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
+            ExecutionStop::NeedsHeapRefill | ExecutionStop::NeedsQuiescence => {}
             ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {
                 if self.machines[vm as usize].start_body.is_some() {
                     self.enter_proc_body(vm, value);
@@ -774,15 +800,15 @@ impl World {
         None
     }
 
-    /// The one driver loop over the activation stack.
-    pub(super) fn drive_stack(
+    /// Advance one activation stack to execution or a caller event.
+    pub(super) fn advance_stack(
         &mut self,
         stack: &mut Vec<Activation>,
-        mut quantum: Option<u32>,
-    ) -> RootEvent {
+        quantum: &mut Option<u32>,
+    ) -> DriverStep {
         loop {
             let Some(top_idx) = stack.len().checked_sub(1) else {
-                return RootEvent::Ran;
+                return DriverStep::Event(RootEvent::Ran);
             };
             let act = stack[top_idx];
             // A descendant of this driven surface parked a request
@@ -793,7 +819,7 @@ impl World {
                 && self.machines[act.vm as usize].vm.routed.is_some()
             {
                 if let Some(event) = self.deliver_parked_route(stack, top_idx) {
-                    return event;
+                    return DriverStep::Event(event);
                 }
                 continue;
             }
@@ -806,7 +832,7 @@ impl World {
                     self.release_activation(popped);
                 }
                 if let Some(event) = self.finish(stack, ExitKind::Bounded) {
-                    return event;
+                    return DriverStep::Event(event);
                 }
                 continue;
             }
@@ -835,7 +861,7 @@ impl World {
                                 },
                             },
                         );
-                        return RootEvent::Blocked;
+                        return DriverStep::Event(RootEvent::Blocked);
                     }
                     if self.block_ready(act.vm) {
                         self.complete_blocked_machine(act.vm);
@@ -854,7 +880,7 @@ impl World {
                     if stack.len() == 1 {
                         let activation = stack.pop().expect("the stack has one activation");
                         self.release_activation(activation);
-                        return RootEvent::Blocked;
+                        return DriverStep::Event(RootEvent::Blocked);
                     }
                     // A nested stack keeps its reply chain until its wake.
                     let base = stack[0].vm;
@@ -869,7 +895,7 @@ impl World {
                             },
                         },
                     );
-                    return RootEvent::Blocked;
+                    return DriverStep::Event(RootEvent::Blocked);
                 }
                 MachineState::Done | MachineState::Faulted => {
                     // This machine reached its terminal state inside
@@ -879,14 +905,14 @@ impl World {
                     // never becomes runnable again.
                     self.note_terminal(act.vm);
                     if let Some(event) = self.finish(stack, ExitKind::Terminal) {
-                        return event;
+                        return DriverStep::Event(event);
                     }
                 }
                 MachineState::Waiting => {
                     if act.mode == StopMode::OneStep {
                         if act.retired {
                             if let Some(event) = self.finish(stack, ExitKind::Waiting) {
-                                return event;
+                                return DriverStep::Event(event);
                             }
                             continue;
                         }
@@ -901,7 +927,7 @@ impl World {
                         let _ = self.poll_host_completion(|key| key == completion);
                         if self.machines[act.vm as usize].vm.state == MachineState::Waiting {
                             if let Some(event) = self.finish(stack, ExitKind::Waiting) {
-                                return event;
+                                return DriverStep::Event(event);
                             }
                         }
                     } else if quantum.is_some() {
@@ -925,7 +951,7 @@ impl World {
                                 },
                             },
                         );
-                        return RootEvent::Waiting;
+                        return DriverStep::Event(RootEvent::Waiting);
                     } else {
                         let Some(completion) = self.completion_key(act.vm) else {
                             self.machines[act.vm as usize].set_fault(
@@ -955,7 +981,7 @@ impl World {
                 // here, and the driver answer makes it ready again.
                 MachineState::Asked => {
                     if let Some(event) = self.finish(stack, ExitKind::Ran) {
-                        return event;
+                        return DriverStep::Event(event);
                     }
                 }
                 MachineState::Empty => {
@@ -975,17 +1001,17 @@ impl World {
                     }
                     if act.mode == StopMode::OneStep && act.retired {
                         if let Some(event) = self.finish(stack, ExitKind::Ran) {
-                            return event;
+                            return DriverStep::Event(event);
                         }
                         continue;
                     }
-                    if matches!(quantum, Some(0)) {
+                    if matches!(*quantum, Some(0)) {
                         // A base activation keeps its continuation in
                         // machine state. Release its driver record at
                         // this scheduler safepoint.
                         if stack.len() == 1 {
                             if let Some(event) = self.finish(stack, ExitKind::Ran) {
-                                return event;
+                                return DriverStep::Event(event);
                             }
                             continue;
                         }
@@ -998,13 +1024,13 @@ impl World {
                                 reason: SuspendReason::Yielded,
                             },
                         );
-                        return RootEvent::Ran;
+                        return DriverStep::Event(RootEvent::Ran);
                     }
                     if self.budget.fuel == 0 {
                         self.machines[act.vm as usize].set_fault(FaultCode::OutOfFuel, "", None);
                         continue;
                     }
-                    let requested = match quantum {
+                    let requested = match *quantum {
                         Some(_) if act.mode == StopMode::OneStep => 1,
                         Some(remaining) => remaining,
                         None if act.mode == StopMode::OneStep => 1,
@@ -1020,13 +1046,37 @@ impl World {
                         .unwrap_or(u32::MAX)
                         .max(1);
                     let limit = requested.min(available).min(turn);
-                    let report = self.execute_inline(act.vm, limit);
-                    if let Some(event) =
-                        self.commit_execution_report(stack, top_idx, act.vm, &mut quantum, report)
-                    {
+                    return DriverStep::Execute {
+                        top_idx,
+                        vm: act.vm,
+                        limit,
+                    };
+                }
+            }
+        }
+    }
+
+    /// The one synchronous driver loop over the activation stack.
+    pub(super) fn drive_stack(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        mut quantum: Option<u32>,
+    ) -> RootEvent {
+        loop {
+            match self.advance_stack(stack, &mut quantum) {
+                DriverStep::Execute { top_idx, vm, limit } => {
+                    let report = self.execute_inline(vm, limit);
+                    if let Some(event) = self.commit_execution_stop(
+                        stack,
+                        top_idx,
+                        vm,
+                        &mut quantum,
+                        report.into_commit(),
+                    ) {
                         return event;
                     }
                 }
+                DriverStep::Event(event) => return event,
             }
         }
     }

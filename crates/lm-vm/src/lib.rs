@@ -25,8 +25,8 @@ pub use host::{
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
     HostExecSpec, HostIpAddress, HostOpenOptions, HostParseStatus, HostRenameMode, HostResource,
     HostSeekFrom, HostShutdown, HostSignalKind, HostSocketAddress, HostStart, HostStdStream,
-    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, NullHost,
-    RecordingHost,
+    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, HostWake,
+    NullHost, RecordingHost,
 };
 pub use machine::{
     Block, FaultRec, FunctionVersionId, MachineExecutionMetrics, MachineState, Mailbox, Ownership,
@@ -37,7 +37,11 @@ pub use schedule::{
     CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey, WaitSourceKey,
     WakeKey,
 };
-pub use world::{MailboxMetrics, RootEvent, StopMode, TraceBlock, TraceEvent, World, WorldMetrics};
+pub use world::{
+    MailboxMetrics, ParallelContinuation, ParallelDispatch, ParallelError, ParallelFallback,
+    ParallelJob, ParallelRequirement, ParallelReturned, ParallelStep, RootEvent, StopMode,
+    TraceBlock, TraceEvent, World, WorldMetrics,
+};
 
 /// The fault codes are manifest content, and the heap and the graph
 /// engine name them too. They live in `lm-abi`.

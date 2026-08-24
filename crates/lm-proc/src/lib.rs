@@ -12,6 +12,8 @@
 //!
 //! One VM never executes concurrently. The deterministic mode uses
 //! one FIFO ready queue and one fixed instruction quantum.
+//! Parallel mode moves independent machine leases to bounded workers.
+//! One coordinator commits every cross-machine action.
 //!
 //! At reset, the root enters first. Active procs follow in `TaskKey`
 //! order. A nonterminal slice enqueues its events before itself. A
@@ -19,8 +21,11 @@
 //! Waiters for one wake key enter in `TaskKey` order.
 
 mod barrier;
+mod parallel;
+mod pool;
 
 pub use barrier::{Barrier, BarrierError, BarrierReport};
+pub use parallel::SchedulerError;
 
 use lm_vm::{
     CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
@@ -36,6 +41,9 @@ pub const WORKER_STACK: usize = 8 << 20;
 
 /// The default guest instruction count of one scheduler slice.
 pub const DEFAULT_QUANTUM: u32 = 1_024;
+
+/// The default guest instruction count of one parallel worker lease.
+pub const DEFAULT_PARALLEL_QUANTUM: u32 = 4_096;
 
 /// How the scheduler picks the next machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,12 +71,15 @@ pub struct SchedulerStats {
     pub proc_slices: u64,
     /// How many blocks the scheduler completed.
     pub unblocked: u64,
+    /// The largest active worker lease count.
+    pub max_active_leases: u32,
 }
 
 /// The proc scheduler.
 pub struct Scheduler {
     mode: SchedulerMode,
     quantum: u32,
+    parallel_quantum: u32,
     include_root: bool,
     stats: SchedulerStats,
     stop: Option<StopReason>,
@@ -352,14 +363,19 @@ impl Default for Scheduler {
 
 impl Scheduler {
     pub fn new(mode: SchedulerMode) -> Scheduler {
-        Scheduler::new_with_quantum(mode, DEFAULT_QUANTUM)
+        Scheduler::new_with_quanta(mode, DEFAULT_QUANTUM, DEFAULT_PARALLEL_QUANTUM)
     }
 
     /// Create one scheduler with an explicit instruction quantum.
     pub fn new_with_quantum(mode: SchedulerMode, quantum: u32) -> Scheduler {
+        Scheduler::new_with_quanta(mode, quantum, quantum)
+    }
+
+    fn new_with_quanta(mode: SchedulerMode, quantum: u32, parallel_quantum: u32) -> Scheduler {
         Scheduler {
             mode,
             quantum: quantum.max(1),
+            parallel_quantum: parallel_quantum.max(1),
             include_root: true,
             stats: SchedulerStats::default(),
             stop: None,
@@ -381,6 +397,10 @@ impl Scheduler {
     /// The guest instruction count of one scheduler slice.
     pub fn quantum(&self) -> u32 {
         self.quantum
+    }
+
+    pub(crate) fn parallel_quantum(&self) -> u32 {
+        self.parallel_quantum
     }
 
     pub fn stats(&self) -> SchedulerStats {

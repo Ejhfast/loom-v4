@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: Stages 0 through 2 are complete. Stages 3 through 8 remain planned.
+Status: Stages 0 through 4 are complete. Stages 5 through 8 remain planned.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -233,6 +233,12 @@ A ready task eventually receives a worker while the scheduler continues.
 
 Parallel mode does not promise equal processor time.
 
+The default parallel lease is 4,096 guest instructions.
+
+The deterministic quantum remains 1,024 guest instructions.
+
+The longer worker lease reduces coordinator traffic and keeps bounded stop delay.
+
 ### 7.3 Mode selection
 
 The Rust API requires an explicit `SchedulerConfig`.
@@ -264,6 +270,10 @@ Each job carries its own report route and world identity.
 The CLI creates one pool for one command.
 
 An embedding host can inject one shared pool.
+
+Stage 3 creates one pool for each parallel run.
+
+Stage 6 exposes pool reuse and host injection through `SchedulerConfig`.
 
 This rule prevents thread growth when one host runs many worlds.
 
@@ -541,23 +551,27 @@ The report states live growth, released space, and unused allowance.
 
 The coordinator applies those values to the aggregate budget.
 
-A worker stops before allocation when its allowance cannot cover the request.
+A worker stops before an allocation-capable instruction when safe preflight is unavailable.
 
 The coordinator can grant another allowance or report the existing budget fault.
 
 A lease shortage is not a guest `HeapLimit` fault.
 
-An allocation-capable instruction preflights its required growth before visible mutation.
+The first implementation does not predict every intrinsic allocation size.
 
-Insufficient allowance returns an internal refill report.
+It returns an internal refill report before the instruction changes visible state.
 
-The coordinator grants more allowance or waits for active reservations to return.
+The coordinator waits for active reservations to return.
+
+It then retries the instruction with all available aggregate capacity.
 
 It reports `HeapLimit` only when the real machine or world limit cannot satisfy the request.
 
 The instruction retries from its unchanged start state after a refill.
 
-An intrinsic that cannot provide this guarantee cannot execute inside a worker slice.
+This conservative retry serializes allocation-capable instruction batches.
+
+Stage 7 can add exact preflight for measured allocation-heavy workloads.
 
 Deterministic mode keeps direct aggregate accounting because it executes one slice inline.
 
@@ -781,9 +795,9 @@ Every lease returns within its remaining quantum, except during one long instruc
 
 The coordinator then applies the existing serial control operation.
 
-This fallback covers send, pause, snapshot, restore, and replacement.
+This fallback covers pause, snapshot, restore, and replacement.
 
-Stage 4 removes global quiescence from ordinary world transactions.
+Stage 4 uses target residency for sends and other ordinary world transactions.
 
 Stage 5 replaces global control stops with scoped barriers.
 
@@ -1081,6 +1095,8 @@ Record the ledger update comparison and complete baseline metadata.
 
 ### Stage 3: Add the bounded worker pool
 
+Complete.
+
 Add opt-in parallel mode with one central dispatcher.
 
 Start the pool only when parallel work exists.
@@ -1103,6 +1119,8 @@ Prove scaling with CPU-only proc programs.
 
 ### Stage 4: Complete world transactions
 
+Complete.
+
 Route send, spawn, receive, close, and terminal actions through the coordinator.
 
 Route nested VM control and policy edits through the same path.
@@ -1119,9 +1137,9 @@ Stages 3 and 4 form one review milestone.
 
 Implement snapshot stop sets and reachability closure.
 
-Implement pause and resume over active leases.
+Replace global pause and resume stops with scoped stop sets.
 
-Implement image safepoints for replacement batches.
+Replace global replacement stops with image safepoints.
 
 Replace global control quiescence with the smallest required stop set.
 
@@ -1220,6 +1238,8 @@ Two independent CPU tasks target at least 1.7 times one-worker throughput.
 
 Four independent CPU tasks target at least 3.0 times one-worker throughput.
 
+This gate uses the default 4,096-instruction parallel lease.
+
 These scaling gates require dedicated hardware and several samples.
 
 Coordinator work stays below fifteen percent of one core in the CPU benchmark.
@@ -1241,6 +1261,8 @@ Parallel mode cannot reproduce one global interleaving without a replay log.
 The first coordinator can limit message-heavy programs before workers reach full use.
 
 Deferred two-machine transactions can wait for one destination quantum.
+
+Allocation-capable instruction batches use global quiescence in the first implementation.
 
 One global type interner lock can limit generic workloads with many new types.
 

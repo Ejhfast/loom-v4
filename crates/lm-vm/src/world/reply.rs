@@ -339,7 +339,7 @@ impl World {
         // The slot takes a new generation, so a reference minted for
         // the retired record names a dead machine, never the next one.
         let generation = self.machines[mock as usize].generation.wrapping_add(1);
-        self.machines[mock as usize] = self.empty_machine(self.config, None, generation);
+        self.machines[mock as usize] = self.empty_machine(self.config, None, generation).into();
         self.mock_free.push(mock);
     }
 

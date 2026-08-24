@@ -6,6 +6,16 @@
 use super::*;
 
 impl World {
+    /// Set one wake callback for asynchronous host readiness.
+    pub fn set_scheduler_wake(&mut self, wake: Option<crate::HostWake>) {
+        self.host.set_scheduler_wake(wake);
+    }
+
+    /// Return nanoseconds until the next host-managed timer expires.
+    pub fn scheduler_wait_nanos(&self) -> Option<u64> {
+        self.host.scheduler_wait_nanos()
+    }
+
     /// True when the block of `vm` can complete now.
     pub(super) fn block_ready(&self, vm: VmId) -> bool {
         let Some(block) = self.machines[vm as usize].vm.block else {
@@ -18,15 +28,17 @@ impl World {
             }
             Block::Send { target, generation } => {
                 !self.proc_running(target, generation)
-                    || self.machines[target as usize].vm.mailbox.closed
-                    || self.machines[target as usize].vm.mailbox.accepts()
+                    || (self.machines[target as usize].is_resident()
+                        && (self.machines[target as usize].vm.mailbox.closed
+                            || self.machines[target as usize].vm.mailbox.accepts()))
             }
             Block::Done { target, generation } => {
                 !self.proc_alive(target, generation)
-                    || matches!(
-                        self.machines[target as usize].vm.state,
-                        MachineState::Done | MachineState::Faulted
-                    )
+                    || (self.machines[target as usize].is_resident()
+                        && matches!(
+                            self.machines[target as usize].vm.state,
+                            MachineState::Done | MachineState::Faulted
+                        ))
             }
             Block::Snapshot {
                 target,
@@ -447,7 +459,10 @@ impl World {
         let Some(machine) = self.machines.get(key.vm as usize) else {
             return TaskStatus::Dormant;
         };
-        if machine.generation != key.generation {
+        if machine.generation() != key.generation {
+            return TaskStatus::Dormant;
+        }
+        if !machine.is_resident() {
             return TaskStatus::Dormant;
         }
         if matches!(machine.vm.state, MachineState::Done | MachineState::Faulted) {
@@ -723,6 +738,26 @@ impl World {
         }
     }
 
+    /// Record one worker report without reading leased machines.
+    pub fn note_parallel_report(&mut self, retired: u32, heap_growth: usize, starts_slice: bool) {
+        if starts_slice {
+            self.metrics.slices = self.metrics.slices.saturating_add(1);
+        }
+        self.metrics.retired_instructions = self
+            .metrics
+            .retired_instructions
+            .saturating_add(u64::from(retired));
+        self.metrics.heap_growth_bytes = self
+            .metrics
+            .heap_growth_bytes
+            .saturating_add(heap_growth as u64);
+    }
+
+    /// True when one snapshot wait needs serial progress accounting.
+    pub fn has_snapshot_watchers(&self) -> bool {
+        self.all_machines_resident() && !self.snapshot_watchers().is_empty()
+    }
+
     pub(super) fn snapshot_watchers(&self) -> Vec<(VmId, VmId, u32, u64, bool)> {
         self.machines
             .iter()
@@ -793,6 +828,10 @@ impl World {
         } else {
             self.fault_event(key.vm, "the scheduler task is not ready to run")
         };
+        Some(self.scheduler_event_exit(key, event))
+    }
+
+    pub(super) fn scheduler_event_exit(&mut self, key: TaskKey, event: RootEvent) -> SliceExit {
         match event {
             RootEvent::Blocked => self
                 .suspended
@@ -802,15 +841,20 @@ impl World {
                     SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
                     _ => None,
                 })
-                .or_else(|| self.block_wake_key(key.vm).map(SliceExit::Blocked)),
-            RootEvent::Waiting => self.suspended.get(&key.vm).and_then(|saved| {
-                if let SuspendReason::Waiting { completion, .. } = saved.reason {
-                    Some(SliceExit::Waiting(completion))
-                } else {
-                    None
-                }
-            }),
-            RootEvent::Ran => Some(SliceExit::Yielded),
+                .or_else(|| self.block_wake_key(key.vm).map(SliceExit::Blocked))
+                .unwrap_or(SliceExit::Yielded),
+            RootEvent::Waiting => self
+                .suspended
+                .get(&key.vm)
+                .and_then(|saved| {
+                    if let SuspendReason::Waiting { completion, .. } = saved.reason {
+                        Some(SliceExit::Waiting(completion))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(SliceExit::Yielded),
+            RootEvent::Ran => SliceExit::Yielded,
             RootEvent::Done(_) | RootEvent::Fault(_) => {
                 if key.vm != 0 && self.scheduler_procs.contains(key) {
                     let faulted = self.machines[key.vm as usize].vm.state == MachineState::Faulted;
@@ -819,7 +863,7 @@ impl World {
                         faulted,
                     });
                 }
-                Some(SliceExit::Terminal)
+                SliceExit::Terminal
             }
             _ => {
                 self.machines[key.vm as usize].set_fault(
@@ -827,7 +871,7 @@ impl World {
                     "the scheduler slice stopped outside its stop set",
                     None,
                 );
-                Some(SliceExit::Terminal)
+                SliceExit::Terminal
             }
         }
     }

@@ -564,6 +564,84 @@ pub enum ExecOutcome {
     },
 }
 
+/// Why one execution batch stopped without a world action.
+pub(crate) enum ExecError {
+    Fault(FaultCode),
+    NeedsHeapRefill,
+    NeedsQuiescence,
+}
+
+pub(crate) fn operation_needs_global_quiescence(op: u32) -> bool {
+    matches!(
+        op,
+        lm_abi::OP_VM_SNAPSHOT_HELD
+            | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
+            | lm_abi::OP_VM_SNAPSHOT_SELF
+            | lm_abi::OP_VM_SNAPSHOT_VM
+            | lm_abi::OP_VM_LOAD_SNAPSHOT
+            | lm_abi::OP_VM_RUN_SNAPSHOT_BYTES
+            | lm_abi::OP_VM_SNAPSHOT_BYTES
+            | lm_abi::OP_VM_RESTORE
+            | lm_abi::OP_VM_RESTORE_VM
+            | lm_abi::OP_PROC_SNAPSHOT_WAIT
+            | lm_abi::OP_COMPILER_VERIFY
+            | lm_abi::OP_VM_INSTALL
+            | lm_abi::OP_VM_INSTALL_WITH
+            | lm_abi::OP_VM_ACTIVATE_DEF
+            | lm_abi::OP_VM_REPLACE_FUNCTION
+            | lm_abi::OP_VM_REPLACE_CLASS
+            | lm_abi::OP_VM_REPLACE_VALUE
+            | lm_abi::OP_VM_REPLACE_PROCESS
+            | lm_abi::OP_VM_CHANGE_FUNCTION
+            | lm_abi::OP_VM_CHANGE_CLASS
+            | lm_abi::OP_VM_CHANGE_VALUE
+            | lm_abi::OP_VM_CHANGE_PROCESS
+            | lm_abi::OP_VM_REPLACE_ALL
+    )
+}
+
+fn instruction_needs_global_quiescence(instr: Instr, operands: &[Value]) -> bool {
+    match instr {
+        Instr::Perform { op, .. } => operation_needs_global_quiescence(op),
+        Instr::PerformValue { argc, .. } => usize::try_from(argc)
+            .ok()
+            .and_then(|argc| argc.checked_add(1))
+            .and_then(|width| operands.len().checked_sub(width))
+            .and_then(|index| operands.get(index))
+            .is_some_and(
+                |value| matches!(value, Value::Op(op) if operation_needs_global_quiescence(*op)),
+            ),
+        _ => false,
+    }
+}
+
+fn instruction_can_grow_guest_heap(instr: Instr) -> bool {
+    match instr {
+        Instr::ConstStr(_)
+        | Instr::ConstBytes(_)
+        | Instr::Native(_)
+        | Instr::MakeClosure { .. }
+        | Instr::New(_)
+        | Instr::NewG { .. }
+        | Instr::TupleNew { .. }
+        | Instr::ListNew { .. }
+        | Instr::ListPush
+        | Instr::MapNew { .. }
+        | Instr::MapPut { .. }
+        | Instr::Extended(_) => true,
+        Instr::Numeric(instruction) => matches!(
+            instruction,
+            NumericInstr::SbAppendFloat
+                | NumericInstr::BytesBitAnd
+                | NumericInstr::BytesBitOr
+                | NumericInstr::BytesBitXor
+                | NumericInstr::BytesBitNot
+                | NumericInstr::FloatFixed
+        ),
+        _ => false,
+    }
+}
+
 /// The serializable state of one machine.
 ///
 /// These fields contain the compact machine state from specification 16.4.
@@ -5422,14 +5500,38 @@ impl Machine {
     ///
     /// `None` means the count expired after `retired` instructions.
     /// A boundary result includes the instruction that produced it.
-    pub fn exec_for_quantum(
+    pub(crate) fn exec_for_quantum(
         &mut self,
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
-    ) -> (Result<Option<ExecOutcome>, FaultCode>, u32) {
+    ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+        self.exec_for_quantum_mode::<false>(module, dispatch, envs, slots, limit)
+    }
+
+    /// Execute one restricted worker lease.
+    #[cold]
+    pub(crate) fn exec_for_quantum_restricted(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
+        limit: u32,
+    ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+        self.exec_for_quantum_mode::<true>(module, dispatch, envs, slots, limit)
+    }
+
+    fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool>(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
+        limit: u32,
+    ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
         debug_assert!(limit > 0);
         let original_fuel = self.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(limit));
@@ -5445,11 +5547,10 @@ impl Machine {
         let mut code: &[Instr] = &[];
         let outcome = loop {
             if self.vm.fuel == 0 {
-                break Err(FaultCode::OutOfFuel);
+                break Err(ExecError::Fault(FaultCode::OutOfFuel));
             }
-            self.vm.fuel -= 1;
             let Some(frame) = self.vm.frames.last() else {
-                break Err(BAD_STATE);
+                break Err(ExecError::Fault(BAD_STATE));
             };
             let (func, block, ip) = (frame.func, frame.block, frame.ip);
             if func != cached_func || block != cached_block {
@@ -5458,13 +5559,23 @@ impl Machine {
                 cached_block = block;
             }
             let instr = code[ip as usize];
+            if RESTRICTED_LEASE {
+                if instruction_needs_global_quiescence(instr, &self.vm.operands) {
+                    break Err(ExecError::NeedsQuiescence);
+                }
+                if instruction_can_grow_guest_heap(instr) {
+                    break Err(ExecError::NeedsHeapRefill);
+                }
+            }
+            self.vm.fuel -= 1;
             let Some(frame) = self.vm.frames.last_mut() else {
-                break Err(BAD_STATE);
+                break Err(ExecError::Fault(BAD_STATE));
             };
             frame.ip += 1;
             match self.exec_instr(module, dispatch, envs, slots, instr) {
                 Ok(ExecOutcome::Continue) => {}
-                outcome => break outcome,
+                Ok(outcome) => break Ok(outcome),
+                Err(code) => break Err(ExecError::Fault(code)),
             }
         };
         let retired = u32::try_from(batch_fuel - self.vm.fuel)
@@ -5472,9 +5583,9 @@ impl Machine {
         self.vm.fuel += held_fuel;
 
         match outcome {
-            Err(FaultCode::OutOfFuel) if count_expiry => (Ok(None), retired),
+            Err(ExecError::Fault(FaultCode::OutOfFuel)) if count_expiry => (Ok(None), retired),
             Ok(outcome) => (Ok(Some(outcome)), retired),
-            Err(code) => (Err(code), retired),
+            Err(error) => (Err(error), retired),
         }
     }
 
@@ -6171,6 +6282,22 @@ fn is_decimal_float_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_class_operations_use_their_exact_quiescence_rule() {
+        let perform = Instr::PerformValue {
+            argc: 1,
+            reply_ty: 0,
+        };
+        assert!(!instruction_needs_global_quiescence(
+            perform,
+            &[Value::Op(lm_abi::OP_PROC_SEND), Value::Unit]
+        ));
+        assert!(instruction_needs_global_quiescence(
+            perform,
+            &[Value::Op(lm_abi::OP_VM_SNAPSHOT_SELF), Value::Unit]
+        ));
+    }
 
     #[test]
     fn a_map_rebuilds_its_private_index_from_semantic_hashes() {

@@ -83,10 +83,13 @@ impl World {
     ///
     /// The pass is conservative. It keeps every machine it cannot
     /// prove dead: a machine on a live activation stack, a machine the
-    /// scheduler owns, a paused machine, a machine one barrier holds,
-    /// a machine that owns a host resource, and a machine that waits
-    /// on the host. A walk that fails frees nothing.
+    /// scheduler still runs, a paused machine, or a barrier target.
+    /// It also keeps machines with host resources or host waits.
+    /// A walk that fails frees nothing.
     pub(crate) fn collect_machines(&mut self) -> usize {
+        if !self.all_machines_resident() {
+            return 0;
+        }
         let count = self.machines.len();
         let mut free_slot = vec![false; count];
         for id in self.vm_free.iter().chain(self.mock_free.iter()) {
@@ -105,6 +108,7 @@ impl World {
                 continue;
             }
             let m = &self.machines[id as usize];
+            let retired_scheduler = self.retired_scheduler_machine(id);
             // A machine with no parent is the world root or one mock
             // record. Neither takes part in the child budget.
             //
@@ -113,7 +117,7 @@ impl World {
             if m.vm.parent.is_none()
                 || m.vm.state == MachineState::Empty
                 || m.active > 0
-                || m.owner != Ownership::Holder
+                || (m.owner != Ownership::Holder && !retired_scheduler)
                 || m.paused
                 || m.barrier.is_some()
             {
@@ -168,8 +172,9 @@ impl World {
                 continue;
             }
             let m = &self.machines[id as usize];
+            let retired_scheduler = self.retired_scheduler_machine(id);
             if m.active > 0
-                || m.owner != Ownership::Holder
+                || (m.owner != Ownership::Holder && !retired_scheduler)
                 || m.paused
                 || m.barrier.is_some()
                 || m.resources.live_count() > 0
@@ -182,7 +187,7 @@ impl World {
             }
             let parent = m.vm.parent;
             let generation = m.generation.wrapping_add(1);
-            self.machines[id as usize] = self.empty_machine(self.config, None, generation);
+            self.machines[id as usize] = self.empty_machine(self.config, None, generation).into();
             if let Some(up) = parent {
                 let record = &mut self.machines[up as usize];
                 record.children = record.children.saturating_sub(1);
@@ -196,6 +201,17 @@ impl World {
         self.collect_vm_images();
         self.collect_images();
         freed
+    }
+
+    fn retired_scheduler_machine(&self, vm: VmId) -> bool {
+        let machine = &self.machines[vm as usize];
+        let key = TaskKey {
+            vm,
+            generation: machine.generation,
+        };
+        machine.owner == Ownership::Scheduler
+            && matches!(machine.vm.state, MachineState::Done | MachineState::Faulted)
+            && !self.scheduler_procs.contains(key)
     }
 
     /// Free every VM image that no surviving value or run names.
@@ -446,6 +462,10 @@ impl World {
         self.loaded = next;
         self.module = self.loaded.module_store();
         self.dispatch = self.loaded.dispatch_store();
+        self.execution_code = Arc::new(crate::executor::ExecutionCode::new(
+            self.module.clone(),
+            self.dispatch.clone(),
+        ));
         self.core = self.loaded.core_layout();
         self.installations.push(artifact);
         Ok(instance_index)
@@ -1091,7 +1111,7 @@ impl World {
     /// Remove one child whose handle was not returned.
     pub(super) fn rollback_child(&mut self, parent: VmId, child: VmId) {
         let generation = self.machines[child as usize].generation;
-        self.machines[child as usize] = self.empty_machine(self.config, None, generation);
+        self.machines[child as usize] = self.empty_machine(self.config, None, generation).into();
         self.vm_free.push(child);
         self.machines[parent as usize].children =
             self.machines[parent as usize].children.saturating_sub(1);

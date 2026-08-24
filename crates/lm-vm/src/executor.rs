@@ -3,7 +3,7 @@
 //! The executor owns one machine and reads immutable code.
 //! It returns before any operation needs world state.
 
-use crate::machine::{ExecOutcome, ImageSlotTarget, Machine, VmId};
+use crate::machine::{ExecError, ExecOutcome, ImageSlotTarget, Machine, VmId};
 use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode};
 use lm_bytecode::closed::TypeEnvs;
@@ -18,8 +18,6 @@ pub(crate) struct ExecutionCode {
 }
 
 impl ExecutionCode {
-    // Stage 3 uses this constructor when worker dispatch starts.
-    #[allow(dead_code)]
     pub(crate) fn new(module: Arc<Module>, dispatch: Arc<[DispatchRow]>) -> ExecutionCode {
         ExecutionCode { module, dispatch }
     }
@@ -43,6 +41,7 @@ pub struct ExecutionLease {
     envs: Box<TypeEnvs>,
     slots: Option<Arc<Vec<ImageSlotTarget>>>,
     instruction_limit: u32,
+    restricted_heap: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +49,7 @@ pub(crate) struct ExecutionLimits {
     pub(crate) instructions: u32,
     pub(crate) heap_growth_bytes: usize,
     pub(crate) heap_growth_objects: usize,
+    pub(crate) exclusive_heap: bool,
 }
 
 /// Coordinator-owned accounting for one execution lease.
@@ -65,7 +65,6 @@ pub(crate) struct ExecutionReservation {
 
 impl ExecutionReservation {
     /// Release all charges after the worker machine was destroyed.
-    #[allow(dead_code)]
     pub(crate) fn cancel_destroyed(self) {
         self.resources.cancel_destroyed();
         self.heap.cancel_destroyed();
@@ -73,8 +72,6 @@ impl ExecutionReservation {
 }
 
 impl ExecutionLease {
-    // Stage 3 uses this constructor when worker dispatch starts.
-    #[allow(dead_code)]
     pub(crate) fn new(
         token: ExecutionToken,
         mut machine: Box<Machine>,
@@ -103,6 +100,7 @@ impl ExecutionLease {
                 envs,
                 slots,
                 instruction_limit: limits.instructions,
+                restricted_heap: !limits.exclusive_heap,
             },
             reservation,
         )
@@ -111,8 +109,17 @@ impl ExecutionLease {
 
 pub(crate) enum ExecutionStop {
     QuantumExpired,
+    NeedsHeapRefill,
+    NeedsQuiescence,
     Boundary(ExecOutcome),
     Fault(FaultCode),
+}
+
+pub(crate) struct ExecutionCommit {
+    pub(crate) stop: ExecutionStop,
+    pub(crate) retired: u32,
+    pub(crate) reached_boundary: bool,
+    pub(crate) charge_fuel: bool,
 }
 
 pub(crate) struct InlineExecutionReport {
@@ -121,22 +128,23 @@ pub(crate) struct InlineExecutionReport {
 }
 
 impl InlineExecutionReport {
-    pub(crate) fn into_parts(self) -> (ExecutionStop, u32, bool) {
+    pub(crate) fn into_commit(self) -> ExecutionCommit {
         let boundary = !matches!(self.stop, ExecutionStop::QuantumExpired);
-        (self.stop, self.retired_instructions, boundary)
+        ExecutionCommit {
+            stop: self.stop,
+            retired: self.retired_instructions,
+            reached_boundary: boundary,
+            charge_fuel: true,
+        }
     }
 }
 
 /// One complete machine execution report.
 #[must_use = "the coordinator must commit this execution report"]
 pub struct ExecutionReport {
-    #[allow(dead_code)]
     token: ExecutionToken,
-    #[allow(dead_code)]
     machine: Box<Machine>,
-    #[allow(dead_code)]
     code: Arc<ExecutionCode>,
-    #[allow(dead_code)]
     envs: Box<TypeEnvs>,
     stop: ExecutionStop,
     retired_instructions: u32,
@@ -149,6 +157,15 @@ pub struct ExecutionReport {
 }
 
 impl ExecutionReport {
+    pub(crate) fn token(&self) -> ExecutionToken {
+        self.token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_token_for_test(&mut self, token: ExecutionToken) {
+        self.token = token;
+    }
+
     /// The number of retired bytecode instructions.
     pub fn retired_instructions(&self) -> u32 {
         self.retired_instructions
@@ -156,7 +173,12 @@ impl ExecutionReport {
 
     /// True when execution reached a semantic boundary.
     pub fn reached_boundary(&self) -> bool {
-        !matches!(self.stop, ExecutionStop::QuantumExpired)
+        !matches!(
+            self.stop,
+            ExecutionStop::QuantumExpired
+                | ExecutionStop::NeedsHeapRefill
+                | ExecutionStop::NeedsQuiescence
+        )
     }
 
     /// The positive local heap growth during this execution.
@@ -189,8 +211,6 @@ impl ExecutionReport {
         self.unused_heap_objects
     }
 
-    // Stage 3 commits these parts after a worker returns them.
-    #[allow(dead_code)]
     pub(crate) fn into_parts(
         mut self,
         reservation: ExecutionReservation,
@@ -202,10 +222,7 @@ impl ExecutionReport {
         ExecutionStop,
         u32,
     ) {
-        assert_eq!(
-            self.token, reservation.token,
-            "the execution report matches its reservation"
-        );
+        debug_assert_eq!(self.token, reservation.token);
         self.machine.vm.heap.end_execution_lease(reservation.heap);
         self.machine
             .resources
@@ -230,17 +247,28 @@ pub fn execute(lease: ExecutionLease) -> ExecutionReport {
         mut envs,
         slots,
         instruction_limit,
+        restricted_heap,
     } = lease;
     let heap_before = machine.vm.heap.used_bytes();
     let objects_before = machine.vm.heap.stats().live;
     let slots = slots.as_deref().map(Vec::as_slice);
-    let (outcome, retired_instructions) = machine.exec_for_quantum(
-        code.module.as_ref(),
-        code.dispatch.as_ref(),
-        &mut envs,
-        slots,
-        instruction_limit,
-    );
+    let (outcome, retired_instructions) = if restricted_heap {
+        machine.exec_for_quantum_restricted(
+            code.module.as_ref(),
+            code.dispatch.as_ref(),
+            &mut envs,
+            slots,
+            instruction_limit,
+        )
+    } else {
+        machine.exec_for_quantum(
+            code.module.as_ref(),
+            code.dispatch.as_ref(),
+            &mut envs,
+            slots,
+            instruction_limit,
+        )
+    };
     let heap_after = machine.vm.heap.used_bytes();
     let objects_after = machine.vm.heap.stats().live;
     let (unused_heap_bytes, unused_heap_objects) =
@@ -248,7 +276,9 @@ pub fn execute(lease: ExecutionLease) -> ExecutionReport {
     let stop = match outcome {
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
-        Err(code) => ExecutionStop::Fault(code),
+        Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
+        Err(ExecError::NeedsHeapRefill) => ExecutionStop::NeedsHeapRefill,
+        Err(ExecError::NeedsQuiescence) => ExecutionStop::NeedsQuiescence,
     };
     ExecutionReport {
         token,
@@ -280,7 +310,13 @@ pub(crate) fn execute_inline(
     let stop = match outcome {
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
-        Err(code) => ExecutionStop::Fault(code),
+        Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
+        Err(ExecError::NeedsHeapRefill) => {
+            unreachable!("inline execution has direct aggregate heap access")
+        }
+        Err(ExecError::NeedsQuiescence) => {
+            unreachable!("inline execution is already coordinator-resident")
+        }
     };
     InlineExecutionReport {
         stop,
@@ -382,6 +418,7 @@ mod tests {
                 instructions: 16,
                 heap_growth_bytes: usize::MAX,
                 heap_growth_objects: usize::MAX,
+                exclusive_heap: true,
             },
         );
         assert_eq!(budget.used_bytes(), 1024);
@@ -471,6 +508,7 @@ mod tests {
                 instructions: 16,
                 heap_growth_bytes: usize::MAX,
                 heap_growth_objects: usize::MAX,
+                exclusive_heap: true,
             },
         );
         assert_eq!(heap_budget.used_bytes(), 1024);

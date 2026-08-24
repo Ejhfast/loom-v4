@@ -37,7 +37,7 @@ impl World {
     /// True when the reference names a live machine slot.
     pub(super) fn proc_alive(&self, proc: VmId, generation: u32) -> bool {
         (proc as usize) < self.machines.len()
-            && self.machines[proc as usize].generation == generation
+            && self.machines[proc as usize].generation() == generation
     }
 
     /// True when the reference names a machine that can still accept
@@ -45,10 +45,11 @@ impl World {
     /// reached a terminal result.
     pub(super) fn proc_running(&self, proc: VmId, generation: u32) -> bool {
         self.proc_alive(proc, generation)
-            && !matches!(
-                self.machines[proc as usize].vm.state,
-                MachineState::Done | MachineState::Faulted
-            )
+            && (!self.machines[proc as usize].is_resident()
+                || !matches!(
+                    self.machines[proc as usize].vm.state,
+                    MachineState::Done | MachineState::Faulted
+                ))
     }
 
     /// Allocate one frozen `Fault` value in `vm`.
@@ -177,7 +178,7 @@ impl World {
         // An image proc reads the same slots as its spawner.
         // The link also keeps that image live.
         machine.image = self.machines[vm as usize].image;
-        self.machines.push(machine);
+        self.machines.push(machine.into());
         // The two closures and every argument cross the boundary. Each
         // result stays rooted while the next value crosses.
         let mut payload: Vec<Value> = vec![args[0], args[1]];

@@ -138,6 +138,53 @@ fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -
     median(runs)
 }
 
+/// Time one proc program with the parallel coordinator.
+fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration {
+    let bytes = lm_testkit::compile_to_bytes("parallel-bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
+        let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+        world.allow("Proc").expect("the Proc grant must exist");
+        let mut scheduler = lm_proc::Scheduler::default();
+        let start = Instant::now();
+        let outcome = scheduler
+            .run_parallel(&mut world, workers)
+            .expect("the parallel benchmark must run");
+        let elapsed = start.elapsed();
+        assert_eq!(world.show_outcome(&outcome), expected);
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    median(runs)
+}
+
+fn parallel_cpu_source(tasks: usize, iterations: usize) -> (String, String) {
+    let mut source = format!(
+        "class Spinner < Proc\n  def on_spawn(self): Int\n    i = 0\n    \
+         while i < {iterations}\n      i = i + 1\n    end\n    i\n  end\nend\n"
+    );
+    for task in 0..tasks {
+        source.push_str(&format!("p{task} = Spinner.spawn()\n"));
+    }
+    source.push('(');
+    for task in 0..tasks {
+        if task > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("p{task}.done()"));
+    }
+    source.push_str(")\n");
+    let values = (0..tasks)
+        .map(|_| format!("Done({iterations})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (source, format!("Done(({values}))"))
+}
+
 // ---------------------------------------------------------------
 // Group 1: the language operations.
 // ---------------------------------------------------------------
@@ -654,6 +701,27 @@ fn bench_proc_operations() {
         elapsed.as_nanos() as f64 / 20_000.0,
         elapsed.as_secs_f64() * 1e3
     );
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_cpu_scaling() {
+    println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
+    for (tasks, workers, gate) in [(2, 2, 1.7), (4, 4, 3.0)] {
+        let (source, expected) = parallel_cpu_source(tasks, 1_000_000);
+        let serial = time_parallel_world(&source, 1, &expected);
+        let parallel = time_parallel_world(&source, workers, &expected);
+        let speedup = serial.as_secs_f64() / parallel.as_secs_f64();
+        println!(
+            "LOOM\tparallel_cpu\t{tasks}\t{workers}\t{:.3}\t{:.3}\t{speedup:.3}",
+            serial.as_secs_f64() * 1e3,
+            parallel.as_secs_f64() * 1e3
+        );
+        assert!(
+            speedup >= gate,
+            "{tasks} tasks reached {speedup:.3}x, below the {gate:.1}x gate"
+        );
+    }
 }
 
 // ---------------------------------------------------------------

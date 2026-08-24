@@ -728,9 +728,10 @@ impl World {
         if let Some(target) = target {
             self.machines[target as usize] = machines
                 .next()
-                .expect("a prepared selected restore holds its first machine");
+                .expect("a prepared selected restore holds its first machine")
+                .into();
         }
-        self.machines.extend(machines);
+        self.machines.extend(machines.map(Into::into));
         for vm in gate_members.iter().copied() {
             let machine = &self.machines[vm as usize];
             if machine.owner == Ownership::Scheduler
