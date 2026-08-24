@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `0e02349`.
+The measured source revision is `ec6b9dd`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -26,40 +26,46 @@ The snapshot format version is 30.
 | HIR functions | 571 |
 | Bytecode functions | 873 |
 | Artifact size | 264,401 bytes |
-| Core checking | 2.071 ms |
-| Core lowering | 0.941 ms |
-| Core compilation | 3.335 ms |
-| Core decoding | 0.386 ms |
-| Core verification | 1.276 ms |
-| Structural verification | 0.468 ms |
-| Verification hash | 0.186 ms |
-| Semantic identity | 2.420 ms |
-| Decoded loading | 1.456 ms |
-| Core loading | 1.846 ms |
+| Core checking | 2.125 ms |
+| Core lowering | 0.960 ms |
+| Core compilation | 3.430 ms |
+| Core decoding | 0.383 ms |
+| Core verification | 1.256 ms |
+| Structural verification | 0.451 ms |
+| Verification hash | 0.127 ms |
+| Semantic identity | 2.384 ms |
+| Decoded loading | 1.431 ms |
+| Core loading | 1.818 ms |
 
 ## Language operations
 
-Each result is a nine-run median.
+Each result is the median of four benchmark processes.
+
+Each process reports one nine-run median.
 
 | Operation | Result |
 | --- | ---: |
-| `int_loop` | 30.7 ns |
-| `direct_call` | 30.1 ns |
-| `string_interp` | 222.6 ns |
-| `float_add` | 32.5 ns |
-| `string_builder` | 42.0 ns |
-| `byte_buffer` | 39.0 ns |
-| `direct_clock` | 108.2 ns |
+| `int_loop` | 33.4 ns |
+| `direct_call` | 31.9 ns |
+| `string_interp` | 254.2 ns |
+| `float_add` | 33.4 ns |
+| `string_builder` | 44.3 ns |
+| `byte_buffer` | 40.9 ns |
+| `direct_clock` | 110.3 ns |
 
-String measurements can vary with process layout.
+String and interpreter measurements can vary with process placement.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 43.74 seconds.
+The warm debug workspace suite completed in 44.40 seconds.
 
 The suite used Cargo's default test concurrency and full coverage.
 
-Every test used deterministic scheduler mode and zero scheduler workers.
+The test harness used deterministic mode by default.
+
+Parallel scheduler tests used up to four workers.
+
+CLI integration tests used the parallel default.
 
 The standard codec modules link only when source imports them.
 
@@ -69,7 +75,7 @@ These results use the deterministic scheduler.
 
 | Measurement | Result |
 | --- | ---: |
-| Proc send and receive | 356.0 ns per message |
+| Proc send and receive | 357.2 ns per message |
 | File open and close | 10.731 us per lifecycle |
 | Cached 1 KiB file read | 4.116 us per read |
 | In-memory file open and close | 1.666 us per lifecycle |
@@ -93,12 +99,30 @@ Each benchmark run uses nine measured executions after one warm execution.
 
 | Tasks | Workers | One worker | Stated workers | Speedup |
 | ---: | ---: | ---: | ---: | ---: |
-| 2 | 2 | 77.038 ms | 37.504 ms | 2.057x |
-| 4 | 4 | 150.046 ms | 39.524 ms | 3.796x |
+| 2 | 2 | 76.580 ms | 36.831 ms | 2.079x |
+| 4 | 4 | 149.266 ms | 39.217 ms | 3.806x |
 
 The pool starts only when a second task can run.
 
 A root-only parallel run uses the inline execution path.
+
+Boundary-heavy message tasks also remain on the coordinator fast path.
+
+### Parallel messages
+
+Each row reports a five-run median and its measured p95.
+
+The ratio is deterministic time divided by parallel time.
+
+| Case | Messages | Workers | Deterministic | Deterministic p95 | Parallel | Parallel p95 | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ping-pong | 4,003 | 4 | 4.342 ms | 4.561 ms | 4.217 ms | 4.267 ms | 1.030x |
+| Stream | 500 | 4 | 0.183 ms | 0.211 ms | 0.180 ms | 0.190 ms | 1.016x |
+| Independent pairs | 4,012 | 4 | 4.330 ms | 4.350 ms | 4.332 ms | 4.360 ms | 1.000x |
+| Many senders | 800 | 4 | 0.329 ms | 0.334 ms | 0.330 ms | 0.338 ms | 0.997x |
+| Allocated stream | 200 | 4 | 0.155 ms | 0.158 ms | 0.157 ms | 0.161 ms | 0.988x |
+
+The aggregate message ratio is 1.013x.
 
 ## Host readiness observations
 
