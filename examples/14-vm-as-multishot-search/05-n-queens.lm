@@ -1,4 +1,4 @@
-# A full n-queens search, and how little a machine costs.
+# A full n-queens search with in-memory machine branches.
 #
 # Run with `--allow Vm`. This example opens no file and no socket.
 #
@@ -6,14 +6,11 @@
 # moment two queens attack. It never removes a queen, and it has no
 # stack of candidates. Read it as a description of a legal board.
 #
-# The driver turns that description into a search. It captures the
-# machine at each row and restores the capture once for each column,
-# so an illegal prefix ends one branch and never costs another.
+# The driver turns that description into a search. It branches the
+# machine at each row, so an illegal prefix cannot affect another branch.
 #
-# Every node of the tree is a machine. Eight queens visit about two
-# thousand legal prefixes, so this run builds and drops many thousands
-# of machines in well under a second. A machine is a small record and
-# a heap, and a machine no live machine names goes away again.
+# Every tree node is a machine. The eight-queens search visits about
+# two thousand legal prefixes. Unused machines become available for collection.
 
 # One board attempt. Answer 1 for a full legal board, 0 otherwise.
 def place(n: Int): Int with Choose
@@ -60,21 +57,17 @@ def count(child: Run[Int]): Int with Vm
   in Asked(request)
     case request
     in Call(Choose.Pick, call, (columns,))
-      case child.snapshot()
-      in Ok(image)
-        total = 0
-        column = 0
-        while column < columns
-          case sys.vm.Vm().restore(image)
-          in Ok(branch)
-            total = total + take(branch, column)
-          in Err(_) then ()
-          end
-          column = column + 1
+      total = 0
+      column = 0
+      while column < columns
+        case child.branch()
+        in Ok(branch)
+          total = total + take(branch, column)
+        in Err(_) then ()
         end
-        total
-      in Err(_) then 0
+        column = column + 1
       end
+      total
     in _ then 0
     end
   end

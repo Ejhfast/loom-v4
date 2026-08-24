@@ -268,6 +268,8 @@ pub enum ParallelRequirement {
     Safepoint(TaskKey),
     /// Every machine must return first.
     Quiescent,
+    /// Every machine must return before machine collection.
+    Collection,
 }
 
 /// A scheduler boundary rejected invalid worker state.
@@ -857,7 +859,9 @@ impl World {
     ) -> Option<ParallelRequirement> {
         let first = args.first().copied();
         let roots = match op {
-            lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+            lm_abi::OP_VM_SNAPSHOT_HELD
+            | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
+            | lm_abi::OP_VM_BRANCH => {
                 vec![self.handle_run(source, first?)?]
             }
             lm_abi::OP_VM_SNAPSHOT_SELF => vec![source],
@@ -975,12 +979,14 @@ impl World {
                 | lm_abi::OP_VM_ACTIVATE
                 | lm_abi::OP_VM_ACTIVATE_OR_FAULT
                 | lm_abi::OP_VM_ACTIVATE_DEF
+                | lm_abi::OP_VM_BRANCH
         ) && self.child_reclamation_needed(source)
         {
-            return ParallelRequirement::Quiescent;
+            return ParallelRequirement::Collection;
         }
-        if op == lm_abi::OP_VM_NEW && self.image_reclamation_needed() {
-            return ParallelRequirement::Quiescent;
+        if matches!(op, lm_abi::OP_VM_NEW | lm_abi::OP_VM_BRANCH) && self.image_reclamation_needed()
+        {
+            return ParallelRequirement::Collection;
         }
         let Some(source_machine) = self.machines.get(source as usize) else {
             return ParallelRequirement::Ready;
@@ -1106,8 +1112,11 @@ impl World {
                     return Err(ParallelError::InvalidState);
                 }
             }
-            ParallelRequirement::Quiescent if self.all_machines_resident() => {}
-            ParallelRequirement::Quiescent => return Err(ParallelError::InvalidState),
+            ParallelRequirement::Quiescent | ParallelRequirement::Collection
+                if self.all_machines_resident() => {}
+            ParallelRequirement::Quiescent | ParallelRequirement::Collection => {
+                return Err(ParallelError::InvalidState);
+            }
         }
         let event = self.commit_execution_stop(
             &mut returned.continuation.stack,

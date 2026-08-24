@@ -111,6 +111,9 @@ pub struct CoreLayout {
     pub snapshot_bad_image: Option<u32>,
     pub restore_error: Option<u32>,
     pub restore_limit_exceeded: Option<u32>,
+    pub branch_error: Option<u32>,
+    pub branch_resource_active: Option<u32>,
+    pub branch_limit_exceeded: Option<u32>,
     pub fs_error: Option<u32>,
     pub fs_error_closed: Option<u32>,
     pub fs_error_invalid_input: Option<u32>,
@@ -287,7 +290,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 251] = [
+pub const PINNED_LABELS: [&str; 254] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -539,6 +542,9 @@ pub const PINNED_LABELS: [&str; 251] = [
     "UdpSocket",
     "ChildEnv.Overlay",
     "FileHandle",
+    "BranchError",
+    "BranchError.ResourceActive",
+    "BranchError.BranchLimitExceeded",
 ];
 
 /// The core role of immediate integer values.
@@ -768,6 +774,9 @@ pub const ROLE_UDP_DATAGRAM: usize = 247;
 pub const ROLE_UDP_SOCKET: usize = 248;
 pub const ROLE_CHILD_ENV_OVERLAY: usize = 249;
 pub const ROLE_FILE_HANDLE: usize = 250;
+pub const ROLE_BRANCH_ERROR: usize = 251;
+pub const ROLE_BRANCH_RESOURCE_ACTIVE: usize = 252;
+pub const ROLE_BRANCH_LIMIT_EXCEEDED: usize = 253;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -899,6 +908,9 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SnapshotError.BadImage" => &mut layout.snapshot_bad_image,
         "RestoreError" => &mut layout.restore_error,
         "RestoreError.RestoreLimitExceeded" => &mut layout.restore_limit_exceeded,
+        "BranchError" => &mut layout.branch_error,
+        "BranchError.ResourceActive" => &mut layout.branch_resource_active,
+        "BranchError.BranchLimitExceeded" => &mut layout.branch_limit_exceeded,
         "FsError" => &mut layout.fs_error,
         "FsError.Closed" => &mut layout.fs_error_closed,
         "FsError.InvalidInput" => &mut layout.fs_error_invalid_input,

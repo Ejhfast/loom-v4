@@ -136,6 +136,132 @@ impl World {
         self.reply_or_fault(vm, op, built);
     }
 
+    /// Copy one held run through the admitted in-memory image path.
+    pub(super) fn branch_run(&mut self, vm: VmId, op: u32, source: VmId) {
+        let barrier = self.next_gate();
+        let image = match self.capture_snapshot(barrier, source, false) {
+            Ok(image) => image,
+            Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
+                self.fault_caller(vm, op, code, &message);
+                return;
+            }
+            Err(fail) => {
+                let built = self
+                    .build_branch_error(vm, &fail)
+                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+                self.reply_or_fault(vm, op, built);
+                return;
+            }
+        };
+        let image_vm = match self.new_vm_image(vm) {
+            Some(image_vm) => image_vm,
+            None => {
+                self.install_branch_limit_error(vm, op);
+                return;
+            }
+        };
+        let target = match self.prepare_run_target(vm, image_vm) {
+            Some(target) => target,
+            None => {
+                self.rollback_vm_image(image_vm);
+                self.install_branch_limit_error(vm, op);
+                return;
+            }
+        };
+        let reply = match self.prepare_restore_reply(vm, target) {
+            Ok(reply) => reply,
+            Err(code) => {
+                self.rollback_run_target(vm, target);
+                self.rollback_vm_image(image_vm);
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+                return;
+            }
+        };
+        if let Err(code) = self.check_reply(vm, reply.value) {
+            self.discard_restore_reply(vm, reply);
+            self.rollback_run_target(vm, target);
+            self.rollback_vm_image(image_vm);
+            self.machines[vm as usize].set_fault(
+                code,
+                "the reply does not carry the type of its perform",
+                Some(op),
+            );
+            return;
+        }
+        if let Err(code) = self.reserve_restore_reply_slot(vm) {
+            self.discard_restore_reply(vm, reply);
+            self.rollback_run_target(vm, target);
+            self.rollback_vm_image(image_vm);
+            self.machines[vm as usize].set_fault(code, "", Some(op));
+            return;
+        }
+        loop {
+            match self.prepare_restore(vm, target, &image) {
+                Ok(plan) => match self.commit_restore(plan) {
+                    Ok(_) => {
+                        self.install_prepared_restore_reply(vm, reply);
+                        return;
+                    }
+                    Err(_) => continue,
+                },
+                Err(crate::snapshot::RestoreFail::LimitExceeded) => {
+                    self.discard_restore_reply(vm, reply);
+                    self.rollback_run_target(vm, target);
+                    self.rollback_vm_image(image_vm);
+                    self.install_branch_limit_error(vm, op);
+                    return;
+                }
+                Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
+                    self.discard_restore_reply(vm, reply);
+                    self.rollback_run_target(vm, target);
+                    self.rollback_vm_image(image_vm);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::MalformedState,
+                        "the in-memory branch image is incompatible with its source world",
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Build one `BranchError` from a capture refusal.
+    fn build_branch_error(
+        &mut self,
+        vm: VmId,
+        fail: &crate::snapshot::SnapshotFail,
+    ) -> Result<Value, FaultCode> {
+        match fail {
+            crate::snapshot::SnapshotFail::LimitExceeded => {
+                self.make_instance(vm, self.core.branch_limit_exceeded, vec![])
+            }
+            crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
+                let items: Vec<Value> = path.iter().map(|part| Value::Int(*part as i64)).collect();
+                let list = self.machines[vm as usize].alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })?;
+                let list_ref = list.as_obj().ok_or(FaultCode::MalformedState)?;
+                self.machines[vm as usize].vm.heap.push_host_root(list_ref);
+                let text = self.machines[vm as usize].alloc(Object::Str(kind.clone().into()));
+                self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
+                let text = text?;
+                self.make_instance(vm, self.core.branch_resource_active, vec![list, text])
+            }
+            crate::snapshot::SnapshotFail::Fault(code, _) => Err(*code),
+        }
+    }
+
+    /// Reply with the branch limit error.
+    fn install_branch_limit_error(&mut self, vm: VmId, op: u32) {
+        let built = self
+            .make_instance(vm, self.core.branch_limit_exceeded, vec![])
+            .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+        self.reply_or_fault(vm, op, built);
+    }
+
     /// `sys.vm.Vm().restore(snap)`.
     ///
     /// A guest holds a snapshot as container bytes. Bytes this world

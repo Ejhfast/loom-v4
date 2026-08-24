@@ -197,12 +197,13 @@ fn sample_parallel_counters(
 fn report_parallel_counters(name: &str, source: &str, workers: usize, expected: &str) {
     let (scheduler, world, execution, types) = sample_parallel_counters(source, workers, expected);
     println!(
-        "LOOM\tparallel_counters\t{name}\t{workers}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "LOOM\tparallel_counters\t{name}\t{workers}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         scheduler.proc_slices,
         scheduler.local_continuations,
         scheduler.local_rotations,
         scheduler.worker_recalls,
         scheduler.global_quiescence,
+        scheduler.collection_quiescence,
         world.retired_instructions,
         world.heap_growth_bytes,
         execution.native_calls,
@@ -1140,6 +1141,99 @@ fn bench_proc_operations() {
 
 #[test]
 #[ignore]
+fn bench_in_memory_branch() {
+    let snapshot_restore = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 100)
+end
+
+def finish(run: Run[Int], answer: Int): Int with Vm
+  case run.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      run.answer(call, answer)
+      run.run().value_or(-1000)
+    in _ then -2000
+    end
+  in Done(value) then value
+  in Fault(_) then -3000
+  end
+end
+
+original = sys.vm.Vm().activate_or_fault(choose, args: ())
+case original.drive()
+in Asked(_)
+  image = case original.snapshot()
+  in Ok(value) then value
+  in Err(error) then panic(display(error))
+  end
+  total = 0
+  index = 0
+  while index < 100
+    copy = case sys.vm.Vm().restore(image)
+    in Ok(value) then value
+    in Err(error) then panic(display(error))
+    end
+    total = total + finish(copy, index)
+    index = index + 1
+  end
+  finish(original, 100)
+  total
+in Done(value) then value
+in Fault(fault) then raise(fault)
+end
+"#;
+    let branch = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 100)
+end
+
+def finish(run: Run[Int], answer: Int): Int with Vm
+  case run.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      run.answer(call, answer)
+      run.run().value_or(-1000)
+    in _ then -2000
+    end
+  in Done(value) then value
+  in Fault(_) then -3000
+  end
+end
+
+original = sys.vm.Vm().activate_or_fault(choose, args: ())
+case original.drive()
+in Asked(_)
+  total = 0
+  index = 0
+  while index < 100
+    copy = case original.branch()
+    in Ok(value) then value
+    in Err(error) then panic(display(error))
+    end
+    total = total + finish(copy, index)
+    index = index + 1
+  end
+  finish(original, 100)
+  total
+in Done(value) then value
+in Fault(fault) then raise(fault)
+end
+"#;
+    let restored = time_world(snapshot_restore, &["Vm"], config(), "Done(4950)");
+    let branched = time_world(branch, &["Vm"], config(), "Done(4950)");
+    let ratio = branched.as_secs_f64() / restored.as_secs_f64();
+    println!(
+        "LOOM\tvm_branch\t100\t{:.3}\t{:.3}\t{ratio:.3}",
+        restored.as_secs_f64() * 1e3,
+        branched.as_secs_f64() * 1e3
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_parallel_cpu_scaling() {
     println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
     for (tasks, workers, gate) in [(2, 2, 1.7), (4, 4, 3.0)] {
@@ -1194,7 +1288,7 @@ fn bench_parallel_allocation_churn() {
         parallel.as_secs_f64() * 1e3
     );
     println!(
-        "LOOM\tparallel_counters\tcase\tworkers\tproc_slices\tcontinuations\trotations\trecalls\tquiescence\tinstructions\theap_growth\tnative_calls\tcollections\tclose_hits\tclose_misses\tderive_hits\tderive_misses"
+        "LOOM\tparallel_counters\tcase\tworkers\tproc_slices\tcontinuations\trotations\trecalls\tquiescence\tcollection_quiescence\tinstructions\theap_growth\tnative_calls\tcollections\tclose_hits\tclose_misses\tderive_hits\tderive_misses"
     );
     report_parallel_counters("allocation_churn", &source, 1, &expected);
     report_parallel_counters("allocation_churn", &source, 8, &expected);

@@ -2994,6 +2994,15 @@ pub(crate) fn step(
                             let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
                             push(state, out)?;
                         }
+                        lm_abi::OP_VM_BRANCH => {
+                            let t = pop_run(state)?;
+                            let run = ctx.intern(BcType::Run(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.branch_error, "BranchError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(run, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
                         lm_abi::OP_VM_DRIVE_FOR => {
                             let count = pop(state)?;
                             if ctx.ty(count) != BcType::Int {

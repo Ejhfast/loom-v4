@@ -235,6 +235,157 @@ exercise()
 }
 
 #[test]
+fn an_in_memory_branch_keeps_both_runs_independent() {
+    let source = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 10)
+end
+
+def finish(run: Run[Int], answer: Int): Int with Vm
+  case run.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      run.answer(call, answer)
+      run.run().value_or(-1)
+    in _ then -2
+    end
+  in Done(value) then value
+  in Fault(_) then -3
+  end
+end
+
+def exercise(): (Int, Int) with Vm
+  original = sys.vm.Vm().activate_or_fault(choose, args: ())
+  case original.drive()
+  in Asked(_)
+    copy = case original.branch()
+    in Ok(run) then run
+    in Err(_) then return (-4, -4)
+    end
+    (finish(original, 3), finish(copy, 8))
+  in Done(value) then (value, value)
+  in Fault(_) then (-5, -5)
+  end
+end
+
+exercise()
+"#;
+    let (deterministic, parallel, stats) =
+        compare_modes(source, &["Vm"]).expect("both branch modes run");
+    assert_eq!(deterministic, "Done((3, 8))");
+    assert_eq!(parallel, deterministic);
+    assert_eq!(stats.global_quiescence, 0);
+
+    let bytes =
+        compile_to_bytes("branch-without-snapshot.lm", source).expect("the source compiles");
+    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the Vm grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), deterministic);
+    assert!(world.last_snapshot().is_none());
+}
+
+#[test]
+fn dynamic_branches_run_as_parallel_scheduler_tasks() {
+    let source = r#"
+def choose_after_work(): Int with Rand.Int
+  answer = sys.rand.int(0, 10)
+  i = 0
+  while i < 300000
+    i = i + 1
+  end
+  answer
+end
+
+def launch(run: Run[Int], answer: Int): Handle[Never, Int] with Vm, Proc
+  case run.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      run.answer(call, answer)
+      sys.proc.run(run)
+    in _ then panic("the branch asked for another operation")
+    end
+  in Done(_) then panic("the branch ended before its answer")
+  in Fault(fault) then raise(fault)
+  end
+end
+
+def exercise(): Int with Vm, Proc
+  original = sys.vm.Vm().activate_or_fault(choose_after_work, args: ())
+  case original.drive()
+  in Asked(_)
+    branches = List[Run[Int]]()
+    index = 0
+    while index < 8
+      case original.branch()
+      in Ok(run) then branches.push(run)
+      in Err(error) then panic(display(error))
+      end
+      index = index + 1
+    end
+    handles = List[Handle[Never, Int]]()
+    index = 0
+    while index < branches.len()
+      handles.push(launch(branches.at(index), index))
+      index = index + 1
+    end
+    handles.push(launch(original, 8))
+    total = 0
+    for handle in handles
+      total = total + handle.done().value()
+    end
+    total
+  in Done(value) then value
+  in Fault(fault) then raise(fault)
+  end
+end
+
+exercise()
+"#;
+    let (outcome, stats) =
+        run_parallel_with(source, 4, &["Vm", "Proc"]).expect("the branch tasks run");
+    assert_eq!(outcome, "Done(36)");
+    assert!(stats.max_active_leases >= 2, "{stats:?}");
+    assert_eq!(stats.global_quiescence, 0, "{stats:?}");
+}
+
+#[test]
+fn a_live_attachment_rejects_an_in_memory_branch() {
+    let source = r#"
+def hold(reader: PipeReader): Int with Pipe.Read
+  reader.read(1).value_or(b"").len()
+end
+
+def exercise(): Bool with Pipe, Vm
+  case Pipe().open()
+  in Ok((reader, writer))
+    child = sys.vm.Vm().activate_or_fault(hold, args: (reader,))
+    blocked = case child.branch()
+    in Err(BranchError.ResourceActive(_, _)) then true
+    in Err(_) then false
+    in Ok(_) then false
+    end
+    writer.close()
+    blocked
+  in Err(_) then false
+  end
+end
+
+exercise()
+"#;
+    let (outcome, _) =
+        run_parallel_with(source, 2, &["Pipe", "Vm"]).expect("the branch refusal returns a value");
+    assert_eq!(outcome, "Done(true)");
+}
+
+#[test]
 fn one_runnable_task_stays_on_the_inline_path() {
     let source = "i = 0\nwhile i < 10000\n  i = i + 1\nend\ni\n";
     let (outcome, stats) = run_parallel(source, 4).expect("the inline world runs");
@@ -341,6 +492,7 @@ spinner = Spinner.spawn()
     assert_eq!(world.show_outcome(&outcome), "Done((Ok(14), Ok(300000)))");
     assert!(scheduler.stats().max_active_leases >= 2);
     assert!(scheduler.stats().global_quiescence > 0);
+    assert!(scheduler.stats().collection_quiescence > 0);
 }
 
 #[test]

@@ -189,6 +189,9 @@ pub(crate) const ROLE_EXEC_ERROR_FAILED: usize = 244;
 pub(crate) const ROLE_PIPE_ERROR_UNSUPPORTED: usize = 246;
 pub(crate) const ROLE_CHILD_ENV_OVERLAY: usize = 249;
 pub(crate) const ROLE_FILE_HANDLE: usize = 250;
+pub(crate) const ROLE_BRANCH_ERROR: usize = 251;
+pub(crate) const ROLE_BRANCH_RESOURCE_ACTIVE: usize = 252;
+pub(crate) const ROLE_BRANCH_LIMIT_EXCEEDED: usize = 253;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -211,7 +214,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 33] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 34] = [
     (
         ROLE_OPTION,
         1,
@@ -303,6 +306,12 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 33] = [
         0,
         &[ROLE_RESTORE_LIMIT_EXCEEDED],
         "RestoreError",
+    ),
+    (
+        ROLE_BRANCH_ERROR,
+        0,
+        &[ROLE_BRANCH_RESOURCE_ACTIVE, ROLE_BRANCH_LIMIT_EXCEEDED],
+        "BranchError",
     ),
     (
         ROLE_FS_ERROR,
@@ -526,7 +535,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 33] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 137] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 139] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -567,6 +576,11 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 137] = [
     (ROLE_SNAPSHOT_LIMIT_EXCEEDED, &[]),
     (ROLE_SNAPSHOT_BAD_IMAGE, &[FieldShape::Str]),
     (ROLE_RESTORE_LIMIT_EXCEEDED, &[]),
+    (
+        ROLE_BRANCH_RESOURCE_ACTIVE,
+        &[FieldShape::ListInt, FieldShape::Str],
+    ),
+    (ROLE_BRANCH_LIMIT_EXCEEDED, &[]),
     (ROLE_FS_ERROR_CLOSED, &[]),
     (ROLE_FS_ERROR_INVALID_INPUT, &[FieldShape::Str]),
     (ROLE_FS_ERROR_INVALID_ENCODING, &[FieldShape::Str]),

@@ -161,6 +161,8 @@ pub struct SchedulerStats {
     pub local_rotations: u32,
     /// Operations that requested global coordinator quiescence.
     pub global_quiescence: u32,
+    /// Global quiescence requests that ran machine collection.
+    pub collection_quiescence: u32,
     /// Scoped barriers that waited for one machine safepoint.
     pub scoped_safepoint_waits: u32,
 }

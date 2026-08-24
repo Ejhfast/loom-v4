@@ -2312,6 +2312,28 @@ Admission status belongs to one process. Snapshot bytes transfer no trust.
 
 Loading the bytes in another process repeats admission (section 17.8).
 
+### 17.10 In-memory branches
+
+`Run.branch()` copies one held run world in memory.
+
+It returns `Result[Run[T],BranchError]`.
+
+The returned run remains under holder ownership.
+
+The operation does not schedule the returned run.
+
+`sys.proc.run` can transfer that run to the scheduler.
+
+The branch shares immutable verified code.
+
+It copies mutable machines, heaps, mailboxes, and VM image state.
+
+The operation does not create snapshot bytes or a snapshot value.
+
+`ResourceActive(path,kind)` reports a live host attachment.
+
+`BranchLimitExceeded` reports a machine, image, heap, or graph limit.
+
 ---
 
 ## 18. Procs and mailboxes
@@ -3261,6 +3283,8 @@ Vm.Dispatch[T]                 (Run[T], Request) -> ()
 Vm.Table[T]                    (Run[T]) -> PolicyTable
 Vm.SnapshotHeld[T]             (Run[T])
                                 -> Result[RunSnapshot[T], SnapshotError]
+Vm.Branch[T]                   (Run[T])
+                                -> Result[Run[T], BranchError]
 Vm.SnapshotSelf                ()
                                 -> Result[VmSnapshot, SnapshotError]
 Vm.LoadSnapshot                (Bytes)
@@ -3551,7 +3575,7 @@ The prelude introduces the pinned value and resource surface:
 (), Never, Bool, Int, Float, Byte, List, Map
 Option, Some, None, Result, Ok, Err, Ordering, Unit, Tuple2, ..., Tuple16, Range
 StepEvent, DriveEvent, Proc, Recv, SendResult, ProcError
-Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
+Choice, SnapshotError, RestoreError, BranchError, FsError, OpenOptions, SeekFrom
 FileKind, FileInfo, DirEntry, RenameMode
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp

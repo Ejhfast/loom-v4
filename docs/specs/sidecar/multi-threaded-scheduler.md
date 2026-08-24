@@ -1009,6 +1009,10 @@ The first implementation can reuse the admitted image representation.
 
 Performance gates determine whether a more direct graph copy adds value.
 
+Machine collection keeps its current global quiescence rule.
+
+The scheduler counts each collection quiescence separately.
+
 ## 20. Termination and failure
 
 ### 20.1 Root termination
@@ -1360,7 +1364,12 @@ The implementation must pass these gates:
 - pause completes during long pure computation;
 - snapshot closure can reach an active task;
 - replacement stops every task using one image;
-- installation stops every task using one image;
+- additive installation stops no active task;
+- slot replacement stops every task using one image;
+- a branch creates no snapshot container or guest snapshot value;
+- a branch remains held until explicit scheduler transfer;
+- dynamic branches can run concurrently after scheduler transfer;
+- a live host attachment rejects a branch with `BranchError`;
 - root termination drains all active leases;
 - worker failure never loses a machine silently;
 - host completion and worker report races lose no wake;

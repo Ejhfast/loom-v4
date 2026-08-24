@@ -1600,6 +1600,21 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Run(t), "branch") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_BRANCH, span)?;
+                let run = ctx.store.intern(Type::Run(t));
+                let error = Self::core_class(ctx, "BranchError");
+                let ty = Self::core_inst(ctx, "Result", vec![run, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_BRANCH,
+                        args: vec![recv_h],
+                    },
+                }
+            }
             (Type::Vm, "restore") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(

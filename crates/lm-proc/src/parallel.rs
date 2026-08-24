@@ -457,10 +457,18 @@ impl ParallelCoordinator<'_> {
                 return Ok(());
             };
             let requirement = self.world.parallel_requirement(returned);
-            if requirement == ParallelRequirement::Quiescent && !self.active.is_empty() {
+            let needs_quiescence = matches!(
+                requirement,
+                ParallelRequirement::Quiescent | ParallelRequirement::Collection
+            );
+            if needs_quiescence && !self.active.is_empty() {
                 if !self.commit_quiescence {
                     self.scheduler.stats.global_quiescence =
                         self.scheduler.stats.global_quiescence.saturating_add(1);
+                    if requirement == ParallelRequirement::Collection {
+                        self.scheduler.stats.collection_quiescence =
+                            self.scheduler.stats.collection_quiescence.saturating_add(1);
+                    }
                 }
                 self.commit_quiescence = true;
                 self.recall_all_active();
@@ -493,7 +501,7 @@ impl ParallelCoordinator<'_> {
                 }
             }
             let front_ready = matches!(requirement, ParallelRequirement::Ready)
-                || (requirement == ParallelRequirement::Quiescent && self.active.is_empty());
+                || (needs_quiescence && self.active.is_empty());
             let index = if front_ready {
                 0
             } else {

@@ -46,3 +46,29 @@ enum RestoreError implements Error
     builder.append("the restored world exceeds its limit")
   end
 end
+
+# The ordinary error of an in-memory run branch.
+enum BranchError implements Error
+  # A live host attachment cannot move into a branch.
+  ResourceActive(path: List[Int], kind: String)
+  # The copied world passed a machine, image, heap, or graph limit.
+  BranchLimitExceeded
+
+  def is_resource_active(self): Bool
+    case self
+    in ResourceActive(_, _)  then true
+    in BranchLimitExceeded   then false
+    end
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in ResourceActive(_, kind)
+      builder.append("a live ")
+      builder.append(kind)
+      builder.append(" blocks branch creation")
+    in BranchLimitExceeded
+      builder.append("the branch exceeds its machine-world limit")
+    end
+  end
+end

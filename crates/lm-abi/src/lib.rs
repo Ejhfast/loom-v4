@@ -59,7 +59,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 31 adds UDP datagram operations.
 /// Version 32 adds exact fault re-raising.
 /// Version 33 adds direct closure proc launch.
-pub const ABI_VERSION: u32 = 33;
+/// Version 34 adds in-memory run branching.
+pub const ABI_VERSION: u32 = 34;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2293,9 +2294,10 @@ pub const OP_UDP_RECV_FROM: OpSlot = 139;
 pub const OP_UDP_LOCAL_ADDRESS: OpSlot = 140;
 pub const OP_UDP_CLOSE: OpSlot = 141;
 pub const OP_PROC_RUN_CLOSURE: OpSlot = 142;
+pub const OP_VM_BRANCH: OpSlot = 143;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 143] = [
+pub const OPS: [OpDef; 144] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3633,6 +3635,15 @@ pub const OPS: [OpDef; 143] = [
         schema: "[R,e](() -> R with e) -> Handle[Never,R]",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Vm",
+        member: "Branch",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Run[T]) -> Result[Run[T], BranchError]",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -3994,6 +4005,7 @@ mod tests {
         assert_eq!(op_by_name("Vm.SnapshotSelf"), Some(OP_VM_SNAPSHOT_SELF));
         assert_eq!(op_by_name("Vm.LoadSnapshot"), Some(OP_VM_LOAD_SNAPSHOT));
         assert_eq!(op_by_name("Vm.Restore"), Some(OP_VM_RESTORE));
+        assert_eq!(op_by_name("Vm.Branch"), Some(OP_VM_BRANCH));
         assert_eq!(op_by_name("Fs.Open"), Some(OP_FS_OPEN));
         assert_eq!(op_by_name("Fs.Close"), Some(OP_FS_CLOSE));
         assert_eq!(op_by_name("Vm.ResourceSame"), Some(OP_VM_RESOURCE_SAME));

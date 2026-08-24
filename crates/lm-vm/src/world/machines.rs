@@ -2132,6 +2132,19 @@ impl World {
                 }
                 self.take_snapshot(vm, op, target, false);
             }
+            lm_abi::OP_VM_BRANCH => {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                self.branch_run(vm, op, target);
+            }
             lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
                 let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;

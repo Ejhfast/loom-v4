@@ -56,7 +56,8 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_VM_BINDING_SPEC
             | lm_abi::OP_VM_BINDING_INSTANCE
             | lm_abi::OP_VM_BINDING_FUNCTION_TARGET
-            | lm_abi::OP_VM_BINDING_CLASS_TARGET => 1,
+            | lm_abi::OP_VM_BINDING_CLASS_TARGET
+            | lm_abi::OP_VM_BRANCH => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
