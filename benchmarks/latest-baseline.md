@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `7ca3ad7`.
+The measured source revision is `754db52`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -31,16 +31,18 @@ The snapshot format version is 30.
 | Bytecode instructions | 18,807 |
 | Decoded instruction width | 16 bytes |
 | Artifact size | 273,244 bytes |
-| Core checking | 2.397 ms |
-| Core lowering | 1.004 ms |
-| Core compilation | 3.792 ms |
-| Core decoding | 0.408 ms |
-| Core verification | 1.412 ms |
-| Structural verification | 0.510 ms |
-| Verification hash | 0.141 ms |
-| Semantic identity | 2.537 ms |
-| Decoded loading | 1.605 ms |
-| Core loading | 1.998 ms |
+| Core checking | 2.399 ms |
+| Core lowering | 0.989 ms |
+| Core compilation | 3.777 ms |
+| Core decoding | 0.407 ms |
+| Core verification | 1.406 ms |
+| Structural verification | 0.511 ms |
+| Verification hash | 0.136 ms |
+| Semantic identity | 2.514 ms |
+| Decoded loading | 1.600 ms |
+| Core loading | 2.011 ms |
+| Cached core loading | 0.166 ms |
+| Default interface witnesses | 11 of 3,552 possible entries |
 
 ### Growth from the scheduler foundation
 
@@ -53,13 +55,13 @@ This comparison uses revision `308b55e` with the same processor placement.
 | Bytecode functions | 873 | 891 | +2.1% |
 | Bytecode instructions | 17,905 | 18,807 | +5.0% |
 | Artifact size | 264,401 bytes | 273,244 bytes | +3.3% |
-| Core checking | 2.065 ms | 2.397 ms | +16.1% |
-| Core lowering | 0.945 ms | 1.004 ms | +6.2% |
-| Core compilation | 3.335 ms | 3.792 ms | +13.7% |
-| Core verification | 1.278 ms | 1.412 ms | +10.5% |
-| Core loading | 1.837 ms | 1.998 ms | +8.8% |
+| Core checking | 2.065 ms | 2.399 ms | +16.2% |
+| Core lowering | 0.945 ms | 0.989 ms | +4.7% |
+| Core compilation | 3.335 ms | 3.777 ms | +13.3% |
+| Core verification | 1.278 ms | 1.406 ms | +10.0% |
+| Core loading | 1.837 ms | 2.011 ms | +9.5% |
 
-The larger core adds 0.332 milliseconds to core checking.
+The larger core adds 0.334 milliseconds to core checking.
 
 Large checker inputs retain the prior scaling slope.
 
@@ -70,6 +72,24 @@ Each row subtracts the smallest input from the largest input.
 | Method chain | 16 to 1,024 | 10.058 ms | 10.113 ms | +0.5% |
 | Interfaces | 16 to 256 | 1.777 ms | 1.819 ms | +2.4% |
 | Wide body | 64 to 1,024 | 0.776 ms | 0.736 ms | -5.2% |
+
+### Sparse default witness gate
+
+Each timing is the median of seven pinned release processes.
+
+Each process reports one median from nine measured runs.
+
+Dense uses revision `4a2dc34`. Sparse uses revision `754db52`.
+
+Cached loading computes the verification hash and rebuilds dispatch tables.
+
+| Measurement | Dense | Sparse | Change |
+| --- | ---: | ---: | ---: |
+| Default interface call | 268.0 ns | 236.2 ns | -11.9% |
+| Cached core loading | 0.171 ms | 0.166 ms | -2.9% |
+| Decoded core loading | 1.602 ms | 1.600 ms | -0.1% |
+| Full core loading | 2.017 ms | 2.011 ms | -0.3% |
+| Witness entries | 3,552 | 11 | -99.7% |
 
 ## Language operations
 
@@ -106,13 +126,13 @@ The largest measured interface delta is 5.8 percent.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 48.67 seconds.
+The warm debug workspace suite completed in 48.55 seconds.
 
 Revision `308b55e` completed in 43.95 seconds under the same settings.
 
 | Target | Foundation | Current | Change |
 | --- | ---: | ---: | ---: |
-| Full workspace | 43.95 s | 48.67 s | +10.7% |
+| Full workspace | 43.95 s | 48.55 s | +10.5% |
 | Snapshot admission | 10.93 s | 11.84 s | +8.3% |
 | Source mutation | 11.48 s | 13.15 s | +14.5% |
 

@@ -1713,6 +1713,18 @@ fn bench_core_compilation() {
         }
     }
 
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_cached(decoded.clone(), &mut cache).expect("the core image loads");
+    let mut cached_load_runs: Vec<Duration> = Vec::new();
+    for _ in 0..ROUNDS {
+        let module = decoded.clone();
+        let start = Instant::now();
+        let loaded = lm_vm::load_cached(module, &mut cache).expect("the core image loads");
+        let elapsed = start.elapsed();
+        std::hint::black_box(loaded.dispatch_cells());
+        cached_load_runs.push(elapsed);
+    }
+
     println!(
         "LOOM\tcore_check\t{}\t{}\t{:.3}\tms",
         hir.classes.len(),
@@ -1784,6 +1796,12 @@ fn bench_core_compilation() {
         bytes.len(),
         module.funcs.len(),
         median(load_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_cached_load\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(cached_load_runs).as_secs_f64() * 1e3
     );
 }
 
