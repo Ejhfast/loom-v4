@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `7e07f4d`.
+The measured source revision is `f67744a`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -18,7 +18,7 @@ The bytecode version is 56.
 
 The verifier version is 36.
 
-The snapshot format version is 30.
+The snapshot format version is 31.
 
 ## Core image
 
@@ -231,19 +231,52 @@ The acceptance limit is 1.08x for each ratio.
 
 ## Reified VM branching
 
-Each result is the median of three pinned release processes.
+Each result is the median of nine release executions after one warm-up.
 
-Each process creates and completes 100 held runs.
+Each execution creates and completes 100 held runs.
 
 | Method | Time | Branch divided by method |
 | --- | ---: | ---: |
-| Reuse one snapshot | 0.312 ms | 1.397x |
-| Fresh capture and restore | 0.501 ms | 0.861x |
-| `Run.branch()` | 0.429 ms | 1.000x |
+| Reuse one snapshot | 0.315 ms | 1.359x |
+| Fresh capture and restore | 0.512 ms | 0.836x |
+| `Run.branch()` | 0.428 ms | 1.000x |
+| `Run.branch_answer()` | 0.343 ms | 1.248x |
 
-`Run.branch()` is 14 percent faster than a fresh capture and restore.
+`Run.branch()` is 16 percent faster than a fresh capture and restore.
+
+`Run.branch_answer()` is 20 percent faster than `Run.branch()` plus a separate answer.
 
 A reused snapshot remains faster for repeated copies of one state.
+
+## Parallel multishot search
+
+Each result is the median of nine release executions after one warm-up.
+
+The search uses seven queens and four parallel workers.
+
+| Method | Time | Relative result |
+| --- | ---: | ---: |
+| Direct recursive search | 0.128 ms | 1.000x |
+| Deterministic multishot search | 2,047.484 ms | 15,998.220x overhead |
+| Parallel multishot search | 1,393.175 ms | 1.470x deterministic speedup |
+
+The multishot search creates 3,072 answered copies and processes 3,585 drive events.
+
+Each selected event rebuilds and rearms the current one-shot wait frontier.
+
+The previous duplicate scans also made each frontier validation quadratic.
+
+`BTreeSet` validation removed those scans. One debug execution fell from 46.74 seconds to 16.99 seconds.
+
+The checked five-queen example takes 0.13 seconds in the debug test profile.
+
+World copying and repeated frontier registration still dominate this small search.
+
+Direct recursive search is the correct implementation when each branch has little work.
+
+Parallel multishot search helps when each copied world performs enough work between boundaries.
+
+A future persistent wait collection can remove repeated full-frontier registration.
 
 ## Host readiness observations
 
