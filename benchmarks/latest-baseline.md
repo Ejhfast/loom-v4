@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `f67744a`.
+The measured source revision is `c9551fc`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -228,6 +228,21 @@ The parallel reference uses hand-written procs with the same chunking policy.
 The deterministic reference uses `Iterable.map`.
 
 The acceptance limit is 1.08x for each ratio.
+
+## Reified VM lifecycle
+
+Each result is the median of nine release executions after one warm-up.
+
+The case runs the nine-queen multishot example.
+
+| Reclamation policy | Time | Adaptive divided by policy |
+| --- | ---: | ---: |
+| Adaptive record threshold | 401.369 ms | 1.000x |
+| Former 1,024-child trigger | 402.299 ms | 0.998x |
+
+The adaptive threshold separates record reclamation from hard resource limits.
+
+The acceptance limit is 1.20x.
 
 ## Reified VM branching
 
