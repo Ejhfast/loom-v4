@@ -19,8 +19,6 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// The largest typed wait table of one machine.
-pub const MAX_LIVE_WAITS: usize = 1_024;
-
 /// The fault one machine takes when the type environment table of its
 /// world reaches a cap.
 ///

@@ -151,7 +151,12 @@ impl World {
         &mut self,
         bytes: &[u8],
     ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::ImageError> {
-        let limits = crate::snapshot::LoadLimits::default();
+        let limits = crate::snapshot::LoadLimits {
+            max_machines: self.budget.limits.max_machines,
+            max_vm_images: self.budget.limits.max_vm_images,
+            max_waits: self.budget.limits.max_waits,
+            ..crate::snapshot::LoadLimits::default()
+        };
         self.record_snapshot_check();
         let image = crate::snapshot::codec::load_external(bytes, &self.base_loaded, limits)?;
         self.trust_image(&image);

@@ -861,7 +861,8 @@ impl World {
         let roots = match op {
             lm_abi::OP_VM_SNAPSHOT_HELD
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
-            | lm_abi::OP_VM_BRANCH => {
+            | lm_abi::OP_VM_BRANCH
+            | lm_abi::OP_VM_BRANCH_ANSWER => {
                 vec![self.handle_run(source, first?)?]
             }
             lm_abi::OP_VM_SNAPSHOT_SELF => vec![source],
@@ -980,11 +981,15 @@ impl World {
                 | lm_abi::OP_VM_ACTIVATE_OR_FAULT
                 | lm_abi::OP_VM_ACTIVATE_DEF
                 | lm_abi::OP_VM_BRANCH
+                | lm_abi::OP_VM_BRANCH_ANSWER
         ) && self.child_reclamation_needed(source)
         {
             return ParallelRequirement::Collection;
         }
-        if matches!(op, lm_abi::OP_VM_NEW | lm_abi::OP_VM_BRANCH) && self.image_reclamation_needed()
+        if matches!(
+            op,
+            lm_abi::OP_VM_NEW | lm_abi::OP_VM_BRANCH | lm_abi::OP_VM_BRANCH_ANSWER
+        ) && self.image_reclamation_needed()
         {
             return ParallelRequirement::Collection;
         }

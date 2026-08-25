@@ -936,11 +936,30 @@ pub fn run_on_worker_with_scheduler(
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
+    run_on_worker_with_scheduler_and_limits(
+        loaded,
+        config,
+        lm_vm::WorldLimits::default(),
+        scheduler_config,
+        grants,
+        host,
+    )
+}
+
+/// Run one program with explicit world and scheduler limits.
+pub fn run_on_worker_with_scheduler_and_limits(
+    loaded: &lm_vm::LoadedModule,
+    config: lm_vm::VmConfig,
+    limits: lm_vm::WorldLimits,
+    scheduler_config: SchedulerConfig,
+    grants: &[&str],
+    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
+) -> Result<WorkerOutcome, String> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
             .spawn_scoped(scope, move || {
-                let mut world = World::new(loaded, config, host());
+                let mut world = World::new_with_limits(loaded, config, limits, host());
                 for grant in grants {
                     world
                         .allow(grant)

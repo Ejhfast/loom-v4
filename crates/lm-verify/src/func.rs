@@ -29,6 +29,7 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             lm_abi::OP_VM_ACTIVATE
             | lm_abi::OP_VM_ACTIVATE_OR_FAULT
             | lm_abi::OP_VM_ANSWER
+            | lm_abi::OP_VM_BRANCH_ANSWER
             | lm_abi::OP_VM_REJECT
             | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,
             lm_abi::OP_VM_ACTIVATE_DEF

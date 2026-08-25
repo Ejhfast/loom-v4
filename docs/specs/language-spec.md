@@ -1998,6 +1998,14 @@ that holds no host resource can never run again and can never be read,
 so the world frees its record and returns its budget unit. A search
 driver therefore pays for the branches it still holds.
 
+The reference runner permits 262,144 live machines, VM images, child
+reservations, and waits by default. These ceilings reserve no memory
+in advance.
+
+The CLI exposes `--max-machines`, `--max-images`, `--max-children`, and
+`--max-waits`. An embedding host supplies the same limits through the
+runner API.
+
 ### 14.12 One interpreter loop
 
 The Rust reference VM exposes one internal entry point:
@@ -2341,6 +2349,16 @@ The operation does not create snapshot bytes or a snapshot value.
 `ResourceActive(path,kind)` reports a live host attachment.
 
 `BranchLimitExceeded` reports a machine, image, heap, or graph limit.
+
+`Run.branch_answer(call,value)` copies a run at a pending call.
+
+It answers only the copied call and returns the copied run.
+
+The source run and its call token stay unchanged.
+
+A stale or foreign call token causes `Fault(InvalidRequestToken)`.
+
+The operation returns the same `BranchError` cases as `branch()`.
 
 ---
 
@@ -3292,6 +3310,8 @@ Vm.Table[T]                    (Run[T]) -> PolicyTable
 Vm.SnapshotHeld[T]             (Run[T])
                                 -> Result[RunSnapshot[T], SnapshotError]
 Vm.Branch[T]                   (Run[T])
+                                -> Result[Run[T], BranchError]
+Vm.BranchAnswer[T,A,R]         (Run[T], PendingCall[A,R], R)
                                 -> Result[Run[T], BranchError]
 Vm.SnapshotSelf                ()
                                 -> Result[VmSnapshot, SnapshotError]
@@ -4381,6 +4401,9 @@ A returned callable is an ordinary terminal value. `lm run` does not invoke it b
 The entry can use `sys.args()` to read strings after `--`. The call needs the `Args` row and policy grant.
 
 `run` constructs a root VM and applies an explicit host policy profile. The artifact row does not grant operations.
+
+The runner accepts explicit machine, image, child, and wait limits.
+The CLI exposes these limits through the options in section 14.11.
 
 ### 26.4 Root policy profiles
 

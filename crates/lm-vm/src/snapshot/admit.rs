@@ -2592,9 +2592,6 @@ impl Admit<'_> {
         if m.next_wait == 0 {
             return fail(ImageReason::State, at("the next wait token is zero"));
         }
-        if m.waits.len() > crate::machine::MAX_LIVE_WAITS {
-            return fail(ImageReason::State, at("the wait table passes its limit"));
-        }
         let tokens = m.waits.iter().map(|wait| wait.token).collect::<Vec<_>>();
         let mut previous = 0;
         for wait in &m.waits {

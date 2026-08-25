@@ -12,7 +12,9 @@ impl World {
         source: WaitSource,
     ) -> Result<(u64, Value), FaultCode> {
         let machine = &self.machines[vm as usize];
-        if machine.vm.waits.len() >= MAX_LIVE_WAITS || machine.vm.next_wait == u64::MAX {
+        if machine.vm.waits.len() >= self.budget.limits.max_waits as usize
+            || machine.vm.next_wait == u64::MAX
+        {
             return Err(FaultCode::BoundaryLimit);
         }
         let token = machine.vm.next_wait;
@@ -31,7 +33,9 @@ impl World {
 
     fn allocate_internal_wait(&mut self, vm: VmId, source: WaitSource) -> Result<u64, FaultCode> {
         let machine = &self.machines[vm as usize];
-        if machine.vm.waits.len() >= MAX_LIVE_WAITS || machine.vm.next_wait == u64::MAX {
+        if machine.vm.waits.len() >= self.budget.limits.max_waits as usize
+            || machine.vm.next_wait == u64::MAX
+        {
             return Err(FaultCode::BoundaryLimit);
         }
         let token = machine.vm.next_wait;
@@ -111,9 +115,11 @@ impl World {
         let waits = &self.machines[vm as usize].vm.waits;
         let mut leaves = Vec::new();
         let mut tokens = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let limit = self.budget.limits.max_waits as usize;
         let mut stack = vec![(root, Vec::new(), true, None)];
         while let Some((token, path, is_root, any_index)) = stack.pop() {
-            if tokens.contains(&token) || tokens.len() >= MAX_LIVE_WAITS {
+            if !seen.insert(token) || tokens.len() >= limit {
                 return Err(FaultCode::MalformedState);
             }
             let Some(entry) = waits.get(&token) else {
@@ -405,7 +411,7 @@ impl World {
                     );
                     return;
                 }
-                if roots.len() >= MAX_LIVE_WAITS {
+                if roots.len() >= self.budget.limits.max_waits as usize {
                     self.fault_caller(
                         vm,
                         op,
@@ -415,11 +421,12 @@ impl World {
                     return;
                 }
                 let mut tokens = Vec::with_capacity(roots.len());
+                let mut seen = std::collections::BTreeSet::new();
                 for value in roots {
                     let Some(token) = self.wait_token(vm, op, value) else {
                         return;
                     };
-                    if tokens.contains(&token) {
+                    if !seen.insert(token) {
                         self.fault_caller(
                             vm,
                             op,
@@ -546,12 +553,12 @@ impl World {
         op: u32,
         leaves: &[WaitLeafPath],
     ) -> bool {
-        let mut drives = Vec::new();
+        let mut drives = std::collections::BTreeSet::new();
         for leaf in leaves {
             let WaitLeaf::Drive { target } = leaf.leaf else {
                 continue;
             };
-            if drives.contains(&target) {
+            if !drives.insert(target) {
                 self.fault_caller(
                     vm,
                     op,
@@ -560,7 +567,6 @@ impl World {
                 );
                 return false;
             }
-            drives.push(target);
             let valid = target != vm
                 && self.machines.get(target as usize).is_some_and(|machine| {
                     machine.owner == Ownership::Holder

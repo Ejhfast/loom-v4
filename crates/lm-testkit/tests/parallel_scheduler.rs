@@ -292,6 +292,140 @@ exercise()
 }
 
 #[test]
+fn an_answered_branch_keeps_the_source_request_available() {
+    let source = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 10)
+end
+
+def exercise(): (Int, Int) with Vm
+  original = sys.vm.Vm().activate_or_fault(choose, args: ())
+  case original.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      copy = case original.branch_answer(call, 3)
+      in Ok(run) then run
+      in Err(error) then panic(display(error))
+      end
+      original.answer(call, 8)
+      (copy.run().value(), original.run().value())
+    in _ then panic("the run asked for another operation")
+    end
+  in Done(_) then panic("the run ended before its choice")
+  in Fault(fault) then raise(fault)
+  end
+end
+
+exercise()
+"#;
+    let (deterministic, parallel, stats) =
+        compare_modes(source, &["Vm"]).expect("both answered branch modes run");
+    assert_eq!(deterministic, "Done((3, 8))");
+    assert_eq!(parallel, deterministic);
+    assert_eq!(stats.global_quiescence, 0);
+}
+
+#[test]
+fn an_answered_branch_relocates_a_routed_call() {
+    let source = r#"
+def exercise(): Int with Vm, Choose
+  inner = do ||: Int with Vm, Choose
+    nested = sys.vm.Vm().activate_or_fault(do ||: Int with Choose
+      sys.choose.pick(10) + 7
+    end, args: ())
+    nested.table().pass(Choose)
+    nested.run().value_or(-10)
+  end
+
+  original = sys.vm.Vm().activate_or_fault(inner, args: ())
+  original.table().pass(Vm)
+  original.table().pass(Choose)
+
+  loop do
+    case original.drive()
+    in Asked(request)
+      case request
+      in Call(Choose.Pick, call, (_,))
+        copy = case original.branch_answer(call, 3)
+        in Ok(run) then run
+        in Err(error) then panic(display(error))
+        end
+        original.answer(call, 8)
+        return copy.run().value_or(-20) + original.run().value_or(-30)
+      in _ then original.dispatch(request)
+      end
+    in Done(_) then panic("the run ended before its choice")
+    in Fault(fault) then raise(fault)
+    end
+  end
+end
+
+exercise()
+"#;
+    let (deterministic, parallel, stats) =
+        compare_modes(source, &["Vm", "Choose"]).expect("both routed branch modes run");
+    assert_eq!(deterministic, "Done(25)");
+    assert_eq!(parallel, deterministic);
+    assert_eq!(stats.global_quiescence, 0);
+}
+
+#[test]
+fn an_answered_branch_rejects_a_foreign_call_token() {
+    let source = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 10)
+end
+
+def exercise(): Int with Vm
+  left = sys.vm.Vm().activate_or_fault(choose, args: ())
+  right = sys.vm.Vm().activate_or_fault(choose, args: ())
+  case left.drive()
+  in Asked(request)
+    case request
+    in Call(Rand.Int, call, (_, _))
+      right.branch_answer(call, 3)
+      1
+    in _ then 2
+    end
+  in Done(_) then 3
+  in Fault(_) then 4
+  end
+end
+
+exercise()
+"#;
+    let (deterministic, parallel, _) =
+        compare_modes(source, &["Vm"]).expect("both foreign-token paths run");
+    assert_eq!(deterministic, "Fault(InvalidRequestToken)");
+    assert_eq!(parallel, deterministic);
+}
+
+#[test]
+fn an_answered_branch_checks_the_reply_type() {
+    let source = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 10)
+end
+
+original = sys.vm.Vm().activate_or_fault(choose, args: ())
+case original.drive()
+in Asked(request)
+  case request
+  in Call(Rand.Int, call, (_, _))
+    original.branch_answer(call, "wrong")
+  in _ then panic("the run asked for another operation")
+  end
+in Done(_) then panic("the run ended before its choice")
+in Fault(fault) then raise(fault)
+end
+"#;
+    let error = compile_to_bytes("branch-answer-type.lm", source)
+        .expect_err("the wrong reply type rejects");
+    assert!(error.contains("expected Int, found String"), "{error}");
+}
+
+#[test]
 fn dynamic_branches_run_as_parallel_scheduler_tasks() {
     let source = r#"
 def choose_after_work(): Int with Rand.Int
@@ -364,7 +498,7 @@ fn the_parallel_branch_example_uses_several_worker_leases() {
     .expect("the parallel branch example reads");
     let (outcome, stats) =
         run_parallel_with(&source, 4, &["Vm", "Wait"]).expect("the branch example runs");
-    assert_eq!(outcome, "Done(92)");
+    assert_eq!(outcome, "Done(10)");
     assert!(stats.max_active_leases >= 2, "{stats:?}");
     assert_eq!(stats.global_quiescence, 0, "{stats:?}");
 }

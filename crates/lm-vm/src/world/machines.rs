@@ -11,6 +11,11 @@ impl World {
         self.budget.limits.max_vm_images as usize
     }
 
+    /// The largest live wait count of one machine.
+    pub(crate) fn wait_limit(&self) -> usize {
+        self.budget.limits.max_waits as usize
+    }
+
     /// Reserve one child machine from the budget of `parent`.
     ///
     /// The parent holds a child budget. Each reservation charges one
@@ -2144,6 +2149,38 @@ impl World {
                     return;
                 }
                 self.branch_run(vm, op, target);
+            }
+            lm_abi::OP_VM_BRANCH_ANSWER => {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let token = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall { vm, ordinal, op } => Some((*vm, *ordinal, *op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = token else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(vm, op, target, token.0, token.1, Some(token.2))
+                else {
+                    return;
+                };
+                self.branch_answer_run(vm, op, target, sink, args[2]);
             }
             lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
                 let Some(target) = self.run_arg(vm, op, args[0]) else {

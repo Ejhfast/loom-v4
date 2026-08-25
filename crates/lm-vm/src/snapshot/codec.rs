@@ -2494,7 +2494,7 @@ fn decode_machine(
     let fuel = cur.u64()?;
     let next_ordinal = cur.u64()?;
     let next_wait = cur.u64()?;
-    let wait_count = cur.count(crate::machine::MAX_LIVE_WAITS as u64, "wait")?;
+    let wait_count = cur.count(limits.max_waits as u64, "wait")?;
     let mut waits = cur.vector(wait_count, "wait table")?;
     for _ in 0..wait_count {
         let token = cur.u64()?;
@@ -2509,8 +2509,7 @@ fn decode_machine(
                 second: cur.u64()?,
             },
             3 => {
-                let count =
-                    cur.count(crate::machine::MAX_LIVE_WAITS as u64, "dynamic wait root")?;
+                let count = cur.count(limits.max_waits as u64, "dynamic wait root")?;
                 let mut roots = cur.vector(count, "dynamic wait roots")?;
                 for _ in 0..count {
                     roots.push(cur.u64()?);

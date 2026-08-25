@@ -5,15 +5,26 @@
 //! machine for each branch of a search must therefore pay for the
 //! branches it still holds, not for every branch it ever built.
 
-use lm_testkit::run_allowed;
-use lm_vm::VmConfig;
+use lm_testkit::compile_to_bytes;
+use lm_vm::{load_bytes, NullHost, VmConfig, World};
+
+fn run_with_child_limit(name: &str, source: &str, max_children: u32) -> String {
+    let bytes = compile_to_bytes(name, source).expect("the source compiles");
+    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let config = VmConfig {
+        max_children,
+        ..VmConfig::default()
+    };
+    let mut world = World::new(&loaded, config, Box::new(NullHost));
+    world.allow("Vm").expect("the Vm grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    world.show_outcome(&outcome)
+}
 
 /// A driver that runs far more child machines than its child budget.
 ///
-/// The budget is 1024 by default. This program builds 4000 machines,
-/// and it holds one at a time. Each finished machine becomes
-/// unreachable, so the world reclaims its record before the budget
-/// runs out.
+/// The test uses a 64-child budget and builds 4,000 machines.
+/// It holds one machine at a time, so reclamation returns each slot.
 #[test]
 fn a_driver_outlives_its_child_budget() {
     let source = "def once(n: Int): Int with Vm
@@ -33,11 +44,9 @@ while i < 4000
   i = i + 1
 end
 total";
-    let budget = VmConfig::default().max_children;
-    assert_eq!(budget, 1_024, "the test states the default budget");
     // The sum of `1..=4000`.
     assert_eq!(
-        run_allowed("reclaim.lm", source, &["Vm"]).unwrap(),
+        run_with_child_limit("reclaim.lm", source, 64),
         "Done(8002000)"
     );
 }
@@ -77,7 +86,7 @@ in Ok(snap)
 in Err(_) then -3
 end";
     assert_eq!(
-        run_allowed("reclaim-restore.lm", source, &["Vm"]).unwrap(),
+        run_with_child_limit("reclaim-restore.lm", source, 64),
         "Done(126000)"
     );
 }
@@ -99,7 +108,7 @@ while i < 2000
 end
 held.len()";
     assert_eq!(
-        run_allowed("reclaim-held.lm", source, &["Vm"]).unwrap(),
+        run_with_child_limit("reclaim-held.lm", source, 64),
         "Fault(InvalidVmState)"
     );
 }

@@ -36,7 +36,7 @@ use crate::host::{
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
     Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry,
-    WaitPreparation, WaitSource, MAX_LIVE_WAITS,
+    WaitPreparation, WaitSource,
 };
 use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,

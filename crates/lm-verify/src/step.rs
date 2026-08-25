@@ -2783,6 +2783,28 @@ pub(crate) fn step(
                             }
                             push(state, TY_UNIT)?;
                         }
+                        lm_abi::OP_VM_BRANCH_ANSWER => {
+                            let value = pop(state)?;
+                            let call = pop(state)?;
+                            let t = pop_run(state)?;
+                            let BcType::PendingCall(_, reply) = ctx.ty(call) else {
+                                return Err(fail(
+                                    "`Vm.BranchAnswer` needs a PendingCall token".to_string(),
+                                ));
+                            };
+                            if !ctx.is_subtype(value, reply) {
+                                return Err(fail(format!(
+                                    "`Vm.BranchAnswer` reply expects type {reply}, found \
+                                     type {value}"
+                                )));
+                            }
+                            let run = ctx.intern(BcType::Run(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.branch_error, "BranchError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(run, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
                         lm_abi::OP_VM_REJECT => {
                             let fault = pop(state)?;
                             let request = pop(state)?;

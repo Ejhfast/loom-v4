@@ -61,7 +61,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 33 adds direct closure proc launch.
 /// Version 34 adds in-memory run branching.
 /// Version 35 adds homogeneous dynamic wait selection.
-pub const ABI_VERSION: u32 = 35;
+/// Version 36 adds answered in-memory run branches.
+pub const ABI_VERSION: u32 = 36;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2297,9 +2298,10 @@ pub const OP_UDP_CLOSE: OpSlot = 141;
 pub const OP_PROC_RUN_CLOSURE: OpSlot = 142;
 pub const OP_VM_BRANCH: OpSlot = 143;
 pub const OP_WAIT_ANY: OpSlot = 144;
+pub const OP_VM_BRANCH_ANSWER: OpSlot = 145;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 145] = [
+pub const OPS: [OpDef; 146] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3655,6 +3657,15 @@ pub const OPS: [OpDef; 145] = [
         schema: "[T](List[Wait[T]]) -> (Int,T)",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Vm",
+        member: "BranchAnswer",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T,A,R](Run[T], PendingCall[A,R], R) -> Result[Run[T], BranchError]",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -4017,6 +4028,7 @@ mod tests {
         assert_eq!(op_by_name("Vm.LoadSnapshot"), Some(OP_VM_LOAD_SNAPSHOT));
         assert_eq!(op_by_name("Vm.Restore"), Some(OP_VM_RESTORE));
         assert_eq!(op_by_name("Vm.Branch"), Some(OP_VM_BRANCH));
+        assert_eq!(op_by_name("Vm.BranchAnswer"), Some(OP_VM_BRANCH_ANSWER));
         assert_eq!(op_by_name("Fs.Open"), Some(OP_FS_OPEN));
         assert_eq!(op_by_name("Fs.Close"), Some(OP_FS_CLOSE));
         assert_eq!(op_by_name("Vm.ResourceSame"), Some(OP_VM_RESOURCE_SAME));

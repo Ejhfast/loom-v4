@@ -774,6 +774,37 @@ mod tests {
     }
 
     #[test]
+    fn answered_branching_verifies_its_call_token() {
+        let mut module = module_with(vec![vec![ConstInt(0), Return]]);
+        let run = module.types.len() as u32;
+        module.types.push(BcType::Run(TY_INT));
+        let effect = module.strings.len() as u32;
+        module.strings.push("Vm.BranchAnswer".to_string());
+        let mut forged = plain_func(
+            "forged_branch",
+            vec![run, TY_INT, TY_INT],
+            TY_INT,
+            vec![vec![
+                LoadLocal(0),
+                LoadLocal(1),
+                LoadLocal(2),
+                Perform {
+                    op: lm_abi::OP_VM_BRANCH_ANSWER,
+                    argc: 3,
+                    reply_ty: TY_INT,
+                },
+                Return,
+            ]],
+        );
+        forged.local_types = vec![run, TY_INT, TY_INT];
+        forged.row = vec![BcRow::Op(effect)];
+        module.funcs.push(forged);
+
+        let error = verify_module(&module).expect_err("the forged call token rejects");
+        assert!(error.message.contains("PendingCall token"), "{error}");
+    }
+
+    #[test]
     fn accepts_a_call_through_an_exact_function_slot() {
         let mut module = module_with(vec![vec![
             Instr::Extended(ExtendedInstr::CallSlot {

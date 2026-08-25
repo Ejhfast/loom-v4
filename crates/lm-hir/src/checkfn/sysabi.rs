@@ -1657,6 +1657,43 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Run(t), "branch_answer") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`branch_answer` expects 2 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let args = arrange_args(args, &["call", "value"], "branch_answer")?;
+                let call = self.synth_expr(ctx, args[0])?;
+                let Type::PendingCall(_, reply) = ctx.store.get(call.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`branch_answer` needs a PendingCall token, found {}",
+                            ctx.display_type(&self.env, call.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let value = self.check_expr(ctx, args[1], reply)?;
+                self.charge_op(ctx, lm_abi::OP_VM_BRANCH_ANSWER, span)?;
+                let run = ctx.store.intern(Type::Run(t));
+                let error = Self::core_class(ctx, "BranchError");
+                let ty = Self::core_inst(ctx, "Result", vec![run, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_BRANCH_ANSWER,
+                        args: vec![recv_h, call, value],
+                    },
+                }
+            }
             (Type::Vm, "restore") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(

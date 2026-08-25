@@ -24,9 +24,11 @@ The deterministic scheduler keeps the current FIFO policy and fixed quantum.
 
 It executes machine slices inline and creates no worker pool.
 
-Scheduler mode never changes Loom types, effects, bytecode, or snapshot bytes.
+Both scheduler modes use the same Loom types, effects, bytecode, operations, and snapshot bytes.
 
-This work needs no source, interface, bytecode, operation, or snapshot format change.
+The scheduler implementation needs no format change.
+
+The later `BranchAnswer` operation extends the operation table for parallel multishot search.
 
 ## 2. Goals
 
@@ -276,6 +278,14 @@ The Rust API requires an explicit `SchedulerConfig`.
 The CLI provides `--scheduler deterministic` and `--scheduler parallel`.
 
 The CLI provides `--threads N` for parallel mode.
+
+The CLI also provides machine, image, child, and wait limits.
+
+The reference runner uses 262,144 for each default structural limit.
+
+These logical ceilings do not reserve machine records in advance.
+
+The Rust runner accepts the same limits through `WorldLimits` and `VmConfig`.
 
 `N` must be greater than zero and below a fixed safety limit.
 
@@ -1024,6 +1034,16 @@ Performance gates determine whether a more direct graph copy adds value.
 Machine collection keeps its current global quiescence rule.
 
 The scheduler counts each collection quiescence separately.
+
+`Run.branch_answer(call,value)` copies one run at a pending call.
+
+The operation answers only the copied call.
+
+The source run and its call token stay unchanged.
+
+The returned run stays under holder ownership.
+
+Its `drive_wait` can arm it as one transient scheduler task.
 
 ## 20. Termination and failure
 

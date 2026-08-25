@@ -3,16 +3,21 @@
 use lm_heap::Object;
 use lm_testkit::{compile_to_bytes, repo_root};
 use lm_vm::snapshot::{codec, ImageBlock, ImageReason, ImageWaitSource};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_vm::{load_bytes, RecordingHost, VmConfig, World, WorldLimits};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 fn run(source: &str, grants: &[&str]) -> String {
+    run_with_limits(source, grants, WorldLimits::default())
+}
+
+fn run_with_limits(source: &str, grants: &[&str], limits: WorldLimits) -> String {
     let bytes = compile_to_bytes("waits.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(
+    let mut world = World::new_with_limits(
         &loaded,
         VmConfig::default(),
+        limits,
         Box::new(RecordingHost::new(1)),
     );
     for grant in grants {
@@ -20,6 +25,30 @@ fn run(source: &str, grants: &[&str]) -> String {
     }
     let outcome = lm_proc::run_world(&mut world);
     world.show_outcome(&outcome)
+}
+
+#[test]
+fn the_world_wait_limit_is_configurable() {
+    let source = r#"
+def spin(): Never
+  loop do
+    ()
+  end
+end
+
+first = sys.vm.Vm().activate_or_fault(spin, args: ())
+second = sys.vm.Vm().activate_or_fault(spin, args: ())
+first.drive_wait()
+second.drive_wait()
+"#;
+    let limits = WorldLimits {
+        max_waits: 1,
+        ..WorldLimits::default()
+    };
+    assert_eq!(
+        run_with_limits(source, &["Vm"], limits),
+        "Fault(BoundaryLimit)"
+    );
 }
 
 #[test]
@@ -559,6 +588,30 @@ end
             .iter()
             .any(|wait| matches!(&wait.source, ImageWaitSource::Any { roots } if roots.len() == 2))
     }));
+
+    let tight = lm_vm::snapshot::LoadLimits {
+        max_waits: 2,
+        ..lm_vm::snapshot::LoadLimits::default()
+    };
+    let error = codec::load_external(&bytes, &loaded, tight)
+        .expect_err("the snapshot wait limit rejects before admission");
+    assert_eq!(error.reason, ImageReason::LimitExceeded);
+
+    let limits = WorldLimits {
+        max_waits: 2,
+        ..WorldLimits::default()
+    };
+    let mut fresh = World::new_with_limits(
+        &loaded,
+        VmConfig::default(),
+        limits,
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = fresh.new_child(0).expect("the restore target exists");
+    let error = fresh
+        .restore_image(0, target, &loaded_image)
+        .expect_err("the world wait limit rejects restore");
+    assert_eq!(error, lm_vm::snapshot::RestoreFail::LimitExceeded);
 
     let mut invalid = image.world().clone();
     let roots = invalid

@@ -125,7 +125,7 @@ impl Default for VmConfig {
             max_stack_values: 4_194_304,
             heap_bytes: 64 << 20,
             graph: GraphLimits::default(),
-            max_children: 1_024,
+            max_children: 262_144,
             max_resources: 1_024,
             mailbox_limit: 64,
             snapshot_bytes: 64 << 20,
@@ -142,6 +142,8 @@ pub struct WorldLimits {
     pub max_machines: u32,
     /// The largest live VM image record count.
     pub max_vm_images: u32,
+    /// The largest live wait table of one machine.
+    pub max_waits: u32,
     /// The largest live host resource count.
     pub max_resources: usize,
     /// The instruction budget shared by all machines.
@@ -161,8 +163,9 @@ pub struct WorldLimits {
 impl Default for WorldLimits {
     fn default() -> WorldLimits {
         WorldLimits {
-            max_machines: 4096,
-            max_vm_images: 4096,
+            max_machines: 262_144,
+            max_vm_images: 262_144,
+            max_waits: 262_144,
             max_resources: 1 << 16,
             fuel: u64::MAX,
             max_trace_events: 1 << 20,

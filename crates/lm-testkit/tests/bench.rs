@@ -142,6 +142,16 @@ fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -
 
 /// Time one proc program with the parallel coordinator.
 fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration {
+    time_parallel_world_with(source, workers, &["Proc"], expected)
+}
+
+/// Time one parallel program with explicit grants.
+fn time_parallel_world_with(
+    source: &str,
+    workers: usize,
+    grants: &[&str],
+    expected: &str,
+) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("parallel-bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
@@ -149,7 +159,9 @@ fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration
     for round in 0..=ROUNDS {
         let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
         let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
-        world.allow("Proc").expect("the Proc grant must exist");
+        for grant in grants {
+            world.allow(grant).expect("the benchmark grant must exist");
+        }
         let mut scheduler = lm_proc::Scheduler::default();
         let start = Instant::now();
         let outcome = scheduler
@@ -452,6 +464,8 @@ counts.sum(0)
 "#
     );
     let solutions = match size {
+        6 => 4,
+        7 => 40,
         12 => 14_200,
         13 => 73_712,
         _ => panic!("the benchmark needs a recorded queen count"),
@@ -1264,9 +1278,39 @@ in Done(value) then value
 in Fault(fault) then raise(fault)
 end
 "#;
+    let answered_branch = r#"
+def choose(): Int with Rand.Int
+  sys.rand.int(0, 100)
+end
+
+original = sys.vm.Vm().activate_or_fault(choose, args: ())
+case original.drive()
+in Asked(request)
+  case request
+  in Call(Rand.Int, call, (_, _))
+    total = 0
+    index = 0
+    while index < 100
+      copy = case original.branch_answer(call, index)
+      in Ok(value) then value
+      in Err(error) then panic(display(error))
+      end
+      total = total + copy.run().value_or(-1000)
+      index = index + 1
+    end
+    original.answer(call, 100)
+    original.run().value_or(-2000)
+    total
+  in _ then -3000
+  end
+in Done(value) then value
+in Fault(fault) then raise(fault)
+end
+"#;
     let reused = time_world(snapshot_reuse, &["Vm"], config(), "Done(4950)");
     let fresh = time_world(snapshot_fresh, &["Vm"], config(), "Done(4950)");
     let branched = time_world(branch, &["Vm"], config(), "Done(4950)");
+    let answered = time_world(answered_branch, &["Vm"], config(), "Done(4950)");
     let reuse_ratio = branched.as_secs_f64() / reused.as_secs_f64();
     let fresh_ratio = branched.as_secs_f64() / fresh.as_secs_f64();
     assert!(
@@ -1278,6 +1322,40 @@ end
         reused.as_secs_f64() * 1e3,
         fresh.as_secs_f64() * 1e3,
         branched.as_secs_f64() * 1e3
+    );
+    let answered_ratio = answered.as_secs_f64() / branched.as_secs_f64();
+    println!(
+        "LOOM\tvm_branch_answer\t100\t{:.3}\t{answered_ratio:.3}",
+        answered.as_secs_f64() * 1e3
+    );
+    assert!(
+        answered_ratio <= 1.05,
+        "answered branching took {answered_ratio:.3} times plain branching"
+    );
+}
+
+#[test]
+#[ignore]
+fn bench_parallel_multishot_queens() {
+    let source = std::fs::read_to_string(
+        lm_testkit::repo_root().join("examples/14-vm-as-multishot-search/07-parallel-n-queens.lm"),
+    )
+    .expect("the multishot benchmark source reads")
+    .replace("parallel_solutions(5)", "parallel_solutions(7)");
+    let (direct_source, direct_expected) = iterable_queens_source(7, false);
+    let direct = time_world(&direct_source, &[], config(), &direct_expected);
+    let deterministic = time_world(&source, &["Vm", "Wait"], config(), "Done(40)");
+    let parallel = time_parallel_world_with(&source, 4, &["Vm", "Wait"], "Done(40)");
+    let speedup = deterministic.as_secs_f64() / parallel.as_secs_f64();
+    let overhead = deterministic.as_secs_f64() / direct.as_secs_f64();
+    println!(
+        "LOOM\tcase\tsize\tworkers\tdirect_ms\tdeterministic_ms\tparallel_ms\tspeedup\toverhead"
+    );
+    println!(
+        "LOOM\tparallel_multishot_queens\t7\t4\t{:.3}\t{:.3}\t{:.3}\t{speedup:.3}\t{overhead:.3}",
+        direct.as_secs_f64() * 1e3,
+        deterministic.as_secs_f64() * 1e3,
+        parallel.as_secs_f64() * 1e3
     );
 }
 

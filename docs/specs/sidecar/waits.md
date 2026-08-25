@@ -176,7 +176,11 @@ The call retries capture after target progress. It returns the last blocker when
 
 ## 10. Limits and cleanup
 
-Each machine can hold at most 1,024 live wait records.
+The host configures the live wait limit for each machine.
+
+The reference runner permits 262,144 live wait records by default.
+
+The `--max-waits` CLI option changes this limit.
 
 Wait creation fails before partial registration when this table is full.
 

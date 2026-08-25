@@ -379,6 +379,9 @@ impl World {
             .zip(child_counts.iter())
         {
             check_effective_limits(source, *config, *children)?;
+            if source.waits.len() > self.wait_limit() {
+                return Err(RestoreFail::LimitExceeded);
+            }
         }
 
         let mut generations = try_vec(count)?;

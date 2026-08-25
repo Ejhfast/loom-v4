@@ -13,7 +13,7 @@
 //!   artifact summary; `--live` runs a program and dumps the machine.
 
 use lm_source::SourceFile;
-use lm_vm::{VmConfig, World};
+use lm_vm::{VmConfig, World, WorldLimits};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
@@ -50,6 +50,8 @@ const USAGE: &str = "usage:
   lm build [file.lm | package directory]
   lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
          [--fuel N] [--max-frames N] [--heap-bytes N]
+         [--max-machines N] [--max-images N]
+         [--max-children N] [--max-waits N]
          [--scheduler deterministic|parallel] [--threads N]
          [file.lm | file.lma | package directory] [-- arguments...]
   (`lm build` and `lm run` default to the current directory)
@@ -164,7 +166,8 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             if options.live {
                 let loaded = load_program(&options.file)?;
                 let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-                let mut world = World::new(&loaded, options.config, host);
+                let mut world =
+                    World::new_with_limits(&loaded, options.config, options.limits, host);
                 for grant in &options.allow {
                     world
                         .allow(grant)
@@ -264,7 +267,13 @@ fn load_image(options: &Options) -> Result<lm_vm::snapshot::SnapshotImage, Strin
     let program = program_of(options)?;
     let loaded = load_program(&program)?;
     let bytes = read_bytes(&options.file)?;
-    lm_vm::snapshot::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+    let limits = lm_vm::snapshot::LoadLimits {
+        max_machines: options.limits.max_machines,
+        max_vm_images: options.limits.max_vm_images,
+        max_waits: options.limits.max_waits,
+        ..lm_vm::snapshot::LoadLimits::default()
+    };
+    lm_vm::snapshot::load_external(&bytes, &loaded, limits)
         .map_err(|e| format!("error: the snapshot did not load: {e}\n"))
 }
 
@@ -277,7 +286,7 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
         .ok_or_else(|| format!("error: `lm snapshot save` needs an output file\n{USAGE}\n"))?;
     let loaded = load_program(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new(&loaded, options.config, host);
+    let mut world = World::new_with_limits(&loaded, options.config, options.limits, host);
     for grant in &options.allow {
         world
             .allow(grant)
@@ -312,7 +321,7 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     let loaded = load_program(&program)?;
     let bytes = read_bytes(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new(&loaded, options.config, host);
+    let mut world = World::new_with_limits(&loaded, options.config, options.limits, host);
     // The external byte path decodes and admits the container once.
     // The restore below reads the admitted image and repeats nothing.
     let image = world
@@ -446,9 +455,10 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
     let arguments = options.command_args;
-    let result = lm_proc::run_on_worker_with_scheduler(
+    let result = lm_proc::run_on_worker_with_scheduler_and_limits(
         &loaded,
         options.config,
+        options.limits,
         options.scheduler,
         &grants,
         Box::new(move || Box::new(lm_host::CliHost::with_args(seed, arguments))),
@@ -591,6 +601,7 @@ struct Options {
     allow: Vec<String>,
     rand_seed: u64,
     config: VmConfig,
+    limits: WorldLimits,
     scheduler: lm_proc::SchedulerConfig,
     /// The tokens after the `lm run` separator.
     command_args: Vec<String>,
@@ -626,6 +637,7 @@ fn parse_options_mode(
     let mut allow = Vec::new();
     let mut rand_seed = 1;
     let mut config = VmConfig::default();
+    let mut limits = WorldLimits::default();
     let mut scheduler_mode = None;
     let mut threads = None;
     let mut command_args = Vec::new();
@@ -659,6 +671,12 @@ fn parse_options_mode(
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
             "--max-frames" => config.max_frames = flag_value(&mut iter, "--max-frames")?,
             "--heap-bytes" => config.heap_bytes = flag_value(&mut iter, "--heap-bytes")?,
+            "--max-machines" => {
+                limits.max_machines = positive_flag_value(&mut iter, "--max-machines")?
+            }
+            "--max-images" => limits.max_vm_images = flag_value(&mut iter, "--max-images")?,
+            "--max-children" => config.max_children = flag_value(&mut iter, "--max-children")?,
+            "--max-waits" => limits.max_waits = flag_value(&mut iter, "--max-waits")?,
             "--scheduler" if command_mode => {
                 if scheduler_mode.is_some() {
                     return Err("error: `--scheduler` occurs more than once\n".to_string());
@@ -709,6 +727,7 @@ fn parse_options_mode(
         allow,
         rand_seed,
         config,
+        limits,
         scheduler,
         command_args,
     })
@@ -758,6 +777,14 @@ fn flag_value<T: std::str::FromStr>(
     value
         .parse()
         .map_err(|_| format!("error: `{flag}` needs a number, found `{value}`\n"))
+}
+
+fn positive_flag_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<u32, String> {
+    let value = flag_value(iter, flag)?;
+    if value == 0 {
+        return Err(format!("error: `{flag}` must be greater than zero\n"));
+    }
+    Ok(value)
 }
 
 fn read_source(path: &str) -> Result<SourceFile, String> {
@@ -832,6 +859,50 @@ mod tests {
                 workers: default_parallel_workers()
             }
         );
+    }
+
+    #[test]
+    fn run_options_set_world_and_child_limits() {
+        let args = [
+            "--max-machines".to_string(),
+            "200000".to_string(),
+            "--max-images".to_string(),
+            "190000".to_string(),
+            "--max-children".to_string(),
+            "180000".to_string(),
+            "--max-waits".to_string(),
+            "170000".to_string(),
+            "program.lm".to_string(),
+        ];
+        let options = parse_run_options(&args, None).expect("the limit options parse");
+        assert_eq!(options.limits.max_machines, 200_000);
+        assert_eq!(options.limits.max_vm_images, 190_000);
+        assert_eq!(options.config.max_children, 180_000);
+        assert_eq!(options.limits.max_waits, 170_000);
+    }
+
+    #[test]
+    fn run_options_use_generous_default_limits() {
+        let options =
+            parse_run_options(&["program.lm".to_string()], None).expect("the default limits parse");
+        assert_eq!(options.limits.max_machines, 262_144);
+        assert_eq!(options.limits.max_vm_images, 262_144);
+        assert_eq!(options.config.max_children, 262_144);
+        assert_eq!(options.limits.max_waits, 262_144);
+    }
+
+    #[test]
+    fn the_machine_limit_keeps_room_for_the_root() {
+        let args = [
+            "--max-machines".to_string(),
+            "0".to_string(),
+            "program.lm".to_string(),
+        ];
+        let error = match parse_run_options(&args, None) {
+            Ok(_) => panic!("zero machines must reject"),
+            Err(error) => error,
+        };
+        assert!(error.contains("must be greater than zero"), "{error}");
     }
 
     #[test]

@@ -138,26 +138,97 @@ impl World {
 
     /// Copy one held run through the admitted in-memory image path.
     pub(super) fn branch_run(&mut self, vm: VmId, op: u32, source: VmId) {
+        if let Some((_, reply)) = self.prepare_branch_run(vm, op, source) {
+            self.install_prepared_restore_reply(vm, reply);
+        }
+    }
+
+    /// Copy one held run and answer only the copied request.
+    pub(super) fn branch_answer_run(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        source: VmId,
+        source_sink: ReplySink,
+        value: Value,
+    ) {
+        let Some((target, reply)) = self.prepare_branch_run(vm, op, source) else {
+            return;
+        };
+        let copied_target = if source_sink.surface == source_sink.target {
+            target
+        } else {
+            match self.machines[target as usize].vm.routed {
+                Some(route) => route.target,
+                None => {
+                    self.discard_failed_branch(vm, reply);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::MalformedState,
+                        "the copied run lost its routed request",
+                    );
+                    return;
+                }
+            }
+        };
+        let Some(copied_sink) = self.reply_sink(
+            vm,
+            op,
+            target,
+            copied_target,
+            source_sink.ordinal,
+            Some(source_sink.op),
+        ) else {
+            self.discard_failed_branch(vm, reply);
+            return;
+        };
+        let copied_value = match self.transfer(vm, copied_sink.target, value) {
+            Ok(value) => value,
+            Err(code) => {
+                self.discard_failed_branch(vm, reply);
+                self.fault_caller(vm, op, code, "the branch reply is not sendable");
+                return;
+            }
+        };
+        self.install_value_reply(copied_sink.target, copied_value);
+        self.consume_reply_sink(copied_sink);
+        self.install_prepared_restore_reply(vm, reply);
+    }
+
+    /// Remove one branch that no guest value received.
+    fn discard_failed_branch(&mut self, vm: VmId, reply: PreparedRestoreReply) {
+        self.discard_restore_reply(vm, reply);
+        self.collect_machines();
+    }
+
+    /// Prepare one copied run and its successful guest reply.
+    fn prepare_branch_run(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        source: VmId,
+    ) -> Option<(VmId, PreparedRestoreReply)> {
         let barrier = self.next_gate();
         let image = match self.capture_snapshot(barrier, source, false) {
             Ok(image) => image,
             Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
                 self.fault_caller(vm, op, code, &message);
-                return;
+                return None;
             }
             Err(fail) => {
                 let built = self
                     .build_branch_error(vm, &fail)
                     .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
                 self.reply_or_fault(vm, op, built);
-                return;
+                return None;
             }
         };
         let image_vm = match self.new_vm_image(vm) {
             Some(image_vm) => image_vm,
             None => {
                 self.install_branch_limit_error(vm, op);
-                return;
+                return None;
             }
         };
         let target = match self.prepare_run_target(vm, image_vm) {
@@ -165,7 +236,7 @@ impl World {
             None => {
                 self.rollback_vm_image(image_vm);
                 self.install_branch_limit_error(vm, op);
-                return;
+                return None;
             }
         };
         let reply = match self.prepare_restore_reply(vm, target) {
@@ -174,7 +245,7 @@ impl World {
                 self.rollback_run_target(vm, target);
                 self.rollback_vm_image(image_vm);
                 self.machines[vm as usize].set_fault(code, "", Some(op));
-                return;
+                return None;
             }
         };
         if let Err(code) = self.check_reply(vm, reply.value) {
@@ -186,21 +257,20 @@ impl World {
                 "the reply does not carry the type of its perform",
                 Some(op),
             );
-            return;
+            return None;
         }
         if let Err(code) = self.reserve_restore_reply_slot(vm) {
             self.discard_restore_reply(vm, reply);
             self.rollback_run_target(vm, target);
             self.rollback_vm_image(image_vm);
             self.machines[vm as usize].set_fault(code, "", Some(op));
-            return;
+            return None;
         }
         loop {
             match self.prepare_restore(vm, target, &image) {
                 Ok(plan) => match self.commit_restore(plan) {
                     Ok(_) => {
-                        self.install_prepared_restore_reply(vm, reply);
-                        return;
+                        return Some((target, reply));
                     }
                     Err(_) => continue,
                 },
@@ -209,7 +279,7 @@ impl World {
                     self.rollback_run_target(vm, target);
                     self.rollback_vm_image(image_vm);
                     self.install_branch_limit_error(vm, op);
-                    return;
+                    return None;
                 }
                 Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
                     self.discard_restore_reply(vm, reply);
@@ -221,7 +291,7 @@ impl World {
                         FaultCode::MalformedState,
                         "the in-memory branch image is incompatible with its source world",
                     );
-                    return;
+                    return None;
                 }
             }
         }
