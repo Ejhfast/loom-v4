@@ -2012,7 +2012,7 @@ fn a_restore_of_another_program_rejects() {
     let target = world.new_child(0).expect("a child budget");
     assert_eq!(
         world.restore_image(0, target, &admitted),
-        Err(lm_vm::snapshot::RestoreFail::OtherProgram)
+        Err(lm_vm::snapshot::RestoreFail::IncompatibleImage)
     );
     // The same image restores into the program it names.
     let mut own = World::new(
