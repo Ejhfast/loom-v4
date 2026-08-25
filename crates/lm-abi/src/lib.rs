@@ -60,7 +60,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 32 adds exact fault re-raising.
 /// Version 33 adds direct closure proc launch.
 /// Version 34 adds in-memory run branching.
-pub const ABI_VERSION: u32 = 34;
+/// Version 35 adds homogeneous dynamic wait selection.
+pub const ABI_VERSION: u32 = 35;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2295,9 +2296,10 @@ pub const OP_UDP_LOCAL_ADDRESS: OpSlot = 140;
 pub const OP_UDP_CLOSE: OpSlot = 141;
 pub const OP_PROC_RUN_CLOSURE: OpSlot = 142;
 pub const OP_VM_BRANCH: OpSlot = 143;
+pub const OP_WAIT_ANY: OpSlot = 144;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 144] = [
+pub const OPS: [OpDef; 145] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3644,6 +3646,15 @@ pub const OPS: [OpDef; 144] = [
         schema: "[T](Run[T]) -> Result[Run[T], BranchError]",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Wait",
+        member: "Any",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](List[Wait[T]]) -> (Int,T)",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -4014,6 +4025,7 @@ mod tests {
         assert_eq!(op_by_name("Wait.Wait"), Some(OP_WAIT_WAIT));
         assert_eq!(op_by_name("Wait.Choose"), Some(OP_WAIT_CHOOSE));
         assert_eq!(op_by_name("Wait.Cancel"), Some(OP_WAIT_CANCEL));
+        assert_eq!(op_by_name("Wait.Any"), Some(OP_WAIT_ANY));
         assert_eq!(op_by_name("Dns.Resolve"), Some(OP_DNS_RESOLVE));
         assert_eq!(op_by_name("Tcp.Connect"), Some(OP_TCP_CONNECT));
         assert_eq!(op_by_name("Tcp.Close"), Some(OP_TCP_CLOSE));

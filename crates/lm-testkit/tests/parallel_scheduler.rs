@@ -357,6 +357,19 @@ exercise()
 }
 
 #[test]
+fn the_parallel_branch_example_uses_several_worker_leases() {
+    let source = std::fs::read_to_string(
+        lm_testkit::repo_root().join("examples/14-vm-as-multishot-search/07-parallel-n-queens.lm"),
+    )
+    .expect("the parallel branch example reads");
+    let (outcome, stats) =
+        run_parallel_with(&source, 4, &["Vm", "Wait"]).expect("the branch example runs");
+    assert_eq!(outcome, "Done(92)");
+    assert!(stats.max_active_leases >= 2, "{stats:?}");
+    assert_eq!(stats.global_quiescence, 0, "{stats:?}");
+}
+
+#[test]
 fn a_live_attachment_rejects_an_in_memory_branch() {
     let source = r#"
 def hold(reader: PipeReader): Int with Pipe.Read

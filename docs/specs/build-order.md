@@ -648,8 +648,8 @@ h.done()
 ```
 
 ```text
-$ lm run --show-result examples/07-procs/worker.lm --allow Proc
-Done(Done(42))
+$ lm run --show-result examples/07-concurrency/worker.lm --allow Proc
+Done(Ok(42))
 ```
 
 A second example sends one handle through another proc mailbox. The

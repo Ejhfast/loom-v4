@@ -50,6 +50,7 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CANCEL
+            | lm_abi::OP_WAIT_ANY
             | lm_abi::OP_VM_MODULE_ENTRY_CODE
             | lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
             | lm_abi::OP_VM_BINDING_SLOT

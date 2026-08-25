@@ -208,8 +208,9 @@ fn a_full_mailbox_blocks_the_sender_before_the_copy() {
 /// A handle crosses a mailbox and still names the same proc.
 #[test]
 fn a_handle_keeps_its_target_across_a_transfer() {
-    let text = std::fs::read_to_string(repo_root().join("examples/07-procs/mailbox-handle.lm"))
-        .expect("the example reads");
+    let text =
+        std::fs::read_to_string(repo_root().join("examples/07-concurrency/mailbox-handle.lm"))
+            .expect("the example reads");
     assert_eq!(run(&text), "Done((Ok(1), Ok(12)))");
 }
 
@@ -794,12 +795,22 @@ fn one_machine_runs_at_a_time() {
 fn week8_examples_have_checked_output() {
     let read =
         |path: &str| std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
-    assert_eq!(run(&read("examples/07-procs/worker.lm")), "Done(Ok(42))");
     assert_eq!(
-        run(&read("examples/07-procs/mailbox-handle.lm")),
+        run(&read("examples/07-concurrency/worker.lm")),
+        "Done(Ok(42))"
+    );
+    assert_eq!(
+        run(&read("examples/07-concurrency/mailbox-handle.lm")),
         "Done((Ok(1), Ok(12)))"
     );
-    assert_eq!(run(&read("examples/07-procs/barrier.lm")), "Done(Ok(5))");
+    assert_eq!(
+        run(&read("examples/07-concurrency/barrier.lm")),
+        "Done(Ok(5))"
+    );
+    assert_eq!(
+        run(&read("examples/07-concurrency/parallel-map.lm")),
+        "Done(([1, 4, 9, 16, 25, 36, 49, 64], 204))"
+    );
 }
 
 /// A bare `Proc` parent is sugar for `Proc[Never]`: the proc takes no

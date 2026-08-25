@@ -1032,6 +1032,13 @@ impl World {
                 return requirement;
             }
         }
+        if op == lm_abi::OP_WAIT_ANY {
+            if let Some(requirement) =
+                self.wait_list_machine_requirement(source, args.first().copied())
+            {
+                return requirement;
+            }
+        }
         ParallelRequirement::Ready
     }
 
@@ -1069,6 +1076,27 @@ impl World {
             let requirement = self.machine_safepoint_requirement(target, slot.generation());
             (requirement != ParallelRequirement::Ready).then_some(requirement)
         })
+    }
+
+    fn wait_list_machine_requirement(
+        &self,
+        source: VmId,
+        value: Option<Value>,
+    ) -> Option<ParallelRequirement> {
+        let reference = value?.as_obj()?;
+        let machine = self.machines.get(source as usize)?;
+        let Object::List { items, .. } = machine.vm.heap.try_get(reference)? else {
+            return None;
+        };
+        for value in items {
+            let Some(requirement) = self.wait_machine_requirement(source, Some(*value)) else {
+                continue;
+            };
+            if requirement != ParallelRequirement::Ready {
+                return Some(requirement);
+            }
+        }
+        None
     }
 
     fn machine_requirement(&self, vm: VmId, generation: u32) -> ParallelRequirement {
@@ -1281,5 +1309,6 @@ fn operation_needs_idle_target(op: u32) -> bool {
             | lm_abi::OP_PROC_RESUME
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CANCEL
+            | lm_abi::OP_WAIT_ANY
     )
 }

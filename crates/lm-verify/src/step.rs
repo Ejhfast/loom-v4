@@ -2985,6 +2985,21 @@ pub(crate) fn step(
                             }
                             push(state, TY_BOOL)?;
                         }
+                        lm_abi::OP_WAIT_ANY => {
+                            let waits = pop(state)?;
+                            let BcType::List(wait) = ctx.ty(waits) else {
+                                return Err(fail(
+                                    "`Wait.Any` needs a list of Wait values".to_string(),
+                                ));
+                            };
+                            let BcType::Wait(result) = ctx.ty(wait) else {
+                                return Err(fail(
+                                    "`Wait.Any` needs a list of Wait values".to_string(),
+                                ));
+                            };
+                            let result = ctx.intern(BcType::Tuple(vec![TY_INT, result]));
+                            push(state, result)?;
+                        }
                         lm_abi::OP_VM_SNAPSHOT_HELD => {
                             let t = pop_run(state)?;
                             let snapshot = ctx.intern(BcType::RunSnapshot(t));

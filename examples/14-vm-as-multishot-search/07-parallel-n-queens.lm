@@ -1,0 +1,105 @@
+# Split one multishot search point across parallel workers.
+#
+# Run with `--allow Vm,Wait`.
+#
+# The reified computation asks for its first column. The driver branches
+# that request once per column. Each branch then counts one complete subtree.
+
+def safe(columns: List[Int], column: Int): Bool
+  row = columns.len()
+  older = 0
+  while older < row
+    seen = columns.at(older)
+    gap = row - older
+    if seen == column or column - seen == gap or seen - column == gap
+      return false
+    end
+    older = older + 1
+  end
+  true
+end
+
+# Count one subtree with ordinary local recursion.
+def count_subtree(n: Int, mut columns: List[Int]): Int
+  if columns.len() == n
+    return 1
+  end
+  total = 0
+  column = 0
+  while column < n
+    if safe(columns, column)
+      columns.push(column)
+      total = total + count_subtree(n, columns)
+      columns.pop()
+    end
+    column = column + 1
+  end
+  total
+end
+
+# The VM driver supplies this choice through independent branches.
+def choose_subtree(n: Int): Int with Choose
+  first = sys.choose.pick(n)
+  count_subtree(n, [first])
+end
+
+def parallel_solutions(n: Int): Int with Vm, Wait
+  original = sys.vm.Vm().activate_or_fault(choose_subtree, args: (n,))
+  runs = List[Run[Int]]()
+
+  case original.drive()
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (columns,))
+      column = 0
+      while column + 1 < columns
+        copy = case original.branch()
+        in Ok(value) then value
+        in Err(error) then panic(display(error))
+        end
+
+        # A copied request needs its own call token. One drive exposes it.
+        case copy.drive()
+        in Asked(copy_request)
+          case copy_request
+          in Call(Choose.Pick, copy_call, (_,))
+            copy.answer(copy_call, column)
+            runs.push(copy)
+          in _ then panic("the copied branch asked for an unexpected effect")
+          end
+        in Done(_) then panic("the copied branch ended before its answer")
+        in Fault(fault) then raise(fault)
+        end
+        column = column + 1
+      end
+
+      original.answer(call, column)
+      runs.push(original)
+    in _ then panic("the search asked for an unexpected effect")
+    end
+  in Done(value) then return value
+  in Fault(fault) then raise(fault)
+  end
+
+  total = 0
+  while runs.len() != 0
+    waits = List[Wait[DriveEvent[Int]]]()
+    for run in runs
+      waits.push(run.drive_wait())
+    end
+    case sys.wait.any(waits)
+    in (index, event)
+      runs.remove(index)
+      case event
+      in Done(value)
+        total = total + value
+      in Fault(fault) then raise(fault)
+      in Asked(_) then panic("a subtree asked for an unexpected effect")
+      end
+    end
+  end
+  total
+end
+
+# Eight queens has 92 solutions.
+parallel_solutions(8)

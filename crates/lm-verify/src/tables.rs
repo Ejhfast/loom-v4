@@ -472,8 +472,10 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
         if let Some(first) = interface_keys.insert(contract.key.as_str(), iidx) {
             return Err(ierr(format!("the key duplicates interface {first}")));
         }
-        if contract.generic_is_effect.len()
-            != (contract.type_params + contract.effect_params) as usize
+        let Some(generic_count) = contract.type_params.checked_add(contract.effect_params) else {
+            return Err(ierr("the generic arity is too large".to_string()));
+        };
+        if contract.generic_is_effect.len() != generic_count as usize
             || contract
                 .generic_is_effect
                 .iter()
@@ -598,8 +600,18 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
                     "a method type-bound table does not match its type arity".to_string(),
                 ));
             }
-            let method_type_count = contract.type_params + method.type_params + 1;
-            let method_effect_count = contract.effect_params + method.effect_params;
+            let Some(method_type_count) = contract
+                .type_params
+                .checked_add(method.type_params)
+                .and_then(|count| count.checked_add(1))
+            else {
+                return Err(ierr("a method type arity is too large".to_string()));
+            };
+            let Some(method_effect_count) =
+                contract.effect_params.checked_add(method.effect_params)
+            else {
+                return Err(ierr("a method effect arity is too large".to_string()));
+            };
             let mut method_scope = interface_scope.clone();
             method_scope.extend(method.type_bounds.clone());
             for (parameter, bounds) in method.type_bounds.iter().enumerate() {

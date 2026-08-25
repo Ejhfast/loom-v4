@@ -1343,14 +1343,18 @@ impl World {
             .waits
             .iter()
             .map(|(token, entry)| {
-                let source = match entry.source {
+                let source = match &entry.source {
                     WaitSource::Receive => ImageWaitSource::Receive,
                     WaitSource::Drive { target } => ImageWaitSource::Drive {
-                        target: self.require_ordinal(target, ordinal_of)?,
+                        target: self.require_ordinal(*target, ordinal_of)?,
                     },
-                    WaitSource::Choice { first, second } => {
-                        ImageWaitSource::Choice { first, second }
-                    }
+                    WaitSource::Choice { first, second } => ImageWaitSource::Choice {
+                        first: *first,
+                        second: *second,
+                    },
+                    WaitSource::Any { roots } => ImageWaitSource::Any {
+                        roots: roots.to_vec(),
+                    },
                     WaitSource::Operation { .. } => {
                         return Err(SnapshotFail::Fault(
                             FaultCode::MalformedState,

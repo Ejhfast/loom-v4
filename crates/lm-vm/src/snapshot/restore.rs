@@ -978,12 +978,18 @@ fn restore_state(
         .waits
         .iter()
         .map(|entry| {
-            let source = match entry.source {
+            let source = match &entry.source {
                 ImageWaitSource::Receive => WaitSource::Receive,
                 ImageWaitSource::Drive { target } => WaitSource::Drive {
-                    target: ids[target as usize],
+                    target: ids[*target as usize],
                 },
-                ImageWaitSource::Choice { first, second } => WaitSource::Choice { first, second },
+                ImageWaitSource::Choice { first, second } => WaitSource::Choice {
+                    first: *first,
+                    second: *second,
+                },
+                ImageWaitSource::Any { roots } => WaitSource::Any {
+                    roots: std::sync::Arc::from(roots.clone()),
+                },
             };
             (
                 entry.token,

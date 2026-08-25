@@ -172,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 5a4b1817)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 5061fc3a)\n"
     );
 }
 
@@ -188,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 68d49e2f)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 17b68e66)\n"
     );
 }
 
@@ -467,7 +467,7 @@ fn run_the_worker_example_prints_done_ok_42() {
     let out = lm(&[
         "run",
         "--show-result",
-        "examples/07-procs/worker.lm",
+        "examples/07-concurrency/worker.lm",
         "--allow",
         "Proc",
     ]);
@@ -477,7 +477,7 @@ fn run_the_worker_example_prints_done_ok_42() {
     let again = lm(&[
         "run",
         "--show-result",
-        "examples/07-procs/worker.lm",
+        "examples/07-concurrency/worker.lm",
         "--allow",
         "Proc",
     ]);
@@ -489,7 +489,7 @@ fn run_the_worker_example_prints_done_ok_42() {
 /// loader admits the result.
 #[test]
 fn a_proc_program_runs_from_its_artifact() {
-    let build = lm(&["build", "examples/07-procs/worker.lm"]);
+    let build = lm(&["build", "examples/07-concurrency/worker.lm"]);
     assert!(build.status.success(), "{}", stderr(&build));
     let out = lm(&[
         "run",
@@ -752,6 +752,19 @@ fn run_queens_example_counts_every_board() {
         search_example("05-n-queens.lm"),
         "Done((2, 10, 4, 40, 92))\n"
     );
+}
+
+#[test]
+fn run_parallel_queens_example_counts_every_board() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Vm,Wait",
+        "examples/14-vm-as-multishot-search/07-parallel-n-queens.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(92)\n");
 }
 
 #[test]

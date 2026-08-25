@@ -300,6 +300,8 @@ struct WaitLeafPath {
     leaf: WaitLeaf,
     /// False selects `Choice.First`. True selects `Choice.Second`.
     path: Vec<bool>,
+    /// The source index of one homogeneous dynamic wait.
+    any_index: Option<usize>,
 }
 
 impl WorldBudget {

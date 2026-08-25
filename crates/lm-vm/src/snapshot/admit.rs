@@ -2533,7 +2533,9 @@ impl Admit<'_> {
                     ImageBlock::Receive => op == lm_abi::OP_PROC_RECV,
                     ImageBlock::Send { .. } => op == lm_abi::OP_PROC_SEND,
                     ImageBlock::Done { .. } => op == lm_abi::OP_PROC_DONE,
-                    ImageBlock::Wait { .. } => op == lm_abi::OP_WAIT_WAIT,
+                    ImageBlock::Wait { .. } => {
+                        matches!(op, lm_abi::OP_WAIT_WAIT | lm_abi::OP_WAIT_ANY)
+                    }
                     ImageBlock::Snapshot { .. } => op == lm_abi::OP_PROC_SNAPSHOT_WAIT,
                 };
                 if !ok {
@@ -2609,7 +2611,7 @@ impl Admit<'_> {
                 );
             }
             previous = wait.token;
-            match wait.source {
+            match &wait.source {
                 ImageWaitSource::Receive if !m.is_proc => {
                     return fail(
                         ImageReason::State,
@@ -2617,8 +2619,21 @@ impl Admit<'_> {
                     )
                 }
                 ImageWaitSource::Drive { target } => {
-                    if target == vm || target as usize >= self.image.machines.len() {
+                    if *target == vm || *target as usize >= self.image.machines.len() {
                         return fail(ImageReason::Reference, at("a drive wait has no child"));
+                    }
+                }
+                ImageWaitSource::Any { roots } => {
+                    let active = matches!(m.block, Some(ImageBlock::Wait { token }) if token == wait.token)
+                        && matches!(
+                            m.pending.as_ref().map(|pending| pending.op),
+                            Some(lm_abi::OP_WAIT_ANY)
+                        );
+                    if !active || roots.is_empty() {
+                        return fail(
+                            ImageReason::State,
+                            at("a dynamic wait set is not the active wait root"),
+                        );
                     }
                 }
                 _ => {}
@@ -2626,19 +2641,35 @@ impl Admit<'_> {
         }
         let mut parents = vec![0u8; m.waits.len()];
         for wait in &m.waits {
-            let ImageWaitSource::Choice { first, second } = wait.source else {
-                continue;
+            let children: Vec<u64> = match &wait.source {
+                ImageWaitSource::Choice { first, second } => {
+                    if first == second || *first >= wait.token || *second >= wait.token {
+                        return fail(ImageReason::State, at("a choice has invalid child tokens"));
+                    }
+                    vec![*first, *second]
+                }
+                ImageWaitSource::Any { roots } => {
+                    let mut seen = HashSet::new();
+                    if roots
+                        .iter()
+                        .any(|child| *child >= wait.token || !seen.insert(*child))
+                    {
+                        return fail(
+                            ImageReason::State,
+                            at("a dynamic wait set has invalid child tokens"),
+                        );
+                    }
+                    roots.clone()
+                }
+                _ => continue,
             };
-            if first == second || first >= wait.token || second >= wait.token {
-                return fail(ImageReason::State, at("a choice has invalid child tokens"));
-            }
-            for child in [first, second] {
+            for child in children {
                 let Ok(index) = tokens.binary_search(&child) else {
-                    return fail(ImageReason::State, at("a choice names no wait child"));
+                    return fail(ImageReason::State, at("a wait parent names no child"));
                 };
                 parents[index] = parents[index].saturating_add(1);
                 if parents[index] > 1 {
-                    return fail(ImageReason::State, at("two choices share one wait child"));
+                    return fail(ImageReason::State, at("two wait parents share one child"));
                 }
             }
         }
@@ -2646,7 +2677,7 @@ impl Admit<'_> {
             if wait.linked != (*parents == 1) {
                 return fail(
                     ImageReason::State,
-                    at("a wait link flag has no matching choice"),
+                    at("a wait link flag has no matching parent"),
                 );
             }
         }
@@ -2660,16 +2691,52 @@ impl Admit<'_> {
                     at("the active wait token is a choice child"),
                 );
             }
-            let receiver_matches = match m.pending.as_ref().and_then(|p| p.args.first()) {
-                Some(Value::Obj(reference)) => {
-                    m.objects.get(reference.slot as usize).is_some_and(|entry| {
-                        matches!(
-                            entry.object,
-                            Object::NativeWait { owner, token: held }
-                                if owner == vm && held == token
-                        )
-                    })
-                }
+            let Some(pending) = m.pending.as_ref() else {
+                return fail(
+                    ImageReason::State,
+                    at("the active wait has no pending request"),
+                );
+            };
+            let receiver_matches = match pending.op {
+                lm_abi::OP_WAIT_WAIT => match pending.args.first() {
+                    Some(Value::Obj(reference)) => {
+                        m.objects.get(reference.slot as usize).is_some_and(|entry| {
+                            matches!(
+                                entry.object,
+                                Object::NativeWait { owner, token: held }
+                                    if owner == vm && held == token
+                            )
+                        })
+                    }
+                    _ => false,
+                },
+                lm_abi::OP_WAIT_ANY => match (pending.args.first(), &m.waits[root].source) {
+                    (Some(Value::Obj(reference)), ImageWaitSource::Any { roots }) => {
+                        m.objects.get(reference.slot as usize).is_some_and(|entry| {
+                            let Object::List { items, .. } = &entry.object else {
+                                return false;
+                            };
+                            let held = items
+                                .iter()
+                                .map(|value| {
+                                    let Value::Obj(reference) = value else {
+                                        return None;
+                                    };
+                                    m.objects.get(reference.slot as usize).and_then(|entry| {
+                                        match entry.object {
+                                            Object::NativeWait { owner, token } if owner == vm => {
+                                                Some(token)
+                                            }
+                                            _ => None,
+                                        }
+                                    })
+                                })
+                                .collect::<Option<Vec<_>>>();
+                            held.as_deref() == Some(roots.as_slice())
+                        })
+                    }
+                    _ => false,
+                },
                 _ => false,
             };
             if !receiver_matches {
@@ -2688,16 +2755,16 @@ impl Admit<'_> {
                 let index = tokens.binary_search(&current).map_err(|_| {
                     ImageError::new(ImageReason::State, at("a wait child is absent"))
                 })?;
-                match m.waits[index].source {
+                match &m.waits[index].source {
                     ImageWaitSource::Receive => {}
                     ImageWaitSource::Drive { target } => {
-                        if !drives.insert(target) {
+                        if !drives.insert(*target) {
                             return fail(
                                 ImageReason::State,
                                 at("the active wait drives one child twice"),
                             );
                         }
-                        let target = self.machine(target);
+                        let target = self.machine(*target);
                         if target.parent != Some(vm)
                             || target.scheduler_owned
                             || target.state == ImageState::Empty
@@ -2709,8 +2776,13 @@ impl Admit<'_> {
                         }
                     }
                     ImageWaitSource::Choice { first, second } => {
-                        stack.push(second);
-                        stack.push(first);
+                        stack.push(*second);
+                        stack.push(*first);
+                    }
+                    ImageWaitSource::Any { roots } => {
+                        for root in roots.iter().rev() {
+                            stack.push(*root);
+                        }
                     }
                 }
             }

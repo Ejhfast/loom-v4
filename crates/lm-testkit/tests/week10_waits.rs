@@ -2,7 +2,7 @@
 
 use lm_heap::Object;
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::snapshot::{codec, ImageBlock, ImageReason};
+use lm_vm::snapshot::{codec, ImageBlock, ImageReason, ImageWaitSource};
 use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -235,6 +235,74 @@ end
 }
 
 #[test]
+fn dynamic_wait_selection_returns_the_list_index() {
+    let source = r#"
+def answer(value: Int): Int
+  value
+end
+
+first = sys.vm.Vm().activate_or_fault(answer, args: (7,))
+second = sys.vm.Vm().activate_or_fault(answer, args: (9,))
+first.run()
+second.run()
+waits = List[Wait[DriveEvent[Int]]]()
+waits.push(first.drive_wait())
+waits.push(second.drive_wait())
+case sys.wait.any(waits)
+in (index, event)
+  case event
+  in Done(value) then (index, value)
+  in Asked(_) then (-1, -1)
+  in Fault(_) then (-2, -2)
+  end
+end
+"#;
+
+    assert_eq!(run(source, &["Vm", "Wait"]), "Done((0, 7))");
+}
+
+#[test]
+fn dynamic_wait_selection_rejects_an_empty_list() {
+    let source = r#"
+waits = List[Wait[Int]]()
+sys.wait.any(waits)
+"#;
+
+    assert_eq!(run(source, &["Wait"]), "Fault(InvalidVmState)");
+}
+
+#[test]
+fn dynamic_wait_selection_rejects_one_root_twice() {
+    let source = r#"
+def spin(): Never
+  loop do
+    ()
+  end
+end
+
+child = sys.vm.Vm().activate_or_fault(spin, args: ())
+pending = child.drive_wait()
+waits = List[Wait[DriveEvent[Never]]]()
+waits.push(pending)
+waits.push(pending)
+sys.wait.any(waits)
+"#;
+
+    assert_eq!(run(source, &["Vm", "Wait"]), "Fault(InvalidVmState)");
+}
+
+#[test]
+fn dynamic_wait_selection_needs_a_wait_list() {
+    let error = compile_to_bytes("bad-wait-any.lm", "sys.wait.any([1, 2])\n")
+        .expect_err("the element type rejects");
+    assert!(error.contains("needs a list of waits"), "{error}");
+
+    let error = compile_to_bytes("bad-wait-any-value.lm", "sys.wait.any(1)\n")
+        .expect_err("the argument type rejects");
+    assert!(error.contains("needs a list of waits"), "{error}");
+}
+
+#[test]
 fn a_mailbox_command_interrupts_an_active_drive_wait() {
     let source = std::fs::read_to_string(
         repo_root().join("examples/09-handles-and-supervision/12-selectable-supervisor.lm"),
@@ -417,4 +485,94 @@ end
         .capture_snapshot(barrier, restored, false)
         .expect("the restored wait captures");
     assert_eq!(recaptured.world().machines[0].waits.len(), 1);
+}
+
+#[test]
+fn an_active_dynamic_wait_survives_snapshot_encoding() {
+    let source = r#"
+def spin(): Never
+  loop do
+    ()
+  end
+end
+
+class Waiting < Proc
+  def on_spawn(self): Int with Vm, Wait
+    first = sys.vm.Vm().activate_or_fault(spin, args: ())
+    second = sys.vm.Vm().activate_or_fault(spin, args: ())
+    waits = List[Wait[DriveEvent[Never]]]()
+    waits.push(first.drive_wait())
+    waits.push(second.drive_wait())
+    sys.wait.any(waits)
+    1
+  end
+end
+
+class Gate < Proc
+  def on_spawn(self): Int
+    1
+  end
+end
+
+waiting = Waiting.spawn()
+case waiting.pause()
+in Ok(vm)
+  vm.table().pass(Vm)
+  vm.table().pass(Wait)
+  waiting.resume()
+in Err(_) then ()
+end
+Gate.spawn().done()
+case waiting.snapshot_wait(0)
+in Ok(_) then "captured"
+in Err(_) then "capture failed"
+end
+"#;
+    let bytes = compile_to_bytes("dynamic-wait-snapshot.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in ["Proc", "Vm", "Wait"] {
+        world.allow(grant).expect("the grant exists");
+    }
+
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(\"captured\")");
+    let image = world.last_snapshot().expect("the snapshot exists").clone();
+    assert!(image.world().machines.iter().any(|machine| {
+        machine
+            .waits
+            .iter()
+            .any(|wait| matches!(&wait.source, ImageWaitSource::Any { roots } if roots.len() == 2))
+    }));
+
+    let bytes = codec::encode(image.world(), usize::MAX).expect("the image encodes");
+    let loaded_image =
+        codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+            .expect("the dynamic wait image admits");
+    assert!(loaded_image.world().machines.iter().any(|machine| {
+        machine
+            .waits
+            .iter()
+            .any(|wait| matches!(&wait.source, ImageWaitSource::Any { roots } if roots.len() == 2))
+    }));
+
+    let mut invalid = image.world().clone();
+    let roots = invalid
+        .machines
+        .iter_mut()
+        .flat_map(|machine| &mut machine.waits)
+        .find_map(|wait| match &mut wait.source {
+            ImageWaitSource::Any { roots } => Some(roots),
+            _ => None,
+        })
+        .expect("the image has a dynamic wait");
+    roots[1] = roots[0];
+    let bytes = codec::encode(&invalid, usize::MAX).expect("the damaged image encodes");
+    let error = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+        .expect_err("duplicate dynamic roots reject");
+    assert_eq!(error.reason, ImageReason::State);
 }

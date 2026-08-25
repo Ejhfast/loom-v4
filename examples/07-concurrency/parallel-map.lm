@@ -1,0 +1,12 @@
+# Map independent values with scheduler procs.
+#
+# Run with `--allow Proc`.
+#
+# `par_map` accepts a pure callback. It can run callback calls on
+# separate scheduler workers. The result keeps the source order.
+
+values = Range(1, 9).par_map(do |value: Int|: Int
+  value * value
+end)
+
+(values, values.sum(0))

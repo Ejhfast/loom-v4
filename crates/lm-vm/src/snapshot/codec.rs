@@ -789,16 +789,23 @@ fn section_machines(
         for wait in &machine.waits {
             out.u64(wait.token);
             out.u8(u8::from(wait.linked));
-            match wait.source {
+            match &wait.source {
                 ImageWaitSource::Receive => out.u8(0),
                 ImageWaitSource::Drive { target } => {
                     out.u8(1);
-                    out.leb(target as u64);
+                    out.leb(*target as u64);
                 }
                 ImageWaitSource::Choice { first, second } => {
                     out.u8(2);
-                    out.u64(first);
-                    out.u64(second);
+                    out.u64(*first);
+                    out.u64(*second);
+                }
+                ImageWaitSource::Any { roots } => {
+                    out.u8(3);
+                    out.leb(roots.len() as u64);
+                    for root in roots {
+                        out.u64(*root);
+                    }
                 }
             }
         }
@@ -2501,6 +2508,15 @@ fn decode_machine(
                 first: cur.u64()?,
                 second: cur.u64()?,
             },
+            3 => {
+                let count =
+                    cur.count(crate::machine::MAX_LIVE_WAITS as u64, "dynamic wait root")?;
+                let mut roots = cur.vector(count, "dynamic wait roots")?;
+                for _ in 0..count {
+                    roots.push(cur.u64()?);
+                }
+                ImageWaitSource::Any { roots }
+            }
             other => {
                 return err(
                     ImageReason::State,

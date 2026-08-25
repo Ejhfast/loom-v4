@@ -158,7 +158,7 @@ fn seed_sources() -> Vec<(String, String)> {
         "examples/03-types",
         "examples/04-effects",
         "examples/06-graphs",
-        "examples/07-procs",
+        "examples/07-concurrency",
     ] {
         for path in lm_files(&repo_root().join(dir)) {
             let text = std::fs::read_to_string(&path).expect("example reads");

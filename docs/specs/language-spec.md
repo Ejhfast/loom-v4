@@ -1208,6 +1208,14 @@ The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 
 
 The runtime tests ready arms in source order whenever the proc resumes.
 
+`sys.wait.any(waits)` selects from a nonempty `List[Wait[T]]`.
+
+It returns `(index, value)`, where `index` identifies the winning list entry.
+
+The call consumes every wait root. It tests roots in list order.
+
+Losing drive waits keep all work completed before withdrawal.
+
 An exact operation can define `wait` through its manifest entry.
 
 For `Op[op, (A...) -> R]`, `wait(A...)` returns `Wait[R]` and charges `op`.
@@ -3460,9 +3468,12 @@ Fuel counts target-world instructions. Host completion time does not consume fue
 Wait.Wait[T]          (Wait[T]) -> T
 Wait.Choose[A,B]      (Wait[A], Wait[B]) -> Wait[Choice[A,B]]
 Wait.Cancel[T]        (Wait[T]) -> Bool
+Wait.Any[T]           (List[Wait[T]]) -> (Int,T)
 ```
 
 Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
+
+`Wait.Any` supports a homogeneous runtime-sized wait set.
 
 The operation manifest marks each exact operation that can create a wait source.
 

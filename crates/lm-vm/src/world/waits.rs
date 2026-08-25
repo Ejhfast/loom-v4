@@ -29,6 +29,24 @@ impl World {
         Ok((token, value))
     }
 
+    fn allocate_internal_wait(&mut self, vm: VmId, source: WaitSource) -> Result<u64, FaultCode> {
+        let machine = &self.machines[vm as usize];
+        if machine.vm.waits.len() >= MAX_LIVE_WAITS || machine.vm.next_wait == u64::MAX {
+            return Err(FaultCode::BoundaryLimit);
+        }
+        let token = machine.vm.next_wait;
+        let machine = &mut self.machines[vm as usize];
+        machine.vm.next_wait += 1;
+        machine.vm.waits.insert(
+            token,
+            WaitEntry {
+                source,
+                linked: false,
+            },
+        );
+        Ok(token)
+    }
+
     pub(super) fn create_wait(&mut self, vm: VmId, op: u32, source: WaitSource) {
         match self.allocate_wait(vm, source) {
             Ok((_, value)) => self.install_value_reply(vm, value),
@@ -93,8 +111,8 @@ impl World {
         let waits = &self.machines[vm as usize].vm.waits;
         let mut leaves = Vec::new();
         let mut tokens = Vec::new();
-        let mut stack = vec![(root, Vec::new(), true)];
-        while let Some((token, path, is_root)) = stack.pop() {
+        let mut stack = vec![(root, Vec::new(), true, None)];
+        while let Some((token, path, is_root, any_index)) = stack.pop() {
             if tokens.contains(&token) || tokens.len() >= MAX_LIVE_WAITS {
                 return Err(FaultCode::MalformedState);
             }
@@ -105,14 +123,16 @@ impl World {
                 return Err(FaultCode::MalformedState);
             }
             tokens.push(token);
-            match entry.source {
+            match &entry.source {
                 WaitSource::Receive => leaves.push(WaitLeafPath {
                     leaf: WaitLeaf::Receive,
                     path,
+                    any_index,
                 }),
                 WaitSource::Drive { target } => leaves.push(WaitLeafPath {
-                    leaf: WaitLeaf::Drive { target },
+                    leaf: WaitLeaf::Drive { target: *target },
                     path,
+                    any_index,
                 }),
                 WaitSource::Operation {
                     op,
@@ -124,15 +144,16 @@ impl World {
                     ready,
                 } => leaves.push(WaitLeafPath {
                     leaf: WaitLeaf::Operation {
-                        op,
-                        ordinal,
-                        scope,
-                        consume_resource,
-                        reply_ty,
-                        env,
-                        ready,
+                        op: *op,
+                        ordinal: *ordinal,
+                        scope: *scope,
+                        consume_resource: *consume_resource,
+                        reply_ty: *reply_ty,
+                        env: *env,
+                        ready: *ready,
                     },
                     path,
+                    any_index,
                 }),
                 WaitSource::Choice { first, second } => {
                     if first == second {
@@ -140,10 +161,18 @@ impl World {
                     }
                     let mut second_path = path.clone();
                     second_path.push(true);
-                    stack.push((second, second_path, false));
+                    stack.push((*second, second_path, false, any_index));
                     let mut first_path = path;
                     first_path.push(false);
-                    stack.push((first, first_path, false));
+                    stack.push((*first, first_path, false, any_index));
+                }
+                WaitSource::Any { roots } => {
+                    if roots.is_empty() || any_index.is_some() || !path.is_empty() {
+                        return Err(FaultCode::MalformedState);
+                    }
+                    for (index, child) in roots.iter().enumerate().rev() {
+                        stack.push((*child, Vec::new(), false, Some(index)));
+                    }
                 }
             }
         }
@@ -345,6 +374,105 @@ impl World {
                     .linked = true;
                 self.install_value_reply(vm, value);
             }
+            lm_abi::OP_WAIT_ANY => {
+                let Some(reference) = args[0].as_obj() else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a list of waits",
+                    );
+                    return;
+                };
+                let roots = match self.machines[vm as usize].vm.heap.get(reference) {
+                    Object::List { items, .. } => items.clone(),
+                    _ => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the argument is not a list of waits",
+                        );
+                        return;
+                    }
+                };
+                if roots.is_empty() {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::InvalidVmState,
+                        "sys.wait.any needs at least one wait",
+                    );
+                    return;
+                }
+                if roots.len() >= MAX_LIVE_WAITS {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryLimit,
+                        "the dynamic wait set passes its limit",
+                    );
+                    return;
+                }
+                let mut tokens = Vec::with_capacity(roots.len());
+                for value in roots {
+                    let Some(token) = self.wait_token(vm, op, value) else {
+                        return;
+                    };
+                    if tokens.contains(&token) {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "a dynamic wait set cannot use one wait twice",
+                        );
+                        return;
+                    }
+                    if !self.wait_root_is_current(vm, op, token) {
+                        return;
+                    }
+                    tokens.push(token);
+                }
+                let source = WaitSource::Any {
+                    roots: Arc::from(tokens.clone()),
+                };
+                let root = match self.allocate_internal_wait(vm, source) {
+                    Ok(root) => root,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the wait limit is full");
+                        return;
+                    }
+                };
+                for token in &tokens {
+                    self.machines[vm as usize]
+                        .vm
+                        .waits
+                        .get_mut(token)
+                        .expect("the checked wait exists")
+                        .linked = true;
+                }
+                let leaves = match self.wait_tree(vm, root) {
+                    Ok((leaves, _)) => leaves,
+                    Err(_) => {
+                        self.rollback_dynamic_wait(vm, root, &tokens);
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::MalformedState,
+                            "the dynamic wait tree is malformed",
+                        );
+                        return;
+                    }
+                };
+                if !self.validate_wait_leases(vm, op, &leaves) {
+                    self.rollback_dynamic_wait(vm, root, &tokens);
+                    return;
+                }
+                if self.complete_ready_wait(vm, root) {
+                    return;
+                }
+                self.block_machine(vm, Block::Wait { token: root });
+            }
             lm_abi::OP_WAIT_CANCEL => {
                 let Some(token) = self.wait_token(vm, op, args[0]) else {
                     return;
@@ -400,6 +528,15 @@ impl World {
                 FaultCode::MalformedState,
                 "the operation has no wait rule",
             ),
+        }
+    }
+
+    fn rollback_dynamic_wait(&mut self, vm: VmId, root: u64, children: &[u64]) {
+        self.machines[vm as usize].vm.waits.remove(&root);
+        for child in children {
+            if let Some(entry) = self.machines[vm as usize].vm.waits.get_mut(child) {
+                entry.linked = false;
+            }
         }
     }
 
@@ -488,7 +625,19 @@ impl World {
                     self.take_operation_wait_value(vm, operation)
                 }
             }
-            .and_then(|value| self.wrap_wait_choice(vm, value, &leaf.path));
+            .and_then(|value| self.wrap_wait_choice(vm, value, &leaf.path))
+            .and_then(|value| {
+                let op = self.pending_op(vm).ok_or(FaultCode::MalformedState)?;
+                match (op, leaf.any_index) {
+                    (lm_abi::OP_WAIT_WAIT, None) => Ok(value),
+                    (lm_abi::OP_WAIT_ANY, Some(index)) => {
+                        self.machines[vm as usize].alloc(Object::Tuple {
+                            items: vec![Value::Int(index as i64), value],
+                        })
+                    }
+                    _ => Err(FaultCode::MalformedState),
+                }
+            });
             let cancelled = self.cancel_wait_operations(vm, &leaves, Some(selected));
             let mut seen = Vec::new();
             self.quiesce_wait_leases(vm, token, &mut seen);
@@ -498,7 +647,8 @@ impl World {
             match built {
                 Ok(value) => self.install_value_reply(vm, value),
                 Err(code) => {
-                    self.machines[vm as usize].set_fault(code, "", Some(lm_abi::OP_WAIT_WAIT))
+                    let op = self.pending_op(vm);
+                    self.machines[vm as usize].set_fault(code, "", op)
                 }
             }
             return true;

@@ -205,14 +205,14 @@ then drives the surviving proc: its next receive faults with
 ### Runnable outputs
 
 ```text
-$ lm run --show-result examples/07-procs/worker.lm --allow Proc
-Done(Done(42))
+$ lm run --show-result examples/07-concurrency/worker.lm --allow Proc
+Done(Ok(42))
 
-$ lm run --show-result examples/07-procs/mailbox-handle.lm --allow Proc
-Done((Done(1), Done(12)))
+$ lm run --show-result examples/07-concurrency/mailbox-handle.lm --allow Proc
+Done((Ok(1), Ok(12)))
 
-$ lm run --show-result examples/07-procs/barrier.lm --allow Proc
-Done(Done(5))
+$ lm run --show-result examples/07-concurrency/barrier.lm --allow Proc
+Done(Ok(5))
 ```
 
 The barrier example is the closed-set gate in source form. The root
@@ -351,7 +351,7 @@ cannot serve this"; the open question below asks for a better one.
   different function index by arithmetic instead of by position.
 - `crates/lm-testkit/tests/week7_graph.rs`, the shape count is fifteen
   and the checked digest output moved with the compiler ABI version.
-- `crates/lm-testkit/tests/fuzz.rs` takes `examples/07-procs` into the
+- `crates/lm-testkit/tests/fuzz.rs` takes `examples/07-concurrency` into the
   mutation seed corpus, raises the corpus floors, and reads the core
   role table at its new size.
 - `crates/lm-heap/src/shape.rs`, the sample list, the tag table, and
@@ -804,7 +804,7 @@ that drains a loop needs it, because the loop exits on `Closed`.
 
 A request-and-reply flow needs `send` and `done` alone. The proc
 receives one message and terminates, so a close adds a third call and
-teaches boilerplate. The narrative examples in `examples/07-procs`
+teaches boilerplate. The narrative examples in `examples/07-concurrency`
 follow this rule now, and the streaming example carries one comment
 that states why its close is there.
 

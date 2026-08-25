@@ -1,4 +1,4 @@
-# One proc with a typed mailbox.
+# One proc uses a typed mailbox.
 #
 # The worker receives one message, doubles it, and returns the result.
 # The spawner sends one message and waits for the terminal result. One

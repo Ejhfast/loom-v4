@@ -2190,7 +2190,8 @@ impl World {
             lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CHOOSE
-            | lm_abi::OP_WAIT_CANCEL => self.wait_exec(vm, op, args),
+            | lm_abi::OP_WAIT_CANCEL
+            | lm_abi::OP_WAIT_ANY => self.wait_exec(vm, op, args),
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_RUN_CLOSURE
             | lm_abi::OP_PROC_SPAWN

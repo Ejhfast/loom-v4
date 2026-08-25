@@ -152,12 +152,13 @@ pub fn dump_image(world: &Image) -> String {
             );
         }
         for wait in &machine.waits {
-            let source = match wait.source {
+            let source = match &wait.source {
                 ImageWaitSource::Receive => "receive".to_string(),
                 ImageWaitSource::Drive { target } => format!("drive machine {target}"),
                 ImageWaitSource::Choice { first, second } => {
                     format!("choice {first} {second}")
                 }
+                ImageWaitSource::Any { roots } => format!("any {roots:?}"),
             };
             let _ = writeln!(
                 out,

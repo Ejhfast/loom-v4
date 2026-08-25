@@ -82,7 +82,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 28 stores each map entry semantic hash.
 /// Version 29 stores floating-point values.
 /// Version 30 adds closed terminal and signal resource values.
-pub const FORMAT_VERSION: u32 = 30;
+/// Version 31 stores homogeneous dynamic wait sets.
+pub const FORMAT_VERSION: u32 = 31;
 
 /// The section kinds, in canonical order.
 ///
@@ -250,15 +251,16 @@ pub enum ImageBlock {
 }
 
 /// One typed wait source in a snapshot image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageWaitSource {
     Receive,
     Drive { target: u32 },
     Choice { first: u64, second: u64 },
+    Any { roots: Vec<u64> },
 }
 
 /// One typed wait entry in a snapshot image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageWaitEntry {
     pub token: u64,
     pub source: ImageWaitSource,
@@ -528,6 +530,11 @@ impl Image {
                 bytes.saturating_add(machine.literals.len() * std::mem::size_of::<Option<u32>>());
             bytes =
                 bytes.saturating_add(machine.waits.len() * std::mem::size_of::<ImageWaitEntry>());
+            for wait in &machine.waits {
+                if let ImageWaitSource::Any { roots } = &wait.source {
+                    bytes = bytes.saturating_add(roots.len() * std::mem::size_of::<u64>());
+                }
+            }
             if let Some(pending) = &machine.pending {
                 bytes = bytes.saturating_add(pending.args.len() * std::mem::size_of::<Value>());
             }

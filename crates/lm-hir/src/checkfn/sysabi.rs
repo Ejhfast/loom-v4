@@ -498,6 +498,48 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
+        // `sys.wait.any(waits)` selects one value from a homogeneous,
+        // runtime-sized wait set. The element type fixes the reply.
+        if group == "Wait" && member == "any" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!("`sys.wait.any` expects 1 argument(s), found {}", args.len()),
+                    span,
+                ));
+            }
+            let waits = self.synth_expr(ctx, &args[0])?;
+            let Type::List(wait) = ctx.store.get(waits.ty).clone() else {
+                return Err(Diagnostic::new(
+                    "E1004",
+                    format!(
+                        "`sys.wait.any` needs a list of waits, found {}",
+                        ctx.display_type(&self.env, waits.ty)
+                    ),
+                    args[0].span,
+                ));
+            };
+            let Type::Wait(result) = ctx.store.get(wait).clone() else {
+                return Err(Diagnostic::new(
+                    "E1004",
+                    format!(
+                        "`sys.wait.any` needs a list of waits, found {}",
+                        ctx.display_type(&self.env, waits.ty)
+                    ),
+                    args[0].span,
+                ));
+            };
+            self.charge_op(ctx, lm_abi::OP_WAIT_ANY, span)?;
+            let ty = ctx.store.intern(Type::Tuple(vec![INT, result]));
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_WAIT_ANY,
+                    args: vec![waits],
+                },
+            });
+        }
         let op = Self::resolve_sys_member(ctx, group, member, name_span)?;
         let def = ctx
             .bundle

@@ -16,6 +16,7 @@ use lm_heap::{
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 /// The largest typed wait table of one machine.
 pub const MAX_LIVE_WAITS: usize = 1_024;
@@ -150,7 +151,7 @@ pub enum Block {
 }
 
 /// One prepared typed wait source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitSource {
     /// Read one message from the owning proc mailbox.
     Receive,
@@ -158,6 +159,8 @@ pub enum WaitSource {
     Drive { target: VmId },
     /// Select between two existing wait trees.
     Choice { first: u64, second: u64 },
+    /// Select one result from a homogeneous runtime-sized wait set.
+    Any { roots: Arc<[u64]> },
     /// One exact operation that becomes visible only after selection.
     Operation {
         op: u32,
@@ -171,7 +174,7 @@ pub enum WaitSource {
 }
 
 /// One wait entry in its owner machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitEntry {
     pub source: WaitSource,
     /// A choice owns linked entries. Their old tokens are stale.
@@ -1359,9 +1362,9 @@ impl Machine {
             if let WaitSource::Operation {
                 ready: Some(Value::Obj(reference)),
                 ..
-            } = entry.source
+            } = &entry.source
             {
-                roots.push(reference);
+                roots.push(*reference);
             }
         }
         if let Some(Terminal::Done(Value::Obj(r))) = &self.vm.terminal {

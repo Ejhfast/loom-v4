@@ -989,7 +989,11 @@ Work completed before withdrawal remains visible in that run.
 
 Fixed `select` arms serve supervisors and other fixed wait sets.
 
-Runtime-sized multishot search uses explicit scheduler transfer instead.
+`sys.wait.any` arms a homogeneous runtime-sized wait set.
+
+One holder can use it to drive a dynamic multishot search frontier.
+
+Each drive leaf in that frontier can execute on a different worker.
 
 ### 19.5 In-memory branches
 
@@ -999,9 +1003,13 @@ It writes no snapshot container and computes no container hash.
 
 It returns a held `Run` and performs no hidden scheduler submission.
 
-The caller can transfer that run through `sys.proc.run`.
+The caller can arm its `drive_wait` or transfer it through `sys.proc.run`.
 
 Several transferred branches can execute concurrently.
+
+A transferred run needs no external driver. Its table must handle all later operations.
+
+A holder-driven run can ask new operations. Its holder resumes it through drive events.
 
 A branch rejects a live host attachment.
 

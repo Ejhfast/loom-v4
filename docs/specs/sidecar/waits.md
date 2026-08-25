@@ -36,6 +36,7 @@ Proc[M].receive_wait()         -> Wait[Recv[M]]
 Wait[T].wait()                 -> T
 Wait[A].choose(Wait[B])        -> Wait[Choice[A, B]]
 Wait[T].cancel()               -> Bool
+sys.wait.any(List[Wait[T]])    -> (Int, T)
 ```
 
 `Choice[A, B]` is an ordinary closed core enum:
@@ -61,6 +62,20 @@ self.receive() = self.receive_wait().wait()
 ```
 
 These equations define visible behavior. Direct calls can use an internal fast path.
+
+### 3.1 Dynamic selection
+
+`sys.wait.any` consumes a nonempty list of current wait roots.
+
+All roots have one result type. The returned index names the winning list entry.
+
+The runtime tests roots in list order. It tests each root tree in its normal leaf order.
+
+The call consumes losing roots. Losing sources follow the same withdrawal rules as `select`.
+
+An empty list faults with `InvalidVmState`.
+
+A duplicate, stale, linked, or foreign root faults with `InvalidVmState`.
 
 ## 4. Select syntax
 
@@ -109,7 +124,11 @@ Current internal sources include mailbox wake keys and host completion keys. Dri
 
 One readiness event refreshes its wait set. Completion removes all losing registrations.
 
-The scheduler stays single-threaded. One VM never executes concurrently.
+Deterministic mode uses one scheduler thread.
+
+Parallel mode can lease distinct drive leaves to different workers.
+
+One machine still has at most one execution lease.
 
 ## 7. Drive leases
 
@@ -142,6 +161,8 @@ An in-memory host can complete an operation immediately. It must keep the same r
 ## 9. Snapshots
 
 Wait descriptions contain only serializable identifiers and source data. Restore rebuilds scheduler indexes from machine state.
+
+An active dynamic wait stores its ordered root list in the machine image.
 
 Scheduler queues, channels, mutexes, and worker tasks never enter snapshot bytes.
 

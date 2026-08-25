@@ -736,6 +736,44 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_wait_selection_verifies_its_element_and_reply_types() {
+        let mut module = module_with(vec![vec![Return]]);
+        let wait = module.types.len() as u32;
+        module.types.push(BcType::Wait(TY_INT));
+        let waits = module.types.len() as u32;
+        module.types.push(BcType::List(wait));
+        let integers = module.types.len() as u32;
+        module.types.push(BcType::List(TY_INT));
+        let result = module.types.len() as u32;
+        module.types.push(BcType::Tuple(vec![TY_INT, TY_INT]));
+        let effect = module.strings.len() as u32;
+        module.strings.push("Wait.Any".to_string());
+        module.funcs[0].ret = result;
+        module.funcs[0].row = vec![BcRow::Op(effect)];
+        module.funcs[0].blocks = vec![vec![
+            ListNew {
+                ty: waits,
+                count: 0,
+            },
+            Perform {
+                op: lm_abi::OP_WAIT_ANY,
+                argc: 1,
+                reply_ty: result,
+            },
+            Return,
+        ]];
+        verify_module(&module).expect("the homogeneous wait list verifies");
+
+        let mut forged = module;
+        forged.funcs[0].blocks[0][0] = ListNew {
+            ty: integers,
+            count: 0,
+        };
+        let error = verify_module(&forged).expect_err("the integer list rejects");
+        assert!(error.message.contains("list of Wait values"), "{error}");
+    }
+
+    #[test]
     fn accepts_a_call_through_an_exact_function_slot() {
         let mut module = module_with(vec![vec![
             Instr::Extended(ExtendedInstr::CallSlot {

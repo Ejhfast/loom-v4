@@ -576,6 +576,18 @@ fn class_arity_flip_is_rejected() {
 }
 
 #[test]
+fn an_overflowing_interface_arity_is_rejected() {
+    let mut module = lm_bytecode::decode(&valid_bytes()).unwrap();
+    let interface = module
+        .interfaces
+        .first_mut()
+        .expect("the core declares an interface");
+    interface.type_params = u32::MAX;
+    interface.effect_params = 1;
+    expect_verify_reject(&lm_bytecode::encode(&module), "generic arity is too large");
+}
+
+#[test]
 fn every_truncated_stream_is_rejected_by_the_decoder() {
     for bytes in [valid_bytes(), object_bytes(), week3_bytes()] {
         for len in 0..bytes.len() {

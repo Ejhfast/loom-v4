@@ -1,4 +1,4 @@
-# Three machines: the root, a worker, and a helper.
+# Three machines coordinate through one accepted handle.
 #
 # The root never binds the helper handle. It sends the handle straight
 # into the worker mailbox, so a barrier from the root reaches the

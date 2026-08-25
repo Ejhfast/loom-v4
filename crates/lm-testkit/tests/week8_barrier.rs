@@ -36,7 +36,7 @@ fn run_to_first_block(world: &mut World) {
 /// message names still joins the set.
 #[test]
 fn the_barrier_set_closes_over_a_mailbox_handle() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
@@ -71,7 +71,7 @@ fn the_barrier_set_closes_over_a_mailbox_handle() {
 /// is frozen while it holds the world.
 #[test]
 fn the_barrier_records_one_mailbox_cut() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
@@ -142,7 +142,7 @@ fn a_frozen_mailbox_blocks_the_sender_instead_of_accepting() {
 /// finds the first and reports the overlap instead of racing it.
 #[test]
 fn overlapping_barriers_serialize() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
@@ -167,7 +167,7 @@ fn overlapping_barriers_serialize() {
 /// the root.
 #[test]
 fn a_disjoint_barrier_proceeds() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
@@ -237,7 +237,7 @@ fn a_live_host_attachment_blocks_the_barrier_and_resumes() {
 /// machine of the set runs while the barrier is open.
 #[test]
 fn a_held_machine_leaves_the_run_set() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
@@ -255,7 +255,7 @@ fn a_held_machine_leaves_the_run_set() {
 /// state of a set member targets another member of the set.
 #[test]
 fn every_handle_in_the_set_targets_a_member_of_the_set() {
-    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+    let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
     let (loaded, ()) = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
