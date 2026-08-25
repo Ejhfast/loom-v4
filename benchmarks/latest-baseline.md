@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `754db52`.
+The measured source revision is `7e07f4d`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -24,25 +24,25 @@ The snapshot format version is 30.
 
 | Measurement | Result |
 | --- | ---: |
-| Classes | 296 |
-| HIR functions | 595 |
-| HIR types | 562 |
-| Bytecode functions | 891 |
-| Bytecode instructions | 18,807 |
+| Classes | 299 |
+| HIR functions | 597 |
+| HIR types | 565 |
+| Bytecode functions | 896 |
+| Bytecode instructions | 18,877 |
 | Decoded instruction width | 16 bytes |
-| Artifact size | 273,244 bytes |
-| Core checking | 2.399 ms |
-| Core lowering | 0.989 ms |
-| Core compilation | 3.777 ms |
-| Core decoding | 0.407 ms |
-| Core verification | 1.406 ms |
-| Structural verification | 0.511 ms |
-| Verification hash | 0.136 ms |
-| Semantic identity | 2.514 ms |
-| Decoded loading | 1.600 ms |
-| Core loading | 2.011 ms |
-| Cached core loading | 0.166 ms |
-| Default interface witnesses | 11 of 3,552 possible entries |
+| Artifact size | 274,657 bytes |
+| Core checking | 2.416 ms |
+| Core lowering | 1.009 ms |
+| Core compilation | 3.838 ms |
+| Core decoding | 0.413 ms |
+| Core verification | 1.411 ms |
+| Structural verification | 0.512 ms |
+| Verification hash | 0.144 ms |
+| Semantic identity | 2.553 ms |
+| Decoded loading | 1.601 ms |
+| Core loading | 2.019 ms |
+| Cached core loading | 0.169 ms |
+| Default interface witnesses | 11 of 3,588 possible entries |
 
 ### Growth from the scheduler foundation
 
@@ -50,18 +50,18 @@ This comparison uses revision `308b55e` with the same processor placement.
 
 | Measurement | Foundation | Current | Change |
 | --- | ---: | ---: | ---: |
-| HIR functions | 571 | 595 | +4.2% |
-| HIR types | 534 | 562 | +5.2% |
-| Bytecode functions | 873 | 891 | +2.1% |
-| Bytecode instructions | 17,905 | 18,807 | +5.0% |
-| Artifact size | 264,401 bytes | 273,244 bytes | +3.3% |
-| Core checking | 2.065 ms | 2.399 ms | +16.2% |
-| Core lowering | 0.945 ms | 0.989 ms | +4.7% |
-| Core compilation | 3.335 ms | 3.777 ms | +13.3% |
-| Core verification | 1.278 ms | 1.406 ms | +10.0% |
-| Core loading | 1.837 ms | 2.011 ms | +9.5% |
+| HIR functions | 571 | 597 | +4.6% |
+| HIR types | 534 | 565 | +5.8% |
+| Bytecode functions | 873 | 896 | +2.6% |
+| Bytecode instructions | 17,905 | 18,877 | +5.4% |
+| Artifact size | 264,401 bytes | 274,657 bytes | +3.9% |
+| Core checking | 2.065 ms | 2.416 ms | +17.0% |
+| Core lowering | 0.945 ms | 1.009 ms | +6.8% |
+| Core compilation | 3.335 ms | 3.838 ms | +15.1% |
+| Core verification | 1.278 ms | 1.411 ms | +10.4% |
+| Core loading | 1.837 ms | 2.019 ms | +9.9% |
 
-The larger core adds 0.334 milliseconds to core checking.
+The larger core adds 0.351 milliseconds to core checking.
 
 Large checker inputs retain the prior scaling slope.
 
@@ -99,13 +99,13 @@ Each process reports one nine-run median.
 
 | Operation | Result |
 | --- | ---: |
-| `int_loop` | 31.6 ns |
+| `int_loop` | 31.4 ns |
 | `direct_call` | 30.5 ns |
-| `string_interp` | 206.6 ns |
-| `float_add` | 32.9 ns |
-| `string_builder` | 41.0 ns |
-| `byte_buffer` | 36.7 ns |
-| `direct_clock` | 114.2 ns |
+| `string_interp` | 208.1 ns |
+| `float_add` | 34.2 ns |
+| `string_builder` | 40.0 ns |
+| `byte_buffer` | 37.1 ns |
+| `direct_clock` | 114.5 ns |
 
 String and interpreter measurements can vary with process placement.
 
@@ -115,28 +115,28 @@ This comparison uses three pinned processes for each revision.
 
 | Operation | Foundation | Current | Change |
 | --- | ---: | ---: | ---: |
-| `partial_eq` | 92.8 ns | 96.5 ns | +4.0% |
-| `list_eq` | 815.3 ns | 816.9 ns | +0.2% |
-| `list_hash` | 800.8 ns | 827.5 ns | +3.3% |
-| `tuple_hash` | 354.8 ns | 375.5 ns | +5.8% |
-| `map_hashable_lookup` | 205.8 ns | 214.7 ns | +4.3% |
-| `list_sort` | 19,162.1 ns | 19,679.6 ns | +2.7% |
+| `partial_eq` | 92.8 ns | 98.7 ns | +6.4% |
+| `list_eq` | 815.3 ns | 812.5 ns | -0.3% |
+| `list_hash` | 800.8 ns | 817.7 ns | +2.1% |
+| `tuple_hash` | 354.8 ns | 371.9 ns | +4.8% |
+| `map_hashable_lookup` | 205.8 ns | 217.0 ns | +5.4% |
+| `list_sort` | 19,162.1 ns | 19,011.0 ns | -0.8% |
 
-The largest measured interface delta is 5.8 percent.
+The largest measured interface delta is 6.4 percent.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 48.55 seconds.
+The warm debug workspace suite completed in 50.26 seconds.
 
 Revision `308b55e` completed in 43.95 seconds under the same settings.
 
 | Target | Foundation | Current | Change |
 | --- | ---: | ---: | ---: |
-| Full workspace | 43.95 s | 48.55 s | +10.5% |
-| Snapshot admission | 10.93 s | 11.84 s | +8.3% |
-| Source mutation | 11.48 s | 13.15 s | +14.5% |
+| Full workspace | 43.95 s | 50.26 s | +14.4% |
+| Snapshot admission | 10.93 s | 11.75 s | +7.5% |
+| Source mutation | 11.48 s | 13.12 s | +14.3% |
 
-The feature suite took 50.48 seconds before this optimization pass.
+Revision `754db52` completed the workspace suite in 48.55 seconds.
 
 The suite used Cargo's default test concurrency and full coverage.
 
@@ -228,6 +228,22 @@ The parallel reference uses hand-written procs with the same chunking policy.
 The deterministic reference uses `Iterable.map`.
 
 The acceptance limit is 1.08x for each ratio.
+
+## Reified VM branching
+
+Each result is the median of three pinned release processes.
+
+Each process creates and completes 100 held runs.
+
+| Method | Time | Branch divided by method |
+| --- | ---: | ---: |
+| Reuse one snapshot | 0.312 ms | 1.397x |
+| Fresh capture and restore | 0.501 ms | 0.861x |
+| `Run.branch()` | 0.429 ms | 1.000x |
+
+`Run.branch()` is 14 percent faster than a fresh capture and restore.
+
+A reused snapshot remains faster for repeated copies of one state.
 
 ## Host readiness observations
 
