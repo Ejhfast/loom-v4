@@ -1031,9 +1031,19 @@ The first implementation can reuse the admitted image representation.
 
 Performance gates determine whether a more direct graph copy adds value.
 
-Machine collection keeps its current global quiescence rule.
+Machine record reclamation keeps its current global quiescence rule.
 
 The scheduler counts each collection quiescence separately.
+
+Machine and VM image tables start reclamation at 1,024 occupied records.
+
+After each pass, the next threshold is twice the remaining live count.
+
+The threshold stays at least 1,024 when the configured hard limit permits it.
+
+The threshold never exceeds that hard limit.
+
+This adaptive threshold separates reclamation cadence from resource policy.
 
 `Run.branch_answer(call,value)` copies one run at a pending call.
 

@@ -27,9 +27,15 @@ impl World {
     /// The local budget bounds tower depth per branch. `WorldBudget`
     /// bounds the total machine count and shared resources.
     pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
-        if !self.can_reserve_child(parent) {
+        let mut collected = false;
+        if self.child_reclamation_needed(parent) {
             // A dead record still holds a slot and a budget unit. Free
-            // the dead records once, then answer the request again.
+            // dead records before the table reaches its hard limit.
+            self.collect_machines();
+            collected = true;
+        }
+        if !self.can_reserve_child(parent) && !collected {
+            // Allocation failure can also request one recovery pass.
             self.collect_machines();
         }
         if !self.can_reserve_child(parent) {
@@ -68,6 +74,39 @@ impl World {
             .saturating_sub(self.mock_free.len())
             .checked_add(count)
             .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
+    }
+
+    /// True when one child reservation needs machine reclamation.
+    pub(super) fn child_reclamation_needed(&self, parent: VmId) -> bool {
+        let Some(machine) = self.machines.get(parent as usize) else {
+            return false;
+        };
+        !self.has_machine_room(1)
+            || machine.children >= machine.config.max_children
+            || (self.vm_free.is_empty()
+                && self.occupied_machine_records() >= self.machine_collection_at)
+    }
+
+    /// True when one VM image reservation needs record reclamation.
+    pub(super) fn image_reclamation_needed(&self) -> bool {
+        let occupied = self.occupied_vm_image_records();
+        occupied >= self.vm_image_limit()
+            || (self.vm_image_free.is_empty() && occupied >= self.vm_image_collection_at)
+    }
+
+    /// The current occupied machine record count.
+    fn occupied_machine_records(&self) -> usize {
+        self.machines
+            .len()
+            .saturating_sub(self.vm_free.len())
+            .saturating_sub(self.mock_free.len())
+    }
+
+    /// The current occupied VM image record count.
+    fn occupied_vm_image_records(&self) -> usize {
+        self.vm_images
+            .len()
+            .saturating_sub(self.vm_image_free.len())
     }
 
     /// Reclaim every machine record that no live machine names.
@@ -200,8 +239,24 @@ impl World {
             self.vm_free.push(id);
             freed += 1;
         }
+        let images_before = self.occupied_vm_image_records();
         self.collect_vm_images();
         self.collect_images();
+        let live_machines = self.occupied_machine_records();
+        let live_images = self.occupied_vm_image_records();
+        self.machine_collection_at =
+            record_reclamation_threshold(live_machines, self.budget.limits.max_machines);
+        self.vm_image_collection_at =
+            record_reclamation_threshold(live_images, self.budget.limits.max_vm_images);
+        self.metrics.reclamation_passes = self.metrics.reclamation_passes.saturating_add(1);
+        self.metrics.machine_records_reclaimed = self
+            .metrics
+            .machine_records_reclaimed
+            .saturating_add(freed as u64);
+        self.metrics.vm_image_records_reclaimed = self
+            .metrics
+            .vm_image_records_reclaimed
+            .saturating_add(images_before.saturating_sub(live_images) as u64);
         freed
     }
 
@@ -279,17 +334,10 @@ impl World {
 
     /// Reserve one persistent VM image record.
     pub(crate) fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
-        let live = self
-            .vm_images
-            .len()
-            .saturating_sub(self.vm_image_free.len());
-        if live >= self.budget.limits.max_vm_images as usize {
+        if self.image_reclamation_needed() {
             self.collect_machines();
         }
-        let live = self
-            .vm_images
-            .len()
-            .saturating_sub(self.vm_image_free.len());
+        let live = self.occupied_vm_image_records();
         if live >= self.budget.limits.max_vm_images as usize {
             return None;
         }

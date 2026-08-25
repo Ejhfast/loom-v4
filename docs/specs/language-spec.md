@@ -2002,6 +2002,11 @@ The reference runner permits 262,144 live machines, VM images, child
 reservations, and waits by default. These ceilings reserve no memory
 in advance.
 
+Hard structural limits do not set the record reclamation interval.
+
+The runtime reclaims unreachable machine and VM image records before
+their tables approach those limits.
+
 The CLI exposes `--max-machines`, `--max-images`, `--max-children`, and
 `--max-waits`. An embedding host supplies the same limits through the
 runner API.

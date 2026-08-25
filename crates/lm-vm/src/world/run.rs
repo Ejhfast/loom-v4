@@ -38,6 +38,8 @@ impl World {
     ) -> World {
         let module = loaded.module_store();
         let budget = WorldBudget::new(limits);
+        let machine_collection_at = record_reclamation_threshold(1, budget.limits.max_machines);
+        let vm_image_collection_at = record_reclamation_threshold(0, budget.limits.max_vm_images);
         let mut root =
             Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone());
         root.table.set_bundle(loaded.bundle().clone());
@@ -68,6 +70,8 @@ impl World {
             vm_image_free: Vec::new(),
             mock_free: Vec::new(),
             vm_free: Vec::new(),
+            machine_collection_at,
+            vm_image_collection_at,
             suspended: std::collections::BTreeMap::new(),
             scheduler_procs: ActiveProcs::new(1),
             schedule_events: ScheduleEvents::default(),
@@ -216,6 +220,11 @@ impl World {
     /// The number of machines, for tests.
     pub fn machine_count(&self) -> usize {
         self.machines.len()
+    }
+
+    /// The number of persistent VM image records, for tests.
+    pub fn vm_image_count(&self) -> usize {
+        self.vm_images.len()
     }
 
     /// The live heap bytes of all machines.

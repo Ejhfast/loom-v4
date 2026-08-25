@@ -473,6 +473,23 @@ counts.sum(0)
     (source, format!("Done({solutions})"))
 }
 
+fn multishot_queens_source(size: usize) -> (String, String) {
+    let source = std::fs::read_to_string(
+        lm_testkit::repo_root().join("examples/14-vm-as-multishot-search/05-n-queens.lm"),
+    )
+    .expect("the multishot search source reads")
+    .replace(
+        "(solutions(4), solutions(5), solutions(6), solutions(7), solutions(8))",
+        &format!("solutions({size})"),
+    );
+    let solutions = match size {
+        9 => 352,
+        10 => 724,
+        _ => panic!("the benchmark needs a recorded queen count"),
+    };
+    (source, format!("Done({solutions})"))
+}
+
 fn manual_par_map_queens_source(size: usize) -> (String, String) {
     let source = format!(
         r#"def count_queens(columns: Int, left: Int, right: Int, mask: Int): Int
@@ -1331,6 +1348,33 @@ end
     assert!(
         answered_ratio <= 1.05,
         "answered branching took {answered_ratio:.3} times plain branching"
+    );
+}
+
+#[test]
+#[ignore]
+fn bench_vm_machine_lifecycle() {
+    let (source, expected) = multishot_queens_source(9);
+    let adaptive = time_world(&source, &["Vm"], config(), &expected);
+    let former_limit = time_world(
+        &source,
+        &["Vm"],
+        VmConfig {
+            max_children: 1_024,
+            ..config()
+        },
+        &expected,
+    );
+    let ratio = adaptive.as_secs_f64() / former_limit.as_secs_f64();
+    println!("LOOM\tcase\tsize\tadaptive_ms\tformer_limit_ms\tratio");
+    println!(
+        "LOOM\tvm_machine_lifecycle\t9\t{:.3}\t{:.3}\t{ratio:.3}",
+        adaptive.as_secs_f64() * 1e3,
+        former_limit.as_secs_f64() * 1e3,
+    );
+    assert!(
+        ratio <= 1.20,
+        "adaptive reclamation took {ratio:.3} times limit-driven reclamation"
     );
 }
 

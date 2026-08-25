@@ -1047,20 +1047,6 @@ impl World {
         ParallelRequirement::Ready
     }
 
-    fn child_reclamation_needed(&self, parent: VmId) -> bool {
-        let Some(machine) = self.machines.get(parent as usize) else {
-            return false;
-        };
-        !self.has_machine_room(1) || machine.children >= machine.config.max_children
-    }
-
-    fn image_reclamation_needed(&self) -> bool {
-        self.vm_images
-            .len()
-            .saturating_sub(self.vm_image_free.len())
-            >= self.vm_image_limit()
-    }
-
     fn wait_machine_requirement(
         &self,
         source: VmId,

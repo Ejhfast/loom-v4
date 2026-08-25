@@ -42,6 +42,16 @@ use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
     WaitSourceKey, WakeKey,
 };
+
+/// The first record count that can trigger machine reclamation.
+const RECORD_RECLAMATION_FLOOR: usize = 1_024;
+
+/// Select the next adaptive record reclamation threshold.
+fn record_reclamation_threshold(live: usize, hard_limit: u32) -> usize {
+    live.saturating_mul(2)
+        .max(RECORD_RECLAMATION_FLOOR)
+        .min(hard_limit as usize)
+}
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
@@ -707,6 +717,10 @@ pub struct World {
     /// `collect_machines` fills this list. A slot here holds an empty
     /// record whose generation already moved past the freed machine.
     vm_free: Vec<VmId>,
+    /// The next live machine count that starts a reclamation pass.
+    machine_collection_at: usize,
+    /// The next live VM image count that starts a reclamation pass.
+    vm_image_collection_at: usize,
     /// Suspended activation stacks, keyed by the machine the stack
     /// started from.
     ///
@@ -900,6 +914,12 @@ pub struct WorldMetrics {
     pub cross_machine_graph_bytes: u64,
     /// Host completions accepted by this world.
     pub host_completions: u64,
+    /// Completed machine-record reclamation passes.
+    pub reclamation_passes: u64,
+    /// Machine records reclaimed by those passes.
+    pub machine_records_reclaimed: u64,
+    /// VM image records reclaimed by those passes.
+    pub vm_image_records_reclaimed: u64,
 }
 
 /// Copy one value that needs no heap traversal.
