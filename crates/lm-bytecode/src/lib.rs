@@ -9,6 +9,7 @@
 //! jumps, calls, and stack shapes.
 
 pub mod append;
+pub mod artifact;
 pub mod closed;
 pub mod corepin;
 pub mod debug;
