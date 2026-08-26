@@ -93,6 +93,44 @@ Definition cycles inside one record remain supported.
 
 The definition collector uses the shared SCC implementation.
 
+### 4.1 Canonical package encoding
+
+The package magic is `LMAR`.
+
+Artifact package format version 1 uses this header.
+
+```text
+magic:               4 bytes
+format version:      u16
+ABI bundle digest:   32 bytes
+root ArtifactId:     32 bytes
+record count:        u32
+```
+
+Records follow in ascending `ArtifactId` order.
+
+Each record uses this encoding.
+
+```text
+stored ArtifactId:   32 bytes
+dependency count:    u32
+dependencies:        repeated dependency records
+module length:       u32
+module payload:      LMBC bytes
+```
+
+Each dependency uses this encoding.
+
+```text
+namespace length:    u32
+namespace:           UTF-8 bytes
+dependency identity: 32 bytes
+```
+
+The decoder recomputes each stored `ArtifactId`.
+
+The package contains no trusted identity field.
+
 ## 5. Identity
 
 ### 5.1 ArtifactId
@@ -394,6 +432,17 @@ The initial limits cover these values.
 - Module payload bytes.
 - Total decoded code bytes.
 
+Version 1 uses these default limits.
+
+| Limit | Value |
+| --- | ---: |
+| Total artifact bytes | 256 MiB |
+| Artifact records | 4,096 |
+| Direct dependencies per record | 4,096 |
+| One module payload | 64 MiB |
+| Total module payload bytes | 256 MiB |
+| One dependency namespace | 4 KiB |
+
 One operation decodes one artifact blob once.
 
 Later phases share the decoded value.
@@ -429,6 +478,24 @@ The records name cold and warm paths separately.
 
 Gate: the baseline names its revision, profile, processor, and scheduler mode.
 
+The initial baseline uses revision `8f7ba66`.
+
+The host has an AMD Ryzen 9 9950X processor.
+
+The release core benchmark uses deterministic mode on logical processor zero.
+
+The workspace result uses a warm debug build and default test concurrency.
+
+| Initial measurement | Result |
+| --- | ---: |
+| Core artifact bytes | 274,657 |
+| Core compilation | 3.780 ms |
+| Core decoding | 0.410 ms |
+| Core verification | 1.401 ms |
+| Core semantic identity | 2.523 ms |
+| Core loading | 2.004 ms |
+| Warm workspace suite | 49.92 s |
+
 ### Stage 1: artifact identity and dependencies
 
 - Add `ArtifactId` and `BlobHash`.
@@ -452,6 +519,10 @@ Gate: thin and fat forms resolve to the same artifact graph.
 Gate: a thin core mismatch rejects before linking.
 
 Gate: a compatible embedded core resolves without ambient core identity.
+
+Stages 1 and 2 do not replace the current execution loader.
+
+Stage 3 makes the compiler and runtime consume the new artifact form.
 
 ### Stage 3: contract-safe artifact linking
 
