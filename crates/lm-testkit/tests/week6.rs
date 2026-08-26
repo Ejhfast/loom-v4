@@ -926,7 +926,7 @@ fn the_program_bytes_are_deterministic() {
 /// request the typed entry, and run it.
 #[test]
 fn the_typed_environments_compile_link_and_run_by_hand() {
-    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
     use lm_source::SourceFile;
 
     // The provider module compiles against an empty environment.
@@ -963,14 +963,10 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
     let mut link_env = LinkEnv::new();
     for unit in [&library, &program] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    unit.path.clone(),
-                    unit.module.clone(),
-                    unit.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                unit.path.clone(),
+                unit.module.clone(),
+                unit.interface.clone(),
             )
             .expect("the module binds");
     }
@@ -994,7 +990,7 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
 /// message names the rebuild as the fix.
 #[test]
 fn a_stale_pin_fails_to_link() {
-    use lm_compiler::{link, LinkEnv, LinkUnit};
+    use lm_compiler::{link, LinkEnv};
     let tree = TempTree::new("stale-pin");
     workspace(&tree);
     let report = tree.build("app").expect("builds");
@@ -1022,14 +1018,10 @@ fn a_stale_pin_fails_to_link() {
     for (idx, unit) in units.iter().enumerate() {
         let unit = if idx == 1 { &stale } else { unit };
         link_env
-            .bind(
-                LinkUnit::new(
-                    unit.path.clone(),
-                    unit.module.clone(),
-                    unit.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                unit.path.clone(),
+                unit.module.clone(),
+                unit.interface.clone(),
             )
             .expect("binds");
     }
@@ -1042,7 +1034,7 @@ fn a_stale_pin_fails_to_link() {
 /// of a crafted unit instead of trusting it.
 #[test]
 fn the_linker_rejects_a_crafted_export_table() {
-    use lm_compiler::{link, LinkEnv, LinkUnit};
+    use lm_compiler::{link, LinkEnv};
     let tree = TempTree::new("crafted");
     workspace(&tree);
     let mut seen = Vec::new();
@@ -1092,15 +1084,7 @@ fn the_linker_rejects_a_crafted_export_table() {
                 damage(&mut module);
             }
             link_env
-                .bind(
-                    LinkUnit::new(
-                        unit.path.clone(),
-                        module,
-                        unit.interface.clone(),
-                        Vec::new(),
-                    )
-                    .expect("the link unit is valid"),
-                )
+                .bind_module(unit.path.clone(), module, unit.interface.clone())
                 .expect("binds");
         }
         let error = link("app.main", &link_env.freeze()).expect_err("the table must reject");

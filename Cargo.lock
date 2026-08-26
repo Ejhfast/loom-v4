@@ -134,6 +134,7 @@ dependencies = [
  "lm-abi",
  "lm-bytecode",
  "lm-hir",
+ "lm-link",
  "lm-scc",
  "lm-source",
  "lm-types",
@@ -187,6 +188,15 @@ dependencies = [
  "rustls",
  "socket2",
  "webpki-roots",
+]
+
+[[package]]
+name = "lm-link"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-bytecode",
+ "lm-verify",
 ]
 
 [[package]]

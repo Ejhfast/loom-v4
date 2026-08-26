@@ -7,7 +7,7 @@
 //! process. A later release bundle can replace the source builder
 //! with decoded artifacts without changing its callers.
 
-use crate::{compile_module, link, CompileEnv, CompileOptions, CompiledModule, LinkEnv, LinkUnit};
+use crate::{compile_module, link, CompileEnv, CompileOptions, CompiledModule, LinkEnv};
 use lm_bytecode::Module;
 use lm_source::SourceFile;
 use std::sync::OnceLock;
@@ -298,26 +298,18 @@ pub fn compile_source(
     let mut link_env = LinkEnv::new();
     for module in &standard {
         link_env
-            .bind(
-                LinkUnit::new(
-                    module.path.clone(),
-                    module.module.clone(),
-                    module.interface.clone(),
-                    Vec::new(),
-                )
-                .map_err(|error| format!("error: {error}\n"))?,
+            .bind_module(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
             )
             .map_err(|error| format!("error: {error}\n"))?;
     }
     link_env
-        .bind(
-            LinkUnit::new(
-                root.path.clone(),
-                root.module.clone(),
-                root.interface.clone(),
-                Vec::new(),
-            )
-            .map_err(|error| format!("error: {error}\n"))?,
+        .bind_module(
+            root.path.clone(),
+            root.module.clone(),
+            root.interface.clone(),
         )
         .map_err(|error| format!("error: {error}\n"))?;
     let linked = link(path, &link_env.freeze()).map_err(|error| format!("error: {error}\n"))?;

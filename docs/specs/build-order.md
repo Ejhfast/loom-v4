@@ -31,6 +31,7 @@ crates/
   lm-types/        interned types, subtyping, inference, rows
   lm-bytecode/     serialized and decoded instruction formats
   lm-verify/       artifact and bytecode verifier
+  lm-link/         exact artifact resolution, contract checks, relocation
   lm-value/        Value, TypeId, ObjRef, scalar semantics
   lm-heap/         object table, pages, GC, native shapes
   lm-graph/        freeze, transfer, digest, snapshot traversal

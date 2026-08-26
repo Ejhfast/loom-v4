@@ -236,6 +236,11 @@ impl Artifact {
             .map(|index| &self.units[index])
     }
 
+    /// Consume the artifact and return its root and units.
+    pub fn into_units(self) -> (ArtifactId, Vec<LinkUnit>) {
+        (self.root, self.units)
+    }
+
     fn validate_graph(&self) -> Result<(), ArtifactGraphError> {
         let index: BTreeMap<ArtifactId, u32> = self
             .units

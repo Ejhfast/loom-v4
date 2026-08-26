@@ -28,15 +28,327 @@
 //! wrong pin or a wrong resolution therefore produces no executable
 //! code that the verifier did not admit.
 
-use crate::env::FrozenLinkEnv;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub use lm_bytecode::artifact::LinkUnit;
+use lm_bytecode::artifact::{Artifact, ArtifactId, CORE_MODULE_PATH};
 use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
-    BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module,
-    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
+    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind,
+    Instr, Module, SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
 };
 use std::collections::HashMap;
+
+/// A failure to build a link environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkEnvError {
+    DuplicateModule(String),
+    InvalidUnit(String),
+    MissingDependency {
+        unit: String,
+        dependency: String,
+    },
+    DependencyIdentityMismatch {
+        unit: String,
+        dependency: String,
+    },
+    MissingDependencyBinding {
+        unit: String,
+        dependency: String,
+    },
+    ExtraDependencyBinding {
+        unit: String,
+        dependency: String,
+    },
+    MissingArtifactDependency {
+        unit: String,
+        dependency: String,
+    },
+    RuntimeCoreMismatch {
+        required: ArtifactId,
+        available: ArtifactId,
+    },
+    DependencyCycle,
+}
+
+impl std::fmt::Display for LinkEnvError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkEnvError::DuplicateModule(path) => {
+                write!(out, "the module `{path}` is bound twice")
+            }
+            LinkEnvError::InvalidUnit(message) => out.write_str(message),
+            LinkEnvError::MissingDependency { unit, dependency } => {
+                write!(out, "module `{unit}` needs unbound module `{dependency}`")
+            }
+            LinkEnvError::DependencyIdentityMismatch { unit, dependency } => write!(
+                out,
+                "module `{unit}` pins another identity for `{dependency}`"
+            ),
+            LinkEnvError::MissingDependencyBinding { unit, dependency } => write!(
+                out,
+                "module `{unit}` imports `{dependency}` without an exact dependency"
+            ),
+            LinkEnvError::ExtraDependencyBinding { unit, dependency } => write!(
+                out,
+                "module `{unit}` has an unused exact dependency on `{dependency}`"
+            ),
+            LinkEnvError::MissingArtifactDependency { unit, dependency } => write!(
+                out,
+                "artifact module `{unit}` needs missing module `{dependency}`"
+            ),
+            LinkEnvError::RuntimeCoreMismatch {
+                required,
+                available,
+            } => write!(
+                out,
+                "the artifact needs core {required}, but the runtime provides {available}"
+            ),
+            LinkEnvError::DependencyCycle => {
+                out.write_str("the artifact module graph contains a dependency cycle")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LinkEnvError {}
+
+/// A mutable set of modules for one link step.
+#[derive(Debug, Clone, Default)]
+pub struct LinkEnv {
+    units: BTreeMap<String, LinkUnit>,
+}
+
+impl LinkEnv {
+    /// Create an empty link environment.
+    pub fn new() -> LinkEnv {
+        LinkEnv::default()
+    }
+
+    /// Bind one module to its canonical path.
+    pub fn bind(&mut self, unit: LinkUnit) -> Result<(), LinkEnvError> {
+        let path = unit.path.clone();
+        if self.units.contains_key(&path) {
+            return Err(LinkEnvError::DuplicateModule(path));
+        }
+        self.validate_dependencies(&unit)?;
+        self.units.insert(path, unit);
+        Ok(())
+    }
+
+    /// Bind compiled module parts to their exact providers.
+    pub fn bind_module(
+        &mut self,
+        path: impl Into<String>,
+        module: Module,
+        interface: Interface,
+    ) -> Result<(), LinkEnvError> {
+        let path = path.into();
+        if self.units.contains_key(&path) {
+            return Err(LinkEnvError::DuplicateModule(path));
+        }
+        let imports = imported_module_paths(&module);
+        let mut dependencies = Vec::with_capacity(imports.len());
+        for dependency in imports {
+            let provider =
+                self.units
+                    .get(&dependency)
+                    .ok_or_else(|| LinkEnvError::MissingDependency {
+                        unit: path.clone(),
+                        dependency: dependency.clone(),
+                    })?;
+            dependencies.push(
+                lm_bytecode::artifact::ArtifactDependency::new(&dependency, provider.id())
+                    .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?,
+            );
+        }
+        let unit = LinkUnit::new(path, module, interface, dependencies)
+            .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?;
+        self.bind(unit)
+    }
+
+    fn validate_dependencies(&self, unit: &LinkUnit) -> Result<(), LinkEnvError> {
+        let imports = imported_module_paths(&unit.module);
+        for dependency in &imports {
+            let exact = unit
+                .dependencies()
+                .iter()
+                .find(|candidate| candidate.module_path() == dependency)
+                .ok_or_else(|| LinkEnvError::MissingDependencyBinding {
+                    unit: unit.path.clone(),
+                    dependency: dependency.clone(),
+                })?;
+            let provider =
+                self.units
+                    .get(dependency)
+                    .ok_or_else(|| LinkEnvError::MissingDependency {
+                        unit: unit.path.clone(),
+                        dependency: dependency.clone(),
+                    })?;
+            if provider.id() != exact.artifact() {
+                return Err(LinkEnvError::DependencyIdentityMismatch {
+                    unit: unit.path.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        for dependency in unit.dependencies() {
+            if !imports.iter().any(|path| path == dependency.module_path()) {
+                return Err(LinkEnvError::ExtraDependencyBinding {
+                    unit: unit.path.clone(),
+                    dependency: dependency.module_path().to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Freeze this environment for one link step.
+    pub fn freeze(self) -> FrozenLinkEnv {
+        FrozenLinkEnv { units: self.units }
+    }
+}
+
+fn imported_module_paths(module: &Module) -> Vec<String> {
+    let mut paths: Vec<String> = module
+        .imports
+        .iter()
+        .map(|import| import.module.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// An immutable set of modules for one link step.
+#[derive(Debug, Clone, Default)]
+pub struct FrozenLinkEnv {
+    units: BTreeMap<String, LinkUnit>,
+}
+
+impl FrozenLinkEnv {
+    /// Return the module at one canonical path.
+    pub fn unit(&self, path: &str) -> Option<&LinkUnit> {
+        self.units.get(path)
+    }
+
+    /// Return all bound module paths in canonical order.
+    pub fn paths(&self) -> Vec<&str> {
+        self.units.keys().map(String::as_str).collect()
+    }
+}
+
+/// Resolve one thin or fat artifact through the shared link environment.
+pub fn resolve_artifact(
+    artifact: Artifact,
+    runtime_core: Option<&LinkUnit>,
+) -> Result<(ArtifactId, FrozenLinkEnv), LinkEnvError> {
+    let (root, mut units) = artifact.into_units();
+    let mut available: BTreeSet<ArtifactId> = units.iter().map(LinkUnit::id).collect();
+    let mut required_core = None;
+    for unit in &units {
+        for dependency in unit.dependencies() {
+            if available.contains(&dependency.artifact()) {
+                continue;
+            }
+            if dependency.module_path() != CORE_MODULE_PATH {
+                return Err(LinkEnvError::MissingArtifactDependency {
+                    unit: unit.path.clone(),
+                    dependency: dependency.module_path().to_string(),
+                });
+            }
+            match required_core {
+                Some(required) if required != dependency.artifact() => {
+                    return Err(LinkEnvError::MissingArtifactDependency {
+                        unit: unit.path.clone(),
+                        dependency: CORE_MODULE_PATH.to_string(),
+                    });
+                }
+                None => required_core = Some(dependency.artifact()),
+                _ => {}
+            }
+        }
+    }
+    if let Some(required) = required_core {
+        let core = runtime_core.ok_or_else(|| LinkEnvError::MissingArtifactDependency {
+            unit: units
+                .iter()
+                .find(|unit| {
+                    unit.dependencies()
+                        .iter()
+                        .any(|dependency| dependency.artifact() == required)
+                })
+                .map(|unit| unit.path.clone())
+                .unwrap_or_else(|| "<root>".to_string()),
+            dependency: CORE_MODULE_PATH.to_string(),
+        })?;
+        if core.id() != required {
+            return Err(LinkEnvError::RuntimeCoreMismatch {
+                required,
+                available: core.id(),
+            });
+        }
+        if core.path != CORE_MODULE_PATH {
+            return Err(LinkEnvError::InvalidUnit(format!(
+                "the runtime core uses module path `{}`",
+                core.path
+            )));
+        }
+        available.insert(core.id());
+        units.push(core.clone());
+    }
+    let mut index = BTreeMap::new();
+    for (position, unit) in units.iter().enumerate() {
+        index.insert(unit.id(), position);
+    }
+    let mut indegree = vec![0usize; units.len()];
+    let mut successors = vec![Vec::new(); units.len()];
+    for (position, unit) in units.iter().enumerate() {
+        indegree[position] = unit.dependencies().len();
+        for dependency in unit.dependencies() {
+            let Some(provider) = index.get(&dependency.artifact()).copied() else {
+                return Err(LinkEnvError::MissingArtifactDependency {
+                    unit: unit.path.clone(),
+                    dependency: dependency.module_path().to_string(),
+                });
+            };
+            successors[provider].push(position);
+        }
+    }
+    let mut ready = BTreeSet::new();
+    for (position, unit) in units.iter().enumerate() {
+        if indegree[position] == 0 {
+            ready.insert((unit.id(), position));
+        }
+    }
+    let mut units: Vec<Option<LinkUnit>> = units.into_iter().map(Some).collect();
+    let mut env = LinkEnv::new();
+    let mut linked = 0usize;
+    while let Some(&(id, position)) = ready.iter().next() {
+        ready.remove(&(id, position));
+        let unit = units[position]
+            .take()
+            .expect("one artifact unit enters the link environment once");
+        env.bind(unit)?;
+        linked += 1;
+        for successor in &successors[position] {
+            indegree[*successor] -= 1;
+            if indegree[*successor] == 0 {
+                let successor_id = units[*successor]
+                    .as_ref()
+                    .expect("an unlinked successor keeps its unit")
+                    .id();
+                ready.insert((successor_id, *successor));
+            }
+        }
+    }
+    if linked != units.len() {
+        return Err(LinkEnvError::DependencyCycle);
+    }
+    Ok((root, env.freeze()))
+}
 
 /// A link failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,6 +917,7 @@ fn relocate(
         funcs,
         slots: Vec::with_capacity(module.slots.len()),
     };
+    check_import_contracts(merged, module, path, &reloc)?;
     for (slot, source) in module.slots.iter().enumerate() {
         let contract = reloc_slot_contract(&source.contract, &reloc);
         let initial = source
@@ -670,33 +983,7 @@ fn relocate(
     for idx in created_classes.iter().chain(shared_classes.iter()) {
         let source = &module.classes[*idx as usize];
         let at = reloc.classes[*idx as usize] as usize;
-        let filled = BcClass {
-            name: source.name.clone(),
-            key: source.key.clone(),
-            is_final: source.is_final,
-            is_frozen: source.is_frozen,
-            parent: match source.parent() {
-                None => NO_PARENT,
-                Some(p) => reloc.classes[p as usize],
-            },
-            parent_args: source
-                .parent_args
-                .iter()
-                .map(|t| reloc.types[*t as usize])
-                .collect(),
-            type_params: source.type_params,
-            kind: source.kind,
-            fields: source
-                .fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
-                .collect(),
-            methods: source
-                .methods
-                .iter()
-                .map(|(sel, func)| (reloc.selectors[*sel as usize], reloc.funcs[*func as usize]))
-                .collect(),
-        };
+        let filled = reloc_class(source, &reloc);
         if created_classes.contains(idx) {
             merged.classes[at] = filled;
         } else if merged.classes[at] != filled {
@@ -775,6 +1062,175 @@ fn relocate(
         .append_relocated(&debug, &reloc.funcs, &reloc.classes)
         .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
     Ok(reloc)
+}
+
+/// Compare every imported declaration with its resolved provider.
+fn check_import_contracts(
+    merged: &Merged,
+    module: &Module,
+    path: &str,
+    reloc: &Reloc,
+) -> Result<(), LinkError> {
+    for import in &module.imports {
+        match import.kind {
+            ImportKind::Class => {
+                let local = import.def as usize;
+                let target = reloc.classes[local] as usize;
+                let class = reloc_class(&module.classes[local], reloc);
+                let bounds = reloc_bounds(&module.class_bounds[local], reloc);
+                if merged.classes[target] != class || merged.class_bounds[target] != bounds {
+                    return Err(import_contract_error(
+                        path,
+                        import,
+                        "the class layout differs",
+                    ));
+                }
+                let local_conformances: Vec<BcConformance> = module
+                    .conformances
+                    .iter()
+                    .filter(|item| item.class as usize == local)
+                    .map(|item| reloc_conformance(item, reloc))
+                    .collect();
+                let provider_conformances: Vec<&BcConformance> = merged
+                    .conformances
+                    .iter()
+                    .filter(|item| item.class as usize == target)
+                    .collect();
+                if local_conformances.len() != provider_conformances.len()
+                    || local_conformances
+                        .iter()
+                        .any(|item| !provider_conformances.contains(&item))
+                {
+                    return Err(import_contract_error(
+                        path,
+                        import,
+                        "the conformance set differs",
+                    ));
+                }
+                let mut local_arms: Vec<u32> = module
+                    .classes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.kind == BcClassKind::Case && item.parent() == Some(import.def)
+                    })
+                    .map(|(index, _)| reloc.classes[index])
+                    .collect();
+                let mut provider_arms: Vec<u32> = merged
+                    .classes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.kind == BcClassKind::Case && item.parent() == Some(target as u32)
+                    })
+                    .map(|(index, _)| index as u32)
+                    .collect();
+                local_arms.sort_unstable();
+                provider_arms.sort_unstable();
+                if local_arms != provider_arms {
+                    return Err(import_contract_error(
+                        path,
+                        import,
+                        "the enum arm set differs",
+                    ));
+                }
+            }
+            ImportKind::Ctor | ImportKind::Method | ImportKind::Func => {
+                let local = import.def as usize;
+                let target = reloc.funcs[local] as usize;
+                let source = &module.funcs[local];
+                let provider = &merged.funcs[target];
+                let bounds = reloc_bounds(&module.func_bounds[local], reloc);
+                let params: Vec<u32> = source
+                    .params
+                    .iter()
+                    .map(|item| reloc.types[*item as usize])
+                    .collect();
+                let captures: Vec<u32> = source
+                    .captures
+                    .iter()
+                    .map(|item| reloc.types[*item as usize])
+                    .collect();
+                let difference = if source.type_params != provider.type_params {
+                    Some("the type parameter count differs".to_string())
+                } else if source.effect_params != provider.effect_params {
+                    Some("the effect parameter count differs".to_string())
+                } else if source.param_muts != provider.param_muts {
+                    Some("the parameter mutability differs".to_string())
+                } else if params != provider.params {
+                    Some("the parameter types differ".to_string())
+                } else if reloc.types[source.ret as usize] != provider.ret {
+                    Some("the result type differs".to_string())
+                } else if reloc_row(&source.row, &reloc.strings) != provider.row {
+                    Some("the effect row differs".to_string())
+                } else if captures != provider.captures {
+                    Some("the capture types differ".to_string())
+                } else if bounds != merged.func_bounds[target] {
+                    Some("the generic bounds differ".to_string())
+                } else {
+                    None
+                };
+                if let Some(difference) = difference {
+                    return Err(import_contract_error(path, import, &difference));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn import_contract_error(path: &str, import: &Import, difference: &str) -> LinkError {
+    fail(format!(
+        "the imported {} `{}` of `{path}` does not match `{}.{}`: {difference}",
+        import_kind_name(import.kind),
+        import.name,
+        import.module,
+        import.name
+    ))
+}
+
+fn import_kind_name(kind: ImportKind) -> &'static str {
+    match kind {
+        ImportKind::Class => "class",
+        ImportKind::Ctor => "constructor",
+        ImportKind::Method => "method",
+        ImportKind::Func => "function",
+    }
+}
+
+fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
+    BcClass {
+        name: source.name.clone(),
+        key: source.key.clone(),
+        is_final: source.is_final,
+        is_frozen: source.is_frozen,
+        parent: source
+            .parent()
+            .map(|parent| reloc.classes[parent as usize])
+            .unwrap_or(NO_PARENT),
+        parent_args: source
+            .parent_args
+            .iter()
+            .map(|item| reloc.types[*item as usize])
+            .collect(),
+        type_params: source.type_params,
+        kind: source.kind,
+        fields: source
+            .fields
+            .iter()
+            .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
+            .collect(),
+        methods: source
+            .methods
+            .iter()
+            .map(|(selector, function)| {
+                (
+                    reloc.selectors[*selector as usize],
+                    reloc.funcs[*function as usize],
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Prove that every class a module defines declares its constructor

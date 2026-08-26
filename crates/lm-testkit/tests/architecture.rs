@@ -21,7 +21,7 @@ fn pure_runtime_crates_do_not_read_the_ambient_clock() {
         .and_then(Path::parent)
         .expect("the workspace root exists");
     let mut files = Vec::new();
-    for name in ["lm-bytecode", "lm-heap", "lm-vm"] {
+    for name in ["lm-bytecode", "lm-heap", "lm-link", "lm-vm"] {
         rust_files(&root.join("crates").join(name).join("src"), &mut files);
     }
     for file in files {

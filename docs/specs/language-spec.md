@@ -46,7 +46,7 @@ lm-core-image / lm-std / self-hosted compiler
                     |
 lm-cli + lm-host + lm-proc + bootstrap compiler
                     |
-lm-vm + lm-bytecode + lm-verify + lm-value + lm-graph
+lm-vm + lm-link + lm-bytecode + lm-verify + lm-value + lm-graph
 ```
 
 The VM and compiler use stable Rust. Unsafe code is permitted only in small audited modules that implement object storage or foreign-function shims; parser, checker, verifier, policy, snapshot validation, and host-operation routing remain safe Rust. No guest pointer is exposed as a Rust reference across an allocation, collection, suspension, or host call.

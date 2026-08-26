@@ -18,7 +18,7 @@ pub mod build;
 pub mod cache;
 pub mod env;
 pub mod graph;
-pub mod link;
+pub use lm_link as link;
 pub mod manifest;
 pub mod module;
 pub mod scaffold;
@@ -30,7 +30,7 @@ pub use cache::{
     write_atomic, Verdict, VerdictKey, VerifiedStore,
 };
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
-pub use link::{link, link_with_bundle, LinkedProgram};
+pub use lm_link::{link, link_with_bundle, resolve_artifact, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};
 pub use module::{
     compile_module, compile_module_with_bundle, compile_module_with_options,

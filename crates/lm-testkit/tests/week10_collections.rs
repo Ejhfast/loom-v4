@@ -1,7 +1,7 @@
 //! Week-10 native collection and iteration behavior.
 
 use lm_bytecode::{BcInterfaceUse, BcType, ExtendedInstr, Instr};
-use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
 use lm_heap::{Object, StructuralEpoch};
 use lm_source::SourceFile;
 use lm_testkit::{compile_text, run_allowed};
@@ -121,14 +121,10 @@ fn interface_contracts_cross_module_boundaries() {
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    module.path.clone(),
-                    module.module.clone(),
-                    module.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
             )
             .expect("the module binds");
     }
@@ -180,14 +176,10 @@ fn interface_inheritance_crosses_module_boundaries() {
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    module.path.clone(),
-                    module.module.clone(),
-                    module.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
             )
             .expect("the module binds");
     }
@@ -346,14 +338,10 @@ describe(catalog.Shelf())
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    module.path.clone(),
-                    module.module.clone(),
-                    module.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
             )
             .expect("the module binds");
     }
@@ -1534,14 +1522,10 @@ table.at(keys.Key(7).freeze())
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    module.path.clone(),
-                    module.module.clone(),
-                    module.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
             )
             .expect("the module binds");
     }

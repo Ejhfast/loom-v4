@@ -6,7 +6,7 @@
 
 use lm_bytecode::identity::module_identity;
 use lm_bytecode::{BcType, DecodeError, Func, Instr, Module};
-use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
 use lm_source::SourceFile;
 use lm_testkit::compile_text;
 
@@ -152,18 +152,184 @@ fn two_module_program() -> Vec<lm_compiler::CompiledModule> {
 fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::LinkedProgram, String> {
     let mut env = LinkEnv::new();
     for unit in units {
-        env.bind(
-            LinkUnit::new(
-                unit.path.clone(),
-                unit.module.clone(),
-                unit.interface.clone(),
-                Vec::new(),
-            )
-            .expect("the link unit is valid"),
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
         )
         .expect("binds");
     }
     link("app.main", &env.freeze()).map_err(|e| e.0)
+}
+
+#[test]
+fn link_units_pin_exact_dependency_identities() {
+    let units = two_module_program();
+    let mut env = LinkEnv::new();
+    for unit in &units {
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
+        )
+        .expect("the unit binds");
+    }
+    let env = env.freeze();
+    let provider = env.unit("app.shapes").expect("the provider is bound");
+    let importer = env.unit("app.main").expect("the importer is bound");
+    assert_eq!(importer.dependencies().len(), 1);
+    assert_eq!(importer.dependencies()[0].module_path(), "app.shapes");
+    assert_eq!(importer.dependencies()[0].artifact(), provider.id());
+}
+
+#[test]
+fn explicit_link_units_must_pin_the_bound_provider() {
+    use lm_bytecode::artifact::{ArtifactDependency, ArtifactId, LinkUnit};
+
+    let units = two_module_program();
+    let provider = LinkUnit::new(
+        units[0].path.clone(),
+        units[0].module.clone(),
+        units[0].interface.clone(),
+        Vec::new(),
+    )
+    .expect("the provider unit is valid");
+    let importer = LinkUnit::new(
+        units[1].path.clone(),
+        units[1].module.clone(),
+        units[1].interface.clone(),
+        vec![
+            ArtifactDependency::new("app.shapes", ArtifactId::from_bytes([9; 32]))
+                .expect("the dependency is valid"),
+        ],
+    )
+    .expect("the importer unit is valid");
+    let mut env = LinkEnv::new();
+    env.bind(provider).expect("the provider binds");
+    let error = env
+        .bind(importer)
+        .expect_err("the wrong identity must reject");
+    assert!(
+        error.to_string().contains("pins another identity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn one_link_environment_resolves_fat_artifacts() {
+    use lm_bytecode::artifact::Artifact;
+
+    let units = two_module_program();
+    let mut env = LinkEnv::new();
+    for unit in &units {
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
+        )
+        .expect("the unit binds");
+    }
+    let env = env.freeze();
+    let root = env.unit("app.main").expect("the root is bound").clone();
+    let provider = env
+        .unit("app.shapes")
+        .expect("the provider is bound")
+        .clone();
+    let artifact = Artifact::new(root.clone(), vec![provider]).expect("the artifact is valid");
+    let (root_id, resolved) = lm_compiler::resolve_artifact(artifact, None)
+        .expect("the fat artifact resolves without ambient state");
+    assert_eq!(root_id, root.id());
+    assert_eq!(resolved.paths(), vec!["app.main", "app.shapes"]);
+}
+
+#[test]
+fn a_thin_artifact_never_uses_an_ambient_non_core_module() {
+    use lm_bytecode::artifact::Artifact;
+
+    let units = two_module_program();
+    let mut env = LinkEnv::new();
+    for unit in &units {
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
+        )
+        .expect("the unit binds");
+    }
+    let env = env.freeze();
+    let root = env.unit("app.main").expect("the root is bound").clone();
+    let artifact = Artifact::new(root, Vec::new()).expect("the thin artifact is valid");
+    let error = lm_compiler::resolve_artifact(artifact, None)
+        .expect_err("a missing non-core module must reject");
+    assert!(error.to_string().contains("app.shapes"), "{error}");
+}
+
+#[test]
+fn thin_and_fat_core_resolution_use_one_link_environment() {
+    use lm_bytecode::artifact::{Artifact, ArtifactDependency, LinkUnit};
+
+    let mut units = two_module_program();
+    let mut core_source = units.remove(0);
+    core_source.path = "core".to_string();
+    core_source.interface.module_path = "core".to_string();
+    let core = LinkUnit::new(
+        "core",
+        core_source.module,
+        core_source.interface,
+        Vec::new(),
+    )
+    .expect("the core unit is valid");
+    let mut root_source = units.remove(0);
+    for import in &mut root_source.module.imports {
+        import.module = "core".to_string();
+    }
+    let root = LinkUnit::new(
+        root_source.path,
+        root_source.module,
+        root_source.interface,
+        vec![ArtifactDependency::new("core", core.id()).expect("the core dependency is valid")],
+    )
+    .expect("the root unit is valid");
+
+    let thin = Artifact::new(root.clone(), Vec::new()).expect("the thin artifact is valid");
+    let (thin_root, thin_env) =
+        lm_compiler::resolve_artifact(thin, Some(&core)).expect("the thin artifact resolves");
+    let fat = Artifact::new(root.clone(), vec![core.clone()]).expect("the fat artifact is valid");
+    let (fat_root, fat_env) =
+        lm_compiler::resolve_artifact(fat, None).expect("the fat artifact resolves");
+    assert_eq!(thin_root, root.id());
+    assert_eq!(fat_root, root.id());
+    assert_eq!(thin_env.paths(), fat_env.paths());
+
+    let mut other_module = core.module.clone();
+    let entry = other_module.entry as usize;
+    other_module.funcs[entry].blocks[0][0] = lm_bytecode::Instr::ConstInt(99);
+    let other_core = LinkUnit::new("core", other_module, core.interface.clone(), Vec::new())
+        .expect("the other core unit is valid");
+    let thin = Artifact::new(root, Vec::new()).expect("the thin artifact is valid");
+    let error = lm_compiler::resolve_artifact(thin, Some(&other_core))
+        .expect_err("another core identity must reject");
+    assert!(error.to_string().contains("runtime provides"), "{error}");
+}
+
+#[test]
+fn a_forged_import_contract_rejects_before_publication() {
+    let mut units = two_module_program();
+    let importer = &mut units[1].module;
+    let imported = importer
+        .imports
+        .iter()
+        .find(|item| item.kind == lm_bytecode::ImportKind::Func)
+        .expect("the program imports one function");
+    let int_type = importer
+        .types
+        .iter()
+        .position(|item| item == &BcType::Int)
+        .expect("the program has Int") as u32;
+    importer.funcs[imported.def as usize].ret = int_type;
+    let error = link_units(&units).expect_err("the forged contract must reject");
+    assert!(error.contains("imported function"), "{error}");
+    assert!(error.contains("result type differs"), "{error}");
 }
 
 /// Row 1: one qualified key with one structural hash merges. Every

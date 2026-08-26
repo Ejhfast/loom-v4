@@ -3019,6 +3019,20 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
 /// and return the instance.
 fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
     if class.imported {
+        if class.kind == ClassKind::EnumParent {
+            return Func {
+                name: format!("<new {}>", class.name),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: m.intern_type(BcType::Unit),
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![],
+            };
+        }
         // An imported class declares its construction function and
         // carries no body. The provider evaluates its own defaults.
         let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();

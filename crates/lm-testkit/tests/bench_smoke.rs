@@ -162,7 +162,7 @@ fn perform_group_pass_smoke() {
 /// load.
 #[test]
 fn build_and_link_smoke() {
-    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
     use lm_source::SourceFile;
     let library =
         "class Cell\n  value: Int = 0\n  def get(self): Int\n    self.value\n  end\nend\n\
@@ -191,14 +191,10 @@ fn build_and_link_smoke() {
     let mut link_env = LinkEnv::new();
     for unit in [&lib, &main] {
         link_env
-            .bind(
-                LinkUnit::new(
-                    unit.path.clone(),
-                    unit.module.clone(),
-                    unit.interface.clone(),
-                    Vec::new(),
-                )
-                .expect("the link unit is valid"),
+            .bind_module(
+                unit.path.clone(),
+                unit.module.clone(),
+                unit.interface.clone(),
             )
             .expect("binds");
     }

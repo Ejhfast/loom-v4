@@ -1,15 +1,10 @@
 [package]
-name = "lm-compiler"
+name = "lm-link"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 lm-abi = { path = "../lm-abi" }
-lm-scc = { path = "../lm-scc" }
-lm-source = { path = "../lm-source" }
-lm-types = { path = "../lm-types" }
-lm-hir = { path = "../lm-hir" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
-lm-link = { path = "../lm-link" }

@@ -10,7 +10,7 @@
 use crate::cache::{
     compile_key, interface_identity, program_key, write_atomic, BuildDir, ProgramEntry,
 };
-use crate::env::{CompileEnv, LinkEnv, LinkUnit};
+use crate::env::{CompileEnv, LinkEnv};
 use crate::graph::{load_workspace, module_order, Workspace};
 use crate::link::link;
 use crate::module::compile_module;
@@ -61,7 +61,7 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let dir = BuildDir::new(build_root);
     let mut env = CompileEnv::new();
     let mut interfaces: BTreeMap<String, [u8; 32]> = BTreeMap::new();
-    let mut units: Vec<LinkUnit> = Vec::new();
+    let mut link_env = LinkEnv::new();
     let mut modules: Vec<ModuleReport> = Vec::new();
     // The stage-2 key inputs, in link order.
     let mut contents: Vec<(String, [u8; 32])> = Vec::new();
@@ -78,15 +78,13 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
         env.bind_interface(module.interface.clone())
             .map_err(|error| format!("error: {error}\n"))?;
         contents.push((module.path.clone(), module.container_hash));
-        units.push(
-            LinkUnit::new(
+        link_env
+            .bind_module(
                 module.path.clone(),
                 module.module.clone(),
                 module.interface.clone(),
-                Vec::new(),
             )
-            .map_err(|error| format!("error: {error}\n"))?,
-        );
+            .map_err(|error| format!("error: {error}\n"))?;
     }
     for package_name in &workspace.order {
         let package = workspace.package(package_name);
@@ -175,15 +173,9 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
             contents.push((compiled.path.clone(), compiled.container_hash));
             // The unit takes the compiled module, so a build moves
             // one module and never copies it.
-            units.push(
-                LinkUnit::new(
-                    compiled.path,
-                    compiled.module,
-                    compiled.interface,
-                    Vec::new(),
-                )
-                .map_err(|error| format!("error: {error}\n"))?,
-            );
+            link_env
+                .bind_module(compiled.path, compiled.module, compiled.interface)
+                .map_err(|error| format!("error: {error}\n"))?;
         }
     }
     let root_package = workspace.package(&workspace.root);
@@ -220,10 +212,6 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
             entry
         }
         None => {
-            let mut link_env = LinkEnv::new();
-            for unit in units {
-                link_env.bind(unit).map_err(|e| format!("error: {e}\n"))?;
-            }
             let program =
                 link(&main_path, &link_env.freeze()).map_err(|e| format!("error: {e}\n"))?;
             let entry = ProgramEntry {

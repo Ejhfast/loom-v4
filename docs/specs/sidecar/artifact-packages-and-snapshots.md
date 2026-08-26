@@ -1,8 +1,8 @@
 # Artifacts and Portable Snapshots
 
-Status: accepted design. Stages 0 through 2 have prototype implementations.
+Status: accepted design. Stages 0 through 2R are complete.
 
-Stage 2R reconciles those implementations with the existing package and linker model.
+Stage 3 has one shared linker. Core extraction remains incomplete.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -749,6 +749,14 @@ Gate: the decoder rejects every non-canonical ordering.
 Gate: semantic identity returns an error or a value for every decoded payload.
 
 ### Stage 3: shared linking and core dependency
+
+Progress: `lm-link` now owns exact artifact resolution and relocation.
+
+Progress: package builds and artifact loads now use one `LinkEnv`.
+
+Progress: the linker compares complete imported contracts before publication.
+
+Remaining: compile core once and emit source-module core imports.
 
 - Move the existing linker into the shared lower layer.
 - Keep one `LinkEnv` implementation.

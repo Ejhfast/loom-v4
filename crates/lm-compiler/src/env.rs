@@ -9,10 +9,11 @@
 //! compiled modules that fulfill the import slots. Both freeze before
 //! use, so no build step mutates an environment another step reads.
 
-pub use lm_bytecode::artifact::LinkUnit;
 use lm_bytecode::interface::{IfaceSlotKind, IfaceSlotSpec, Interface};
 use lm_hir::import::ImportEnv;
 use std::collections::{BTreeMap, BTreeSet};
+
+pub use lm_link::{FrozenLinkEnv, LinkEnv, LinkEnvError, LinkUnit};
 
 /// A failure to build a compile environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,64 +220,5 @@ impl FrozenCompileEnv {
 
     pub(crate) fn late_bindings(&self) -> &BTreeMap<String, IfaceSlotSpec> {
         &self.late
-    }
-}
-
-/// A failure to build a link environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkEnvError {
-    DuplicateModule(String),
-}
-
-impl std::fmt::Display for LinkEnvError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LinkEnvError::DuplicateModule(path) => {
-                write!(f, "the module `{path}` is bound twice")
-            }
-        }
-    }
-}
-
-/// The typed link environment builder: the modules that fulfill the
-/// import slots.
-#[derive(Debug, Clone, Default)]
-pub struct LinkEnv {
-    units: BTreeMap<String, LinkUnit>,
-}
-
-impl LinkEnv {
-    pub fn new() -> LinkEnv {
-        LinkEnv::default()
-    }
-
-    /// Bind one compiled module. Binding a path twice is an error.
-    pub fn bind(&mut self, unit: LinkUnit) -> Result<(), LinkEnvError> {
-        let path = unit.path.clone();
-        if self.units.contains_key(&path) {
-            return Err(LinkEnvError::DuplicateModule(path));
-        }
-        self.units.insert(path, unit);
-        Ok(())
-    }
-
-    pub fn freeze(self) -> FrozenLinkEnv {
-        FrozenLinkEnv { units: self.units }
-    }
-}
-
-/// A frozen link environment.
-#[derive(Debug, Clone, Default)]
-pub struct FrozenLinkEnv {
-    units: BTreeMap<String, LinkUnit>,
-}
-
-impl FrozenLinkEnv {
-    pub fn unit(&self, path: &str) -> Option<&LinkUnit> {
-        self.units.get(path)
-    }
-
-    pub fn paths(&self) -> Vec<&str> {
-        self.units.keys().map(|k| k.as_str()).collect()
     }
 }

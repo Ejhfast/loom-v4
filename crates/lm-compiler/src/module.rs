@@ -1722,14 +1722,10 @@ mod tests {
         let mut link_env = crate::LinkEnv::new();
         for unit in [&library, &program] {
             link_env
-                .bind(
-                    crate::LinkUnit::new(
-                        unit.path.clone(),
-                        unit.module.clone(),
-                        unit.interface.clone(),
-                        Vec::new(),
-                    )
-                    .expect("the link unit is valid"),
+                .bind_module(
+                    unit.path.clone(),
+                    unit.module.clone(),
+                    unit.interface.clone(),
                 )
                 .expect("the unit binds");
         }
