@@ -111,6 +111,7 @@ impl ArtifactDependency {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactRecord {
     id: ArtifactId,
+    bundle_digest: [u8; 32],
     module: Module,
     dependencies: Vec<ArtifactDependency>,
 }
@@ -135,6 +136,7 @@ impl ArtifactRecord {
         let id = compute_artifact_id(&module, &dependencies, bundle)?;
         Ok(ArtifactRecord {
             id,
+            bundle_digest: bundle.digest(),
             module,
             dependencies,
         })
@@ -148,6 +150,10 @@ impl ArtifactRecord {
     /// Return the bytecode payload.
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    pub(crate) fn bundle_digest(&self) -> [u8; 32] {
+        self.bundle_digest
     }
 
     /// Return the canonical dependency bindings.
@@ -951,11 +957,13 @@ mod tests {
         let right_id = id(2);
         let left = ArtifactRecord {
             id: left_id,
+            bundle_digest: lm_abi::standard_bundle().digest(),
             module: module(1, &[]),
             dependencies: vec![ArtifactDependency::new("right", right_id).unwrap()],
         };
         let right = ArtifactRecord {
             id: right_id,
+            bundle_digest: lm_abi::standard_bundle().digest(),
             module: module(2, &[]),
             dependencies: vec![ArtifactDependency::new("left", left_id).unwrap()],
         };

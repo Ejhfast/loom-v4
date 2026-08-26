@@ -1898,6 +1898,33 @@ fn bench_core_compilation() {
         .map(Vec::len)
         .sum();
     let bytes = lm_bytecode::encode(&module);
+    let artifact_record = lm_bytecode::artifact::ArtifactRecord::new(module.clone(), Vec::new())
+        .expect("the core artifact has an identity");
+    let artifact = lm_bytecode::artifact::Artifact::new(artifact_record, Vec::new())
+        .expect("the core artifact graph is valid");
+    let artifact_bytes =
+        lm_bytecode::artifact::encode(&artifact).expect("the core artifact encodes");
+    let mut artifact_encode_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let encoded = lm_bytecode::artifact::encode(&artifact).expect("the core artifact encodes");
+        let elapsed = start.elapsed();
+        std::hint::black_box(encoded.len());
+        if round > 0 {
+            artifact_encode_runs.push(elapsed);
+        }
+    }
+    let mut artifact_decode_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let decoded =
+            lm_bytecode::artifact::decode(&artifact_bytes).expect("the core artifact decodes");
+        let elapsed = start.elapsed();
+        std::hint::black_box(decoded.records().len());
+        if round > 0 {
+            artifact_decode_runs.push(elapsed);
+        }
+    }
     let mut decode_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
@@ -2019,6 +2046,18 @@ fn bench_core_compilation() {
         bytes.len(),
         module.funcs.len(),
         median(decode_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_artifact_encode\t{}\t{}\t{:.3}\tms",
+        artifact_bytes.len(),
+        artifact.records().len(),
+        median(artifact_encode_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_artifact_decode\t{}\t{}\t{:.3}\tms",
+        artifact_bytes.len(),
+        artifact.records().len(),
+        median(artifact_decode_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tcore_verify\t{}\t{}\t{:.3}\tms",

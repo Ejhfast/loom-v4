@@ -1,8 +1,6 @@
 //! Canonical encoding for thin and fat artifacts.
 
-use super::{
-    compute_artifact_id, Artifact, ArtifactError, ArtifactGraphError, ArtifactId, ArtifactRecord,
-};
+use super::{Artifact, ArtifactError, ArtifactGraphError, ArtifactId, ArtifactRecord};
 use crate::DecodeError;
 use std::fmt;
 
@@ -43,7 +41,11 @@ impl Default for ArtifactLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactEncodeError {
     LengthOverflow,
-    IdentityChanged(ArtifactId),
+    BundleMismatch {
+        record: ArtifactId,
+        expected: [u8; 32],
+        found: [u8; 32],
+    },
 }
 
 impl fmt::Display for ArtifactEncodeError {
@@ -52,9 +54,16 @@ impl fmt::Display for ArtifactEncodeError {
             ArtifactEncodeError::LengthOverflow => {
                 out.write_str("the artifact is too large to encode")
             }
-            ArtifactEncodeError::IdentityChanged(id) => {
-                write!(out, "artifact record {id} belongs to another ABI bundle")
-            }
+            ArtifactEncodeError::BundleMismatch {
+                record,
+                expected,
+                found,
+            } => write!(
+                out,
+                "artifact record {record} uses ABI bundle {}, but this encoder uses {}",
+                digest_text(found),
+                digest_text(expected)
+            ),
         }
     }
 }
@@ -137,10 +146,12 @@ pub fn encode_with_bundle(
     let mut modules = Vec::with_capacity(artifact.records().len());
     let mut total = HEADER_LEN;
     for record in artifact.records() {
-        let computed = compute_artifact_id(record.module(), record.dependencies(), bundle)
-            .map_err(|_| ArtifactEncodeError::IdentityChanged(record.id()))?;
-        if computed != record.id() {
-            return Err(ArtifactEncodeError::IdentityChanged(record.id()));
+        if record.bundle_digest() != bundle.digest() {
+            return Err(ArtifactEncodeError::BundleMismatch {
+                record: record.id(),
+                expected: bundle.digest(),
+                found: record.bundle_digest(),
+            });
         }
         let module = crate::encode_with_bundle(record.module(), bundle);
         total = total
