@@ -623,6 +623,7 @@ impl<'a> Materializer<'a> {
                 let sig = self.fn_sig(ctx, &method.sig, Some((self_ty, method.mut_self)), span)?;
                 let func = ctx.push_func(
                     HirFunc {
+                        core: false,
                         source_span: None,
                         name: format!("{}.{}", item.name, method.name),
                         type_params: sig.type_params.len() as u32,
@@ -700,6 +701,7 @@ impl<'a> Materializer<'a> {
             };
             let func = ctx.push_func(
                 HirFunc {
+                    core: false,
                     source_span: None,
                     name: item.binding.clone(),
                     type_params: sig.type_params.len() as u32,
@@ -733,6 +735,7 @@ impl<'a> Materializer<'a> {
             let sig = self.fn_sig(ctx, &item.sig, None, span)?;
             let func = ctx.push_func(
                 HirFunc {
+                    core: false,
                     source_span: None,
                     name: item.name.clone(),
                     type_params: sig.type_params.len() as u32,
@@ -1090,6 +1093,7 @@ impl<'a> Materializer<'a> {
             IfaceType::Int => lm_types::INT,
             IfaceType::Float => lm_types::FLOAT,
             IfaceType::Str => lm_types::STRING,
+            IfaceType::Never => lm_types::NEVER,
             IfaceType::Bytes => lm_types::BYTES,
             IfaceType::FileHandle => lm_types::FILE_HANDLE,
             IfaceType::ResourceHandle => lm_types::RESOURCE_HANDLE,

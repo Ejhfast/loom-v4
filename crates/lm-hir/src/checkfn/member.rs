@@ -1403,6 +1403,7 @@ impl<'o> FnChecker<'o> {
         let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         let func = ctx.push_func(
             HirFunc {
+                core: env.core_scope,
                 imported: false,
                 source_span: (!env.core_scope).then_some(span),
                 name,

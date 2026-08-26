@@ -1781,16 +1781,10 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     // equal the signature, and every variable must be in scope.
     for (fidx, func) in module.funcs.iter().enumerate() {
         if extern_funcs[fidx] {
-            // An imported function is a declaration: a signature with
-            // no body, no captures, and no extra local slots.
+            // An imported function is a declaration. It has no body
+            // and no extra local slots. A closure body can declare captures.
             if !func.blocks.is_empty() {
                 return Err(err(fidx as u32, "an imported function must have no body"));
-            }
-            if !func.captures.is_empty() {
-                return Err(err(
-                    fidx as u32,
-                    "an imported function must have no captures",
-                ));
             }
             if func.local_types.len() != func.params.len() {
                 return Err(err(

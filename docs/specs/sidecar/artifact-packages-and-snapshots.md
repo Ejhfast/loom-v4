@@ -2,7 +2,9 @@
 
 Status: accepted design. Stages 0 through 2R are complete.
 
-Stage 3 has one shared linker. Core extraction remains incomplete.
+Stage 3 has one shared linker and one core provider.
+
+Artifact-backed `.lma` files remain incomplete.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -756,7 +758,11 @@ Progress: package builds and artifact loads now use one `LinkEnv`.
 
 Progress: the linker compares complete imported contracts before publication.
 
-Remaining: compile core once and emit source-module core imports.
+Progress: the compiler builds core once and emits source-module core imports.
+
+Progress: local functions keep separate arena entries after relocation.
+
+Remaining: replace the flattened `.lma` payload with an Artifact container.
 
 - Move the existing linker into the shared lower layer.
 - Keep one `LinkEnv` implementation.

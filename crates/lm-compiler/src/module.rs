@@ -150,7 +150,8 @@ pub fn compile_module_with_options_and_bundle(
         );
         return Err(diagnostic.render(source));
     }
-    let hir = lm_hir::check_module_with(
+    let core = crate::core_link_unit_with_bundle(bundle)?;
+    let mut hir = lm_hir::check_module_with(
         &ast,
         lm_hir::CheckOptions {
             prelude: true,
@@ -161,6 +162,8 @@ pub fn compile_module_with_options_and_bundle(
     )
     .map_err(|d| d.render(source))?;
     let (linkage, interface_slots) = select_linkage(path, &hir, env, options)?;
+    lm_hir::externalize_core(&mut hir, &core.interface)
+        .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     if options.dynamic_result {
@@ -1391,6 +1394,75 @@ mod tests {
             .flatten()
     }
 
+    fn link_compiled(unit: &CompiledModule) -> Module {
+        let mut env = crate::core_link_env().expect("the core link environment builds");
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
+        )
+        .expect("the compiled module binds");
+        crate::link(&unit.path, &env.freeze())
+            .expect("the compiled module links")
+            .module
+    }
+
+    #[test]
+    fn a_source_module_imports_core_without_core_bodies() {
+        let compiled = compile("1\n", &CompileOptions::new());
+        let extern_classes = compiled.module.extern_classes();
+        let extern_funcs = compiled.module.extern_funcs();
+        let mut core_class_imports = 0usize;
+        let mut core_function_imports = 0usize;
+        for import in &compiled.module.imports {
+            if import.module != lm_bytecode::CORE_MODULE {
+                continue;
+            }
+            if import.kind == lm_bytecode::ImportKind::Class {
+                core_class_imports += 1;
+                assert!(extern_classes[import.def as usize]);
+            } else {
+                core_function_imports += 1;
+                assert!(extern_funcs[import.def as usize]);
+                assert!(compiled.module.funcs[import.def as usize].blocks.is_empty());
+            }
+        }
+        assert!(core_class_imports > 0);
+        assert!(core_function_imports > 0);
+        assert!(compiled
+            .module
+            .conformances
+            .iter()
+            .any(|item| extern_classes[item.class as usize]));
+        let linked = link_compiled(&compiled);
+        assert_eq!(
+            linked
+                .classes
+                .iter()
+                .filter(|class| class.key == "core.Int")
+                .count(),
+            1
+        );
+        let core = crate::core_link_unit().expect("the core link unit builds");
+        assert_eq!(linked.conformances.len(), core.module.conformances.len());
+    }
+
+    #[test]
+    fn the_linker_rejects_a_changed_imported_conformance_set() {
+        let mut compiled = compile("1\n", &CompileOptions::new());
+        compiled
+            .module
+            .conformances
+            .pop()
+            .expect("the imported core carries conformances");
+        let mut env = crate::core_link_env().expect("the core link environment builds");
+        env.bind_module(compiled.path.clone(), compiled.module, compiled.interface)
+            .expect("the forged module binds");
+        let error = crate::link(&compiled.path, &env.freeze())
+            .expect_err("a changed conformance set must reject");
+        assert!(error.0.contains("conformance"), "{error}");
+    }
+
     #[test]
     fn default_options_keep_static_artifacts_identical() {
         let source = SourceFile::new(
@@ -1719,7 +1791,7 @@ mod tests {
             Instr::Extended(ExtendedInstr::CallSlot { .. })
         )));
 
-        let mut link_env = crate::LinkEnv::new();
+        let mut link_env = crate::core_link_env().expect("the core link environment builds");
         for unit in [&library, &program] {
             link_env
                 .bind_module(
@@ -1839,24 +1911,20 @@ mod tests {
             &CompileOptions::new().late_function("added"),
         )
         .expect("the addition compiles");
-        let appended = lm_bytecode::append::append_linked(&base.module, &addition.module)
-            .expect("the module appends");
+        let base = link_compiled(&base);
+        let addition = link_compiled(&addition);
+        let appended =
+            lm_bytecode::append::append_linked(&base, &addition).expect("the module appends");
         assert_eq!(
-            &appended.module.strings[..base.module.strings.len()],
-            &base.module.strings
+            &appended.module.strings[..base.strings.len()],
+            &base.strings
         );
+        assert_eq!(&appended.module.types[..base.types.len()], &base.types);
         assert_eq!(
-            &appended.module.types[..base.module.types.len()],
-            &base.module.types
+            &appended.module.classes[..base.classes.len()],
+            &base.classes
         );
-        assert_eq!(
-            &appended.module.classes[..base.module.classes.len()],
-            &base.module.classes
-        );
-        assert_eq!(
-            &appended.module.funcs[..base.module.funcs.len()],
-            &base.module.funcs
-        );
+        assert_eq!(&appended.module.funcs[..base.funcs.len()], &base.funcs);
         lm_verify::verify_module(&appended.module).expect("the appended module verifies");
     }
 }

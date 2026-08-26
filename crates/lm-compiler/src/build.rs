@@ -10,7 +10,7 @@
 use crate::cache::{
     compile_key, interface_identity, program_key, write_atomic, BuildDir, ProgramEntry,
 };
-use crate::env::{CompileEnv, LinkEnv};
+use crate::env::CompileEnv;
 use crate::graph::{load_workspace, module_order, Workspace};
 use crate::link::link;
 use crate::module::compile_module;
@@ -61,7 +61,7 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let dir = BuildDir::new(build_root);
     let mut env = CompileEnv::new();
     let mut interfaces: BTreeMap<String, [u8; 32]> = BTreeMap::new();
-    let mut link_env = LinkEnv::new();
+    let mut link_env = crate::core_link_env()?;
     let mut modules: Vec<ModuleReport> = Vec::new();
     // The stage-2 key inputs, in link order.
     let mut contents: Vec<(String, [u8; 32])> = Vec::new();

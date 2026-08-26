@@ -36,6 +36,7 @@ pub struct CoreIds {
 }
 
 /// One exported top-level definition of the source module.
+#[derive(Clone)]
 pub struct HirExport {
     pub kind: lm_bytecode::ExportKind,
     pub name: String,
@@ -86,6 +87,8 @@ pub struct HirModule {
     pub core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     /// The exported top-level definitions, in declaration order.
     pub exports: Vec<HirExport>,
+    /// The definitions that the separate core unit exports.
+    pub core_exports: Vec<HirExport>,
     /// The import slots, in slot order.
     pub imports: Vec<HirImport>,
     /// The named function bindings of the declared functions, the
@@ -266,6 +269,8 @@ pub struct HirClass {
 pub struct HirFunc {
     /// True for an imported declaration: a signature with no body.
     pub imported: bool,
+    /// True when the pinned core source owns this function.
+    pub core: bool,
     /// The source definition range for optional debug data.
     pub source_span: Option<lm_source::Span>,
     pub name: String,

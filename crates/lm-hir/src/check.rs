@@ -2688,6 +2688,7 @@ pub fn check_module_with(
         let type_bounds = into_hir_bounds(checked.type_bounds);
         ctx.funcs[idx] = Some(HirFunc {
             imported: false,
+            core: false,
             source_span: Some(func.span),
             name: func.name.clone(),
             type_params: type_param_count,
@@ -2740,6 +2741,7 @@ pub fn check_module_with(
         let type_bounds = into_hir_bounds(checked.type_bounds);
         ctx.funcs[index] = Some(HirFunc {
             imported: false,
+            core: true,
             source_span: None,
             name: func.name.clone(),
             type_params: type_param_count,
@@ -2769,9 +2771,10 @@ pub fn check_module_with(
     let (body, entry_ty, _mutable, locals, entry_row) =
         checker.check_entry(&mut ctx, &module.entry, entry_span)?;
     let entry_ty = if entry_ty == NEVER { UNIT } else { entry_ty };
-    let exports = collect_exports(&ctx, module, &options.module_path)?;
+    let exports = collect_exports(&ctx, module, &options.module_path, false)?;
     ctx.funcs[entry_idx] = Some(HirFunc {
         imported: false,
+        core: false,
         source_span: module
             .entry
             .first()
@@ -2789,39 +2792,60 @@ pub fn check_module_with(
         locals,
         body,
     });
+    let core_exports = collect_core_exports(&ctx, core)?;
     assemble(
         ctx,
         own_defaults,
         entry_idx,
-        exports,
+        ExportSets {
+            module: exports,
+            core: core_exports,
+        },
         &options.module_path,
         module.funcs.len(),
         core.funcs.len(),
     )
 }
 
+struct ExportSets {
+    module: Vec<HirExport>,
+    core: Vec<HirExport>,
+}
+
 /// Collect the exported top-level definitions of the source module,
-/// in declaration order. The embedded core and every imported
-/// declaration stay out: a module exports only what it defines.
+/// in declaration order. Core and imported declarations stay out. A
+/// module exports only what it defines.
 fn collect_exports(
     ctx: &Ctx,
     module: &ast::Module,
     module_path: &str,
+    is_core: bool,
 ) -> Result<Vec<HirExport>, Diagnostic> {
     let naming = crate::iface::Naming { ctx, module_path };
     let mut out: Vec<(lm_bytecode::ExportKind, String, u32)> = Vec::new();
     let class_index = |name: &str| -> u32 {
-        *ctx.user_types
+        let types = if is_core {
+            &ctx.core_types
+        } else {
+            &ctx.user_types
+        };
+        *types
             .get(name)
-            .expect("every user class name registers")
+            .expect("every declared class name registers")
     };
     for interface in &module.interfaces {
+        let interfaces = if is_core {
+            &ctx.core_interfaces
+        } else {
+            &ctx.user_interfaces
+        };
+        let interface_index = interfaces[&interface.name];
         out.push((
             lm_bytecode::ExportKind::Interface,
             interface.name.clone(),
-            ctx.user_interfaces[&interface.name],
+            interface_index,
         ));
-        let info = &ctx.interfaces[ctx.user_interfaces[&interface.name] as usize];
+        let info = &ctx.interfaces[interface_index as usize];
         for method in &info.methods {
             if let (Some(binding), Some(func)) = (&method.default_binding, method.default_func) {
                 out.push((lm_bytecode::ExportKind::Function, binding.clone(), func));
@@ -2847,10 +2871,15 @@ fn collect_exports(
         }
     }
     for func in &module.funcs {
+        let functions = if is_core {
+            &ctx.core_func_index
+        } else {
+            &ctx.func_index
+        };
         out.push((
             lm_bytecode::ExportKind::Function,
             func.name.clone(),
-            ctx.func_index[&func.name],
+            functions[&func.name],
         ));
     }
     Ok(out
@@ -2862,6 +2891,46 @@ fn collect_exports(
             item: naming.item(kind, def),
         })
         .collect())
+}
+
+/// Collect the complete provider surface of the pinned core.
+fn collect_core_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport>, Diagnostic> {
+    let mut exports = collect_exports(ctx, module, lm_bytecode::CORE_MODULE, true)?;
+    let exported: BTreeSet<u32> = exports
+        .iter()
+        .filter(|item| item.kind == lm_bytecode::ExportKind::Function)
+        .map(|item| item.def)
+        .collect();
+    let methods: BTreeSet<u32> = ctx.classes[..ctx.user_start as usize]
+        .iter()
+        .flat_map(|class| class.methods.iter().map(|method| method.func))
+        .collect();
+    let naming = crate::iface::Naming {
+        ctx,
+        module_path: lm_bytecode::CORE_MODULE,
+    };
+    let mut ordinal = 0u32;
+    for (index, function) in ctx.funcs.iter().enumerate() {
+        let Some(function) = function else {
+            continue;
+        };
+        if !function.core {
+            continue;
+        }
+        let current = ordinal;
+        ordinal += 1;
+        let index = index as u32;
+        if methods.contains(&index) || exported.contains(&index) {
+            continue;
+        }
+        exports.push(HirExport {
+            kind: lm_bytecode::ExportKind::Function,
+            name: format!("$internal.function.{current}"),
+            def: index,
+            item: naming.item(lm_bytecode::ExportKind::Function, index),
+        });
+    }
+    Ok(exports)
 }
 
 /// Reserve one verified function for each local interface default.
@@ -2970,7 +3039,7 @@ fn assemble(
     mut ctx: Ctx,
     own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
     entry_idx: usize,
-    exports: Vec<HirExport>,
+    exports: ExportSets,
     module_path: &str,
     source_funcs: usize,
     core_funcs: usize,
@@ -3185,9 +3254,8 @@ fn assemble(
         .collect();
     // The named function bindings this module declares. A name points
     // at a function value; it is never a part of that value. A free
-    // function takes the module path as its root, and a class member
-    // takes the qualified key of its class, so an embedded core copy
-    // binds the same names in every module.
+    // function takes the module path as its root. A class member takes
+    // the qualified key of its class.
     let mut bindings: Vec<lm_bytecode::FuncBinding> = Vec::new();
     for (idx, func) in funcs.iter().enumerate().take(source_funcs) {
         if func.imported {
@@ -3255,7 +3323,8 @@ fn assemble(
         entry: entry_idx,
         core: ctx.core,
         core_roles,
-        exports,
+        exports: exports.module,
+        core_exports: exports.core,
         imports: ctx.imports,
         bindings,
         reified_functions,
@@ -5541,6 +5610,7 @@ fn check_interface_defaults(
             let checked = checker.check_callable(ctx, body, sig.ret, method.span)?;
             ctx.funcs[func as usize] = Some(HirFunc {
                 imported: false,
+                core: is_core,
                 source_span: (!is_core).then_some(method.span),
                 name: requirement
                     .default_binding
@@ -5633,6 +5703,7 @@ fn check_method(
     }
     ctx.funcs[sig.func as usize] = Some(HirFunc {
         imported: false,
+        core: is_core,
         source_span: (!is_core).then_some(method.span),
         name: format!("{}.{}", ctx.classes[cidx as usize].name, method.name),
         type_params: type_param_count,

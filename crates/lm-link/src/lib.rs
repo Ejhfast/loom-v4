@@ -11,15 +11,11 @@
 //!   an export. The linker finds that export and rejects a provider
 //!   whose interface hash differs from the pinned one.
 //! - **Class merging.** The linker compares two classes on their
-//!   qualified key and their structural hash, and it implements all
-//!   four rows of the class table in specification 3.6. This is how
-//!   the embedded core copies of every module become one core: a core
-//!   value that crosses a module boundary keeps its class.
-//! - **Function code sharing and binding resolution.** Two functions
-//!   with one structural hash are one function value. A named binding
-//!   maps a qualified name to a function value, and the linker keeps
-//!   every binding. One binding key with two structural hashes is a
-//!   rejection: two providers of one name never coexist in silence.
+//!   qualified key and structural hash. One core provider supplies
+//!   every imported core class.
+//! - **Function binding resolution.** A named binding maps a qualified
+//!   name to one function. One binding key with two structural hashes
+//!   is a rejection. Two providers of one name never coexist.
 //! - **Relocation.** Every module-global index is renumbered into the
 //!   merged tables. Strings, types, selectors, and applications
 //!   intern by content, so the merged tables stay canonical.
@@ -460,9 +456,8 @@ struct Merged {
     /// Late-bound slots, merged by their stable key.
     slots: Vec<SlotSpec>,
     slot_by_key: HashMap<[u8; 32], u32>,
-    /// The merged core role table. Every module carries the same core,
-    /// so every module fills the same roles with the same merged
-    /// classes.
+    /// The merged core role table. Every module pins the same core
+    /// provider and names the same relocated classes.
     core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     /// (qualified key, structural hash) to merged class index. The
     /// pair is the whole merge rule for a class.
@@ -473,10 +468,6 @@ struct Merged {
     class_version: HashMap<String, ([u8; 32], String)>,
     /// One merged interface slot per nominal key.
     interface_by_key: HashMap<String, (u32, String)>,
-    /// Structural hash to merged function index. A function value is
-    /// identified by its structural hash, so content alone decides
-    /// which code objects merge.
-    func_by_hash: HashMap<[u8; 32], u32>,
     /// The named function bindings of the merged program, in link
     /// order. Several bindings may name one function value.
     bindings: Vec<lm_bytecode::FuncBinding>,
@@ -523,7 +514,6 @@ impl Default for Merged {
             class_by_def: HashMap::new(),
             class_version: HashMap::new(),
             interface_by_key: HashMap::new(),
-            func_by_hash: HashMap::new(),
             bindings: Vec::new(),
             debug: lm_bytecode::debug::DebugInfo::default(),
             binding_version: HashMap::new(),
@@ -627,6 +617,8 @@ pub fn link_with_bundle(
         if unit.interface.bundle_digest != bundle.digest() {
             return Err(fail(format!("the module `{path}` uses another ABI bundle")));
         }
+        lm_verify::verify_module_with_bundle(&unit.module, bundle)
+            .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
         let identity = lm_bytecode::identity::module_identity_with_bundle(&unit.module, bundle)
             .map_err(|e| fail(format!("the module `{path}` does not hash: {e}")))?;
         let reloc = relocate(&mut merged, &unit.module, &identity, path)?;
@@ -729,6 +721,7 @@ fn relocate(
     path: &str,
 ) -> Result<Reloc, LinkError> {
     check_ctor_bindings(module, path)?;
+    let extern_classes = module.extern_classes();
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
     let bytes: Vec<u32> = module
         .bytes
@@ -862,7 +855,8 @@ fn relocate(
         apps[idx] = merged.app(relocated);
     }
     // The function map: an imported function resolves to a provided
-    // definition, a local function shares a merged entry by hash.
+    // definition. Each local function gets one arena entry. A
+    // definition hash does not identify its relocated dependencies.
     let mut funcs: Vec<u32> = vec![u32::MAX; module.funcs.len()];
     for (idx, import) in module.imports.iter().enumerate() {
         if import.kind == ImportKind::Class {
@@ -872,39 +866,28 @@ fn relocate(
         funcs[import.def as usize] = target;
     }
     let mut created_funcs: Vec<u32> = Vec::new();
-    let mut shared_funcs: Vec<u32> = Vec::new();
     for idx in 0..module.funcs.len() {
         if extern_funcs[idx] {
             continue;
         }
-        let hash = identity.func_hashes[idx];
-        match merged.func_by_hash.get(&hash) {
-            Some(existing) => {
-                funcs[idx] = *existing;
-                shared_funcs.push(idx as u32);
-            }
-            None => {
-                let at = merged.funcs.len() as u32;
-                // The placeholder keeps the index; the body fills
-                // below, once every function index is known.
-                merged.funcs.push(Func {
-                    name: module.funcs[idx].name.clone(),
-                    type_params: 0,
-                    effect_params: 0,
-                    params: Vec::new(),
-                    param_muts: Vec::new(),
-                    ret: 0,
-                    row: Vec::new(),
-                    captures: Vec::new(),
-                    local_types: Vec::new(),
-                    blocks: Vec::new(),
-                });
-                merged.func_bounds.push(Vec::new());
-                merged.func_by_hash.insert(hash, at);
-                funcs[idx] = at;
-                created_funcs.push(idx as u32);
-            }
-        }
+        let at = merged.funcs.len() as u32;
+        // The placeholder keeps the index. The body fills after all
+        // function indices are known.
+        merged.funcs.push(Func {
+            name: module.funcs[idx].name.clone(),
+            type_params: 0,
+            effect_params: 0,
+            params: Vec::new(),
+            param_muts: Vec::new(),
+            ret: 0,
+            row: Vec::new(),
+            captures: Vec::new(),
+            local_types: Vec::new(),
+            blocks: Vec::new(),
+        });
+        merged.func_bounds.push(Vec::new());
+        funcs[idx] = at;
+        created_funcs.push(idx as u32);
     }
     let mut reloc = Reloc {
         strings,
@@ -1021,7 +1004,7 @@ fn relocate(
             )));
         }
     }
-    for idx in created_funcs.iter().chain(shared_funcs.iter()) {
+    for idx in &created_funcs {
         let source = &module.funcs[*idx as usize];
         let at = reloc.funcs[*idx as usize] as usize;
         let filled = reloc_func(source, &reloc);
@@ -1030,23 +1013,16 @@ fn relocate(
             .get(*idx as usize)
             .map(|items| reloc_bounds(items, &reloc))
             .unwrap_or_default();
-        if created_funcs.contains(idx) {
-            merged.funcs[at] = filled;
-            merged.func_bounds[at] = bounds;
-        } else if !same_body(&merged.funcs[at], &filled) {
-            return Err(fail(format!(
-                "the function `{}` of `{path}` shares a definition hash with a \
-                 different definition",
-                source.name
-            )));
-        } else if merged.func_bounds[at] != bounds {
-            return Err(fail(format!(
-                "the function `{}` of `{path}` shares code with different interface bounds",
-                source.name
-            )));
-        }
+        merged.funcs[at] = filled;
+        merged.func_bounds[at] = bounds;
     }
     for source in &module.conformances {
+        // An imported class carries its provider conformance set as
+        // part of its declaration. The contract check compares that
+        // set. Only the provider publishes those conformances.
+        if extern_classes[source.class as usize] {
+            continue;
+        }
         let filled = reloc_conformance(source, &reloc);
         if !merged.conformances.contains(&filled) {
             merged.conformances.push(filled);
@@ -1610,20 +1586,6 @@ fn register_exports(
         }
     }
     Ok(())
-}
-
-/// Compare two relocated functions without their names.
-///
-/// A function definition hash excludes the name by design, so two
-/// functions that differ only in the name are one definition. The
-/// generated constructor stubs of the abstract enum parents are the
-/// common case: every one is `unit; return`.
-fn same_body(a: &Func, b: &Func) -> bool {
-    let mut left = a.clone();
-    let mut right = b.clone();
-    left.name.clear();
-    right.name.clear();
-    left == right
 }
 
 fn reloc_row(row: &[BcRow], strings: &[u32]) -> Vec<BcRow> {

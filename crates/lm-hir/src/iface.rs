@@ -38,8 +38,8 @@ impl Naming<'_> {
     /// A core class takes the reserved module path `core`. A source
     /// module path never equals that value, so a user class never
     /// takes a core key. The interface uses the empty path for a core
-    /// class instead, because an interface reader already knows that
-    /// every module carries the core.
+    /// class instead. An interface reader resolves that name through
+    /// the exact core dependency.
     pub(crate) fn key(&self, class: u32) -> String {
         let info = &self.ctx.classes[class as usize];
         match self.ctx.class_origin(class) {
@@ -87,9 +87,7 @@ impl Naming<'_> {
             Type::Int => IfaceType::Int,
             Type::Float => IfaceType::Float,
             Type::String => IfaceType::Str,
-            // `Never` cannot appear in a declared signature; the
-            // checker widens it to the declared result type.
-            Type::Never => IfaceType::Unit,
+            Type::Never => IfaceType::Never,
             Type::Bytes => IfaceType::Bytes,
             Type::FileHandle => IfaceType::FileHandle,
             Type::ResourceHandle => IfaceType::ResourceHandle,

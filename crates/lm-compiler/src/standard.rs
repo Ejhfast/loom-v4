@@ -7,7 +7,7 @@
 //! process. A later release bundle can replace the source builder
 //! with decoded artifacts without changing its callers.
 
-use crate::{compile_module, link, CompileEnv, CompileOptions, CompiledModule, LinkEnv};
+use crate::{compile_module, link, CompileEnv, CompiledModule};
 use lm_bytecode::Module;
 use lm_source::SourceFile;
 use std::sync::OnceLock;
@@ -287,15 +287,7 @@ pub fn compile_source(
             .map_err(|error| format!("error: {error}\n"))?;
     }
     let root = compile_module(path, source, &env.freeze(), is_main)?;
-    if standard.is_empty() {
-        return Ok(CompiledSource {
-            program: root.module.clone(),
-            artifact: root.artifact.clone(),
-            root,
-            standard_modules: Vec::new(),
-        });
-    }
-    let mut link_env = LinkEnv::new();
+    let mut link_env = crate::core_link_env()?;
     for module in &standard {
         link_env
             .bind_module(
@@ -305,14 +297,14 @@ pub fn compile_source(
             )
             .map_err(|error| format!("error: {error}\n"))?;
     }
+    let link_path = if path.is_empty() { "test.entry" } else { path };
+    let mut root_interface = root.interface.clone();
+    root_interface.module_path = link_path.to_string();
     link_env
-        .bind_module(
-            root.path.clone(),
-            root.module.clone(),
-            root.interface.clone(),
-        )
+        .bind_module(link_path, root.module.clone(), root_interface)
         .map_err(|error| format!("error: {error}\n"))?;
-    let linked = link(path, &link_env.freeze()).map_err(|error| format!("error: {error}\n"))?;
+    let linked =
+        link(link_path, &link_env.freeze()).map_err(|error| format!("error: {error}\n"))?;
     Ok(CompiledSource {
         program: linked.module,
         artifact: linked.artifact,
@@ -321,36 +313,9 @@ pub fn compile_source(
     })
 }
 
-/// Compile one runnable source module with a fast core-only path.
-///
-/// A source without a `std` import keeps the direct checker path. A
-/// source with a `std` import uses the literal module linker.
+/// Compile one runnable source module.
 pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String> {
-    let (ast, syntax) =
-        lm_source::syntax::parse_complete(&source.text).map_err(|error| error.render(source))?;
-    let uses_standard = ast
-        .uses
-        .iter()
-        .any(|item| item.path.first().map(String::as_str) == Some("std"));
-    if uses_standard {
-        return Ok(compile_source(path, source, true)?.program);
-    }
-    let hir = lm_hir::check_module_with(
-        &ast,
-        lm_hir::CheckOptions {
-            module_path: path.to_string(),
-            ..lm_hir::CheckOptions::default()
-        },
-    )
-    .map_err(|error| error.render(source))?;
-    let mut env = CompileEnv::new();
-    env.bind_standard_root();
-    let (linkage, _) =
-        crate::module::select_linkage(path, &hir, &env.freeze(), &CompileOptions::default())?;
-    let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
-        .map_err(|error| format!("error: `{path}`: {error}\n"))?;
-    crate::module::attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
-    Ok(module)
+    Ok(compile_source(path, source, true)?.program)
 }
 
 #[cfg(test)]

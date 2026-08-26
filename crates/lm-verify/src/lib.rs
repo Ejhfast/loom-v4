@@ -271,7 +271,8 @@ use tables::verify_tables;
 /// Version 34 verifies Float and bitwise instructions.
 /// Version 35 verifies text padding and Float text conversions.
 /// Version 36 verifies stream roles and child environment overlays.
-pub const VERIFIER_VERSION: u32 = 36;
+/// Version 37 permits capture contracts on imported closure bodies.
+pub const VERIFIER_VERSION: u32 = 37;
 
 /// Verify a full module. Every table and every function must pass.
 ///

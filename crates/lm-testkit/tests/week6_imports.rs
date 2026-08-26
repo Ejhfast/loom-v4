@@ -135,13 +135,11 @@ fn two_slots_cannot_claim_one_definition() {
     assert!(module_identity(&module).is_err());
 }
 
-/// An imported function is a declaration: a body, a capture, or an
-/// extra local slot rejects at the verifier.
+/// An imported function has no body and no extra local slot.
 #[test]
 fn an_imported_function_must_carry_no_body() {
     for mutate in [
         |m: &mut Module| m.funcs[0].blocks = vec![vec![Instr::ConstInt(1), Instr::Return]],
-        |m: &mut Module| m.funcs[0].captures = vec![2],
         |m: &mut Module| m.funcs[0].local_types = vec![2, 2],
     ] {
         let mut module = importing_module(PIN);
@@ -151,6 +149,14 @@ fn an_imported_function_must_carry_no_body() {
             "the verifier admitted an imported function with a body"
         );
     }
+}
+
+/// An imported closure body keeps its capture contract.
+#[test]
+fn an_imported_function_can_declare_captures() {
+    let mut module = importing_module(PIN);
+    module.funcs[0].captures = vec![2];
+    lm_verify::verify_module(&module).expect("the capture contract verifies");
 }
 
 /// A method of an imported class must be imported too, and a local

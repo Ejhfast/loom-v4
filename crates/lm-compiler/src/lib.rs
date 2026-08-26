@@ -16,6 +16,7 @@
 
 pub mod build;
 pub mod cache;
+mod core;
 pub mod env;
 pub mod graph;
 pub use lm_link as link;
@@ -28,6 +29,9 @@ pub use build::{build_package, BuildReport, ModuleReport};
 pub use cache::{
     compile_key_with_bundle, load_through_store, program_key_with_bundle, user_cache_dir,
     write_atomic, Verdict, VerdictKey, VerifiedStore,
+};
+pub use core::{
+    core_link_env, core_link_env_with_bundle, core_link_unit, core_link_unit_with_bundle,
 };
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use lm_link::{link, link_with_bundle, resolve_artifact, LinkedProgram};

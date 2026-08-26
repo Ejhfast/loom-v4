@@ -1500,6 +1500,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.lower_expr(arg);
                 }
                 self.emit_call(*func, targs, rowargs);
+                if self.m.funcs[*func as usize].ret == NEVER {
+                    self.emit(Instr::Unreachable);
+                }
             }
             HExprKind::Construct { class, targs, args } => {
                 if *class == self.m.core.some_class {
@@ -2967,6 +2970,7 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     let params: Vec<u32> = func.params.iter().map(|t| m.bc_ty(*t)).collect();
     let ret = m.bc_ty(func.ret);
     let row = m.bc_row(&func.row);
+    let captures: Vec<u32> = func.captures.iter().map(|t| m.bc_ty(*t)).collect();
     if func.imported {
         // An imported function is a declaration: the signature only.
         // The linker replaces it with the provider definition.
@@ -2978,12 +2982,11 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
             param_muts: func.param_muts.clone(),
             ret,
             row,
-            captures: vec![],
+            captures,
             local_types: params,
             blocks: vec![],
         };
     }
-    let captures: Vec<u32> = func.captures.iter().map(|t| m.bc_ty(*t)).collect();
     // The declared checker types of every local slot seed the table;
     // scratch slots append their true types during lowering.
     let base_types: Vec<u32> = func.locals.iter().map(|t| m.bc_ty(*t)).collect();
@@ -3019,7 +3022,7 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
 /// and return the instance.
 fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
     if class.imported {
-        if class.kind == ClassKind::EnumParent {
+        if class.kind == ClassKind::EnumParent || class.native_repr == Some(NativeRepr::Text) {
             return Func {
                 name: format!("<new {}>", class.name),
                 type_params: 0,
@@ -3030,6 +3033,20 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 row: vec![],
                 captures: vec![],
                 local_types: vec![],
+                blocks: vec![],
+            };
+        }
+        if let Some((type_params, params, ret)) = imported_native_ctor(m, class, cidx) {
+            return Func {
+                name: format!("<new {}>", class.name),
+                type_params,
+                effect_params: 0,
+                param_muts: vec![false; params.len()],
+                local_types: params.clone(),
+                params,
+                ret,
+                row: vec![],
+                captures: vec![],
                 blocks: vec![],
             };
         }
@@ -3468,6 +3485,51 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         local_types,
         blocks,
     }
+}
+
+/// Return the constructor contract of one native value class.
+fn imported_native_ctor(
+    m: &mut ModLowerer<'_>,
+    class: &HirClass,
+    cidx: u32,
+) -> Option<(u32, Vec<u32>, u32)> {
+    let contract = match class.native_repr? {
+        NativeRepr::Unit => (0, Vec::new(), m.intern_type(BcType::Unit)),
+        NativeRepr::Int => (0, Vec::new(), m.intern_type(BcType::Int)),
+        NativeRepr::Float => (0, Vec::new(), m.intern_type(BcType::Float)),
+        NativeRepr::Bool => (0, Vec::new(), m.intern_type(BcType::Bool)),
+        NativeRepr::String => (0, Vec::new(), m.intern_type(BcType::Str)),
+        NativeRepr::Bytes => (0, Vec::new(), m.intern_type(BcType::Bytes)),
+        NativeRepr::Tuple(arity) => {
+            let params: Vec<u32> = (0..arity)
+                .map(|index| m.intern_type(BcType::Var(index as u32)))
+                .collect();
+            let ty = m.intern_type(BcType::Tuple(params.clone()));
+            (arity as u32, params, ty)
+        }
+        NativeRepr::List => {
+            let element = m.intern_type(BcType::Var(0));
+            (1, Vec::new(), m.intern_type(BcType::List(element)))
+        }
+        NativeRepr::Map => {
+            let key = m.intern_type(BcType::Var(0));
+            let value = m.intern_type(BcType::Var(1));
+            (2, Vec::new(), m.intern_type(BcType::Map(key, value)))
+        }
+        NativeRepr::Text => return None,
+        _ => {
+            let ty = if class.type_params == 0 {
+                m.intern_type(BcType::Class(cidx))
+            } else {
+                let args = (0..class.type_params)
+                    .map(|index| m.intern_type(BcType::Var(index)))
+                    .collect();
+                m.intern_type(BcType::Inst(cidx, args))
+            };
+            (class.type_params, Vec::new(), ty)
+        }
+    };
+    Some(contract)
 }
 
 /// Synthesize one closure-compatible dispatcher for a late class.
