@@ -192,10 +192,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 }
                 "lma" => {
                     let bytes = read_bytes(&options.file)?;
-                    let module = lm_bytecode::decode(&bytes)
+                    let artifact = lm_bytecode::artifact::decode(&bytes)
                         .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
+                    let artifact_id = artifact.id();
+                    let unit_count = artifact.units().len();
+                    let module = link_artifact(artifact)?.module;
                     let identity = lm_bytecode::identity::module_identity(&module)
                         .map_err(|e| format!("error: {e}\n"))?;
+                    outln!("artifact {}", artifact_id);
                     outln!("module   {}", hex(&identity.semantic_hash));
                     outln!(
                         "container {}",
@@ -208,6 +212,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         module.bindings.len(),
                         module.entry
                     );
+                    outln!("units {unit_count}");
                     Ok(ExitCode::SUCCESS)
                 }
                 _ => Err(format!(
@@ -499,8 +504,9 @@ fn extension(path: &str) -> &str {
 fn load_program(path: &str) -> Result<lm_vm::LoadedModule, String> {
     if extension(path) == "lma" {
         let bytes = read_bytes(path)?;
-        let module = lm_bytecode::decode(&bytes)
+        let artifact = lm_bytecode::artifact::decode(&bytes)
             .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
+        let module = link_artifact(artifact)?.module;
         load_stored(Path::new(path), module)
             .map_err(|e| format!("error: the loader rejected the artifact: {e}\n"))
     } else {
@@ -539,11 +545,20 @@ fn load_stored(
 fn read_module(path: &str) -> Result<lm_bytecode::Module, String> {
     if extension(path) == "lma" {
         let bytes = read_bytes(path)?;
-        lm_bytecode::decode(&bytes).map_err(|e| format!("error: cannot decode the artifact: {e}\n"))
+        let artifact = lm_bytecode::artifact::decode(&bytes)
+            .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
+        Ok(link_artifact(artifact)?.module)
     } else {
         let source = read_source(path)?;
         compile(&source)
     }
+}
+
+fn link_artifact(
+    artifact: lm_bytecode::artifact::Artifact,
+) -> Result<lm_compiler::LinkedProgram, String> {
+    let core = lm_compiler::core_link_unit()?;
+    lm_compiler::link_artifact(artifact, Some(&core)).map_err(|error| format!("error: {error}\n"))
 }
 
 /// Build one source file into `build/debug/<name>.lma` plus

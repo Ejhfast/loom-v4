@@ -34,7 +34,10 @@ pub use core::{
     core_link_env, core_link_env_with_bundle, core_link_unit, core_link_unit_with_bundle,
 };
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
-pub use lm_link::{link, link_with_bundle, resolve_artifact, LinkedProgram};
+pub use lm_link::{
+    link, link_artifact, link_artifact_with_bundle, link_with_bundle, resolve_artifact,
+    LinkedProgram,
+};
 pub use manifest::{parse_manifest, Manifest};
 pub use module::{
     compile_module, compile_module_with_bundle, compile_module_with_options,

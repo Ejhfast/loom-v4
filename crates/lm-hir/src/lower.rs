@@ -2562,7 +2562,9 @@ const INLINE_NODE_LIMIT: usize = 8;
 
 /// Select one safe expression body for direct-call inlining.
 fn inline_body(func: &HirFunc) -> Option<HExpr> {
-    if func.imported
+    // A core import keeps its checked provider body for compile-time
+    // inlining. The emitted import declaration still has no body.
+    if (func.imported && !func.core)
         || func.effect_params != 0
         || !func.row.is_empty()
         || !func.captures.is_empty()

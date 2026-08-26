@@ -1,6 +1,6 @@
 //! Conditional conformance tests.
 
-use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
+use lm_compiler::{compile_module, link, CompileEnv};
 use lm_source::SourceFile;
 use lm_testkit::{compile_text, run_allowed};
 use lm_vm::{Vm, VmConfig};
@@ -511,7 +511,7 @@ end
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(
@@ -560,7 +560,7 @@ fn interface_defaults_cross_module_boundaries() {
         true,
     )
     .expect("the default caller compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(
@@ -667,7 +667,7 @@ end
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(

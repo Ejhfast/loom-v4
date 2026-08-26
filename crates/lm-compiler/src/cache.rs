@@ -6,12 +6,11 @@
 //! | Stage | Key | Value |
 //! | --- | --- | --- |
 //! | 1 | the compile key of one module | the module artifact and interface |
-//! | 2 | the module content hashes of one program | the linked artifact |
+//! | 2 | the module content hashes of one program | the program artifact |
 //! | 3 | the verified-code key of one artifact | the verifier verdict |
 //!
-//! Stage 1 removes a compiler run. Stage 2 removes a link run and the
-//! verification of the merged program. Stage 3 removes the verifier
-//! pass of a load.
+//! Stage 1 removes a compiler run. Stage 2 reuses program artifact bytes.
+//! Stage 3 removes the verifier pass of a load.
 //!
 //! Every stage is a trust boundary, because every entry is a file. An
 //! earlier claim here said no stage is one, on the ground that a
@@ -184,13 +183,10 @@ pub fn program_key_with_bundle(
     hash256(&bytes)
 }
 
-/// One stage-2 entry: the linked artifact and its two hashes.
+/// One stage-2 entry: the artifact package and its two hashes.
 ///
-/// The entry carries the hashes because the semantic hash costs a
-/// full `module_identity` pass over the merged program. That pass is
-/// a large part of the work a stage-2 hit removes, so a hit must not
-/// pay it again. The container hash is cheap, and it travels with the
-/// semantic hash to keep one format.
+/// The entry carries report hashes beside the canonical bytes. A
+/// reader recomputes both hashes before it uses the entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramEntry {
     pub artifact: Vec<u8>,
@@ -296,12 +292,11 @@ impl BuildDir {
     /// Read one stage-2 entry. A missing, unreadable, or damaged
     /// entry is a miss, never an error: the linker simply runs again.
     ///
-    /// The stored artifact decodes through the ordinary decoder
-    /// before the caller uses it, exactly like a stage-1 entry.
+    /// The stored artifact decodes through the artifact decoder.
     pub fn read_program(&self, key: &[u8; 32]) -> Option<ProgramEntry> {
         let bytes = std::fs::read(self.program_path(key)).ok()?;
         let entry = decode_program_entry(&bytes)?;
-        lm_bytecode::decode(&entry.artifact).ok()?;
+        lm_bytecode::artifact::decode(&entry.artifact).ok()?;
         Some(entry)
     }
 

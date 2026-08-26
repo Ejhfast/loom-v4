@@ -1898,20 +1898,7 @@ fn bench_core_compilation() {
         .map(Vec::len)
         .sum();
     let bytes = lm_bytecode::encode(&module);
-    let module_identity =
-        lm_bytecode::identity::module_identity(&module).expect("the core module has an identity");
-    let interface = lm_bytecode::interface::Interface {
-        abi_version: lm_abi::ABI_VERSION,
-        compiler_abi_version: lm_bytecode::identity::COMPILER_ABI_VERSION,
-        bundle_digest: lm_abi::standard_bundle().digest(),
-        module_path: "core".to_string(),
-        semantic_hash: module_identity.semantic_hash,
-        exports: Vec::new(),
-        slots: Vec::new(),
-    };
-    let artifact_unit =
-        lm_bytecode::artifact::LinkUnit::new("core", module.clone(), interface, Vec::new())
-            .expect("the core artifact has an identity");
+    let artifact_unit = lm_compiler::core_link_unit().expect("the core artifact has an identity");
     let artifact = lm_bytecode::artifact::Artifact::new(artifact_unit, Vec::new())
         .expect("the core artifact graph is valid");
     let artifact_bytes =
@@ -2118,6 +2105,67 @@ fn bench_core_compilation() {
         module.classes.len(),
         module.funcs.len(),
         median(cached_load_runs).as_secs_f64() * 1e3
+    );
+}
+
+#[test]
+#[ignore]
+fn bench_program_artifact_linking() {
+    let source = lm_source::SourceFile::new("tiny.lm", "1\n");
+    let compiled = lm_compiler::compile_source("bench.main", &source, true)
+        .expect("the tiny program compiles");
+    let bytes = compiled.artifact;
+    let artifact = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let mut decode_runs = Vec::new();
+    let mut link_runs = Vec::new();
+    let mut cold_runs = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+        let elapsed = start.elapsed();
+        std::hint::black_box(decoded.id());
+        if round > 0 {
+            decode_runs.push(elapsed);
+        }
+
+        let start = Instant::now();
+        let linked =
+            lm_compiler::link_artifact(artifact.clone(), Some(&core)).expect("the artifact links");
+        let elapsed = start.elapsed();
+        std::hint::black_box(linked.module.funcs.len());
+        if round > 0 {
+            link_runs.push(elapsed);
+        }
+
+        let start = Instant::now();
+        let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+        let linked = lm_compiler::link_artifact(decoded, Some(&core)).expect("the artifact links");
+        let loaded = lm_vm::load(linked.module).expect("the artifact loads");
+        let elapsed = start.elapsed();
+        std::hint::black_box(loaded.dispatch_cells());
+        if round > 0 {
+            cold_runs.push(elapsed);
+        }
+    }
+    println!(
+        "LOOM\tprogram_artifact\t{}\t{}\t{}\t{}\tbytes_units_classes_functions",
+        bytes.len(),
+        artifact.units().len(),
+        artifact.root().module.classes.len(),
+        artifact.root().module.funcs.len()
+    );
+    println!(
+        "LOOM\tprogram_artifact_decode\t{:.3}\tms",
+        median(decode_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tprogram_artifact_link\t{:.3}\tms",
+        median(link_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tprogram_artifact_cold_load\t{:.3}\tms",
+        median(cold_runs).as_secs_f64() * 1e3
     );
 }
 

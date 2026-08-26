@@ -318,6 +318,37 @@ fn thin_and_fat_core_resolution_use_one_link_environment() {
 }
 
 #[test]
+fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
+    let units = two_module_program();
+    let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
+    for unit in &units {
+        env.bind_module(
+            unit.path.clone(),
+            unit.module.clone(),
+            unit.interface.clone(),
+        )
+        .expect("the unit binds");
+    }
+    let env = env.freeze();
+    let core = env.unit("core").expect("the core is bound").clone();
+    let thin = env.artifact("app.main").expect("the thin artifact builds");
+    let fat = env
+        .fat_artifact("app.main")
+        .expect("the fat artifact builds");
+    assert_eq!(thin.id(), fat.id());
+    assert_eq!(thin.units().len(), 2);
+    assert_eq!(fat.units().len(), 3);
+    assert!(thin.units().iter().all(|unit| unit.path != "core"));
+    assert!(fat.units().iter().any(|unit| unit.path == "core"));
+
+    let thin_linked =
+        lm_compiler::link_artifact(thin, Some(&core)).expect("the thin artifact links");
+    let fat_linked = lm_compiler::link_artifact(fat, None).expect("the fat artifact links");
+    assert_eq!(thin_linked.module, fat_linked.module);
+    assert_eq!(thin_linked.artifact_id, fat_linked.artifact_id);
+}
+
+#[test]
 fn a_forged_import_contract_rejects_before_publication() {
     let provider = compile_one(
         "app.shapes",

@@ -43,7 +43,7 @@ pub struct CompiledSource {
     pub root: CompiledModule,
     /// The closed module that the VM can load.
     pub program: Module,
-    /// The encoded form of `program`.
+    /// The program artifact that contains the selected source units.
     pub artifact: Vec<u8>,
     /// The bundled modules selected by the source imports.
     pub standard_modules: Vec<String>,

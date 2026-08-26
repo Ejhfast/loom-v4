@@ -134,10 +134,21 @@ A standard import grants no operation or policy authority.
 - `lm test` — build and run the package tests. The full harness is
   not implemented yet.
 
-The `.lma` artifact is the deployment and sandbox unit. It is the
-same container the runtime compiler produces and the linker
-consumes (specification 3.4-3.6). Every load path admits code
-through the one verifier.
+The `.lma` artifact is the deployment and sandbox unit.
+
+It uses the canonical `LMAR` Artifact container.
+
+A thin `.lma` embeds every non-core dependency unit.
+
+It pins the exact runtime core `ArtifactId`.
+
+A fat `.lma` embeds the complete dependency graph.
+
+Both forms use the same Artifact identity and linker.
+
+The runtime never reads the source build cache during resolution.
+
+Every load path admits code through the independent verifier.
 
 ## 7. Identity and caching
 

@@ -822,6 +822,8 @@ fn installed_slot_artifact() -> Vec<u8> {
             .late_class("Box"),
     )
     .expect("the installed fuzz artifact compiles");
+    let path = compiled.path;
+    let interface = compiled.interface;
     let mut module = compiled.module;
     let step = module
         .exports
@@ -833,7 +835,9 @@ fn installed_slot_artifact() -> Vec<u8> {
         .exports
         .iter()
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
-        .expect("the class is exported");
+        .expect("the class is exported")
+        .clone();
+    let constructor_name = module.funcs[class.ctor as usize].name.clone();
     assert!(module
         .slots
         .iter()
@@ -862,6 +866,40 @@ fn installed_slot_artifact() -> Vec<u8> {
             result: int,
         },
         initial: None,
+    });
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
+    link_env
+        .bind_module(path, module, interface)
+        .expect("the fuzz module binds");
+    let mut module = lm_compiler::link("fuzz-slots", &link_env.freeze())
+        .expect("the fuzz module links")
+        .module;
+    let step = module
+        .funcs
+        .iter()
+        .position(|function| function.name == "step")
+        .expect("the linked function exists") as u32;
+    let class = module
+        .classes
+        .iter()
+        .position(|candidate| candidate.name == "Box")
+        .expect("the linked class exists") as u32;
+    let constructor = module
+        .funcs
+        .iter()
+        .position(|function| function.name == constructor_name)
+        .expect("the linked constructor exists") as u32;
+    module.exports.push(lm_bytecode::Export {
+        kind: lm_bytecode::ExportKind::Function,
+        name: "step".to_string(),
+        def: step,
+        ctor: lm_bytecode::NO_CTOR,
+    });
+    module.exports.push(lm_bytecode::Export {
+        kind: lm_bytecode::ExportKind::Class,
+        name: "Box".to_string(),
+        def: class,
+        ctor: constructor,
     });
     lm_verify::verify_module(&module).expect("the installed fuzz artifact verifies");
     lm_bytecode::encode(&module)
@@ -903,8 +941,8 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   image = sys.vm.Vm()
   instance = case install_fuzz(image)
   in Ok(value) then value
-  in Err(_)
-    return -2
+  in Err(error)
+    panic(error.message)
   end
   function_binding = case instance.function_binding[(Int,), Int]("step")
   in Ok(value) then value
@@ -1002,6 +1040,7 @@ go()
         }
         // Step to one boundary after every slot target is installed.
         let mut best: Option<Vec<u8>> = None;
+        let mut last_event = String::new();
         for _ in 0..2_000 {
             let gate = world.next_gate();
             if let Ok(image) = world.capture_snapshot(gate, 0, false) {
@@ -1044,7 +1083,9 @@ go()
                     break;
                 }
             }
-            match world.step_root() {
+            let event = world.step_root();
+            last_event = format!("{event:?}");
+            match event {
                 RootEvent::Ran => {}
                 RootEvent::Waiting | RootEvent::Blocked => {
                     world.poll_blocked();
@@ -1052,7 +1093,9 @@ go()
                 _ => break,
             }
         }
-        best.expect("one boundary holds installed code and every slot target")
+        best.unwrap_or_else(|| {
+            panic!("no boundary holds every slot target; last event: {last_event}")
+        })
     };
     (loaded, container)
 }

@@ -1,10 +1,8 @@
 # Artifacts and Portable Snapshots
 
-Status: accepted design. Stages 0 through 2R are complete.
+Status: accepted design. Stages 0 through 3 are complete.
 
-Stage 3 has one shared linker and one core provider.
-
-Artifact-backed `.lma` files remain incomplete.
+Stage 4 dependency collection is in progress.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -752,17 +750,17 @@ Gate: semantic identity returns an error or a value for every decoded payload.
 
 ### Stage 3: shared linking and core dependency
 
-Progress: `lm-link` now owns exact artifact resolution and relocation.
+`lm-link` now owns exact artifact resolution and relocation.
 
-Progress: package builds and artifact loads now use one `LinkEnv`.
+Package builds and artifact loads now use one `LinkEnv`.
 
-Progress: the linker compares complete imported contracts before publication.
+The linker compares complete imported contracts before publication.
 
-Progress: the compiler builds core once and emits source-module core imports.
+The compiler builds core once and emits source-module core imports.
 
-Progress: local functions keep separate arena entries after relocation.
+Local functions keep separate arena entries after relocation.
 
-Remaining: replace the flattened `.lma` payload with an Artifact container.
+The `.lma` file now contains the canonical Artifact container.
 
 - Move the existing linker into the shared lower layer.
 - Keep one `LinkEnv` implementation.
@@ -784,11 +782,19 @@ Gate: the cold path does not use compression or a cache result.
 
 ### Stage 4: artifact-aware dependency collection
 
-- Collect required `LinkUnit` values first.
-- Collect required definitions second.
+- Start from the selected artifact root.
+- Collect the root module from its entry function.
+- Read retained imports as exact provider export requests.
+- Process provider modules in reverse dependency order.
+- Collect each provider from the union of its requests.
 - Use `lm-scc` for definition cycles.
 - Retain sealed families as complete units.
+- Rebuild each collected module interface from retained exports.
+- Rebuild provider `LinkUnit` values before importer values.
+- Recompute every dependency `ArtifactId` after collection.
 - Keep the exact core dependency unchanged.
+- Permit that core dependency without a retained core import.
+- Reject every other unused exact dependency.
 - Restore deep and cyclic collector tests.
 
 Gate: program `1` keeps one local entry and no local core class.
@@ -909,3 +915,36 @@ Artifact decoding recomputes semantic identity from decoded content.
 The decoder does not trust the stored unit identity.
 
 Stage 4 makes ordinary root units much smaller than the core unit.
+
+## 21. Stage 3 performance record
+
+The result uses the Stage 0 measurement settings.
+
+The current root unit still retains unused definitions before Stage 4.
+
+| Stage 3 measurement | Result |
+| --- | ---: |
+| Core LMBC bytes | 285,598 |
+| Core LMAR bytes | 454,904 |
+| Core compilation | 4.539 ms |
+| Core artifact decoding | 3.074 ms |
+| Core verification | 1.409 ms |
+| Core semantic identity | 2.516 ms |
+| Core loading | 2.043 ms |
+| Core cached loading | 0.162 ms |
+
+The tiny program uses source `1`.
+
+| Tiny program measurement | Result |
+| --- | ---: |
+| Raw artifact bytes | 221,295 |
+| Embedded units | 1 |
+| Root classes | 299 |
+| Root functions | 896 |
+| Artifact decoding | 0.615 ms |
+| Artifact linking | 11.691 ms |
+| Cold decode, link, and load | 13.688 ms |
+
+These results are the Stage 4 baseline.
+
+Stage 4 must reduce raw bytes and cold load time without compression or cached verification.

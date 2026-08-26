@@ -39,9 +39,7 @@ pub struct BuildReport {
     pub program: Option<PathBuf>,
     pub program_semantic: Option<[u8; 32]>,
     pub program_container: Option<[u8; 32]>,
-    /// True when the stage-2 cache answered instead of the linker.
-    /// A hit skips the link run and the verification of the merged
-    /// program.
+    /// True when the stage-2 cache supplied the artifact bytes.
     pub program_cached: bool,
 }
 
@@ -192,16 +190,12 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     }
     let main_path = format!("{}.main", workspace.root);
     // Stage 2: the module set fixes the merged program, so an
-    // unchanged module set skips the link run. A damaged entry is a
-    // miss.
+    // unchanged module set reuses the artifact bytes. A damaged entry
+    // is a miss.
     //
-    // A hit does not skip the verification of the merged program. The
-    // entry is a file, so a writer of the build directory decides what
-    // this build emits. The verifier therefore runs on every hit, and
-    // the two reported hashes come from the bytes, never from the
-    // entry. A failing entry falls through to a fresh link, which
-    // overwrites it, so a damaged or planted entry costs one link and
-    // never emits an unverified program.
+    // A hit resolves and verifies every unit. The two reported hashes
+    // come from the artifact bytes. A failing entry causes a fresh
+    // artifact build.
     let key = program_key(&main_path, &contents);
     let checked = dir
         .read_program(&key)
@@ -248,20 +242,15 @@ pub fn workspace_of(start: &Path) -> Result<Workspace, String> {
 /// Check one stage-2 entry and rebuild its two hashes from its bytes.
 ///
 /// A stage-2 entry is a file in the build directory, so it carries no
-/// trust. The check decodes the artifact, proves it holds no import
-/// slot, runs the whole verifier over it, and computes the two hashes
-/// from the bytes. `None` marks an entry the build must not emit, and
-/// the caller then links again.
+/// trust. The check resolves and verifies every unit. It computes both
+/// hashes from the bytes. `None` marks an entry the build cannot emit.
 fn verified_program_entry(artifact: &[u8]) -> Option<ProgramEntry> {
-    let module = lm_bytecode::decode(artifact).ok()?;
-    if !module.imports.is_empty() {
-        return None;
-    }
-    lm_verify::verify_module(&module).ok()?;
-    let identity = lm_bytecode::identity::module_identity(&module).ok()?;
+    let decoded = lm_bytecode::artifact::decode(artifact).ok()?;
+    let core = crate::core_link_unit().ok()?;
+    let linked = crate::link_artifact(decoded, Some(&core)).ok()?;
     Some(ProgramEntry {
         artifact: artifact.to_vec(),
-        semantic_hash: identity.semantic_hash,
+        semantic_hash: linked.semantic_hash,
         container_hash: lm_bytecode::identity::container_hash(artifact),
     })
 }

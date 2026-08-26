@@ -1,7 +1,7 @@
 //! Week-10 native collection and iteration behavior.
 
 use lm_bytecode::{BcInterfaceUse, BcType, ExtendedInstr, Instr};
-use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
+use lm_compiler::{compile_module, link, CompileEnv};
 use lm_heap::{Object, StructuralEpoch};
 use lm_source::SourceFile;
 use lm_testkit::{compile_text, run_allowed};
@@ -118,7 +118,7 @@ fn interface_contracts_cross_module_boundaries() {
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(
@@ -173,7 +173,7 @@ fn interface_inheritance_crosses_module_boundaries() {
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(
@@ -335,7 +335,7 @@ describe(catalog.Shelf())
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(
@@ -1519,7 +1519,7 @@ table.at(keys.Key(7).freeze())
         true,
     )
     .expect("the program compiles");
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
         link_env
             .bind_module(

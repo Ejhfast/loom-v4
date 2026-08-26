@@ -162,7 +162,7 @@ fn perform_group_pass_smoke() {
 /// load.
 #[test]
 fn build_and_link_smoke() {
-    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
+    use lm_compiler::{compile_module, link, CompileEnv};
     use lm_source::SourceFile;
     let library =
         "class Cell\n  value: Int = 0\n  def get(self): Int\n    self.value\n  end\nend\n\
@@ -188,7 +188,7 @@ fn build_and_link_smoke() {
     .expect("compiles");
     let compiled = start.elapsed();
     let start = Instant::now();
-    let mut link_env = LinkEnv::new();
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in [&lib, &main] {
         link_env
             .bind_module(
@@ -200,10 +200,11 @@ fn build_and_link_smoke() {
     }
     let linked = link("app.main", &link_env.freeze()).expect("links");
     let linked_time = start.elapsed();
+    let program_bytes = lm_bytecode::encode(&linked.module);
     let start = Instant::now();
     let mut cache = lm_vm::VerifiedCache::new();
     for _ in 0..20 {
-        lm_vm::load_bytes_cached(&linked.artifact, &mut cache).expect("loads");
+        lm_vm::load_bytes_cached(&program_bytes, &mut cache).expect("loads");
     }
     let loads = start.elapsed();
     assert_eq!(cache.verifications, 1);

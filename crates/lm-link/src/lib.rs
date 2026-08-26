@@ -234,6 +234,20 @@ impl FrozenLinkEnv {
     pub fn paths(&self) -> Vec<&str> {
         self.units.keys().map(String::as_str).collect()
     }
+
+    /// Build a thin artifact for one root module.
+    ///
+    /// The artifact embeds every reachable unit except standard core.
+    pub fn artifact(&self, root: &str) -> Result<Artifact, LinkError> {
+        let order = link_order(root, self)?;
+        artifact_from_order(root, self, &order, false)
+    }
+
+    /// Build a fat artifact for one root module.
+    pub fn fat_artifact(&self, root: &str) -> Result<Artifact, LinkError> {
+        let order = link_order(root, self)?;
+        artifact_from_order(root, self, &order, true)
+    }
 }
 
 /// Resolve one thin or fat artifact through the shared link environment.
@@ -360,10 +374,11 @@ fn fail(message: impl Into<String>) -> LinkError {
     LinkError(message.into())
 }
 
-/// One linked program: the merged module and its container bytes.
+/// One linked program and its deployable artifact bytes.
 #[derive(Debug, Clone)]
 pub struct LinkedProgram {
     pub module: Module,
+    pub artifact_id: ArtifactId,
     pub artifact: Vec<u8>,
     pub semantic_hash: [u8; 32],
     pub container_hash: [u8; 32],
@@ -601,6 +616,35 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
     link_with_bundle(root, env, &bundle)
 }
 
+/// Resolve and link one decoded artifact.
+pub fn link_artifact(
+    artifact: Artifact,
+    runtime_core: Option<&LinkUnit>,
+) -> Result<LinkedProgram, LinkError> {
+    let bundle = lm_abi::standard_bundle();
+    link_artifact_with_bundle(artifact, runtime_core, &bundle)
+}
+
+/// Resolve and link one decoded artifact under one ABI bundle.
+pub fn link_artifact_with_bundle(
+    artifact: Artifact,
+    runtime_core: Option<&LinkUnit>,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<LinkedProgram, LinkError> {
+    let root_path = artifact.root().path.clone();
+    let (root, env) = resolve_artifact(artifact, runtime_core)
+        .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
+    let unit = env
+        .unit(&root_path)
+        .ok_or_else(|| fail(format!("the artifact root `{root_path}` is not bound")))?;
+    if unit.id() != root {
+        return Err(fail(format!(
+            "the artifact root `{root_path}` has another identity"
+        )));
+    }
+    link_with_bundle(&root_path, &env, bundle)
+}
+
 /// Link one program against an immutable ABI bundle.
 pub fn link_with_bundle(
     root: &str,
@@ -655,17 +699,46 @@ pub fn link_with_bundle(
     // The merged program meets the whole verifier before it runs.
     lm_verify::verify_module_with_bundle(&module, bundle)
         .map_err(|e| fail(format!("the linked program does not verify: {e}")))?;
-    let artifact = lm_bytecode::encode_with_bundle(&module, bundle);
+    let package = artifact_from_order(root, env, &order, false)?;
+    let artifact_id = package.id();
+    let artifact = lm_bytecode::artifact::encode_with_bundle(&package, bundle)
+        .map_err(|error| fail(format!("the artifact does not encode: {error}")))?;
     let container_hash = lm_bytecode::identity::container_hash(&artifact);
     let semantic_hash = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
         .map_err(|e| fail(format!("the linked program does not hash: {e}")))?
         .semantic_hash;
     Ok(LinkedProgram {
         module,
+        artifact_id,
         artifact,
         semantic_hash,
         container_hash,
     })
+}
+
+fn artifact_from_order(
+    root: &str,
+    env: &FrozenLinkEnv,
+    order: &[String],
+    embed_core: bool,
+) -> Result<Artifact, LinkError> {
+    let root_unit = env
+        .unit(root)
+        .cloned()
+        .ok_or_else(|| fail(format!("the module `{root}` is not bound")))?;
+    let mut embedded = Vec::new();
+    for path in order {
+        if path == root || (!embed_core && path == CORE_MODULE_PATH) {
+            continue;
+        }
+        embedded.push(
+            env.unit(path)
+                .cloned()
+                .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?,
+        );
+    }
+    Artifact::new(root_unit, embedded)
+        .map_err(|error| fail(format!("the artifact graph is invalid: {error}")))
 }
 
 /// The link order: every imported module before its importer. The

@@ -347,10 +347,14 @@ fn cfg_dump_shows_signatures_blocks_and_jumps() {
     )
     .unwrap();
     let dump = lm_hir::dump_cfg(&module);
-    // The module functions take the first indices. The entry follows
-    // every class method, so the test reads its index from the module.
+    // Core functions precede local functions. Read the entry index
+    // from the module and match the local function by name.
     let entry = module.entry;
-    assert!(dump.contains("fn0 half(Int) -> Int"), "{dump}");
+    assert!(
+        dump.lines()
+            .any(|line| line.starts_with("fn") && line.ends_with(" half(Int) -> Int")),
+        "{dump}"
+    );
     assert!(
         dump.contains(&format!("fn{entry} <entry>() -> Int")),
         "{dump}"

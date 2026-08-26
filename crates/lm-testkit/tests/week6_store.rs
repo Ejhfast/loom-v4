@@ -1,7 +1,7 @@
 //! Stage 2 and stage 3 of the build store.
 //!
-//! Stage 2 keys the linked artifact on the module content hashes, so
-//! a rebuild with no source change never links again. Stage 3 keys
+//! Stage 2 keys the program artifact on the module content hashes.
+//! A rebuild with no source change reuses its bytes. Stage 3 keys
 //! the verifier verdict on the verified-code key, so a second load of
 //! one artifact never meets the verifier again.
 //!
@@ -170,7 +170,7 @@ fn load_artifact_in(
     verifications: &mut u64,
 ) -> Result<lm_vm::LoadedModule, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
-    let module = lm_bytecode::decode(&bytes).map_err(|e| format!("cannot decode: {e}"))?;
+    let module = lm_testkit::link_artifact_bytes(&bytes)?.module;
     let key = lm_vm::verified_key(&module);
     load_through_store(
         store,
@@ -202,16 +202,22 @@ fn run_loaded(loaded: &lm_vm::LoadedModule) -> String {
 // Stage 2: the linked-artifact cache.
 // ---------------------------------------------------------------
 
-/// A second build of one package hits stage 2 and never links again.
+/// A second build of one package reuses the stage-2 artifact bytes.
 #[test]
 fn a_second_build_hits_the_program_cache() {
     let tree = TempTree::new("stage2-hit");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
-    assert!(!first.program_cached, "the first build must link");
+    assert!(
+        !first.program_cached,
+        "the first build reused artifact bytes"
+    );
     assert_eq!(program_entries(&tree).len(), 1, "one stage-2 entry");
     let second = tree.build("app").expect("builds");
-    assert!(second.program_cached, "the second build linked again");
+    assert!(
+        second.program_cached,
+        "the second build missed the artifact bytes"
+    );
     assert_eq!(second.compiled(), 0, "the second build compiled a module");
     // A hit still reports both program hashes and writes the program.
     assert_eq!(first.program_semantic, second.program_semantic);
@@ -541,8 +547,12 @@ fn a_wrong_key_never_admits_the_module() {
         .program
         .expect("a program");
 
-    let solo_module = lm_bytecode::decode(&std::fs::read(&solo).unwrap()).expect("decodes");
-    let other_module = lm_bytecode::decode(&std::fs::read(&other).unwrap()).expect("decodes");
+    let solo_module = lm_testkit::link_artifact_bytes(&std::fs::read(&solo).unwrap())
+        .expect("links")
+        .module;
+    let other_module = lm_testkit::link_artifact_bytes(&std::fs::read(&other).unwrap())
+        .expect("links")
+        .module;
     let solo_key = lm_vm::verified_key(&solo_module);
     let other_key = lm_vm::verified_key(&other_module);
     assert_ne!(solo_key, other_key, "the two programs share a key");

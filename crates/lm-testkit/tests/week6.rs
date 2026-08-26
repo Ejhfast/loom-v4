@@ -115,7 +115,8 @@ fn workspace(tree: &TempTree) {
 /// grants. Returns the printed output.
 fn run_artifact(path: &Path, allow: &[&str]) -> String {
     let bytes = std::fs::read(path).expect("the artifact reads");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact loads");
+    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the artifact links");
+    let loaded = lm_vm::load(linked.module).expect("the artifact loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
     for grant in allow {
@@ -242,16 +243,29 @@ fn a_stale_caller_fails_to_compile() {
     assert!(error.contains("describe"), "{error}");
 }
 
-/// The linked program is a closed artifact: it carries no import slot
-/// and runs with no source and no dependency present.
+/// The program artifact embeds its package units and pins the runtime core.
 #[test]
-fn the_program_artifact_is_closed() {
+fn the_program_artifact_is_thin_and_portable() {
     let tree = TempTree::new("closed");
     workspace(&tree);
     let report = tree.build("app").expect("builds");
     let bytes = std::fs::read(report.program.clone().unwrap()).unwrap();
-    let module = lm_bytecode::decode(&bytes).expect("decodes");
-    assert!(module.imports.is_empty(), "the program has import slots");
+    let artifact = lm_bytecode::artifact::decode(&bytes).expect("decodes");
+    assert!(
+        artifact
+            .units()
+            .iter()
+            .all(|unit| unit.module_path() != "core"),
+        "the thin artifact embeds core"
+    );
+    assert!(
+        artifact.units().iter().any(|unit| {
+            unit.dependencies()
+                .iter()
+                .any(|dependency| dependency.module_path() == "core")
+        }),
+        "the thin artifact does not pin core"
+    );
     // Copy the artifact away from the sources and run it there.
     let alone = TempTree::new("alone");
     alone.write("app.lma", "");
@@ -513,11 +527,14 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
     let report = tree.build("app").expect("builds");
     let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n");
-    // The main module still pins the transitive class, because its
-    // own import of `report` names it.
+    // The main unit keeps its exact transitive dependency graph.
     let bytes = std::fs::read(report.program.unwrap()).unwrap();
-    let module = lm_bytecode::decode(&bytes).expect("decodes");
-    assert!(module.imports.is_empty());
+    let artifact = lm_bytecode::artifact::decode(&bytes).expect("decodes");
+    assert!(artifact
+        .units()
+        .iter()
+        .any(|unit| unit.path == "mathlib.matrix"));
+    lm_testkit::link_artifact_bytes(&bytes).expect("the artifact links");
 }
 
 /// An exported effect-polymorphic function keeps its effect
@@ -671,7 +688,8 @@ fn an_import_grants_no_authority() {
     );
     let report = tree.build("prog").expect("builds");
     let bytes = std::fs::read(report.program.clone().unwrap()).unwrap();
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
+    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("links");
+    let loaded = lm_vm::load(linked.module).expect("loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
     let outcome = world.run_root();
@@ -697,7 +715,8 @@ fn a_package_links_a_requested_standard_module() {
     let report = tree.build("app").expect("the package builds");
     assert_eq!(report.modules.len(), 1);
     let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
     assert!(loaded.module().imports.is_empty());
     let mut world = World::new(
         &loaded,
@@ -738,7 +757,8 @@ fn a_standard_type_crosses_a_package_interface() {
     );
     let report = tree.build("app").expect("the package graph builds");
     let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
     let mut world = World::new(
         &loaded,
         VmConfig::default(),
@@ -961,6 +981,9 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
     assert!(lm_vm::load(program.module.clone()).is_err());
 
     let mut link_env = LinkEnv::new();
+    link_env
+        .bind(lm_compiler::core_link_unit().expect("the core builds"))
+        .expect("the core binds");
     for unit in [&library, &program] {
         link_env
             .bind_module(
@@ -980,7 +1003,7 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
         .entry()
         .expect(&lm_bytecode::BcType::Str, &[])
         .is_err());
-    let loaded = lm_vm::load_bytes(&linked.artifact).expect("the program loads");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
     let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(42)");
@@ -997,6 +1020,9 @@ fn a_stale_pin_fails_to_link() {
     let _ = report;
     // Rebuild the units from the cache files and move one pin.
     let mut link_env = LinkEnv::new();
+    link_env
+        .bind(lm_compiler::core_link_unit().expect("the core builds"))
+        .expect("the core binds");
     let mut units = Vec::new();
     let mut seen = Vec::new();
     for (path, file) in [
@@ -1075,6 +1101,9 @@ fn the_linker_rejects_a_crafted_export_table() {
     ];
     for (needle, damage) in cases {
         let mut link_env = LinkEnv::new();
+        link_env
+            .bind(lm_compiler::core_link_unit().expect("the core builds"))
+            .expect("the core binds");
         for (idx, unit) in units.iter().enumerate() {
             let mut module = unit.module.clone();
             // The first two cases damage the provider; the third

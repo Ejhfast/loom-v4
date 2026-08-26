@@ -73,7 +73,11 @@ fn disasm_prints_signatures_blocks_and_jump_targets() {
     let out = lm(&["disasm", "examples/01-basics/factorial.lm"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("fn0 factorial(Int) -> Int"), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("fn") && line.ends_with(" factorial(Int) -> Int")),
+        "{text}"
+    );
     // The entry follows every class method, so the test reads its
     // index from the dump instead of pinning a constant.
     let index = text
