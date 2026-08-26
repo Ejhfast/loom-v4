@@ -1,6 +1,6 @@
 # Artifact Packages and Portable Snapshots
 
-Status: accepted design. Stages 0 through 2 form the first implementation unit.
+Status: accepted design. Stages 0 through 2 are implemented.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -619,3 +619,36 @@ These items remain outside version 1.
 - Stored verifier verdicts for the new package path.
 
 None of these items changes the version 1 identity model.
+
+## 20. Stage 2 performance record
+
+The result uses revision `e1c73d4` and the Stage 0 measurement settings.
+
+Existing compiler and execution paths do not consume the new package yet.
+
+| Existing path | Parent | Stage 2 | Change |
+| --- | ---: | ---: | ---: |
+| Core artifact bytes | 274,657 | 274,657 | 0.0% |
+| Core compilation | 3.780 ms | 3.802 ms | +0.6% |
+| Core decoding | 0.410 ms | 0.399 ms | -2.7% |
+| Core verification | 1.401 ms | 1.390 ms | -0.8% |
+| Core semantic identity | 2.523 ms | 2.514 ms | -0.4% |
+| Core loading | 2.004 ms | 2.009 ms | +0.2% |
+| Warm workspace suite | 49.92 s | 49.56 s | -0.7% |
+
+These differences stay inside normal process noise.
+
+The new package path has these direct measurements.
+
+| Package measurement | Result |
+| --- | ---: |
+| One-record core package | 274,771 bytes |
+| Package wrapper | 114 bytes |
+| Package encoding | 0.128 ms |
+| Package decoding and identity | 2.786 ms |
+
+Package decoding recomputes semantic identity from decoded content.
+
+The decoder does not trust the stored record identity.
+
+Stage 5 makes ordinary root records much smaller than the core record.
