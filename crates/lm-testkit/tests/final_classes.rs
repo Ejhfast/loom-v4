@@ -80,7 +80,8 @@ fn a_dependent_checker_reads_final_from_the_interface() {
 
 #[test]
 fn the_verifier_rejects_a_final_parent() {
-    let source = "class Base\nend\nclass Child < Base\nend\n1\n";
+    let source = "class Base\n  def value(self): Int\n    1\n  end\nend\n\
+                  class Child < Base\nend\nChild().value()\n";
     let mut module = compile_text("final.lm", source).expect("the program compiles");
     let base = module
         .classes

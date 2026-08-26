@@ -173,6 +173,26 @@ fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::Link
     link("app.main", &env.freeze()).map_err(|e| e.0)
 }
 
+fn link_selective_provider(unused_result: &str) -> lm_compiler::LinkedProgram {
+    let provider = compile_one(
+        "app.shapes",
+        &format!(
+            "def used(): Int\n  7\nend\n\
+             def unused_left(n: Int): Int\n  if n == 0\n    {unused_result}\n  else\n    unused_right(n - 1)\n  end\nend\n\
+             def unused_right(n: Int): Int\n  if n == 0\n    {unused_result}\n  else\n    unused_left(n - 1)\n  end\nend\n"
+        ),
+        &[],
+        false,
+    );
+    let main = compile_one(
+        "app.main",
+        "use shapes.used\nused()\n",
+        std::slice::from_ref(&provider.interface),
+        true,
+    );
+    link_units(&[provider, main]).expect("the selective program links")
+}
+
 #[test]
 fn link_units_pin_exact_dependency_identities() {
     let units = two_module_program();
@@ -306,10 +326,10 @@ fn thin_and_fat_core_resolution_use_one_link_environment() {
     assert_eq!(fat_root, root.id());
     assert_eq!(thin_env.paths(), fat_env.paths());
 
-    let mut other_module = core.module.clone();
+    let mut other_module = core.module().clone();
     let entry = other_module.entry as usize;
     other_module.funcs[entry].blocks[0][0] = lm_bytecode::Instr::ConstInt(99);
-    let other_core = LinkUnit::new("core", other_module, core.interface.clone(), Vec::new())
+    let other_core = LinkUnit::new("core", other_module, core.interface().clone(), Vec::new())
         .expect("the other core unit is valid");
     let thin = Artifact::new(root, Vec::new()).expect("the thin artifact is valid");
     let error = lm_compiler::resolve_artifact(thin, Some(&other_core))
@@ -338,14 +358,67 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
     assert_eq!(thin.id(), fat.id());
     assert_eq!(thin.units().len(), 2);
     assert_eq!(fat.units().len(), 3);
-    assert!(thin.units().iter().all(|unit| unit.path != "core"));
-    assert!(fat.units().iter().any(|unit| unit.path == "core"));
+    assert!(thin.units().iter().all(|unit| unit.module_path() != "core"));
+    assert!(fat.units().iter().any(|unit| unit.module_path() == "core"));
 
     let thin_linked =
         lm_compiler::link_artifact(thin, Some(&core)).expect("the thin artifact links");
     let fat_linked = lm_compiler::link_artifact(fat, None).expect("the fat artifact links");
     assert_eq!(thin_linked.module, fat_linked.module);
     assert_eq!(thin_linked.artifact_id, fat_linked.artifact_id);
+}
+
+#[test]
+fn collection_keeps_one_import_and_removes_an_unused_cycle() {
+    let first = link_selective_provider("0");
+    let second = link_selective_provider("1");
+    assert_eq!(first.artifact_id, second.artifact_id);
+
+    let artifact = lm_bytecode::artifact::decode(&first.artifact).expect("the artifact decodes");
+    assert_eq!(artifact.units().len(), 2);
+    let provider = artifact
+        .units()
+        .iter()
+        .find(|unit| unit.module_path() == "app.shapes")
+        .expect("the artifact contains the provider");
+    let exports: Vec<&str> = provider
+        .interface()
+        .exports
+        .iter()
+        .map(|export| export.name.as_str())
+        .collect();
+    assert_eq!(exports, vec!["used"]);
+    assert!(provider
+        .module()
+        .funcs
+        .iter()
+        .any(|func| func.name == "used"));
+    assert!(provider
+        .module()
+        .funcs
+        .iter()
+        .all(|func| !func.name.starts_with("unused_")));
+    assert!(provider.module().classes.is_empty());
+
+    let root = artifact.root();
+    let provider_pin = root
+        .dependencies()
+        .iter()
+        .find(|dependency| dependency.module_path() == "app.shapes")
+        .expect("the root pins the provider");
+    assert_eq!(provider_pin.artifact(), provider.id());
+    assert!(provider
+        .dependencies()
+        .iter()
+        .any(|dependency| dependency.module_path() == "core"));
+
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let linked =
+        lm_compiler::link_artifact(artifact, Some(&core)).expect("the collected artifact links");
+    let loaded = lm_vm::load(linked.module).expect("the collected program loads");
+    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(7)");
 }
 
 #[test]
@@ -515,6 +588,17 @@ fn rekey_class(unit: &mut lm_compiler::CompiledModule, from: &str, to: &str, nam
             binding.key = format!("{to}.{rest}");
         }
     }
+    let identity = module_identity(&unit.module).expect("the changed module has an identity");
+    unit.interface.semantic_hash = identity.semantic_hash;
+    for (entry, export) in unit.interface.exports.iter_mut().zip(&unit.module.exports) {
+        entry.def_hash = if export.kind.is_class() {
+            identity.class_hashes[export.def as usize]
+        } else if export.kind.is_interface() {
+            identity.interface_hashes[export.def as usize]
+        } else {
+            identity.func_hashes[export.def as usize]
+        };
+    }
 }
 
 /// Two providers of one class key. The second module declares a class
@@ -667,7 +751,7 @@ fn two_equal_bodies_keep_two_code_objects_and_two_bindings() {
     let main = compile_one(
         "app.main",
         "use shapes\ndef increment(n: Int): Int\n  n + 1\nend\n\
-         shapes.bump(1) + increment(2)\n",
+         f = increment\nshapes.bump(1) + f(2)\n",
         std::slice::from_ref(&shapes.interface),
         true,
     );
@@ -726,10 +810,11 @@ fn every_named_function_carries_one_binding() {
                   def twice(n: Int): Int\n  n * 2\nend\n\
                   add_one = { |x: Int|: Int x + 1 }\n\
                   c = Counter(2)\ntwice(c.add(1)) + add_one(1)\n";
-    let module = compile_text("t.lm", source).expect("compiles");
+    let module = raw_module(source);
     let bound: Vec<u32> = module.bindings.iter().map(|b| b.func).collect();
+    let imported = module.extern_funcs();
     for (idx, func) in module.funcs.iter().enumerate() {
-        if bound.contains(&(idx as u32)) {
+        if imported[idx] || bound.contains(&(idx as u32)) {
             continue;
         }
         assert!(
@@ -739,16 +824,19 @@ fn every_named_function_carries_one_binding() {
         );
     }
     let keys: Vec<&str> = module.bindings.iter().map(|b| b.key.as_str()).collect();
-    for key in [
-        "twice",
-        "Counter.add",
-        "Counter.init",
-        "Counter.<new>",
-        "Shape.<new>",
-        "Shape.Dot.<new>",
-        "Shape.Line.<new>",
+    for suffix in [
+        ".twice",
+        ".Counter.add",
+        ".Counter.init",
+        ".Counter.<new>",
+        ".Shape.<new>",
+        ".Shape.Dot.<new>",
+        ".Shape.Line.<new>",
     ] {
-        assert!(keys.contains(&key), "the binding `{key}` is missing");
+        assert!(
+            keys.iter().any(|key| key.ends_with(suffix)),
+            "a binding with suffix `{suffix}` is missing"
+        );
     }
 }
 
@@ -1553,34 +1641,21 @@ fn an_impossible_binding_count_rejects_before_the_reserve() {
 #[test]
 fn a_selector_or_published_binding_rename_moves_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
-    let foo = compile_text(
-        "t.lm",
-        "class C\n  def foo(self): Int\n    1\n  end\nend\nC().foo()\n",
-    )
-    .unwrap();
-    let bar = compile_text(
-        "t.lm",
-        "class C\n  def bar(self): Int\n    1\n  end\nend\nC().bar()\n",
-    )
-    .unwrap();
+    let foo = raw_module("class C\n  def foo(self): Int\n    1\n  end\nend\nC().foo()\n");
+    let bar = raw_module("class C\n  def bar(self): Int\n    1\n  end\nend\nC().bar()\n");
     assert_ne!(
         verification_hash(&foo),
         verification_hash(&bar),
         "a selector rename must move the verification hash"
     );
-    let renamed = compile_text(
-        "t.lm",
-        "class D\n  def foo(self): Int\n    1\n  end\nend\nD().foo()\n",
-    )
-    .unwrap();
+    let renamed = raw_module("class D\n  def foo(self): Int\n    1\n  end\nend\nD().foo()\n");
     assert_ne!(
         verification_hash(&foo),
         verification_hash(&renamed),
         "a class binding rename must move the verification hash"
     );
-    let first = compile_text("t.lm", "def first(n: Int): Int\n  n + 1\nend\nfirst(1)\n").unwrap();
-    let second =
-        compile_text("t.lm", "def second(n: Int): Int\n  n + 1\nend\nsecond(1)\n").unwrap();
+    let first = raw_module("def first(n: Int): Int\n  n + 1\nend\nfirst(1)\n");
+    let second = raw_module("def second(n: Int): Int\n  n + 1\nend\nsecond(1)\n");
     assert_ne!(
         verification_hash(&first),
         verification_hash(&second),

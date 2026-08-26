@@ -831,7 +831,14 @@ impl World {
                     return;
                 }
             },
-            None => Vec::new(),
+            None => match self.resolve_ambient_code_imports(code.bytes.as_slice()) {
+                Ok(imports) => imports,
+                Err(message) => {
+                    let value = self.code_error(vm, &message);
+                    self.finish_code_result(vm, op, value);
+                    return;
+                }
+            },
         };
         match self.install_artifact(key, code.bytes, code.interface, &imports) {
             Ok(instance) => {
@@ -1179,6 +1186,10 @@ impl World {
             .try_reserve_exact(module.imports.len())
             .map_err(|_| "the import table is too large".to_string())?;
         for import in &module.imports {
+            if import.module == lm_bytecode::artifact::CORE_MODULE_PATH {
+                resolved.push(self.resolve_ambient_core_import(&module, import)?);
+                continue;
+            }
             let provider = providers
                 .iter()
                 .find(|provider| provider.interface.module_path == import.module)
@@ -1186,6 +1197,100 @@ impl World {
             resolved.push(provider.resolve(import)?);
         }
         Ok(resolved)
+    }
+
+    fn resolve_ambient_code_imports(
+        &self,
+        artifact: &[u8],
+    ) -> Result<Vec<lm_bytecode::append::ResolvedImport>, String> {
+        let module = lm_bytecode::decode_with_bundle(artifact, self.loaded.bundle())
+            .map_err(|error| format!("the artifact did not decode: {error}"))?;
+        let mut resolved = Vec::new();
+        resolved
+            .try_reserve_exact(module.imports.len())
+            .map_err(|_| "the import table is too large".to_string())?;
+        for import in &module.imports {
+            resolved.push(self.resolve_ambient_core_import(&module, import)?);
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_ambient_core_import(
+        &self,
+        module: &lm_bytecode::Module,
+        import: &lm_bytecode::Import,
+    ) -> Result<lm_bytecode::append::ResolvedImport, String> {
+        if import.module != lm_bytecode::artifact::CORE_MODULE_PATH {
+            return Err(format!(
+                "the module `{}` needs an explicit link provider",
+                import.module
+            ));
+        }
+        if import.kind == lm_bytecode::ImportKind::Class {
+            let local = module
+                .classes
+                .get(import.def as usize)
+                .ok_or_else(|| "a core class import has no declaration".to_string())?;
+            let expected = lm_bytecode::qualified_key(&import.module, &import.name);
+            if local.key != expected {
+                return Err(format!(
+                    "the core class import `{}` has another nominal key",
+                    import.name
+                ));
+            }
+            let target = self
+                .module
+                .classes
+                .iter()
+                .position(|class| class.key == expected)
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or_else(|| format!("the runtime core has no class `{}`", import.name))?;
+            return Ok(lm_bytecode::append::ResolvedImport::Class(target));
+        }
+
+        let binding = match import.kind {
+            lm_bytecode::ImportKind::Ctor => format!(
+                "{}.<new>",
+                lm_bytecode::qualified_key(&import.module, &import.name)
+            ),
+            lm_bytecode::ImportKind::Method | lm_bytecode::ImportKind::Func => {
+                lm_bytecode::qualified_key(&import.module, &import.name)
+            }
+            lm_bytecode::ImportKind::Class => unreachable!(),
+        };
+        let target = self
+            .module
+            .bindings
+            .iter()
+            .find(|candidate| candidate.key == binding)
+            .map(|candidate| candidate.func);
+        let target = match target {
+            Some(target) => target,
+            None => {
+                let local = module
+                    .funcs
+                    .get(import.def as usize)
+                    .ok_or_else(|| "a core function import has no declaration".to_string())?;
+                let mut candidates = self
+                    .module
+                    .funcs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| candidate.name == local.name);
+                let target = candidates
+                    .next()
+                    .and_then(|(index, _)| u32::try_from(index).ok())
+                    .ok_or_else(|| format!("the runtime core has no function `{}`", import.name))?;
+                if candidates.next().is_some() {
+                    return Err(format!(
+                        "the runtime core function `{}` is ambiguous",
+                        import.name
+                    ));
+                }
+                target
+            }
+        };
+        Ok(lm_bytecode::append::ResolvedImport::Function(target))
     }
 
     fn code_entry(&mut self, vm: VmId, op: u32, value: Value) {

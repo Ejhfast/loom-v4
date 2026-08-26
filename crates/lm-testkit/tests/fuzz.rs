@@ -810,7 +810,7 @@ fn installed_slot_artifact() -> Vec<u8> {
     use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
     let source = lm_source::SourceFile::new(
         "fuzz-slots.lm",
-        "final class Box\nend\ndef step(value: Int): Int\n  value + 1\nend\n0\n",
+        "final class Box\nend\ndef step(value: Int): Int\n  value + 1\nend\nBox()\nstep(0)\n",
     );
     let compiled = compile_module_with_options(
         "fuzz-slots",
@@ -824,7 +824,7 @@ fn installed_slot_artifact() -> Vec<u8> {
     .expect("the installed fuzz artifact compiles");
     let path = compiled.path;
     let interface = compiled.interface;
-    let mut module = compiled.module;
+    let module = compiled.module;
     let step = module
         .exports
         .iter()
@@ -847,6 +847,13 @@ fn installed_slot_artifact() -> Vec<u8> {
             class: class.def,
             constructor: class.ctor,
         })));
+    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
+    link_env
+        .bind_module(path, module, interface)
+        .expect("the fuzz module binds");
+    let mut module = lm_compiler::link("fuzz-slots", &link_env.freeze())
+        .expect("the fuzz module links")
+        .module;
     let int = module
         .types
         .iter()
@@ -867,13 +874,6 @@ fn installed_slot_artifact() -> Vec<u8> {
         },
         initial: None,
     });
-    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
-    link_env
-        .bind_module(path, module, interface)
-        .expect("the fuzz module binds");
-    let mut module = lm_compiler::link("fuzz-slots", &link_env.freeze())
-        .expect("the fuzz module links")
-        .module;
     let step = module
         .funcs
         .iter()

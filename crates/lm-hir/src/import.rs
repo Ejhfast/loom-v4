@@ -56,9 +56,9 @@ impl ImportEnv {
         ImportEnv::default()
     }
 
-    /// True when the environment carries no module at all.
-    pub fn is_empty(&self) -> bool {
-        self.roots.is_empty()
+    /// True when the environment carries no package dependency root.
+    pub fn has_no_package_roots(&self) -> bool {
+        self.roots.keys().all(|root| root == "std")
     }
 
     /// The interface of one module path.

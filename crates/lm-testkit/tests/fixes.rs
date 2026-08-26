@@ -215,7 +215,7 @@ fn out_of_range_local_type_entry_is_rejected() {
 
 #[test]
 fn local_type_table_shorter_than_parameters_is_rejected() {
-    let source = "def double(n: Int): Int\n  n * 2\nend\ndouble(4)\n";
+    let source = "def double(n: Int): Int\n  if n == 0\n    0\n  else\n    double(n - 1) + 2\n  end\nend\ndouble(4)\n";
     let mut with_params = compile_text("fixes.lm", source).unwrap();
     let f = with_params
         .funcs

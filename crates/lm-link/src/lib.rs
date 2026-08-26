@@ -24,6 +24,9 @@
 //! wrong pin or a wrong resolution therefore produces no executable
 //! code that the verifier did not admit.
 
+mod collect;
+mod contracts;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use lm_bytecode::artifact::LinkUnit;
@@ -125,7 +128,7 @@ impl LinkEnv {
 
     /// Bind one module to its canonical path.
     pub fn bind(&mut self, unit: LinkUnit) -> Result<(), LinkEnvError> {
-        let path = unit.path.clone();
+        let path = unit.module_path().to_string();
         if self.units.contains_key(&path) {
             return Err(LinkEnvError::DuplicateModule(path));
         }
@@ -140,6 +143,18 @@ impl LinkEnv {
         path: impl Into<String>,
         module: Module,
         interface: Interface,
+    ) -> Result<(), LinkEnvError> {
+        let bundle = lm_abi::standard_bundle();
+        self.bind_module_with_bundle(path, module, interface, &bundle)
+    }
+
+    /// Bind compiled module parts under one immutable ABI bundle.
+    pub fn bind_module_with_bundle(
+        &mut self,
+        path: impl Into<String>,
+        module: Module,
+        interface: Interface,
+        bundle: &std::sync::Arc<lm_abi::AbiBundle>,
     ) -> Result<(), LinkEnvError> {
         let path = path.into();
         if self.units.contains_key(&path) {
@@ -160,40 +175,71 @@ impl LinkEnv {
                     .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?,
             );
         }
-        let unit = LinkUnit::new(path, module, interface, dependencies)
+        if path != CORE_MODULE_PATH
+            && !dependencies
+                .iter()
+                .any(|dependency| dependency.module_path() == CORE_MODULE_PATH)
+        {
+            if let Some(core) = self.units.get(CORE_MODULE_PATH) {
+                dependencies.push(
+                    lm_bytecode::artifact::ArtifactDependency::new(CORE_MODULE_PATH, core.id())
+                        .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?,
+                );
+            }
+        }
+        let unit = LinkUnit::new_with_bundle(path, module, interface, dependencies, bundle)
             .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?;
         self.bind(unit)
     }
 
     fn validate_dependencies(&self, unit: &LinkUnit) -> Result<(), LinkEnvError> {
-        let imports = imported_module_paths(&unit.module);
+        let imports = imported_module_paths(unit.module());
         for dependency in &imports {
             let exact = unit
                 .dependencies()
                 .iter()
                 .find(|candidate| candidate.module_path() == dependency)
                 .ok_or_else(|| LinkEnvError::MissingDependencyBinding {
-                    unit: unit.path.clone(),
+                    unit: unit.module_path().to_string(),
                     dependency: dependency.clone(),
                 })?;
             let provider =
                 self.units
                     .get(dependency)
                     .ok_or_else(|| LinkEnvError::MissingDependency {
-                        unit: unit.path.clone(),
+                        unit: unit.module_path().to_string(),
                         dependency: dependency.clone(),
                     })?;
             if provider.id() != exact.artifact() {
                 return Err(LinkEnvError::DependencyIdentityMismatch {
-                    unit: unit.path.clone(),
+                    unit: unit.module_path().to_string(),
                     dependency: dependency.clone(),
                 });
             }
         }
         for dependency in unit.dependencies() {
-            if !imports.iter().any(|path| path == dependency.module_path()) {
+            if dependency.module_path() == CORE_MODULE_PATH
+                && !imports.iter().any(|path| path == CORE_MODULE_PATH)
+            {
+                let provider = self.units.get(CORE_MODULE_PATH).ok_or_else(|| {
+                    LinkEnvError::MissingDependency {
+                        unit: unit.module_path().to_string(),
+                        dependency: CORE_MODULE_PATH.to_string(),
+                    }
+                })?;
+                if provider.id() != dependency.artifact() {
+                    return Err(LinkEnvError::DependencyIdentityMismatch {
+                        unit: unit.module_path().to_string(),
+                        dependency: CORE_MODULE_PATH.to_string(),
+                    });
+                }
+                continue;
+            }
+            if !imports.iter().any(|path| path == dependency.module_path())
+                && dependency.module_path() != CORE_MODULE_PATH
+            {
                 return Err(LinkEnvError::ExtraDependencyBinding {
-                    unit: unit.path.clone(),
+                    unit: unit.module_path().to_string(),
                     dependency: dependency.module_path().to_string(),
                 });
             }
@@ -239,14 +285,18 @@ impl FrozenLinkEnv {
     ///
     /// The artifact embeds every reachable unit except standard core.
     pub fn artifact(&self, root: &str) -> Result<Artifact, LinkError> {
-        let order = link_order(root, self)?;
-        artifact_from_order(root, self, &order, false)
+        let bundle = lm_abi::standard_bundle();
+        let selected = collect_environment(root, self, &bundle)?;
+        let order = link_order(root, &selected)?;
+        artifact_from_order(root, &selected, &order, false)
     }
 
     /// Build a fat artifact for one root module.
     pub fn fat_artifact(&self, root: &str) -> Result<Artifact, LinkError> {
-        let order = link_order(root, self)?;
-        artifact_from_order(root, self, &order, true)
+        let bundle = lm_abi::standard_bundle();
+        let selected = collect_environment(root, self, &bundle)?;
+        let order = link_order(root, &selected)?;
+        artifact_from_order(root, &selected, &order, true)
     }
 }
 
@@ -265,14 +315,14 @@ pub fn resolve_artifact(
             }
             if dependency.module_path() != CORE_MODULE_PATH {
                 return Err(LinkEnvError::MissingArtifactDependency {
-                    unit: unit.path.clone(),
+                    unit: unit.module_path().to_string(),
                     dependency: dependency.module_path().to_string(),
                 });
             }
             match required_core {
                 Some(required) if required != dependency.artifact() => {
                     return Err(LinkEnvError::MissingArtifactDependency {
-                        unit: unit.path.clone(),
+                        unit: unit.module_path().to_string(),
                         dependency: CORE_MODULE_PATH.to_string(),
                     });
                 }
@@ -290,7 +340,7 @@ pub fn resolve_artifact(
                         .iter()
                         .any(|dependency| dependency.artifact() == required)
                 })
-                .map(|unit| unit.path.clone())
+                .map(|unit| unit.module_path().to_string())
                 .unwrap_or_else(|| "<root>".to_string()),
             dependency: CORE_MODULE_PATH.to_string(),
         })?;
@@ -300,10 +350,10 @@ pub fn resolve_artifact(
                 available: core.id(),
             });
         }
-        if core.path != CORE_MODULE_PATH {
+        if core.module_path() != CORE_MODULE_PATH {
             return Err(LinkEnvError::InvalidUnit(format!(
                 "the runtime core uses module path `{}`",
-                core.path
+                core.module_path()
             )));
         }
         available.insert(core.id());
@@ -320,7 +370,7 @@ pub fn resolve_artifact(
         for dependency in unit.dependencies() {
             let Some(provider) = index.get(&dependency.artifact()).copied() else {
                 return Err(LinkEnvError::MissingArtifactDependency {
-                    unit: unit.path.clone(),
+                    unit: unit.module_path().to_string(),
                     dependency: dependency.module_path().to_string(),
                 });
             };
@@ -372,6 +422,351 @@ impl std::fmt::Display for LinkError {
 
 fn fail(message: impl Into<String>) -> LinkError {
     LinkError(message.into())
+}
+
+/// Collect one exact artifact graph before relocation.
+fn collect_environment(
+    root: &str,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<FrozenLinkEnv, LinkError> {
+    let order = validate_environment(root, env, bundle)?;
+    let mut requests: BTreeMap<String, Vec<(String, ImportKind)>> = BTreeMap::new();
+    let mut selected: BTreeMap<String, Module> = BTreeMap::new();
+
+    for path in order.iter().rev() {
+        let unit = env
+            .unit(path)
+            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        if path == CORE_MODULE_PATH {
+            selected.insert(path.clone(), unit.module().clone());
+            continue;
+        }
+        let result = if path == root {
+            collect::collect_link_root(unit.module())
+        } else {
+            let Some(exports) = requests.remove(path) else {
+                continue;
+            };
+            collect::collect_link_exports(unit.module(), &exports)
+        };
+        let module = result
+            .map_err(|error| fail(format!("the module `{path}` does not collect: {error}")))?
+            .0;
+        for import in &module.imports {
+            requests
+                .entry(import.module.clone())
+                .or_default()
+                .push((import.name.clone(), import.kind));
+        }
+        selected.insert(path.clone(), module);
+    }
+
+    requests.remove(CORE_MODULE_PATH);
+    if let Some(path) = requests.keys().next() {
+        return Err(fail(format!(
+            "the selected artifact needs the unbound module `{path}`"
+        )));
+    }
+
+    let mut rebuilt = LinkEnv::new();
+    for path in &order {
+        let Some(module) = selected.remove(path) else {
+            continue;
+        };
+        let source = env
+            .unit(path)
+            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        if path == CORE_MODULE_PATH {
+            rebuilt
+                .bind(source.clone())
+                .map_err(|error| fail(error.to_string()))?;
+            continue;
+        }
+        lm_verify::verify_module_with_bundle(&module, bundle).map_err(|error| {
+            let function = error
+                .func
+                .and_then(|index| module.funcs.get(index as usize))
+                .map(|function| format!(" in `{}`", function.name))
+                .unwrap_or_default();
+            fail(format!(
+                "the collected module `{path}` does not verify{function}: {error}"
+            ))
+        })?;
+        let interface = collected_interface(source, &module, bundle)?;
+        rebuilt
+            .bind_module_with_bundle(path.clone(), module, interface, bundle)
+            .map_err(|error| fail(error.to_string()))?;
+    }
+    Ok(rebuilt.freeze())
+}
+
+/// Validate every table and import before collection can remove code.
+fn validate_environment(
+    root: &str,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Vec<String>, LinkError> {
+    let order = link_order(root, env)?;
+    for path in &order {
+        let unit = env
+            .unit(path)
+            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        if unit.interface().bundle_digest != bundle.digest() {
+            return Err(fail(format!("the module `{path}` uses another ABI bundle")));
+        }
+        lm_verify::verify_structure_only_with_bundle(unit.module(), bundle).map_err(|error| {
+            fail(format!(
+                "the module `{path}` has an invalid structure: {error}"
+            ))
+        })?;
+        check_ctor_bindings(unit.module(), path)?;
+        validate_export_table(unit.module(), path)?;
+        lm_bytecode::interface::validate_interface_with_bundle(
+            unit.module(),
+            unit.identity(),
+            unit.interface(),
+            bundle,
+        )
+        .map_err(|error| fail(format!("the interface of `{path}` is invalid: {error}")))?;
+    }
+    for path in &order {
+        let unit = env
+            .unit(path)
+            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        for (slot, import) in unit.module().imports.iter().enumerate() {
+            validate_import_contract(path, unit, import, slot, env)?;
+        }
+    }
+    Ok(order)
+}
+
+/// Validate exports before collection can remove an invalid entry.
+fn validate_export_table(module: &Module, path: &str) -> Result<(), LinkError> {
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
+    let mut names = BTreeSet::new();
+    for export in &module.exports {
+        if !names.insert(export.name.as_str()) {
+            return Err(fail(format!(
+                "the module `{path}` exports the name `{}` twice",
+                export.name
+            )));
+        }
+        let limit = if export.kind.is_class() {
+            module.classes.len()
+        } else if export.kind.is_interface() {
+            module.interfaces.len()
+        } else {
+            module.funcs.len()
+        };
+        if export.def as usize >= limit
+            || (export.ctor != lm_bytecode::NO_CTOR && export.ctor as usize >= module.funcs.len())
+        {
+            return Err(fail(format!(
+                "the export `{}` of `{path}` names a definition outside the module",
+                export.name
+            )));
+        }
+        let imported = if export.kind.is_class() {
+            extern_classes[export.def as usize]
+        } else if export.kind.is_interface() {
+            false
+        } else {
+            extern_funcs[export.def as usize]
+        };
+        if imported {
+            return Err(fail(format!(
+                "the module `{path}` exports `{}`, which it imports",
+                export.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_import_contract(
+    path: &str,
+    importer: &LinkUnit,
+    import: &Import,
+    slot: usize,
+    env: &FrozenLinkEnv,
+) -> Result<(), LinkError> {
+    let provider = env.unit(&import.module).ok_or_else(|| {
+        fail(format!(
+            "`{path}` slot {slot} names the unbound module `{}`",
+            import.module
+        ))
+    })?;
+    let export_name = import_export_name(import)?;
+    let interface = provider.interface().find(export_name).ok_or_else(|| {
+        fail(format!(
+            "`{path}` slot {slot} names `{}.{export_name}`, which the module does not export",
+            import.module
+        ))
+    })?;
+    if interface.iface_hash != import.hash {
+        return Err(fail(format!(
+            "`{path}` slot {slot} pins an interface of `{}.{export_name}` that the module no longer provides; rebuild the importing module",
+            import.module
+        )));
+    }
+    let export = provider
+        .module()
+        .exports
+        .iter()
+        .find(|export| export.name == export_name)
+        .ok_or_else(|| {
+            fail(format!(
+                "`{path}` slot {slot} names `{}.{export_name}`, which the module does not export",
+                import.module
+            ))
+        })?;
+    let difference = match import.kind {
+        ImportKind::Class => {
+            if !export.kind.is_class() {
+                return Err(fail(format!(
+                    "`{path}` slot {slot} names `{}.{export_name}`, which is not a class",
+                    import.module
+                )));
+            }
+            contracts::class_difference(
+                importer.module(),
+                importer.identity(),
+                import.def,
+                provider.module(),
+                provider.identity(),
+                export.def,
+            )
+        }
+        ImportKind::Func => {
+            if export.kind != lm_bytecode::ExportKind::Function {
+                return Err(fail(format!(
+                    "`{path}` slot {slot} names `{}.{export_name}`, which is not a function",
+                    import.module
+                )));
+            }
+            contracts::function_difference(
+                importer.module(),
+                importer.identity(),
+                import.def,
+                provider.module(),
+                provider.identity(),
+                export.def,
+            )
+        }
+        ImportKind::Ctor => {
+            if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
+                return Err(fail(format!(
+                    "`{path}` slot {slot} names `{}.{export_name}`, which has no constructor",
+                    import.module
+                )));
+            }
+            contracts::function_difference(
+                importer.module(),
+                importer.identity(),
+                import.def,
+                provider.module(),
+                provider.identity(),
+                export.ctor,
+            )
+        }
+        ImportKind::Method => {
+            let (_, method_name) = import.name.rsplit_once('.').ok_or_else(|| {
+                fail(format!(
+                    "`{path}` slot {slot} names the method `{}` without a class",
+                    import.name
+                ))
+            })?;
+            let class = provider
+                .module()
+                .classes
+                .get(export.def as usize)
+                .ok_or_else(|| fail("an exported class index is invalid"))?;
+            let function = class
+                .methods
+                .iter()
+                .find(|(selector, _)| {
+                    provider
+                        .module()
+                        .selectors
+                        .get(*selector as usize)
+                        .map(String::as_str)
+                        == Some(method_name)
+                })
+                .map(|(_, function)| *function)
+                .ok_or_else(|| {
+                    fail(format!(
+                        "`{path}` slot {slot} names the method `{method_name}`, which `{}.{export_name}` does not answer",
+                        import.module
+                    ))
+                })?;
+            contracts::function_difference(
+                importer.module(),
+                importer.identity(),
+                import.def,
+                provider.module(),
+                provider.identity(),
+                function,
+            )
+        }
+    };
+    if let Some(difference) = difference {
+        return Err(import_contract_error(path, import, difference));
+    }
+    Ok(())
+}
+
+fn import_export_name(import: &Import) -> Result<&str, LinkError> {
+    if import.kind == ImportKind::Method {
+        import
+            .name
+            .rsplit_once('.')
+            .map(|(class, _)| class)
+            .ok_or_else(|| fail(format!("the method import `{}` has no class", import.name)))
+    } else {
+        Ok(&import.name)
+    }
+}
+
+fn collected_interface(
+    source: &LinkUnit,
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Interface, LinkError> {
+    let identity = lm_bytecode::identity::module_identity_with_bundle(module, bundle)
+        .map_err(|error| fail(format!("the collected module does not hash: {error}")))?;
+    let mut items = Vec::with_capacity(module.exports.len());
+    for export in &module.exports {
+        let item = source
+            .interface()
+            .find(&export.name)
+            .filter(|entry| entry.kind == export.kind)
+            .ok_or_else(|| {
+                fail(format!(
+                    "the source interface does not describe export `{}`",
+                    export.name
+                ))
+            })?;
+        items.push(item.item.clone());
+    }
+    let mut interface = lm_bytecode::interface::build_interface_with_bundle(
+        module,
+        &identity,
+        source.module_path(),
+        &items,
+        bundle,
+    )
+    .map_err(|error| fail(format!("the collected interface does not build: {error}")))?;
+    let slot_keys: BTreeSet<[u8; 32]> = module.slots.iter().map(|slot| slot.key).collect();
+    interface.slots = source
+        .interface()
+        .slots
+        .iter()
+        .filter(|slot| slot_keys.contains(&slot.key))
+        .cloned()
+        .collect();
+    Ok(interface)
 }
 
 /// One linked program and its deployable artifact bytes.
@@ -631,7 +1026,7 @@ pub fn link_artifact_with_bundle(
     runtime_core: Option<&LinkUnit>,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<LinkedProgram, LinkError> {
-    let root_path = artifact.root().path.clone();
+    let root_path = artifact.root().module_path().to_string();
     let (root, env) = resolve_artifact(artifact, runtime_core)
         .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
     let unit = env
@@ -642,11 +1037,20 @@ pub fn link_artifact_with_bundle(
             "the artifact root `{root_path}` has another identity"
         )));
     }
-    link_with_bundle(&root_path, &env, bundle)
+    link_resolved_with_bundle(&root_path, &env, bundle)
 }
 
 /// Link one program against an immutable ABI bundle.
 pub fn link_with_bundle(
+    root: &str,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<LinkedProgram, LinkError> {
+    let selected = collect_environment(root, env, bundle)?;
+    link_resolved_with_bundle(root, &selected, bundle)
+}
+
+fn link_resolved_with_bundle(
     root: &str,
     env: &FrozenLinkEnv,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
@@ -658,17 +1062,9 @@ pub fn link_with_bundle(
         let unit = env
             .unit(path)
             .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
-        if unit.interface.bundle_digest != bundle.digest() {
-            return Err(fail(format!("the module `{path}` uses another ABI bundle")));
-        }
-        lm_verify::verify_module_with_bundle(&unit.module, bundle)
-            .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
-        let identity = lm_bytecode::identity::module_identity_with_bundle(&unit.module, bundle)
-            .map_err(|e| fail(format!("the module `{path}` does not hash: {e}")))?;
-        let reloc = relocate(&mut merged, &unit.module, &identity, path)?;
-        register_exports(&mut merged, &unit.module, &unit.interface, path, &reloc)?;
+        let reloc = merge_checked_unit(&mut merged, unit, path, bundle)?;
         if path == root {
-            entry = Some(reloc.funcs[unit.module.entry as usize]);
+            entry = Some(reloc.funcs[unit.module().entry as usize]);
         }
     }
     let entry = entry.ok_or_else(|| fail("the root module is not bound"))?;
@@ -714,6 +1110,31 @@ pub fn link_with_bundle(
         semantic_hash,
         container_hash,
     })
+}
+
+/// Verify and merge one unit before publication.
+fn merge_checked_unit(
+    merged: &mut Merged,
+    unit: &LinkUnit,
+    path: &str,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Reloc, LinkError> {
+    if unit.interface().bundle_digest != bundle.digest() {
+        return Err(fail(format!("the module `{path}` uses another ABI bundle")));
+    }
+    lm_verify::verify_module_with_bundle(unit.module(), bundle)
+        .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
+    let identity = unit.identity();
+    let reloc = relocate(merged, unit.module(), identity, path)?;
+    lm_bytecode::interface::validate_interface_with_bundle(
+        unit.module(),
+        identity,
+        unit.interface(),
+        bundle,
+    )
+    .map_err(|error| fail(format!("the interface of `{path}` is invalid: {error}")))?;
+    register_exports(merged, unit.module(), unit.interface(), path, &reloc)?;
+    Ok(reloc)
 }
 
 fn artifact_from_order(
@@ -765,10 +1186,9 @@ fn link_order(root: &str, env: &FrozenLinkEnv) -> Result<Vec<String>, LinkError>
         path.push(name.clone());
         stack.push((name.clone(), true));
         let mut needs: Vec<&str> = unit
-            .module
-            .imports
+            .dependencies()
             .iter()
-            .map(|i| i.module.as_str())
+            .map(|dependency| dependency.module_path())
             .collect();
         needs.sort_unstable();
         needs.dedup();

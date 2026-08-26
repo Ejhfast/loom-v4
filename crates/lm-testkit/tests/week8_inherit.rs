@@ -299,6 +299,7 @@ fn the_class_entry_records_the_parent_type_arguments() {
          end\n\
          class IntCell < Cell[Int]\n\
          end\n\
+         IntCell()\n\
          1\n",
     )
     .expect("the module compiles");
@@ -330,6 +331,8 @@ fn the_class_listing_shows_the_parent_type_arguments() {
          \x20   super.init(0, 1)\n\
          \x20 end\n\
          end\n\
+         IntCell()\n\
+         Window()\n\
          1\n",
     )
     .expect("the module compiles");

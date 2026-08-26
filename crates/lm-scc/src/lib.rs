@@ -30,6 +30,26 @@ const UNSET: u32 = u32::MAX;
 /// A node with no cycle forms a component of one member. A node
 /// reaches its own component index through the second return value.
 pub fn components(node_count: usize, succ: &[Vec<u32>]) -> (Vec<Vec<u32>>, Vec<u32>) {
+    components_from_iter(node_count, succ, 0..node_count as u32)
+}
+
+/// Return components that the given roots reach.
+///
+/// Unreached nodes keep `u32::MAX` in the component index table.
+/// Each root must be less than `node_count`.
+pub fn components_from_roots(
+    node_count: usize,
+    succ: &[Vec<u32>],
+    roots: &[u32],
+) -> (Vec<Vec<u32>>, Vec<u32>) {
+    components_from_iter(node_count, succ, roots.iter().copied())
+}
+
+fn components_from_iter(
+    node_count: usize,
+    succ: &[Vec<u32>],
+    roots: impl IntoIterator<Item = u32>,
+) -> (Vec<Vec<u32>>, Vec<u32>) {
     let n = node_count;
     let mut index = vec![UNSET; n];
     let mut low = vec![0u32; n];
@@ -40,7 +60,7 @@ pub fn components(node_count: usize, succ: &[Vec<u32>]) -> (Vec<Vec<u32>>, Vec<u
     let mut comp_of = vec![UNSET; n];
     // The explicit DFS work stack: (node, next successor position).
     let mut work: Vec<(u32, usize)> = Vec::new();
-    for root in 0..n as u32 {
+    for root in roots {
         if index[root as usize] != UNSET {
             continue;
         }
@@ -93,7 +113,7 @@ pub fn components(node_count: usize, succ: &[Vec<u32>]) -> (Vec<Vec<u32>>, Vec<u
 
 #[cfg(test)]
 mod tests {
-    use super::components;
+    use super::{components, components_from_roots};
 
     #[test]
     fn a_node_without_an_edge_forms_its_own_component() {
@@ -155,5 +175,13 @@ mod tests {
         let (comps, comp_of) = components(1, &[vec![0]]);
         assert_eq!(comps, vec![vec![0]]);
         assert_eq!(comp_of, vec![0]);
+    }
+
+    #[test]
+    fn rooted_components_do_not_walk_unreached_nodes() {
+        let (components, component_of) =
+            components_from_roots(5, &[vec![1], vec![0], vec![3], vec![], vec![]], &[2]);
+        assert_eq!(components, vec![vec![3], vec![2]]);
+        assert_eq!(component_of, vec![u32::MAX, u32::MAX, 1, 0, u32::MAX]);
     }
 }

@@ -156,6 +156,7 @@ fn an_imported_function_must_carry_no_body() {
 fn an_imported_function_can_declare_captures() {
     let mut module = importing_module(PIN);
     module.funcs[0].captures = vec![2];
+    module.funcs[1].blocks = vec![vec![Instr::ConstInt(1), Instr::Return]];
     lm_verify::verify_module(&module).expect("the capture contract verifies");
 }
 

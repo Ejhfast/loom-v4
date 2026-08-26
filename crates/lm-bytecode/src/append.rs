@@ -346,9 +346,17 @@ pub fn append_resolved(
         &new_funcs,
         &shared_funcs,
     )?;
+    validate_import_contracts(&merged, addition, &reloc)?;
+    let extern_classes = addition.extern_classes();
     for conformance in &addition.conformances {
         let relocated = reloc_conformance(conformance, &reloc);
-        if !merged.conformances.contains(&relocated) {
+        if extern_classes[conformance.class as usize] {
+            if !merged.conformances.contains(&relocated) {
+                return Err(fail(
+                    "an imported class declares another conformance contract",
+                ));
+            }
+        } else if !merged.conformances.contains(&relocated) {
             merged.conformances.push(relocated);
         }
     }
@@ -402,6 +410,67 @@ pub fn append_resolved(
         reloc,
         slot_initials,
     })
+}
+
+fn validate_import_contracts(
+    merged: &Module,
+    source: &Module,
+    reloc: &AppendReloc,
+) -> Result<(), String> {
+    for import in &source.imports {
+        if import.kind == crate::ImportKind::Class {
+            let local = source
+                .classes
+                .get(import.def as usize)
+                .ok_or_else(|| fail("an imported class declaration is outside the module"))?;
+            let target = reloc.classes[import.def as usize] as usize;
+            let found = merged
+                .classes
+                .get(target)
+                .ok_or_else(|| fail("an imported class target is outside the base module"))?;
+            let bounds = reloc_bounds(&source.class_bounds[import.def as usize], reloc);
+            if reloc_class(local, reloc) != *found || bounds != merged.class_bounds[target] {
+                return Err(fail(format!(
+                    "the imported class `{}` has another contract",
+                    import.name
+                )));
+            }
+            continue;
+        }
+
+        let local = source
+            .funcs
+            .get(import.def as usize)
+            .ok_or_else(|| fail("an imported function declaration is outside the module"))?;
+        let target = reloc.funcs[import.def as usize] as usize;
+        let found = merged
+            .funcs
+            .get(target)
+            .ok_or_else(|| fail("an imported function target is outside the base module"))?;
+        let local = reloc_func(local, reloc);
+        let bounds = reloc_bounds(&source.func_bounds[import.def as usize], reloc);
+        let matches = local.type_params == found.type_params
+            && local.effect_params == found.effect_params
+            && local.params == found.params
+            && local.param_muts == found.param_muts
+            && local.ret == found.ret
+            && local.row == found.row
+            && local.captures == found.captures
+            && bounds == merged.func_bounds[target];
+        if !matches {
+            return Err(fail(format!(
+                "the imported {} `{}` has another contract",
+                match import.kind {
+                    crate::ImportKind::Ctor => "constructor",
+                    crate::ImportKind::Method => "method",
+                    crate::ImportKind::Func => "function",
+                    crate::ImportKind::Class => "class",
+                },
+                import.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn intern<T: Clone + Eq + std::hash::Hash>(
@@ -1192,5 +1261,176 @@ fn reloc_app(app: u32, reloc: &AppendReloc) -> u32 {
         crate::NO_APP
     } else {
         reloc.apps[app as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BcClassKind, BcConformance, BcInterfaceUse, Import, ImportKind};
+
+    const PIN: [u8; 32] = [7; 32];
+
+    fn function_module(imported: bool, parameter: u32) -> Module {
+        Module {
+            strings: vec!["value".to_string()],
+            bytes: Vec::new(),
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: Vec::new(),
+            apps: Vec::new(),
+            interfaces: Vec::new(),
+            conformances: Vec::new(),
+            class_bounds: Vec::new(),
+            func_bounds: vec![Vec::new(), Vec::new()],
+            imports: imported
+                .then_some(Import {
+                    module: "base".to_string(),
+                    name: "value".to_string(),
+                    kind: ImportKind::Func,
+                    def: 0,
+                    hash: PIN,
+                })
+                .into_iter()
+                .collect(),
+            slots: Vec::new(),
+            core_roles: [NO_ROLE; crate::CORE_ROLE_COUNT],
+            classes: Vec::new(),
+            funcs: vec![
+                Func {
+                    name: "value".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![parameter],
+                    param_muts: vec![false],
+                    ret: 2,
+                    row: Vec::new(),
+                    captures: Vec::new(),
+                    local_types: vec![parameter],
+                    blocks: if imported {
+                        Vec::new()
+                    } else {
+                        vec![vec![Instr::LoadLocal(0), Instr::Return]]
+                    },
+                },
+                Func {
+                    name: "<entry>".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: Vec::new(),
+                    param_muts: Vec::new(),
+                    ret: 2,
+                    row: Vec::new(),
+                    captures: Vec::new(),
+                    local_types: Vec::new(),
+                    blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
+                },
+            ],
+            entry: 1,
+            exports: Vec::new(),
+            bindings: Vec::new(),
+            debug: Vec::new(),
+        }
+    }
+
+    fn class_module(imported: bool, with_conformance: bool) -> Module {
+        let interface = BcInterface {
+            name: "Marked".to_string(),
+            key: "addition.Marked".to_string(),
+            type_params: 0,
+            effect_params: 0,
+            generic_is_effect: Vec::new(),
+            parents: Vec::new(),
+            type_bounds: Vec::new(),
+            associated: Vec::new(),
+            methods: Vec::new(),
+        };
+        Module {
+            strings: Vec::new(),
+            bytes: Vec::new(),
+            types: vec![
+                BcType::Unit,
+                BcType::Bool,
+                BcType::Int,
+                BcType::Str,
+                BcType::Class(0),
+            ],
+            selectors: Vec::new(),
+            apps: Vec::new(),
+            interfaces: with_conformance.then_some(interface).into_iter().collect(),
+            conformances: with_conformance
+                .then_some(BcConformance {
+                    class: 0,
+                    application: BcInterfaceUse {
+                        interface: 0,
+                        types: Vec::new(),
+                        rows: Vec::new(),
+                    },
+                    premises: Vec::new(),
+                    associated: Vec::new(),
+                    method_overrides: Vec::new(),
+                })
+                .into_iter()
+                .collect(),
+            class_bounds: vec![Vec::new()],
+            func_bounds: vec![Vec::new()],
+            imports: imported
+                .then_some(Import {
+                    module: "base".to_string(),
+                    name: "Box".to_string(),
+                    kind: ImportKind::Class,
+                    def: 0,
+                    hash: PIN,
+                })
+                .into_iter()
+                .collect(),
+            slots: Vec::new(),
+            core_roles: [NO_ROLE; crate::CORE_ROLE_COUNT],
+            classes: vec![BcClass {
+                name: "Box".to_string(),
+                key: "base.Box".to_string(),
+                is_final: true,
+                is_frozen: false,
+                parent: NO_PARENT,
+                parent_args: Vec::new(),
+                type_params: 0,
+                kind: BcClassKind::Normal,
+                fields: Vec::new(),
+                methods: Vec::new(),
+            }],
+            funcs: vec![Func {
+                name: "<entry>".to_string(),
+                type_params: 0,
+                effect_params: 0,
+                params: Vec::new(),
+                param_muts: Vec::new(),
+                ret: 2,
+                row: Vec::new(),
+                captures: Vec::new(),
+                local_types: Vec::new(),
+                blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
+            }],
+            entry: 0,
+            exports: Vec::new(),
+            bindings: Vec::new(),
+            debug: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolved_function_imports_need_the_provider_contract() {
+        let base = function_module(false, 2);
+        let addition = function_module(true, 3);
+        let error = append_resolved(&base, &addition, &[ResolvedImport::Function(0)])
+            .expect_err("the mismatched import appended");
+        assert!(error.contains("imported function `value` has another contract"));
+    }
+
+    #[test]
+    fn an_imported_class_cannot_gain_a_conformance() {
+        let base = class_module(false, false);
+        let addition = class_module(true, true);
+        let error = append_resolved(&base, &addition, &[ResolvedImport::Class(0)])
+            .expect_err("the foreign conformance appended");
+        assert!(error.contains("imported class declares another conformance"));
     }
 }

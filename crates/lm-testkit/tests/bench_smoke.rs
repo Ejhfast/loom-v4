@@ -101,7 +101,11 @@ fn many_class_dispatch_memory_smoke() {
             "class C{i}\n  def m{i}(self): Int\n    {i}\n  end\nend\n"
         ));
     }
-    source.push_str("C7().m7()\n");
+    source.push_str("total = 0\n");
+    for i in 0..classes {
+        source.push_str(&format!("total = total + C{i}().m{i}()\n"));
+    }
+    source.push_str("total\n");
     let start = Instant::now();
     let bytes = lm_testkit::compile_to_bytes("bench.lm", &source).unwrap();
     let loaded = lm_vm::load_bytes(&bytes).unwrap();
@@ -109,7 +113,10 @@ fn many_class_dispatch_memory_smoke() {
     let cells = loaded.dispatch_cells();
     let selectors = loaded.module().selectors.len();
     let dense = loaded.module().classes.len() * selectors;
-    eprintln!("bench-smoke dispatch cells {cells} (dense equivalent {dense})");
+    eprintln!(
+        "bench-smoke dispatch cells {cells} for {} classes and {selectors} selectors (dense equivalent {dense})",
+        loaded.module().classes.len()
+    );
     // Every class answers its own selector plus the shared core
     // selectors, so the cell count stays near the method count.
     assert!(
@@ -125,7 +132,7 @@ fn many_class_dispatch_memory_smoke() {
     );
     let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
-    assert_eq!(vm.show_outcome(&outcome), "Done(7)");
+    assert_eq!(vm.show_outcome(&outcome), "Done(44850)");
 }
 
 /// Time one effectful workload in a world with grants.

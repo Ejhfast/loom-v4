@@ -595,7 +595,7 @@ fn resolve_module_use(
         known.push("sys");
         return Err(Diagnostic::new(
             "E1052",
-            if env.is_empty() {
+            if env.has_no_package_roots() {
                 format!(
                     "`use {text}` names a module; a module import needs a package, \
                      so compile the file inside one"
@@ -3309,6 +3309,21 @@ fn assemble(
             bindings.push(lm_bytecode::FuncBinding {
                 key: format!("{}.init", class.key),
                 func,
+                class: lm_bytecode::NO_CLASS,
+            });
+        }
+    }
+    let mut binding_keys: HashSet<String> =
+        bindings.iter().map(|binding| binding.key.clone()).collect();
+    for export in &exports.core {
+        if export.kind != lm_bytecode::ExportKind::Function {
+            continue;
+        }
+        let key = lm_bytecode::qualified_key(lm_bytecode::CORE_MODULE, &export.name);
+        if binding_keys.insert(key.clone()) {
+            bindings.push(lm_bytecode::FuncBinding {
+                key,
+                func: export.def,
                 class: lm_bytecode::NO_CLASS,
             });
         }

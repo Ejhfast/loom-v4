@@ -332,7 +332,13 @@ final class Box[T] implements Labeled when T: Labeled
   end
 end
 
-1
+final class Word implements Labeled
+  def label(self): String
+    "word"
+  end
+end
+
+Box[Word]().label()
 "#;
     let module = compile_text("conditional.lm", source).expect("the source compiles");
     let box_class = module

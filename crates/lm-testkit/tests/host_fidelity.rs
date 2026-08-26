@@ -110,14 +110,22 @@ fn extension_operations_carry_float_values_across_the_host_boundary() {
         "def go(): Float with Telemetry.Scale\n  sys.telemetry.scale(1.5)\nend\n\ngo()\n",
     );
     let compiled = lm_compiler::compile_module_with_bundle(
-        "",
+        "test.entry",
         &source,
         &lm_compiler::CompileEnv::new().freeze(),
         true,
         &bundle,
     )
     .expect("the program compiles");
-    let loaded = lm_vm::load_with_bundle(compiled.module, &bundle).expect("the program loads");
+    let root = compiled.path.clone();
+    let mut link_env =
+        lm_compiler::core_link_env_with_bundle(&bundle).expect("the core environment builds");
+    link_env
+        .bind_module_with_bundle(compiled.path, compiled.module, compiled.interface, &bundle)
+        .expect("the program binds");
+    let linked = lm_compiler::link_with_bundle(&root, &link_env.freeze(), &bundle)
+        .expect("the program links");
+    let loaded = lm_vm::load_with_bundle(linked.module, &bundle).expect("the program loads");
     let mut world = World::new(
         &loaded,
         VmConfig::default(),

@@ -1,6 +1,6 @@
 //! Reified compiler and VM integration.
 
-use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
+use lm_compiler::{compile_module_with_options, core_link_env, link, CompileEnv, CompileOptions};
 use lm_host::CliHost;
 use lm_source::SourceFile;
 use lm_testkit::compile_to_bytes;
@@ -3736,7 +3736,12 @@ fn a_dynamic_result_survives_an_external_snapshot() {
         &CompileOptions::new().dynamic_result(),
     )
     .expect("the dynamic source compiles");
-    let bytes = lm_bytecode::encode(&compiled.module);
+    let mut links = core_link_env().expect("the core link environment builds");
+    links
+        .bind_module(compiled.path.clone(), compiled.module, compiled.interface)
+        .expect("the dynamic module binds");
+    let linked = link(&compiled.path, &links.freeze()).expect("the dynamic module links");
+    let bytes = lm_bytecode::encode(&linked.module);
     let loaded = load_bytes(&bytes).expect("the dynamic program loads");
     let mut world = World::new(
         &loaded,

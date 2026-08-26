@@ -6,17 +6,13 @@ use lm_vm::VmConfig;
 fn a_small_expression_body_inlines() {
     let source = "def add1(n: Int): Int\n  n + 1\nend\nadd1(41)\n";
     let module = compile_text("inline.lm", source).expect("the program compiles");
-    let target = module
-        .funcs
-        .iter()
-        .position(|func| func.name == "add1")
-        .expect("add1 exists") as u32;
+    assert!(module.funcs.iter().all(|func| func.name != "add1"));
     let entry = &module.funcs[module.entry as usize];
     assert!(entry
         .blocks
         .iter()
         .flatten()
-        .all(|instr| { !matches!(instr, Instr::Call(func) if *func == target) }));
+        .all(|instr| !matches!(instr, Instr::Call(_))));
     let result = run_text("inline.lm", source, VmConfig::default()).unwrap();
     assert_eq!(result, "Done(42)");
 }
@@ -25,17 +21,13 @@ fn a_small_expression_body_inlines() {
 fn a_small_generic_body_inlines() {
     let source = "def id[T](value: T): T\n  value\nend\nid(42)\n";
     let module = compile_text("inline_generic.lm", source).expect("the program compiles");
-    let target = module
-        .funcs
-        .iter()
-        .position(|func| func.name == "id")
-        .expect("id exists") as u32;
+    assert!(module.funcs.iter().all(|func| func.name != "id"));
     let entry = &module.funcs[module.entry as usize];
     assert!(entry
         .blocks
         .iter()
         .flatten()
-        .all(|instruction| !matches!(instruction, Instr::CallG { func, .. } if *func == target)));
+        .all(|instruction| !matches!(instruction, Instr::CallG { .. })));
     assert_eq!(
         run_text("inline_generic.lm", source, VmConfig::default()).unwrap(),
         "Done(42)"

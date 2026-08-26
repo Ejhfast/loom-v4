@@ -196,6 +196,7 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-scc",
  "lm-verify",
 ]
 

@@ -672,6 +672,7 @@ final class Shelf implements Catalog
   end
 end
 
+NameOnly()
 Shelf()
 "#;
     let module = compile_text("collections.lm", source).expect("the source compiles");

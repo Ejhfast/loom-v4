@@ -162,7 +162,7 @@ pub fn compile_module_with_options_and_bundle(
     )
     .map_err(|d| d.render(source))?;
     let (linkage, interface_slots) = select_linkage(path, &hir, env, options)?;
-    lm_hir::externalize_core(&mut hir, &core.interface)
+    lm_hir::externalize_core(&mut hir, core.interface())
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
@@ -1444,7 +1444,7 @@ mod tests {
             1
         );
         let core = crate::core_link_unit().expect("the core link unit builds");
-        assert_eq!(linked.conformances.len(), core.module.conformances.len());
+        assert_eq!(linked.conformances.len(), core.module().conformances.len());
     }
 
     #[test]

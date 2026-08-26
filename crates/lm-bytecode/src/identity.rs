@@ -149,7 +149,7 @@ fn fail(message: impl Into<String>) -> IdentityError {
 
 /// The identity of one module: a definition hash per class and per
 /// function, plus the module semantic hash.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleIdentity {
     pub class_hashes: Vec<[u8; 32]>,
     pub func_hashes: Vec<[u8; 32]>,

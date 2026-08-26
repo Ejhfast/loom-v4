@@ -3,7 +3,7 @@
 //! A `LinkUnit` contains one module, its interface, and exact dependencies.
 //! An `Artifact` contains one root unit and its embedded dependency units.
 
-use crate::identity::{module_identity_with_bundle, IdentityError};
+use crate::identity::{module_identity_with_bundle, IdentityError, ModuleIdentity};
 use crate::interface::{interface_identity, Interface};
 use crate::{hash, Module};
 use std::collections::BTreeMap;
@@ -85,12 +85,10 @@ impl ArtifactDependency {
 pub struct LinkUnit {
     id: ArtifactId,
     bundle_digest: [u8; 32],
-    /// The canonical module path.
-    pub path: String,
-    /// The compiled bytecode module.
-    pub module: Module,
-    /// The exported module interface.
-    pub interface: Interface,
+    identity: ModuleIdentity,
+    path: String,
+    module: Module,
+    interface: Interface,
     dependencies: Vec<ArtifactDependency>,
 }
 
@@ -123,10 +121,12 @@ impl LinkUnit {
             });
         }
         canonicalize_dependencies(&mut dependencies)?;
-        let id = compute_artifact_id(&module_path, &module, &interface, &dependencies, bundle)?;
+        let identity = module_identity_with_bundle(&module, bundle)?;
+        let id = compute_artifact_id(&module_path, &identity, &interface, &dependencies)?;
         Ok(LinkUnit {
             id,
             bundle_digest: bundle.digest(),
+            identity,
             path: module_path,
             module,
             interface,
@@ -147,6 +147,11 @@ impl LinkUnit {
     /// Return the bytecode payload.
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// Return the recomputed module identity.
+    pub fn identity(&self) -> &ModuleIdentity {
+        &self.identity
     }
 
     /// Return the module interface.
@@ -390,14 +395,12 @@ fn write_digest(out: &mut fmt::Formatter<'_>, digest: &[u8; 32]) -> fmt::Result 
 
 fn compute_artifact_id(
     module_path: &str,
-    module: &Module,
+    identity: &ModuleIdentity,
     interface: &Interface,
     dependencies: &[ArtifactDependency],
-    bundle: &lm_abi::AbiBundle,
 ) -> Result<ArtifactId, ArtifactError> {
     let count =
         u32::try_from(dependencies.len()).map_err(|_| ArtifactError::TooManyDependencies)?;
-    let identity = module_identity_with_bundle(module, bundle)?;
     let mut bytes = Vec::with_capacity(
         ARTIFACT_ID_TAG.len() + module_path.len() + 72 + dependencies.len() * 40,
     );
@@ -819,6 +822,8 @@ mod tests {
             bundle_digest: lm_abi::standard_bundle().digest(),
             path: "cycle.left".to_string(),
             interface: interface("cycle.left", &left_module),
+            identity: crate::identity::module_identity(&left_module)
+                .expect("the left module has an identity"),
             module: left_module,
             dependencies: vec![ArtifactDependency::new("cycle.right", right_id).unwrap()],
         };
@@ -827,6 +832,8 @@ mod tests {
             bundle_digest: lm_abi::standard_bundle().digest(),
             path: "cycle.right".to_string(),
             interface: interface("cycle.right", &right_module),
+            identity: crate::identity::module_identity(&right_module)
+                .expect("the right module has an identity"),
             module: right_module,
             dependencies: vec![ArtifactDependency::new("cycle.left", left_id).unwrap()],
         };

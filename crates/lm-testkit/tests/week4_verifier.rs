@@ -249,7 +249,7 @@ fn an_op_const_of_a_vm_control_slot_is_rejected() {
 }
 
 const MOCKER: &str = "def f(vm: Run[Int]) with Vm\n  \
-    vm.table().mock(Clock.Now, { ||: Int 1 })\nend\n1\n";
+    vm.table().mock(Clock.Now, { ||: Int 1 })\nend\ncodeof(f)\n";
 
 #[test]
 fn table_edit_forgeries_are_rejected() {
@@ -293,7 +293,7 @@ fn table_edit_forgeries_are_rejected() {
 fn as_call_of_a_vm_control_slot_is_rejected() {
     let source = "def f(vm: Run[Int]): Int with Vm\n  case vm.drive()\n  in Asked(q)\n    \
         case q\n    in Call(Clock.Now, call, ()) then 1\n    in _ then 2\n    end\n  \
-        in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\n1\n";
+        in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ncodeof(f)\n";
     let mut module = compile(source);
     let f = func_index(&module, "f");
     for block in &mut module.funcs[f].blocks {

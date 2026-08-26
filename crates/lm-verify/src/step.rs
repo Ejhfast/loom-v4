@@ -1980,21 +1980,19 @@ pub(crate) fn step(
                             }
                             let code = pop(state)?;
                             let code_ty = ctx.ty(code);
-                            let installed = if code
-                                == ctx
-                                    .plain_inst(ctx.core.verified_module, "VerifiedModule")
-                                    .map_err(&fail)?
-                            {
+                            let verified = ctx
+                                .core
+                                .verified_module
+                                .map(|class| ctx.intern(BcType::Class(class)));
+                            let class_code = ctx
+                                .core
+                                .class_code
+                                .map(|class| ctx.intern(BcType::Class(class)));
+                            let installed = if verified == Some(code) {
                                 ctx.plain_inst(ctx.core.instance, "Instance")
                                     .map_err(&fail)?
                             } else if let BcType::Inst(class, args) = code_ty.clone() {
-                                let function_code = ctx.core.function_code.ok_or_else(|| {
-                                    fail(
-                                        "the module does not carry the pinned core FunctionCode definition"
-                                            .to_string(),
-                                    )
-                                })?;
-                                if class != function_code || args.len() != 2 {
+                                if ctx.core.function_code != Some(class) || args.len() != 2 {
                                     return Err(fail(
                                         "`Vm.Install` has invalid code input".to_string(),
                                     ));
@@ -2007,11 +2005,7 @@ pub(crate) fn step(
                                     )
                                 })?;
                                 ctx.intern(BcType::Inst(function_binding, args))
-                            } else if code
-                                == ctx
-                                    .plain_inst(ctx.core.class_code, "ClassCode")
-                                    .map_err(&fail)?
-                            {
+                            } else if class_code == Some(code) {
                                 ctx.plain_inst(ctx.core.class_binding, "ClassBinding")
                                     .map_err(&fail)?
                             } else if let BcType::Fn(params, muts, ret, _) = code_ty {
@@ -2259,24 +2253,19 @@ pub(crate) fn step(
                         | lm_abi::OP_VM_BINDING_FUNCTION_TARGET
                         | lm_abi::OP_VM_BINDING_CLASS_TARGET => {
                             let binding = pop(state)?;
-                            let function_binding = ctx.core.function_binding.ok_or_else(|| {
-                                fail(
-                                    "the module does not carry the pinned core FunctionBinding definition"
-                                        .to_string(),
-                                )
-                            })?;
-                            let class_binding = ctx
-                                .plain_inst(ctx.core.class_binding, "ClassBinding")
-                                .map_err(&fail)?;
                             let function_args = match ctx.ty(binding) {
                                 BcType::Inst(class, args)
-                                    if class == function_binding && args.len() == 2 =>
+                                    if ctx.core.function_binding == Some(class)
+                                        && args.len() == 2 =>
                                 {
                                     Some(args)
                                 }
                                 _ => None,
                             };
-                            let is_class = binding == class_binding;
+                            let is_class = matches!(
+                                ctx.ty(binding),
+                                BcType::Class(class) if ctx.core.class_binding == Some(class)
+                            );
                             if function_args.is_none() && !is_class {
                                 return Err(fail(
                                     "a binding operation needs an installed binding".to_string(),
@@ -2376,24 +2365,13 @@ pub(crate) fn step(
                             let args_ty = pop(state)?;
                             let definition = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
-                            let Some(function_def) = ctx.core.function_def else {
-                                return Err(fail(
-                                    "the module does not carry the pinned core FunctionDef definition"
-                                        .to_string(),
-                                ));
-                            };
-                            let Some(function_binding) = ctx.core.function_binding else {
-                                return Err(fail(
-                                    "the module does not carry the pinned core FunctionBinding definition"
-                                        .to_string(),
-                                ));
-                            };
                             let BcType::Inst(found, parts) = ctx.ty(definition) else {
                                 return Err(fail(
                                     "`Vm.ActivateDef` needs an installed function".to_string(),
                                 ));
                             };
-                            if (found != function_def && found != function_binding)
+                            if (ctx.core.function_def != Some(found)
+                                && ctx.core.function_binding != Some(found))
                                 || parts.len() != 2
                                 || !ctx.is_subtype(args_ty, parts[0])
                             {
@@ -2418,23 +2396,12 @@ pub(crate) fn step(
                             let definition = pop(state)?;
                             let slot = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
-                            let function_def = ctx.core.function_def.ok_or_else(|| {
-                                fail(
-                                    "the module does not carry the pinned core FunctionDef definition"
-                                        .to_string(),
-                                )
-                            })?;
-                            let function_binding = ctx.core.function_binding.ok_or_else(|| {
-                                fail(
-                                    "the module does not carry the pinned core FunctionBinding definition"
-                                        .to_string(),
-                                )
-                            })?;
                             let definition_ty = ctx.ty(definition);
                             let valid = matches!(
                                 &definition_ty,
                                 BcType::Inst(class, args)
-                                    if (*class == function_def || *class == function_binding)
+                                    if (ctx.core.function_def == Some(*class)
+                                        || ctx.core.function_binding == Some(*class))
                                         && args.len() == 2
                             ) || matches!(
                                 &definition_ty,
@@ -2446,13 +2413,14 @@ pub(crate) fn step(
                                     "`Vm.ReplaceFunction` needs a function target".to_string(),
                                 ));
                             }
-                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
+                            let direct_slot =
+                                ctx.core.slot.map(|class| ctx.intern(BcType::Class(class)));
                             let binding = matches!(
                                 ctx.ty(slot),
                                 BcType::Inst(class, args)
-                                    if class == function_binding && args.len() == 2
+                                    if ctx.core.function_binding == Some(class) && args.len() == 2
                             );
-                            if slot != slot_ty && !binding {
+                            if direct_slot != Some(slot) && !binding {
                                 return Err(fail(
                                     "`Vm.ReplaceFunction` needs a function binding".to_string(),
                                 ));
@@ -2474,18 +2442,21 @@ pub(crate) fn step(
                             let slot = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
                             let class_def = ctx
-                                .plain_inst(ctx.core.class_def, "ClassDef")
-                                .map_err(&fail)?;
+                                .core
+                                .class_def
+                                .map(|class| ctx.intern(BcType::Class(class)));
                             let class_binding = ctx
-                                .plain_inst(ctx.core.class_binding, "ClassBinding")
-                                .map_err(&fail)?;
-                            if definition != class_def && definition != class_binding {
+                                .core
+                                .class_binding
+                                .map(|class| ctx.intern(BcType::Class(class)));
+                            if class_def != Some(definition) && class_binding != Some(definition) {
                                 return Err(fail(
                                     "`Vm.ReplaceClass` needs a class target".to_string(),
                                 ));
                             }
-                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
-                            if slot != slot_ty && slot != class_binding {
+                            let slot_ty =
+                                ctx.core.slot.map(|class| ctx.intern(BcType::Class(class)));
+                            if slot_ty != Some(slot) && class_binding != Some(slot) {
                                 return Err(fail(
                                     "`Vm.ReplaceClass` needs a class binding".to_string(),
                                 ));

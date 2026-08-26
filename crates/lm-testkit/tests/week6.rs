@@ -510,15 +510,26 @@ fn an_imported_class_holds_its_mutable_methods() {
 fn a_transitive_type_materializes_without_its_own_use_line() {
     let tree = TempTree::new("transitive");
     workspace(&tree);
-    // `main` drops `use mathlib.matrix` and still calls
-    // `greeting.report`, whose parameter is a `mathlib` class.
+    tree.write(
+        "app/src/greeting.lm",
+        "use mathlib.matrix\n\
+         \n\
+         def unit(): matrix.Matrix\n\
+         \x20 matrix.Matrix(1, 1)\n\
+         end\n\
+         \n\
+         def report(m: matrix.Matrix): String\n\
+         \x20 \"#{matrix.describe(m)} has #{m.area()} cells\"\n\
+         end\n",
+    );
+    // `main` infers the transitive class without importing its module.
     tree.write(
         "app/src/main.lm",
         "use sys.io.write\n\
          use greeting\n\
          \n\
          def run() with Io.Write\n\
-         \x20 line = greeting.greet(\"Ada\")\n\
+         \x20 line = greeting.report(greeting.unit())\n\
          \x20 print(\"#{line}\\n\")\n\
          end\n\
          \n\
@@ -526,14 +537,14 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
     );
     let report = tree.build("app").expect("builds");
     let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
-    assert_eq!(output, "Hello Ada!\n");
+    assert_eq!(output, "1x1 has 1 cells\n");
     // The main unit keeps its exact transitive dependency graph.
     let bytes = std::fs::read(report.program.unwrap()).unwrap();
     let artifact = lm_bytecode::artifact::decode(&bytes).expect("decodes");
     assert!(artifact
         .units()
         .iter()
-        .any(|unit| unit.path == "mathlib.matrix"));
+        .any(|unit| unit.module_path() == "mathlib.matrix"));
     lm_testkit::link_artifact_bytes(&bytes).expect("the artifact links");
 }
 
@@ -1018,7 +1029,7 @@ fn a_stale_pin_fails_to_link() {
     workspace(&tree);
     let report = tree.build("app").expect("builds");
     let _ = report;
-    // Rebuild the units from the cache files and move one pin.
+    // Compile the importer against the first provider interface.
     let mut link_env = LinkEnv::new();
     link_env
         .bind(lm_compiler::core_link_unit().expect("the core builds"))
@@ -1032,17 +1043,23 @@ fn a_stale_pin_fails_to_link() {
     ] {
         units.push(compile_one(&tree, path, file, &mut seen));
     }
-    // The greeting module pins the interface of `mathlib.matrix`.
-    let mut stale = units[1].clone();
-    let slot = stale
-        .module
-        .imports
-        .iter_mut()
-        .find(|i| i.module == "mathlib.matrix")
-        .expect("the greeting module imports the matrix module");
-    slot.hash[0] ^= 0xff;
+    // Change the provider contract after the importer pins it.
+    tree.write(
+        "mathlib/src/matrix.lm",
+        &std::fs::read_to_string(tree.path("mathlib/src/matrix.lm"))
+            .expect("the provider reads")
+            .replace("def area(self): Int", "def area(self, scale: Int): Int")
+            .replace("self.rows * self.cols", "self.rows * self.cols * scale"),
+    );
+    let mut changed_seen = Vec::new();
+    let changed = compile_one(
+        &tree,
+        "mathlib.matrix",
+        "mathlib/src/matrix.lm",
+        &mut changed_seen,
+    );
     for (idx, unit) in units.iter().enumerate() {
-        let unit = if idx == 1 { &stale } else { unit };
+        let unit = if idx == 0 { &changed } else { unit };
         link_env
             .bind_module(
                 unit.path.clone(),
@@ -1106,14 +1123,42 @@ fn the_linker_rejects_a_crafted_export_table() {
             .expect("the core binds");
         for (idx, unit) in units.iter().enumerate() {
             let mut module = unit.module.clone();
+            let mut interface = unit.interface.clone();
             // The first two cases damage the provider; the third
             // damages the importer.
             let target = if needle == "which it imports" { 1 } else { 0 };
             if idx == target {
                 damage(&mut module);
+                if needle != "outside the" {
+                    let mut items: Vec<lm_bytecode::interface::IfaceItem> = interface
+                        .exports
+                        .iter()
+                        .map(|entry| entry.item.clone())
+                        .collect();
+                    if needle == "twice" {
+                        items.push(items[0].clone());
+                    } else {
+                        items.push(
+                            units[0]
+                                .interface
+                                .find("Matrix")
+                                .expect("the provider exports Matrix")
+                                .item
+                                .clone(),
+                        );
+                    }
+                    let identity = lm_bytecode::identity::module_identity(&module)
+                        .expect("the crafted module has an identity");
+                    let slots = interface.slots.clone();
+                    interface = lm_bytecode::interface::build_interface(
+                        &module, &identity, &unit.path, &items,
+                    )
+                    .expect("the crafted interface builds");
+                    interface.slots = slots;
+                }
             }
             link_env
-                .bind_module(unit.path.clone(), module, unit.interface.clone())
+                .bind_module(unit.path.clone(), module, interface)
                 .expect("binds");
         }
         let error = link("app.main", &link_env.freeze()).expect_err("the table must reject");

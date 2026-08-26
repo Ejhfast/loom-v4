@@ -44,8 +44,9 @@ fn building_twice_is_byte_identical() {
 
 #[test]
 fn a_comment_edit_changes_only_source_bytes() {
-    let plain = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
-    let commented = "# a leading comment\ndef f(n: Int): Int\n  # inside\n  n + 1\nend\n\nf(41)\n";
+    let plain =
+        "def f(n: Int): Int\n  if n == 0\n    1\n  else\n    f(n - 1) + 1\n  end\nend\nf(2)\n";
+    let commented = "# a leading comment\ndef f(n: Int): Int\n  # inside\n  if n == 0\n    1\n  else\n    f(n - 1) + 1\n  end\nend\n\nf(2)\n";
     let a = compile_to_bytes("t.lm", plain).unwrap();
     let b = compile_to_bytes("t.lm", commented).unwrap();
     // The source attachment preserves comments and changes exact bytes.
@@ -62,8 +63,8 @@ fn a_comment_edit_changes_only_source_bytes() {
 
 #[test]
 fn a_body_edit_changes_only_that_definition() {
-    let one = "def f(n: Int): Int\n  n + 1\nend\ndef g(n: Int): Int\n  n * 3\nend\nf(g(1))\n";
-    let two = "def f(n: Int): Int\n  n + 2\nend\ndef g(n: Int): Int\n  n * 3\nend\nf(g(1))\n";
+    let one = "def f(n: Int): Int\n  if n < 0\n    f(n)\n  else\n    n + 1\n  end\nend\ndef g(n: Int): Int\n  if n < 0\n    g(n)\n  else\n    n * 3\n  end\nend\nf(g(1))\n";
+    let two = "def f(n: Int): Int\n  if n < 0\n    f(n)\n  else\n    n + 2\n  end\nend\ndef g(n: Int): Int\n  if n < 0\n    g(n)\n  else\n    n * 3\n  end\nend\nf(g(1))\n";
     let (ma, ia) = identity_of(one);
     let (mb, ib) = identity_of(two);
     assert_ne!(func_hash(&ma, &ia, "f"), func_hash(&mb, &ib, "f"));
@@ -122,10 +123,10 @@ fn definition_hashes_do_not_depend_on_source_order() {
 /// semantic hash changes through the export table.
 #[test]
 fn a_rename_changes_the_module_hash_and_no_definition_hash() {
-    let before = "def helper(n: Int): Int\n  n * 2\nend\n\
-                  def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
-    let after = "def assist(n: Int): Int\n  n * 2\nend\n\
-                 def caller(n: Int): Int\n  assist(n) + 1\nend\ncaller(3)\n";
+    let before = "def helper(n: Int): Int\n  if n < 0\n    helper(n)\n  else\n    n * 2\n  end\nend\n\
+                  def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    helper(n) + 1\n  end\nend\ncaller(3)\n";
+    let after = "def assist(n: Int): Int\n  if n < 0\n    assist(n)\n  else\n    n * 2\n  end\nend\n\
+                 def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    assist(n) + 1\n  end\nend\ncaller(3)\n";
     let (ma, ia) = identity_of(before);
     let (mb, ib) = identity_of(after);
     assert_eq!(
@@ -488,9 +489,10 @@ fn a_cached_load_and_an_uncached_load_always_agree() {
                      self.value = self.value + n\n    self.value\n  end\n  \
                      def get(self): Int\n    self.value\n  end\nend\n\
                      c = Counter()\nc.add(1)\nc.get()\n";
-    let str_src = "def label(): String\n  \"hello\"\nend\nlabel()\n";
+    let str_src = "def label(n: Int): String\n  if n < 0\n    label(n)\n  else\n    \"hello\"\n  end\nend\nlabel(0)\n";
     let gen_src = "def id[T](x: T): T\n  x\nend\nid[Int](1)\n";
-    let twin_src = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
+    let twin_src =
+        "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\nb = B()\na.x + b.x\n";
 
     // (label, source, mutation, stable). Each mutation returns true
     // when it applied. `stable` states whether the module semantic
@@ -724,7 +726,8 @@ fn point_new(m: &mut Module, from: u32, to: u32) -> bool {
 /// load-bearing fix, not the hash domain.
 #[test]
 fn a_duplicate_class_key_cannot_use_a_cache_hit() {
-    let source = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
+    let source =
+        "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\nb = B()\na.x + b.x\n";
     let bytes = compile_to_bytes("t.lm", source).unwrap();
     let mut module = lm_bytecode::decode(&bytes).unwrap();
     let a = module.classes.iter().position(|c| c.name == "A").unwrap() as u32;
@@ -801,10 +804,10 @@ fn the_verification_hash_keeps_every_index() {
 #[test]
 fn a_published_rename_moves_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
-    let before = "def helper(n: Int): Int\n  n * 2\nend\n\
-                  def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
-    let after = "def assist(n: Int): Int\n  n * 2\nend\n\
-                 def caller(n: Int): Int\n  assist(n) + 1\nend\ncaller(3)\n";
+    let before = "def helper(n: Int): Int\n  if n < 0\n    helper(n)\n  else\n    n * 2\n  end\nend\n\
+                  def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    helper(n) + 1\n  end\nend\ncaller(3)\n";
+    let after = "def assist(n: Int): Int\n  if n < 0\n    assist(n)\n  else\n    n * 2\n  end\nend\n\
+                 def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    assist(n) + 1\n  end\nend\ncaller(3)\n";
     let ma = compile_text("t.lm", before).unwrap();
     let mb = compile_text("t.lm", after).unwrap();
     assert_ne!(

@@ -114,9 +114,13 @@ fn generic_inference_and_ambiguity() {
 #[test]
 fn generic_bodies_are_shared_not_monomorphized() {
     // One `id` body serves two instantiations; the bytecode holds one
-    // function for it.
-    let module =
-        compile_text("t.lm", "def id[T](x: T): T\n  x\nend\n(id(1), id(\"a\"))\n").unwrap();
+    // function for it. Recursion prevents inlining from removing the
+    // shared body before collection.
+    let module = compile_text(
+        "t.lm",
+        "def id[T](x: T, depth: Int): T\n  if depth == 0\n    x\n  else\n    id(x, depth - 1)\n  end\nend\n(id(1, 1), id(\"a\", 1))\n",
+    )
+    .unwrap();
     let count = module.funcs.iter().filter(|f| f.name == "id").count();
     assert_eq!(count, 1);
     // Two call sites share the module through type applications.

@@ -186,8 +186,8 @@ fn the_verifier_requires_the_complete_text_family() {
 
 #[test]
 fn the_verifier_rejects_an_extra_text_subclass() {
-    let mut module =
-        compile_text("text_subclass.lm", "class Extra\nend\n0\n").expect("the program compiles");
+    let mut module = compile_text("text_subclass.lm", "class Extra\nend\nExtra()\n0\n")
+        .expect("the program compiles");
     let text = module.core_roles[ROLE_TEXT];
     let extra = module
         .classes

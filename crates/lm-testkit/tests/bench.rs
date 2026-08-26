@@ -2120,7 +2120,17 @@ fn bench_program_artifact_linking() {
     let mut decode_runs = Vec::new();
     let mut link_runs = Vec::new();
     let mut cold_runs = Vec::new();
+    let mut compile_runs = Vec::new();
     for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let compiled = lm_compiler::compile_source("bench.main", &source, true)
+            .expect("the tiny program compiles");
+        let elapsed = start.elapsed();
+        std::hint::black_box(compiled.artifact.len());
+        if round > 0 {
+            compile_runs.push(elapsed);
+        }
+
         let start = Instant::now();
         let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
         let elapsed = start.elapsed();
@@ -2152,12 +2162,16 @@ fn bench_program_artifact_linking() {
         "LOOM\tprogram_artifact\t{}\t{}\t{}\t{}\tbytes_units_classes_functions",
         bytes.len(),
         artifact.units().len(),
-        artifact.root().module.classes.len(),
-        artifact.root().module.funcs.len()
+        artifact.root().module().classes.len(),
+        artifact.root().module().funcs.len()
     );
     println!(
         "LOOM\tprogram_artifact_decode\t{:.3}\tms",
         median(decode_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tprogram_artifact_compile\t{:.3}\tms",
+        median(compile_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tprogram_artifact_link\t{:.3}\tms",
