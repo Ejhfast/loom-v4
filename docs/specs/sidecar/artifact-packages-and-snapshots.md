@@ -1,6 +1,8 @@
-# Artifact Packages and Portable Snapshots
+# Artifacts and Portable Snapshots
 
-Status: accepted design. Stages 0 through 2 are implemented.
+Status: accepted design. Stages 0 through 2 have prototype implementations.
+
+Stage 2R reconciles those implementations with the existing package and linker model.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -10,7 +12,7 @@ It replaces no source-language syntax.
 
 Loom code is a value. A Loom world must also be a portable value.
 
-The current system links one complete program into one `Module`.
+The current system links one complete program into one aggregate `Module`.
 
 The current snapshot stores state against that ambient module.
 
@@ -18,175 +20,275 @@ This design removes that ambient dependency.
 
 It keeps execution tables dense and fast.
 
-It also keeps the standard core outside thin packages.
+It also keeps the standard core outside thin encodings.
 
-## 2. Public model
+The package rules remain in [packages.md](packages.md).
+
+This document adds no second package graph, module path system, resolver, or cache.
+
+## 2. Unified build-output model
 
 The public model has two main values.
 
-- An `Artifact` contains verified code and exact artifact dependencies.
+- An `Artifact` contains code and exact artifact dependencies.
 - A `Snapshot` contains artifacts and runtime state.
 
-`Module` remains the decoded bytecode payload of one artifact record.
+Verification remains the publication boundary for decoded code.
+
+The source package model keeps its current parts.
+
+- `lm.package` defines one source package and its dependency aliases.
+- The source tree defines canonical module paths.
+- `CompileEnv` supplies visible interfaces to the compiler.
+- `LinkUnit` carries one compiled module and its interface.
+- `LinkEnv` resolves canonical module paths.
+
+An artifact is the built form of one selected root.
+
+It can be a program entry, one library module, or a `codeof` closure.
+
+One source package can therefore produce several artifacts.
+
+`Module` remains the decoded bytecode payload of one `LinkUnit`.
 
 `Module` is not the deployment abstraction.
 
-An encoded artifact can include dependency records.
+`LinkUnit` is an internal build and link value.
+
+`Artifact` and `Snapshot` remain the public values.
+
+An encoded artifact can include dependency units.
 
 The same artifact can use a thin or fat encoding.
 
-A thin encoding omits dependencies that the loader already has.
+A thin encoding omits exact dependencies that the loader can supply.
 
 A fat encoding includes the complete dependency graph.
 
 Both encodings name the same root `ArtifactId`.
 
-## 3. Artifact records
+The build cache does not participate in artifact resolution.
 
-One artifact record contains these fields.
+### 2.1 One path from source to execution
+
+The system uses this single path.
 
 ```text
-ArtifactRecord
+source package graph
+  -> CompiledModule
+  -> LinkUnit
+  -> Artifact
+  -> LinkEnv
+  -> CodeNamespace
+```
+
+`CompiledModule` is the unbound result of one compiler call.
+
+It contains one module, one interface, and build metadata.
+
+The source build cache can store that result through its existing keys.
+
+The package builder binds every import to an exact provider.
+
+That step produces one `LinkUnit`.
+
+`LinkUnit` is the only linkable module type.
+
+An `Artifact` stores one root and its reachable `LinkUnit` closure.
+
+Thin and fat artifacts differ only in which exact dependency units they embed.
+
+`LinkEnv` resolves the artifact graph for the compiler or runtime.
+
+The runtime never reads the source build cache.
+
+The `.lma` file contains the same `Artifact` value that runtime compilation produces.
+
+A snapshot contains one or more ordinary artifacts and runtime state.
+
+No stage rebuilds a second package graph.
+
+## 3. Link units
+
+The existing compiler `LinkUnit` moves into `lm-bytecode`.
+
+`lm-compiler` re-exports that exact type.
+
+Stage 3 removes all legacy construction with missing dependency bindings.
+
+```text
+LinkUnit
+  module_path: String
   module: Module
+  interface: Interface
   dependencies: List[ArtifactDependency]
 ```
 
-One dependency contains a logical namespace and an exact identity.
+One dependency contains a canonical module path and an exact identity.
 
 ```text
 ArtifactDependency
-  namespace: String
+  module_path: String
   artifact: ArtifactId
 ```
 
-The namespace never contains a filesystem path.
+The module path never contains a filesystem path.
 
-The compiler derives it from the logical module or package namespace.
+The package builder derives it through the rules in `packages.md`.
 
-The standard core uses the namespace `core`.
+Manifest dependency aliases do not enter the artifact.
 
-One record cannot bind one namespace twice.
+The standard core uses the canonical module path `core`.
+
+One unit cannot bind one module path twice.
 
 Dependency order has no semantic meaning.
 
-Canonical encodings sort dependencies by namespace and identity.
+Canonical encodings sort dependencies by module path and identity.
 
-## 4. Artifact packages
+Each `Import.module` must name a bound dependency module.
 
-An encoded `Artifact` is a flat package.
+The linker rejects an import that has no exact dependency binding.
 
-It contains one root record and zero or more embedded records.
+The wire codec can use a private record structure.
 
-The package header names the root by `ArtifactId`.
+That record is not another public code abstraction.
 
-Each embedded record carries its direct dependency list.
+## 4. Artifact containers
 
-The records form a directed acyclic graph in version 1.
+An encoded `Artifact` is a flat container.
 
-The decoder rejects duplicate records and unreachable records.
+It contains one root unit and zero or more embedded units.
+
+The artifact header names the root by `ArtifactId`.
+
+Each embedded unit carries its direct dependency list.
+
+The units form a directed acyclic graph in version 1.
+
+The decoder rejects duplicate units and unreachable units.
 
 The decoder uses an explicit work stack for graph checks.
 
 Source module import cycles remain unsupported in version 1.
 
-Definition cycles inside one record remain supported.
+Definition cycles inside one unit remain supported.
 
 The definition collector uses the shared SCC implementation.
 
-### 4.1 Canonical package encoding
+### 4.1 Canonical artifact encoding
 
-The package magic is `LMAR`.
+The artifact magic is `LMAR`.
 
-Artifact package format version 1 uses this header.
+Artifact format version 1 uses this header.
 
 ```text
 magic:               4 bytes
 format version:      u16
 ABI bundle digest:   32 bytes
 root ArtifactId:     32 bytes
-record count:        u32
+unit count:          u32
 ```
 
-Records follow in ascending `ArtifactId` order.
+Units follow in ascending `ArtifactId` order.
 
-Each record uses this encoding.
+Each unit uses this encoding.
 
 ```text
 stored ArtifactId:   32 bytes
+module path length:  u32
+module path:         UTF-8 bytes
 dependency count:    u32
 dependencies:        repeated dependency records
 module length:       u32
 module payload:      LMBC bytes
+interface length:    u32
+interface payload:   LMI bytes
 ```
 
 Each dependency uses this encoding.
 
 ```text
-namespace length:    u32
-namespace:           UTF-8 bytes
+module path length:  u32
+module path:         UTF-8 bytes
 dependency identity: 32 bytes
 ```
 
 The decoder recomputes each stored `ArtifactId`.
 
-The package contains no trusted identity field.
+The artifact contains no trusted identity field.
+
+The decoder rejects units that do not use ascending identity order.
+
+The decoder rejects dependencies that do not use canonical order.
+
+A trusted builder can sort values before encoding.
 
 ## 5. Identity
 
 ### 5.1 ArtifactId
 
-`ArtifactId` is the semantic identity of one artifact record.
+`ArtifactId` is the semantic identity of one `LinkUnit` closure.
 
 It uses BLAKE3-256 with a distinct domain tag.
 
 It covers these values.
 
-- The bytecode format version.
-- The compiler ABI version.
-- The ABI bundle digest.
+- The canonical module path.
 - The module semantic hash.
-- Every dependency namespace and `ArtifactId`.
+- The interface identity.
+- Every dependency module path and `ArtifactId`.
+
+The module semantic hash owns format and ABI version coverage.
+
+`ArtifactId` does not encode those values a second time.
 
 It does not cover source text or optional debug data.
 
 A debug-only edit keeps the same `ArtifactId`.
 
-A dependency edit moves the `ArtifactId`.
+A resolved dependency edit moves the `ArtifactId`.
 
-### 5.2 BlobHash
+### 5.2 Container hash
 
-`BlobHash` is BLAKE3-256 over the exact encoded artifact bytes.
+The existing container hash is BLAKE3-256 over the exact encoded artifact bytes.
 
 A thin and fat encoding can share one `ArtifactId`.
 
-They always have different `BlobHash` values.
+They have different container hashes.
 
-An encoding or debug-data edit moves `BlobHash`.
+An encoding or debug-data edit moves the container hash.
+
+The artifact model adds no second exact-byte hash type.
 
 ### 5.3 Stored identities
 
-The container stores each record identity for graph references.
+The container stores each unit identity for graph references.
 
 The decoder recomputes every stored identity.
 
 No stored digest acts as proof.
 
+Semantic identity must return an error for every invalid decoded module.
+
+Semantic identity must never panic on decoded input.
+
 ## 6. Version 1 resolution
 
-Version 1 has no local or network artifact store.
+Version 1 has no local or network runtime artifact store.
 
-The resolver has two sources.
+The shared linker has two artifact sources.
 
-1. It uses records embedded in the artifact.
-2. It can use the runtime standard core.
+1. It uses units embedded in the artifact.
+2. It can use the exact runtime standard core.
 
 Every non-core dependency must be embedded.
 
-The resolver identifies the core through the `core` namespace.
+The linker identifies core through its canonical module path.
 
 A thin core dependency must exactly match the runtime core `ArtifactId`.
 
-The resolver rejects a different thin core identity.
+The linker rejects a different thin core identity.
 
 A fat artifact can embed another compatible core.
 
@@ -197,6 +299,66 @@ The runtime never substitutes a compatible artifact automatically.
 A future store can resolve more exact `ArtifactId` values.
 
 That extension does not change the artifact format.
+
+`LinkEnv` remains the only module-path resolver.
+
+Decoded artifact units populate one `LinkEnv` for each resolved graph.
+
+The compiler, runtime loader, and snapshot restore use the same linker.
+
+The existing build cache remains private to source builds.
+
+Runtime loading never queries the build cache.
+
+### 6.1 Shared linker ownership
+
+The compiler and VM both need the same linker.
+
+Neither crate can depend on the other.
+
+The existing linker moves into one shared lower crate.
+
+This document calls that crate `lm-link`.
+
+`lm-link` depends on `lm-bytecode` and `lm-verify`.
+
+It has no source compiler, filesystem, host, network, or clock dependency.
+
+`lm-bytecode` owns the `LinkUnit` data and artifact codec.
+
+`lm-link` owns `LinkEnv`, graph resolution, contract checks, and relocation plans.
+
+`lm-compiler` can re-export its existing `LinkEnv` surface.
+
+This move replaces the compiler linker and runtime append linker with one implementation.
+
+### 6.2 Package build flow
+
+The existing package builder remains the only manifest consumer.
+
+It resolves dependency aliases to canonical package and module paths.
+
+It compiles modules in dependency order through `CompileEnv`.
+
+It then binds actual imports to exact provider `ArtifactId` values.
+
+The selected root and its reachable units form the Artifact.
+
+Unreachable source modules do not enter that Artifact.
+
+The standard catalog supplies ordinary `LinkUnit` values.
+
+The core prelude also becomes one ordinary `LinkUnit` dependency.
+
+`CompileEnv` keeps the prelude names available without a `use` declaration.
+
+The lowerer emits imports for referenced core definitions.
+
+A compiled source unit contains no copied core method body.
+
+The old flattened linked-program `Module` stops being the deployment value.
+
+The `.lma` file stores the Artifact container instead.
 
 ## 7. Runtime ABI
 
@@ -226,15 +388,15 @@ Cross-version admission remains deferred.
 
 ## 8. Linking and verification
 
-The verifier checks each artifact record before publication.
+The verifier checks each `LinkUnit` before publication.
 
 An imported declaration has no executable body.
 
-The linker resolves imports through artifact dependencies.
+The linker resolves imports through exact `LinkUnit` dependencies.
 
 An import identifies these values.
 
-- A dependency namespace.
+- A canonical dependency module path.
 - An exported key.
 - An export kind.
 - An interface contract hash.
@@ -259,29 +421,55 @@ One `World` owns one `CodeArena`.
 
 The arena holds dense executable tables.
 
-An artifact enters the arena through one checked relocation.
+A `LinkUnit` enters the arena through one checked relocation.
 
 Existing indices never move.
 
-The arena deduplicates definitions by their existing identities.
+The arena deduplicates complete units by `ArtifactId`.
 
-One `CodeNamespace` names one resolved artifact graph.
+Version 1 does not deduplicate definitions across different units.
 
-It records bindings, slots, exports, and core roles.
+One `CodeNamespace` is one relocated and immutable `LinkEnv`.
+
+It records module bindings, slots, exports, relocation maps, and core roles.
 
 Each machine stores one `NamespaceId`.
 
 An execution lease pins its namespace view.
 
+The world has no global core-role layout.
+
+Each namespace carries the core-role layout of its exact core artifact.
+
+Host replies use the destination machine's namespace.
+
 Normal instruction dispatch uses dense arena indices.
 
 It performs no hash or namespace lookup.
 
-Two namespaces can bind the same source names differently.
+Two namespaces can bind the same module path to different exact artifacts.
 
 Cross-namespace work uses VM boundary operations.
 
 Direct calls and slot targets stay inside one namespace.
+
+The arena can hold two compatible core artifacts.
+
+Each core keeps its own `ArtifactId`, definitions, and core-role layout.
+
+One resolved artifact graph binds each module path once.
+
+A world can hold several graphs through separate namespaces.
+
+A snapshot can therefore contain `core` units with different identities.
+
+Its namespace manifests state which exact core belongs to each machine.
+
+Primitive value representations come from the universal runtime ABI.
+
+Primitive virtual dispatch uses the current machine's core-role layout.
+
+Heap instances carry relocated arena class indices.
 
 ## 10. Boundary values
 
@@ -305,7 +493,7 @@ It does not move those values into its own namespace.
 
 ## 11. `codeof` and runtime compilation
 
-`codeof` produces the same artifact record form as source compilation.
+`codeof` produces the same `LinkUnit` form as source compilation.
 
 It includes the selected definition closure.
 
@@ -334,7 +522,7 @@ Snapshot
   state: RuntimeState
 ```
 
-The artifact section uses the ordinary artifact package format.
+The artifact section uses the ordinary artifact container format.
 
 The namespace section binds machines to resolved artifact graphs.
 
@@ -342,11 +530,21 @@ The state section stores heaps, frames, mailboxes, policies, slots, and resource
 
 A thin snapshot can omit the exact runtime standard core.
 
-A fat snapshot embeds every artifact, including its core.
+A fat snapshot embeds every required unit, including each core.
 
 Both forms use the same admission path.
 
 A snapshot never relies on the loader's ambient program.
+
+An in-memory snapshot shares immutable arena units and namespace views.
+
+Snapshot capture does not encode shared code until the caller requests bytes.
+
+A serialized thin snapshot stores program and installed-code units.
+
+It references the exact runtime core by `ArtifactId`.
+
+A serialized fat snapshot embeds the complete unit graph.
 
 ## 13. Snapshot relocation
 
@@ -396,9 +594,9 @@ Collection works inside artifact boundaries.
 
 It never flattens all dependencies before collection.
 
-The first pass selects needed artifact records.
+The first pass selects needed `LinkUnit` values.
 
-The second pass selects definitions inside each selected record.
+The second pass selects definitions inside each selected unit.
 
 The definition graph includes every bytecode reference kind.
 
@@ -416,6 +614,14 @@ Keeping a runtime role class does not keep every unused method.
 
 Runtime construction roots only the methods that the runtime can call.
 
+Collection produces ordinary `LinkUnit` values.
+
+It recomputes each module identity, interface identity, dependency list, and `ArtifactId`.
+
+Collection preserves the exact core dependency.
+
+It never copies core definitions into a local unit.
+
 ## 16. Resource limits
 
 The decoder checks total bytes before nested decode work.
@@ -427,9 +633,10 @@ It applies limits before verification, identity work, or arena cloning.
 The initial limits cover these values.
 
 - Total artifact bytes.
-- Artifact record count.
+- Artifact unit count.
 - Direct dependency count.
 - Module payload bytes.
+- Interface payload bytes.
 - Total decoded code bytes.
 
 Version 1 uses these default limits.
@@ -437,11 +644,12 @@ Version 1 uses these default limits.
 | Limit | Value |
 | --- | ---: |
 | Total artifact bytes | 256 MiB |
-| Artifact records | 4,096 |
-| Direct dependencies per record | 4,096 |
+| Artifact units | 4,096 |
+| Direct dependencies per unit | 4,096 |
 | One module payload | 64 MiB |
-| Total module payload bytes | 256 MiB |
-| One dependency namespace | 4 KiB |
+| One interface payload | 64 MiB |
+| Total module and interface bytes | 256 MiB |
+| One dependency module path | 4 KiB |
 
 One operation decodes one artifact blob once.
 
@@ -498,7 +706,7 @@ The workspace result uses a warm debug build and default test concurrency.
 
 ### Stage 1: artifact identity and dependencies
 
-- Add `ArtifactId` and `BlobHash`.
+- Add `ArtifactId`.
 - Add canonical dependency bindings.
 - Compute identities from decoded content.
 - Add bounded artifact decoding.
@@ -506,12 +714,12 @@ The workspace result uses a warm debug build and default test concurrency.
 
 Gate: stored identities never bypass recomputation.
 
-### Stage 2: thin and fat artifact packages
+### Stage 2: thin and fat artifact containers
 
-- Add the flat artifact package encoding.
+- Add the flat artifact encoding.
 - Add exact runtime-core resolution.
 - Reject missing non-core dependencies.
-- Reject cycles, duplicates, and unreachable records.
+- Reject cycles, duplicates, and unreachable units.
 - Keep the legacy `Module` codec as the payload codec.
 
 Gate: thin and fat forms resolve to the same artifact graph.
@@ -522,11 +730,33 @@ Gate: a compatible embedded core resolves without ambient core identity.
 
 Stages 1 and 2 do not replace the current execution loader.
 
-Stage 3 makes the compiler and runtime consume the new artifact form.
+### Stage 2R: package and linker reconciliation
 
-### Stage 3: contract-safe artifact linking
+- Make the wire record contain one complete `LinkUnit`.
+- Store the canonical module path and interface.
+- Replace artifact namespaces with canonical module paths.
+- Reuse the existing container hash.
+- Remove the independent artifact resolver.
+- Reject non-canonical unit and dependency order.
+- Add semantic payload mutation tests.
+- State that decoded artifacts remain untrusted.
+- Rewrite this document around `packages.md`.
 
-- Resolve imports across artifact records.
+Gate: the artifact model defines no second package graph, resolver, cache, or byte hash.
+
+Gate: the decoder rejects every non-canonical ordering.
+
+Gate: semantic identity returns an error or a value for every decoded payload.
+
+### Stage 3: shared linking and core dependency
+
+- Move the existing linker into the shared lower layer.
+- Keep one `LinkEnv` implementation.
+- Make package builds produce exact `LinkUnit` graphs.
+- Compile core once as a normal dependency unit.
+- Emit source-module core references as imports.
+- Replace the flattened `.lma` payload with the Artifact container.
+- Resolve imports across artifact units.
 - Compare complete importer and provider contracts.
 - Reject executable extern declarations.
 - Reject foreign conformance attachment.
@@ -534,28 +764,39 @@ Stage 3 makes the compiler and runtime consume the new artifact form.
 
 Gate: a correct hash with a wrong local declaration rejects.
 
-### Stage 4: shared arena and namespaces
+Gate: a source module contains no copied core function body.
 
-- Add one append-only `CodeArena` to `World`.
-- Add `CodeNamespace` and `NamespaceId`.
-- Relocate each artifact once.
-- Keep execution on dense indices.
+Gate: the cold path does not use compression or a cache result.
 
-Gate: two namespaces can bind equal names to different definitions.
+### Stage 4: artifact-aware dependency collection
 
-Gate: direct-call performance stays within normal noise.
-
-### Stage 5: artifact-aware dependency collection
-
-- Collect required artifact records first.
+- Collect required `LinkUnit` values first.
 - Collect required definitions second.
 - Use `lm-scc` for definition cycles.
 - Retain sealed families as complete units.
+- Keep the exact core dependency unchanged.
 - Restore deep and cyclic collector tests.
 
 Gate: program `1` keeps one local entry and no local core class.
 
 Gate: `use m.f` removes unrelated exports.
+
+### Stage 5: shared arena and namespaces
+
+- Add one append-only `CodeArena` to `World`.
+- Add `CodeNamespace` and `NamespaceId`.
+- Relocate each exact unit once.
+- Deduplicate complete units by `ArtifactId`.
+- Keep different units separate despite equal definition hashes.
+- Move core roles from `World` into each namespace.
+- Route host replies through the destination namespace.
+- Keep execution on dense indices.
+
+Gate: two namespaces can bind equal names to different definitions.
+
+Gate: two compatible cores operate in separate namespaces.
+
+Gate: direct-call performance stays within normal noise.
 
 ### Stage 6: `codeof` and runtime compilation
 
@@ -567,12 +808,15 @@ Gate: a function and a class install into an empty VM.
 
 ### Stage 7: artifact-backed snapshots
 
-- Replace ambient-program snapshot binding with artifact packages.
+- Replace ambient-program snapshot binding with artifact containers.
 - Encode thin and fat snapshots.
 - Store namespace manifests.
+- Share code views in in-memory snapshots.
 - Preserve runtime-compiled code and slots.
 
 Gate: an unrelated Loom program restores and drives the snapshot.
+
+Gate: thin capture and restore do not encode or decode the runtime core.
 
 ### Stage 8: admission and relocation closure
 
@@ -616,7 +860,6 @@ These items remain outside version 1.
 - Snapshot state diffs.
 - Arena reclamation.
 - Artifact compression.
-- Stored verifier verdicts for the new package path.
 
 None of these items changes the version 1 identity model.
 
@@ -624,7 +867,7 @@ None of these items changes the version 1 identity model.
 
 The result uses revision `e1c73d4` and the Stage 0 measurement settings.
 
-Existing compiler and execution paths do not consume the new package yet.
+Existing compiler and execution paths do not consume the new artifact yet.
 
 | Existing path | Parent | Stage 2 | Change |
 | --- | ---: | ---: | ---: |
@@ -638,17 +881,17 @@ Existing compiler and execution paths do not consume the new package yet.
 
 These differences stay inside normal process noise.
 
-The new package path has these direct measurements.
+The prototype artifact path has these direct measurements.
 
-| Package measurement | Result |
+| Artifact measurement | Result |
 | --- | ---: |
-| One-record core package | 274,771 bytes |
-| Package wrapper | 114 bytes |
-| Package encoding | 0.128 ms |
-| Package decoding and identity | 2.786 ms |
+| One-unit core artifact | 274,771 bytes |
+| Artifact wrapper | 114 bytes |
+| Artifact encoding | 0.128 ms |
+| Artifact decoding and identity | 2.786 ms |
 
-Package decoding recomputes semantic identity from decoded content.
+Artifact decoding recomputes semantic identity from decoded content.
 
-The decoder does not trust the stored record identity.
+The decoder does not trust the stored unit identity.
 
-Stage 5 makes ordinary root records much smaller than the core record.
+Stage 4 makes ordinary root units much smaller than the core unit.

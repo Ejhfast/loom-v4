@@ -298,19 +298,27 @@ pub fn compile_source(
     let mut link_env = LinkEnv::new();
     for module in &standard {
         link_env
-            .bind(LinkUnit {
-                path: module.path.clone(),
-                module: module.module.clone(),
-                interface: module.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    module.path.clone(),
+                    module.module.clone(),
+                    module.interface.clone(),
+                    Vec::new(),
+                )
+                .map_err(|error| format!("error: {error}\n"))?,
+            )
             .map_err(|error| format!("error: {error}\n"))?;
     }
     link_env
-        .bind(LinkUnit {
-            path: root.path.clone(),
-            module: root.module.clone(),
-            interface: root.interface.clone(),
-        })
+        .bind(
+            LinkUnit::new(
+                root.path.clone(),
+                root.module.clone(),
+                root.interface.clone(),
+                Vec::new(),
+            )
+            .map_err(|error| format!("error: {error}\n"))?,
+        )
         .map_err(|error| format!("error: {error}\n"))?;
     let linked = link(path, &link_env.freeze()).map_err(|error| format!("error: {error}\n"))?;
     Ok(CompiledSource {
@@ -359,7 +367,7 @@ mod tests {
 
     fn compile(text: &str) -> CompiledSource {
         let source = SourceFile::new("standard_test.lm", text);
-        compile_source("", &source, true).expect("the source compiles")
+        compile_source("standard.test", &source, true).expect("the source compiles")
     }
 
     #[test]

@@ -1898,9 +1898,21 @@ fn bench_core_compilation() {
         .map(Vec::len)
         .sum();
     let bytes = lm_bytecode::encode(&module);
-    let artifact_record = lm_bytecode::artifact::ArtifactRecord::new(module.clone(), Vec::new())
-        .expect("the core artifact has an identity");
-    let artifact = lm_bytecode::artifact::Artifact::new(artifact_record, Vec::new())
+    let module_identity =
+        lm_bytecode::identity::module_identity(&module).expect("the core module has an identity");
+    let interface = lm_bytecode::interface::Interface {
+        abi_version: lm_abi::ABI_VERSION,
+        compiler_abi_version: lm_bytecode::identity::COMPILER_ABI_VERSION,
+        bundle_digest: lm_abi::standard_bundle().digest(),
+        module_path: "core".to_string(),
+        semantic_hash: module_identity.semantic_hash,
+        exports: Vec::new(),
+        slots: Vec::new(),
+    };
+    let artifact_unit =
+        lm_bytecode::artifact::LinkUnit::new("core", module.clone(), interface, Vec::new())
+            .expect("the core artifact has an identity");
+    let artifact = lm_bytecode::artifact::Artifact::new(artifact_unit, Vec::new())
         .expect("the core artifact graph is valid");
     let artifact_bytes =
         lm_bytecode::artifact::encode(&artifact).expect("the core artifact encodes");
@@ -1920,7 +1932,7 @@ fn bench_core_compilation() {
         let decoded =
             lm_bytecode::artifact::decode(&artifact_bytes).expect("the core artifact decodes");
         let elapsed = start.elapsed();
-        std::hint::black_box(decoded.records().len());
+        std::hint::black_box(decoded.units().len());
         if round > 0 {
             artifact_decode_runs.push(elapsed);
         }
@@ -2050,13 +2062,13 @@ fn bench_core_compilation() {
     println!(
         "LOOM\tcore_artifact_encode\t{}\t{}\t{:.3}\tms",
         artifact_bytes.len(),
-        artifact.records().len(),
+        artifact.units().len(),
         median(artifact_encode_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tcore_artifact_decode\t{}\t{}\t{:.3}\tms",
         artifact_bytes.len(),
-        artifact.records().len(),
+        artifact.units().len(),
         median(artifact_decode_runs).as_secs_f64() * 1e3
     );
     println!(

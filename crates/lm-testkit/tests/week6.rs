@@ -963,11 +963,15 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
     let mut link_env = LinkEnv::new();
     for unit in [&library, &program] {
         link_env
-            .bind(LinkUnit {
-                path: unit.path.clone(),
-                module: unit.module.clone(),
-                interface: unit.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    unit.path.clone(),
+                    unit.module.clone(),
+                    unit.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("the module binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("links");
@@ -1018,11 +1022,15 @@ fn a_stale_pin_fails_to_link() {
     for (idx, unit) in units.iter().enumerate() {
         let unit = if idx == 1 { &stale } else { unit };
         link_env
-            .bind(LinkUnit {
-                path: unit.path.clone(),
-                module: unit.module.clone(),
-                interface: unit.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    unit.path.clone(),
+                    unit.module.clone(),
+                    unit.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("binds");
     }
     let error = link("app.main", &link_env.freeze()).expect_err("the stale pin must reject");
@@ -1084,11 +1092,15 @@ fn the_linker_rejects_a_crafted_export_table() {
                 damage(&mut module);
             }
             link_env
-                .bind(LinkUnit {
-                    path: unit.path.clone(),
-                    module,
-                    interface: unit.interface.clone(),
-                })
+                .bind(
+                    LinkUnit::new(
+                        unit.path.clone(),
+                        module,
+                        unit.interface.clone(),
+                        Vec::new(),
+                    )
+                    .expect("the link unit is valid"),
+                )
                 .expect("binds");
         }
         let error = link("app.main", &link_env.freeze()).expect_err("the table must reject");

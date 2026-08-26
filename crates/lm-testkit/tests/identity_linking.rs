@@ -152,11 +152,15 @@ fn two_module_program() -> Vec<lm_compiler::CompiledModule> {
 fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::LinkedProgram, String> {
     let mut env = LinkEnv::new();
     for unit in units {
-        env.bind(LinkUnit {
-            path: unit.path.clone(),
-            module: unit.module.clone(),
-            interface: unit.interface.clone(),
-        })
+        env.bind(
+            LinkUnit::new(
+                unit.path.clone(),
+                unit.module.clone(),
+                unit.interface.clone(),
+                Vec::new(),
+            )
+            .expect("the link unit is valid"),
+        )
         .expect("binds");
     }
     link("app.main", &env.freeze()).map_err(|e| e.0)

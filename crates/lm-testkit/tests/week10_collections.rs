@@ -121,11 +121,15 @@ fn interface_contracts_cross_module_boundaries() {
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(LinkUnit {
-                path: module.path.clone(),
-                module: module.module.clone(),
-                interface: module.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    module.path.clone(),
+                    module.module.clone(),
+                    module.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("the module binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("the program links");
@@ -176,11 +180,15 @@ fn interface_inheritance_crosses_module_boundaries() {
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(LinkUnit {
-                path: module.path.clone(),
-                module: module.module.clone(),
-                interface: module.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    module.path.clone(),
+                    module.module.clone(),
+                    module.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("the module binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("the program links");
@@ -338,11 +346,15 @@ describe(catalog.Shelf())
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(LinkUnit {
-                path: module.path.clone(),
-                module: module.module.clone(),
-                interface: module.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    module.path.clone(),
+                    module.module.clone(),
+                    module.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("the module binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("the program links");
@@ -1522,11 +1534,15 @@ table.at(keys.Key(7).freeze())
     let mut link_env = LinkEnv::new();
     for module in [&library, &main] {
         link_env
-            .bind(LinkUnit {
-                path: module.path.clone(),
-                module: module.module.clone(),
-                interface: module.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    module.path.clone(),
+                    module.module.clone(),
+                    module.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("the module binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("the program links");

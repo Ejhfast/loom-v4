@@ -374,6 +374,29 @@ impl Interface {
     }
 }
 
+/// Return the semantic identity of one module interface.
+///
+/// The identity covers the canonical module path and exported contracts.
+/// It does not cover implementation hashes.
+pub fn interface_identity(interface: &Interface) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"lm-iface-set-v1\0");
+    write_str(&mut bytes, &interface.module_path);
+    let mut exports: Vec<(u8, &str, [u8; 32])> = interface
+        .exports
+        .iter()
+        .map(|entry| (entry.kind.tag(), entry.name.as_str(), entry.iface_hash))
+        .collect();
+    exports.sort();
+    write_u32(&mut bytes, exports.len() as u32);
+    for (kind, name, hash) in exports {
+        bytes.push(kind);
+        write_str(&mut bytes, name);
+        bytes.extend_from_slice(&hash);
+    }
+    crate::hash::hash256(&bytes)
+}
+
 /// The interface hash of one export: the kind, the name, and the
 /// signature, with the compiler ABI version and the operation
 /// manifest. No body takes part.

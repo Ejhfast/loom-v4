@@ -9,8 +9,8 @@
 //! compiled modules that fulfill the import slots. Both freeze before
 //! use, so no build step mutates an environment another step reads.
 
+pub use lm_bytecode::artifact::LinkUnit;
 use lm_bytecode::interface::{IfaceSlotKind, IfaceSlotSpec, Interface};
-use lm_bytecode::Module;
 use lm_hir::import::ImportEnv;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -220,14 +220,6 @@ impl FrozenCompileEnv {
     pub(crate) fn late_bindings(&self) -> &BTreeMap<String, IfaceSlotSpec> {
         &self.late
     }
-}
-
-/// One compiled module a link step may consume.
-#[derive(Debug, Clone)]
-pub struct LinkUnit {
-    pub path: String,
-    pub module: Module,
-    pub interface: Interface,
 }
 
 /// A failure to build a link environment.

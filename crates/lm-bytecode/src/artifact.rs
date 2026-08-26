@@ -1,11 +1,11 @@
-//! Semantic artifact identities and exact dependency bindings.
+//! Semantic artifact identities and exact module dependencies.
 //!
-//! A `Module` is one bytecode payload. An `ArtifactRecord` binds that
-//! payload to exact artifact dependencies. The package codec lives in
-//! this module because it must recompute every stored identity.
+//! A `LinkUnit` contains one module, its interface, and exact dependencies.
+//! An `Artifact` contains one root unit and its embedded dependency units.
 
-use crate::identity::{module_identity_with_bundle, IdentityError, COMPILER_ABI_VERSION};
-use crate::{hash, Module, VERSION};
+use crate::identity::{module_identity_with_bundle, IdentityError};
+use crate::interface::{interface_identity, Interface};
+use crate::{hash, Module};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -18,10 +18,10 @@ pub use codec::{
 
 const ARTIFACT_ID_TAG: &[u8] = b"lm-artifact-id-v1\0";
 
-/// The logical dependency namespace of the standard core.
-pub const CORE_NAMESPACE: &str = "core";
+/// The canonical module path of the standard core.
+pub const CORE_MODULE_PATH: &str = "core";
 
-/// The semantic identity of one artifact record.
+/// The semantic identity of one link-unit closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArtifactId([u8; 32]);
 
@@ -48,57 +48,30 @@ impl fmt::Display for ArtifactId {
     }
 }
 
-/// The exact identity of one encoded artifact blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobHash([u8; 32]);
-
-impl BlobHash {
-    /// Construct a hash from its canonical bytes.
-    pub const fn from_bytes(bytes: [u8; 32]) -> BlobHash {
-        BlobHash(bytes)
-    }
-
-    /// Return the canonical hash bytes.
-    pub const fn into_bytes(self) -> [u8; 32] {
-        self.0
-    }
-
-    /// Borrow the canonical hash bytes.
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl fmt::Display for BlobHash {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_digest(out, &self.0)
-    }
-}
-
-/// One exact dependency in the logical artifact namespace.
+/// One exact dependency on a canonical module path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDependency {
-    namespace: String,
+    module_path: String,
     artifact: ArtifactId,
 }
 
 impl ArtifactDependency {
     /// Create one dependency binding.
     pub fn new(
-        namespace: impl Into<String>,
+        module_path: impl Into<String>,
         artifact: ArtifactId,
     ) -> Result<ArtifactDependency, ArtifactError> {
-        let namespace = namespace.into();
-        validate_namespace(&namespace)?;
+        let module_path = module_path.into();
+        validate_module_path(&module_path)?;
         Ok(ArtifactDependency {
-            namespace,
+            module_path,
             artifact,
         })
     }
 
-    /// Return the logical namespace.
-    pub fn namespace(&self) -> &str {
-        &self.namespace
+    /// Return the canonical dependency module path.
+    pub fn module_path(&self) -> &str {
+        &self.module_path
     }
 
     /// Return the exact dependency identity.
@@ -107,37 +80,56 @@ impl ArtifactDependency {
     }
 }
 
-/// One module payload with its exact direct dependencies.
+/// One compiled module, its interface, and exact direct dependencies.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ArtifactRecord {
+pub struct LinkUnit {
     id: ArtifactId,
     bundle_digest: [u8; 32],
-    module: Module,
+    /// The canonical module path.
+    pub path: String,
+    /// The compiled bytecode module.
+    pub module: Module,
+    /// The exported module interface.
+    pub interface: Interface,
     dependencies: Vec<ArtifactDependency>,
 }
 
-impl ArtifactRecord {
-    /// Create one record under the standard ABI bundle.
+impl LinkUnit {
+    /// Create one unit under the standard ABI bundle.
     pub fn new(
+        module_path: impl Into<String>,
         module: Module,
+        interface: Interface,
         dependencies: Vec<ArtifactDependency>,
-    ) -> Result<ArtifactRecord, ArtifactError> {
+    ) -> Result<LinkUnit, ArtifactError> {
         let bundle = lm_abi::standard_bundle();
-        ArtifactRecord::new_with_bundle(module, dependencies, &bundle)
+        LinkUnit::new_with_bundle(module_path, module, interface, dependencies, &bundle)
     }
 
-    /// Create one record under an explicit ABI bundle.
+    /// Create one unit under an explicit ABI bundle.
     pub fn new_with_bundle(
+        module_path: impl Into<String>,
         module: Module,
+        interface: Interface,
         mut dependencies: Vec<ArtifactDependency>,
         bundle: &lm_abi::AbiBundle,
-    ) -> Result<ArtifactRecord, ArtifactError> {
+    ) -> Result<LinkUnit, ArtifactError> {
+        let module_path = module_path.into();
+        validate_module_path(&module_path)?;
+        if interface.module_path != module_path {
+            return Err(ArtifactError::InterfacePathMismatch {
+                unit: module_path,
+                interface: interface.module_path,
+            });
+        }
         canonicalize_dependencies(&mut dependencies)?;
-        let id = compute_artifact_id(&module, &dependencies, bundle)?;
-        Ok(ArtifactRecord {
+        let id = compute_artifact_id(&module_path, &module, &interface, &dependencies, bundle)?;
+        Ok(LinkUnit {
             id,
             bundle_digest: bundle.digest(),
+            path: module_path,
             module,
+            interface,
             dependencies,
         })
     }
@@ -147,9 +139,19 @@ impl ArtifactRecord {
         self.id
     }
 
+    /// Return the canonical module path.
+    pub fn module_path(&self) -> &str {
+        &self.path
+    }
+
     /// Return the bytecode payload.
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// Return the module interface.
+    pub fn interface(&self) -> &Interface {
+        &self.interface
     }
 
     pub(crate) fn bundle_digest(&self) -> [u8; 32] {
@@ -161,43 +163,51 @@ impl ArtifactRecord {
         &self.dependencies
     }
 
-    /// Consume the record and return its payload and dependencies.
-    pub fn into_parts(self) -> (Module, Vec<ArtifactDependency>) {
-        (self.module, self.dependencies)
+    /// Consume the unit and return its semantic parts.
+    pub fn into_parts(self) -> (String, Module, Interface, Vec<ArtifactDependency>) {
+        (self.path, self.module, self.interface, self.dependencies)
     }
 }
 
-/// One root artifact and its embedded dependency records.
+/// One root artifact and its embedded dependency units.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Artifact {
     root: ArtifactId,
-    records: Vec<ArtifactRecord>,
+    units: Vec<LinkUnit>,
 }
 
 impl Artifact {
     /// Create one artifact from a root and embedded dependencies.
-    pub fn new(
-        root: ArtifactRecord,
-        embedded: Vec<ArtifactRecord>,
-    ) -> Result<Artifact, ArtifactGraphError> {
+    pub fn new(root: LinkUnit, embedded: Vec<LinkUnit>) -> Result<Artifact, ArtifactGraphError> {
         let root_id = root.id();
-        let mut records = Vec::with_capacity(embedded.len().saturating_add(1));
-        records.push(root);
-        records.extend(embedded);
-        Artifact::from_records(root_id, records)
+        let mut units = Vec::with_capacity(embedded.len().saturating_add(1));
+        units.push(root);
+        units.extend(embedded);
+        Artifact::from_units(root_id, units)
     }
 
-    pub(crate) fn from_records(
+    pub(crate) fn from_units(
         root: ArtifactId,
-        mut records: Vec<ArtifactRecord>,
+        mut units: Vec<LinkUnit>,
     ) -> Result<Artifact, ArtifactGraphError> {
-        records.sort_by_key(ArtifactRecord::id);
-        for pair in records.windows(2) {
+        units.sort_by_key(LinkUnit::id);
+        for pair in units.windows(2) {
             if pair[0].id() == pair[1].id() {
-                return Err(ArtifactGraphError::DuplicateRecord(pair[0].id()));
+                return Err(ArtifactGraphError::DuplicateUnit(pair[0].id()));
             }
         }
-        let artifact = Artifact { root, records };
+        let mut module_paths = BTreeMap::new();
+        for unit in &units {
+            if module_paths
+                .insert(unit.module_path().to_string(), unit.id())
+                .is_some()
+            {
+                return Err(ArtifactGraphError::DuplicateModulePath(
+                    unit.module_path().to_string(),
+                ));
+            }
+        }
+        let artifact = Artifact { root, units };
         artifact.validate_graph()?;
         Ok(artifact)
     }
@@ -207,110 +217,51 @@ impl Artifact {
         self.root
     }
 
-    /// Return the root record.
-    pub fn root(&self) -> &ArtifactRecord {
-        self.record(self.root)
-            .expect("artifact graph validation keeps the root record")
+    /// Return the root unit.
+    pub fn root(&self) -> &LinkUnit {
+        self.unit(self.root)
+            .expect("artifact graph validation keeps the root unit")
     }
 
-    /// Return all embedded records, including the root.
-    pub fn records(&self) -> &[ArtifactRecord] {
-        &self.records
+    /// Return all embedded units, including the root.
+    pub fn units(&self) -> &[LinkUnit] {
+        &self.units
     }
 
-    /// Find one embedded record by semantic identity.
-    pub fn record(&self, id: ArtifactId) -> Option<&ArtifactRecord> {
-        self.records
-            .binary_search_by_key(&id, ArtifactRecord::id)
+    /// Find one embedded unit by semantic identity.
+    pub fn unit(&self, id: ArtifactId) -> Option<&LinkUnit> {
+        self.units
+            .binary_search_by_key(&id, LinkUnit::id)
             .ok()
-            .map(|index| &self.records[index])
-    }
-
-    /// Resolve the package through an optional runtime core.
-    pub fn resolve<'a>(
-        &'a self,
-        runtime_core: Option<&'a ArtifactRecord>,
-    ) -> Result<ResolvedArtifact<'a>, ArtifactResolveError> {
-        let package: BTreeMap<ArtifactId, &ArtifactRecord> = self
-            .records
-            .iter()
-            .map(|record| (record.id(), record))
-            .collect();
-        let mut selected: BTreeMap<ArtifactId, &ArtifactRecord> = BTreeMap::new();
-        let mut work = vec![self.root];
-        while let Some(id) = work.pop() {
-            if selected.contains_key(&id) {
-                continue;
-            }
-            let record = package
-                .get(&id)
-                .copied()
-                .ok_or(ArtifactResolveError::MissingRoot(id))?;
-            selected.insert(id, record);
-            for dependency in record.dependencies.iter().rev() {
-                if package.contains_key(&dependency.artifact) {
-                    work.push(dependency.artifact);
-                    continue;
-                }
-                if dependency.namespace == CORE_NAMESPACE {
-                    let Some(core) = runtime_core else {
-                        return Err(ArtifactResolveError::MissingCore {
-                            expected: dependency.artifact,
-                        });
-                    };
-                    if core.id() != dependency.artifact {
-                        return Err(ArtifactResolveError::CoreMismatch {
-                            expected: dependency.artifact,
-                            found: core.id(),
-                        });
-                    }
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        selected.entry(core.id())
-                    {
-                        entry.insert(core);
-                        for child in core.dependencies.iter().rev() {
-                            if package.contains_key(&child.artifact) {
-                                work.push(child.artifact);
-                            } else {
-                                return Err(ArtifactResolveError::MissingDependency {
-                                    parent: core.id(),
-                                    namespace: child.namespace.clone(),
-                                    expected: child.artifact,
-                                });
-                            }
-                        }
-                    }
-                    continue;
-                }
-                return Err(ArtifactResolveError::MissingDependency {
-                    parent: record.id(),
-                    namespace: dependency.namespace.clone(),
-                    expected: dependency.artifact,
-                });
-            }
-        }
-        resolved_from_records(self.root, selected)
+            .map(|index| &self.units[index])
     }
 
     fn validate_graph(&self) -> Result<(), ArtifactGraphError> {
         let index: BTreeMap<ArtifactId, u32> = self
-            .records
+            .units
             .iter()
             .enumerate()
-            .map(|(index, record)| (record.id(), index as u32))
+            .map(|(index, unit)| (unit.id(), index as u32))
             .collect();
         let Some(root) = index.get(&self.root).copied() else {
             return Err(ArtifactGraphError::MissingRoot(self.root));
         };
-        let mut successors = vec![Vec::new(); self.records.len()];
-        for (record_index, record) in self.records.iter().enumerate() {
-            for dependency in &record.dependencies {
+        let mut successors = vec![Vec::new(); self.units.len()];
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            for dependency in &unit.dependencies {
                 if let Some(target) = index.get(&dependency.artifact) {
-                    successors[record_index].push(*target);
+                    let target_unit = &self.units[*target as usize];
+                    if target_unit.module_path() != dependency.module_path() {
+                        return Err(ArtifactGraphError::DependencyPathMismatch {
+                            module_path: dependency.module_path().to_string(),
+                            artifact: dependency.artifact(),
+                        });
+                    }
+                    successors[unit_index].push(*target);
                 }
             }
         }
-        let mut reached = vec![false; self.records.len()];
+        let mut reached = vec![false; self.units.len()];
         let mut work = vec![root];
         while let Some(node) = work.pop() {
             if reached[node as usize] {
@@ -320,65 +271,50 @@ impl Artifact {
             work.extend(successors[node as usize].iter().copied());
         }
         if let Some((index, _)) = reached.iter().enumerate().find(|(_, item)| !**item) {
-            return Err(ArtifactGraphError::UnreachableRecord(
-                self.records[index].id(),
-            ));
+            return Err(ArtifactGraphError::UnreachableUnit(self.units[index].id()));
         }
-        reject_cycles(&self.records, &successors)
-    }
-}
-
-/// One fully resolved artifact graph in dependency-first order.
-#[derive(Debug)]
-pub struct ResolvedArtifact<'a> {
-    root: ArtifactId,
-    records: Vec<&'a ArtifactRecord>,
-}
-
-impl ResolvedArtifact<'_> {
-    /// Return the root identity.
-    pub fn id(&self) -> ArtifactId {
-        self.root
-    }
-
-    /// Return the root record.
-    pub fn root(&self) -> &ArtifactRecord {
-        self.records
-            .iter()
-            .copied()
-            .find(|record| record.id() == self.root)
-            .expect("resolved artifact validation keeps the root record")
-    }
-
-    /// Return records in dependency-first order.
-    pub fn records(&self) -> &[&ArtifactRecord] {
-        &self.records
+        reject_cycles(&self.units, &successors)
     }
 }
 
 /// An invalid artifact package graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactGraphError {
-    DuplicateRecord(ArtifactId),
+    DuplicateUnit(ArtifactId),
+    DuplicateModulePath(String),
+    DependencyPathMismatch {
+        module_path: String,
+        artifact: ArtifactId,
+    },
     MissingRoot(ArtifactId),
-    UnreachableRecord(ArtifactId),
+    UnreachableUnit(ArtifactId),
     DependencyCycle(ArtifactId),
 }
 
 impl fmt::Display for ArtifactGraphError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ArtifactGraphError::DuplicateRecord(id) => {
-                write!(out, "artifact record {id} occurs twice")
+            ArtifactGraphError::DuplicateUnit(id) => {
+                write!(out, "artifact unit {id} occurs twice")
             }
+            ArtifactGraphError::DuplicateModulePath(path) => {
+                write!(out, "artifact module path `{path}` occurs twice")
+            }
+            ArtifactGraphError::DependencyPathMismatch {
+                module_path,
+                artifact,
+            } => write!(
+                out,
+                "dependency `{module_path}` names artifact {artifact} for another module"
+            ),
             ArtifactGraphError::MissingRoot(id) => {
-                write!(out, "root artifact record {id} is missing")
+                write!(out, "root artifact unit {id} is missing")
             }
-            ArtifactGraphError::UnreachableRecord(id) => {
-                write!(out, "artifact record {id} is unreachable from the root")
+            ArtifactGraphError::UnreachableUnit(id) => {
+                write!(out, "artifact unit {id} is unreachable from the root")
             }
             ArtifactGraphError::DependencyCycle(id) => {
-                write!(out, "artifact record {id} belongs to a dependency cycle")
+                write!(out, "artifact unit {id} belongs to a dependency cycle")
             }
         }
     }
@@ -386,105 +322,13 @@ impl fmt::Display for ArtifactGraphError {
 
 impl std::error::Error for ArtifactGraphError {}
 
-/// An artifact dependency resolution failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArtifactResolveError {
-    MissingRoot(ArtifactId),
-    MissingCore {
-        expected: ArtifactId,
-    },
-    CoreMismatch {
-        expected: ArtifactId,
-        found: ArtifactId,
-    },
-    MissingDependency {
-        parent: ArtifactId,
-        namespace: String,
-        expected: ArtifactId,
-    },
-    DependencyCycle(ArtifactId),
-}
-
-impl fmt::Display for ArtifactResolveError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ArtifactResolveError::MissingRoot(id) => {
-                write!(out, "root artifact record {id} is missing")
-            }
-            ArtifactResolveError::MissingCore { expected } => {
-                write!(out, "the artifact needs unavailable core {expected}")
-            }
-            ArtifactResolveError::CoreMismatch { expected, found } => write!(
-                out,
-                "the artifact needs core {expected}, but the runtime provides {found}"
-            ),
-            ArtifactResolveError::MissingDependency {
-                parent,
-                namespace,
-                expected,
-            } => write!(
-                out,
-                "artifact {parent} needs unavailable dependency `{namespace}` {expected}"
-            ),
-            ArtifactResolveError::DependencyCycle(id) => {
-                write!(out, "artifact record {id} belongs to a dependency cycle")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ArtifactResolveError {}
-
-fn resolved_from_records<'a>(
-    root: ArtifactId,
-    records: BTreeMap<ArtifactId, &'a ArtifactRecord>,
-) -> Result<ResolvedArtifact<'a>, ArtifactResolveError> {
-    let entries: Vec<(ArtifactId, &ArtifactRecord)> = records.into_iter().collect();
-    let index: BTreeMap<ArtifactId, u32> = entries
-        .iter()
-        .enumerate()
-        .map(|(index, (id, _))| (*id, index as u32))
-        .collect();
-    let mut successors = vec![Vec::new(); entries.len()];
-    for (record_index, (_, record)) in entries.iter().enumerate() {
-        for dependency in record.dependencies() {
-            let Some(target) = index.get(&dependency.artifact()) else {
-                return Err(ArtifactResolveError::MissingDependency {
-                    parent: record.id(),
-                    namespace: dependency.namespace().to_string(),
-                    expected: dependency.artifact(),
-                });
-            };
-            successors[record_index].push(*target);
-        }
-    }
-    let (components, _) = lm_scc::components(entries.len(), &successors);
-    let mut ordered = Vec::with_capacity(entries.len());
-    for component in components {
-        let first = component[0];
-        if component.len() != 1 || successors[first as usize].contains(&first) {
-            return Err(ArtifactResolveError::DependencyCycle(
-                entries[first as usize].0,
-            ));
-        }
-        ordered.push(entries[first as usize].1);
-    }
-    Ok(ResolvedArtifact {
-        root,
-        records: ordered,
-    })
-}
-
-fn reject_cycles(
-    records: &[ArtifactRecord],
-    successors: &[Vec<u32>],
-) -> Result<(), ArtifactGraphError> {
-    let (components, _) = lm_scc::components(records.len(), successors);
+fn reject_cycles(units: &[LinkUnit], successors: &[Vec<u32>]) -> Result<(), ArtifactGraphError> {
+    let (components, _) = lm_scc::components(units.len(), successors);
     for component in components {
         let first = component[0];
         if component.len() != 1 || successors[first as usize].contains(&first) {
             return Err(ArtifactGraphError::DependencyCycle(
-                records[first as usize].id(),
+                units[first as usize].id(),
             ));
         }
     }
@@ -494,8 +338,9 @@ fn reject_cycles(
 /// An artifact identity or dependency failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactError {
-    InvalidNamespace(String),
-    DuplicateNamespace(String),
+    InvalidModulePath(String),
+    DuplicateModulePath(String),
+    InterfacePathMismatch { unit: String, interface: String },
     TooManyDependencies,
     Identity(IdentityError),
 }
@@ -503,11 +348,17 @@ pub enum ArtifactError {
 impl fmt::Display for ArtifactError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ArtifactError::InvalidNamespace(namespace) => {
-                write!(out, "the artifact namespace `{namespace}` is invalid")
+            ArtifactError::InvalidModulePath(path) => {
+                write!(out, "the artifact module path `{path}` is invalid")
             }
-            ArtifactError::DuplicateNamespace(namespace) => {
-                write!(out, "the artifact namespace `{namespace}` is bound twice")
+            ArtifactError::DuplicateModulePath(path) => {
+                write!(out, "the artifact module path `{path}` is bound twice")
+            }
+            ArtifactError::InterfacePathMismatch { unit, interface } => {
+                write!(
+                    out,
+                    "module `{unit}` carries the interface for `{interface}`"
+                )
             }
             ArtifactError::TooManyDependencies => {
                 out.write_str("the artifact has too many direct dependencies")
@@ -525,11 +376,6 @@ impl From<IdentityError> for ArtifactError {
     }
 }
 
-/// Compute the exact hash of encoded artifact bytes.
-pub fn blob_hash(bytes: &[u8]) -> BlobHash {
-    BlobHash(hash::hash256(bytes))
-}
-
 fn write_digest(out: &mut fmt::Formatter<'_>, digest: &[u8; 32]) -> fmt::Result {
     for byte in digest {
         write!(out, "{byte:02x}")?;
@@ -538,51 +384,60 @@ fn write_digest(out: &mut fmt::Formatter<'_>, digest: &[u8; 32]) -> fmt::Result 
 }
 
 fn compute_artifact_id(
+    module_path: &str,
     module: &Module,
+    interface: &Interface,
     dependencies: &[ArtifactDependency],
     bundle: &lm_abi::AbiBundle,
 ) -> Result<ArtifactId, ArtifactError> {
     let count =
         u32::try_from(dependencies.len()).map_err(|_| ArtifactError::TooManyDependencies)?;
     let identity = module_identity_with_bundle(module, bundle)?;
-    let mut bytes = Vec::with_capacity(ARTIFACT_ID_TAG.len() + 74 + dependencies.len() * 40);
+    let mut bytes = Vec::with_capacity(
+        ARTIFACT_ID_TAG.len() + module_path.len() + 72 + dependencies.len() * 40,
+    );
     bytes.extend_from_slice(ARTIFACT_ID_TAG);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
-    bytes.extend_from_slice(&COMPILER_ABI_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&bundle.digest());
+    write_identity_string(&mut bytes, module_path)?;
     bytes.extend_from_slice(&identity.semantic_hash);
+    bytes.extend_from_slice(&interface_identity(interface));
     bytes.extend_from_slice(&count.to_le_bytes());
     for dependency in dependencies {
-        let namespace = dependency.namespace.as_bytes();
-        let length = u32::try_from(namespace.len())
-            .map_err(|_| ArtifactError::InvalidNamespace(dependency.namespace.clone()))?;
-        bytes.extend_from_slice(&length.to_le_bytes());
-        bytes.extend_from_slice(namespace);
+        write_identity_string(&mut bytes, &dependency.module_path)?;
         bytes.extend_from_slice(dependency.artifact.as_bytes());
     }
     Ok(ArtifactId(hash::hash256(&bytes)))
 }
 
+fn write_identity_string(out: &mut Vec<u8>, text: &str) -> Result<(), ArtifactError> {
+    let length = u32::try_from(text.len())
+        .map_err(|_| ArtifactError::InvalidModulePath(text.to_string()))?;
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    Ok(())
+}
+
 fn canonicalize_dependencies(dependencies: &mut [ArtifactDependency]) -> Result<(), ArtifactError> {
     for dependency in dependencies.iter() {
-        validate_namespace(&dependency.namespace)?;
+        validate_module_path(&dependency.module_path)?;
     }
     dependencies.sort_by(|left, right| {
-        left.namespace
-            .cmp(&right.namespace)
+        left.module_path
+            .cmp(&right.module_path)
             .then(left.artifact.cmp(&right.artifact))
     });
     for pair in dependencies.windows(2) {
-        if pair[0].namespace == pair[1].namespace {
-            return Err(ArtifactError::DuplicateNamespace(pair[0].namespace.clone()));
+        if pair[0].module_path == pair[1].module_path {
+            return Err(ArtifactError::DuplicateModulePath(
+                pair[0].module_path.clone(),
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_namespace(namespace: &str) -> Result<(), ArtifactError> {
-    let valid = !namespace.is_empty()
-        && namespace.split('.').all(|part| {
+fn validate_module_path(module_path: &str) -> Result<(), ArtifactError> {
+    let valid = !module_path.is_empty()
+        && module_path.split('.').all(|part| {
             let mut chars = part.chars();
             chars.next().is_some_and(|first| {
                 (first.is_ascii_alphabetic() || first == '_')
@@ -592,7 +447,7 @@ fn validate_namespace(namespace: &str) -> Result<(), ArtifactError> {
     if valid {
         Ok(())
     } else {
-        Err(ArtifactError::InvalidNamespace(namespace.to_string()))
+        Err(ArtifactError::InvalidModulePath(module_path.to_string()))
     }
 }
 
@@ -639,214 +494,211 @@ mod tests {
         ArtifactId::from_bytes([byte; 32])
     }
 
+    fn interface(module_path: &str, module: &Module) -> Interface {
+        let identity =
+            crate::identity::module_identity(module).expect("the module has an identity");
+        Interface {
+            abi_version: lm_abi::ABI_VERSION,
+            compiler_abi_version: crate::identity::COMPILER_ABI_VERSION,
+            bundle_digest: lm_abi::standard_bundle().digest(),
+            module_path: module_path.to_string(),
+            semantic_hash: identity.semantic_hash,
+            exports: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    fn unit_at(
+        module_path: &str,
+        value: i64,
+        debug: &[u8],
+        dependencies: Vec<ArtifactDependency>,
+    ) -> LinkUnit {
+        let module = module(value, debug);
+        let interface = interface(module_path, &module);
+        LinkUnit::new(module_path, module, interface, dependencies)
+            .expect("the artifact unit is valid")
+    }
+
+    fn unit(value: i64, debug: &[u8]) -> LinkUnit {
+        unit_at("test.main", value, debug, Vec::new())
+    }
+
     #[test]
     fn dependency_order_does_not_move_identity() {
-        let first = ArtifactRecord::new(
-            module(7, &[]),
+        let first = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![
                 ArtifactDependency::new("z", id(2)).unwrap(),
                 ArtifactDependency::new("a", id(1)).unwrap(),
             ],
-        )
-        .unwrap();
-        let second = ArtifactRecord::new(
-            module(7, &[]),
+        );
+        let second = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![
                 ArtifactDependency::new("a", id(1)).unwrap(),
                 ArtifactDependency::new("z", id(2)).unwrap(),
             ],
-        )
-        .unwrap();
+        );
         assert_eq!(first.id(), second.id());
-        assert_eq!(first.dependencies()[0].namespace(), "a");
+        assert_eq!(first.dependencies()[0].module_path(), "a");
     }
 
     #[test]
     fn dependency_identity_moves_artifact_identity() {
-        let first = ArtifactRecord::new(
-            module(7, &[]),
+        let first = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![ArtifactDependency::new("core", id(1)).unwrap()],
-        )
-        .unwrap();
-        let second = ArtifactRecord::new(
-            module(7, &[]),
+        );
+        let second = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![ArtifactDependency::new("core", id(2)).unwrap()],
-        )
-        .unwrap();
+        );
         assert_ne!(first.id(), second.id());
     }
 
     #[test]
-    fn dependency_namespace_moves_artifact_identity() {
-        let first = ArtifactRecord::new(
-            module(7, &[]),
+    fn dependency_module_path_moves_artifact_identity() {
+        let first = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![ArtifactDependency::new("left", id(1)).unwrap()],
-        )
-        .unwrap();
-        let second = ArtifactRecord::new(
-            module(7, &[]),
+        );
+        let second = unit_at(
+            "test.main",
+            7,
+            &[],
             vec![ArtifactDependency::new("right", id(1)).unwrap()],
-        )
-        .unwrap();
+        );
+        assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn own_module_path_moves_artifact_identity() {
+        let first = unit_at("left", 7, &[], Vec::new());
+        let second = unit_at("right", 7, &[], Vec::new());
         assert_ne!(first.id(), second.id());
     }
 
     #[test]
     fn debug_data_does_not_move_artifact_identity() {
-        let first = ArtifactRecord::new(module(7, b"first"), Vec::new()).unwrap();
-        let second = ArtifactRecord::new(module(7, b"second"), Vec::new()).unwrap();
+        let first = unit(7, b"first");
+        let second = unit(7, b"second");
         assert_eq!(first.id(), second.id());
     }
 
     #[test]
     fn module_semantics_move_artifact_identity() {
-        let first = ArtifactRecord::new(module(7, &[]), Vec::new()).unwrap();
-        let second = ArtifactRecord::new(module(8, &[]), Vec::new()).unwrap();
+        let first = unit(7, &[]);
+        let second = unit(8, &[]);
         assert_ne!(first.id(), second.id());
     }
 
     #[test]
-    fn duplicate_namespace_rejects() {
-        let error = ArtifactRecord::new(
-            module(7, &[]),
+    fn duplicate_module_path_rejects() {
+        let module = module(7, &[]);
+        let interface = interface("test.main", &module);
+        let error = LinkUnit::new(
+            "test.main",
+            module,
+            interface,
             vec![
                 ArtifactDependency::new("core", id(1)).unwrap(),
                 ArtifactDependency::new("core", id(2)).unwrap(),
             ],
         )
         .unwrap_err();
-        assert_eq!(error, ArtifactError::DuplicateNamespace("core".to_string()));
-    }
-
-    #[test]
-    fn filesystem_namespace_rejects() {
-        let error = ArtifactDependency::new("../core", id(1)).unwrap_err();
         assert_eq!(
             error,
-            ArtifactError::InvalidNamespace("../core".to_string())
+            ArtifactError::DuplicateModulePath("core".to_string())
         );
     }
 
     #[test]
-    fn blob_hash_reads_exact_bytes() {
-        assert_ne!(blob_hash(b"one"), blob_hash(b"two"));
-        assert_eq!(blob_hash(b"one"), blob_hash(b"one"));
+    fn filesystem_module_path_rejects() {
+        let error = ArtifactDependency::new("../core", id(1)).unwrap_err();
+        assert_eq!(
+            error,
+            ArtifactError::InvalidModulePath("../core".to_string())
+        );
     }
 
     #[test]
-    fn thin_and_fat_artifacts_resolve_to_one_graph() {
-        let core = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
-            vec![ArtifactDependency::new(CORE_NAMESPACE, core.id()).unwrap()],
-        )
-        .unwrap();
+    fn interface_for_another_module_rejects() {
+        let module = module(7, &[]);
+        let interface = interface("other.main", &module);
+        assert!(matches!(
+            LinkUnit::new("test.main", module, interface, Vec::new()),
+            Err(ArtifactError::InterfacePathMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn thin_and_fat_artifacts_have_one_root_identity() {
+        let core = unit_at(CORE_MODULE_PATH, 1, &[], Vec::new());
+        let root = unit_at(
+            "app.main",
+            42,
+            &[],
+            vec![ArtifactDependency::new(CORE_MODULE_PATH, core.id()).unwrap()],
+        );
         let thin_bytes = encode(&Artifact::new(root.clone(), Vec::new()).unwrap()).unwrap();
         let fat_bytes = encode(&Artifact::new(root, vec![core.clone()]).unwrap()).unwrap();
         let thin = decode(&thin_bytes).unwrap();
         let fat = decode(&fat_bytes).unwrap();
-        let thin_ids: Vec<ArtifactId> = thin
-            .resolve(Some(&core))
-            .unwrap()
-            .records()
-            .iter()
-            .map(|record| record.id())
-            .collect();
-        let fat_ids: Vec<ArtifactId> = fat
-            .resolve(None)
-            .unwrap()
-            .records()
-            .iter()
-            .map(|record| record.id())
-            .collect();
         assert_eq!(thin.id(), fat.id());
-        assert_eq!(thin_ids, fat_ids);
-        assert_ne!(blob_hash(&thin_bytes), blob_hash(&fat_bytes));
-    }
-
-    #[test]
-    fn thin_artifact_rejects_another_runtime_core() {
-        let expected = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let found = ArtifactRecord::new(module(2, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
-            vec![ArtifactDependency::new(CORE_NAMESPACE, expected.id()).unwrap()],
-        )
-        .unwrap();
-        let artifact = Artifact::new(root, Vec::new()).unwrap();
-        assert_eq!(
-            artifact.resolve(Some(&found)).unwrap_err(),
-            ArtifactResolveError::CoreMismatch {
-                expected: expected.id(),
-                found: found.id(),
-            }
+        assert_eq!(thin.units().len(), 1);
+        assert_eq!(fat.units().len(), 2);
+        assert_ne!(
+            crate::identity::container_hash(&thin_bytes),
+            crate::identity::container_hash(&fat_bytes)
         );
     }
 
     #[test]
-    fn runtime_core_cannot_fill_another_namespace() {
-        let library = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
-            vec![ArtifactDependency::new("math", library.id()).unwrap()],
-        )
-        .unwrap();
-        let artifact = Artifact::new(root.clone(), Vec::new()).unwrap();
-        assert_eq!(
-            artifact.resolve(Some(&library)).unwrap_err(),
-            ArtifactResolveError::MissingDependency {
-                parent: root.id(),
-                namespace: "math".to_string(),
-                expected: library.id(),
-            }
-        );
-    }
-
-    #[test]
-    fn embedded_core_needs_no_ambient_core() {
-        let core = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
-            vec![ArtifactDependency::new(CORE_NAMESPACE, core.id()).unwrap()],
-        )
-        .unwrap();
-        let artifact = Artifact::new(root, vec![core]).unwrap();
-        assert_eq!(artifact.resolve(None).unwrap().records().len(), 2);
-    }
-
-    #[test]
-    fn package_encoding_is_canonical() {
-        let left = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let right = ArtifactRecord::new(module(2, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
+    fn artifact_encoding_is_canonical() {
+        let left = unit_at("lib.left", 1, &[], Vec::new());
+        let right = unit_at("lib.right", 2, &[], Vec::new());
+        let root = unit_at(
+            "app.main",
+            42,
+            &[],
             vec![
-                ArtifactDependency::new("right", right.id()).unwrap(),
-                ArtifactDependency::new("left", left.id()).unwrap(),
+                ArtifactDependency::new("lib.right", right.id()).unwrap(),
+                ArtifactDependency::new("lib.left", left.id()).unwrap(),
             ],
-        )
-        .unwrap();
+        );
         let first = Artifact::new(root.clone(), vec![left.clone(), right.clone()]).unwrap();
         let second = Artifact::new(root, vec![right, left]).unwrap();
         assert_eq!(encode(&first).unwrap(), encode(&second).unwrap());
     }
 
     #[test]
-    fn package_round_trip_preserves_every_record() {
-        let core = ArtifactRecord::new(module(1, &[]), Vec::new()).unwrap();
-        let root = ArtifactRecord::new(
-            module(42, &[]),
-            vec![ArtifactDependency::new(CORE_NAMESPACE, core.id()).unwrap()],
-        )
-        .unwrap();
+    fn artifact_round_trip_preserves_every_unit() {
+        let core = unit_at(CORE_MODULE_PATH, 1, &[], Vec::new());
+        let root = unit_at(
+            "app.main",
+            42,
+            &[],
+            vec![ArtifactDependency::new(CORE_MODULE_PATH, core.id()).unwrap()],
+        );
         let artifact = Artifact::new(root, vec![core]).unwrap();
         let bytes = encode(&artifact).unwrap();
         assert_eq!(decode(&bytes).unwrap(), artifact);
     }
 
     #[test]
-    fn decoder_recomputes_stored_record_identity() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+    fn decoder_recomputes_stored_unit_identity() {
+        let root = unit(42, &[]);
         let artifact = Artifact::new(root, Vec::new()).unwrap();
         let mut bytes = encode(&artifact).unwrap();
         bytes[codec::HEADER_LEN] ^= 1;
@@ -858,7 +710,7 @@ mod tests {
 
     #[test]
     fn decoder_rejects_a_missing_root() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+        let root = unit(42, &[]);
         let artifact = Artifact::new(root, Vec::new()).unwrap();
         let mut bytes = encode(&artifact).unwrap();
         let root_offset = 4 + 2 + 32;
@@ -872,18 +724,18 @@ mod tests {
     }
 
     #[test]
-    fn decoder_checks_record_count_before_allocation() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+    fn decoder_checks_unit_count_before_allocation() {
+        let root = unit(42, &[]);
         let artifact = Artifact::new(root, Vec::new()).unwrap();
         let mut bytes = encode(&artifact).unwrap();
         let count_offset = 4 + 2 + 32 + 32;
         bytes[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(decode(&bytes), Err(ArtifactDecodeError::Limit("record")));
+        assert_eq!(decode(&bytes), Err(ArtifactDecodeError::Limit("unit")));
     }
 
     #[test]
     fn decoder_checks_total_bytes_before_header_work() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+        let root = unit(42, &[]);
         let bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
         let bundle = lm_abi::standard_bundle();
         let limits = ArtifactLimits {
@@ -898,7 +750,7 @@ mod tests {
 
     #[test]
     fn decoder_checks_module_bytes_before_module_decode() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+        let root = unit(42, &[]);
         let bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
         let bundle = lm_abi::standard_bundle();
         let limits = ArtifactLimits {
@@ -913,7 +765,7 @@ mod tests {
 
     #[test]
     fn decoder_rejects_another_abi_bundle_digest() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+        let root = unit(42, &[]);
         let mut bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
         bytes[4 + 2] ^= 1;
         assert!(matches!(
@@ -923,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn every_package_truncation_rejects() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+    fn every_artifact_truncation_rejects() {
+        let root = unit(42, &[]);
         let bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
         for end in 0..bytes.len() {
             assert!(decode(&bytes[..end]).is_err(), "prefix {end} decoded");
@@ -932,22 +784,22 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_record_rejects() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
+    fn duplicate_unit_rejects() {
+        let root = unit(42, &[]);
         let root_id = root.id();
         assert_eq!(
-            Artifact::from_records(root_id, vec![root.clone(), root]).unwrap_err(),
-            ArtifactGraphError::DuplicateRecord(root_id)
+            Artifact::from_units(root_id, vec![root.clone(), root]).unwrap_err(),
+            ArtifactGraphError::DuplicateUnit(root_id)
         );
     }
 
     #[test]
-    fn unreachable_record_rejects() {
-        let root = ArtifactRecord::new(module(42, &[]), Vec::new()).unwrap();
-        let extra = ArtifactRecord::new(module(7, &[]), Vec::new()).unwrap();
+    fn unreachable_unit_rejects() {
+        let root = unit_at("app.main", 42, &[], Vec::new());
+        let extra = unit_at("app.extra", 7, &[], Vec::new());
         assert_eq!(
             Artifact::new(root, vec![extra.clone()]).unwrap_err(),
-            ArtifactGraphError::UnreachableRecord(extra.id())
+            ArtifactGraphError::UnreachableUnit(extra.id())
         );
     }
 
@@ -955,55 +807,136 @@ mod tests {
     fn dependency_cycle_rejects() {
         let left_id = id(1);
         let right_id = id(2);
-        let left = ArtifactRecord {
+        let left_module = module(1, &[]);
+        let right_module = module(2, &[]);
+        let left = LinkUnit {
             id: left_id,
             bundle_digest: lm_abi::standard_bundle().digest(),
-            module: module(1, &[]),
-            dependencies: vec![ArtifactDependency::new("right", right_id).unwrap()],
+            path: "cycle.left".to_string(),
+            interface: interface("cycle.left", &left_module),
+            module: left_module,
+            dependencies: vec![ArtifactDependency::new("cycle.right", right_id).unwrap()],
         };
-        let right = ArtifactRecord {
+        let right = LinkUnit {
             id: right_id,
             bundle_digest: lm_abi::standard_bundle().digest(),
-            module: module(2, &[]),
-            dependencies: vec![ArtifactDependency::new("left", left_id).unwrap()],
+            path: "cycle.right".to_string(),
+            interface: interface("cycle.right", &right_module),
+            module: right_module,
+            dependencies: vec![ArtifactDependency::new("cycle.left", left_id).unwrap()],
         };
         assert!(matches!(
-            Artifact::from_records(left_id, vec![left, right]),
+            Artifact::from_units(left_id, vec![left, right]),
             Err(ArtifactGraphError::DependencyCycle(_))
         ));
     }
 
     #[test]
     fn deep_dependency_graph_does_not_use_the_host_stack() {
-        let mut records = Vec::new();
-        let mut root = ArtifactRecord::new(module(0, &[]), Vec::new()).unwrap();
+        let mut units = Vec::new();
+        let mut root = unit_at("chain.n0", 0, &[], Vec::new());
         for value in 1..2048 {
-            records.push(root.clone());
-            root = ArtifactRecord::new(
-                module(value, &[]),
-                vec![ArtifactDependency::new("next", root.id()).unwrap()],
-            )
-            .unwrap();
+            units.push(root.clone());
+            let dependency_path = root.module_path().to_string();
+            root = unit_at(
+                &format!("chain.n{value}"),
+                value,
+                &[],
+                vec![ArtifactDependency::new(dependency_path, root.id()).unwrap()],
+            );
         }
-        let artifact = Artifact::new(root, records).unwrap();
-        assert_eq!(artifact.resolve(None).unwrap().records().len(), 2048);
+        let artifact = Artifact::new(root, units).unwrap();
+        assert_eq!(artifact.units().len(), 2048);
     }
 
     #[test]
-    fn debug_data_moves_blob_hash_but_not_artifact_identity() {
-        let first = Artifact::new(
-            ArtifactRecord::new(module(42, b"first"), Vec::new()).unwrap(),
-            Vec::new(),
-        )
-        .unwrap();
-        let second = Artifact::new(
-            ArtifactRecord::new(module(42, b"second"), Vec::new()).unwrap(),
-            Vec::new(),
-        )
-        .unwrap();
+    fn debug_data_moves_container_hash_but_not_artifact_identity() {
+        let first = Artifact::new(unit(42, b"first"), Vec::new()).unwrap();
+        let second = Artifact::new(unit(42, b"second"), Vec::new()).unwrap();
         let first_bytes = encode(&first).unwrap();
         let second_bytes = encode(&second).unwrap();
         assert_eq!(first.id(), second.id());
-        assert_ne!(blob_hash(&first_bytes), blob_hash(&second_bytes));
+        assert_ne!(
+            crate::identity::container_hash(&first_bytes),
+            crate::identity::container_hash(&second_bytes)
+        );
+    }
+
+    #[test]
+    fn payload_mutations_never_panic() {
+        let bytes = encode(&Artifact::new(unit(42, b"debug"), Vec::new()).unwrap()).unwrap();
+        for index in codec::HEADER_LEN..bytes.len() {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            let _ = decode(&changed);
+        }
+    }
+
+    #[test]
+    fn decoder_rejects_noncanonical_unit_order() {
+        let first = unit_at("app.first", 1, &[], Vec::new());
+        let second = unit_at("app.second", 2, &[], Vec::new());
+        let mut units = vec![first, second];
+        units.sort_by_key(LinkUnit::id);
+        units.reverse();
+        let artifact = Artifact {
+            root: units[0].id(),
+            units,
+        };
+        let bytes = encode(&artifact).unwrap();
+        assert_eq!(decode(&bytes), Err(ArtifactDecodeError::NonCanonicalUnits));
+    }
+
+    #[test]
+    fn decoder_rejects_noncanonical_dependency_order() {
+        let mut root = unit_at(
+            "app.main",
+            42,
+            &[],
+            vec![
+                ArtifactDependency::new("app.first", id(1)).unwrap(),
+                ArtifactDependency::new("app.second", id(2)).unwrap(),
+            ],
+        );
+        root.dependencies.reverse();
+        let artifact = Artifact {
+            root: root.id(),
+            units: vec![root],
+        };
+        let bytes = encode(&artifact).unwrap();
+        assert_eq!(
+            decode(&bytes),
+            Err(ArtifactDecodeError::NonCanonicalDependencies)
+        );
+    }
+
+    #[test]
+    fn decoder_checks_interface_bytes_before_interface_decode() {
+        let root = unit(42, &[]);
+        let bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
+        let bundle = lm_abi::standard_bundle();
+        let limits = ArtifactLimits {
+            max_interface_bytes: 0,
+            ..ArtifactLimits::default()
+        };
+        assert_eq!(
+            decode_with_bundle(&bytes, &bundle, limits),
+            Err(ArtifactDecodeError::Limit("interface byte"))
+        );
+    }
+
+    #[test]
+    fn embedded_dependency_module_path_must_match() {
+        let dependency = unit_at("lib.actual", 1, &[], Vec::new());
+        let root = unit_at(
+            "app.main",
+            42,
+            &[],
+            vec![ArtifactDependency::new("lib.claimed", dependency.id()).unwrap()],
+        );
+        assert!(matches!(
+            Artifact::new(root, vec![dependency]),
+            Err(ArtifactGraphError::DependencyPathMismatch { .. })
+        ));
     }
 }

@@ -191,11 +191,15 @@ fn build_and_link_smoke() {
     let mut link_env = LinkEnv::new();
     for unit in [&lib, &main] {
         link_env
-            .bind(LinkUnit {
-                path: unit.path.clone(),
-                module: unit.module.clone(),
-                interface: unit.interface.clone(),
-            })
+            .bind(
+                LinkUnit::new(
+                    unit.path.clone(),
+                    unit.module.clone(),
+                    unit.interface.clone(),
+                    Vec::new(),
+                )
+                .expect("the link unit is valid"),
+            )
             .expect("binds");
     }
     let linked = link("app.main", &link_env.freeze()).expect("links");

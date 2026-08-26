@@ -78,11 +78,15 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
         env.bind_interface(module.interface.clone())
             .map_err(|error| format!("error: {error}\n"))?;
         contents.push((module.path.clone(), module.container_hash));
-        units.push(LinkUnit {
-            path: module.path.clone(),
-            module: module.module.clone(),
-            interface: module.interface.clone(),
-        });
+        units.push(
+            LinkUnit::new(
+                module.path.clone(),
+                module.module.clone(),
+                module.interface.clone(),
+                Vec::new(),
+            )
+            .map_err(|error| format!("error: {error}\n"))?,
+        );
     }
     for package_name in &workspace.order {
         let package = workspace.package(package_name);
@@ -171,11 +175,15 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
             contents.push((compiled.path.clone(), compiled.container_hash));
             // The unit takes the compiled module, so a build moves
             // one module and never copies it.
-            units.push(LinkUnit {
-                path: compiled.path,
-                module: compiled.module,
-                interface: compiled.interface,
-            });
+            units.push(
+                LinkUnit::new(
+                    compiled.path,
+                    compiled.module,
+                    compiled.interface,
+                    Vec::new(),
+                )
+                .map_err(|error| format!("error: {error}\n"))?,
+            );
         }
     }
     let root_package = workspace.package(&workspace.root);

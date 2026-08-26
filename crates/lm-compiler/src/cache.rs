@@ -70,22 +70,7 @@ const TAG: &[u8] = b"lm-build-key-v1\0";
 /// The interface identity of one module: the export surface without
 /// any implementation hash.
 pub fn interface_identity(interface: &Interface) -> [u8; 32] {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"lm-iface-set-v1\0");
-    write_str(&mut bytes, &interface.module_path);
-    let mut exports: Vec<(u8, &str, [u8; 32])> = interface
-        .exports
-        .iter()
-        .map(|e| (e.kind.tag(), e.name.as_str(), e.iface_hash))
-        .collect();
-    exports.sort();
-    bytes.extend_from_slice(&(exports.len() as u32).to_le_bytes());
-    for (kind, name, hash) in exports {
-        bytes.push(kind);
-        write_str(&mut bytes, name);
-        bytes.extend_from_slice(&hash);
-    }
-    hash256(&bytes)
+    lm_bytecode::interface::interface_identity(interface)
 }
 
 fn write_str(out: &mut Vec<u8>, text: &str) {

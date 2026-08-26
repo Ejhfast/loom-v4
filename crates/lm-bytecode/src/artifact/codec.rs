@@ -1,38 +1,40 @@
 //! Canonical encoding for thin and fat artifacts.
 
-use super::{Artifact, ArtifactError, ArtifactGraphError, ArtifactId, ArtifactRecord};
+use super::{Artifact, ArtifactError, ArtifactGraphError, ArtifactId, LinkUnit};
 use crate::DecodeError;
 use std::fmt;
 
 const MAGIC: &[u8; 4] = b"LMAR";
 
-/// The artifact package format version.
+/// The artifact format version.
 pub const FORMAT_VERSION: u16 = 1;
 
 pub(super) const HEADER_LEN: usize = 4 + 2 + 32 + 32 + 4;
-const MIN_RECORD_BYTES: usize = 32 + 4 + 4;
+const MIN_UNIT_BYTES: usize = 32 + 4 + 1 + 4 + 4 + 4;
 const MIN_DEPENDENCY_BYTES: usize = 4 + 1 + 32;
 
-/// Limits for one artifact package decode.
+/// Limits for one artifact decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactLimits {
     pub max_bytes: usize,
-    pub max_records: usize,
-    pub max_dependencies_per_record: usize,
+    pub max_units: usize,
+    pub max_dependencies_per_unit: usize,
     pub max_module_bytes: usize,
+    pub max_interface_bytes: usize,
     pub max_code_bytes: usize,
-    pub max_namespace_bytes: usize,
+    pub max_module_path_bytes: usize,
 }
 
 impl Default for ArtifactLimits {
     fn default() -> ArtifactLimits {
         ArtifactLimits {
             max_bytes: 256 * 1024 * 1024,
-            max_records: 4096,
-            max_dependencies_per_record: 4096,
+            max_units: 4096,
+            max_dependencies_per_unit: 4096,
             max_module_bytes: 64 * 1024 * 1024,
+            max_interface_bytes: 64 * 1024 * 1024,
             max_code_bytes: 256 * 1024 * 1024,
-            max_namespace_bytes: 4096,
+            max_module_path_bytes: 4096,
         }
     }
 }
@@ -42,7 +44,7 @@ impl Default for ArtifactLimits {
 pub enum ArtifactEncodeError {
     LengthOverflow,
     BundleMismatch {
-        record: ArtifactId,
+        unit: ArtifactId,
         expected: [u8; 32],
         found: [u8; 32],
     },
@@ -55,12 +57,12 @@ impl fmt::Display for ArtifactEncodeError {
                 out.write_str("the artifact is too large to encode")
             }
             ArtifactEncodeError::BundleMismatch {
-                record,
+                unit,
                 expected,
                 found,
             } => write!(
                 out,
-                "artifact record {record} uses ABI bundle {}, but this encoder uses {}",
+                "artifact unit {unit} uses ABI bundle {}, but this encoder uses {}",
                 digest_text(found),
                 digest_text(expected)
             ),
@@ -82,10 +84,13 @@ pub enum ArtifactDecodeError {
     },
     BadLength,
     BadUtf8,
+    NonCanonicalUnits,
+    NonCanonicalDependencies,
     TrailingBytes,
     Limit(&'static str),
     Module(DecodeError),
-    Record(ArtifactError),
+    Interface(DecodeError),
+    Unit(ArtifactError),
     IdentityMismatch {
         stored: ArtifactId,
         computed: ArtifactId,
@@ -111,7 +116,13 @@ impl fmt::Display for ArtifactDecodeError {
                 out.write_str("an artifact length exceeds the remaining input")
             }
             ArtifactDecodeError::BadUtf8 => {
-                out.write_str("an artifact namespace is not valid UTF-8")
+                out.write_str("an artifact module path is not valid UTF-8")
+            }
+            ArtifactDecodeError::NonCanonicalUnits => {
+                out.write_str("artifact units are not in canonical order")
+            }
+            ArtifactDecodeError::NonCanonicalDependencies => {
+                out.write_str("artifact dependencies are not in canonical order")
             }
             ArtifactDecodeError::TrailingBytes => out.write_str("extra bytes follow the artifact"),
             ArtifactDecodeError::Limit(name) => {
@@ -120,10 +131,13 @@ impl fmt::Display for ArtifactDecodeError {
             ArtifactDecodeError::Module(error) => {
                 write!(out, "an artifact module is invalid: {error}")
             }
-            ArtifactDecodeError::Record(error) => error.fmt(out),
+            ArtifactDecodeError::Interface(error) => {
+                write!(out, "an artifact interface is invalid: {error}")
+            }
+            ArtifactDecodeError::Unit(error) => error.fmt(out),
             ArtifactDecodeError::IdentityMismatch { stored, computed } => write!(
                 out,
-                "artifact record identity {stored} does not match computed identity {computed}"
+                "artifact unit identity {stored} does not match computed identity {computed}"
             ),
             ArtifactDecodeError::Graph(error) => error.fmt(out),
         }
@@ -143,38 +157,41 @@ pub fn encode_with_bundle(
     artifact: &Artifact,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<Vec<u8>, ArtifactEncodeError> {
-    let mut modules = Vec::with_capacity(artifact.records().len());
+    let mut payloads = Vec::with_capacity(artifact.units().len());
     let mut total = HEADER_LEN;
-    for record in artifact.records() {
-        if record.bundle_digest() != bundle.digest() {
+    for unit in artifact.units() {
+        if unit.bundle_digest() != bundle.digest() {
             return Err(ArtifactEncodeError::BundleMismatch {
-                record: record.id(),
+                unit: unit.id(),
                 expected: bundle.digest(),
-                found: record.bundle_digest(),
+                found: unit.bundle_digest(),
             });
         }
-        let module = crate::encode_with_bundle(record.module(), bundle);
+        let module = crate::encode_with_bundle(unit.module(), bundle);
+        let interface = crate::interface::encode_interface(unit.interface());
         total = total
-            .checked_add(record_size(record, module.len())?)
+            .checked_add(unit_size(unit, module.len(), interface.len())?)
             .ok_or(ArtifactEncodeError::LengthOverflow)?;
-        modules.push(module);
+        payloads.push((module, interface));
     }
     let count =
-        u32::try_from(artifact.records().len()).map_err(|_| ArtifactEncodeError::LengthOverflow)?;
+        u32::try_from(artifact.units().len()).map_err(|_| ArtifactEncodeError::LengthOverflow)?;
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&bundle.digest());
     out.extend_from_slice(artifact.id().as_bytes());
     out.extend_from_slice(&count.to_le_bytes());
-    for (record, module) in artifact.records().iter().zip(modules) {
-        out.extend_from_slice(record.id().as_bytes());
-        write_u32(&mut out, record.dependencies().len())?;
-        for dependency in record.dependencies() {
-            write_bytes(&mut out, dependency.namespace().as_bytes())?;
+    for (unit, (module, interface)) in artifact.units().iter().zip(payloads) {
+        out.extend_from_slice(unit.id().as_bytes());
+        write_bytes(&mut out, unit.module_path().as_bytes())?;
+        write_u32(&mut out, unit.dependencies().len())?;
+        for dependency in unit.dependencies() {
+            write_bytes(&mut out, dependency.module_path().as_bytes())?;
             out.extend_from_slice(dependency.artifact().as_bytes());
         }
         write_bytes(&mut out, &module)?;
+        write_bytes(&mut out, &interface)?;
     }
     Ok(out)
 }
@@ -208,23 +225,37 @@ pub fn decode_with_bundle(
         return Err(ArtifactDecodeError::BadBundle { expected, found });
     }
     let root = ArtifactId::from_bytes(cursor.digest()?);
-    let count = cursor.count(limits.max_records, MIN_RECORD_BYTES, "record")?;
-    let mut records = Vec::with_capacity(count);
+    let count = cursor.count(limits.max_units, MIN_UNIT_BYTES, "unit")?;
+    let mut units = Vec::with_capacity(count);
     let mut code_bytes = 0usize;
+    let mut previous_unit = None;
     for _ in 0..count {
         let stored = ArtifactId::from_bytes(cursor.digest()?);
+        if previous_unit.is_some_and(|previous| previous >= stored) {
+            return Err(ArtifactDecodeError::NonCanonicalUnits);
+        }
+        previous_unit = Some(stored);
+        let module_path = cursor.string(limits.max_module_path_bytes)?;
         let dependency_count = cursor.count(
-            limits.max_dependencies_per_record,
+            limits.max_dependencies_per_unit,
             MIN_DEPENDENCY_BYTES,
             "direct dependency",
         )?;
         let mut dependencies = Vec::with_capacity(dependency_count);
+        let mut previous_dependency: Option<(String, ArtifactId)> = None;
         for _ in 0..dependency_count {
-            let namespace = cursor.string(limits.max_namespace_bytes)?;
+            let dependency_path = cursor.string(limits.max_module_path_bytes)?;
             let artifact = ArtifactId::from_bytes(cursor.digest()?);
+            if previous_dependency
+                .as_ref()
+                .is_some_and(|previous| previous >= &(dependency_path.clone(), artifact))
+            {
+                return Err(ArtifactDecodeError::NonCanonicalDependencies);
+            }
+            previous_dependency = Some((dependency_path.clone(), artifact));
             dependencies.push(
-                super::ArtifactDependency::new(namespace, artifact)
-                    .map_err(ArtifactDecodeError::Record)?,
+                super::ArtifactDependency::new(dependency_path, artifact)
+                    .map_err(ArtifactDecodeError::Unit)?,
             );
         }
         let module_length = cursor.length()?;
@@ -240,33 +271,51 @@ pub fn decode_with_bundle(
         let module_bytes = cursor.take(module_length)?;
         let module =
             crate::decode_with_bundle(module_bytes, bundle).map_err(ArtifactDecodeError::Module)?;
-        let record = ArtifactRecord::new_with_bundle(module, dependencies, bundle)
-            .map_err(ArtifactDecodeError::Record)?;
-        if record.id() != stored {
+        let interface_length = cursor.length()?;
+        if interface_length > limits.max_interface_bytes {
+            return Err(ArtifactDecodeError::Limit("interface byte"));
+        }
+        code_bytes = code_bytes
+            .checked_add(interface_length)
+            .ok_or(ArtifactDecodeError::Limit("decoded code byte"))?;
+        if code_bytes > limits.max_code_bytes {
+            return Err(ArtifactDecodeError::Limit("decoded code byte"));
+        }
+        let interface_bytes = cursor.take(interface_length)?;
+        let interface = crate::interface::decode_interface(interface_bytes)
+            .map_err(ArtifactDecodeError::Interface)?;
+        let unit = LinkUnit::new_with_bundle(module_path, module, interface, dependencies, bundle)
+            .map_err(ArtifactDecodeError::Unit)?;
+        if unit.id() != stored {
             return Err(ArtifactDecodeError::IdentityMismatch {
                 stored,
-                computed: record.id(),
+                computed: unit.id(),
             });
         }
-        records.push(record);
+        units.push(unit);
     }
     if cursor.remaining() != 0 {
         return Err(ArtifactDecodeError::TrailingBytes);
     }
-    Artifact::from_records(root, records).map_err(ArtifactDecodeError::Graph)
+    Artifact::from_units(root, units).map_err(ArtifactDecodeError::Graph)
 }
 
-fn record_size(
-    record: &ArtifactRecord,
+fn unit_size(
+    unit: &LinkUnit,
     module_length: usize,
+    interface_length: usize,
 ) -> Result<usize, ArtifactEncodeError> {
-    let mut size = MIN_RECORD_BYTES;
-    for dependency in record.dependencies() {
+    let mut size = MIN_UNIT_BYTES;
+    size = size
+        .checked_add(unit.module_path().len())
+        .ok_or(ArtifactEncodeError::LengthOverflow)?;
+    for dependency in unit.dependencies() {
         size = size
-            .checked_add(4 + dependency.namespace().len() + 32)
+            .checked_add(4 + dependency.module_path().len() + 32)
             .ok_or(ArtifactEncodeError::LengthOverflow)?;
     }
     size.checked_add(module_length)
+        .and_then(|size| size.checked_add(interface_length))
         .ok_or(ArtifactEncodeError::LengthOverflow)
 }
 
@@ -362,7 +411,7 @@ impl<'a> Cursor<'a> {
     fn string(&mut self, maximum: usize) -> Result<String, ArtifactDecodeError> {
         let length = self.u32()? as usize;
         if length > maximum {
-            return Err(ArtifactDecodeError::Limit("namespace byte"));
+            return Err(ArtifactDecodeError::Limit("module path byte"));
         }
         let bytes = self.take(length)?;
         let text = std::str::from_utf8(bytes).map_err(|_| ArtifactDecodeError::BadUtf8)?;
