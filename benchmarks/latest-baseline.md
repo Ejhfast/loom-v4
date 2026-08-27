@@ -1,8 +1,10 @@
 # Latest benchmark baseline
 
-The measured tree includes correctness checkpoint `580ea17` and the performance pass.
+The measured tree is checkpoint `611d6f7`.
 
-The tree contains the one-surface artifact correction.
+The tree compiles source modules against sparse dependencies.
+
+The checker selects exact core support declarations.
 
 All comparisons use `main` revision `8f7ba66` in the same session.
 
@@ -37,19 +39,19 @@ The snapshot format version is 31.
 | Core LMBC | 305,056 bytes |
 | Core LMAR | 305,178 bytes |
 | LMAR wrapper | 122 bytes |
-| LMAR encoding | 0.131 ms |
-| LMAR decoding and identity | 3.592 ms |
-| Core checking | 2.510 ms |
-| Core lowering | 1.031 ms |
-| Core compilation | 3.975 ms |
+| LMAR encoding | 0.132 ms |
+| LMAR decoding and identity | 3.617 ms |
+| Core checking | 2.512 ms |
+| Core lowering | 1.023 ms |
+| Core compilation | 3.957 ms |
 | Core decoding | 0.457 ms |
-| Core verification | 1.462 ms |
-| Structural verification | 0.580 ms |
+| Core verification | 1.488 ms |
+| Structural verification | 0.592 ms |
 | Verification hash | 0.140 ms |
-| Semantic identity | 2.440 ms |
-| Core namespace publication | 4.094 ms |
-| External core artifact load | 7.282 ms |
-| Repeated artifact publication | 0.754 ms |
+| Semantic identity | 2.476 ms |
+| Core namespace publication | 4.156 ms |
+| External core artifact load | 7.412 ms |
+| Repeated artifact publication | 0.770 ms |
 | Default interface witnesses | 11 of 3,588 possible entries |
 
 LMBC stores compiler surface facts once.
@@ -69,14 +71,14 @@ Each process reports one median from nine measured runs.
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
 | Core LMBC | 274,657 bytes | 305,056 bytes | +11.1% |
-| Core checking | 2.396 ms | 2.510 ms | +4.8% |
-| Core lowering | 1.000 ms | 1.031 ms | +3.1% |
-| Core compilation | 3.788 ms | 3.975 ms | +4.9% |
+| Core checking | 2.396 ms | 2.512 ms | +4.8% |
+| Core lowering | 1.000 ms | 1.023 ms | +2.3% |
+| Core compilation | 3.788 ms | 3.957 ms | +4.5% |
 | Core decoding | 0.411 ms | 0.457 ms | +11.2% |
-| Core verification | 1.411 ms | 1.462 ms | +3.6% |
-| Structural verification | 0.516 ms | 0.580 ms | +12.4% |
+| Core verification | 1.411 ms | 1.488 ms | +5.5% |
+| Structural verification | 0.516 ms | 0.592 ms | +14.7% |
 | Verification hash | 0.137 ms | 0.140 ms | +2.2% |
-| Semantic identity | 2.538 ms | 2.440 ms | -3.9% |
+| Semantic identity | 2.538 ms | 2.476 ms | -2.4% |
 
 The LMBC growth stores exact source contract facts.
 
@@ -95,19 +97,35 @@ The program contains source `1`.
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
 | Artifact bytes | 274,942 | 1,699 | -99.4% |
-| Source compilation | 8.342 ms | 6.215 ms | -25.5% |
-| Cold artifact load | 2.033 ms | 1.411 ms | -30.6% |
-| Compilation and cold load | 10.375 ms | 7.626 ms | -26.5% |
+| Source compilation | 8.342 ms | 2.144 ms | -74.3% |
+| Cold artifact load | 2.033 ms | 1.423 ms | -30.0% |
+| Compilation and cold load | 10.375 ms | 3.567 ms | -65.6% |
 
 The root unit contains one function and no class.
 
 Artifact decoding takes 0.009 milliseconds.
 
-Dependency collection takes 0.843 milliseconds.
+Dependency collection takes 0.456 milliseconds.
 
-Namespace publication takes 1.464 milliseconds.
+Namespace publication takes 1.439 milliseconds.
 
 The cold-load timing measures decoding and publication together.
+
+## Command startup
+
+Each cell gives the best result from two batches of twenty release executions.
+
+The benchmark alternates the two revisions within each batch.
+
+| Source | `main` | Current | Change |
+| --- | ---: | ---: | ---: |
+| `1` | 10.473 / 10.457 ms | 17.914 / 17.854 ms | +70.9% |
+| `use std.json.Json` | 35.679 / 35.500 ms | 23.645 / 23.765 ms | -33.4% |
+| `use std.http.Http` | 52.625 / 52.806 ms | 31.819 / 31.974 ms | -39.5% |
+
+Tiny command startup still constructs, identifies, verifies, and publishes the runtime core.
+
+Sparse dependency compilation removes repeated core work from standard modules.
 
 ## Execution gate
 
@@ -139,19 +157,19 @@ The warm debug suite uses Cargo's default concurrency and full coverage.
 
 | Revision | Tests | Time |
 | --- | ---: | ---: |
-| `main` | 1,638 | 49.35 s |
-| Current | 1,684 | 47.30 s |
+| `main` | 1,637 | 50.156 s |
+| Current | 1,673 | 33.213 s |
 
-The current tree adds 46 tests.
+The current tree adds 36 tests.
 
-The current suite is 4.1 percent faster.
+The current suite is 33.8 percent faster.
 
 | Test binary | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Snapshot admission | 11.68 s | 5.66 s | -51.5% |
-| Snapshot mutation fuzzing | 13.89 s | 14.64 s | +5.4% |
-| Snapshot image rules | 0.17 s | 0.23 s | +0.06 s |
-| Snapshot restore rules | 0.36 s | 0.46 s | +0.10 s |
+| Snapshot admission | 11.78 s | 5.05 s | -57.1% |
+| Snapshot mutation fuzzing | 14.06 s | 7.18 s | -48.9% |
+| Snapshot image rules | 0.17 s | 0.20 s | +0.03 s |
+| Snapshot restore rules | 0.40 s | 0.31 s | -0.09 s |
 
 Each test executable builds one process-local core `LinkUnit` when required.
 
