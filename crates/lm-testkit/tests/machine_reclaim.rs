@@ -6,7 +6,8 @@
 //! branches it still holds, not for every branch it ever built.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, NullHost, VmConfig, World, WorldMetrics};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{NullHost, VmConfig, World, WorldMetrics};
 
 const CHILD_CHURN: &str = "def once(n: Int): Int with Vm
   vm = sys.vm.Vm().activate_or_fault(do |x: Int|: Int
@@ -32,8 +33,8 @@ fn run_with_config(
     config: VmConfig,
 ) -> (String, usize, usize, WorldMetrics) {
     let bytes = compile_to_bytes(name, source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
-    let mut world = World::new(&loaded, config, Box::new(NullHost));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
+    let mut world = World::new(arena, namespace, config, Box::new(NullHost));
     world.allow("Vm").expect("the Vm grant exists");
     let outcome = lm_proc::run_world(&mut world);
     (

@@ -136,7 +136,7 @@ impl World {
                 let element = match self.envs.ty(expected).cloned() {
                     Some(ClosedType::List(element)) => element,
                     Some(ClosedType::Inst(class, args))
-                        if Some(class) == self.core.list && args.len() == 1 =>
+                        if Some(class) == self.core_of(vm).list && args.len() == 1 =>
                     {
                         args[0]
                     }
@@ -207,10 +207,10 @@ impl World {
                 lm_abi::OP_UDP_BIND,
             ),
             HostValue::Resource(resource) => self.build_host_resource(vm, *resource),
-            HostValue::Artifact { module, interface } => {
+            HostValue::Artifact(artifact) => {
                 let valid = matches!(
                     self.envs.ty(expected),
-                    Some(ClosedType::Class(class)) if Some(*class) == self.core.artifact
+                    Some(ClosedType::Class(class)) if Some(*class) == self.core_of(vm).artifact
                 );
                 if !valid {
                     return Err(FaultCode::TypeMismatch);
@@ -218,9 +218,8 @@ impl World {
                 self.machines[vm as usize].alloc(Object::NativeCode(Box::new(
                     lm_heap::PortableCode {
                         kind: lm_heap::PortableCodeKind::Artifact,
-                        bytes: module.clone(),
-                        interface: Some(interface.clone()),
-                        index: u32::MAX,
+                        bytes: artifact.clone(),
+                        slot: None,
                         origin: None,
                     },
                 )))
@@ -240,105 +239,117 @@ impl World {
             ),
             HostValue::Ctor(ctor, parts) => {
                 let class = match ctor {
-                    CoreCtor::Some => self.core.option_some,
-                    CoreCtor::None => self.core.option_none,
-                    CoreCtor::Ok => self.core.result_ok,
-                    CoreCtor::Err => self.core.result_err,
-                    CoreCtor::IoErrorBrokenPipe => self.core.io_error_broken_pipe,
-                    CoreCtor::IoErrorInvalidInput => self.core.io_error_invalid_input,
-                    CoreCtor::IoErrorLimitExceeded => self.core.io_error_limit_exceeded,
-                    CoreCtor::IoErrorUnsupported => self.core.io_error_unsupported,
-                    CoreCtor::IoErrorFailed => self.core.io_error_failed,
-                    CoreCtor::EnvInvalidName => self.core.env_error_invalid_name,
-                    CoreCtor::EnvInvalidEncoding => self.core.env_error_invalid_encoding,
-                    CoreCtor::EnvPermissionDenied => self.core.env_error_permission_denied,
-                    CoreCtor::EnvFailed => self.core.env_error_failed,
-                    CoreCtor::EntropyInvalidInput => self.core.entropy_error_invalid_input,
-                    CoreCtor::EntropyLimitExceeded => self.core.entropy_error_limit_exceeded,
-                    CoreCtor::EntropyUnavailable => self.core.entropy_error_unavailable,
-                    CoreCtor::EntropyFailed => self.core.entropy_error_failed,
-                    CoreCtor::FsErrorClosed => self.core.fs_error_closed,
-                    CoreCtor::FsErrorInvalidInput => self.core.fs_error_invalid_input,
-                    CoreCtor::FsErrorInvalidEncoding => self.core.fs_error_invalid_encoding,
-                    CoreCtor::FsErrorLimitExceeded => self.core.fs_error_limit_exceeded,
-                    CoreCtor::FsErrorNotFound => self.core.fs_error_not_found,
-                    CoreCtor::FsErrorAlreadyExists => self.core.fs_error_already_exists,
-                    CoreCtor::FsErrorPermissionDenied => self.core.fs_error_permission_denied,
-                    CoreCtor::FsErrorNotDirectory => self.core.fs_error_not_directory,
-                    CoreCtor::FsErrorIsDirectory => self.core.fs_error_is_directory,
-                    CoreCtor::FsErrorDirectoryNotEmpty => self.core.fs_error_directory_not_empty,
-                    CoreCtor::FsErrorCrossDevice => self.core.fs_error_cross_device,
-                    CoreCtor::FsErrorUnsupported => self.core.fs_error_unsupported,
-                    CoreCtor::FsErrorFailed => self.core.fs_error_failed,
-                    CoreCtor::FileKindFile => self.core.file_kind_file,
-                    CoreCtor::FileKindDirectory => self.core.file_kind_directory,
-                    CoreCtor::FileKindSymlink => self.core.file_kind_symlink,
-                    CoreCtor::FileKindOther => self.core.file_kind_other,
-                    CoreCtor::FileInfo => self.core.file_info,
-                    CoreCtor::DirEntry => self.core.dir_entry,
-                    CoreCtor::NetInvalidInput => self.core.net_invalid_input,
-                    CoreCtor::NetNameNotFound => self.core.net_name_not_found,
-                    CoreCtor::NetUnavailable => self.core.net_unavailable,
-                    CoreCtor::NetPermissionDenied => self.core.net_permission_denied,
-                    CoreCtor::NetAddressInUse => self.core.net_address_in_use,
-                    CoreCtor::NetConnectionRefused => self.core.net_connection_refused,
-                    CoreCtor::NetConnectionReset => self.core.net_connection_reset,
-                    CoreCtor::NetNotConnected => self.core.net_not_connected,
-                    CoreCtor::NetTimedOut => self.core.net_timed_out,
-                    CoreCtor::NetClosed => self.core.net_closed,
-                    CoreCtor::NetLimitExceeded => self.core.net_limit_exceeded,
-                    CoreCtor::NetUnsupported => self.core.net_unsupported,
-                    CoreCtor::NetFailed => self.core.net_failed,
-                    CoreCtor::TcpReadData => self.core.tcp_read_data,
-                    CoreCtor::TcpReadEnd => self.core.tcp_read_end,
-                    CoreCtor::TlsInvalidConfig => self.core.tls_invalid_config,
-                    CoreCtor::TlsHandshake => self.core.tls_handshake,
-                    CoreCtor::TlsCertificate => self.core.tls_certificate,
-                    CoreCtor::TlsProtocol => self.core.tls_protocol,
-                    CoreCtor::TlsNetwork => self.core.tls_network,
-                    CoreCtor::TlsClosed => self.core.tls_closed,
-                    CoreCtor::TlsLimitExceeded => self.core.tls_limit_exceeded,
-                    CoreCtor::TtySize => self.core.tty_size,
-                    CoreCtor::TtyClosed => self.core.tty_error_closed,
-                    CoreCtor::TtyNotTerminal => self.core.tty_error_not_terminal,
-                    CoreCtor::TtyBusy => self.core.tty_error_busy,
-                    CoreCtor::TtyPermissionDenied => self.core.tty_error_permission_denied,
-                    CoreCtor::TtyUnsupported => self.core.tty_error_unsupported,
-                    CoreCtor::TtyFailed => self.core.tty_error_failed,
-                    CoreCtor::SignalInterrupt => self.core.signal_interrupt,
-                    CoreCtor::SignalTerminate => self.core.signal_terminate,
-                    CoreCtor::SignalClosed => self.core.signal_error_closed,
-                    CoreCtor::SignalInvalidInput => self.core.signal_error_invalid_input,
-                    CoreCtor::SignalBusy => self.core.signal_error_busy,
-                    CoreCtor::SignalUnsupported => self.core.signal_error_unsupported,
-                    CoreCtor::SignalLimitExceeded => self.core.signal_error_limit_exceeded,
-                    CoreCtor::SignalFailed => self.core.signal_error_failed,
-                    CoreCtor::PipeErrorClosed => self.core.pipe_error_closed,
-                    CoreCtor::PipeErrorBrokenPipe => self.core.pipe_error_broken_pipe,
-                    CoreCtor::PipeErrorInvalidInput => self.core.pipe_error_invalid_input,
-                    CoreCtor::PipeErrorLimitExceeded => self.core.pipe_error_limit_exceeded,
-                    CoreCtor::PipeErrorUnsupported => self.core.pipe_error_unsupported,
-                    CoreCtor::PipeErrorFailed => self.core.pipe_error_failed,
-                    CoreCtor::ChildStatusExited => self.core.child_status_exited,
-                    CoreCtor::ChildStatusTerminated => self.core.child_status_terminated,
-                    CoreCtor::ExecErrorClosed => self.core.exec_error_closed,
-                    CoreCtor::ExecErrorInvalidInput => self.core.exec_error_invalid_input,
-                    CoreCtor::ExecErrorLimitExceeded => self.core.exec_error_limit_exceeded,
-                    CoreCtor::ExecErrorNotFound => self.core.exec_error_not_found,
-                    CoreCtor::ExecErrorPermissionDenied => self.core.exec_error_permission_denied,
-                    CoreCtor::ExecErrorUnsupported => self.core.exec_error_unsupported,
-                    CoreCtor::ExecErrorFailed => self.core.exec_error_failed,
-                    CoreCtor::UdpDatagram => self.core.udp_datagram,
-                    CoreCtor::CompileErrors => self.core.compile_errors,
+                    CoreCtor::Some => self.core_of(vm).option_some,
+                    CoreCtor::None => self.core_of(vm).option_none,
+                    CoreCtor::Ok => self.core_of(vm).result_ok,
+                    CoreCtor::Err => self.core_of(vm).result_err,
+                    CoreCtor::IoErrorBrokenPipe => self.core_of(vm).io_error_broken_pipe,
+                    CoreCtor::IoErrorInvalidInput => self.core_of(vm).io_error_invalid_input,
+                    CoreCtor::IoErrorLimitExceeded => self.core_of(vm).io_error_limit_exceeded,
+                    CoreCtor::IoErrorUnsupported => self.core_of(vm).io_error_unsupported,
+                    CoreCtor::IoErrorFailed => self.core_of(vm).io_error_failed,
+                    CoreCtor::EnvInvalidName => self.core_of(vm).env_error_invalid_name,
+                    CoreCtor::EnvInvalidEncoding => self.core_of(vm).env_error_invalid_encoding,
+                    CoreCtor::EnvPermissionDenied => self.core_of(vm).env_error_permission_denied,
+                    CoreCtor::EnvFailed => self.core_of(vm).env_error_failed,
+                    CoreCtor::EntropyInvalidInput => self.core_of(vm).entropy_error_invalid_input,
+                    CoreCtor::EntropyLimitExceeded => self.core_of(vm).entropy_error_limit_exceeded,
+                    CoreCtor::EntropyUnavailable => self.core_of(vm).entropy_error_unavailable,
+                    CoreCtor::EntropyFailed => self.core_of(vm).entropy_error_failed,
+                    CoreCtor::FsErrorClosed => self.core_of(vm).fs_error_closed,
+                    CoreCtor::FsErrorInvalidInput => self.core_of(vm).fs_error_invalid_input,
+                    CoreCtor::FsErrorInvalidEncoding => self.core_of(vm).fs_error_invalid_encoding,
+                    CoreCtor::FsErrorLimitExceeded => self.core_of(vm).fs_error_limit_exceeded,
+                    CoreCtor::FsErrorNotFound => self.core_of(vm).fs_error_not_found,
+                    CoreCtor::FsErrorAlreadyExists => self.core_of(vm).fs_error_already_exists,
+                    CoreCtor::FsErrorPermissionDenied => {
+                        self.core_of(vm).fs_error_permission_denied
+                    }
+                    CoreCtor::FsErrorNotDirectory => self.core_of(vm).fs_error_not_directory,
+                    CoreCtor::FsErrorIsDirectory => self.core_of(vm).fs_error_is_directory,
+                    CoreCtor::FsErrorDirectoryNotEmpty => {
+                        self.core_of(vm).fs_error_directory_not_empty
+                    }
+                    CoreCtor::FsErrorCrossDevice => self.core_of(vm).fs_error_cross_device,
+                    CoreCtor::FsErrorUnsupported => self.core_of(vm).fs_error_unsupported,
+                    CoreCtor::FsErrorFailed => self.core_of(vm).fs_error_failed,
+                    CoreCtor::FileKindFile => self.core_of(vm).file_kind_file,
+                    CoreCtor::FileKindDirectory => self.core_of(vm).file_kind_directory,
+                    CoreCtor::FileKindSymlink => self.core_of(vm).file_kind_symlink,
+                    CoreCtor::FileKindOther => self.core_of(vm).file_kind_other,
+                    CoreCtor::FileInfo => self.core_of(vm).file_info,
+                    CoreCtor::DirEntry => self.core_of(vm).dir_entry,
+                    CoreCtor::NetInvalidInput => self.core_of(vm).net_invalid_input,
+                    CoreCtor::NetNameNotFound => self.core_of(vm).net_name_not_found,
+                    CoreCtor::NetUnavailable => self.core_of(vm).net_unavailable,
+                    CoreCtor::NetPermissionDenied => self.core_of(vm).net_permission_denied,
+                    CoreCtor::NetAddressInUse => self.core_of(vm).net_address_in_use,
+                    CoreCtor::NetConnectionRefused => self.core_of(vm).net_connection_refused,
+                    CoreCtor::NetConnectionReset => self.core_of(vm).net_connection_reset,
+                    CoreCtor::NetNotConnected => self.core_of(vm).net_not_connected,
+                    CoreCtor::NetTimedOut => self.core_of(vm).net_timed_out,
+                    CoreCtor::NetClosed => self.core_of(vm).net_closed,
+                    CoreCtor::NetLimitExceeded => self.core_of(vm).net_limit_exceeded,
+                    CoreCtor::NetUnsupported => self.core_of(vm).net_unsupported,
+                    CoreCtor::NetFailed => self.core_of(vm).net_failed,
+                    CoreCtor::TcpReadData => self.core_of(vm).tcp_read_data,
+                    CoreCtor::TcpReadEnd => self.core_of(vm).tcp_read_end,
+                    CoreCtor::TlsInvalidConfig => self.core_of(vm).tls_invalid_config,
+                    CoreCtor::TlsHandshake => self.core_of(vm).tls_handshake,
+                    CoreCtor::TlsCertificate => self.core_of(vm).tls_certificate,
+                    CoreCtor::TlsProtocol => self.core_of(vm).tls_protocol,
+                    CoreCtor::TlsNetwork => self.core_of(vm).tls_network,
+                    CoreCtor::TlsClosed => self.core_of(vm).tls_closed,
+                    CoreCtor::TlsLimitExceeded => self.core_of(vm).tls_limit_exceeded,
+                    CoreCtor::TtySize => self.core_of(vm).tty_size,
+                    CoreCtor::TtyClosed => self.core_of(vm).tty_error_closed,
+                    CoreCtor::TtyNotTerminal => self.core_of(vm).tty_error_not_terminal,
+                    CoreCtor::TtyBusy => self.core_of(vm).tty_error_busy,
+                    CoreCtor::TtyPermissionDenied => self.core_of(vm).tty_error_permission_denied,
+                    CoreCtor::TtyUnsupported => self.core_of(vm).tty_error_unsupported,
+                    CoreCtor::TtyFailed => self.core_of(vm).tty_error_failed,
+                    CoreCtor::SignalInterrupt => self.core_of(vm).signal_interrupt,
+                    CoreCtor::SignalTerminate => self.core_of(vm).signal_terminate,
+                    CoreCtor::SignalClosed => self.core_of(vm).signal_error_closed,
+                    CoreCtor::SignalInvalidInput => self.core_of(vm).signal_error_invalid_input,
+                    CoreCtor::SignalBusy => self.core_of(vm).signal_error_busy,
+                    CoreCtor::SignalUnsupported => self.core_of(vm).signal_error_unsupported,
+                    CoreCtor::SignalLimitExceeded => self.core_of(vm).signal_error_limit_exceeded,
+                    CoreCtor::SignalFailed => self.core_of(vm).signal_error_failed,
+                    CoreCtor::PipeErrorClosed => self.core_of(vm).pipe_error_closed,
+                    CoreCtor::PipeErrorBrokenPipe => self.core_of(vm).pipe_error_broken_pipe,
+                    CoreCtor::PipeErrorInvalidInput => self.core_of(vm).pipe_error_invalid_input,
+                    CoreCtor::PipeErrorLimitExceeded => self.core_of(vm).pipe_error_limit_exceeded,
+                    CoreCtor::PipeErrorUnsupported => self.core_of(vm).pipe_error_unsupported,
+                    CoreCtor::PipeErrorFailed => self.core_of(vm).pipe_error_failed,
+                    CoreCtor::ChildStatusExited => self.core_of(vm).child_status_exited,
+                    CoreCtor::ChildStatusTerminated => self.core_of(vm).child_status_terminated,
+                    CoreCtor::ExecErrorClosed => self.core_of(vm).exec_error_closed,
+                    CoreCtor::ExecErrorInvalidInput => self.core_of(vm).exec_error_invalid_input,
+                    CoreCtor::ExecErrorLimitExceeded => self.core_of(vm).exec_error_limit_exceeded,
+                    CoreCtor::ExecErrorNotFound => self.core_of(vm).exec_error_not_found,
+                    CoreCtor::ExecErrorPermissionDenied => {
+                        self.core_of(vm).exec_error_permission_denied
+                    }
+                    CoreCtor::ExecErrorUnsupported => self.core_of(vm).exec_error_unsupported,
+                    CoreCtor::ExecErrorFailed => self.core_of(vm).exec_error_failed,
+                    CoreCtor::UdpDatagram => self.core_of(vm).udp_datagram,
+                    CoreCtor::CompileErrors => self.core_of(vm).compile_errors,
                 };
                 if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
                     let (class, args) = match self.envs.ty(expected).cloned() {
                         Some(ClosedType::Inst(class, args)) => (class, args),
                         _ => return Err(FaultCode::TypeMismatch),
                     };
-                    let option = self.core.option.ok_or(FaultCode::MalformedState)?;
-                    let some = self.core.option_some.ok_or(FaultCode::MalformedState)?;
-                    let none = self.core.option_none.ok_or(FaultCode::MalformedState)?;
+                    let option = self.core_of(vm).option.ok_or(FaultCode::MalformedState)?;
+                    let some = self
+                        .core_of(vm)
+                        .option_some
+                        .ok_or(FaultCode::MalformedState)?;
+                    let none = self
+                        .core_of(vm)
+                        .option_none
+                        .ok_or(FaultCode::MalformedState)?;
                     if args.len() != 1 || (class != option && class != some && class != none) {
                         return Err(FaultCode::TypeMismatch);
                     }
@@ -367,7 +378,8 @@ impl World {
                     .envs
                     .env_of(args, Vec::new())
                     .map_err(|_| FaultCode::BoundaryLimit)?;
-                let templates: Vec<u32> = self.module.classes[class as usize]
+                let code = self.code_of(vm).clone();
+                let templates: Vec<u32> = code.classes[class as usize]
                     .fields
                     .iter()
                     .map(|(_, ty)| *ty)
@@ -379,7 +391,7 @@ impl World {
                 for (part, template) in parts.iter().zip(templates) {
                     let field = self
                         .envs
-                        .close(&self.module, template, env)
+                        .close(code.as_ref(), template, env)
                         .map_err(|_| FaultCode::BoundaryLimit)?;
                     fields.push(self.build_host_value(vm, part, field)?);
                 }
@@ -400,7 +412,7 @@ impl World {
     ) -> Result<Value, FaultCode> {
         let expected_ok = matches!(
             self.envs.ty(expected),
-            Some(ClosedType::Class(class)) if Some(*class) == self.core.syntax_parse
+            Some(ClosedType::Class(class)) if Some(*class) == self.core_of(vm).syntax_parse
         );
         if !expected_ok {
             return Err(FaultCode::TypeMismatch);
@@ -429,16 +441,17 @@ impl World {
                 .push_host_root(records_ref);
             roots.push(records_ref);
 
-            let tree = self.make_instance(vm, self.core.syntax_tree, vec![source, records])?;
+            let tree =
+                self.make_instance(vm, self.core_of(vm).syntax_tree, vec![source, records])?;
             let tree_ref = tree.as_obj().ok_or(FaultCode::MalformedState)?;
             self.machines[vm as usize].vm.heap.set_frozen(tree_ref);
             self.machines[vm as usize].vm.heap.push_host_root(tree_ref);
             roots.push(tree_ref);
 
             let status_class = match status {
-                HostParseStatus::Complete => self.core.parse_complete,
-                HostParseStatus::Incomplete => self.core.parse_incomplete,
-                HostParseStatus::Invalid => self.core.parse_invalid,
+                HostParseStatus::Complete => self.core_of(vm).parse_complete,
+                HostParseStatus::Incomplete => self.core_of(vm).parse_incomplete,
+                HostParseStatus::Invalid => self.core_of(vm).parse_invalid,
             };
             let status = self.make_instance(vm, status_class, vec![])?;
             let status_ref = status.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -461,7 +474,7 @@ impl World {
                 roots.push(message_ref);
                 let value = self.make_instance(
                     vm,
-                    self.core.syntax_diagnostic,
+                    self.core_of(vm).syntax_diagnostic,
                     vec![
                         Value::Int(i64::from(diagnostic.start)),
                         Value::Int(i64::from(diagnostic.stop)),
@@ -488,8 +501,11 @@ impl World {
                 .heap
                 .push_host_root(diagnostics_ref);
             roots.push(diagnostics_ref);
-            let value =
-                self.make_instance(vm, self.core.syntax_parse, vec![tree, status, diagnostics])?;
+            let value = self.make_instance(
+                vm,
+                self.core_of(vm).syntax_parse,
+                vec![tree, status, diagnostics],
+            )?;
             let value_ref = value.as_obj().ok_or(FaultCode::MalformedState)?;
             self.machines[vm as usize].vm.heap.set_frozen(value_ref);
             Ok(value)
@@ -507,14 +523,14 @@ impl World {
         address: crate::HostSocketAddress,
     ) -> Result<Value, FaultCode> {
         let (class, bytes) = match address.ip {
-            crate::HostIpAddress::V4(bytes) => (self.core.ip_v4, bytes.to_vec()),
-            crate::HostIpAddress::V6(bytes) => (self.core.ip_v6, bytes.to_vec()),
+            crate::HostIpAddress::V4(bytes) => (self.core_of(vm).ip_v4, bytes.to_vec()),
+            crate::HostIpAddress::V6(bytes) => (self.core_of(vm).ip_v6, bytes.to_vec()),
         };
         let bytes = self.machines[vm as usize].alloc(Object::Bytes(bytes.into()))?;
         let ip = self.make_instance(vm, class, vec![bytes])?;
         let address = self.make_instance(
             vm,
-            self.core.socket_address,
+            self.core_of(vm).socket_address,
             vec![
                 ip,
                 Value::Int(i64::from(address.port)),
@@ -741,7 +757,7 @@ impl World {
         host: crate::HostResource,
     ) -> Result<Value, FaultCode> {
         if self
-            .loaded
+            .code_of(vm)
             .bundle()
             .resource_by_identity(host.kind)
             .is_none()
@@ -915,7 +931,7 @@ impl World {
         let Object::Instance { class, fields, .. } = spec else {
             return Vec::new();
         };
-        if Some(*class) != self.core.exec_spec || fields.len() != 7 {
+        if Some(*class) != self.core_of(vm).exec_spec || fields.len() != 7 {
             return Vec::new();
         }
         let mut resources = Vec::new();
@@ -975,7 +991,7 @@ impl World {
         value.as_obj().is_some_and(|reference| {
             matches!(
                 self.machines[holder as usize].vm.heap.get(reference),
-                Object::Instance { class, .. } if Some(*class) == self.core.result_ok
+                Object::Instance { class, .. } if Some(*class) == self.core_of(holder).result_ok
             )
         })
     }
@@ -994,7 +1010,7 @@ impl World {
         else {
             return false;
         };
-        if Some(*class) != self.core.result_err || fields.len() != 1 {
+        if Some(*class) != self.core_of(holder).result_err || fields.len() != 1 {
             return false;
         }
         fields[0].as_obj().is_some_and(|error| {
@@ -1143,16 +1159,16 @@ impl World {
         family: ResourceErrors,
     ) -> Result<Value, FaultCode> {
         let arm = match family {
-            ResourceErrors::Fs => self.core.fs_error_closed,
-            ResourceErrors::Net => self.core.net_closed,
-            ResourceErrors::Tls => self.core.tls_closed,
-            ResourceErrors::Tty => self.core.tty_error_closed,
-            ResourceErrors::Signal => self.core.signal_error_closed,
-            ResourceErrors::Pipe => self.core.pipe_error_closed,
-            ResourceErrors::Exec => self.core.exec_error_closed,
+            ResourceErrors::Fs => self.core_of(vm).fs_error_closed,
+            ResourceErrors::Net => self.core_of(vm).net_closed,
+            ResourceErrors::Tls => self.core_of(vm).tls_closed,
+            ResourceErrors::Tty => self.core_of(vm).tty_error_closed,
+            ResourceErrors::Signal => self.core_of(vm).signal_error_closed,
+            ResourceErrors::Pipe => self.core_of(vm).pipe_error_closed,
+            ResourceErrors::Exec => self.core_of(vm).exec_error_closed,
         };
         let closed = self.make_instance(vm, arm, vec![])?;
-        self.make_instance(vm, self.core.result_err, vec![closed])
+        self.make_instance(vm, self.core_of(vm).result_err, vec![closed])
     }
 
     /// Build one ordinary service failure for a resource family.
@@ -1167,26 +1183,30 @@ impl World {
     ) -> Result<Value, FaultCode> {
         let text = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
         let error = match family {
-            ResourceErrors::Fs => self.make_instance(vm, self.core.fs_error_failed, vec![text])?,
-            ResourceErrors::Net => self.make_instance(vm, self.core.net_failed, vec![text])?,
+            ResourceErrors::Fs => {
+                self.make_instance(vm, self.core_of(vm).fs_error_failed, vec![text])?
+            }
+            ResourceErrors::Net => {
+                self.make_instance(vm, self.core_of(vm).net_failed, vec![text])?
+            }
             ResourceErrors::Tls => {
-                let network = self.make_instance(vm, self.core.net_failed, vec![text])?;
-                self.make_instance(vm, self.core.tls_network, vec![network])?
+                let network = self.make_instance(vm, self.core_of(vm).net_failed, vec![text])?;
+                self.make_instance(vm, self.core_of(vm).tls_network, vec![network])?
             }
             ResourceErrors::Tty => {
-                self.make_instance(vm, self.core.tty_error_failed, vec![text])?
+                self.make_instance(vm, self.core_of(vm).tty_error_failed, vec![text])?
             }
             ResourceErrors::Signal => {
-                self.make_instance(vm, self.core.signal_error_failed, vec![text])?
+                self.make_instance(vm, self.core_of(vm).signal_error_failed, vec![text])?
             }
             ResourceErrors::Pipe => {
-                self.make_instance(vm, self.core.pipe_error_failed, vec![text])?
+                self.make_instance(vm, self.core_of(vm).pipe_error_failed, vec![text])?
             }
             ResourceErrors::Exec => {
-                self.make_instance(vm, self.core.exec_error_failed, vec![text])?
+                self.make_instance(vm, self.core_of(vm).exec_error_failed, vec![text])?
             }
         };
-        self.make_instance(vm, self.core.result_err, vec![error])
+        self.make_instance(vm, self.core_of(vm).result_err, vec![error])
     }
 
     /// Build one ordinary invalid network argument.
@@ -1196,7 +1216,7 @@ impl World {
         message: &str,
     ) -> Result<Value, FaultCode> {
         let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
-        let error = self.make_instance(vm, self.core.net_invalid_input, vec![message])?;
-        self.make_instance(vm, self.core.result_err, vec![error])
+        let error = self.make_instance(vm, self.core_of(vm).net_invalid_input, vec![message])?;
+        self.make_instance(vm, self.core_of(vm).result_err, vec![error])
     }
 }

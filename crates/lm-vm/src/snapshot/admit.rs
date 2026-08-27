@@ -33,7 +33,6 @@ use super::{
     ImagePolicyCursor, ImageReason, ImageSlotTarget, ImageState, ImageTerminal, ImageWaitSource,
     LoadLimits, SnapshotImage, FORMAT_VERSION,
 };
-use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, SlotContract};
@@ -48,49 +47,6 @@ pub struct AdmissionBudget {
     limit: u64,
     used: u64,
     byte_limit: usize,
-}
-
-/// One bounded cache for repeated admissions with the same code.
-///
-/// The cache retains only the latest verified aggregate. It never
-/// caches machine state, heaps, policies, or slot targets.
-#[derive(Default)]
-pub struct AdmissionCache {
-    code: Option<CachedCode>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct CodeCacheKey {
-    base_verification: [u8; 32],
-    artifacts: Vec<[u8; 32]>,
-    providers: Vec<(Vec<u32>, Vec<u32>)>,
-}
-
-struct CachedCode {
-    key: CodeCacheKey,
-    aggregate: LoadedModule,
-    installations: Vec<InstallationProof>,
-}
-
-enum CodeProof<'a> {
-    Owned(Box<LoadedModule>, Vec<InstallationProof>),
-    Cached(&'a CachedCode),
-}
-
-impl CodeProof<'_> {
-    fn aggregate(&self) -> &LoadedModule {
-        match self {
-            CodeProof::Owned(aggregate, _) => aggregate.as_ref(),
-            CodeProof::Cached(cached) => &cached.aggregate,
-        }
-    }
-
-    fn installations(&self) -> &[InstallationProof] {
-        match self {
-            CodeProof::Owned(_, installations) => installations,
-            CodeProof::Cached(cached) => &cached.installations,
-        }
-    }
 }
 
 /// The default aggregate admission work limit, in units.
@@ -154,7 +110,7 @@ impl Default for AdmissionBudget {
     }
 }
 
-/// Admit one editable image against one exact verified module.
+/// Admit one editable image against its artifact graph.
 ///
 /// The call consumes the image, so no caller keeps a mutable handle on
 /// the admitted state. Success returns the sealed `SnapshotImage` with
@@ -162,17 +118,21 @@ impl Default for AdmissionBudget {
 /// identity.
 pub fn admit(
     image: Image,
-    loaded: &LoadedModule,
+    available: Option<&lm_link::CodeNamespace>,
     budget: &mut AdmissionBudget,
 ) -> Result<SnapshotImage, ImageError> {
-    let proof = prove(&image, loaded, budget)?;
-    codec::seal_admitted(image, proof.identity, proof.loaded, budget.byte_limit())
-}
-
-/// Verified code and identity produced by one admission proof.
-pub(super) struct AdmissionProof {
-    pub(super) identity: AdmissionIdentity,
-    pub(super) loaded: LoadedModule,
+    let bundle = available
+        .map(|namespace| namespace.bundle().clone())
+        .unwrap_or_else(lm_abi::standard_bundle);
+    let runtime_core = available.and_then(|namespace| {
+        namespace
+            .active_unit(lm_bytecode::artifact::CORE_MODULE_PATH)
+            .cloned()
+            .map(std::sync::Arc::new)
+    });
+    let code = super::code::prepare_external(&image, runtime_core, bundle, None)?;
+    let identity = prove(&image, &code, budget)?;
+    codec::seal_admitted(image, identity, code, budget.byte_limit())
 }
 
 /// Prove the admission rule over one image.
@@ -182,264 +142,56 @@ pub(super) struct AdmissionProof {
 /// holds, so the container is never encoded twice.
 pub(super) fn prove(
     image: &Image,
-    loaded: &LoadedModule,
+    code: &super::code::SnapshotCode,
     budget: &mut AdmissionBudget,
-) -> Result<AdmissionProof, ImageError> {
-    prove_inner(image, loaded, budget, None)
-}
-
-pub(super) fn prove_cached(
-    image: &Image,
-    loaded: &LoadedModule,
-    budget: &mut AdmissionBudget,
-    cache: &mut AdmissionCache,
-) -> Result<AdmissionProof, ImageError> {
-    prove_inner(image, loaded, budget, Some(cache))
-}
-
-fn prove_inner(
-    image: &Image,
-    loaded: &LoadedModule,
-    budget: &mut AdmissionBudget,
-    cache: Option<&mut AdmissionCache>,
-) -> Result<AdmissionProof, ImageError> {
+) -> Result<AdmissionIdentity, ImageError> {
     budget.charge(admission_cost(image)?)?;
-    let base_identity = loaded.identity().map_err(|_| {
-        ImageError::admission(ImageReason::Code, "the program has no verified identity")
+    let aggregate = code.tables().ok_or_else(|| {
+        ImageError::admission(ImageReason::Code, "the snapshot has no code namespace")
     })?;
-    let code = match cache {
-        Some(cache) if !image.installations.is_empty() => {
-            CodeProof::Cached(cache.prepare(image, loaded)?)
-        }
-        _ => {
-            let (aggregate, installations) = rebuild_aggregate(image, loaded)?;
-            CodeProof::Owned(Box::new(aggregate), installations)
-        }
-    };
-    let aggregate = code.aggregate();
-    let installations = code.installations();
     let identity = aggregate.identity().map_err(|_| {
         ImageError::admission(
             ImageReason::Code,
-            "the installed code has no verified identity",
+            "the snapshot code has no verified identity",
         )
     })?;
-    let module = aggregate.module();
-    check_identity(image, identity)?;
-    let tables = resolve_type_tables(image, module, aggregate.bundle())?;
+    let module = aggregate.as_ref();
+    check_identity(image, code)?;
+    let tables = resolve_type_tables(image, code, module, aggregate.bundle())?;
     let admit = Admit {
         image,
+        code,
         module,
         bundle: aggregate.bundle(),
         identity,
-        installations,
         closure_bodies: aggregate,
         witness: tables,
     };
     admit.run()?;
-    Ok(AdmissionProof {
-        identity: AdmissionIdentity {
-            base_semantic: base_identity.semantic_hash,
-            base_verification: loaded.verification_hash(),
-            module_semantic: identity.semantic_hash,
-            verification: aggregate.verification_hash(),
-            format: image.format,
-            abi_version: image.abi_version,
-            compiler_abi: image.compiler_abi,
-            verifier_version: image.verifier_version,
-            bundle_digest: aggregate.bundle().digest(),
-        },
-        loaded: aggregate.clone(),
+    Ok(AdmissionIdentity {
+        format: image.format,
+        abi_version: image.abi_version,
+        compiler_abi: image.compiler_abi,
+        verifier_version: image.verifier_version,
+        bundle_digest: aggregate.bundle().digest(),
     })
-}
-
-impl AdmissionCache {
-    fn prepare(&mut self, image: &Image, base: &LoadedModule) -> Result<&CachedCode, ImageError> {
-        let key = code_cache_key(image, base)?;
-        if let Some(cached) = &self.code {
-            if cached.key == key {
-                return Ok(self.code.as_ref().expect("the cached code exists"));
-            }
-        }
-        let (aggregate, installations) = rebuild_aggregate(image, base)?;
-        self.code = Some(CachedCode {
-            key,
-            aggregate,
-            installations,
-        });
-        Ok(self.code.as_ref().expect("the cached code exists"))
-    }
-}
-
-fn code_cache_key(image: &Image, base: &LoadedModule) -> Result<CodeCacheKey, ImageError> {
-    let mut artifacts = Vec::new();
-    artifacts
-        .try_reserve_exact(image.installations.len())
-        .map_err(|_| {
-            ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
-        })?;
-    artifacts.extend(
-        image
-            .installations
-            .iter()
-            .map(|artifact| lm_bytecode::hash::hash256(artifact)),
-    );
-    let mut providers = Vec::new();
-    providers
-        .try_reserve_exact(image.installations.len())
-        .map_err(|_| {
-            ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
-        })?;
-    for installation in 0..image.installations.len() {
-        let instance = image
-            .vm_images
-            .iter()
-            .flat_map(|image| &image.instances)
-            .find(|instance| instance.installation as usize == installation);
-        let instance = instance.ok_or_else(|| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("installed artifact {installation} has no module instance"),
-            )
-        })?;
-        let mut functions = Vec::new();
-        functions
-            .try_reserve_exact(instance.funcs.len())
-            .map_err(|_| {
-                ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
-            })?;
-        functions.extend_from_slice(&instance.funcs);
-        let mut classes = Vec::new();
-        classes
-            .try_reserve_exact(instance.classes.len())
-            .map_err(|_| {
-                ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
-            })?;
-        classes.extend_from_slice(&instance.classes);
-        providers.push((functions, classes));
-    }
-    Ok(CodeCacheKey {
-        base_verification: base.verification_hash(),
-        artifacts,
-        providers,
-    })
-}
-
-/// Rebuild and verify the aggregate code stated by an image.
-fn rebuild_aggregate(
-    image: &Image,
-    base: &LoadedModule,
-) -> Result<(LoadedModule, Vec<InstallationProof>), ImageError> {
-    if image.installations.is_empty() {
-        return Ok((base.clone(), Vec::new()));
-    }
-    let mut module = base.module().clone();
-    let mut proofs = Vec::new();
-    proofs
-        .try_reserve_exact(image.installations.len())
-        .map_err(|_| {
-            ImageError::admission(
-                ImageReason::Budget,
-                "the installation proof allocation failed",
-            )
-        })?;
-    for (index, bytes) in image.installations.iter().enumerate() {
-        let addition = lm_bytecode::decode_with_bundle(bytes, base.bundle()).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("installed artifact {index} did not decode: {error}"),
-            )
-        })?;
-        lm_verify::verify_module_with_bundle(&addition, base.bundle()).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("installed artifact {index} did not verify: {error}"),
-            )
-        })?;
-        let source_identity =
-            lm_bytecode::identity::module_identity_with_bundle(&addition, base.bundle()).map_err(
-                |_| {
-                    ImageError::admission(
-                        ImageReason::Code,
-                        format!("installed artifact {index} has no semantic identity"),
-                    )
-                },
-            )?;
-        let instance = image
-            .vm_images
-            .iter()
-            .flat_map(|vm| &vm.instances)
-            .find(|instance| instance.installation as usize == index)
-            .ok_or_else(|| {
-                ImageError::admission(
-                    ImageReason::Code,
-                    format!("installed artifact {index} has no module instance"),
-                )
-            })?;
-        let mut imports = Vec::new();
-        imports
-            .try_reserve_exact(addition.imports.len())
-            .map_err(|_| {
-                ImageError::admission(ImageReason::Budget, "the resolved import allocation failed")
-            })?;
-        for import in &addition.imports {
-            let target = if import.kind == lm_bytecode::ImportKind::Class {
-                instance
-                    .classes
-                    .get(import.def as usize)
-                    .copied()
-                    .map(lm_bytecode::append::ResolvedImport::Class)
-            } else {
-                instance
-                    .funcs
-                    .get(import.def as usize)
-                    .copied()
-                    .map(lm_bytecode::append::ResolvedImport::Function)
-            }
-            .ok_or_else(|| {
-                ImageError::admission(
-                    ImageReason::Code,
-                    format!("installed artifact {index} has an invalid import target"),
-                )
-            })?;
-            imports.push(target);
-        }
-        let appended = lm_bytecode::append::append_resolved(&module, &addition, &imports).map_err(
-            |error| {
-                ImageError::admission(
-                    ImageReason::Code,
-                    format!("installed artifact {index} did not link: {error}"),
-                )
-            },
-        )?;
-        proofs.push(InstallationProof {
-            semantic_hash: source_identity.semantic_hash,
-            entry: appended.reloc.funcs[addition.entry as usize],
-            reloc: appended.reloc,
-            source: addition,
-            source_identity,
-        });
-        module = appended.module;
-    }
-    let loaded = crate::load_with_bundle(module, base.bundle()).map_err(|error| {
-        ImageError::admission(
-            ImageReason::Code,
-            format!("the installed aggregate did not verify: {error}"),
-        )
-    })?;
-    Ok((loaded, proofs))
-}
-
-struct InstallationProof {
-    semantic_hash: [u8; 32],
-    entry: u32,
-    reloc: lm_bytecode::append::AppendReloc,
-    source: lm_bytecode::Module,
-    source_identity: ModuleIdentity,
 }
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
     Err(ImageError::admission(reason, detail))
+}
+
+fn sole_export(module: &lm_bytecode::Module, class: bool) -> Option<u32> {
+    let mut matches = module.exports.iter().filter_map(|export| {
+        let matches = if class {
+            export.kind.is_class()
+        } else {
+            export.kind == lm_bytecode::ExportKind::Function
+        };
+        matches.then_some(export.def)
+    });
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
 }
 
 /// Calculate the complete structural work of one image.
@@ -454,22 +206,18 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
         })?;
         Ok(())
     };
-    add(image.funcs.len())?;
-    add(image.classes.len())?;
-    add(image.installations.len())?;
-    for artifact in &image.installations {
+    add(image.artifacts.len())?;
+    for artifact in &image.artifacts {
         add(artifact.len())?;
+    }
+    add(image.namespaces.len())?;
+    for namespace in &image.namespaces {
+        add(namespace.artifacts.len())?;
     }
     add(image.vm_images.len())?;
     for image in &image.vm_images {
         add(image.slots.len())?;
         add(image.instances.len())?;
-        for instance in &image.instances {
-            add(instance.interface.as_ref().map_or(0, Vec::len))?;
-            add(instance.funcs.len())?;
-            add(instance.classes.len())?;
-            add(instance.slots.len())?;
-        }
         for entry in &image.objects {
             let edges = object_edges(&entry.object);
             add(2usize.saturating_add(edges.saturating_mul(2)))?;
@@ -573,7 +321,7 @@ fn work_vec<T>(count: usize) -> Result<Vec<T>, ImageError> {
 /// An admission identity mismatch rejects. The versions travel inside
 /// the image, so an edited image states them again and admission reads
 /// them again.
-fn check_identity(image: &Image, identity: &ModuleIdentity) -> Result<(), ImageError> {
+fn check_identity(image: &Image, code: &super::code::SnapshotCode) -> Result<(), ImageError> {
     if image.format != FORMAT_VERSION {
         return fail(
             ImageReason::Version,
@@ -592,10 +340,12 @@ fn check_identity(image: &Image, identity: &ModuleIdentity) -> Result<(), ImageE
             "the image names another ABI, compiler, or verifier version",
         );
     }
-    if image.module_semantic != identity.semantic_hash {
+    if image.artifacts.len() != code.artifacts().len()
+        || image.namespaces.len() != code.namespaces().len()
+    {
         return fail(
             ImageReason::Code,
-            "the image names another program than the loaded one",
+            "the artifact and namespace tables do not resolve exactly",
         );
     }
     Ok(())
@@ -620,12 +370,12 @@ struct WitnessTables {
 /// The state of one admission pass.
 struct Admit<'m> {
     image: &'m Image,
-    module: &'m lm_bytecode::Module,
+    code: &'m super::code::SnapshotCode,
+    module: &'m crate::NamespaceRuntime,
     bundle: &'m std::sync::Arc<lm_abi::AbiBundle>,
     identity: &'m ModuleIdentity,
-    installations: &'m [InstallationProof],
     /// Functions that verified code can construct as closures.
-    closure_bodies: &'m LoadedModule,
+    closure_bodies: &'m std::sync::Arc<crate::NamespaceRuntime>,
     /// The witness tables the image carries.
     witness: WitnessTables,
 }
@@ -642,7 +392,8 @@ struct Admit<'m> {
 /// Every entry charges the aggregate admission budget.
 fn resolve_type_tables(
     image: &Image,
-    module: &lm_bytecode::Module,
+    code: &super::code::SnapshotCode,
+    module: &crate::NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<WitnessTables, ImageError> {
     let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
@@ -659,12 +410,7 @@ fn resolve_type_tables(
             "the closed type index allocation failed",
         )
     })?;
-    let class_named = |slot: u32| {
-        image
-            .classes
-            .binary_search_by_key(&slot, |(s, _)| *s)
-            .is_ok()
-    };
+    let class_named = |slot: u32| code.contains_class(slot);
     for (at, node) in image.types.iter().enumerate() {
         for child in node.children() {
             if child as usize >= at {
@@ -796,12 +542,12 @@ fn resolve_type_tables(
 /// Prove that one closed effect row names this program and stays
 /// canonical.
 fn check_closed_row(
-    module: &lm_bytecode::Module,
+    module: &dyn lm_bytecode::CodeTableView,
     row: &[u32],
     at: usize,
 ) -> Result<(), ImageError> {
     for slot in row {
-        if *slot as usize >= module.strings.len() {
+        if *slot as usize >= module.strings().len() {
             return fail(
                 ImageReason::Code,
                 format!("entry {at} names effect name slot {slot}, which the program has not"),
@@ -809,8 +555,8 @@ fn check_closed_row(
         }
     }
     for pair in row.windows(2) {
-        let first = &module.strings[pair[0] as usize];
-        let second = &module.strings[pair[1] as usize];
+        let first = &module.strings()[pair[0] as usize];
+        let second = &module.strings()[pair[1] as usize];
         if first >= second {
             return fail(
                 ImageReason::Layout,
@@ -858,7 +604,6 @@ impl Admit<'_> {
                 "the full VM selector names no captured VM image",
             );
         }
-        self.check_code_manifest()?;
         self.check_instances()?;
         self.check_slot_state()?;
         for image in 0..self.image.vm_images.len() {
@@ -891,96 +636,66 @@ impl Admit<'_> {
         &self.image.machines[vm as usize]
     }
 
+    fn namespace(&self, ordinal: u32) -> Result<&crate::NamespaceRuntime, ImageError> {
+        self.code
+            .namespace(ordinal)
+            .map(std::sync::Arc::as_ref)
+            .ok_or_else(|| {
+                ImageError::admission(
+                    ImageReason::Reference,
+                    format!("code namespace {ordinal} does not exist"),
+                )
+            })
+    }
+
     // ----------------------------------------------------------
     // Structural resolution.
     // ----------------------------------------------------------
 
-    /// Every named function and class exists and carries its verified
-    /// definition hash.
-    fn check_code_manifest(&self) -> Result<(), ImageError> {
-        let mut last: Option<u32> = None;
-        for (slot, hash) in &self.image.funcs {
-            if *slot as usize >= self.module.funcs.len() {
-                return fail(
-                    ImageReason::Code,
-                    format!("the image names function slot {slot}, which the program has not"),
-                );
-            }
-            if last.is_some_and(|l| *slot <= l) {
-                return fail(ImageReason::Code, "the function manifest is not ascending");
-            }
-            last = Some(*slot);
-            if self.identity.func_hashes[*slot as usize] != *hash {
-                return fail(
-                    ImageReason::Code,
-                    format!("function slot {slot} carries another definition hash"),
-                );
-            }
-        }
-        let mut last: Option<u32> = None;
-        for (slot, hash) in &self.image.classes {
-            if *slot as usize >= self.module.classes.len() {
-                return fail(
-                    ImageReason::Code,
-                    format!("the image names class slot {slot}, which the program has not"),
-                );
-            }
-            if last.is_some_and(|l| *slot <= l) {
-                return fail(ImageReason::Code, "the class manifest is not ascending");
-            }
-            last = Some(*slot);
-            if self.identity.class_hashes[*slot as usize] != *hash {
-                return fail(
-                    ImageReason::Code,
-                    format!("class slot {slot} carries another definition hash"),
-                );
-            }
-        }
-        Ok(())
-    }
-
     fn func_named(&self, slot: u32) -> bool {
-        self.image
-            .funcs
-            .binary_search_by_key(&slot, |(s, _)| *s)
-            .is_ok()
+        self.code.contains_function(slot)
     }
 
     fn class_named(&self, slot: u32) -> bool {
-        self.image
-            .classes
-            .binary_search_by_key(&slot, |(s, _)| *s)
-            .is_ok()
+        self.code.contains_class(slot)
     }
 
     /// Prove each module instance against its installation record.
     fn check_instances(&self) -> Result<(), ImageError> {
         for (image, vm) in self.image.vm_images.iter().enumerate() {
+            let namespace = self.namespace(vm.namespace)?;
+            let manifest = self
+                .image
+                .namespaces
+                .get(vm.namespace as usize)
+                .ok_or_else(|| {
+                    ImageError::admission(
+                        ImageReason::Reference,
+                        format!("VM image {image} names no code namespace"),
+                    )
+                })?;
             for (index, instance) in vm.instances.iter().enumerate() {
-                let Some(proof) = self.installations.get(instance.installation as usize) else {
+                if !manifest.artifacts.contains(&instance.artifact) {
                     return fail(
                         ImageReason::Code,
-                        format!("VM image {image} instance {index} names no installation"),
+                        format!("VM image {image} instance {index} names an unbound artifact"),
                     );
-                };
-                if instance.semantic_hash != proof.semantic_hash
-                    || instance.entry != proof.entry
-                    || instance.funcs != proof.reloc.funcs
-                    || instance.classes != proof.reloc.classes
-                    || instance.slots != proof.reloc.slots
+                }
+                let artifact = self.code.artifact(instance.artifact).ok_or_else(|| {
+                    ImageError::admission(
+                        ImageReason::Reference,
+                        format!("VM image {image} instance {index} names no artifact"),
+                    )
+                })?;
+                if namespace
+                    .code_namespace()
+                    .relocation(artifact.id())
+                    .is_none()
                 {
                     return fail(
                         ImageReason::Code,
-                        format!("VM image {image} instance {index} has invalid relocation"),
+                        format!("VM image {image} instance {index} is absent from its namespace"),
                     );
-                }
-                if let Some(bytes) = &instance.interface {
-                    self.check_interface(
-                        &proof.source,
-                        &proof.source_identity,
-                        bytes,
-                        "a module instance",
-                    )?;
                 }
             }
         }
@@ -992,54 +707,67 @@ impl Admit<'_> {
         &self,
         kind: PortableCodeKind,
         bytes: &[u8],
-        interface: Option<&[u8]>,
-        index: u32,
+        slot: Option<u32>,
         origin: Option<[u8; 32]>,
     ) -> Result<(), ImageError> {
-        if kind == PortableCodeKind::Artifact && origin.is_none() {
+        if kind == PortableCodeKind::Artifact {
+            if slot.is_some() || origin.is_some() {
+                return fail(
+                    ImageReason::Code,
+                    "an artifact value carries a selected code view",
+                );
+            }
             return Ok(());
         }
-        let module = lm_bytecode::decode_with_bundle(bytes, self.bundle).map_err(|error| {
+        let artifact = lm_bytecode::artifact::decode_with_bundle(
+            bytes,
+            self.bundle,
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("a portable code value did not decode: {error}"),
             )
         })?;
-        lm_verify::verify_module_with_bundle(&module, self.bundle).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("a portable code value did not verify: {error}"),
-            )
-        })?;
-        let identity = lm_bytecode::identity::module_identity_with_bundle(&module, self.bundle)
-            .map_err(|error| {
+        for unit in artifact.units() {
+            lm_verify::verify_module_with_bundle(unit.module(), self.bundle).map_err(|error| {
                 ImageError::admission(
                     ImageReason::Code,
-                    format!("a portable code value did not hash: {error}"),
+                    format!(
+                        "portable module `{}` did not verify: {error}",
+                        unit.module_path()
+                    ),
                 )
             })?;
-        if let Some(interface) = interface {
-            self.check_interface(&module, &identity, interface, "a portable code value")?;
         }
-        if kind == PortableCodeKind::SlotSpec && index as usize >= module.slots.len() {
+        let module = artifact.root().module();
+        let selected = match kind {
+            PortableCodeKind::SlotSpec => match slot {
+                Some(index) if (index as usize) < module.slots.len() => Some(index),
+                _ => {
+                    return fail(
+                        ImageReason::Code,
+                        "a portable slot specification names no source slot",
+                    )
+                }
+            },
+            PortableCodeKind::Function => sole_export(module, false),
+            PortableCodeKind::Class => sole_export(module, true),
+            PortableCodeKind::Artifact | PortableCodeKind::VerifiedModule => None,
+        };
+        if matches!(kind, PortableCodeKind::Function | PortableCodeKind::Class)
+            && selected.is_none()
+        {
             return fail(
                 ImageReason::Code,
-                "a portable slot specification names no source slot",
+                "a portable definition artifact has no sole root export",
             );
         }
-        if kind == PortableCodeKind::Function && index as usize >= module.funcs.len() {
+        if kind != PortableCodeKind::SlotSpec && slot.is_some() {
             return fail(
                 ImageReason::Code,
-                "a portable function names no source function",
-            );
-        }
-        if kind == PortableCodeKind::Class && index as usize >= module.classes.len() {
-            return fail(ImageReason::Code, "a portable class names no source class");
-        }
-        if kind == PortableCodeKind::VerifiedModule && index != u32::MAX {
-            return fail(
-                ImageReason::Code,
-                "a verified module value carries a source index",
+                "a portable code value carries an unexpected slot selection",
             );
         }
         if let Some(origin) = origin {
@@ -1054,11 +782,11 @@ impl Admit<'_> {
                     && match kind {
                         PortableCodeKind::Function => {
                             definition.kind == lm_bytecode::debug::DefinitionKind::Function
-                                && definition.target == index
+                                && Some(definition.target) == selected
                         }
                         PortableCodeKind::Class => {
                             definition.kind == lm_bytecode::debug::DefinitionKind::Class
-                                && definition.target == index
+                                && Some(definition.target) == selected
                         }
                         _ => false,
                     }
@@ -1071,39 +799,6 @@ impl Admit<'_> {
             }
         }
         Ok(())
-    }
-
-    fn check_interface(
-        &self,
-        source: &lm_bytecode::Module,
-        identity: &ModuleIdentity,
-        bytes: &[u8],
-        owner: &str,
-    ) -> Result<(), ImageError> {
-        let interface = lm_bytecode::interface::decode_interface(bytes).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("{owner} has an interface that did not decode: {error}"),
-            )
-        })?;
-        if lm_bytecode::interface::encode_interface(&interface) != bytes {
-            return fail(
-                ImageReason::Code,
-                format!("{owner} has noncanonical interface bytes"),
-            );
-        }
-        lm_bytecode::interface::validate_interface_with_bundle(
-            source,
-            identity,
-            &interface,
-            self.bundle,
-        )
-        .map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("{owner} has an invalid interface: {error}"),
-            )
-        })
     }
 
     /// Prove each captured target against its immutable module contract.
@@ -1208,7 +903,7 @@ impl Admit<'_> {
         let Some((class, args)) = types.as_instance(receiver) else {
             return false;
         };
-        let Some(proc_class) = lm_bytecode::corepin::declared_layout(self.module).proc_class else {
+        let Some(proc_class) = self.module.core_layout().proc_class else {
             return false;
         };
         types
@@ -1340,8 +1035,7 @@ impl Admit<'_> {
                     self.check_portable_code(
                         code.kind,
                         code.bytes.as_slice(),
-                        code.interface.as_ref().map(|bytes| bytes.as_slice()),
-                        code.index,
+                        code.slot,
                         code.origin,
                     )?;
                 }
@@ -1671,31 +1365,46 @@ impl Admit<'_> {
                         at(&format!("object {ordinal} names no module instance")),
                     );
                 };
+                let image_record = &self.image.vm_images[image as usize];
+                let namespace = self.namespace(image_record.namespace)?;
+                let artifact = self.code.artifact(record.artifact).ok_or_else(|| {
+                    ImageError::admission(
+                        ImageReason::Reference,
+                        at(&format!("object {ordinal} names no instance artifact")),
+                    )
+                })?;
+                let source = artifact.root().module();
+                let Some(reloc) = namespace.code_namespace().relocation(artifact.id()) else {
+                    return fail(
+                        ImageReason::Code,
+                        at(&format!(
+                            "object {ordinal} names an unbound instance artifact"
+                        )),
+                    );
+                };
                 let valid = match kind {
                     CodeHandleKind::Instance => index == instance,
                     CodeHandleKind::Function => {
-                        record.funcs.contains(&index) && self.func_named(index)
+                        reloc.functions().contains(&index)
+                            && namespace.code_namespace().contains_function(index)
                     }
                     CodeHandleKind::Class => {
-                        record.classes.contains(&index) && self.class_named(index)
+                        reloc.classes().contains(&index)
+                            && namespace.code_namespace().contains_class(index)
                     }
                     CodeHandleKind::Slot => {
-                        record.slots.contains(&index) && (index as usize) < self.module.slots.len()
+                        reloc.slots().contains(&index)
+                            && namespace.code_namespace().contains_slot(index)
                     }
                     CodeHandleKind::FunctionBinding => {
                         let source_slot = usize::try_from(index).ok();
                         let mapped = source_slot
-                            .and_then(|source_slot| record.slots.get(source_slot))
-                            .and_then(|slot| self.module.slots.get(*slot as usize));
-                        let source = self
-                            .installations
-                            .get(record.installation as usize)
-                            .map(|proof| &proof.source);
+                            .and_then(|source_slot| reloc.slots().get(source_slot))
+                            .and_then(|slot| namespace.slots.get(*slot as usize));
                         matches!(
-                            (source_slot, source, mapped),
+                            (source_slot, mapped),
                             (
                                 Some(source_slot),
-                                Some(source),
                                 Some(lm_bytecode::SlotSpec {
                                     contract: SlotContract::Function(_) | SlotContract::Method(_),
                                     ..
@@ -1703,25 +1412,20 @@ impl Admit<'_> {
                             ) if matches!(
                                 source.slots.get(source_slot).and_then(|slot| slot.initial),
                                 Some(lm_bytecode::SlotTarget::Function(function))
-                                    if record.funcs.get(function as usize)
-                                        .is_some_and(|target| self.func_named(*target))
+                                    if reloc.functions().get(function as usize)
+                                        .is_some_and(|target| namespace.code_namespace().contains_function(*target))
                             )
                         )
                     }
                     CodeHandleKind::ClassBinding => {
                         let source_slot = usize::try_from(index).ok();
                         let mapped = source_slot
-                            .and_then(|source_slot| record.slots.get(source_slot))
-                            .and_then(|slot| self.module.slots.get(*slot as usize));
-                        let source = self
-                            .installations
-                            .get(record.installation as usize)
-                            .map(|proof| &proof.source);
+                            .and_then(|source_slot| reloc.slots().get(source_slot))
+                            .and_then(|slot| namespace.slots.get(*slot as usize));
                         matches!(
-                            (source_slot, source, mapped),
+                            (source_slot, mapped),
                             (
                                 Some(source_slot),
-                                Some(source),
                                 Some(lm_bytecode::SlotSpec {
                                     contract: SlotContract::Class { .. },
                                     ..
@@ -1729,10 +1433,10 @@ impl Admit<'_> {
                             ) if matches!(
                                 source.slots.get(source_slot).and_then(|slot| slot.initial),
                                 Some(lm_bytecode::SlotTarget::Class { class, constructor })
-                                    if record.classes.get(class as usize)
-                                        .is_some_and(|target| self.class_named(*target))
-                                        && record.funcs.get(constructor as usize)
-                                            .is_some_and(|target| self.func_named(*target))
+                                    if reloc.classes().get(class as usize)
+                                        .is_some_and(|target| namespace.code_namespace().contains_class(*target))
+                                        && reloc.functions().get(constructor as usize)
+                                            .is_some_and(|target| namespace.code_namespace().contains_function(*target))
                             )
                         )
                     }
@@ -1773,13 +1477,7 @@ impl Admit<'_> {
                 }
             }
             if let Object::NativeCode(code) = &entry.object {
-                self.check_portable_code(
-                    code.kind,
-                    code.bytes.as_slice(),
-                    code.interface.as_ref().map(|bytes| bytes.as_slice()),
-                    code.index,
-                    code.origin,
-                )?;
+                self.check_portable_code(code.kind, code.bytes.as_slice(), code.slot, code.origin)?;
             }
             if let Object::NativeFault { trace, .. } = &entry.object {
                 self.check_fault_trace(trace, &at(&format!("object {ordinal}")))?;
@@ -3187,7 +2885,7 @@ impl Admit<'_> {
     /// The verifier proved the shape of every filled role slot, so the
     /// answer names the core class and never a class of the image.
     fn proc_class(&self) -> Option<u32> {
-        lm_bytecode::corepin::declared_layout(self.module).proc_class
+        self.module.core_layout().proc_class
     }
 
     /// True when `child` equals `ancestor` or inherits it.

@@ -936,8 +936,15 @@ fn verify_bindings(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
     let mut constructors = vec![Vec::new(); module.classes.len()];
+    let mut keys = HashSet::new();
 
     for (index, binding) in module.bindings.iter().enumerate() {
+        if !keys.insert(binding.key.as_str()) {
+            return Err(terr(format!(
+                "the binding `{}` appears more than once",
+                binding.key
+            )));
+        }
         let Some(function) = module.funcs.get(binding.func as usize) else {
             return Err(terr(format!(
                 "binding {index} names a function outside the module"

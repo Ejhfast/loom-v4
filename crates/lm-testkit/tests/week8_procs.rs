@@ -5,8 +5,9 @@
 //! and the result repeat exactly.
 
 use lm_proc::{Scheduler, SchedulerMode, StopReason};
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root, run_allowed};
-use lm_vm::{load_bytes, MachineState, Ownership, RecordingHost, TraceEvent, VmConfig, World};
+use lm_vm::{MachineState, Ownership, RecordingHost, TraceEvent, VmConfig, World};
 
 /// Compile and run one program with the deterministic scheduler.
 fn run(source: &str) -> String {
@@ -172,12 +173,12 @@ fn a_mutable_terminal_proc_result_crosses_as_a_mutable_copy() {
 fn a_full_mailbox_blocks_the_sender_before_the_copy() {
     let source = format!("{ADDER}h = Adder.spawn()\nh.send(1)\nh.send(2)\nh.close()\nh.done()\n");
     let bytes = compile_to_bytes("proc.lm", &source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let config = VmConfig {
         mailbox_limit: 1,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     world.trace_procs();
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
@@ -336,9 +337,10 @@ fn a_paused_proc_leaves_the_scheduler_run_set() {
          h.pause()\n",
     )
     .expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -372,9 +374,10 @@ fn a_quantum_boundary_accepts_a_pause() {
                   in Err(_) then -1\n\
                   end\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -448,9 +451,10 @@ fn parent_death_closes_the_pass_through() {
                   h.close()\n\
                   1\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -514,10 +518,11 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
          (a.done(), b.done())\n"
     );
     let bytes = compile_to_bytes("proc.lm", &source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
     let trace_of = || {
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -550,9 +555,10 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
 fn quantum_expiry_is_not_a_semantic_boundary() {
     let source = "i = 0\nwhile i < 1000\n  i = i + 1\nend\ni\n";
     let bytes = compile_to_bytes("quantum.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -586,9 +592,10 @@ fn bounded_slices_let_a_later_short_proc_finish_first() {
                   fast = Spin.spawn(1)\n\
                   (slow.done(), fast.done())\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -624,9 +631,10 @@ fn a_host_wait_does_not_stop_a_ready_task() {
                   fast = sys.proc.run(quick)\n\
                   (slow.done(), fast.done())\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -668,9 +676,10 @@ fn host_completion_waits_for_its_controlling_task() {
                   nap.table().pass(Clock)\n\
                   sys.proc.run(nap).done()\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -691,9 +700,10 @@ fn host_completion_waits_for_its_controlling_task() {
 fn scheduler_statistics_reset_at_each_run() {
     let source = "i = 0\nwhile i < 20\n  i = i + 1\nend\ni\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -731,9 +741,10 @@ fn a_deadlock_faults_every_blocked_machine() {
                   h = Patient.spawn()\n\
                   h.done()\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -753,9 +764,10 @@ fn a_deadlock_faults_every_blocked_machine() {
 fn one_machine_runs_at_a_time() {
     let source = format!("{ADDER}h = Adder.spawn()\nh.send(1)\nh.close()\nh.done()\n");
     let bytes = compile_to_bytes("proc.lm", &source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -971,9 +983,10 @@ fn a_transfer_keeps_the_proc_identifier_and_generation() {
                   hold.close()\n\
                   hold.done()\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1202,12 +1215,12 @@ fn a_spawn_reserves_a_child_from_the_parent_budget() {
                   Q.spawn()\n\
                   1\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let config = VmConfig {
         max_children: 1,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::default();
     let outcome = scheduler
@@ -1378,9 +1391,10 @@ fn a_proc_that_outlives_its_spawner_keeps_its_pass_through() {
     assert_eq!(run(source), "Done(\"done 3\")");
     // Machine 1 keeps its table while machine 2 uses that route.
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1445,10 +1459,11 @@ fn a_proc_runs_under_its_own_fuel_budget() {
 fn the_proc_dumps_are_readable_and_deterministic() {
     let source = format!("{ADDER}h = Adder.spawn()\nh.send(1)\nh.send(2)\nh.close()\nh.done()\n");
     let bytes = compile_to_bytes("proc.lm", &source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
     let dumps = || {
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -1500,7 +1515,7 @@ fn a_message_past_the_boundary_limit_names_the_limit() {
                   h.send([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])\n\
                   h.done()\n";
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let base = VmConfig::default();
     let config = VmConfig {
         // The message costs more bytes than one copy may walk. Every
@@ -1511,7 +1526,7 @@ fn a_message_past_the_boundary_limit_names_the_limit() {
         },
         ..base
     };
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
     let outcome = scheduler

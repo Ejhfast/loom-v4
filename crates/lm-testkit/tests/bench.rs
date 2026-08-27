@@ -48,11 +48,12 @@ fn config() -> VmConfig {
 fn time_program(source: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let start = Instant::now();
-        let mut vm = Vm::new(&loaded, config());
+        let mut vm = Vm::new(arena, namespace, config());
         let outcome = vm.run();
         let elapsed = start.elapsed();
         assert!(
@@ -121,12 +122,13 @@ fn report_world_with(name: &str, iterations: u64, source: &str, grants: &[&str],
 fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let start = Instant::now();
         let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
-        let mut world = lm_vm::World::new(&loaded, config, Box::new(host));
+        let mut world = lm_vm::World::new(arena, namespace, config, Box::new(host));
         for grant in grants {
             world.allow(grant).expect("the benchmark grant must exist");
         }
@@ -154,11 +156,12 @@ fn time_parallel_world_with(
 ) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("parallel-bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
-        let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+        let mut world = lm_vm::World::new(arena, namespace, config(), Box::new(host));
         for grant in grants {
             world.allow(grant).expect("the benchmark grant must exist");
         }
@@ -189,9 +192,10 @@ fn sample_parallel_counters(
 ) {
     let bytes = lm_testkit::compile_to_bytes("parallel-counter-bench.lm", source)
         .unwrap_or_else(|error| panic!("the benchmark source must compile:\n{error}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
-    let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+    let mut world = lm_vm::World::new(arena, namespace, config(), Box::new(host));
     world.allow("Proc").expect("the Proc grant must exist");
     let mut scheduler = lm_proc::Scheduler::default();
     let outcome = scheduler
@@ -230,11 +234,12 @@ fn report_parallel_counters(name: &str, source: &str, workers: usize, expected: 
 fn sample_message_world(source: &str, expected: &str, workers: Option<usize>) -> Vec<Duration> {
     let bytes = lm_testkit::compile_to_bytes("parallel-message-bench.lm", source)
         .unwrap_or_else(|error| panic!("the message source must compile:\n{error}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the message artifact must load");
     let mut runs = Vec::with_capacity(MESSAGE_ROUNDS);
     for round in 0..=MESSAGE_ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the message artifact must load");
         let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
-        let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+        let mut world = lm_vm::World::new(arena, namespace, config(), Box::new(host));
         world.allow("Proc").expect("the Proc grant must exist");
         let start = Instant::now();
         let outcome = match workers {
@@ -1980,42 +1985,64 @@ fn bench_core_compilation() {
         }
     }
 
-    let mut decoded_load_runs: Vec<Duration> = Vec::new();
-    let mut interface_witness_entries = 0;
+    let mut publish_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
-        let module = decoded.clone();
+        let mut arena = lm_link::CodeArena::new();
         let start = Instant::now();
-        let loaded = lm_vm::load(module).expect("the core image loads");
+        let namespace = arena
+            .publish(artifact.clone(), None)
+            .expect("the core artifact publishes");
         let elapsed = start.elapsed();
-        std::hint::black_box(loaded.dispatch_cells());
-        interface_witness_entries = loaded.interface_witness_entries();
+        std::hint::black_box(
+            arena
+                .namespace(namespace)
+                .expect("the core namespace exists")
+                .tables()
+                .funcs
+                .len(),
+        );
         if round > 0 {
-            decoded_load_runs.push(elapsed);
+            publish_runs.push(elapsed);
         }
     }
 
     let mut load_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
-        let loaded = lm_vm::load_bytes(&bytes).expect("the core image loads");
+        let decoded =
+            lm_bytecode::artifact::decode(&artifact_bytes).expect("the core artifact decodes");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(decoded, None)
+            .expect("the core artifact publishes");
         let elapsed = start.elapsed();
-        std::hint::black_box(loaded.dispatch_cells());
+        std::hint::black_box(namespace);
         if round > 0 {
             load_runs.push(elapsed);
         }
     }
 
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_cached(decoded.clone(), &mut cache).expect("the core image loads");
-    let mut cached_load_runs: Vec<Duration> = Vec::new();
+    let mut arena = lm_link::CodeArena::new();
+    arena
+        .publish(artifact.clone(), None)
+        .expect("the core artifact publishes");
+    let mut repeat_publish_runs: Vec<Duration> = Vec::new();
     for _ in 0..ROUNDS {
-        let module = decoded.clone();
         let start = Instant::now();
-        let loaded = lm_vm::load_cached(module, &mut cache).expect("the core image loads");
+        let namespace = arena
+            .publish(artifact.clone(), None)
+            .expect("the core artifact republishes");
         let elapsed = start.elapsed();
-        std::hint::black_box(loaded.dispatch_cells());
-        cached_load_runs.push(elapsed);
+        std::hint::black_box(namespace);
+        repeat_publish_runs.push(elapsed);
     }
+
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact.clone(), None)
+        .expect("the core artifact publishes");
+    let vm = Vm::new(arena, namespace, VmConfig::default());
+    let interface_witness_entries = vm.interface_witness_entries();
 
     println!(
         "LOOM\tcore_check\t{}\t{}\t{:.3}\tms",
@@ -2084,10 +2111,10 @@ fn bench_core_compilation() {
         median(identity_runs).as_secs_f64() * 1e3
     );
     println!(
-        "LOOM\tcore_decoded_load\t{}\t{}\t{:.3}\tms",
+        "LOOM\tcore_publish\t{}\t{}\t{:.3}\tms",
         module.classes.len(),
         module.funcs.len(),
-        median(decoded_load_runs).as_secs_f64() * 1e3
+        median(publish_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tcore_interface_witnesses\t{}\t{}\t{}\tentries",
@@ -2102,10 +2129,10 @@ fn bench_core_compilation() {
         median(load_runs).as_secs_f64() * 1e3
     );
     println!(
-        "LOOM\tcore_cached_load\t{}\t{}\t{:.3}\tms",
+        "LOOM\tcore_repeat_publish\t{}\t{}\t{:.3}\tms",
         module.classes.len(),
         module.funcs.len(),
-        median(cached_load_runs).as_secs_f64() * 1e3
+        median(repeat_publish_runs).as_secs_f64() * 1e3
     );
 }
 
@@ -2116,29 +2143,23 @@ fn bench_program_artifact_linking() {
     let compiled = lm_compiler::compile_source("bench.main", &source, true)
         .expect("the tiny program compiles");
     let mut source_env = lm_compiler::core_link_env().expect("the core environment builds");
-    source_env
-        .bind_module(
-            compiled.root.path.clone(),
-            compiled.root.module.clone(),
-            compiled.root.interface.clone(),
-        )
+    lm_testkit::bind_compiled_unit(&mut source_env, compiled.root.clone())
         .expect("the tiny module binds");
     let source_env = source_env.freeze();
-    let bytes = compiled.artifact;
-    let artifact = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+    let artifact = compiled.artifact;
+    let bytes = lm_bytecode::artifact::encode(&artifact).expect("the artifact encodes");
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
     let mut decode_runs = Vec::new();
     let mut link_runs = Vec::new();
     let mut cold_runs = Vec::new();
     let mut compile_runs = Vec::new();
     let mut collect_runs = Vec::new();
-    let mut trusted_link_runs = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
         let compiled = lm_compiler::compile_source("bench.main", &source, true)
             .expect("the tiny program compiles");
         let elapsed = start.elapsed();
-        std::hint::black_box(compiled.artifact.len());
+        std::hint::black_box(compiled.artifact.id());
         if round > 0 {
             compile_runs.push(elapsed);
         }
@@ -2154,15 +2175,6 @@ fn bench_program_artifact_linking() {
         }
 
         let start = Instant::now();
-        let linked =
-            lm_compiler::link("bench.main", &source_env).expect("the trusted program links");
-        let elapsed = start.elapsed();
-        std::hint::black_box(linked.module.funcs.len());
-        if round > 0 {
-            trusted_link_runs.push(elapsed);
-        }
-
-        let start = Instant::now();
         let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
         let elapsed = start.elapsed();
         std::hint::black_box(decoded.id());
@@ -2171,21 +2183,31 @@ fn bench_program_artifact_linking() {
         }
 
         let start = Instant::now();
-        let linked = lm_compiler::link_artifact(artifact.clone(), Some(core.clone()))
-            .expect("the artifact links");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(artifact.clone(), Some(core.clone()))
+            .expect("the artifact publishes");
         let elapsed = start.elapsed();
-        std::hint::black_box(linked.module.funcs.len());
+        std::hint::black_box(
+            arena
+                .namespace(namespace)
+                .expect("the namespace exists")
+                .tables()
+                .funcs
+                .len(),
+        );
         if round > 0 {
             link_runs.push(elapsed);
         }
 
         let start = Instant::now();
         let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
-        let linked =
-            lm_compiler::link_artifact(decoded, Some(core.clone())).expect("the artifact links");
-        let loaded = lm_vm::load(linked.module).expect("the artifact loads");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(decoded, Some(core.clone()))
+            .expect("the artifact publishes");
         let elapsed = start.elapsed();
-        std::hint::black_box(loaded.dispatch_cells());
+        std::hint::black_box(namespace);
         if round > 0 {
             cold_runs.push(elapsed);
         }
@@ -2210,11 +2232,7 @@ fn bench_program_artifact_linking() {
         median(collect_runs).as_secs_f64() * 1e3
     );
     println!(
-        "LOOM\tprogram_trusted_link\t{:.3}\tms",
-        median(trusted_link_runs).as_secs_f64() * 1e3
-    );
-    println!(
-        "LOOM\tprogram_artifact_link\t{:.3}\tms",
+        "LOOM\tprogram_artifact_publish\t{:.3}\tms",
         median(link_runs).as_secs_f64() * 1e3
     );
     println!(
@@ -2367,7 +2385,7 @@ fn bench_typechecking() {
             let mut runs: Vec<Duration> = Vec::new();
             for round in 0..=ROUNDS {
                 let start = Instant::now();
-                let module = lm_testkit::compile_text("bench.lm", &source)
+                let module = lm_testkit::compile_module_text("bench.lm", &source)
                     .unwrap_or_else(|e| panic!("the generated `{name}` must compile:\n{e}"));
                 let elapsed = start.elapsed();
                 std::hint::black_box(module.funcs.len());
@@ -2440,9 +2458,16 @@ fn bench_verification() {
         let mut runs: Vec<Duration> = Vec::new();
         for round in 0..=ROUNDS {
             let start = Instant::now();
-            let loaded = lm_vm::load_bytes(&bytes).expect("loads");
+            let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
             let elapsed = start.elapsed();
-            std::hint::black_box(loaded.dispatch_cells());
+            std::hint::black_box(
+                arena
+                    .namespace(namespace)
+                    .expect("the namespace exists")
+                    .tables()
+                    .funcs
+                    .len(),
+            );
             if round > 0 {
                 runs.push(elapsed);
             }
@@ -2505,11 +2530,12 @@ impl Drop for FsTree {
 fn time_fs(source: &str, expected: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("fs-bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let host = Box::new(lm_host::CliHost::new(1));
-        let mut world = lm_vm::World::new(&loaded, config(), host);
+        let mut world = lm_vm::World::new(arena, namespace, config(), host);
         world.allow("Fs").expect("the Fs grant exists");
         let start = Instant::now();
         let outcome = lm_proc::run_world(&mut world);
@@ -2536,12 +2562,13 @@ fn time_fs(source: &str, expected: &str) -> Duration {
 fn time_fs_memory(source: &str, file: &str, bytes: usize, expected: &str) -> Duration {
     let artifact = lm_testkit::compile_to_bytes("fs-bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&artifact).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
+        let (arena, namespace) = lm_testkit::publish_artifact_bytes(&artifact)
+            .expect("the benchmark artifact must load");
         let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
         host.borrow_mut().set_file(file, vec![b'x'; bytes]);
-        let mut world = lm_vm::World::new(&loaded, config(), Box::new(host));
+        let mut world = lm_vm::World::new(arena, namespace, config(), Box::new(host));
         world.allow("Fs").expect("the Fs grant exists");
         let start = Instant::now();
         let outcome = lm_proc::run_world(&mut world);
@@ -2591,12 +2618,13 @@ fn evict_page_cache(path: &str) {
 fn report_fs_cold(name: &str, bytes: u64, path: &str, source: &str, expected: &str) {
     let artifact = lm_testkit::compile_to_bytes("fs-bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
-    let loaded = lm_vm::load_bytes(&artifact).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=3 {
         evict_page_cache(path);
+        let (arena, namespace) = lm_testkit::publish_artifact_bytes(&artifact)
+            .expect("the benchmark artifact must load");
         let host = Box::new(lm_host::CliHost::new(1));
-        let mut world = lm_vm::World::new(&loaded, config(), host);
+        let mut world = lm_vm::World::new(arena, namespace, config(), host);
         world.allow("Fs").expect("the Fs grant exists");
         let start = Instant::now();
         let outcome = lm_proc::run_world(&mut world);

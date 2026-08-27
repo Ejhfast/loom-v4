@@ -5,13 +5,15 @@
 //! returns `None` instead, so the holder can do other work.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{RecordingHost, VmConfig, World};
 
 fn run(src: &str) -> String {
     let bytes = compile_to_bytes("probe.lm", src).expect("the probe compiles");
-    let loaded = load_bytes(&bytes).expect("the probe loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the probe loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

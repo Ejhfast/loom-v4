@@ -66,7 +66,7 @@ impl World {
         env: TypeEnvId,
     ) -> Option<RootEvent> {
         if self
-            .loaded
+            .code_of(vm)
             .bundle()
             .op(op)
             .is_none_or(|operation| !operation.wait_source)
@@ -140,7 +140,9 @@ impl World {
     pub(super) fn deliver_asked(&mut self, child: VmId, parent: VmId, ordinal: u64) {
         let built = self.machines[parent as usize]
             .alloc(Object::NativeRequest { vm: child, ordinal })
-            .and_then(|request| self.make_instance(parent, self.core.drive_asked, vec![request]));
+            .and_then(|request| {
+                self.make_instance(parent, self.core_of(parent).drive_asked, vec![request])
+            });
         // A bounded turn answers `Option[DriveEvent[T]]`.
         let family = if self.pending_op(parent) == Some(lm_abi::OP_VM_DRIVE_FOR) {
             Family::DriveFor
@@ -161,7 +163,9 @@ impl World {
                 vm: target,
                 ordinal,
             })
-            .and_then(|request| self.make_instance(parent, self.core.drive_asked, vec![request]));
+            .and_then(|request| {
+                self.make_instance(parent, self.core_of(parent).drive_asked, vec![request])
+            });
         // A bounded turn answers `Option[DriveEvent[T]]`.
         let family = if self.pending_op(parent) == Some(lm_abi::OP_VM_DRIVE_FOR) {
             Family::DriveFor
@@ -485,15 +489,15 @@ impl World {
         };
         match self.resolve_policy(cursor, op) {
             Resolution::Denied => {
+                let operation = self
+                    .code_of(vm)
+                    .bundle()
+                    .op_name(op)
+                    .unwrap_or("<invalid operation>")
+                    .to_string();
                 self.machines[vm as usize].set_fault(
                     FaultCode::PolicyDenied,
-                    format!(
-                        "the operation {} is not granted",
-                        self.loaded
-                            .bundle()
-                            .op_name(op)
-                            .unwrap_or("<invalid operation>")
-                    ),
+                    format!("the operation {operation} is not granted"),
                     Some(op),
                 );
             }
@@ -503,7 +507,7 @@ impl World {
             }
             Resolution::Root => {
                 if self
-                    .loaded
+                    .code_of(vm)
                     .bundle()
                     .op(op)
                     .is_some_and(|operation| operation.kind == lm_abi::OpKind::VmControl)
@@ -635,10 +639,11 @@ impl World {
     /// completion or the machine termination closes it.
     pub(super) fn start_wait(&mut self, vm: VmId, op: u32, token: u64) {
         let operation = self
-            .loaded
+            .code_of(vm)
             .bundle()
             .op(op)
-            .expect("verified code names an operation");
+            .expect("verified code names an operation")
+            .clone();
         if !operation.suspends() {
             self.machines[vm as usize].set_fault(
                 FaultCode::HostFault,
@@ -689,7 +694,7 @@ impl World {
         let pending = m.vm.pending.as_ref().ok_or(FaultCode::MalformedState)?;
         if pending.op >= lm_abi::OP_COUNT {
             let operation = self
-                .loaded
+                .code_of(vm)
                 .bundle()
                 .op(pending.op)
                 .ok_or(FaultCode::MalformedState)?;
@@ -716,17 +721,17 @@ impl World {
                         .map(HostArg::Bytes)
                         .map_err(|_| FaultCode::HeapLimit),
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.compile_env =>
+                        if Some(*class) == self.core_of(vm).compile_env =>
                     {
                         self.host_compile_env(vm, fields)
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.compile_options =>
+                        if Some(*class) == self.core_of(vm).compile_options =>
                     {
                         self.host_compile_options(vm, fields)
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.syntax_node =>
+                        if Some(*class) == self.core_of(vm).syntax_node =>
                     {
                         self.host_syntax(vm, fields)
                     }
@@ -806,7 +811,7 @@ impl World {
                         .host_pipe_token(vm, *resource, crate::ResourceKind::UdpSocket)
                         .map(HostArg::Udp),
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.exec_spec =>
+                        if Some(*class) == self.core_of(vm).exec_spec =>
                     {
                         self.host_exec_spec(vm, fields).map(HostArg::ExecSpec)
                     }
@@ -821,13 +826,13 @@ impl World {
                                     bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
                                 )),
                                 Object::Instance { class, fields, .. }
-                                    if Some(*class) == self.core.signal_interrupt
+                                    if Some(*class) == self.core_of(vm).signal_interrupt
                                         && fields.is_empty() =>
                                 {
                                     values.push(HostArg::SignalKind(HostSignalKind::Interrupt));
                                 }
                                 Object::Instance { class, fields, .. }
-                                    if Some(*class) == self.core.signal_terminate
+                                    if Some(*class) == self.core_of(vm).signal_terminate
                                         && fields.is_empty() =>
                                 {
                                     values.push(HostArg::SignalKind(HostSignalKind::Terminate));
@@ -838,78 +843,85 @@ impl World {
                         Ok(HostArg::List(values))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.std_stream_input && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).std_stream_input
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::StdStream(HostStdStream::Input))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.std_stream_output && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).std_stream_output
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::StdStream(HostStdStream::Output))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.std_stream_error && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).std_stream_error
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::StdStream(HostStdStream::Error))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.socket_address =>
+                        if Some(*class) == self.core_of(vm).socket_address =>
                     {
                         self.host_socket_address(vm, fields)
                             .map(HostArg::SocketAddress)
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.shutdown_read && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).shutdown_read && fields.is_empty() =>
                     {
                         Ok(HostArg::Shutdown(crate::HostShutdown::Read))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.shutdown_write && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).shutdown_write && fields.is_empty() =>
                     {
                         Ok(HostArg::Shutdown(crate::HostShutdown::Write))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.shutdown_both && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).shutdown_both && fields.is_empty() =>
                     {
                         Ok(HostArg::Shutdown(crate::HostShutdown::Both))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_read_only && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_read_only && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::ReadOnly))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_write_only && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_write_only
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::WriteOnly))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_read_write && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_read_write
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::ReadWrite))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_create && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_create && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::Create))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_create_truncate && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_create_truncate
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::CreateTruncate))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_create_new && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_create_new
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::CreateNew))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.open_append && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).open_append && fields.is_empty() =>
                     {
                         Ok(HostArg::OpenOptions(HostOpenOptions::Append))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.seek_start =>
+                        if Some(*class) == self.core_of(vm).seek_start =>
                     {
                         match fields.as_slice() {
                             [Value::Int(offset)] => {
@@ -919,7 +931,7 @@ impl World {
                         }
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.seek_current =>
+                        if Some(*class) == self.core_of(vm).seek_current =>
                     {
                         match fields.as_slice() {
                             [Value::Int(offset)] => {
@@ -929,7 +941,7 @@ impl World {
                         }
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.seek_end =>
+                        if Some(*class) == self.core_of(vm).seek_end =>
                     {
                         match fields.as_slice() {
                             [Value::Int(offset)] => {
@@ -939,12 +951,13 @@ impl World {
                         }
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.rename_no_replace && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).rename_no_replace
+                            && fields.is_empty() =>
                     {
                         Ok(HostArg::RenameMode(crate::HostRenameMode::NoReplace))
                     }
                     Object::Instance { class, fields, .. }
-                        if Some(*class) == self.core.rename_replace && fields.is_empty() =>
+                        if Some(*class) == self.core_of(vm).rename_replace && fields.is_empty() =>
                     {
                         Ok(HostArg::RenameMode(crate::HostRenameMode::Replace))
                     }
@@ -1000,12 +1013,12 @@ impl World {
         };
         let environment = match environment.as_obj().map(|reference| heap.get(reference)) {
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_env_inherit && fields.is_empty() =>
+                if Some(*class) == self.core_of(vm).child_env_inherit && fields.is_empty() =>
             {
                 HostChildEnv::Inherit
             }
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_env_exact && fields.len() == 1 =>
+                if Some(*class) == self.core_of(vm).child_env_exact && fields.len() == 1 =>
             {
                 let Some(Object::Map { entries, .. }) =
                     fields[0].as_obj().map(|reference| heap.get(reference))
@@ -1022,7 +1035,7 @@ impl World {
                 HostChildEnv::Exact(values)
             }
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_env_overlay && fields.len() == 1 =>
+                if Some(*class) == self.core_of(vm).child_env_overlay && fields.len() == 1 =>
             {
                 let Some(Object::Map { entries, .. }) =
                     fields[0].as_obj().map(|reference| heap.get(reference))
@@ -1042,17 +1055,17 @@ impl World {
         };
         let input = match input.as_obj().map(|reference| heap.get(reference)) {
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_input_inherit && fields.is_empty() =>
+                if Some(*class) == self.core_of(vm).child_input_inherit && fields.is_empty() =>
             {
                 HostChildInput::Inherit
             }
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_input_null && fields.is_empty() =>
+                if Some(*class) == self.core_of(vm).child_input_null && fields.is_empty() =>
             {
                 HostChildInput::Null
             }
             Some(Object::Instance { class, fields, .. })
-                if Some(*class) == self.core.child_input_pipe && fields.len() == 1 =>
+                if Some(*class) == self.core_of(vm).child_input_pipe && fields.len() == 1 =>
             {
                 let Some(Object::NativePipeReader { resource }) =
                     fields[0].as_obj().map(|reference| heap.get(reference))
@@ -1070,17 +1083,18 @@ impl World {
         let output_value = |value: Value| -> Result<HostChildOutput, FaultCode> {
             match value.as_obj().map(|reference| heap.get(reference)) {
                 Some(Object::Instance { class, fields, .. })
-                    if Some(*class) == self.core.child_output_inherit && fields.is_empty() =>
+                    if Some(*class) == self.core_of(vm).child_output_inherit
+                        && fields.is_empty() =>
                 {
                     Ok(HostChildOutput::Inherit)
                 }
                 Some(Object::Instance { class, fields, .. })
-                    if Some(*class) == self.core.child_output_null && fields.is_empty() =>
+                    if Some(*class) == self.core_of(vm).child_output_null && fields.is_empty() =>
                 {
                     Ok(HostChildOutput::Null)
                 }
                 Some(Object::Instance { class, fields, .. })
-                    if Some(*class) == self.core.child_output_pipe && fields.len() == 1 =>
+                    if Some(*class) == self.core_of(vm).child_output_pipe && fields.len() == 1 =>
                 {
                     let Some(Object::NativePipeWriter { resource }) =
                         fields[0].as_obj().map(|reference| heap.get(reference))
@@ -1191,12 +1205,12 @@ impl World {
                 let [payload] = fields.as_slice() else {
                     return Err(FaultCode::TypeMismatch);
                 };
-                if Some(*class) == self.core.result_ok {
+                if Some(*class) == self.core_of(vm).result_ok {
                     self.host_data_arg(vm, *payload, arguments[0])
                         .map(Box::new)
                         .map(Ok)
                         .map(HostArg::Result)
-                } else if Some(*class) == self.core.result_err {
+                } else if Some(*class) == self.core_of(vm).result_err {
                     self.host_data_arg(vm, *payload, arguments[1])
                         .map(Box::new)
                         .map(Err)
@@ -1219,7 +1233,7 @@ impl World {
             return Ok(Vec::new());
         }
         let operation = self
-            .loaded
+            .code_of(vm)
             .bundle()
             .op(op)
             .ok_or(FaultCode::MalformedState)?;
@@ -1301,9 +1315,9 @@ impl World {
                 let [payload] = fields.as_slice() else {
                     return Err(FaultCode::TypeMismatch);
                 };
-                let ty = if Some(*class) == self.core.result_ok {
+                let ty = if Some(*class) == self.core_of(vm).result_ok {
                     arguments[0]
-                } else if Some(*class) == self.core.result_err {
+                } else if Some(*class) == self.core_of(vm).result_err {
                     arguments[1]
                 } else {
                     return Err(FaultCode::TypeMismatch);
@@ -1336,10 +1350,8 @@ impl World {
             if code.kind != lm_heap::PortableCodeKind::VerifiedModule {
                 return Err(FaultCode::TypeMismatch);
             }
-            let interface = code.interface.as_ref().ok_or(FaultCode::TypeMismatch)?;
             host_modules.push(HostCompileModule {
                 artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
-                interface: interface.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
             });
         }
 
@@ -1395,7 +1407,7 @@ impl World {
             let Object::Instance { class, fields, .. } = heap.get(definition) else {
                 return Err(FaultCode::TypeMismatch);
             };
-            if Some(*class) != self.core.definition_spec || fields.len() != 3 {
+            if Some(*class) != self.core_of(vm).definition_spec || fields.len() != 3 {
                 return Err(FaultCode::TypeMismatch);
             }
             let identity = fields[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
@@ -1409,7 +1421,7 @@ impl World {
             else {
                 return Err(FaultCode::TypeMismatch);
             };
-            if Some(*class) != self.core.definition_identity || identity.len() != 4 {
+            if Some(*class) != self.core_of(vm).definition_identity || identity.len() != 4 {
                 return Err(FaultCode::TypeMismatch);
             }
             let module_name = identity[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
@@ -1446,15 +1458,12 @@ impl World {
                 if code.kind != lm_heap::PortableCodeKind::SlotSpec {
                     return Err(FaultCode::TypeMismatch);
                 }
+                let Some(index) = code.slot else {
+                    return Err(FaultCode::MalformedState);
+                };
                 host_slots.push(HostCompileSlot {
                     artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
-                    interface: code
-                        .interface
-                        .as_ref()
-                        .map(|bytes| bytes.try_bounded())
-                        .transpose()
-                        .map_err(|_| FaultCode::HeapLimit)?,
-                    index: code.index,
+                    index,
                 });
             }
             host_definitions.push(HostCompileDefinition {
@@ -1582,7 +1591,7 @@ impl World {
         let heap = &self.machines[vm as usize].vm.heap;
         let ip = match heap.get(*ip) {
             Object::Instance { class, fields, .. }
-                if Some(*class) == self.core.ip_v4 && fields.len() == 1 =>
+                if Some(*class) == self.core_of(vm).ip_v4 && fields.len() == 1 =>
             {
                 let Value::Obj(bytes) = fields[0] else {
                     return Err(FaultCode::TypeMismatch);
@@ -1597,7 +1606,7 @@ impl World {
                 crate::HostIpAddress::V4(bytes)
             }
             Object::Instance { class, fields, .. }
-                if Some(*class) == self.core.ip_v6 && fields.len() == 1 =>
+                if Some(*class) == self.core_of(vm).ip_v6 && fields.len() == 1 =>
             {
                 let Value::Obj(bytes) = fields[0] else {
                     return Err(FaultCode::TypeMismatch);
@@ -1689,10 +1698,15 @@ impl World {
             fuel: MOCK_FUEL,
             ..self.config
         };
+        let namespace = self.namespace_of(owner);
+        let bundle = self.code_for_namespace(namespace).bundle().clone();
         // Reuse a retired mock slot before the table grows.
         let id = match self.mock_free.pop() {
             Some(id) => {
-                self.machines[id as usize] = self.empty_machine(mock_config, None, 0).into();
+                let mut machine = self.empty_machine(mock_config, None, 0);
+                machine.namespace = namespace;
+                machine.table.set_bundle(bundle.clone());
+                self.machines[id as usize] = machine.into();
                 id
             }
             None => {
@@ -1706,7 +1720,9 @@ impl World {
                     return;
                 }
                 let id = self.machines.len() as VmId;
-                let machine = self.empty_machine(mock_config, None, 0);
+                let mut machine = self.empty_machine(mock_config, None, 0);
+                machine.namespace = namespace;
+                machine.table.set_bundle(bundle);
                 self.machines.push(machine.into());
                 id
             }
@@ -1790,8 +1806,9 @@ impl World {
                 return;
             }
         };
+        let code = self.code_of(id).clone();
         self.machines[id as usize].load_frame(
-            &self.module,
+            code.as_ref(),
             func,
             moved_args,
             Some(closure_ref),

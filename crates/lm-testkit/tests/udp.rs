@@ -1,7 +1,8 @@
 //! UDP effects, datagram waits, and resource behavior.
 
-use lm_testkit::{compile_text, compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_testkit::{compile_module_text, compile_to_bytes, repo_root};
+use lm_vm::{RecordingHost, VmConfig, World};
 
 const LOOPBACK: &str = r#"
 def loopback(port: Int): SocketAddress
@@ -16,13 +17,13 @@ end
 
 fn run(source: &str, grants: &[&str], real: bool) -> (String, usize) {
     let bytes = compile_to_bytes("udp.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host: Box<dyn lm_vm::Host> = if real {
         Box::new(lm_host::CliHost::new(1))
     } else {
         Box::new(RecordingHost::new(1))
     };
-    let mut world = World::new(&loaded, VmConfig::default(), host);
+    let mut world = World::new(arena, namespace, VmConfig::default(), host);
     for grant in grants {
         world.allow(grant).expect("the UDP grant exists");
     }
@@ -200,7 +201,7 @@ send_large()
 
 #[test]
 fn the_verifier_rejects_a_forged_udp_datagram_role() {
-    let mut module = compile_text("udp-role.lm", "1\n").expect("the program compiles");
+    let mut module = compile_module_text("udp-role.lm", "1\n").expect("the program compiles");
     let role = lm_bytecode::corepin::role_index("UdpDatagram").expect("the role exists");
     let class = module.core_roles[role];
     module.classes[class as usize].fields.pop();

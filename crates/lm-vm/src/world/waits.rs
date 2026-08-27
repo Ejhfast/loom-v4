@@ -730,7 +730,7 @@ impl World {
             .close_by_ordinal(ordinal);
         if let Some(resource) = consume_resource {
             let consumed = self.value_is_result_ok(vm, value)
-                || self.value_is_result_error_class(vm, value, self.core.exec_error_closed);
+                || self.value_is_result_error_class(vm, value, self.core_of(vm).exec_error_closed);
             if consumed {
                 self.retire_resource(resource, false);
             }
@@ -777,13 +777,13 @@ impl World {
                 proc: vm,
                 closed: false,
             });
-            self.make_instance(vm, self.core.recv_msg, vec![value])
+            self.make_instance(vm, self.core_of(vm).recv_msg, vec![value])
         } else if self.machines[vm as usize].vm.mailbox.closed {
             self.record(TraceEvent::Receive {
                 proc: vm,
                 closed: true,
             });
-            self.make_instance(vm, self.core.recv_closed, vec![])
+            self.make_instance(vm, self.core_of(vm).recv_closed, vec![])
         } else {
             Err(FaultCode::MalformedState)
         }
@@ -822,7 +822,7 @@ impl World {
             vm: target,
             ordinal: fresh,
         })?;
-        self.make_instance(vm, self.core.drive_asked, vec![request])
+        self.make_instance(vm, self.core_of(vm).drive_asked, vec![request])
     }
 
     pub(super) fn wrap_wait_choice(
@@ -833,9 +833,9 @@ impl World {
     ) -> Result<Value, FaultCode> {
         for second in path.iter().rev() {
             let arm = if *second {
-                self.core.choice_second
+                self.core_of(vm).choice_second
             } else {
-                self.core.choice_first
+                self.core_of(vm).choice_first
             };
             value = self.make_instance(vm, arm, vec![value])?;
         }

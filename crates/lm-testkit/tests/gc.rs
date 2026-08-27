@@ -2,17 +2,18 @@
 //! without Rust-stack recursion, bounded object tables under churn,
 //! and value preservation across many collections.
 
-use lm_testkit::compile_text;
+use lm_bytecode::artifact::Artifact;
+use lm_testkit::{compile_text, publish_artifact};
 use lm_vm::{Vm, VmConfig};
 
 fn run_vm(source: &str, config: VmConfig) -> (String, lm_vm::HeapStats) {
-    let module = compile_text("gc.lm", source).unwrap();
-    let loaded = lm_vm::load(module).unwrap();
-    run_loaded(&loaded, config)
+    let artifact = compile_text("gc.lm", source).unwrap();
+    run_artifact(&artifact, config)
 }
 
-fn run_loaded(loaded: &lm_vm::LoadedModule, config: VmConfig) -> (String, lm_vm::HeapStats) {
-    let mut vm = Vm::new(loaded, config);
+fn run_artifact(artifact: &Artifact, config: VmConfig) -> (String, lm_vm::HeapStats) {
+    let (arena, namespace) = publish_artifact(artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, config);
     let outcome = vm.run();
     (vm.show_outcome(&outcome), vm.heap().stats())
 }
@@ -57,8 +58,7 @@ fn deep_chain_is_traced_and_frozen_without_rust_recursion() {
     // and then churns garbage under a cap that forces collections over
     // the dead chain. A small Rust stack proves the tracer and the
     // freezer are iterative.
-    let module = compile_text("gc.lm", DEEP_CHAIN).unwrap();
-    let loaded = lm_vm::load(module).unwrap();
+    let artifact = compile_text("gc.lm", DEEP_CHAIN).unwrap();
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(move || {
@@ -66,7 +66,7 @@ fn deep_chain_is_traced_and_frozen_without_rust_recursion() {
                 heap_bytes: 8 << 20,
                 ..VmConfig::default()
             };
-            run_loaded(&loaded, config)
+            run_artifact(&artifact, config)
         })
         .expect("thread starts");
     let (outcome, stats) = handle.join().expect("no Rust stack overflow");

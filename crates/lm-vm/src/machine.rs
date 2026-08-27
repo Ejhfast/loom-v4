@@ -7,9 +7,9 @@
 //! world driver.
 
 use crate::resource::{ResourceBudget, ResourceRegistry};
-use crate::{FaultCode, VmConfig};
+use crate::{FaultCode, NamespaceRuntime, VmConfig};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
-use lm_bytecode::{ExtendedInstr, Instr, Module, NumericInstr};
+use lm_bytecode::{ExtendedInstr, Instr, Module as CompiledModulePayload, NumericInstr};
 use lm_heap::{
     process_lookup_hash, FaultSite, Heap, MapEntry, MapIndex, NativeByteBuffer,
     NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
@@ -623,6 +623,8 @@ pub struct VmState {
 
 /// One machine with compact state, callback state, and host state.
 pub struct Machine {
+    /// The code namespace that defines this machine.
+    pub namespace: lm_link::NamespaceId,
     /// The serializable machine state.
     pub vm: VmState,
     /// Policy state: the effect table this machine owns. A snapshot
@@ -717,38 +719,53 @@ struct PortableDefinitionInfo {
     related_functions: Vec<u32>,
 }
 
-fn portable_definition_info(
+fn portable_definition_index(
     code: &lm_heap::PortableCode,
-    module: &Module,
+    module: &CompiledModulePayload,
+) -> Result<u32, FaultCode> {
+    let mut matches = module.exports.iter().filter_map(|export| match code.kind {
+        lm_heap::PortableCodeKind::Function if export.kind == lm_bytecode::ExportKind::Function => {
+            Some(export.def)
+        }
+        lm_heap::PortableCodeKind::Class if export.kind.is_class() => Some(export.def),
+        _ => None,
+    });
+    let selected = matches.next().ok_or(BAD_STATE)?;
+    if matches.next().is_some() {
+        return Err(BAD_STATE);
+    }
+    Ok(selected)
+}
+
+fn portable_definition_info_payload(
+    code: &lm_heap::PortableCode,
+    module: &CompiledModulePayload,
     identity: &lm_bytecode::identity::ModuleIdentity,
 ) -> Result<PortableDefinitionInfo, FaultCode> {
+    let index = portable_definition_index(code, module)?;
     match code.kind {
         lm_heap::PortableCodeKind::Function => {
             let binding = module
                 .bindings
                 .iter()
-                .filter(|binding| {
-                    binding.func == code.index && binding.class == lm_bytecode::NO_CLASS
-                })
+                .filter(|binding| binding.func == index && binding.class == lm_bytecode::NO_CLASS)
                 .min_by(|left, right| left.key.cmp(&right.key))
                 .ok_or(BAD_STATE)?;
-            let module_name = binding
-                .key
-                .rsplit_once('.')
-                .map_or("", |(prefix, _)| prefix)
-                .to_string();
-            let hashes =
-                lm_bytecode::identity::function_definition_hashes(module, identity, code.index)
-                    .map_err(|_| BAD_STATE)?;
+            let hashes = lm_bytecode::identity::function_definition_hashes(module, identity, index)
+                .map_err(|_| BAD_STATE)?;
             Ok(PortableDefinitionInfo {
-                module_name,
+                module_name: binding
+                    .key
+                    .rsplit_once('.')
+                    .map_or("", |(prefix, _)| prefix)
+                    .to_string(),
                 qualified_key: binding.key.clone(),
                 hashes,
-                related_functions: vec![code.index],
+                related_functions: vec![index],
             })
         }
         lm_heap::PortableCodeKind::Class => {
-            let class = module.classes.get(code.index as usize).ok_or(BAD_STATE)?;
+            let class = module.classes.get(index as usize).ok_or(BAD_STATE)?;
             let suffix = format!(".{}", class.name);
             let module_name = if class.key == class.name {
                 String::new()
@@ -759,9 +776,8 @@ fn portable_definition_info(
                     .ok_or(BAD_STATE)?
                     .to_string()
             };
-            let hashes =
-                lm_bytecode::identity::class_definition_hashes(module, identity, code.index)
-                    .map_err(|_| BAD_STATE)?;
+            let hashes = lm_bytecode::identity::class_definition_hashes(module, identity, index)
+                .map_err(|_| BAD_STATE)?;
             Ok(PortableDefinitionInfo {
                 module_name,
                 qualified_key: class.key.clone(),
@@ -779,7 +795,7 @@ fn portable_definition_info(
 
 impl Machine {
     /// Return the class method table for one runtime value.
-    fn virtual_class(&self, module: &Module, value: Value) -> Result<u32, FaultCode> {
+    fn virtual_class(&self, module: &NamespaceRuntime, value: Value) -> Result<u32, FaultCode> {
         match value {
             Value::Unit => {
                 let class = module.core_roles[lm_bytecode::corepin::ROLE_UNIT];
@@ -1018,7 +1034,7 @@ impl Machine {
     /// Resolve native resource classes outside common value dispatch.
     #[cold]
     #[inline(never)]
-    fn cold_native_class(module: &Module, object: &Object) -> Result<u32, FaultCode> {
+    fn cold_native_class(module: &NamespaceRuntime, object: &Object) -> Result<u32, FaultCode> {
         let role = match object {
             Object::NativeFileHandle { .. } => lm_bytecode::corepin::ROLE_FILE_HANDLE,
             _ => return Err(BAD_TYPE),
@@ -1065,6 +1081,7 @@ impl Machine {
         resource_budget: Option<ResourceBudget>,
     ) -> Machine {
         Machine {
+            namespace: lm_link::NamespaceId::ROOT,
             vm: VmState {
                 heap: Heap::new(config.heap_bytes),
                 frames: Vec::new(),
@@ -1128,7 +1145,7 @@ impl Machine {
     /// modules; this check is the runtime backstop.
     pub fn load_frame(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         func: u32,
         args: Vec<Value>,
         closure: Option<ObjRef>,
@@ -1869,7 +1886,7 @@ impl Machine {
     #[inline(never)]
     fn call_generic(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         callee: u32,
         app: u32,
@@ -1893,7 +1910,7 @@ impl Machine {
     #[inline(never)]
     fn call_virtual_generic(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         selector: u32,
@@ -1919,7 +1936,7 @@ impl Machine {
     #[inline(never)]
     fn call_interface(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         call: InterfaceCallSite,
@@ -1992,7 +2009,7 @@ impl Machine {
     #[inline(never)]
     fn new_generic(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         class: u32,
         app: u32,
@@ -3170,7 +3187,7 @@ impl Machine {
     #[inline(never)]
     fn exec_map_put(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         ty: u32,
         discard: bool,
@@ -3229,7 +3246,7 @@ impl Machine {
     #[inline(never)]
     fn exec_option_collection(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         op: OptionCollectionOp,
     ) -> Result<(), FaultCode> {
@@ -3397,7 +3414,7 @@ impl Machine {
     #[inline(never)]
     fn exec_collection_extension(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         op: CollectionExtensionOp,
     ) -> Result<(), FaultCode> {
@@ -3733,12 +3750,13 @@ impl Machine {
     /// Allocate one verified definition record.
     fn alloc_definition_spec(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         code: &lm_heap::PortableCode,
-        decoded: &Module,
+        decoded: &CompiledModulePayload,
         module_identity: &lm_bytecode::identity::ModuleIdentity,
     ) -> Result<Value, FaultCode> {
-        let info = portable_definition_info(code, decoded, module_identity)?;
+        let info = portable_definition_info_payload(code, decoded, module_identity)?;
+        let selected = portable_definition_index(code, decoded)?;
         let identity_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_IDENTITY];
         let spec_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SPEC];
         if identity_class == lm_bytecode::NO_ROLE || spec_class == lm_bytecode::NO_ROLE {
@@ -3783,11 +3801,11 @@ impl Machine {
                 (
                     lm_heap::PortableCodeKind::Function,
                     Some(lm_bytecode::SlotTarget::Function(target)),
-                ) => target == code.index,
+                ) => target == selected,
                 (
                     lm_heap::PortableCodeKind::Class,
                     Some(lm_bytecode::SlotTarget::Class { class, .. }),
-                ) => class == code.index,
+                ) => class == selected,
                 (
                     lm_heap::PortableCodeKind::Class,
                     Some(lm_bytecode::SlotTarget::Function(target)),
@@ -3801,8 +3819,7 @@ impl Machine {
             let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
                 kind: lm_heap::PortableCodeKind::SlotSpec,
                 bytes: code.bytes.clone(),
-                interface: code.interface.clone(),
-                index,
+                slot: Some(index),
                 origin: None,
             })))?;
             self.push(value)?;
@@ -3833,7 +3850,7 @@ impl Machine {
     #[inline(never)]
     fn exec_code_source(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         ty: u32,
     ) -> Result<(), FaultCode> {
@@ -3849,10 +3866,16 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let decoded = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.table.bundle())
-            .map_err(|_| BAD_STATE)?;
+        let artifact = lm_bytecode::artifact::decode_with_bundle(
+            code.bytes.as_slice(),
+            self.table.bundle(),
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|_| BAD_STATE)?;
+        let decoded = artifact.root().module();
+        let selected = portable_definition_index(&code, decoded)?;
         let debug = lm_bytecode::debug::decode(&decoded.debug).map_err(|_| BAD_STATE)?;
-        lm_bytecode::debug::validate(&debug, &decoded).map_err(|_| BAD_STATE)?;
+        lm_bytecode::debug::validate(&debug, decoded).map_err(|_| BAD_STATE)?;
         let kind = match code.kind {
             lm_heap::PortableCodeKind::Function => lm_bytecode::debug::DefinitionKind::Function,
             lm_heap::PortableCodeKind::Class => lm_bytecode::debug::DefinitionKind::Class,
@@ -3862,13 +3885,13 @@ impl Machine {
             Some(origin) => debug.definitions.iter().find(|definition| {
                 definition.origin == origin
                     && definition.kind == kind
-                    && definition.target == code.index
+                    && definition.target == selected
             }),
             None => debug
                 .definitions
                 .iter()
                 .rev()
-                .find(|definition| definition.kind == kind && definition.target == code.index),
+                .find(|definition| definition.kind == kind && definition.target == selected),
         };
         let Some(definition) = definition else {
             let family = self.close_option_family(module, envs, ty)?;
@@ -3879,9 +3902,7 @@ impl Machine {
             .sources
             .get(definition.source as usize)
             .ok_or(BAD_STATE)?;
-        let identity =
-            lm_bytecode::identity::module_identity_with_bundle(&decoded, self.table.bundle())
-                .map_err(|_| BAD_STATE)?;
+        let identity = artifact.root().identity();
         let syntax_class = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_NODE];
         let source_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SOURCE];
         if syntax_class == lm_bytecode::NO_ROLE || source_class == lm_bytecode::NO_ROLE {
@@ -3903,7 +3924,7 @@ impl Machine {
         self.push(records)?;
         let syntax = self.alloc_syntax_view(syntax_class, text, records, definition.syntax)?;
         self.push(syntax)?;
-        let spec = self.alloc_definition_spec(module, &code, &decoded, &identity)?;
+        let spec = self.alloc_definition_spec(module, &code, decoded, identity)?;
         self.push(spec)?;
         let value = self.alloc(Object::Instance {
             class: source_class,
@@ -3919,7 +3940,7 @@ impl Machine {
 
     /// Read stable binding data from one portable definition.
     #[inline(never)]
-    fn exec_code_definition(&mut self, module: &Module) -> Result<(), FaultCode> {
+    fn exec_code_definition(&mut self, module: &NamespaceRuntime) -> Result<(), FaultCode> {
         let reference = self.pop_obj()?;
         let code = match self.vm.heap.get(reference) {
             Object::NativeCode(code)
@@ -3932,19 +3953,22 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let decoded = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.table.bundle())
-            .map_err(|_| BAD_STATE)?;
-        let identity =
-            lm_bytecode::identity::module_identity_with_bundle(&decoded, self.table.bundle())
-                .map_err(|_| BAD_STATE)?;
-        let value = self.alloc_definition_spec(module, &code, &decoded, &identity)?;
+        let artifact = lm_bytecode::artifact::decode_with_bundle(
+            code.bytes.as_slice(),
+            self.table.bundle(),
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|_| BAD_STATE)?;
+        let decoded = artifact.root().module();
+        let identity = artifact.root().identity();
+        let value = self.alloc_definition_spec(module, &code, decoded, identity)?;
         self.push(value)
     }
 
     /// Build one public source location for a compact fault coordinate.
     fn alloc_fault_location(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         debug: &lm_bytecode::debug::DebugInfo,
         identity: &lm_bytecode::identity::ModuleIdentity,
@@ -4041,7 +4065,7 @@ impl Machine {
     #[inline(never)]
     fn exec_fault_locations(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         ty: u32,
         primary: bool,
@@ -4053,12 +4077,10 @@ impl Machine {
         };
         let debug = lm_bytecode::debug::decode(&module.debug).map_err(|_| BAD_STATE)?;
         lm_bytecode::debug::validate(&debug, module).map_err(|_| BAD_STATE)?;
-        let identity =
-            lm_bytecode::identity::module_identity_with_bundle(module, self.table.bundle())
-                .map_err(|_| BAD_STATE)?;
+        let identity = module.identity().map_err(|_| BAD_STATE)?;
         if primary {
             if let Some(site) = trace.into_iter().next() {
-                let location = self.alloc_fault_location(module, envs, &debug, &identity, site)?;
+                let location = self.alloc_fault_location(module, envs, &debug, identity, site)?;
                 self.push(location)?;
                 return Ok(());
             }
@@ -4073,7 +4095,7 @@ impl Machine {
             .try_reserve_exact(trace.len())
             .map_err(|_| FaultCode::HeapLimit)?;
         for site in trace {
-            let location = self.alloc_fault_location(module, envs, &debug, &identity, site)?;
+            let location = self.alloc_fault_location(module, envs, &debug, identity, site)?;
             self.push(location)?;
             locations.push(location);
         }
@@ -4087,7 +4109,7 @@ impl Machine {
     }
 
     /// Read the debug origin for the current code reification instruction.
-    fn current_code_origin(&self, module: &Module) -> Option<[u8; 32]> {
+    fn current_code_origin(&self, module: &NamespaceRuntime) -> Option<[u8; 32]> {
         let frame = self.vm.frames.last()?;
         let instruction = frame.ip.checked_sub(1)?;
         let debug = lm_bytecode::debug::decode(&module.debug).ok()?;
@@ -4363,7 +4385,7 @@ impl Machine {
     #[inline(never)]
     fn exec_extended(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         instr: ExtendedInstr,
@@ -4642,7 +4664,7 @@ impl Machine {
     #[inline(always)]
     fn exec_instr(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
@@ -5466,7 +5488,7 @@ impl Machine {
     /// A boundary result includes the instruction that produced it.
     pub(crate) fn exec_for_quantum(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
@@ -5479,7 +5501,7 @@ impl Machine {
     #[cold]
     pub(crate) fn exec_for_quantum_restricted(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
@@ -5490,7 +5512,7 @@ impl Machine {
 
     fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool>(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
@@ -5548,7 +5570,7 @@ impl Machine {
     /// Close an `Option` family or arm type to its family type.
     fn close_option_family(
         &self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         ty: u32,
     ) -> Result<ClosedTypeId, FaultCode> {
@@ -5578,7 +5600,7 @@ impl Machine {
     /// Test one value against a class type.
     fn value_matches_class(
         &self,
-        module: &Module,
+        module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
         value: Value,
         ty: u32,
@@ -5603,7 +5625,12 @@ impl Machine {
     }
 
     /// Return true when the instance class equals or extends the target.
-    fn instance_matches(&self, module: &Module, r: ObjRef, ty: u32) -> Result<bool, FaultCode> {
+    fn instance_matches(
+        &self,
+        module: &NamespaceRuntime,
+        r: ObjRef,
+        ty: u32,
+    ) -> Result<bool, FaultCode> {
         let target = match module.types.get(ty as usize).ok_or(BAD_STATE)? {
             lm_bytecode::BcType::Class(c) | lm_bytecode::BcType::Inst(c, _) => *c,
             _ => return Err(BAD_STATE),
@@ -5798,7 +5825,7 @@ impl Machine {
     /// closure call.
     fn push_frame(
         &mut self,
-        module: &Module,
+        module: &NamespaceRuntime,
         callee: u32,
         consume: usize,
         closure: Option<FrameCapture>,
@@ -6025,7 +6052,12 @@ impl Machine {
     /// pays for the size of that loop, and this comparison runs on
     /// one instruction alone.
     #[inline(never)]
-    fn values_equal(&self, module: &Module, a: Value, b: Value) -> Result<bool, FaultCode> {
+    fn values_equal(
+        &self,
+        module: &NamespaceRuntime,
+        a: Value,
+        b: Value,
+    ) -> Result<bool, FaultCode> {
         let mut work: Vec<(Value, Value)> = vec![(a, b)];
         while let Some((left, right)) = work.pop() {
             let equal = match (left, right) {
@@ -6101,7 +6133,7 @@ impl Machine {
         Ok(true)
     }
 
-    fn references_equal(&self, module: &Module, a: ObjRef, b: ObjRef) -> bool {
+    fn references_equal(&self, module: &NamespaceRuntime, a: ObjRef, b: ObjRef) -> bool {
         if a == b {
             return true;
         }

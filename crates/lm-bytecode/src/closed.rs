@@ -19,7 +19,7 @@
 //! shared module state: it re-interns the records of the image into
 //! the table of the target world.
 
-use crate::{BcClass, BcClassKind, BcRow, BcType, Module, NO_PARENT};
+use crate::{BcClass, BcClassKind, BcRow, BcType, CodeTableView, NO_PARENT};
 use lm_value::TypeEnvId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -962,7 +962,7 @@ impl TypeEnvs {
     /// that depth, so a walk on the Rust stack would abort the host.
     pub fn close(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         ty: u32,
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, TypeEnvFull> {
@@ -993,7 +993,7 @@ impl TypeEnvs {
             // the unit type. Every caller inside this workspace reads
             // a verified module, so the branch is unreachable there; a
             // hand-built module must not panic here.
-            let node = match module.types.get(cur as usize) {
+            let node = match module.types().get(cur as usize) {
                 Some(node) => node.clone(),
                 None => BcType::Unit,
             };
@@ -1020,7 +1020,7 @@ impl TypeEnvs {
     /// Close one module type node whose children already closed.
     fn close_flat(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         node: &BcType,
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, TypeEnvFull> {
@@ -1075,7 +1075,7 @@ impl TypeEnvs {
                 };
                 let mut steps = 0usize;
                 loop {
-                    if let Some(conformance) = module.conformances.iter().find(|item| {
+                    if let Some(conformance) = module.conformances().iter().find(|item| {
                         item.class == class && item.application.interface == *interface
                     }) {
                         let Some(template) = conformance.associated.get(*assoc as usize) else {
@@ -1085,10 +1085,10 @@ impl TypeEnvs {
                         return self.close(module, *template, owner);
                     }
                     steps += 1;
-                    if steps > module.classes.len() {
+                    if steps > module.classes().len() {
                         return self.intern(ClosedType::Unit);
                     }
-                    let Some(entry) = module.classes.get(class as usize) else {
+                    let Some(entry) = module.classes().get(class as usize) else {
                         return self.intern(ClosedType::Unit);
                     };
                     if entry.parent == NO_PARENT {
@@ -1102,7 +1102,7 @@ impl TypeEnvs {
                             parent_args.push(self.close(module, *template, owner)?);
                         }
                         args = parent_args;
-                    } else if module.classes[parent as usize].type_params == 0 {
+                    } else if module.classes()[parent as usize].type_params == 0 {
                         args.clear();
                     }
                     class = parent;
@@ -1142,7 +1142,12 @@ impl TypeEnvs {
     ///
     /// The answer is canonical: the operation names sort by their text
     /// and hold no duplicate, so one closed row has one identity.
-    pub fn close_row(&self, module: &Module, row: &[BcRow], env: TypeEnvId) -> ClosedRow {
+    pub fn close_row(
+        &self,
+        module: &impl CodeTableView,
+        row: &[BcRow],
+        env: TypeEnvId,
+    ) -> ClosedRow {
         let mut out: ClosedRow = Vec::with_capacity(row.len());
         for elem in row {
             match elem {
@@ -1166,7 +1171,7 @@ impl TypeEnvs {
     /// generic call reuses one index.
     pub fn derive(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         parent: TypeEnvId,
         app: u32,
     ) -> Result<TypeEnvId, TypeEnvFull> {
@@ -1182,7 +1187,7 @@ impl TypeEnvs {
         }
         self.metrics.derive_misses = self.metrics.derive_misses.saturating_add(1);
         self.metrics_dirty = true;
-        let entry = match module.apps.get(app as usize) {
+        let entry = match module.apps().get(app as usize) {
             Some(entry) => entry.clone(),
             None => return Ok(TypeEnvId::EMPTY),
         };
@@ -1217,13 +1222,13 @@ impl TypeEnvs {
     /// arguments. One canonical composition serves every activation.
     pub fn method_env(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         callee: u32,
         class: u32,
         class_env: TypeEnvId,
         own: TypeEnvId,
     ) -> Result<TypeEnvId, TypeEnvFull> {
-        let body = match module.funcs.get(callee as usize) {
+        let body = match module.funcs().get(callee as usize) {
             Some(body) => body,
             None => return Ok(own),
         };
@@ -1248,7 +1253,7 @@ impl TypeEnvs {
         let owner = match body
             .params
             .first()
-            .and_then(|param| module.types.get(*param as usize))
+            .and_then(|param| module.types().get(*param as usize))
         {
             Some(BcType::Class(owner)) | Some(BcType::Inst(owner, _)) => *owner,
             _ => return Ok(own),
@@ -1288,25 +1293,19 @@ impl TypeEnvs {
     /// carries generic arguments even when the value representation does not.
     pub fn interface_method_env(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         callee: u32,
         runtime_class: u32,
         receiver: ClosedTypeId,
         own: TypeEnvId,
     ) -> Result<Option<TypeEnvId>, TypeEnvFull> {
-        let Some(body) = module.funcs.get(callee as usize) else {
+        let Some(body) = module.funcs().get(callee as usize) else {
             return Ok(None);
         };
         if body.type_params == 0 && body.effect_params == 0 {
             return Ok(Some(TypeEnvId::EMPTY));
         }
-        let role = |index: usize| {
-            module
-                .core_roles
-                .get(index)
-                .copied()
-                .filter(|class| *class != crate::NO_ROLE)
-        };
+        let role = |index: usize| module.core_role(index);
         let (class, args) = match self.ty(receiver).cloned() {
             Some(ClosedType::Class(class)) => (class, Vec::new()),
             Some(ClosedType::Inst(class, args)) => (class, args),
@@ -1356,7 +1355,7 @@ impl TypeEnvs {
         let runtime_args = if class == runtime_class {
             args.clone()
         } else {
-            let Some(runtime) = module.classes.get(runtime_class as usize) else {
+            let Some(runtime) = module.classes().get(runtime_class as usize) else {
                 return Ok(None);
             };
             if runtime.kind == BcClassKind::Case && runtime.type_params as usize == args.len() {
@@ -1373,7 +1372,7 @@ impl TypeEnvs {
         let owner = match body
             .params
             .first()
-            .and_then(|item| module.types.get(*item as usize))
+            .and_then(|item| module.types().get(*item as usize))
         {
             Some(BcType::Class(owner) | BcType::Inst(owner, _)) => *owner,
             Some(BcType::Unit) => match role(crate::corepin::ROLE_UNIT) {
@@ -1438,7 +1437,7 @@ impl TypeEnvs {
     /// Build the environment of one interface-owned default function.
     pub fn interface_default_env(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         interface: u32,
         runtime_class: u32,
         receiver: ClosedTypeId,
@@ -1450,7 +1449,7 @@ impl TypeEnvs {
         let runtime_args = if static_class == runtime_class {
             static_args.clone()
         } else {
-            let Some(runtime) = module.classes.get(runtime_class as usize) else {
+            let Some(runtime) = module.classes().get(runtime_class as usize) else {
                 return Ok(None);
             };
             if runtime.kind == BcClassKind::Case
@@ -1473,7 +1472,7 @@ impl TypeEnvs {
         let mut class_args = runtime_args;
         let mut steps = 0usize;
         loop {
-            if let Some(conformance) = module.conformances.iter().find(|candidate| {
+            if let Some(conformance) = module.conformances().iter().find(|candidate| {
                 candidate.class == class && candidate.application.interface == interface
             }) {
                 let owner = self.env_of(class_args, Vec::new())?;
@@ -1495,10 +1494,10 @@ impl TypeEnvs {
                 return self.env_of(types, rows).map(Some);
             }
             steps += 1;
-            if steps > module.classes.len() {
+            if steps > module.classes().len() {
                 return Ok(None);
             }
-            let Some(entry) = module.classes.get(class as usize) else {
+            let Some(entry) = module.classes().get(class as usize) else {
                 return Ok(None);
             };
             let Some(parent) = entry.parent() else {
@@ -1511,7 +1510,7 @@ impl TypeEnvs {
                     parent_args.push(self.close(module, *ty, owner)?);
                 }
                 class_args = parent_args;
-            } else if module.classes[parent as usize].type_params == 0 {
+            } else if module.classes()[parent as usize].type_params == 0 {
                 class_args.clear();
             }
             class = parent;
@@ -1539,16 +1538,10 @@ impl TypeEnvs {
     /// Return the nominal class and arguments of one closed value type.
     fn closed_instance(
         &self,
-        module: &Module,
+        module: &impl CodeTableView,
         ty: ClosedTypeId,
     ) -> Option<(u32, Vec<ClosedTypeId>)> {
-        let role = |index: usize| {
-            module
-                .core_roles
-                .get(index)
-                .copied()
-                .filter(|class| *class != crate::NO_ROLE)
-        };
+        let role = |index: usize| module.core_role(index);
         match self.ty(ty)? {
             ClosedType::Class(class) => Some((*class, Vec::new())),
             ClosedType::Inst(class, args) => Some((*class, args.clone())),
@@ -1579,7 +1572,7 @@ impl TypeEnvs {
     /// substitutes.
     pub fn ancestor_args(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         class: u32,
         args: &[ClosedTypeId],
         ancestor: u32,
@@ -1592,10 +1585,10 @@ impl TypeEnvs {
                 return Some(cur_args);
             }
             steps += 1;
-            if steps > module.classes.len() {
+            if steps > module.classes().len() {
                 return None;
             }
-            let entry: &BcClass = module.classes.get(cur as usize)?;
+            let entry: &BcClass = module.classes().get(cur as usize)?;
             if entry.parent == NO_PARENT {
                 return None;
             }
@@ -1607,7 +1600,7 @@ impl TypeEnvs {
                     out.push(self.close(module, arg, env).ok()?);
                 }
                 cur_args = out;
-            } else if module.classes.get(parent as usize)?.type_params == 0 {
+            } else if module.classes().get(parent as usize)?.type_params == 0 {
                 cur_args = Vec::new();
             }
             cur = parent;
@@ -1626,7 +1619,7 @@ impl TypeEnvs {
     /// so a walk on the Rust stack would abort the host.
     pub fn digest(
         &mut self,
-        module: &Module,
+        module: &impl CodeTableView,
         class_hashes: &[[u8; 32]],
         id: ClosedTypeId,
     ) -> [u8; 32] {
@@ -1666,7 +1659,7 @@ impl TypeEnvs {
     /// The digest of one node whose children already answered.
     fn digest_flat(
         &self,
-        module: &Module,
+        module: &impl CodeTableView,
         class_hashes: &[[u8; 32]],
         node: &ClosedType,
     ) -> [u8; 32] {
@@ -1716,7 +1709,7 @@ impl TypeEnvs {
                 out.extend_from_slice(&(row.len() as u32).to_le_bytes());
                 for slot in row {
                     let name = module
-                        .strings
+                        .strings()
                         .get(*slot as usize)
                         .map(String::as_str)
                         .unwrap_or("");
@@ -1734,7 +1727,7 @@ impl TypeEnvs {
                 out.extend_from_slice(&(row.len() as u32).to_le_bytes());
                 for slot in row {
                     let name = module
-                        .strings
+                        .strings()
                         .get(*slot as usize)
                         .map(String::as_str)
                         .unwrap_or("");
@@ -1820,10 +1813,10 @@ pub fn tag_of(node: &ClosedType) -> u8 {
 ///
 /// The order follows the operation text, so it never depends on the
 /// string-pool order of one linked program.
-pub fn canonical_row(module: &Module, mut row: ClosedRow) -> ClosedRow {
+pub fn canonical_row(module: &impl CodeTableView, mut row: ClosedRow) -> ClosedRow {
     let name = |slot: &u32| -> &str {
         module
-            .strings
+            .strings()
             .get(*slot as usize)
             .map(String::as_str)
             .unwrap_or("")
@@ -1836,6 +1829,7 @@ pub fn canonical_row(module: &Module, mut row: ClosedRow) -> ClosedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Module;
     use crate::{BcClass, BcClassKind, Func, TypeApp};
 
     /// One module with `Int`, `Var(0)`, `List[Var(0)]`, and one

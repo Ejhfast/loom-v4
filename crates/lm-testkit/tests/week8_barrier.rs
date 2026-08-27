@@ -5,18 +5,24 @@
 //! and the preflight result, which is what the week-9 encoder
 //! consumes.
 
+use lm_bytecode::artifact::Artifact;
 use lm_proc::{Barrier, BarrierError, Scheduler};
-use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, FaultCode, RecordingHost, RootEvent, VmConfig, World};
+use lm_testkit::{compile_text, publish_artifact, repo_root};
+use lm_vm::{FaultCode, RecordingHost, RootEvent, VmConfig, World};
 
 /// Build one world from source with the `Proc` group granted.
-fn world_of(source: &str) -> (lm_vm::LoadedModule, ()) {
-    let bytes = compile_to_bytes("barrier.lm", source).expect("the program compiles");
-    (load_bytes(&bytes).expect("the program loads"), ())
+fn world_of(source: &str) -> Artifact {
+    compile_text("barrier.lm", source).expect("the program compiles")
 }
 
-fn ready_world(loaded: &lm_vm::LoadedModule, allow: &[&str]) -> World {
-    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+fn ready_world(artifact: &Artifact, allow: &[&str]) -> World {
+    let (arena, namespace) = publish_artifact(artifact).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }
@@ -38,7 +44,7 @@ fn run_to_first_block(world: &mut World) {
 fn the_barrier_set_closes_over_a_mailbox_handle() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     // Three machines exist: the root, the worker, and the helper.
@@ -73,7 +79,7 @@ fn the_barrier_set_closes_over_a_mailbox_handle() {
 fn the_barrier_records_one_mailbox_cut() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     let first = Barrier::new(1)
@@ -108,7 +114,7 @@ fn a_frozen_mailbox_blocks_the_sender_instead_of_accepting() {
                   h = Sink.spawn()\n\
                   h.send(1)\n\
                   h.done()\n";
-    let (loaded, ()) = world_of(source);
+    let loaded = world_of(source);
     let mut world = ready_world(&loaded, &["Proc"]);
     // Step the root until the spawn created the proc, then freeze the
     // mailbox before the send reaches it.
@@ -144,7 +150,7 @@ fn a_frozen_mailbox_blocks_the_sender_instead_of_accepting() {
 fn overlapping_barriers_serialize() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     // Another barrier already holds the worker.
@@ -169,7 +175,7 @@ fn overlapping_barriers_serialize() {
 fn a_disjoint_barrier_proceeds() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     // A barrier rooted at the helper reaches the helper only.
@@ -189,7 +195,7 @@ fn a_disjoint_barrier_proceeds() {
 #[test]
 fn a_live_host_attachment_blocks_the_barrier_and_resumes() {
     let source = "def go() with Clock.Sleep\n  sys.clock.sleep(1)\nend\ngo()\n";
-    let (loaded, ()) = world_of(source);
+    let loaded = world_of(source);
     let mut world = ready_world(&loaded, &["Clock"]);
     // Step until the root waits on the host.
     let mut waited = false;
@@ -239,7 +245,7 @@ fn a_live_host_attachment_blocks_the_barrier_and_resumes() {
 fn a_held_machine_leaves_the_run_set() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     assert_eq!(world.runnable_procs(), vec![1, 2]);
@@ -257,7 +263,7 @@ fn a_held_machine_leaves_the_run_set() {
 fn every_handle_in_the_set_targets_a_member_of_the_set() {
     let source = std::fs::read_to_string(repo_root().join("examples/07-concurrency/barrier.lm"))
         .expect("the example reads");
-    let (loaded, ()) = world_of(&source);
+    let loaded = world_of(&source);
     let mut world = ready_world(&loaded, &["Proc"]);
     run_to_first_block(&mut world);
     let report = Barrier::new(1)
@@ -288,7 +294,7 @@ fn the_set_closes_over_every_machine_reference_shape() {
                   \x20 end\n\
                   end\n\
                   go()\n";
-    let (loaded, ()) = world_of(source);
+    let loaded = world_of(source);
     let mut world = ready_world(&loaded, &["Vm", "Clock.Now"]);
     // Step until both machines exist and the table handle is live.
     let mut ready = false;

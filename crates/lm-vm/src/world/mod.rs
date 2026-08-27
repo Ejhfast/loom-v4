@@ -52,10 +52,10 @@ fn record_reclamation_threshold(live: usize, hard_limit: u32) -> usize {
         .max(RECORD_RECLAMATION_FLOOR)
         .min(hard_limit as usize)
 }
-use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
+use crate::{FaultCode, NamespaceRuntime, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
-use lm_bytecode::{BcClassKind, BcType, Module};
+use lm_bytecode::{BcClassKind, BcType};
 use lm_heap::{Heap, Object, SharedBytes, SharedText, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
 use std::ops::{Deref, DerefMut};
@@ -199,7 +199,7 @@ enum DriverStep {
 struct ModuleCodes<'m> {
     identity: &'m lm_bytecode::identity::ModuleIdentity,
     bundle: &'m lm_abi::AbiBundle,
-    module: &'m Module,
+    module: &'m NamespaceRuntime,
     envs: &'m mut lm_bytecode::closed::TypeEnvs,
     core: CoreLayout,
 }
@@ -214,14 +214,8 @@ struct WorldBudget {
 /// One module installation inside one persistent VM image.
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledInstance {
-    /// The world installation record that supplied this instance.
-    pub(crate) installation: u32,
     /// Canonical source artifact bytes.
     pub(crate) artifact: SharedBytes,
-    /// Canonical source interface bytes, when the compiler supplied them.
-    pub(crate) interface: Option<SharedBytes>,
-    /// The semantic identity of the source module.
-    pub(crate) semantic_hash: [u8; 32],
     /// The relocated entry function.
     pub(crate) entry: u32,
     /// Source function indices mapped into the world code store.
@@ -238,6 +232,8 @@ pub(crate) struct InstalledInstance {
 
 /// One persistent execution image in the world image registry.
 pub(crate) struct VmImageRecord {
+    /// The code namespace that this image owns.
+    pub(crate) namespace: lm_link::NamespaceId,
     /// The generation that validates a holder-local image handle.
     pub(crate) generation: u32,
     /// False marks a reclaimed registry entry.
@@ -685,20 +681,12 @@ impl DerefMut for MachineSlot {
 pub struct World {
     /// The process-local identity used by execution lease tokens.
     world_id: u64,
-    /// The verified module that started this world.
-    base_loaded: LoadedModule,
-    pub(crate) loaded: LoadedModule,
-    pub(crate) module: std::sync::Arc<Module>,
-    pub(crate) dispatch: std::sync::Arc<[crate::DispatchRow]>,
-    execution_code: std::sync::Arc<crate::executor::ExecutionCode>,
-    pub(crate) core: CoreLayout,
-    /// Slots present when this world started.
-    ///
-    /// A new image receives these initial targets. Later installed
-    /// slots remain empty until that image installs their module.
-    base_slot_count: usize,
-    /// Artifacts in successful installation order.
-    pub(crate) installations: Vec<SharedBytes>,
+    /// The append-only code arena and its published namespaces.
+    pub(crate) arena: lm_link::CodeArena,
+    pub(crate) root_namespace: lm_link::NamespaceId,
+    pub(crate) namespaces: Vec<Option<std::sync::Arc<NamespaceRuntime>>>,
+    namespace_execution: Vec<Option<std::sync::Arc<crate::executor::ExecutionCode>>>,
+    arena_execution: std::sync::Arc<crate::executor::ExecutionCode>,
     pub(crate) machines: Vec<MachineSlot>,
     /// Persistent VM images, separate from run machine records.
     pub(crate) vm_images: Vec<VmImageRecord>,
@@ -989,14 +977,14 @@ mod tests {
     use super::*;
     use crate::host::NullHost;
     use crate::machine::Pending;
-    use crate::{load, VmConfig, WorldLimits};
+    use crate::{arena_from_test_unit, unit_from_module_for_test, VmConfig, WorldLimits};
     use lm_bytecode::{
         BcCallableContract, BcClass, BcClassKind, BcType, ExtendedInstr, Func, Instr, Module,
         SlotContract, SlotSpec, SlotTarget, NO_PARENT,
     };
 
-    fn trivial_loaded() -> crate::LoadedModule {
-        load(Module {
+    fn trivial_loaded() -> Arc<crate::NamespaceRuntime> {
+        unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
@@ -1031,10 +1019,43 @@ mod tests {
         .expect("the trivial module verifies")
     }
 
+    fn test_world(
+        code: &crate::NamespaceRuntime,
+        config: VmConfig,
+        host: Box<dyn crate::Host>,
+    ) -> World {
+        let (arena, namespace) = arena_from_test_unit(code).expect("the test unit publishes");
+        World::new(arena, namespace, config, host)
+    }
+
+    fn test_world_with_limits(
+        code: &crate::NamespaceRuntime,
+        config: VmConfig,
+        limits: WorldLimits,
+        host: Box<dyn crate::Host>,
+    ) -> World {
+        let (arena, namespace) = arena_from_test_unit(code).expect("the test unit publishes");
+        World::new_with_limits(arena, namespace, config, limits, host)
+    }
+
+    fn edit_root_core(world: &mut World, edit: impl FnOnce(&mut CoreLayout)) {
+        let namespace = world.root_namespace;
+        let mut code = world.code_for_namespace(namespace).as_ref().clone();
+        edit(&mut code.core);
+        let code = Arc::new(code);
+        let execution = Arc::new(crate::executor::ExecutionCode::new(
+            code.clone(),
+            code.dispatch_store(),
+        ));
+        world.namespaces[namespace.index()] = Some(code);
+        world.namespace_execution[namespace.index()] = Some(execution.clone());
+        world.arena_execution = execution;
+    }
+
     #[test]
     fn machine_slots_reject_stale_and_duplicate_restores() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let token = crate::executor::ExecutionToken {
             world: world.world_id,
             machine: 0,
@@ -1047,7 +1068,7 @@ mod tests {
             .restore_from_lease(stale, machine)
             .is_err());
 
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let machine = world.machines[0].take_for_lease(token);
         world.machines[0]
             .restore_from_lease(token, machine)
@@ -1061,7 +1082,7 @@ mod tests {
     #[test]
     fn a_parallel_policy_cycle_is_an_invalid_requirement() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         world.machines[0].vm.parent = Some(0);
 
         assert_eq!(
@@ -1073,7 +1094,7 @@ mod tests {
     #[test]
     fn a_resource_close_waits_for_its_leased_owner() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let resource = 1;
         world.machines[0]
             .resources
@@ -1125,7 +1146,7 @@ mod tests {
             ..WorldLimits::default()
         };
         let mut world =
-            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+            test_world_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
         let key = world.task_key(0).expect("the root task exists");
         let step = world
             .begin_parallel_slice(key, 16, 1)
@@ -1150,7 +1171,7 @@ mod tests {
     #[test]
     fn a_stale_parallel_report_poisons_the_world_and_releases_its_reservation() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let key = world.task_key(0).expect("the root task exists");
         let fuel = world.world_fuel();
         let step = world
@@ -1182,7 +1203,7 @@ mod tests {
     #[test]
     fn worker_failure_cancels_the_execution_reservation() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let key = world.task_key(0).expect("the root task exists");
         let fuel = world.world_fuel();
         let step = world
@@ -1198,7 +1219,7 @@ mod tests {
         assert_eq!(world.world_fuel(), fuel);
     }
 
-    fn installable_artifact(value: i64) -> SharedBytes {
+    fn installable_artifact(value: i64, code: &crate::NamespaceRuntime) -> SharedBytes {
         let contract = BcCallableContract {
             type_params: 0,
             effect_params: 0,
@@ -1208,7 +1229,7 @@ mod tests {
             ret: 2,
             row: vec![],
         };
-        lm_bytecode::encode(&Module {
+        let module = Module {
             strings: vec![],
             bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
@@ -1246,20 +1267,36 @@ mod tests {
             exports: vec![],
             bindings: vec![],
             debug: Vec::new(),
-        })
-        .into()
+        };
+        let core = code
+            .code_namespace()
+            .core_artifact()
+            .expect("the test namespace has one core unit");
+        let dependency = lm_bytecode::artifact::ArtifactDependency::new(
+            lm_bytecode::artifact::CORE_MODULE_PATH,
+            core,
+        )
+        .expect("the core dependency is valid");
+        let unit =
+            lm_bytecode::artifact::LinkUnit::from_module("test.revision", module, vec![dependency])
+                .expect("the install unit builds");
+        let artifact = lm_bytecode::artifact::Artifact::new(unit, Vec::new())
+            .expect("the install artifact builds");
+        lm_bytecode::artifact::encode(&artifact)
+            .expect("the install artifact encodes")
+            .into()
     }
 
     #[test]
     fn installation_appends_code_and_changes_only_its_target_image() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let target = world.new_vm_image(0).expect("the target image fits");
         let other = world.new_vm_image(0).expect("the other image fits");
         let frame = world.machines[0].vm.frames[0].func;
 
         let first = world
-            .install_artifact(target, installable_artifact(7), None, &[])
+            .install_artifact(target, installable_artifact(7, &loaded))
             .expect("the artifact installs");
         assert_eq!(first, 0);
         assert_eq!(world.machines[0].vm.frames[0].func, frame);
@@ -1268,43 +1305,39 @@ mod tests {
             world.vm_images[target.image as usize].slots[0],
             ImageSlotTarget::Function(_)
         ));
-        assert_eq!(
-            world.vm_images[other.image as usize].slots[0],
-            ImageSlotTarget::Empty
-        );
+        assert!(world.vm_images[other.image as usize].slots.is_empty());
 
         let late = world.new_vm_image(0).expect("the later image fits");
-        assert_eq!(
-            world.vm_images[late.image as usize].slots[0],
-            ImageSlotTarget::Empty
-        );
+        assert!(world.vm_images[late.image as usize].slots.is_empty());
     }
 
     #[test]
     fn repeated_installation_creates_distinct_instances_without_duplicate_code() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let target = world.new_vm_image(0).expect("the target image fits");
-        let artifact = installable_artifact(8);
+        let artifact = installable_artifact(8, &loaded);
         let first = world
-            .install_artifact(target, artifact.clone(), None, &[])
+            .install_artifact(target, artifact.clone())
             .expect("the first installation succeeds");
-        let functions = world.module.funcs.len();
+        let namespace = world.vm_images[target.image as usize].namespace;
+        let functions = world.code_for_namespace(namespace).funcs.len();
         let second = world
-            .install_artifact(target, artifact, None, &[])
+            .install_artifact(target, artifact)
             .expect("the second installation succeeds");
         assert_eq!((first, second), (0, 1));
-        assert_eq!(world.module.funcs.len(), functions);
+        let namespace = world.vm_images[target.image as usize].namespace;
+        assert_eq!(world.code_for_namespace(namespace).funcs.len(), functions);
         assert_eq!(world.vm_images[target.image as usize].instances.len(), 2);
     }
 
     #[test]
     fn a_proc_image_link_guards_slots_and_image_lifetime() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world
-            .install_artifact(image, installable_artifact(7), None, &[])
+            .install_artifact(image, installable_artifact(7, &loaded))
             .expect("the artifact installs");
         let target = match world.vm_images[image.image as usize].slots[0] {
             ImageSlotTarget::Function(target) => target,
@@ -1338,13 +1371,13 @@ mod tests {
     #[test]
     fn failed_installation_changes_no_world_code_or_image_state() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let target = world.new_vm_image(0).expect("the target image fits");
-        let verification = world.loaded.verification_hash();
+        let artifact = world.root_code().code_namespace().artifact_id();
         let slots = world.vm_images[target.image as usize].slots.clone();
-        let result = world.install_artifact(target, vec![1, 2, 3].into(), None, &[]);
+        let result = world.install_artifact(target, vec![1, 2, 3].into());
         assert!(result.is_err());
-        assert_eq!(world.loaded.verification_hash(), verification);
+        assert_eq!(world.root_code().code_namespace().artifact_id(), artifact);
         assert_eq!(world.vm_images[target.image as usize].slots, slots);
         assert!(world.vm_images[target.image as usize].instances.is_empty());
     }
@@ -1373,7 +1406,7 @@ mod tests {
             local_types: vec![],
             blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
         };
-        let loaded = load(Module {
+        let loaded = unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
@@ -1428,7 +1461,7 @@ mod tests {
             debug: Vec::new(),
         })
         .expect("the slot module verifies");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
 
@@ -1450,7 +1483,7 @@ mod tests {
 
     #[test]
     fn a_value_slot_owns_a_frozen_copy_and_snapshots_it() {
-        let loaded = load(Module {
+        let loaded = unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
@@ -1493,7 +1526,7 @@ mod tests {
             debug: Vec::new(),
         })
         .expect("the value-slot module verifies");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
         let source = world.machines[0]
@@ -1544,7 +1577,7 @@ mod tests {
             local_types: vec![4],
             blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
         };
-        let loaded = load(Module {
+        let loaded = unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![
@@ -1636,7 +1669,7 @@ mod tests {
             debug: Vec::new(),
         })
         .expect("the method-slot module verifies");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
         let published = world.vm_images[image.image as usize].slots.clone();
@@ -1781,8 +1814,8 @@ mod tests {
                 constructor: 1,
             }),
         };
-        let loaded = load(module).expect("the class-slot module verifies");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let loaded = unit_from_module_for_test(module).expect("the class-slot module verifies");
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
         world
@@ -1812,7 +1845,7 @@ mod tests {
             local_types: vec![5],
             blocks: vec![vec![value, Instr::Return]],
         };
-        let loaded = load(Module {
+        let loaded = unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![
@@ -1897,8 +1930,8 @@ mod tests {
             debug: Vec::new(),
         })
         .expect("the process-slot module verifies");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        world.core.proc_class = Some(0);
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
+        edit_root_core(&mut world, |core| core.proc_class = Some(0));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
         let mut good = world.empty_machine(VmConfig::default(), Some(0), 0);
@@ -1952,7 +1985,7 @@ mod tests {
     #[test]
     fn control_of_an_active_machine_faults_the_caller_only() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let mut child = Machine::empty(VmConfig::default(), Some(0));
         child.vm.state = MachineState::Ready;
         child.active = 1;
@@ -1974,7 +2007,7 @@ mod tests {
     #[test]
     fn a_stale_token_faults_the_caller_and_keeps_the_request() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let mut child = Machine::empty(VmConfig::default(), Some(0));
         child.vm.state = MachineState::Asked;
         child.vm.pending = Some(Pending {
@@ -2018,7 +2051,7 @@ mod tests {
     #[test]
     fn a_cross_machine_token_faults_the_caller() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         for _ in 0..2 {
             let mut child = Machine::empty(VmConfig::default(), Some(0));
             child.vm.state = MachineState::Asked;
@@ -2059,7 +2092,7 @@ mod tests {
     #[test]
     fn a_self_send_copies_inside_one_heap() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         // A scalar carries no reference.
         assert_eq!(world.boundary_copy(0, 0, Value::Int(7)), Ok(Value::Int(7)));
         // A mutable graph copies, so the message is a second object.
@@ -2112,7 +2145,7 @@ mod tests {
     #[test]
     fn a_self_send_rejects_a_holder_local_value() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let mock = world.empty_machine(VmConfig::default(), None, 0);
         world.machines.push(mock.into());
         let handle = world.machines[0]
@@ -2177,7 +2210,7 @@ mod tests {
     #[test]
     fn a_stale_generation_names_a_dead_proc() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let mut proc = Machine::empty_at(VmConfig::default(), Some(0), 3);
         proc.vm.state = MachineState::Ready;
         proc.owner = crate::machine::Ownership::Scheduler;
@@ -2197,7 +2230,7 @@ mod tests {
     #[test]
     fn a_retired_slot_takes_a_new_generation() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let mock = world.empty_machine(VmConfig::default(), None, 0);
         world.machines.push(mock.into());
         assert_eq!(world.generation_of(1), 0);
@@ -2219,7 +2252,7 @@ mod tests {
     #[test]
     fn a_reclaimed_slot_takes_a_new_generation() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let child = world.install_child(VmConfig::default(), 0);
         // An empty record is one the pass always keeps, because it
         // cannot tell a new machine from an abandoned one. This one
@@ -2252,7 +2285,7 @@ mod tests {
     #[test]
     fn a_failed_mock_start_returns_its_machine_slot() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         // A machine handle is holder-local, so it never crosses a
         // boundary. It stands in for any unsendable handler here.
         let handle = world.machines[0]
@@ -2295,7 +2328,7 @@ mod tests {
             ..WorldLimits::default()
         };
         let mut world =
-            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+            test_world_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
         assert!(world.new_child(0).is_some());
         assert!(world.new_child(0).is_none());
         assert_eq!(world.machine_count(), 2);
@@ -2311,7 +2344,7 @@ mod tests {
             heap_bytes: bytes,
             ..VmConfig::default()
         };
-        let mut world = World::new(&loaded, config, Box::new(NullHost));
+        let mut world = test_world(&loaded, config, Box::new(NullHost));
         let root_value = world.machines[0]
             .alloc(object.clone())
             .expect("the root heap charge fits");
@@ -2347,7 +2380,7 @@ mod tests {
             ..WorldLimits::default()
         };
         let mut world =
-            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+            test_world_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
         assert_eq!(world.run_root(), Outcome::Fault(FaultCode::OutOfFuel));
         assert_eq!(world.world_fuel(), 0);
     }
@@ -2355,7 +2388,7 @@ mod tests {
     #[test]
     fn a_terminal_intermediate_parent_keeps_policy_routing() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let middle = world.new_child(0).expect("the middle record fits");
         let leaf = world.new_child(middle).expect("the leaf record fits");
         let op = lm_abi::OP_CLOCK_NOW;
@@ -2385,7 +2418,7 @@ mod tests {
     #[test]
     fn a_terminal_world_root_denies_a_descendant_pass() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let child = world.new_child(0).expect("the child record fits");
         let op = lm_abi::OP_CLOCK_NOW;
         world.machines[0].vm.state = MachineState::Done;
@@ -2404,7 +2437,7 @@ mod tests {
     #[test]
     fn a_live_child_keeps_its_terminal_parent_record() {
         let loaded = trivial_loaded();
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut world = test_world(&loaded, VmConfig::default(), Box::new(NullHost));
         let middle = world.new_child(0).expect("the middle record fits");
         let leaf = world.new_child(middle).expect("the leaf record fits");
         world.machines[middle as usize].is_proc = true;
@@ -2427,7 +2460,7 @@ mod tests {
             ..WorldLimits::default()
         };
         let mut world =
-            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+            test_world_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
         world.trace_procs();
         world.record(TraceEvent::Pause { proc: 0 });
         world.record(TraceEvent::Resume { proc: 0 });
@@ -2442,8 +2475,8 @@ mod tests {
             heap_bytes: handle_bytes,
             ..VmConfig::default()
         };
-        let mut world = World::new(&loaded, config, Box::new(NullHost));
-        world.core.result_ok = Some(0);
+        let mut world = test_world(&loaded, config, Box::new(NullHost));
+        edit_root_core(&mut world, |core| core.result_ok = Some(0));
         assert!(matches!(
             world.prepare_restore_reply(0, 1),
             Err(FaultCode::HeapLimit)

@@ -25,13 +25,12 @@
 
 use super::{
     AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageInstance,
-    ImageLimits, ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor,
-    ImageReason, ImageRoutedRequest, ImageSlotTarget, ImageState, ImageTerminal, ImageVm,
-    ImageWaitEntry, ImageWaitSource, LoadLimits, Origin, SnapshotFail, SnapshotImage,
+    ImageLimits, ImageMachine, ImageMailbox, ImageNamespace, ImageObject, ImagePending,
+    ImagePolicyCursor, ImageReason, ImageRoutedRequest, ImageSlotTarget, ImageState, ImageTerminal,
+    ImageVm, ImageWaitEntry, ImageWaitSource, LoadLimits, Origin, SnapshotFail, SnapshotImage,
     FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES,
     SECTION_TYPES,
 };
-use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
@@ -349,7 +348,6 @@ fn section_header(image: &Image, bundle: &lm_abi::AbiBundle) -> Vec<u8> {
     // A full snapshot selects one persistent VM image. A run snapshot
     // records zero here.
     out.leb(image.full_vm.map_or(0, |image| image as u64 + 1));
-    out.hash(&image.module_semantic);
     out.hash(&image.result_type);
     out.bytes
 }
@@ -365,22 +363,41 @@ fn section_code(
         bundle,
         bad_op: None,
     };
-    out.leb(image.funcs.len() as u64);
-    for (slot, hash) in &image.funcs {
-        out.leb(*slot as u64);
-        out.hash(hash);
+    if image.artifacts.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(SnapshotFail::Fault(
+            FaultCode::MalformedState,
+            "the artifact table is not in canonical order".to_string(),
+        ));
     }
-    out.leb(image.classes.len() as u64);
-    for (slot, hash) in &image.classes {
-        out.leb(*slot as u64);
-        out.hash(hash);
+    if image
+        .namespaces
+        .windows(2)
+        .any(|pair| pair[0].artifacts >= pair[1].artifacts)
+    {
+        return Err(SnapshotFail::Fault(
+            FaultCode::MalformedState,
+            "the namespace table is not in canonical order".to_string(),
+        ));
     }
-    out.leb(image.installations.len() as u64);
-    for artifact in &image.installations {
+    out.leb(image.artifacts.len() as u64);
+    for artifact in &image.artifacts {
         out.leb(artifact.len() as u64);
         out.bytes.extend_from_slice(artifact);
         if out.over_limit() {
             return Err(SnapshotFail::LimitExceeded);
+        }
+    }
+    out.leb(image.namespaces.len() as u64);
+    for namespace in &image.namespaces {
+        if namespace.artifacts.is_empty() {
+            return Err(SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a code namespace has no artifact".to_string(),
+            ));
+        }
+        out.leb(namespace.artifacts.len() as u64);
+        for artifact in &namespace.artifacts {
+            out.leb(*artifact as u64);
         }
     }
     out.into_bytes()
@@ -577,19 +594,11 @@ fn encode_object(out: &mut Out, object: &Object) {
                 PortableCodeKind::Function => 3,
                 PortableCodeKind::Class => 4,
             });
-            out.leb(code.index as u64);
+            out.leb(code.slot.map_or(0, |slot| u64::from(slot) + 1));
             match code.origin {
                 Some(origin) => {
                     out.u8(1);
                     out.bytes.extend_from_slice(&origin);
-                }
-                None => out.u8(0),
-            }
-            match &code.interface {
-                Some(interface) => {
-                    out.u8(1);
-                    out.leb(interface.len() as u64);
-                    out.bytes.extend_from_slice(interface.as_slice());
                 }
                 None => out.u8(0),
             }
@@ -709,6 +718,7 @@ fn section_machines(
         bad_op: None,
     };
     for image in &image.vm_images {
+        out.leb(image.namespace as u64);
         encode_limits(&mut out, &image.limits);
         if image.slots.len() != image.slot_versions.len() {
             return Err(SnapshotFail::Fault(
@@ -743,26 +753,11 @@ fn section_machines(
         }
         out.leb(image.instances.len() as u64);
         for instance in &image.instances {
-            out.leb(instance.installation as u64);
-            match &instance.interface {
-                Some(interface) => {
-                    out.u8(1);
-                    out.leb(interface.len() as u64);
-                    out.bytes.extend_from_slice(interface);
-                }
-                None => out.u8(0),
-            }
-            out.hash(&instance.semantic_hash);
-            out.leb(instance.entry as u64);
-            for values in [&instance.funcs, &instance.classes, &instance.slots] {
-                out.leb(values.len() as u64);
-                for value in values {
-                    out.leb(*value as u64);
-                }
-            }
+            out.leb(instance.artifact as u64);
         }
     }
     for machine in &image.machines {
+        out.leb(machine.namespace as u64);
         out.opt(machine.parent);
         out.opt(machine.image);
         out.u8(machine.state.tag());
@@ -1148,6 +1143,7 @@ struct Ctx {
     limits: LoadLimits,
     machine_count: u32,
     image_count: u32,
+    namespace_count: u32,
     /// The number of type environment entries the image carries.
     env_count: u32,
     /// The number of closed type entries the image carries.
@@ -1162,30 +1158,28 @@ struct Ctx {
 /// admitted image and repeats nothing (specification 17.8).
 pub fn load_external(
     bytes: &[u8],
-    loaded: &LoadedModule,
+    available: Option<&lm_link::CodeNamespace>,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
-    load_external_inner(bytes, loaded, limits, None)
+    load_external_inner(bytes, available, None, limits)
 }
 
-/// Load one external container with a bounded verified-code cache.
-///
-/// Each call still decodes and admits all mutable state. The cache
-/// reuses only the latest unchanged installed code aggregate.
-pub fn load_external_cached(
+/// Load one external snapshot against a known runtime namespace.
+pub(crate) fn load_external_known(
     bytes: &[u8],
-    loaded: &LoadedModule,
+    available: std::sync::Arc<crate::NamespaceRuntime>,
+    known: Vec<std::sync::Arc<crate::NamespaceRuntime>>,
     limits: LoadLimits,
-    cache: &mut super::AdmissionCache,
 ) -> Result<SnapshotImage, ImageError> {
-    load_external_inner(bytes, loaded, limits, Some(cache))
+    let namespace = available.code_namespace().clone();
+    load_external_inner(bytes, Some(namespace.as_ref()), Some(known), limits)
 }
 
 fn load_external_inner(
     bytes: &[u8],
-    loaded: &LoadedModule,
+    available: Option<&lm_link::CodeNamespace>,
+    known: Option<Vec<std::sync::Arc<crate::NamespaceRuntime>>>,
     limits: LoadLimits,
-    cache: Option<&mut super::AdmissionCache>,
 ) -> Result<SnapshotImage, ImageError> {
     if bytes.len() > limits.max_bytes {
         return err(
@@ -1197,14 +1191,21 @@ fn load_external_inner(
             ),
         );
     }
+    let bundle = available
+        .map(|namespace| namespace.bundle().clone())
+        .unwrap_or_else(lm_abi::standard_bundle);
+    let runtime_core = available.and_then(|namespace| {
+        namespace
+            .active_unit(lm_bytecode::artifact::CORE_MODULE_PATH)
+            .cloned()
+            .map(std::sync::Arc::new)
+    });
     let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
-    let (image, hash) = decode_inner(bytes, limits, &decode_budget, loaded.bundle())?;
+    let (image, hash) = decode_inner(bytes, limits, &decode_budget, &bundle)?;
     decode_budget.charge(bytes.len(), "container copy")?;
+    let code = super::code::prepare_external(&image, runtime_core, bundle, known.as_deref())?;
     let mut admission_budget = AdmissionBudget::default();
-    let proof = match cache {
-        Some(cache) => super::admit::prove_cached(&image, loaded, &mut admission_budget, cache)?,
-        None => super::admit::prove(&image, loaded, &mut admission_budget)?,
-    };
+    let identity = super::admit::prove(&image, &code, &mut admission_budget)?;
     // The decoder accepts one byte string for one image, so the bytes
     // it received are the canonical bytes of the admitted image.
     let mut owned = Vec::new();
@@ -1218,9 +1219,9 @@ fn load_external_inner(
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::from(std::sync::Arc::new(owned)),
         world: std::sync::Arc::new(image),
-        loaded: proof.loaded,
+        code,
         hash: std::sync::OnceLock::from(hash),
-        identity: proof.identity,
+        identity,
         origin: Origin::ExternalContainer,
         byte_limit: usize::MAX,
     })
@@ -1244,8 +1245,7 @@ fn load_external_inner(
 /// check repeats the limit when the bytes appear.
 pub(super) fn from_trusted_capture(
     image: Image,
-    identity: super::AdmissionIdentity,
-    loaded: LoadedModule,
+    code: super::code::SnapshotCode,
     limit: usize,
 ) -> Result<SnapshotImage, SnapshotFail> {
     if image.resident_bytes() > limit {
@@ -1254,9 +1254,9 @@ pub(super) fn from_trusted_capture(
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::new(),
         world: std::sync::Arc::new(image),
-        loaded,
+        identity: identity_of(&code),
+        code,
         hash: std::sync::OnceLock::new(),
-        identity,
         origin: Origin::TrustedCapture,
         byte_limit: limit,
     })
@@ -1269,35 +1269,47 @@ pub(super) fn from_trusted_capture(
 pub(super) fn seal_admitted(
     image: Image,
     identity: super::AdmissionIdentity,
-    loaded: LoadedModule,
+    code: super::code::SnapshotCode,
     limit: usize,
 ) -> Result<SnapshotImage, ImageError> {
     // The encoder has two failures, and they break two rules. A
     // container past its byte limit breaks the limit rule. An
     // operation slot the manifest has not breaks the code rule, and
     // reporting it as a limit names the wrong rule.
-    let bytes =
-        encode_with_bundle(&image, limit, loaded.bundle()).map_err(|error| match error {
-            SnapshotFail::LimitExceeded => ImageError::admission(
-                ImageReason::LimitExceeded,
-                "the admitted image passes the container byte limit",
-            ),
-            SnapshotFail::Fault(_, detail) => ImageError::admission(ImageReason::Code, detail),
-            SnapshotFail::ResourceActive { kind, .. } => ImageError::admission(
-                ImageReason::State,
-                format!("the admitted image holds a live {kind} attachment"),
-            ),
-        })?;
+    let bundle = code.bundle().ok_or_else(|| {
+        ImageError::admission(ImageReason::Code, "the snapshot has no code namespace")
+    })?;
+    let bytes = encode_with_bundle(&image, limit, bundle).map_err(|error| match error {
+        SnapshotFail::LimitExceeded => ImageError::admission(
+            ImageReason::LimitExceeded,
+            "the admitted image passes the container byte limit",
+        ),
+        SnapshotFail::Fault(_, detail) => ImageError::admission(ImageReason::Code, detail),
+        SnapshotFail::ResourceActive { kind, .. } => ImageError::admission(
+            ImageReason::State,
+            format!("the admitted image holds a live {kind} attachment"),
+        ),
+    })?;
     let hash = stored_container_hash(&bytes);
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::from(std::sync::Arc::new(bytes)),
         world: std::sync::Arc::new(image),
-        loaded,
+        code,
         hash: std::sync::OnceLock::from(hash),
         identity,
         origin: Origin::ExternalContainer,
         byte_limit: limit,
     })
+}
+
+fn identity_of(code: &super::code::SnapshotCode) -> super::AdmissionIdentity {
+    super::AdmissionIdentity {
+        format: FORMAT_VERSION,
+        abi_version: lm_abi::ABI_VERSION,
+        compiler_abi: COMPILER_ABI_VERSION,
+        verifier_version: lm_verify::VERIFIER_VERSION,
+        bundle_digest: code.bundle().map_or([0; 32], |bundle| bundle.digest()),
+    }
 }
 
 /// Decode one container into editable image data.
@@ -1515,7 +1527,6 @@ fn decode_inner(
             )
         })?)
     };
-    let module_semantic = header.hash()?;
     let result_type = header.hash()?;
     if header.remaining() != 0 {
         return err(
@@ -1523,44 +1534,46 @@ fn decode_inner(
             "the header section holds extra bytes",
         );
     }
-    // Section 2: the code manifest. The decoder reads no program, so
-    // it proves the canonical ascending order alone. Admission proves
-    // that every slot exists and carries its definition hash.
+    // Section 2: the artifact table and the namespace manifests.
     let mut code = section(1);
-    let func_count = code.count(limits.max_code_slots as u64, "function")?;
-    let mut funcs: Vec<(u32, [u8; 32])> = code.vector(func_count, "function manifest")?;
-    let mut last: Option<u32> = None;
-    for _ in 0..func_count {
-        let slot = code.leb()?;
-        let hash = code.hash()?;
-        let slot = u32::try_from(slot)
-            .map_err(|_| ImageError::new(ImageReason::Code, "a function slot is too large"))?;
-        if last.is_some_and(|l| slot <= l) {
-            return err(ImageReason::Code, "the function manifest is not ascending");
-        }
-        last = Some(slot);
-        funcs.push((slot, hash));
-    }
-    let class_count = code.count(limits.max_code_slots as u64, "class")?;
-    let mut classes: Vec<(u32, [u8; 32])> = code.vector(class_count, "class manifest")?;
-    let mut last: Option<u32> = None;
-    for _ in 0..class_count {
-        let slot = code.leb()?;
-        let hash = code.hash()?;
-        let slot = u32::try_from(slot)
-            .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))?;
-        if last.is_some_and(|l| slot <= l) {
-            return err(ImageReason::Code, "the class manifest is not ascending");
-        }
-        last = Some(slot);
-        classes.push((slot, hash));
-    }
-    let installation_count = code.count(limits.max_code_slots as u64, "installation")?;
-    let mut installations = code.vector(installation_count, "installation table")?;
-    for _ in 0..installation_count {
+    let artifact_count = code.count(limits.max_code_slots as u64, "artifact")?;
+    let mut artifacts = code.vector(artifact_count, "artifact table")?;
+    for _ in 0..artifact_count {
         let length = code.count(limits.max_bytes as u64, "artifact byte")?;
         let source = code.take(length)?;
-        installations.push(code.copy_bytes(source, "installed artifact")?);
+        let artifact = code.copy_bytes(source, "artifact")?;
+        if artifacts.last().is_some_and(|last| last >= &artifact) {
+            return err(ImageReason::Code, "the artifact table is not canonical");
+        }
+        artifacts.push(artifact);
+    }
+    let namespace_count = code.count(limits.max_code_slots as u64, "namespace")?;
+    let mut namespaces: Vec<ImageNamespace> = code.vector(namespace_count, "namespace table")?;
+    for _ in 0..namespace_count {
+        let count = code.count(artifact_count as u64, "namespace artifact")?;
+        if count == 0 {
+            return err(ImageReason::Code, "a code namespace has no artifact");
+        }
+        let mut ordinals = code.vector(count, "namespace artifact table")?;
+        for _ in 0..count {
+            let ordinal = code.leb()?;
+            if ordinal >= artifact_count as u64 {
+                return err(
+                    ImageReason::Reference,
+                    "a namespace names an artifact that does not exist",
+                );
+            }
+            ordinals.push(ordinal as u32);
+        }
+        if namespaces
+            .last()
+            .is_some_and(|last| last.artifacts >= ordinals)
+        {
+            return err(ImageReason::Code, "the namespace table is not canonical");
+        }
+        namespaces.push(ImageNamespace {
+            artifacts: ordinals,
+        });
     }
     if code.remaining() != 0 {
         return err(ImageReason::Trailing, "the code section holds extra bytes");
@@ -1577,6 +1590,7 @@ fn decode_inner(
         limits,
         machine_count: machine_count as u32,
         image_count: image_count as u32,
+        namespace_count: namespace_count as u32,
         env_count: envs.len() as u32,
         type_count: types.len() as u32,
     };
@@ -1613,6 +1627,13 @@ fn decode_inner(
     let mut records = section(4);
     let mut vm_images: Vec<ImageVm> = records.vector(image_count, "VM image table")?;
     for objects in all_image_objects {
+        let namespace = records.leb()?;
+        if namespace >= namespace_count as u64 {
+            return err(
+                ImageReason::Reference,
+                "a VM image names a code namespace that does not exist",
+            );
+        }
         let limits = decode_limits(&mut records)?;
         let slot_count = records.count(ctx.limits.max_code_slots as u64, "VM slot")?;
         let mut slots = records.vector(slot_count, "VM slot table")?;
@@ -1658,51 +1679,19 @@ fn decode_inner(
         let instance_count = records.count(ctx.limits.max_code_slots as u64, "module instance")?;
         let mut instances = records.vector(instance_count, "module instance table")?;
         for _ in 0..instance_count {
-            let installation = records.leb()?;
-            if installation >= installation_count as u64 {
+            let artifact = records.leb()?;
+            if artifact >= artifact_count as u64 {
                 return err(
                     ImageReason::Reference,
-                    "a module instance names no installed artifact",
+                    "a module instance names an artifact that does not exist",
                 );
             }
-            let installation = installation as u32;
-            let interface = match records.u8()? {
-                0 => None,
-                1 => {
-                    let count = records.count(ctx.limits.max_bytes as u64, "interface byte")?;
-                    let source = records.take(count)?;
-                    Some(records.copy_bytes(source, "interface bytes")?)
-                }
-                _ => return err(ImageReason::Layout, "a module interface flag is invalid"),
-            };
-            let semantic_hash = records.hash()?;
-            let entry = u32::try_from(records.leb()?).map_err(|_| {
-                ImageError::new(ImageReason::Reference, "an instance entry is too large")
-            })?;
-            let mut read_map = |what: &str| -> Result<Vec<u32>, ImageError> {
-                let count = records.count(ctx.limits.max_code_slots as u64, what)?;
-                let mut values = records.vector(count, what)?;
-                for _ in 0..count {
-                    values.push(u32::try_from(records.leb()?).map_err(|_| {
-                        ImageError::new(
-                            ImageReason::Reference,
-                            format!("an instance {what} index is too large"),
-                        )
-                    })?);
-                }
-                Ok(values)
-            };
             instances.push(ImageInstance {
-                installation,
-                interface,
-                semantic_hash,
-                entry,
-                funcs: read_map("function relocation")?,
-                classes: read_map("class relocation")?,
-                slots: read_map("slot relocation")?,
+                artifact: artifact as u32,
             });
         }
         vm_images.push(ImageVm {
+            namespace: namespace as u32,
             limits,
             slots,
             slot_versions,
@@ -1727,13 +1716,11 @@ fn decode_inner(
             abi_version,
             compiler_abi,
             verifier_version,
-            module_semantic,
             distinguished,
             full_vm,
             result_type,
-            funcs,
-            classes,
-            installations,
+            artifacts,
+            namespaces,
             types,
             envs,
             vm_images,
@@ -2295,9 +2282,18 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                     )
                 }
             };
-            let index = u32::try_from(cur.leb()?).map_err(|_| {
-                ImageError::new(ImageReason::Reference, "a portable code index is too large")
-            })?;
+            let slot = match cur.leb()? {
+                0 => None,
+                encoded => Some(u32::try_from(encoded - 1).map_err(|_| {
+                    ImageError::new(ImageReason::Reference, "a portable slot index is too large")
+                })?),
+            };
+            if (kind == PortableCodeKind::SlotSpec) != slot.is_some() {
+                return err(
+                    ImageReason::Layout,
+                    "a portable code view has an invalid slot selection".to_string(),
+                );
+            }
             let origin = match cur.u8()? {
                 0 => None,
                 1 => {
@@ -2312,27 +2308,12 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                     )
                 }
             };
-            let interface = match cur.u8()? {
-                0 => None,
-                1 => {
-                    let count = cur.count(limits.max_bytes as u64, "interface byte")?;
-                    let source = cur.take(count)?;
-                    Some(cur.copy_bytes(source, "interface bytes")?.into())
-                }
-                _ => {
-                    return err(
-                        ImageReason::Layout,
-                        "a portable interface flag is invalid".to_string(),
-                    )
-                }
-            };
             let count = cur.count(limits.max_bytes as u64, "artifact byte")?;
             let source = cur.take(count)?;
             Object::NativeCode(Box::new(PortableCode {
                 kind,
                 bytes: cur.copy_bytes(source, "artifact bytes")?.into(),
-                interface,
-                index,
+                slot,
                 origin,
             }))
         }
@@ -2472,6 +2453,13 @@ fn decode_machine(
 ) -> Read<ImageMachine> {
     let count = objects.len() as u32;
     let limits = &ctx.limits;
+    let namespace = cur.leb()?;
+    if namespace >= ctx.namespace_count as u64 {
+        return err(
+            ImageReason::Reference,
+            "a machine names a code namespace that does not exist",
+        );
+    }
     let parent = cur.opt(ctx.machine_count as u64, "parent machine")?;
     let image = cur.opt(ctx.image_count as u64, "VM image")?;
     let state = ImageState::from_tag(cur.u8()?)
@@ -2716,6 +2704,7 @@ fn decode_machine(
         }
     };
     Ok(ImageMachine {
+        namespace: namespace as u32,
         parent,
         image,
         state,

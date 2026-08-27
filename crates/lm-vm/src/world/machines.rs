@@ -342,17 +342,18 @@ impl World {
             return None;
         }
         let config = self.machines.get(holder as usize)?.config;
+        let namespace = self.machines.get(holder as usize)?.namespace;
+        let code = self.code_of(holder).clone();
         let mut slots = Vec::new();
-        slots.try_reserve_exact(self.module.slots.len()).ok()?;
-        for (index, slot) in self.module.slots.iter().enumerate() {
-            if index >= self.base_slot_count {
-                slots.push(ImageSlotTarget::Empty);
-                continue;
-            }
-            slots.push(match slot.initial {
-                Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(func),
+        slots.try_reserve_exact(code.slots.len()).ok()?;
+        for initial in &code.slot_initials {
+            slots.push(match initial {
+                Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(*func),
                 Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
-                    ImageSlotTarget::Class { class, constructor }
+                    ImageSlotTarget::Class {
+                        class: *class,
+                        constructor: *constructor,
+                    }
                 }
                 None => ImageSlotTarget::Empty,
             });
@@ -360,6 +361,7 @@ impl World {
         if let Some(image) = self.vm_image_free.pop() {
             let record = &mut self.vm_images[image as usize];
             record.live = true;
+            record.namespace = namespace;
             record.config = config;
             record.slots = Arc::new(slots);
             record.slot_versions = vec![0; record.slots.len()];
@@ -373,6 +375,7 @@ impl World {
         self.vm_images.try_reserve(1).ok()?;
         let image = u32::try_from(self.vm_images.len()).ok()?;
         self.vm_images.push(VmImageRecord {
+            namespace,
             generation: 0,
             live: true,
             config,
@@ -403,118 +406,121 @@ impl World {
         self.vm_image_free.push(key.image);
     }
 
-    /// Install one verified linked artifact into one stopped image.
-    ///
-    /// The append linker preserves all existing numeric indices.
-    /// The method commits only after the aggregate module verifies.
+    /// Install one artifact into one stopped image.
+    #[cfg(test)]
     pub(super) fn install_artifact(
         &mut self,
         key: VmImageKey,
         artifact: SharedBytes,
-        interface: Option<SharedBytes>,
-        imports: &[lm_bytecode::append::ResolvedImport],
     ) -> Result<u32, String> {
-        self.check_slot_safepoint(key)
-            .map_err(|_| "the VM image is not at a safe installation point".to_string())?;
+        let base = self.vm_images[key.image as usize].namespace;
+        let decoded = lm_bytecode::artifact::decode_with_bundle(
+            artifact.as_slice(),
+            self.code_for_namespace(base).bundle(),
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|error| format!("the artifact did not decode: {error}"))?;
+        self.install_resolved_artifact(key, artifact, decoded)
+    }
 
-        let addition = lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
-            .map_err(|error| format!("the artifact did not decode: {error}"))?;
-        lm_verify::verify_module_with_bundle(&addition, self.loaded.bundle())
-            .map_err(|error| format!("the artifact did not verify: {error}"))?;
-        let identity =
-            lm_bytecode::identity::module_identity_with_bundle(&addition, self.loaded.bundle())
-                .map_err(|error| format!("the artifact has no semantic identity: {error}"))?;
-        let appended = lm_bytecode::append::append_resolved(&self.module, &addition, imports)?;
-        let next = crate::load_with_bundle(appended.module, self.loaded.bundle())
-            .map_err(|error| format!("the installed code did not verify: {error}"))?;
-
-        let slot_count = next.module().slots.len();
+    pub(super) fn install_resolved_artifact(
+        &mut self,
+        key: VmImageKey,
+        artifact: SharedBytes,
+        decoded: lm_bytecode::artifact::Artifact,
+    ) -> Result<u32, String> {
+        let base = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .map(|image| image.namespace)
+            .ok_or_else(|| "the VM image is not live".to_string())?;
+        let root = decoded.id();
+        let source = decoded.root().module().clone();
+        let namespace = self
+            .arena
+            .extend(base, decoded)
+            .map_err(|error| error.to_string())?;
+        let linked = self
+            .arena
+            .namespace(namespace)
+            .cloned()
+            .ok_or_else(|| "the installed namespace is missing".to_string())?;
+        let reloc = linked
+            .relocation(root)
+            .cloned()
+            .ok_or_else(|| "the installed root has no relocation".to_string())?;
+        let next = self.register_namespace(namespace)?;
+        let slot_count = next.slots.len();
         let target_index = key.image as usize;
         let instance_index = self.vm_images[target_index].instances.len();
         let instance_index = u32::try_from(instance_index)
             .map_err(|_| "the VM image has too many module instances".to_string())?;
-        let installation = u32::try_from(self.installations.len())
-            .map_err(|_| "the world has too many installations".to_string())?;
-
-        for image in &mut self.vm_images {
-            if image.live && image.slots.len() < slot_count {
-                let additional = slot_count - image.slots.len();
-                Arc::make_mut(&mut image.slots)
-                    .try_reserve_exact(additional)
-                    .map_err(|_| "the VM image has no slot capacity".to_string())?;
-                image
-                    .slot_versions
-                    .try_reserve_exact(slot_count - image.slot_versions.len())
-                    .map_err(|_| "the VM image has no slot version capacity".to_string())?;
-            }
-        }
+        let additional = slot_count.saturating_sub(self.vm_images[target_index].slots.len());
+        Arc::make_mut(&mut self.vm_images[target_index].slots)
+            .try_reserve_exact(additional)
+            .map_err(|_| "the VM image has no slot capacity".to_string())?;
+        self.vm_images[target_index]
+            .slot_versions
+            .try_reserve_exact(additional)
+            .map_err(|_| "the VM image has no slot version capacity".to_string())?;
         self.vm_images[target_index]
             .instances
             .try_reserve(1)
             .map_err(|_| "the VM image has no instance capacity".to_string())?;
-        self.installations
-            .try_reserve(1)
-            .map_err(|_| "the world has no installation capacity".to_string())?;
-
-        let binding_targets: Vec<ImageSlotTarget> = appended
-            .slot_initials
+        let binding_targets: Vec<ImageSlotTarget> = source
+            .slots
             .iter()
-            .map(|initial| match initial {
-                Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(*func),
+            .map(|slot| match slot.initial {
+                Some(lm_bytecode::SlotTarget::Function(func)) => {
+                    ImageSlotTarget::Function(reloc.functions()[func as usize])
+                }
                 Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
                     ImageSlotTarget::Class {
-                        class: *class,
-                        constructor: *constructor,
+                        class: reloc.classes()[class as usize],
+                        constructor: reloc.functions()[constructor as usize],
                     }
                 }
                 None => ImageSlotTarget::Empty,
             })
             .collect();
-
-        for image in &mut self.vm_images {
-            if image.live {
-                Arc::make_mut(&mut image.slots).resize(slot_count, ImageSlotTarget::Empty);
-                image.slot_versions.resize(slot_count, 0);
-            }
-        }
         let target = &mut self.vm_images[target_index];
+        Arc::make_mut(&mut target.slots).resize(slot_count, ImageSlotTarget::Empty);
+        target.slot_versions.resize(slot_count, 0);
         for (source, initial) in binding_targets.iter().enumerate() {
-            let slot = appended.reloc.slots[source] as usize;
+            let slot = reloc.slots()[source] as usize;
             if matches!(target.slots[slot], ImageSlotTarget::Empty) {
                 Arc::make_mut(&mut target.slots)[slot] = *initial;
             }
         }
+        target.namespace = namespace;
         target.instances.push(InstalledInstance {
-            installation,
             artifact: artifact.clone(),
-            interface,
-            semantic_hash: identity.semantic_hash,
-            entry: appended.reloc.funcs[addition.entry as usize],
-            funcs: appended.reloc.funcs.clone(),
-            classes: appended.reloc.classes,
-            slots: appended.reloc.slots,
+            entry: reloc.functions()[source.entry as usize],
+            funcs: reloc.functions().to_vec(),
+            classes: reloc.classes().to_vec(),
+            slots: reloc.slots().to_vec(),
             binding_targets,
-            exports: addition
+            exports: source
                 .exports
                 .iter()
                 .filter(|export| export.kind == lm_bytecode::ExportKind::Function)
-                .map(|export| {
-                    (
-                        export.name.clone(),
-                        appended.reloc.funcs[export.def as usize],
-                    )
-                })
+                .map(|export| (export.name.clone(), reloc.functions()[export.def as usize]))
                 .collect(),
         });
-        self.loaded = next;
-        self.module = self.loaded.module_store();
-        self.dispatch = self.loaded.dispatch_store();
-        self.execution_code = Arc::new(crate::executor::ExecutionCode::new(
-            self.module.clone(),
-            self.dispatch.clone(),
-        ));
-        self.core = self.loaded.core_layout();
-        self.installations.push(artifact);
+        for machine in &mut self.machines {
+            if machine
+                .resident
+                .as_ref()
+                .is_some_and(|machine| machine.image == Some(key))
+            {
+                machine
+                    .resident
+                    .as_mut()
+                    .expect("the tested machine is resident")
+                    .namespace = namespace;
+            }
+        }
         Ok(instance_index)
     }
 
@@ -539,8 +545,14 @@ impl World {
         slot: u32,
         target: u32,
     ) -> Result<(), FaultCode> {
-        let spec = self
-            .module
+        let namespace = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .map(|image| image.namespace)
+            .ok_or(FaultCode::InvalidVmState)?;
+        let code = self.code_for_namespace(namespace);
+        let spec = code
             .slots
             .get(slot as usize)
             .ok_or(FaultCode::TypeMismatch)?;
@@ -549,19 +561,16 @@ impl World {
             | lm_bytecode::SlotContract::Method(contract) => contract,
             _ => return Err(FaultCode::TypeMismatch),
         };
-        let func = self
-            .module
+        let func = code
             .funcs
             .get(target as usize)
             .ok_or(FaultCode::TypeMismatch)?;
-        let bounds = self
-            .module
+        let bounds = code
             .func_bounds
             .get(target as usize)
             .ok_or(FaultCode::TypeMismatch)?;
         let method_ok = !matches!(&spec.contract, lm_bytecode::SlotContract::Method(_))
-            || self
-                .module
+            || code
                 .classes
                 .iter()
                 .any(|class| class.methods.iter().any(|(_, func)| *func == target));
@@ -628,8 +637,14 @@ impl World {
         target: u32,
         target_constructor: u32,
     ) -> Result<(), FaultCode> {
-        let spec = self
-            .module
+        let namespace = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .map(|image| image.namespace)
+            .ok_or(FaultCode::InvalidVmState)?;
+        let code = self.code_for_namespace(namespace);
+        let spec = code
             .slots
             .get(slot as usize)
             .ok_or(FaultCode::TypeMismatch)?;
@@ -642,33 +657,29 @@ impl World {
         else {
             return Err(FaultCode::TypeMismatch);
         };
-        let class = self
-            .module
+        let class = code
             .classes
             .get(target as usize)
             .ok_or(FaultCode::TypeMismatch)?;
-        let contract_class = match self.module.types.get(*ty as usize) {
+        let contract_class = match code.types.get(*ty as usize) {
             Some(lm_bytecode::BcType::Class(class)) | Some(lm_bytecode::BcType::Inst(class, _)) => {
                 *class
             }
             _ => return Err(FaultCode::TypeMismatch),
         };
         let exact_class = target == contract_class;
-        let contract_class = self
-            .module
+        let contract_class = code
             .classes
             .get(contract_class as usize)
             .ok_or(FaultCode::TypeMismatch)?;
         if class.type_params != *type_params || class.key != contract_class.key {
             return Err(FaultCode::TypeMismatch);
         }
-        let function = self
-            .module
+        let function = code
             .funcs
             .get(target_constructor as usize)
             .ok_or(FaultCode::TypeMismatch)?;
-        let bounds = self
-            .module
+        let bounds = code
             .func_bounds
             .get(target_constructor as usize)
             .ok_or(FaultCode::TypeMismatch)?;
@@ -715,7 +726,7 @@ impl World {
         value: Value,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
-        self.validate_value_slot(slot, source, value)?;
+        self.validate_value_slot(key, slot, source, value)?;
         let version = self.slot_version(key, slot)?;
         let moved = self.stage_value_target(key, source, value, &[])?;
         self.commit_slot_targets(key, &[(slot, version, ImageSlotTarget::Value(moved))])
@@ -724,11 +735,19 @@ impl World {
     /// Validate one value target without changing a slot.
     pub(crate) fn validate_value_slot(
         &mut self,
+        key: VmImageKey,
         slot: u32,
         source: VmId,
         value: Value,
     ) -> Result<(), FaultCode> {
-        let ty = match self.module.slots.get(slot as usize) {
+        let namespace = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .map(|image| image.namespace)
+            .ok_or(FaultCode::InvalidVmState)?;
+        let code = self.code_for_namespace(namespace).clone();
+        let ty = match code.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Value { ty },
                 ..
@@ -742,7 +761,7 @@ impl World {
             .vm
             .heap;
         crate::typecheck::check_boundary_value(
-            crate::typecheck::BoundaryContext::new(&self.module, self.loaded.bundle(), source_heap),
+            crate::typecheck::BoundaryContext::new(code.as_ref(), code.bundle(), source_heap),
             &mut self.envs,
             &mut self.check,
             value,
@@ -788,7 +807,7 @@ impl World {
         handle: Value,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
-        let target = self.validate_process_slot(slot, holder, handle)?;
+        let target = self.validate_process_slot(key, slot, holder, handle)?;
         let version = self.slot_version(key, slot)?;
         self.commit_slot_targets(key, &[(slot, version, target)])
     }
@@ -796,11 +815,19 @@ impl World {
     /// Validate one process target without changing a slot.
     pub(crate) fn validate_process_slot(
         &mut self,
+        key: VmImageKey,
         slot: u32,
         holder: VmId,
         handle: Value,
     ) -> Result<ImageSlotTarget, FaultCode> {
-        let (message, result) = match self.module.slots.get(slot as usize) {
+        let namespace = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .map(|image| image.namespace)
+            .ok_or(FaultCode::InvalidVmState)?;
+        let code = self.code_for_namespace(namespace).clone();
+        let (message, result) = match code.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Process { message, result },
                 ..
@@ -810,7 +837,7 @@ impl World {
         let (proc, generation) = self
             .handle_proc(holder, handle)
             .ok_or(FaultCode::TypeMismatch)?;
-        if !self.process_matches_contract(proc, generation, message, result)? {
+        if !self.process_matches_contract(namespace, proc, generation, message, result)? {
             return Err(FaultCode::TypeMismatch);
         }
         Ok(ImageSlotTarget::Process { proc, generation })
@@ -867,7 +894,8 @@ impl World {
             Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
             _ => return Err(FaultCode::MalformedState),
         };
-        let ty = match self.module.slots.get(slot as usize) {
+        let code = self.code_of(vm).clone();
+        let ty = match code.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Value { ty },
                 ..
@@ -876,8 +904,8 @@ impl World {
         };
         crate::typecheck::check_boundary_value(
             crate::typecheck::BoundaryContext::new(
-                &self.module,
-                self.loaded.bundle(),
+                code.as_ref(),
+                code.bundle(),
                 &self.vm_images[key.image as usize].heap,
             ),
             &mut self.envs,
@@ -923,6 +951,7 @@ impl World {
     /// Test one process target against one closed slot contract.
     fn process_matches_contract(
         &mut self,
+        contract_namespace: lm_link::NamespaceId,
         proc: VmId,
         generation: u32,
         message: u32,
@@ -937,8 +966,9 @@ impl World {
         let Some(body_index) = machine.body_func else {
             return Ok(false);
         };
-        let body = self
-            .module
+        let process_code = self.code_of(proc).clone();
+        let contract_code = self.code_for_namespace(contract_namespace).clone();
+        let body = process_code
             .funcs
             .get(body_index as usize)
             .ok_or(FaultCode::MalformedState)?;
@@ -948,32 +978,32 @@ impl World {
         let witness = machine.witness;
         let expected_message = self
             .envs
-            .close(&self.module, message, lm_value::TypeEnvId::EMPTY)
+            .close(contract_code.as_ref(), message, lm_value::TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let expected_result = self
             .envs
-            .close(&self.module, result, lm_value::TypeEnvId::EMPTY)
+            .close(contract_code.as_ref(), result, lm_value::TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let actual_result = self
             .envs
-            .close(&self.module, body.ret, witness)
+            .close(process_code.as_ref(), body.ret, witness)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         if actual_result != expected_result {
             return Ok(false);
         }
         let receiver = self
             .envs
-            .close(&self.module, *receiver, witness)
+            .close(process_code.as_ref(), *receiver, witness)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let Some((class, args)) = self.envs.as_instance(receiver) else {
             return Ok(false);
         };
-        let Some(proc_class) = self.core.proc_class else {
+        let Some(proc_class) = self.core_for_namespace(self.namespace_of(proc)).proc_class else {
             return Err(FaultCode::MalformedState);
         };
         Ok(self
             .envs
-            .ancestor_args(&self.module, class, &args, proc_class)
+            .ancestor_args(process_code.as_ref(), class, &args, proc_class)
             .is_some_and(|args| args.as_slice() == [expected_message]))
     }
 
@@ -1027,7 +1057,12 @@ impl World {
             generation,
             self.budget.resources.clone(),
         );
-        machine.table.set_bundle(self.loaded.bundle().clone());
+        machine.namespace = parent
+            .and_then(|vm| self.machines.get(vm as usize).map(|item| item.namespace))
+            .unwrap_or(self.root_namespace);
+        machine
+            .table
+            .set_bundle(self.code_for_namespace(machine.namespace).bundle().clone());
         machine
     }
 
@@ -1057,7 +1092,8 @@ impl World {
                 return;
             }
         };
-        self.machines[vm as usize].load_frame(&self.module, func, vec![instance], Some(body), env);
+        let code = self.code_of(vm).clone();
+        self.machines[vm as usize].load_frame(code.as_ref(), func, vec![instance], Some(body), env);
     }
 
     /// Read one VM image handle out of a holder value.
@@ -1152,6 +1188,7 @@ impl World {
         let config = intersect_config(run_config, image_config);
         let target = self.install_child(config, parent);
         self.machines[target as usize].image = Some(image);
+        self.machines[target as usize].namespace = self.vm_images[image.image as usize].namespace;
         Some(target)
     }
 
@@ -1379,8 +1416,9 @@ impl World {
                     );
                     return;
                 }
+                let code = self.code_of(target).clone();
                 self.machines[target as usize].load_frame(
-                    &self.module,
+                    code.as_ref(),
                     func,
                     locals,
                     Some(closure_ref),
@@ -1671,7 +1709,7 @@ impl World {
                 let built = self.machines[sink.target as usize]
                     .alloc(Object::NativeFileHandle { resource })
                     .and_then(|handle| {
-                        self.make_instance(sink.target, self.core.result_ok, vec![handle])
+                        self.make_instance(sink.target, self.core_of(vm).result_ok, vec![handle])
                     });
                 let reply = match built {
                     Ok(reply) => reply,
@@ -1770,7 +1808,7 @@ impl World {
                         }
                     })
                     .and_then(|value| {
-                        self.make_instance(sink.target, self.core.result_ok, vec![value])
+                        self.make_instance(sink.target, self.core_of(vm).result_ok, vec![value])
                     });
                 let reply = match built {
                     Ok(reply) => reply,
@@ -1850,7 +1888,7 @@ impl World {
                 let built = self.machines[sink.target as usize]
                     .alloc(Object::NativeTcpListener { resource })
                     .and_then(|listener| {
-                        self.make_instance(sink.target, self.core.result_ok, vec![listener])
+                        self.make_instance(sink.target, self.core_of(vm).result_ok, vec![listener])
                     });
                 let reply = match built {
                     Ok(reply) => reply,
@@ -1962,7 +2000,7 @@ impl World {
                 let built = self.machines[sink.target as usize]
                     .alloc(Object::NativeTlsStream { resource })
                     .and_then(|stream| {
-                        self.make_instance(sink.target, self.core.result_ok, vec![stream])
+                        self.make_instance(sink.target, self.core_of(vm).result_ok, vec![stream])
                     });
                 let reply = match built {
                     Ok(reply) => reply,
@@ -2056,10 +2094,10 @@ impl World {
                                     "pending-operation".to_string()
                                 }
                                 crate::ResourceKind::Extension(identity) => self
-                                    .loaded
+                                    .code_of(vm)
                                     .bundle()
                                     .resource_by_identity(identity)
-                                    .and_then(|slot| self.loaded.bundle().resource(slot))
+                                    .and_then(|slot| self.code_of(vm).bundle().resource(slot))
                                     .map(|resource| resource.name.clone())
                                     .unwrap_or_else(|| "extension-resource".to_string()),
                             })

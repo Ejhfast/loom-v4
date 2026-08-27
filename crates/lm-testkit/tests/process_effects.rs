@@ -1,9 +1,9 @@
 //! Anonymous pipe and operating-system child effects.
 
-use lm_testkit::{compile_to_bytes, repo_root};
+use lm_testkit::{compile_to_bytes, publish_artifact_bytes, repo_root};
 use lm_vm::{
-    load_bytes, CompletionKey, Host, HostArg, HostChildEnv, HostCompletion, HostStart,
-    RecordingHost, VmConfig, World,
+    CompletionKey, Host, HostArg, HostChildEnv, HostCompletion, HostStart, RecordingHost, VmConfig,
+    World,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,10 +18,15 @@ fn execute(
     configure: impl FnOnce(&mut RecordingHost),
 ) -> (String, Rc<RefCell<RecordingHost>>) {
     let bytes = compile_to_bytes("process-effects.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     configure(&mut host.borrow_mut());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+    );
     for grant in grants {
         world.allow(grant).expect("the grant exists");
     }
@@ -31,9 +36,10 @@ fn execute(
 
 fn run_real(source: &str, grants: &[&str]) -> String {
     let bytes = compile_to_bytes("real-process-effects.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(lm_host::CliHost::new(1)),
     );
@@ -204,7 +210,7 @@ go()
 
     let bytes = compile_to_bytes("child-environment-overlay.lm", source)
         .expect("the overlay program compiles");
-    let loaded = load_bytes(&bytes).expect("the overlay program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the overlay program loads");
     let seen = Rc::new(RefCell::new(None));
     let mut inner = RecordingHost::new(1);
     inner.set_child_program("inspect", 0, Vec::new(), Vec::new());
@@ -212,7 +218,7 @@ go()
         inner,
         seen: Rc::clone(&seen),
     };
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world.allow("Exec").expect("the Exec grant exists");
     let outcome = lm_proc::run_world(&mut world);
 

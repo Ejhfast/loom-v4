@@ -1,7 +1,7 @@
 use lm_bytecode::interface::IfaceItem;
 use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
 fn library(path: &str, source: &str) -> lm_compiler::CompiledModule {
@@ -17,7 +17,7 @@ fn library(path: &str, source: &str) -> lm_compiler::CompiledModule {
 #[test]
 fn a_final_class_compiles_and_runs() {
     let source = "final class Token\n  value: Int = 42\nend\nToken().value\n";
-    let module = compile_text("final.lm", source).expect("the program compiles");
+    let module = compile_module_text("final.lm", source).expect("the program compiles");
     let class = module
         .classes
         .iter()
@@ -33,7 +33,7 @@ fn a_final_class_compiles_and_runs() {
 #[test]
 fn a_final_class_rejects_a_subclass() {
     let source = "final class Base\nend\nclass Child < Base\nend\n1\n";
-    let error = compile_text("final.lm", source).expect_err("the subclass rejects");
+    let error = compile_module_text("final.lm", source).expect_err("the subclass rejects");
     assert!(error.contains("E1040"), "{error}");
     assert!(error.contains("final and cannot be a parent"), "{error}");
 }
@@ -67,7 +67,7 @@ fn final_changes_both_class_contract_hashes() {
 fn a_dependent_checker_reads_final_from_the_interface() {
     let base = library("lib.base", "final class Base\nend\n");
     let mut env = CompileEnv::new();
-    env.bind_interface(base.interface).unwrap();
+    env.bind_projection(base.interface).unwrap();
     env.bind_root("lib", "lib").unwrap();
     let source = SourceFile::new(
         "app/main.lm",
@@ -82,7 +82,7 @@ fn a_dependent_checker_reads_final_from_the_interface() {
 fn the_verifier_rejects_a_final_parent() {
     let source = "class Base\n  def value(self): Int\n    1\n  end\nend\n\
                   class Child < Base\nend\nChild().value()\n";
-    let mut module = compile_text("final.lm", source).expect("the program compiles");
+    let mut module = compile_module_text("final.lm", source).expect("the program compiles");
     let base = module
         .classes
         .iter()
@@ -98,7 +98,7 @@ fn a_final_generic_method_resolves_directly() {
     let source = "final class Box[T]\n  value: T\n  def init(mut self, value: T)\n    \
                   self.value = value\n  end\n  def get(self): T\n    self.value\n  end\nend\n\
                   Box[Int](42).get()\n";
-    let module = compile_text("final_generic.lm", source).expect("the program compiles");
+    let module = compile_module_text("final_generic.lm", source).expect("the program compiles");
     let target = module
         .funcs
         .iter()

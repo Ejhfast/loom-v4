@@ -111,7 +111,7 @@ impl LinkUnit {
         bundle: &lm_abi::AbiBundle,
     ) -> Result<LinkUnit, ArtifactError> {
         let module_path = module_path.into();
-        validate_module_path(&module_path)?;
+        validate_unit_path(&module_path)?;
         canonicalize_dependencies(&mut dependencies)?;
         let identity = module_identity_with_bundle(&module, bundle)?;
         let interface = crate::interface::derive_interface_with_bundle(
@@ -153,7 +153,7 @@ impl LinkUnit {
         bundle: &lm_abi::AbiBundle,
     ) -> Result<LinkUnit, ArtifactError> {
         let module_path = module_path.into();
-        validate_module_path(&module_path)?;
+        validate_unit_path(&module_path)?;
         if interface.module_path != module_path {
             return Err(ArtifactError::InterfacePathMismatch {
                 unit: module_path,
@@ -500,6 +500,14 @@ fn validate_module_path(module_path: &str) -> Result<(), ArtifactError> {
         Ok(())
     } else {
         Err(ArtifactError::InvalidModulePath(module_path.to_string()))
+    }
+}
+
+fn validate_unit_path(module_path: &str) -> Result<(), ArtifactError> {
+    if module_path.is_empty() {
+        Ok(())
+    } else {
+        validate_module_path(module_path)
     }
 }
 

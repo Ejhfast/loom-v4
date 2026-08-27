@@ -5,9 +5,8 @@
 
 use crate::machine::{ExecError, ExecOutcome, ImageSlotTarget, Machine, VmId};
 use crate::resource::ResourceBudgetReservation;
-use crate::{DispatchRow, FaultCode};
+use crate::{DispatchRow, FaultCode, NamespaceRuntime};
 use lm_bytecode::closed::TypeEnvs;
-use lm_bytecode::Module;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -104,13 +103,24 @@ impl Drop for ExecutionFuelClaim {
 
 /// One immutable verified execution view.
 pub(crate) struct ExecutionCode {
-    module: Arc<Module>,
+    module: Arc<NamespaceRuntime>,
     dispatch: Arc<[DispatchRow]>,
 }
 
 impl ExecutionCode {
-    pub(crate) fn new(module: Arc<Module>, dispatch: Arc<[DispatchRow]>) -> ExecutionCode {
+    pub(crate) fn new(
+        module: Arc<NamespaceRuntime>,
+        dispatch: Arc<[DispatchRow]>,
+    ) -> ExecutionCode {
         ExecutionCode { module, dispatch }
+    }
+
+    pub(crate) fn module(&self) -> &Arc<NamespaceRuntime> {
+        &self.module
+    }
+
+    pub(crate) fn dispatch(&self) -> &Arc<[DispatchRow]> {
+        &self.dispatch
     }
 }
 
@@ -462,7 +472,7 @@ pub fn execute(mut lease: ExecutionLease) -> ExecutionReport {
 /// Execute one deterministic slice through borrowed state.
 pub(crate) fn execute_inline(
     machine: &mut Machine,
-    module: &Module,
+    module: &NamespaceRuntime,
     dispatch: &[DispatchRow],
     envs: &mut TypeEnvs,
     slots: Option<&[ImageSlotTarget]>,
@@ -497,7 +507,7 @@ mod tests {
         assert_send::<ExecutionToken>();
         assert_send::<Machine>();
         assert_send::<Box<Machine>>();
-        assert_send::<Arc<Module>>();
+        assert_send::<Arc<NamespaceRuntime>>();
         assert_send::<Arc<[DispatchRow]>>();
         assert_send::<Arc<ExecutionCode>>();
         assert_send::<TypeEnvs>();
@@ -515,10 +525,10 @@ mod tests {
 
     #[test]
     fn one_owned_lease_executes_on_another_thread() {
-        let module = Arc::new(Module {
+        let module = crate::unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
-            types: vec![BcType::Unit, BcType::Int],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
             interfaces: vec![],
@@ -536,7 +546,7 @@ mod tests {
                 effect_params: 0,
                 params: vec![],
                 param_muts: vec![],
-                ret: 1,
+                ret: 2,
                 row: vec![],
                 captures: vec![],
                 local_types: vec![],
@@ -546,7 +556,8 @@ mod tests {
             exports: vec![],
             bindings: vec![],
             debug: vec![],
-        });
+        })
+        .expect("the worker test unit verifies");
         let config = VmConfig {
             heap_bytes: 1024,
             ..VmConfig::default()
@@ -593,10 +604,10 @@ mod tests {
 
     #[test]
     fn a_worker_enforces_its_local_heap_limit() {
-        let module = Arc::new(Module {
+        let module = crate::unit_from_module_for_test(Module {
             strings: vec!["allocation".to_string()],
             bytes: vec![],
-            types: vec![BcType::Str],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
             interfaces: vec![],
@@ -614,7 +625,7 @@ mod tests {
                 effect_params: 0,
                 params: vec![],
                 param_muts: vec![],
-                ret: 0,
+                ret: 3,
                 row: vec![],
                 captures: vec![],
                 local_types: vec![],
@@ -624,7 +635,8 @@ mod tests {
             exports: vec![],
             bindings: vec![],
             debug: vec![],
-        });
+        })
+        .expect("the allocation test unit verifies");
         let config = VmConfig {
             heap_bytes: 1,
             ..VmConfig::default()
@@ -664,10 +676,10 @@ mod tests {
 
     #[test]
     fn the_coordinator_cancels_a_worker_drop() {
-        let module = Arc::new(Module {
+        let module = crate::unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
-            types: vec![BcType::Unit],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
             interfaces: vec![],
@@ -695,7 +707,8 @@ mod tests {
             exports: vec![],
             bindings: vec![],
             debug: vec![],
-        });
+        })
+        .expect("the resource test unit verifies");
         let config = VmConfig {
             heap_bytes: 1024,
             ..VmConfig::default()

@@ -1,15 +1,20 @@
 //! Terminal and process signal effects.
 
-use lm_testkit::{compile_text, compile_to_bytes, repo_root};
+use lm_testkit::{compile_module_text, compile_to_bytes, repo_root};
 use lm_vm::{HostSignalKind, HostStdStream, Object, RecordingHost, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 fn world(source: &str) -> (World, Rc<RefCell<RecordingHost>>) {
     let bytes = compile_to_bytes("tty-signal.lm", source).expect("the program compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    let world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+    );
     (world, host)
 }
 
@@ -353,7 +358,7 @@ fn terminal_and_signal_operations_need_rows_and_policy_grants() {
 
 #[test]
 fn the_verifier_rejects_a_forged_terminal_size_role() {
-    let mut module = compile_text("tty-role.lm", "1\n").expect("the program compiles");
+    let mut module = compile_module_text("tty-role.lm", "1\n").expect("the program compiles");
     let role = lm_bytecode::corepin::role_index("TtySize").expect("the role exists");
     let class = module.core_roles[role];
     module.classes[class as usize].fields.pop();
@@ -384,9 +389,10 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("closed-tty-signal.lm", source).expect("the program compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -408,8 +414,11 @@ go()
             .any(|entry| matches!(entry.object, Object::NativeSignalStream { resource: 0 }))
     }));
 
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the program reloads");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -446,11 +455,16 @@ fn the_termination_example_writes_an_admitted_snapshot() {
     let source = std::fs::read_to_string(path).expect("the example reads");
     let bytes =
         compile_to_bytes("checkpoint-on-termination.lm", &source).expect("the example compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .queue_signal_on_open(HostSignalKind::Terminate);
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+    );
     allow(&mut world, &["Signal", "Wait", "Vm", "Fs"]);
 
     let outcome = lm_proc::run_world(&mut world);
@@ -464,9 +478,9 @@ fn the_termination_example_writes_an_admitted_snapshot() {
         world.show_outcome(&outcome),
         format!("Done(\"saved {} bytes after termination\")", snapshot.len())
     );
-    lm_vm::snapshot::codec::load_external(
+    lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         &snapshot,
-        &loaded,
         lm_vm::snapshot::LoadLimits::default(),
     )
     .expect("the written snapshot admits");

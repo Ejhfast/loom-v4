@@ -80,16 +80,16 @@ fn an_import_slot_carries_the_pinned_identity() {
     assert_ne!(identity.semantic_hash, other_identity.semantic_hash);
 }
 
-/// An unlinked module verifies, so `lm build` can check it, and never
-/// loads, because an import slot has no body to run.
+/// An unbound unit verifies, but publication rejects its missing provider.
 #[test]
 fn an_unlinked_module_verifies_but_never_loads() {
     let module = importing_module(PIN);
     lm_verify::verify_module(&module).expect("an unlinked module verifies");
-    let error = lm_vm::load(module).expect_err("the loader admitted an unlinked module");
+    let error =
+        lm_testkit::unit_from_module(module).expect_err("publication admitted an unbound unit");
     assert!(
-        error.message.contains("unresolved import slot"),
-        "{error:?}"
+        error.contains("dependency") || error.contains("import"),
+        "{error}"
     );
 }
 

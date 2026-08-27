@@ -11,7 +11,7 @@
 //! `tests/fuzz-regressions/` holds the permanent corpus: crafted
 //! modules for known verifier findings replay on every run.
 
-use lm_testkit::{compile_to_bytes, lm_files, repo_root};
+use lm_testkit::{compile_text, lm_files, publish_artifact, repo_root};
 use lm_vm::{Vm, VmConfig};
 
 /// The largest input one fuzz case may present. The mutations never
@@ -134,7 +134,7 @@ fn exercise_module(bytes: &[u8]) {
     let Ok(module) = lm_bytecode::decode(bytes) else {
         return;
     };
-    let Ok(loaded) = lm_vm::load(module) else {
+    let Ok((arena, namespace)) = lm_testkit::unit_from_module(module) else {
         return;
     };
     let config = VmConfig {
@@ -144,7 +144,7 @@ fn exercise_module(bytes: &[u8]) {
         heap_bytes: 1 << 20,
         ..VmConfig::default()
     };
-    let mut vm = Vm::new(&loaded, config);
+    let mut vm = Vm::new(arena, namespace, config);
     let outcome = vm.run();
     let _ = vm.show_outcome(&outcome);
 }
@@ -174,7 +174,8 @@ fn mutated_modules_never_panic_the_decoder_verifier_or_vm() {
     on_supported_stack(|| {
         let mut prng = Prng(SEED);
         for (name, text) in seed_sources() {
-            let base = compile_to_bytes(&name, &text).expect("examples compile");
+            let module = lm_testkit::compile_module_text(&name, &text).expect("examples compile");
+            let base = lm_bytecode::encode(&module);
             let mut cases = Vec::with_capacity(ROUNDS);
             for round in 0..ROUNDS {
                 let mut bytes = base.clone();
@@ -215,7 +216,7 @@ end
 
 Numbers()
 "#;
-    let mut module = lm_testkit::compile_text("seed.lm", source).expect("the seed compiles");
+    let mut module = lm_testkit::compile_module_text("seed.lm", source).expect("the seed compiles");
     let iterable = module
         .interfaces
         .iter()
@@ -266,15 +267,16 @@ Numbers()
 /// The dictionary is the container itself. Every mutation starts from
 /// a real image, so the mutants reach the structural rules instead of
 /// stopping at the magic.
-fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+fn snapshot_seed() -> (lm_bytecode::artifact::Artifact, Vec<u8>) {
     use lm_vm::{RecordingHost, World};
     let path = repo_root().join("checkpoints/asked-tree.lm");
     let text = std::fs::read_to_string(&path).expect("the checkpoint source reads");
-    let bytes = compile_to_bytes(&path.display().to_string(), &text).expect("it compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("it loads");
+    let artifact = compile_text(&path.display().to_string(), &text).expect("it compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("it loads");
     let container = {
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -289,18 +291,19 @@ fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
             .expect("the image encodes")
             .to_vec()
     };
-    (loaded, container)
+    (artifact, container)
 }
 
 /// A snapshot seed with a terminal fault and retained code locations.
-fn fault_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+fn fault_snapshot_seed() -> (lm_bytecode::artifact::Artifact, Vec<u8>) {
     use lm_vm::{RecordingHost, RootEvent, World};
     let source = "def fail(value: Int): Int\n  10 / value\nend\nfail(0)\n";
-    let bytes = compile_to_bytes("fault-seed.lm", source).expect("the seed compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
+    let artifact = compile_text("fault-seed.lm", source).expect("the seed compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the seed loads");
     let container = {
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -318,7 +321,7 @@ fn fault_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
             .expect("the image encodes")
             .to_vec()
     };
-    (loaded, container)
+    (artifact, container)
 }
 
 /// Drive one restored world to a stop under a bounded slice budget.
@@ -352,7 +355,11 @@ fn drive_restored(world: &mut lm_vm::World, root: lm_vm::VmId) {
 fn mutated_snapshot_containers_never_panic_the_loader() {
     on_supported_stack(|| {
         let mut prng = Prng(SEED ^ 0x5_9a5);
-        let (loaded, base) = snapshot_seed();
+        let (artifact, base) = snapshot_seed();
+        let (available_arena, available_id) = publish_artifact(&artifact).expect("the seed loads");
+        let available = available_arena
+            .namespace(available_id)
+            .expect("the namespace exists");
         let limits = lm_vm::snapshot::LoadLimits::default();
         let mut accepted = 0usize;
         let mut sealed = 0usize;
@@ -385,12 +392,15 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
                     .expect("an accepted image encodes");
                 assert_eq!(again, bytes, "an accepted mutant has two spellings");
                 let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-                let Ok(admitted) = lm_vm::snapshot::admit(image, &loaded, &mut budget) else {
+                let Ok(admitted) = lm_vm::snapshot::admit(image, Some(available), &mut budget)
+                else {
                     continue;
                 };
                 accepted += 1;
+                let (arena, namespace) = publish_artifact(&artifact).expect("the seed loads");
                 let mut world = lm_vm::World::new(
-                    &loaded,
+                    arena,
+                    namespace,
                     VmConfig {
                         fuel: 20_000,
                         heap_bytes: 1 << 20,
@@ -514,7 +524,7 @@ fn recanonicalize(machine: &mut lm_vm::snapshot::ImageMachine) {
 /// A byte mutation almost always fails the decoder. A structural
 /// mutation states a world the decoder accepts, so admission and the
 /// interpreter answer for it instead.
-fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
+fn mutate_image_with_choice(image: &mut lm_vm::snapshot::Image, prng: &mut Prng, choice: usize) {
     use lm_value::{ObjRef, Value};
     if image.machines.is_empty() {
         return;
@@ -538,7 +548,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             _ => Value::Unit,
         }
     };
-    match prng.below(21) {
+    match choice {
         0 => {
             let m = &mut image.machines[vm];
             if !m.locals.is_empty() {
@@ -656,57 +666,37 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             }
         }
         13 => {
-            if !image.installations.is_empty() {
-                let installation = prng.below(image.installations.len());
-                if !image.installations[installation].is_empty() {
-                    let at = prng.below(image.installations[installation].len());
-                    image.installations[installation][at] ^= prng.next() as u8;
+            if !image.artifacts.is_empty() {
+                let artifact = prng.below(image.artifacts.len());
+                if !image.artifacts[artifact].is_empty() {
+                    let at = prng.below(image.artifacts[artifact].len());
+                    image.artifacts[artifact][at] ^= prng.next() as u8;
                 }
             }
         }
         14 => {
-            if !image.vm_images.is_empty() {
-                let vm_image = prng.below(image.vm_images.len());
-                let instances = &mut image.vm_images[vm_image].instances;
-                if !instances.is_empty() {
-                    let instance = prng.below(instances.len());
-                    instances[instance].installation = prng.next() as u32;
+            if !image.namespaces.is_empty() {
+                let namespace = prng.below(image.namespaces.len());
+                let artifacts = &mut image.namespaces[namespace].artifacts;
+                if !artifacts.is_empty() {
+                    let artifact = prng.below(artifacts.len());
+                    artifacts[artifact] = prng.next() as u32;
                 }
             }
         }
         15 => {
             if !image.vm_images.is_empty() {
                 let vm_image = prng.below(image.vm_images.len());
-                let instances = &mut image.vm_images[vm_image].instances;
-                if !instances.is_empty() {
-                    let instance = prng.below(instances.len());
-                    if prng.next() & 1 == 0 {
-                        instances[instance].entry = prng.next() as u32;
-                    } else {
-                        let at = prng.below(instances[instance].semantic_hash.len());
-                        instances[instance].semantic_hash[at] ^= prng.next() as u8;
-                    }
+                if prng.next() & 1 == 0 {
+                    image.vm_images[vm_image].namespace = prng.next() as u32;
+                } else if !image.vm_images[vm_image].instances.is_empty() {
+                    let instance = prng.below(image.vm_images[vm_image].instances.len());
+                    image.vm_images[vm_image].instances[instance].artifact = prng.next() as u32;
                 }
             }
         }
         16 => {
-            if !image.vm_images.is_empty() {
-                let vm_image = prng.below(image.vm_images.len());
-                let instances = &mut image.vm_images[vm_image].instances;
-                if !instances.is_empty() {
-                    let at = prng.below(instances.len());
-                    let instance = &mut instances[at];
-                    let map = match prng.below(3) {
-                        0 => &mut instance.funcs,
-                        1 => &mut instance.classes,
-                        _ => &mut instance.slots,
-                    };
-                    if !map.is_empty() {
-                        let at = prng.below(map.len());
-                        map[at] = prng.next() as u32;
-                    }
-                }
-            }
+            image.machines[vm].namespace = prng.next() as u32;
         }
         17 => {
             if !image.vm_images.is_empty() {
@@ -784,18 +774,11 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
                     changed = true;
                 }
             }
-            if !changed && !image.vm_images.is_empty() {
-                let vm_image = prng.below(image.vm_images.len());
-                let instances = &mut image.vm_images[vm_image].instances;
-                if !instances.is_empty() {
-                    let at = prng.below(instances.len());
-                    let instance = &mut instances[at];
-                    if let Some(interface) = &mut instance.interface {
-                        if !interface.is_empty() {
-                            let at = prng.below(interface.len());
-                            interface[at] ^= prng.next() as u8;
-                        }
-                    }
+            if !changed && !image.artifacts.is_empty() {
+                let artifact = prng.below(image.artifacts.len());
+                if !image.artifacts[artifact].is_empty() {
+                    let at = prng.below(image.artifacts[artifact].len());
+                    image.artifacts[artifact][at] ^= prng.next() as u8;
                 }
             }
         }
@@ -803,6 +786,12 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
     for machine in &mut image.machines {
         recanonicalize(machine);
     }
+}
+
+/// Apply one mutation that can still reach runtime admission.
+fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
+    let choice = prng.below(13);
+    mutate_image_with_choice(image, prng, choice);
 }
 
 /// Build one artifact with every slot target kind.
@@ -823,8 +812,7 @@ fn installed_slot_artifact() -> Vec<u8> {
     )
     .expect("the installed fuzz artifact compiles");
     let path = compiled.path;
-    let interface = compiled.interface;
-    let module = compiled.module;
+    let mut module = compiled.module;
     let step = module
         .exports
         .iter()
@@ -837,7 +825,6 @@ fn installed_slot_artifact() -> Vec<u8> {
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
         .expect("the class is exported")
         .clone();
-    let constructor_name = module.funcs[class.ctor as usize].name.clone();
     assert!(module
         .slots
         .iter()
@@ -847,13 +834,6 @@ fn installed_slot_artifact() -> Vec<u8> {
             class: class.def,
             constructor: class.ctor,
         })));
-    let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
-    link_env
-        .bind_module(path, module, interface)
-        .expect("the fuzz module binds");
-    let mut module = lm_compiler::link("fuzz-slots", &link_env.freeze())
-        .expect("the fuzz module links")
-        .module;
     let int = module
         .types
         .iter()
@@ -878,42 +858,25 @@ fn installed_slot_artifact() -> Vec<u8> {
         },
         initial: None,
     });
-    let step = module
-        .funcs
-        .iter()
-        .position(|function| function.name == "step")
-        .expect("the linked function exists") as u32;
-    let class = module
-        .classes
-        .iter()
-        .position(|candidate| candidate.name == "Box")
-        .expect("the linked class exists") as u32;
-    let constructor = module
-        .funcs
-        .iter()
-        .position(|function| function.name == constructor_name)
-        .expect("the linked constructor exists") as u32;
-    module.exports.push(lm_bytecode::Export {
-        kind: lm_bytecode::ExportKind::Function,
-        name: "step".to_string(),
-        def: step,
-        ctor: lm_bytecode::NO_CTOR,
-    });
-    module.exports.push(lm_bytecode::Export {
-        kind: lm_bytecode::ExportKind::Class,
-        name: "Box".to_string(),
-        def: class,
-        ctor: constructor,
-    });
     lm_verify::verify_module(&module).expect("the installed fuzz artifact verifies");
-    lm_bytecode::encode(&module)
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let dependency = lm_bytecode::artifact::ArtifactDependency::new(
+        lm_bytecode::artifact::CORE_MODULE_PATH,
+        core.id(),
+    )
+    .expect("the core dependency is valid");
+    let root = lm_bytecode::artifact::LinkUnit::from_module(path, module, vec![dependency])
+        .expect("the fuzz unit builds");
+    let artifact =
+        lm_bytecode::artifact::Artifact::new(root, Vec::new()).expect("the fuzz artifact builds");
+    lm_bytecode::artifact::encode(&artifact).expect("the fuzz artifact encodes")
 }
 
 /// A second seed with installed code and every live slot target.
 ///
 /// The root also keeps ordinary collections and live locals. Admitted
 /// mutants can therefore reach both restored code state and execution.
-fn ready_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+fn ready_snapshot_seed() -> (lm_bytecode::artifact::Artifact, Vec<u8>) {
     use lm_vm::{RecordingHost, RootEvent, World};
     let artifact = installed_slot_artifact();
     let source = r#"
@@ -1032,13 +995,13 @@ end
 
 go()
 "#;
-    let bytes = compile_to_bytes("ready.lm", source).expect("the seed compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
+    let program = compile_text("ready.lm", source).expect("the seed compiles");
+    let (arena, namespace) = publish_artifact(&program).expect("the seed loads");
     let container = {
         let host = std::rc::Rc::new(std::cell::RefCell::new(RecordingHost::new(1)));
         host.borrow_mut()
             .set_file("fuzz-slots.lmbc", artifact.clone());
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+        let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
         for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
             world.allow(grant).expect("the grant names a target");
         }
@@ -1101,7 +1064,7 @@ go()
             panic!("no boundary holds every slot target; last event: {last_event}")
         })
     };
-    (loaded, container)
+    (program, container)
 }
 
 /// Every structural mutant decodes, admits or rejects, restores, and
@@ -1118,26 +1081,36 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
         let mut admitted_count = 0usize;
         let mut restored_count = 0usize;
         let mut ran_count = 0usize;
-        for (loaded, base, grants, rounds) in [
+        for (artifact, base, grants, rounds) in [
             {
-                let (loaded, base) = snapshot_seed();
-                (loaded, base, &["Proc", "Vm", "Clock"][..], ROUNDS * 4)
+                let (artifact, base) = snapshot_seed();
+                (artifact, base, &["Proc", "Vm", "Clock"][..], ROUNDS * 4)
             },
             {
-                let (loaded, base) = ready_snapshot_seed();
-                (loaded, base, &["Fs", "Vm", "Proc"][..], RICH_IMAGE_ROUNDS)
+                let (artifact, base) = ready_snapshot_seed();
+                (artifact, base, &["Fs", "Vm", "Proc"][..], RICH_IMAGE_ROUNDS)
             },
             {
-                let (loaded, base) = fault_snapshot_seed();
-                (loaded, base, &[][..], RICH_IMAGE_ROUNDS)
+                let (artifact, base) = fault_snapshot_seed();
+                (artifact, base, &[][..], RICH_IMAGE_ROUNDS)
             },
         ] {
-            let seed_image = lm_vm::snapshot::codec::load_external(&base, &loaded, limits)
+            let seed_image = lm_testkit::load_snapshot_for_artifact(&artifact, &base, limits)
                 .expect("the seed admits")
                 .into_image();
             // A valid seed can exceed the general byte limit as core grows.
             // Structural mutations cannot change collection lengths.
             let case_limit = MAX_CASE_BYTES.max(base.len().saturating_add(64));
+            for choice in 13..21 {
+                for _ in 0..4 {
+                    let mut image = seed_image.clone();
+                    mutate_image_with_choice(&mut image, &mut prng, choice);
+                    let Ok(bytes) = lm_vm::snapshot::codec::encode(&image, case_limit) else {
+                        continue;
+                    };
+                    let _ = lm_testkit::load_snapshot_for_artifact(&artifact, &bytes, limits);
+                }
+            }
             for _round in 0..rounds {
                 let started = std::time::Instant::now();
                 let mut image = seed_image.clone();
@@ -1153,15 +1126,18 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
                     bytes.len(),
                     base.len()
                 );
-                let Ok(admitted) = lm_vm::snapshot::codec::load_external(&bytes, &loaded, limits)
+                let Ok(admitted) =
+                    lm_testkit::load_snapshot_for_artifact(&artifact, &bytes, limits)
                 else {
                     continue;
                 };
                 admitted_count += 1;
                 // The heap cap includes installed core objects.
                 // The fuel cap bounds mutant execution.
+                let (arena, namespace) = publish_artifact(&artifact).expect("the seed loads");
                 let mut world = lm_vm::World::new(
-                    &loaded,
+                    arena,
+                    namespace,
                     VmConfig {
                         fuel: 20_000,
                         heap_bytes: 2 << 20,
@@ -1260,7 +1236,7 @@ fn mutated_interfaces_never_panic_the_decoder() {
             false,
         )
         .expect("the seed compiles");
-        let base = compiled.interface_bytes;
+        let base = encode_interface(&compiled.interface);
         for _ in 0..ROUNDS {
             let mut bytes = base.clone();
             for _ in 0..=prng.below(3) {
@@ -1323,7 +1299,7 @@ fn the_regression_corpus_replays() {
                         let module = decoded
                             .unwrap_or_else(|e| panic!("{} must decode: {e}", path.display()));
                         assert!(
-                            lm_vm::load(module).is_err(),
+                            lm_verify::verify_module(&module).is_err(),
                             "{} was accepted",
                             path.display()
                         );
@@ -1333,7 +1309,7 @@ fn the_regression_corpus_replays() {
                 Some("lm") => {
                     let text =
                         String::from_utf8_lossy(&std::fs::read(&path).expect("reads")).into_owned();
-                    let _ = lm_testkit::compile_text(&path.display().to_string(), &text);
+                    let _ = lm_testkit::compile_module_text(&path.display().to_string(), &text);
                     sources += 1;
                 }
                 Some("lms") => {
@@ -1341,10 +1317,10 @@ fn the_regression_corpus_replays() {
                     // program the container names. The valid seed
                     // loads; every other seed rejects at the loader.
                     let bytes = std::fs::read(&path).expect("corpus case reads");
-                    let (loaded, _) = snapshot_seed();
-                    let out = lm_vm::snapshot::codec::load_external(
+                    let (artifact, _) = snapshot_seed();
+                    let out = lm_testkit::load_snapshot_for_artifact(
+                        &artifact,
                         &bytes,
-                        &loaded,
                         lm_vm::snapshot::LoadLimits::default(),
                     );
                     let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -1503,7 +1479,7 @@ fn regenerate_fuzz_corpus() {
     // Week-4 finding class: a perform outside the claimed row, and a
     // first-class operation type with a forged signature.
     let source = "def greet(name: String) with Io.Write\n  print(name)\nend\ngreet(\"x\")\n";
-    let mut module = lm_testkit::compile_text("seed.lm", source).expect("seed compiles");
+    let mut module = lm_testkit::compile_module_text("seed.lm", source).expect("seed compiles");
     let greet = module
         .funcs
         .iter()
@@ -1512,7 +1488,7 @@ fn regenerate_fuzz_corpus() {
     module.funcs[greet].row.clear();
     write("perform-outside-claimed-row.lmbc", &module);
     let source = "def f() with Io.Write\n  p = sys.io.write\n  p(b\"x\")\nend\nf()\n";
-    let mut module = lm_testkit::compile_text("seed.lm", source).expect("seed compiles");
+    let mut module = lm_testkit::compile_module_text("seed.lm", source).expect("seed compiles");
     for ty in &mut module.types {
         if let BcType::Op(_, f) = ty {
             *f = 2;
@@ -1585,10 +1561,10 @@ fn regenerate_fuzz_corpus() {
     // Snapshot container seeds: one valid machine world and one
     // world whose heap is not in canonical traversal order.
     {
-        let (loaded, container) = snapshot_seed();
+        let (artifact, container) = snapshot_seed();
         std::fs::write(dir.join("snapshot-world.lms"), &container).expect("corpus writes");
         let limits = lm_vm::snapshot::LoadLimits::default();
-        let image = lm_vm::snapshot::codec::load_external(&container, &loaded, limits)
+        let image = lm_testkit::load_snapshot_for_artifact(&artifact, &container, limits)
             .expect("the seed loads")
             .into_image();
         let mut broken = image.clone();
@@ -1609,7 +1585,7 @@ fn regenerate_fuzz_corpus() {
         let bad =
             lm_vm::snapshot::codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
         assert!(
-            lm_vm::snapshot::codec::load_external(&bad, &loaded, limits).is_err(),
+            lm_testkit::load_snapshot_for_artifact(&artifact, &bad, limits).is_err(),
             "the swapped-root seed must reject"
         );
         std::fs::write(dir.join("snapshot-swapped-roots.lms"), &bad).expect("corpus writes");

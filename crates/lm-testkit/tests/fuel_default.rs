@@ -5,8 +5,9 @@
 //! root program must not take an instruction cap it never asked for.
 //! A caller that runs code it does not trust states a bound instead.
 
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, run_world};
-use lm_vm::{load_bytes, NullHost, VmConfig, World, WorldLimits};
+use lm_vm::{NullHost, VmConfig, World, WorldLimits};
 
 /// Both budgets default to the largest value: the budget of one
 /// machine, and the budget every machine of one world shares.
@@ -27,8 +28,8 @@ fn both_default_budgets_are_the_largest_value() {
 fn a_program_under_the_default_retires_with_no_cap() {
     let source = "i = 0\nwhile i < 2000\n  i = i + 1\nend\ni\n";
     let bytes = compile_to_bytes("fuel.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(NullHost));
     let before = world.world_fuel();
     let outcome = world.run_root();
     let retired = before - world.world_fuel();

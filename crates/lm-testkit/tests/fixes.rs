@@ -3,8 +3,8 @@
 //! `mut` markers in function types, the constructor-collision note,
 //! and nested exact-arm exhaustiveness.
 
-use lm_testkit::{compile_text, run_allowed, run_text};
-use lm_vm::{LoadError, RecordingHost, VmConfig, World};
+use lm_testkit::{compile_module_text, run_allowed, run_text};
+use lm_vm::{RecordingHost, VmConfig, World};
 
 fn run(source: &str) -> String {
     run_text("fixes.lm", source, VmConfig::default()).unwrap()
@@ -15,7 +15,7 @@ fn allowed(source: &str, allow: &[&str]) -> String {
 }
 
 fn expect_error(source: &str, needle: &str) {
-    let rendered = compile_text("fixes.lm", source).unwrap_err();
+    let rendered = compile_module_text("fixes.lm", source).unwrap_err();
     assert!(
         rendered.contains(needle),
         "expected `{needle}` in:\n{rendered}"
@@ -60,9 +60,11 @@ fn a_deliberate_fault_keeps_its_message_and_source() {
     let source = "value = 1\npanic(\"the item is missing\")\n";
     let bytes =
         lm_testkit::compile_to_bytes("panic-source.lm", source).expect("the program compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the program verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -161,15 +163,14 @@ fn widened_local_reassigned_in_a_loop() {
 
 fn widened_module() -> lm_bytecode::Module {
     let source = format!("{ANIMALS}a: Animal = Dog()\nif a is Cat\n  1\nelse\n  2\nend\n");
-    compile_text("fixes.lm", &source).unwrap()
+    compile_module_text("fixes.lm", &source).unwrap()
 }
 
 fn expect_load_reject(module: &lm_bytecode::Module, needle: &str) {
-    let bytes = lm_bytecode::encode(module);
-    match lm_vm::load_bytes(&bytes) {
-        Err(LoadError::Verify(e)) => {
-            assert!(e.message.contains(needle), "wrong rejection: {e}");
-        }
+    let result = lm_testkit::artifact_with_core_from_module("fixes", module.clone())
+        .and_then(|artifact| lm_testkit::publish_artifact(&artifact).map(|_| ()));
+    match result {
+        Err(error) => assert!(error.contains(needle), "wrong rejection: {error}"),
         other => panic!("expected a verifier rejection with `{needle}`, got {other:?}"),
     }
 }
@@ -216,7 +217,7 @@ fn out_of_range_local_type_entry_is_rejected() {
 #[test]
 fn local_type_table_shorter_than_parameters_is_rejected() {
     let source = "def double(n: Int): Int\n  if n == 0\n    0\n  else\n    double(n - 1) + 2\n  end\nend\ndouble(4)\n";
-    let mut with_params = compile_text("fixes.lm", source).unwrap();
+    let mut with_params = compile_module_text("fixes.lm", source).unwrap();
     let f = with_params
         .funcs
         .iter()
@@ -225,7 +226,7 @@ fn local_type_table_shorter_than_parameters_is_rejected() {
     with_params.funcs[f].local_types.clear();
     expect_load_reject(&with_params, "more parameters than local slots");
     // A wrong parameter prefix is also rejected.
-    let mut wrong_prefix = compile_text("fixes.lm", source).unwrap();
+    let mut wrong_prefix = compile_module_text("fixes.lm", source).unwrap();
     let f = wrong_prefix
         .funcs
         .iter()
@@ -573,7 +574,7 @@ fn forged_fn_type_mut_flag_is_rejected() {
     // encoded module. The stored closure type then differs from the
     // real one, so the verifier rejects the module.
     let source = "f = { |mut ys: [Int]|: () ys.push(1) }\nxs: [Int] = []\nf(xs)\nxs.len()\n";
-    let mut module = compile_text("fixes.lm", source).unwrap();
+    let mut module = compile_module_text("fixes.lm", source).unwrap();
     let mut hit = false;
     for ty in &mut module.types {
         if let lm_bytecode::BcType::Fn(_, muts, _, _) = ty {
@@ -590,7 +591,7 @@ fn forged_fn_type_mut_flag_is_rejected() {
 #[test]
 fn invalid_mut_flag_byte_is_rejected_by_the_decoder() {
     let source = "f = { |mut ys: [Int]|: () ys.push(1) }\n1\n";
-    let bytes = lm_bytecode::encode(&compile_text("fixes.lm", source).unwrap());
+    let bytes = lm_bytecode::encode(&compile_module_text("fixes.lm", source).unwrap());
     // Flip every byte to 2 in turn; at least one position must be a
     // mut flag and fail with the flag error.
     let mut rejected = false;

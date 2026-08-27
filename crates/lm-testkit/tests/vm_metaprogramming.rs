@@ -1,11 +1,12 @@
 //! Reified compiler and VM integration.
 
-use lm_compiler::{compile_module_with_options, core_link_env, link, CompileEnv, CompileOptions};
+use lm_compiler::{compile_module_with_options, core_link_env, CompileEnv, CompileOptions};
 use lm_host::CliHost;
 use lm_source::SourceFile;
 use lm_testkit::compile_to_bytes;
-use lm_vm::snapshot::{codec, LoadLimits, SnapshotFail};
-use lm_vm::{load_bytes, RecordingHost, RootEvent, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::snapshot::{LoadLimits, SnapshotFail};
+use lm_vm::{RecordingHost, RootEvent, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -19,12 +20,12 @@ fn run_with_files_and_grants(
     extra_grants: &[&str],
 ) -> String {
     let bytes = compile_to_bytes("meta.lm", source).expect("the test program compiles");
-    let loaded = load_bytes(&bytes).expect("the test program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     for (name, bytes) in files {
         host.borrow_mut().set_file(*name, bytes.clone());
     }
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -37,8 +38,13 @@ fn run_with_files_and_grants(
 
 fn run_with_compiler(source: &str) -> String {
     let bytes = compile_to_bytes("meta-compiler.lm", source).expect("the test program compiles");
-    let loaded = load_bytes(&bytes).expect("the test program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
     for grant in ["Compiler", "Reflect", "Vm"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -138,9 +144,10 @@ execute()
 fn a_fault_trace_survives_an_external_snapshot() {
     let source = "def fail(value: Int): Int\n  10 / value\nend\nfail(0)\n";
     let bytes = compile_to_bytes("fault-snapshot.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -152,14 +159,16 @@ fn a_fault_trace_survives_an_external_snapshot() {
     let captured = world
         .capture_snapshot(gate, 0, false)
         .expect("the faulted machine captures");
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -202,15 +211,20 @@ def execute(): Bool with Vm
   end
 end
 
-execute()
+    execute()
 "#;
     let bytes = compile_to_bytes("stripped-fault.lm", source).expect("the program compiles");
-    let mut module = lm_bytecode::decode(&bytes).expect("the program decodes");
+    let artifact = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+    let mut module = artifact.root().module().clone();
     module.debug.clear();
     lm_verify::verify_module(&module).expect("the stripped program verifies");
-    let loaded = load_bytes(&lm_bytecode::encode(&module)).expect("the program loads");
+    let artifact =
+        lm_testkit::replace_artifact_root(&artifact, module).expect("the stripped artifact builds");
+    let bytes = lm_bytecode::artifact::encode(&artifact).expect("the artifact encodes");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1034,8 +1048,9 @@ fn syntax_view_hierarchy_rejects_user_subclasses() {
 
 #[test]
 fn verifier_rejects_direct_native_code_handle_allocation() {
-    let mut module = lm_testkit::compile_text("native-code-forgery.lm", "0\n")
-        .expect("the seed program compiles");
+    let mut module =
+        lm_testkit::compile_module_text("native-code-forgery.lm", "sys.vm.artifact(Bytes())\n")
+            .expect("the seed program compiles");
     let class = module.core_roles[lm_bytecode::corepin::ROLE_ARTIFACT];
     let entry = module.entry as usize;
     module.funcs[entry].blocks = vec![vec![
@@ -1043,7 +1058,11 @@ fn verifier_rejects_direct_native_code_handle_allocation() {
         lm_bytecode::Instr::Return,
     ]];
     let error = lm_verify::verify_module(&module).expect_err("the verifier rejects the forgery");
-    assert!(error.message.contains("native core class"));
+    assert!(
+        error.message.contains("native core class"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
@@ -1769,8 +1788,13 @@ execute()
 "#;
     let bytes =
         compile_to_bytes("snapshot-runtime-links.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
     for grant in ["Compiler", "Vm"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -1795,7 +1819,13 @@ execute()
         }
         let gate = world.next_gate();
         match world.capture_snapshot(gate, 0, false) {
-            Ok(image) if image.world().installations.len() == 2 => {
+            Ok(image)
+                if image
+                    .world()
+                    .vm_images
+                    .iter()
+                    .any(|record| record.instances.len() == 2) =>
+            {
                 captured = Some(image);
                 break;
             }
@@ -1804,14 +1834,16 @@ execute()
         }
     }
     let captured = captured.expect("a boundary follows both installations");
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the linked snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1878,8 +1910,13 @@ options = CompileOptions(
 sys.compiler.compile("blocked", "blocked.lm", "1\n", env, options)
 "#;
     let bytes = compile_to_bytes("blocked-compiler.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
     let outcome = lm_proc::run_world(&mut world);
     assert_eq!(format!("{outcome:?}"), "Fault(PolicyDenied)");
 }
@@ -1948,7 +1985,7 @@ fn revision_artifact(body: &str) -> Vec<u8> {
         &CompileOptions::new().late_function("step"),
     )
     .expect("the revision compiles");
-    lm_bytecode::encode(&compiled.module)
+    lm_testkit::encode_compiled_artifact(compiled).expect("the revision artifact encodes")
 }
 
 #[test]
@@ -2061,7 +2098,7 @@ fn class_revision_artifact(default: i64, increment: i64) -> Vec<u8> {
         &CompileOptions::new().late_class("Box"),
     )
     .expect("the class revision compiles");
-    lm_bytecode::encode(&compiled.module)
+    lm_testkit::encode_compiled_artifact(compiled).expect("the class artifact encodes")
 }
 
 fn proc_class_revision_artifact(default: i64, increment: i64) -> Vec<u8> {
@@ -2091,7 +2128,7 @@ worker
         &CompileOptions::new().late_class("Worker"),
     )
     .expect("the proc class revision compiles");
-    lm_bytecode::encode(&compiled.module)
+    lm_testkit::encode_compiled_artifact(compiled).expect("the proc class artifact encodes")
 }
 
 fn proc_revision_artifact(body: &str) -> Vec<u8> {
@@ -2119,7 +2156,7 @@ worker
         &CompileOptions::new().late_function("step"),
     )
     .expect("the proc revision compiles");
-    lm_bytecode::encode(&compiled.module)
+    lm_testkit::encode_compiled_artifact(compiled).expect("the proc artifact encodes")
 }
 
 fn live_proc_revision_artifact(body: &str) -> Vec<u8> {
@@ -2154,7 +2191,7 @@ worker
         &CompileOptions::new().late_function("step"),
     )
     .expect("the live proc revision compiles");
-    lm_bytecode::encode(&compiled.module)
+    lm_testkit::encode_compiled_artifact(compiled).expect("the live proc artifact encodes")
 }
 
 fn complete_slot_artifact() -> Vec<u8> {
@@ -2219,7 +2256,8 @@ fn complete_slot_artifact() -> Vec<u8> {
         initial: None,
     });
     lm_verify::verify_module(&module).expect("the complete slot artifact verifies");
-    lm_bytecode::encode(&module)
+    lm_testkit::encode_artifact_with_core_from_module("slot-kinds", module)
+        .expect("the complete slot artifact encodes")
 }
 
 #[test]
@@ -2615,12 +2653,12 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("image-proc-host.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("first-proc.lmbc", first.clone());
     host.borrow_mut()
         .set_file("second-proc.lmbc", second.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -2637,9 +2675,9 @@ execute()
         .collect();
     assert!(!procs.is_empty());
     assert!(procs.iter().all(|machine| machine.image == Some(full_vm)));
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         image.bytes().expect("the proc snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the proc snapshot admits");
@@ -3050,11 +3088,11 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("slot-kinds-host.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("slot-kinds.lmbc", artifact.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3142,11 +3180,11 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("value-change.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("slot-kinds.lmbc", artifact.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3254,11 +3292,11 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("process-change.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("slot-kinds.lmbc", artifact.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3344,10 +3382,10 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("full-vm-host.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("full-vm.lmbc", artifact.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3359,16 +3397,16 @@ execute()
     assert_eq!(image.world().distinguished, None);
     assert_eq!(image.world().full_vm, Some(0));
     assert_eq!(image.world().machines.len(), 1);
-    assert_eq!(image.world().installations.len(), 1);
-    let admitted = codec::load_external(
+    assert_eq!(image.world().vm_images[0].instances.len(), 1);
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         image.bytes().expect("the full snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the external full snapshot admits");
     assert_eq!(admitted.world().distinguished, None);
     assert_eq!(admitted.world().full_vm, Some(0));
-    assert_eq!(admitted.world().installations.len(), 1);
+    assert_eq!(admitted.world().vm_images[0].instances.len(), 1);
 }
 
 #[test]
@@ -3423,9 +3461,10 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("guest-load.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut seed = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3437,7 +3476,8 @@ execute()
 
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("seed.lms", snapshot);
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3514,11 +3554,11 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("snapshot-code.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("installed.lmbc", artifact.clone());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -3535,7 +3575,13 @@ execute()
         }
         let gate = world.next_gate();
         match world.capture_snapshot(gate, 0, false) {
-            Ok(image) if !image.world().installations.is_empty() => {
+            Ok(image)
+                if image
+                    .world()
+                    .vm_images
+                    .iter()
+                    .any(|record| !record.instances.is_empty()) =>
+            {
                 captured = Some(image);
                 break;
             }
@@ -3544,18 +3590,19 @@ execute()
         }
     }
     let captured = captured.expect("a boundary follows installation");
-    assert_eq!(captured.world().installations.len(), 1);
     assert_eq!(captured.world().vm_images.len(), 1);
     assert_eq!(captured.world().vm_images[0].instances.len(), 1);
 
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the external snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3644,9 +3691,10 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("snapshot-bindings.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3681,7 +3729,8 @@ execute()
         }
     }
     let captured = captured.expect("a boundary follows the binding replacement");
-    assert_eq!(captured.world().installations.len(), 1);
+    // Each selected definition carries one exact artifact.
+    assert_eq!(captured.world().vm_images[0].instances.len(), 3);
     let kinds: Vec<_> = captured
         .world()
         .machines
@@ -3701,14 +3750,16 @@ execute()
         .flat_map(|machine| &machine.objects)
         .any(|entry| matches!(&entry.object, lm_heap::Object::NativeSlotChange { .. })));
 
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the external snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3740,15 +3791,18 @@ fn a_dynamic_result_survives_an_external_snapshot() {
         &CompileOptions::new().dynamic_result(),
     )
     .expect("the dynamic source compiles");
+    let path = compiled.path.clone();
     let mut links = core_link_env().expect("the core link environment builds");
-    links
-        .bind_module(compiled.path.clone(), compiled.module, compiled.interface)
-        .expect("the dynamic module binds");
-    let linked = link(&compiled.path, &links.freeze()).expect("the dynamic module links");
-    let bytes = lm_bytecode::encode(&linked.module);
-    let loaded = load_bytes(&bytes).expect("the dynamic program loads");
+    lm_testkit::bind_compiled_unit(&mut links, compiled).expect("the dynamic module binds");
+    let artifact = links
+        .freeze()
+        .artifact(&path)
+        .expect("the dynamic artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the dynamic program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3759,14 +3813,17 @@ fn a_dynamic_result_survives_an_external_snapshot() {
     let captured = world
         .capture_snapshot(gate, 0, false)
         .expect("the dynamic result captures");
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact(
+        &artifact,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the dynamic snapshot admits");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the dynamic program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -3803,8 +3860,13 @@ end
 execute()
 "#;
     let bytes = compile_to_bytes("snapshot-syntax.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
     world.allow("Reflect").expect("the grant exists");
     for _ in 0..100 {
         match world.step_root() {
@@ -3820,14 +3882,16 @@ execute()
     let captured = world
         .capture_snapshot(gate, 0, false)
         .expect("the syntax value captures");
-    let admitted = codec::load_external(
+    let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         captured.bytes().expect("the snapshot encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the syntax snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

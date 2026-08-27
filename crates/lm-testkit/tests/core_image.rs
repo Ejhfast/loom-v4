@@ -18,6 +18,12 @@ fn compile_with_prelude(text: &str, prelude: bool) -> Vec<u8> {
     lm_bytecode::encode(&lower_module(&hir))
 }
 
+fn compile_artifact_with_prelude(text: &str, prelude: bool) -> Vec<u8> {
+    let module = lm_bytecode::decode(&compile_with_prelude(text, prelude)).expect("decodes");
+    let artifact = lm_testkit::artifact_from_module(module).expect("the artifact builds");
+    lm_bytecode::artifact::encode(&artifact).expect("the artifact encodes")
+}
+
 #[test]
 fn core_image_recompiles_byte_identically() {
     let a = lm_bytecode::encode(&lm_hir::core_image());
@@ -173,9 +179,9 @@ fn prelude_membership_does_not_change_core_identity() {
 #[test]
 fn get_returns_core_option_without_the_prelude() {
     let program = "xs = [1, 2]\nxs.get(0).is_some()\n";
-    let bytes = compile_with_prelude(program, false);
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
-    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let bytes = compile_artifact_with_prelude(program, false);
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
+    let mut vm = lm_vm::Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(true)");
 }
@@ -204,9 +210,9 @@ fn prelude_controls_only_unqualified_names() {
 fn user_definitions_shadow_the_prelude() {
     let program = "enum Option\n  Empty\n  Full(v: Int)\nend\n\
                    x: Option = Full(3)\ncase x\nin Full(v) then v\nin Empty then 0\nend\n";
-    let bytes = compile_with_prelude(program, true);
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
-    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let bytes = compile_artifact_with_prelude(program, true);
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
+    let mut vm = lm_vm::Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(3)");
 }

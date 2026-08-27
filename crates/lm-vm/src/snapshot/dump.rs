@@ -54,24 +54,24 @@ pub fn dump_image(world: &Image) -> String {
         "format {} abi {} compiler {} verifier {}",
         world.format, world.abi_version, world.compiler_abi, world.verifier_version
     );
-    let _ = writeln!(out, "module {}", hex(&world.module_semantic));
     let _ = writeln!(out, "distinguished-run {:?}", world.distinguished);
     let _ = writeln!(out, "full-VM {:?}", world.full_vm);
     let _ = writeln!(out, "result-type {}", hex(&world.result_type));
     let _ = writeln!(out, "{}", verdict(world));
-    for (slot, hash) in &world.funcs {
-        let _ = writeln!(out, "func {slot} {}", hex(hash));
-    }
-    for (slot, hash) in &world.classes {
-        let _ = writeln!(out, "class {slot} {}", hex(hash));
-    }
-    for (ordinal, artifact) in world.installations.iter().enumerate() {
+    for (ordinal, artifact) in world.artifacts.iter().enumerate() {
         let hash = lm_bytecode::identity::container_hash(artifact);
         let _ = writeln!(
             out,
-            "installation {ordinal} bytes {} hash {}",
+            "artifact {ordinal} bytes {} hash {}",
             artifact.len(),
             hex(&hash)
+        );
+    }
+    for (ordinal, namespace) in world.namespaces.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "namespace {ordinal} artifacts {:?}",
+            namespace.artifacts
         );
     }
     let _ = writeln!(
@@ -83,7 +83,8 @@ pub fn dump_image(world: &Image) -> String {
     for (ordinal, image) in world.vm_images.iter().enumerate() {
         let _ = writeln!(
             out,
-            "VM image {ordinal} slots {} objects {} instances {}",
+            "VM image {ordinal} namespace {} slots {} objects {} instances {}",
+            image.namespace,
             image.slots.len(),
             image.objects.len(),
             image.instances.len()
@@ -92,17 +93,7 @@ pub fn dump_image(world: &Image) -> String {
             let _ = writeln!(out, "  slot {slot} {}", slot_text(*target));
         }
         for (index, instance) in image.instances.iter().enumerate() {
-            let _ = writeln!(
-                out,
-                "  instance {index} installation {} entry {} interface {} semantic {}",
-                instance.installation,
-                instance.entry,
-                instance.interface.as_ref().map_or(0, Vec::len),
-                hex(&instance.semantic_hash)
-            );
-            let _ = writeln!(out, "    functions {:?}", instance.funcs);
-            let _ = writeln!(out, "    classes {:?}", instance.classes);
-            let _ = writeln!(out, "    slots {:?}", instance.slots);
+            let _ = writeln!(out, "  instance {index} artifact {}", instance.artifact,);
         }
         for (index, entry) in image.objects.iter().enumerate() {
             let state = if entry.frozen { "frozen" } else { "mutable" };
@@ -322,11 +313,10 @@ fn payload(object: &Object) -> String {
         Object::NativeRun { vm } => format!("run {vm}"),
         Object::NativeCode(code) => {
             format!(
-                "portable {:?} index {} bytes {} interface {}",
+                "portable {:?} slot {:?} bytes {}",
                 code.kind,
-                code.index,
-                code.bytes.len(),
-                code.interface.as_ref().map_or(0, |bytes| bytes.len())
+                code.slot,
+                code.bytes.len()
             )
         }
         Object::NativeCodeHandle {

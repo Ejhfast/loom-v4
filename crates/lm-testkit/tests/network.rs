@@ -1,7 +1,8 @@
 //! Network effects, TCP handles, and deterministic host behavior.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{RecordingHost, VmConfig, World};
 
 const LOOPBACK: &str = r#"
 def loopback(port: Int): Result[SocketAddress, NetError]
@@ -16,9 +17,10 @@ end
 
 fn run(source: &str, grants: &[&str]) -> (String, usize) {
     let bytes = compile_to_bytes("network.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

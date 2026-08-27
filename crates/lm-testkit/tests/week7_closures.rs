@@ -1,7 +1,7 @@
 //! Week-7 closure suites: the brace spelling, trailing closure
 //! arguments, and the brace/pipe disambiguation.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
 fn runs(source: &str) -> String {
@@ -9,12 +9,12 @@ fn runs(source: &str) -> String {
 }
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = compile_module_text("t.lm", source).unwrap_err();
     rendered[6..11].to_string()
 }
 
 fn code_hash(source: &str) -> [u8; 32] {
-    let module = compile_text("t.lm", source).expect("the program compiles");
+    let module = compile_module_text("t.lm", source).expect("the program compiles");
     lm_bytecode::identity::verification_hash(&module)
 }
 
@@ -284,7 +284,7 @@ with_value(41)
 /// An unterminated brace closure names the closing brace.
 #[test]
 fn an_unterminated_brace_closure_rejects() {
-    let rendered = compile_text("t.lm", "f = { |x: Int|: Int x + 1\n").unwrap_err();
+    let rendered = compile_module_text("t.lm", "f = { |x: Int|: Int x + 1\n").unwrap_err();
     assert!(rendered.starts_with("error[E1003]"), "{rendered}");
     assert!(rendered.contains("`}`"), "{rendered}");
 }
@@ -292,7 +292,7 @@ fn an_unterminated_brace_closure_rejects() {
 /// A brace closure without the closing pipe names the pipe.
 #[test]
 fn a_brace_closure_needs_its_parameter_list() {
-    let rendered = compile_text("t.lm", "f = { |x: Int 1 }\nf(1)\n").unwrap_err();
+    let rendered = compile_module_text("t.lm", "f = { |x: Int 1 }\nf(1)\n").unwrap_err();
     assert!(rendered.starts_with("error[E1003]"), "{rendered}");
 }
 

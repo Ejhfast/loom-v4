@@ -2,7 +2,7 @@
 //!
 //! This data stays outside the semantic and verification regions.
 
-use crate::Module;
+use crate::CodeTableView;
 use std::collections::{HashMap, HashSet};
 
 const MAGIC: &[u8; 4] = b"LMDB";
@@ -314,7 +314,7 @@ pub fn definition_origin(
 }
 
 /// Validate metadata against its decoded module.
-pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
+pub fn validate(info: &DebugInfo, module: &impl CodeTableView) -> Result<(), DebugError> {
     let views = info
         .sources
         .iter()
@@ -366,8 +366,8 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
             return Err(DebugError::BadIndex);
         }
         let valid_target = match definition.kind {
-            DefinitionKind::Function => (definition.target as usize) < module.funcs.len(),
-            DefinitionKind::Class => (definition.target as usize) < module.classes.len(),
+            DefinitionKind::Function => (definition.target as usize) < module.funcs().len(),
+            DefinitionKind::Class => (definition.target as usize) < module.classes().len(),
         };
         if !valid_target {
             return Err(DebugError::BadIndex);
@@ -379,7 +379,7 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
             .sources
             .get(function.source as usize)
             .ok_or(DebugError::BadIndex)?;
-        if function.function as usize >= module.funcs.len()
+        if function.function as usize >= module.funcs().len()
             || function.lo > function.hi
             || function.hi as usize > source.text.len()
         {
@@ -388,7 +388,7 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
     }
     for origin in &info.code_origins {
         let function = module
-            .funcs
+            .funcs()
             .get(origin.function as usize)
             .ok_or(DebugError::BadIndex)?;
         let block = function

@@ -5,14 +5,14 @@
 //! appears only when a caller asks for the bytes, and it stays the
 //! canonical container of specification 17.9.
 
+use lm_bytecode::artifact::Artifact;
 use lm_heap::Object;
-use lm_testkit::compile_to_bytes;
-use lm_vm::snapshot::{codec, LoadLimits};
-use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, World};
+use lm_testkit::{compile_text, load_snapshot_for_artifact, publish_artifact};
+use lm_vm::snapshot::LoadLimits;
+use lm_vm::{Outcome, RecordingHost, RootEvent, VmConfig, World};
 
-fn program(source: &str) -> LoadedModule {
-    let bytes = compile_to_bytes("images.lm", source).expect("the program compiles");
-    load_bytes(&bytes).expect("the program loads")
+fn program(source: &str) -> Artifact {
+    compile_text("images.lm", source).expect("the program compiles")
 }
 
 /// A capture holds its admitted world and writes no container.
@@ -22,8 +22,10 @@ fn program(source: &str) -> LoadedModule {
 #[test]
 fn a_capture_writes_its_container_only_when_a_caller_asks() {
     let loaded = program("1 + 1\n");
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -60,8 +62,10 @@ vm.step()
 vm.snapshot()
 ",
     );
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -95,8 +99,10 @@ vm.step()
 vm.snapshot()
 ",
     );
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -129,8 +135,10 @@ vm.snapshot()
 #[test]
 fn a_snapshot_preserves_float_and_byte_values() {
     let loaded = program("(Float.from_bits(0x7ff0000000000001), b\"\\x00\\xff\")\n");
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -140,11 +148,13 @@ fn a_snapshot_preserves_float_and_byte_values() {
         .capture_snapshot(gate, 0, false)
         .expect("the capture succeeds");
     let bytes = image.bytes().expect("the image encodes");
-    let admitted =
-        codec::load_external(bytes, &loaded, LoadLimits::default()).expect("the image admits");
+    let admitted = load_snapshot_for_artifact(&loaded, bytes, LoadLimits::default())
+        .expect("the image admits");
 
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut restored = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

@@ -1,7 +1,8 @@
 //! TLS effects, resources, and deterministic host behavior.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, Object, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{Object, RecordingHost, VmConfig, World};
 
 const LOOPBACK: &str = r#"
 use std.tls.Tls
@@ -49,8 +50,8 @@ fn run(source: &str, grants: &[&str]) -> (String, usize) {
 
 fn run_with_config(source: &str, grants: &[&str], config: VmConfig) -> (String, usize) {
     let bytes = compile_to_bytes("tls.lm", source).expect("the TLS program compiles");
-    let loaded = load_bytes(&bytes).expect("the TLS program loads");
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the TLS program loads");
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     for grant in grants {
         world.allow(grant).expect("the TLS grant exists");
     }
@@ -357,9 +358,10 @@ capture()
 "#
     );
     let bytes = compile_to_bytes("closed_tls.lm", &source).expect("the TLS program compiles");
-    let loaded = load_bytes(&bytes).expect("the TLS program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the TLS program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -379,8 +381,10 @@ capture()
             .any(|entry| matches!(entry.object, Object::NativeTlsStream { resource: 0 }))
     }));
 
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the TLS program reloads");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

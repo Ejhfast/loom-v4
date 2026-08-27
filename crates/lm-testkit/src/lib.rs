@@ -13,33 +13,186 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// Compile source text to decoded bytecode. `name` appears in
-/// diagnostics. `Err` holds the fully rendered diagnostic.
-pub fn compile_text(name: &str, text: &str) -> Result<lm_bytecode::Module, String> {
+/// Compile source text to one artifact. `name` appears in diagnostics.
+/// `Err` holds the fully rendered diagnostic.
+pub fn compile_text(name: &str, text: &str) -> Result<lm_bytecode::artifact::Artifact, String> {
     let source = SourceFile::new(name, text);
-    lm_compiler::compile_program("", &source)
+    lm_compiler::compile_source("", &source, true).map(|compiled| compiled.artifact)
 }
 
-/// Compile source text to serialized bytecode bytes.
+/// Compile source text and return its root module for compiler tests.
+pub fn compile_module_text(name: &str, text: &str) -> Result<lm_bytecode::Module, String> {
+    let source = SourceFile::new(name, text);
+    lm_compiler::compile_source("", &source, true).map(|compiled| compiled.root.module)
+}
+
+/// Compile source text to serialized artifact bytes.
 pub fn compile_to_bytes(name: &str, text: &str) -> Result<Vec<u8>, String> {
-    Ok(lm_bytecode::encode(&compile_text(name, text)?))
+    lm_bytecode::artifact::encode(&compile_text(name, text)?)
+        .map_err(|error| format!("artifact encode error: {error}"))
 }
 
-/// Decode and link one program artifact against the exact runtime core.
-pub fn link_artifact_bytes(bytes: &[u8]) -> Result<lm_compiler::LinkedProgram, String> {
+/// Decode and publish one artifact against the exact runtime core.
+pub fn publish_artifact_bytes(
+    bytes: &[u8],
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
     let artifact = lm_bytecode::artifact::decode(bytes)
         .map_err(|error| format!("artifact decode error: {error}"))?;
+    publish_artifact(&artifact)
+}
+
+/// Load snapshot bytes with the exact runtime core of artifact bytes.
+pub fn load_snapshot_for_artifact_bytes(
+    artifact_bytes: &[u8],
+    snapshot_bytes: &[u8],
+    limits: lm_vm::snapshot::LoadLimits,
+) -> Result<lm_vm::snapshot::SnapshotImage, lm_vm::snapshot::ImageError> {
+    let artifact = lm_bytecode::artifact::decode(artifact_bytes).map_err(|error| {
+        lm_vm::snapshot::ImageError::admission(
+            lm_vm::snapshot::ImageReason::Code,
+            format!("artifact decode error: {error}"),
+        )
+    })?;
+    load_snapshot_for_artifact(&artifact, snapshot_bytes, limits)
+}
+
+/// Load snapshot bytes with the exact runtime core of one artifact.
+pub fn load_snapshot_for_artifact(
+    artifact: &lm_bytecode::artifact::Artifact,
+    snapshot_bytes: &[u8],
+    limits: lm_vm::snapshot::LoadLimits,
+) -> Result<lm_vm::snapshot::SnapshotImage, lm_vm::snapshot::ImageError> {
+    let (arena, namespace) = publish_artifact(artifact).map_err(|message| {
+        lm_vm::snapshot::ImageError::admission(lm_vm::snapshot::ImageReason::Code, message)
+    })?;
+    let available = arena
+        .namespace(namespace)
+        .expect("the published namespace exists");
+    lm_vm::snapshot::codec::load_external(snapshot_bytes, Some(available), limits)
+}
+
+/// Verify and publish one artifact against the exact runtime core.
+pub fn publish_artifact(
+    artifact: &lm_bytecode::artifact::Artifact,
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
     let core = lm_compiler::core_link_unit()?;
-    lm_compiler::link_artifact(artifact, Some(core))
-        .map_err(|error| format!("artifact link error: {error}"))
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact.clone(), Some(core))
+        .map_err(|error| format!("artifact publish error: {error}"))?;
+    Ok((arena, namespace))
+}
+
+/// Verify and publish one crafted module as a test-only core unit.
+pub fn unit_from_module(
+    module: lm_bytecode::Module,
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let artifact = artifact_from_module(module)?;
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact, None)
+        .map_err(|error| error.to_string())?;
+    Ok((arena, namespace))
+}
+
+/// Wrap one crafted module in a test-only artifact.
+pub fn artifact_from_module(
+    module: lm_bytecode::Module,
+) -> Result<lm_bytecode::artifact::Artifact, String> {
+    let unit = lm_bytecode::artifact::LinkUnit::from_module(
+        lm_bytecode::artifact::CORE_MODULE_PATH,
+        module,
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact = lm_bytecode::artifact::Artifact::new(unit, Vec::new())
+        .map_err(|error| error.to_string())?;
+    Ok(artifact)
+}
+
+/// Replace the root payload of one artifact for a bytecode test.
+pub fn replace_artifact_root(
+    artifact: &lm_bytecode::artifact::Artifact,
+    module: lm_bytecode::Module,
+) -> Result<lm_bytecode::artifact::Artifact, String> {
+    let old = artifact.root();
+    let root = lm_bytecode::artifact::LinkUnit::from_module(
+        old.module_path(),
+        module,
+        old.dependencies().to_vec(),
+    )
+    .map_err(|error| error.to_string())?;
+    let embedded = artifact
+        .units()
+        .iter()
+        .filter(|unit| unit.id() != old.id())
+        .cloned()
+        .collect();
+    lm_bytecode::artifact::Artifact::new(root, embedded).map_err(|error| error.to_string())
+}
+
+/// Build one artifact from a compiler result.
+pub fn artifact_from_compiled(
+    compiled: lm_compiler::CompiledModule,
+) -> Result<lm_bytecode::artifact::Artifact, String> {
+    let root = compiled.path.clone();
+    let mut env = lm_compiler::core_link_env()?;
+    bind_compiled_unit(&mut env, compiled)?;
+    env.freeze()
+        .complete_artifact(&root)
+        .map_err(|error| error.to_string())
+}
+
+/// Encode one artifact from a compiler result.
+pub fn encode_compiled_artifact(compiled: lm_compiler::CompiledModule) -> Result<Vec<u8>, String> {
+    lm_bytecode::artifact::encode(&artifact_from_compiled(compiled)?)
+        .map_err(|error| error.to_string())
+}
+
+/// Build a test artifact from one crafted source module.
+pub fn artifact_with_core_from_module(
+    path: &str,
+    module: lm_bytecode::Module,
+) -> Result<lm_bytecode::artifact::Artifact, String> {
+    let identity =
+        lm_bytecode::identity::module_identity(&module).map_err(|error| error.to_string())?;
+    let interface = lm_bytecode::interface::derive_interface(&module, &identity, path)?;
+    let mut env = lm_compiler::core_link_env()?;
+    let unit = env
+        .prepare_unit(path, module, interface)
+        .map_err(|error| error.to_string())?;
+    env.bind_unit(unit).map_err(|error| error.to_string())?;
+    env.freeze()
+        .complete_artifact(path)
+        .map_err(|error| error.to_string())
+}
+
+/// Encode a test artifact from one crafted source module.
+pub fn encode_artifact_with_core_from_module(
+    path: &str,
+    module: lm_bytecode::Module,
+) -> Result<Vec<u8>, String> {
+    lm_bytecode::artifact::encode(&artifact_with_core_from_module(path, module)?)
+        .map_err(|error| error.to_string())
+}
+
+/// Convert one compiler result to a link unit and bind it.
+pub fn bind_compiled_unit(
+    env: &mut lm_link::LinkEnv,
+    compiled: lm_compiler::CompiledModule,
+) -> Result<(), String> {
+    let unit = compiled
+        .into_link_unit(env)
+        .map_err(|error| error.to_string())?;
+    env.bind_unit(unit).map_err(|error| error.to_string())
 }
 
 /// Compile, serialize, decode, verify, and run one program. Return the
 /// stable outcome text, for example `Done(42)` or `Fault(OutOfFuel)`.
 pub fn run_text(name: &str, text: &str, config: VmConfig) -> Result<String, String> {
     let bytes = compile_to_bytes(name, text)?;
-    let loaded = lm_vm::load_bytes(&bytes).map_err(|e| format!("load error: {e}"))?;
-    let mut vm = Vm::new(&loaded, config);
+    let (arena, namespace) = publish_artifact_bytes(&bytes)?;
+    let mut vm = Vm::new(arena, namespace, config);
     let outcome = vm.run();
     Ok(vm.show_outcome(&outcome))
 }
@@ -54,9 +207,9 @@ pub fn run_world(
     config: VmConfig,
 ) -> Result<(String, Rc<RefCell<RecordingHost>>), String> {
     let bytes = compile_to_bytes(name, text)?;
-    let loaded = lm_vm::load_bytes(&bytes).map_err(|e| format!("load error: {e}"))?;
+    let (arena, namespace) = publish_artifact_bytes(&bytes)?;
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let mut world = World::new(&loaded, config, Box::new(host.clone()));
+    let mut world = World::new(arena, namespace, config, Box::new(host.clone()));
     for grant in allow {
         world
             .allow(grant)

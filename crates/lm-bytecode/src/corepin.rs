@@ -1109,8 +1109,13 @@ pub fn role_index(label: &str) -> Option<usize> {
 /// verifier proves the shape of every filled slot. This function reads
 /// slots only: no name, no hash, and no position takes part.
 pub fn declared_layout(module: &Module) -> CoreLayout {
+    layout_from_roles(&module.core_roles)
+}
+
+/// Read one core layout from relocated namespace roles.
+pub fn layout_from_roles(roles: &[u32; crate::CORE_ROLE_COUNT]) -> CoreLayout {
     let mut layout = CoreLayout::default();
-    for (role, slot) in module.core_roles.iter().enumerate() {
+    for (role, slot) in roles.iter().enumerate() {
         if *slot == crate::NO_ROLE {
             continue;
         }

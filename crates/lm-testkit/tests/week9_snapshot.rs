@@ -4,20 +4,28 @@
 //! The cases below state the week-9 gates of the build order. Each
 //! gate names the case that proves it in `docs/notes/week9.md`.
 
+use lm_bytecode::artifact::Artifact;
 use lm_heap::Object;
-use lm_testkit::{compile_to_bytes, repo_root, run_allowed, run_world};
+use lm_testkit::{
+    compile_text, load_snapshot_for_artifact, publish_artifact, repo_root, run_allowed, run_world,
+};
 use lm_vm::snapshot::{
     codec, ImagePolicyCursor, ImageReason, ImageState, LoadLimits, RestoreFail, SnapshotFail,
 };
-use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World};
+use lm_vm::{Outcome, RecordingHost, RootEvent, VmConfig, VmId, World};
 
-fn program(source: &str) -> LoadedModule {
-    let bytes = compile_to_bytes("snapshot.lm", source).expect("the program compiles");
-    load_bytes(&bytes).expect("the program loads")
+fn program(source: &str) -> Artifact {
+    compile_text("snapshot.lm", source).expect("the program compiles")
 }
 
-fn world_of(loaded: &LoadedModule, allow: &[&str]) -> World {
-    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+fn world_of(artifact: &Artifact, allow: &[&str]) -> World {
+    let (arena, namespace) = publish_artifact(artifact).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }
@@ -56,7 +64,7 @@ fn run_restored(world: &mut World, root: VmId) -> String {
 }
 
 /// Restore one admitted image into a fresh world of the same program.
-fn restore_into(loaded: &LoadedModule, image: &lm_vm::snapshot::SnapshotImage) -> (World, VmId) {
+fn restore_into(loaded: &Artifact, image: &lm_vm::snapshot::SnapshotImage) -> (World, VmId) {
     let mut world = world_of(loaded, &["Proc", "Vm", "Clock"]);
     let target = world.new_child(0).expect("the budget holds one child");
     let root = world
@@ -142,9 +150,9 @@ fn a_snapshot_round_trips_at_every_boundary_of_the_example_corpus() {
                 .unwrap_or_else(|e| panic!("{path} boundary {boundary}: capture failed: {e:?}"));
             // The bytes decode, and the decoded image encodes back to
             // exactly the same bytes.
-            let admitted = codec::load_external(
-                image.bytes().expect("the image encodes"),
+            let admitted = load_snapshot_for_artifact(
                 &loaded,
+                image.bytes().expect("the image encodes"),
                 LoadLimits::default(),
             )
             .unwrap_or_else(|e| panic!("{path} boundary {boundary}: {e}"));
@@ -188,9 +196,9 @@ bytes = byte_builder.append(195).append(169).finish()
     let image = world
         .capture_snapshot(gate, 0, false)
         .expect("the terminal capture succeeds");
-    let admitted = codec::load_external(
-        image.bytes().expect("the image encodes"),
+    let admitted = load_snapshot_for_artifact(
         &loaded,
+        image.bytes().expect("the image encodes"),
         LoadLimits::default(),
     )
     .expect("the text snapshot loads");
@@ -211,7 +219,7 @@ fn asked_tree_source() -> String {
 }
 
 /// Capture the world the checkpoint program builds.
-fn asked_tree_image(loaded: &LoadedModule) -> lm_vm::snapshot::SnapshotImage {
+fn asked_tree_image(loaded: &Artifact) -> lm_vm::snapshot::SnapshotImage {
     let mut world = world_of(loaded, &["Proc", "Vm", "Clock"]);
     let outcome = drive(&mut world);
     assert_eq!(world.show_outcome(&outcome), "Done(1)");
@@ -517,8 +525,10 @@ fn a_restored_table_is_default_deny_plus_the_birth_grant() {
 fn a_failed_restore_exposes_no_partial_world() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig {
             // One child for the restore target, and nothing left for
             // the two procs the image holds.
@@ -561,7 +571,8 @@ fn a_local_heap_failure_releases_the_restore_plan() {
         heap_bytes: first_heap - 1,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     let target = world.new_child(0).expect("the target record fits");
     assert_eq!(
         world.restore_image(0, target, &image),
@@ -585,7 +596,8 @@ fn restore_rejects_a_queue_past_the_effective_mailbox_limit() {
         mailbox_limit: 0,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
     let target = world.new_child(0).expect("the target record fits");
     assert_eq!(
         world.restore_image(0, target, &image),
@@ -814,7 +826,7 @@ fn malformed_routed_snapshot_state_rejects() {
     let mut broken = image.clone().into_image();
     broken.machines[0].nested = None;
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+    let error = load_snapshot_for_artifact(&loaded, &bytes, LoadLimits::default())
         .expect_err("the incomplete nested edge rejects");
     assert_eq!(error.reason, ImageReason::State);
 
@@ -825,7 +837,7 @@ fn malformed_routed_snapshot_state_rejects() {
         .expect("the route exists")
         .cursor = ImagePolicyCursor::Table(1);
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+    let error = load_snapshot_for_artifact(&loaded, &bytes, LoadLimits::default())
         .expect_err("the invalid policy cursor rejects");
     assert_eq!(error.reason, ImageReason::State);
 }
@@ -846,7 +858,7 @@ fn a_zero_request_ordinal_rejects() {
         .expect("the asked machine holds a request")
         .ordinal = 0;
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+    let error = load_snapshot_for_artifact(&loaded, &bytes, LoadLimits::default())
         .expect_err("the zero pending ordinal rejects");
     assert_eq!(error.reason, ImageReason::State);
     assert!(
@@ -868,7 +880,7 @@ fn a_zero_request_ordinal_rejects() {
     let mut broken = image.clone().into_image();
     broken.machines[idle].next_ordinal = 0;
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+    let error = load_snapshot_for_artifact(&loaded, &bytes, LoadLimits::default())
         .expect_err("the zero next ordinal rejects");
     assert_eq!(error.reason, ImageReason::State);
     assert!(
@@ -1052,8 +1064,10 @@ go()
 #[test]
 fn a_capture_past_the_byte_limit_returns_the_typed_error() {
     let loaded = program("1 + 1\n");
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig {
             snapshot_bytes: 16,
             ..VmConfig::default()

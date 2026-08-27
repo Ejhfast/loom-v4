@@ -89,8 +89,19 @@ fn loop_module() -> Module {
 
 #[test]
 fn run_allocates_no_event_per_instruction() {
-    let loaded = lm_vm::load(loop_module()).expect("the loop module verifies");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let unit = lm_bytecode::artifact::LinkUnit::from_module(
+        lm_bytecode::artifact::CORE_MODULE_PATH,
+        loop_module(),
+        Vec::new(),
+    )
+    .expect("the loop unit builds");
+    let artifact =
+        lm_bytecode::artifact::Artifact::new(unit, Vec::new()).expect("the loop artifact builds");
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact, None)
+        .expect("the loop artifact verifies and publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     let outcome = vm.run();
     let after = ALLOCATIONS.load(Ordering::Relaxed);

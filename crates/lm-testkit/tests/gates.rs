@@ -22,11 +22,11 @@ const SMALL_RUST_STACK: usize = 256 * 1024;
 
 fn run_on_small_stack(source: &'static str, config: VmConfig) -> String {
     let bytes = compile_to_bytes("gate.lm", source).expect("compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
     std::thread::Builder::new()
         .stack_size(SMALL_RUST_STACK)
         .spawn(move || {
-            let mut vm = Vm::new(&loaded, config);
+            let mut vm = Vm::new(arena, namespace, config);
             let outcome = vm.run();
             vm.show_outcome(&outcome)
         })
@@ -102,9 +102,11 @@ fn short_lived_data_collects_before_the_hard_heap_limit() {
     let source = "i = 0\ntext = \"\"\nwhile i < 100000\n  text = \"value #{i}\"\n  \
                   i = i + 1\nend\ntext.len()\n";
     let bytes = compile_to_bytes("heap-pace.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact loads");
     let mut world = lm_vm::World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(lm_vm::RecordingHost::new(1)),
     );
@@ -135,8 +137,8 @@ fn compilation_is_deterministic() {
 #[test]
 fn diagnostics_are_deterministic() {
     let source = "x = 1\nx = \"two\"\n";
-    let a = lm_testkit::compile_text("t.lm", source).unwrap_err();
-    let b = lm_testkit::compile_text("t.lm", source).unwrap_err();
+    let a = lm_testkit::compile_module_text("t.lm", source).unwrap_err();
+    let b = lm_testkit::compile_module_text("t.lm", source).unwrap_err();
     assert_eq!(a, b);
     assert_eq!(
         a,

@@ -57,7 +57,6 @@ pub enum HostArg {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostCompileModule {
     pub artifact: SharedBytes,
-    pub interface: SharedBytes,
 }
 
 /// One explicit runtime compiler environment.
@@ -84,7 +83,6 @@ pub struct HostCompileDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostCompileSlot {
     pub artifact: SharedBytes,
-    pub interface: Option<SharedBytes>,
     pub index: u32,
 }
 
@@ -357,10 +355,7 @@ pub enum HostValue {
     Child(u64),
     UdpSocket(u64),
     Resource(HostResource),
-    Artifact {
-        module: SharedBytes,
-        interface: SharedBytes,
-    },
+    Artifact(SharedBytes),
     SyntaxParse {
         source: SharedText,
         records: SharedBytes,
@@ -1474,7 +1469,7 @@ impl RecordingHost {
             | HostValue::Bytes(_)
             | HostValue::SocketAddress(_)
             | HostValue::Resource(_)
-            | HostValue::Artifact { .. }
+            | HostValue::Artifact(_)
             | HostValue::SyntaxParse { .. } => {}
         }
     }

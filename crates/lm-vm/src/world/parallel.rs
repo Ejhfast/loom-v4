@@ -698,20 +698,15 @@ impl World {
             .take_worker_envs()
             .unwrap_or_else(|| Box::new(self.envs.fork_shared()));
         envs.sync_shared();
+        let execution_code = self.execution_code_of(vm);
         let machine = self.machines[vm as usize].take_for_lease(token);
         let limits = ExecutionLimits {
             instructions: limit,
             exclusive_world,
             fuel: Arc::clone(&self.budget.fuel),
         };
-        let (worker, reservation) = ExecutionLease::new(
-            token,
-            machine,
-            self.execution_code.clone(),
-            envs,
-            slots,
-            limits,
-        );
+        let (worker, reservation) =
+            ExecutionLease::new(token, machine, execution_code, envs, slots, limits);
         Ok(ParallelStep::Dispatch(ParallelDispatch {
             lease: worker,
             job: ParallelJob {

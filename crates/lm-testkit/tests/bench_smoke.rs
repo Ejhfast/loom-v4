@@ -76,9 +76,9 @@ fn map_insertion_scaling_smoke() {
 fn literal_loop_allocation_smoke() {
     let source = "i = 0\ns = \"\"\nwhile i < 200000\n  s = \"hello\"\n  i = i + 1\nend\ni\n";
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source).unwrap();
-    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
     let start = Instant::now();
-    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let mut vm = lm_vm::Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     eprintln!("bench-smoke literal_loop_200k: {:?}", start.elapsed());
     assert_eq!(vm.show_outcome(&outcome), "Done(200000)");
@@ -108,14 +108,20 @@ fn many_class_dispatch_memory_smoke() {
     source.push_str("total\n");
     let start = Instant::now();
     let bytes = lm_testkit::compile_to_bytes("bench.lm", &source).unwrap();
-    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
     eprintln!("bench-smoke many_class_load_300: {:?}", start.elapsed());
-    let cells = loaded.dispatch_cells();
-    let selectors = loaded.module().selectors.len();
-    let dense = loaded.module().classes.len() * selectors;
+    let code = arena
+        .namespace(namespace)
+        .expect("the published namespace exists");
+    let selectors = code.tables().selectors.len();
+    let classes = code.tables().classes.len();
+    let interfaces = code.tables().interfaces.len();
+    let dense = classes * selectors;
+    let mut vm = lm_vm::Vm::new(arena, namespace, VmConfig::default());
+    let cells = vm.dispatch_cells();
     eprintln!(
         "bench-smoke dispatch cells {cells} for {} classes and {selectors} selectors (dense equivalent {dense})",
-        loaded.module().classes.len()
+        classes
     );
     // Every class answers its own selector plus the shared core
     // selectors, so the cell count stays near the method count.
@@ -123,14 +129,13 @@ fn many_class_dispatch_memory_smoke() {
         cells < dense / 10,
         "the dispatch table is near dense: {cells} of {dense}"
     );
-    let witnesses = loaded.interface_witness_entries();
-    let dense_witnesses = loaded.module().classes.len() * loaded.module().interfaces.len();
+    let witnesses = vm.interface_witness_entries();
+    let dense_witnesses = classes * interfaces;
     eprintln!("bench-smoke interface witnesses {witnesses} (dense equivalent {dense_witnesses})");
     assert!(
         witnesses < dense_witnesses / 10,
         "the interface witness table is near dense: {witnesses} of {dense_witnesses}"
     );
-    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(44850)");
 }
@@ -163,13 +168,10 @@ fn perform_group_pass_smoke() {
     timed_world("perform_group_pass_20k", source, &["Clock"], "Done(20000)");
 }
 
-/// The week-6 build path: identity, the linker, and the cached load.
-/// The printed timings document the shape of the load path, where
-/// identity now runs once per distinct module instead of once per
-/// load.
+/// Time compilation, artifact construction, and namespace publication.
 #[test]
 fn build_and_link_smoke() {
-    use lm_compiler::{compile_module, link, CompileEnv};
+    use lm_compiler::{compile_module, CompileEnv};
     use lm_source::SourceFile;
     let library =
         "class Cell\n  value: Int = 0\n  def get(self): Int\n    self.value\n  end\nend\n\
@@ -184,7 +186,7 @@ fn build_and_link_smoke() {
     )
     .expect("compiles");
     let mut env = CompileEnv::new();
-    env.bind_interface(lib.interface.clone()).expect("binds");
+    env.bind_projection(lib.interface.clone()).expect("binds");
     env.bind_root("lib", "lib").expect("binds");
     let main = compile_module(
         "app.main",
@@ -197,28 +199,29 @@ fn build_and_link_smoke() {
     let start = Instant::now();
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in [&lib, &main] {
-        link_env
-            .bind_module(
-                unit.path.clone(),
-                unit.module.clone(),
-                unit.interface.clone(),
-            )
-            .expect("binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, unit.clone()).expect("binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("links");
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the artifact builds");
     let linked_time = start.elapsed();
-    let program_bytes = lm_bytecode::encode(&linked.module);
+    let program_bytes = lm_bytecode::artifact::encode(&artifact).expect("the artifact encodes");
     let start = Instant::now();
-    let mut cache = lm_vm::VerifiedCache::new();
+    let core = lm_compiler::core_link_unit().expect("the runtime core builds");
+    let mut arena = lm_link::CodeArena::new();
     for _ in 0..20 {
-        lm_vm::load_bytes_cached(&program_bytes, &mut cache).expect("loads");
+        let decoded = lm_bytecode::artifact::decode(&program_bytes).expect("decodes");
+        arena
+            .publish(decoded, Some(core.clone()))
+            .expect("publishes");
     }
     let loads = start.elapsed();
-    assert_eq!(cache.verifications, 1);
+    assert_eq!(arena.namespace_count(), 1);
     eprintln!(
         "bench-smoke build_2_modules: {compiled:?} link: {linked_time:?} \
-         20_cached_loads: {loads:?} bytes: {}",
-        linked.artifact.len()
+         20_publications: {loads:?} bytes: {}",
+        program_bytes.len()
     );
 }
 
@@ -522,12 +525,13 @@ fn proc_terminal_publication_smoke() {
 
 /// Time one snapshot workload: capture, encode, load, and restore.
 fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, restores: usize) {
-    use lm_vm::snapshot::{codec, LoadLimits};
+    use lm_vm::snapshot::LoadLimits;
     use lm_vm::{RecordingHost, World};
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source).unwrap();
-    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -550,9 +554,9 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
     assert_eq!(again.bytes().expect("the image encodes").len(), size);
     // The load time of the external byte path.
     let load_start = Instant::now();
-    let checked = codec::load_external(
+    let checked = lm_testkit::load_snapshot_for_artifact_bytes(
+        &bytes,
         image.bytes().expect("the image encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the container loads and admits");
@@ -560,8 +564,10 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
     // The restore time, averaged over the requested count.
     let restore_start = Instant::now();
     for _ in 0..restores {
+        let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
         let mut fresh = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );

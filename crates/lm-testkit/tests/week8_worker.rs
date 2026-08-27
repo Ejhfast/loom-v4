@@ -5,7 +5,8 @@
 //! back, so no guest reference ever crosses the thread boundary.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{RecordingHost, VmConfig, World};
 
 /// The worker runs a proc program, and the host thread agrees.
 #[test]
@@ -29,9 +30,10 @@ fn a_worker_thread_runs_the_whole_world() {
                   h.close()\n\
                   h.done()\n";
     let bytes = compile_to_bytes("worker.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let outcome = lm_proc::run_on_worker(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         &["Proc"],
         Box::new(|| Box::new(RecordingHost::new(1))),
@@ -41,8 +43,10 @@ fn a_worker_thread_runs_the_whole_world() {
     assert_eq!(outcome.text, "Done(Ok(42))");
     // The same program on the host thread agrees, so the mode changes
     // no semantics.
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program reloads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -63,9 +67,10 @@ fn a_worker_thread_accepts_parallel_scheduler_configuration() {
                   b = Value.spawn()\n\
                   (a.done(), b.done())\n";
     let bytes = compile_to_bytes("parallel-worker.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let outcome = lm_proc::run_on_worker_with_scheduler(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         lm_proc::SchedulerConfig::parallel(2),
         &["Proc"],
@@ -93,13 +98,12 @@ fn a_shared_scheduler_pool_serves_two_worlds() {
                   d = Counter.spawn()\n\
                   (a.done(), b.done(), c.done(), d.done())\n";
     let bytes = compile_to_bytes("shared-pool.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
     let pool = lm_proc::SchedulerPool::new(2).expect("the shared pool starts");
     std::thread::scope(|scope| {
         let first_pool = pool.clone();
         let second_pool = pool.clone();
-        let first = scope.spawn(|| run_shared_world(&loaded, first_pool, 1));
-        let second = scope.spawn(|| run_shared_world(&loaded, second_pool, 2));
+        let first = scope.spawn(|| run_shared_world(&bytes, first_pool, 1));
+        let second = scope.spawn(|| run_shared_world(&bytes, second_pool, 2));
         let first = first.join().expect("the first host thread runs");
         let second = second.join().expect("the second host thread runs");
         assert_eq!(
@@ -114,12 +118,14 @@ fn a_shared_scheduler_pool_serves_two_worlds() {
 }
 
 fn run_shared_world(
-    loaded: &lm_vm::LoadedModule,
+    bytes: &[u8],
     pool: lm_proc::SchedulerPool,
     seed: u64,
 ) -> (String, lm_proc::SchedulerStats) {
+    let (arena, namespace) = publish_artifact_bytes(bytes).expect("the program publishes");
     let mut world = World::new(
-        loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(seed)),
     );
@@ -148,13 +154,14 @@ fn a_worker_thread_carries_deep_guest_recursion() {
                   end\n\
                   Deep.spawn().done()\n";
     let bytes = compile_to_bytes("worker.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let config = VmConfig {
         max_frames: 100_000,
         ..VmConfig::default()
     };
     let outcome = lm_proc::run_on_worker(
-        &loaded,
+        arena,
+        namespace,
         config,
         &["Proc"],
         Box::new(|| Box::new(RecordingHost::new(1))),
@@ -167,9 +174,10 @@ fn a_worker_thread_carries_deep_guest_recursion() {
 #[test]
 fn a_worker_thread_reports_a_bad_grant() {
     let bytes = compile_to_bytes("worker.lm", "1\n").expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let error = lm_proc::run_on_worker(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         &["Nope"],
         Box::new(|| Box::new(RecordingHost::new(1))),
@@ -182,9 +190,10 @@ fn a_worker_thread_reports_a_bad_grant() {
 #[test]
 fn a_worker_thread_rejects_an_invalid_parallel_worker_count() {
     let bytes = compile_to_bytes("worker.lm", "1\n").expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let error = lm_proc::run_on_worker_with_scheduler(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         lm_proc::SchedulerConfig::parallel(0),
         &[],

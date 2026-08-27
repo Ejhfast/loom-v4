@@ -115,10 +115,15 @@ fn workspace(tree: &TempTree) {
 /// grants. Returns the printed output.
 fn run_artifact(path: &Path, allow: &[&str]) -> String {
     let bytes = std::fs::read(path).expect("the artifact reads");
-    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the artifact links");
-    let loaded = lm_vm::load(linked.module).expect("the artifact loads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(host.clone()),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant applies");
     }
@@ -153,7 +158,7 @@ fn a_two_package_workspace_builds_and_runs() {
     assert_eq!(report.root, "app");
     assert_eq!(report.modules.len(), 3);
     assert_eq!(report.compiled(), 3, "the first build compiles everything");
-    let program = report.program.clone().expect("the app builds a program");
+    let program = report.artifact.clone().expect("the app builds a program");
     let output = run_artifact(&program, &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }
@@ -165,12 +170,12 @@ fn a_second_build_hits_the_cache() {
     let tree = TempTree::new("cache");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
-    let first_bytes = std::fs::read(first.program.clone().unwrap()).unwrap();
+    let first_bytes = std::fs::read(first.artifact.clone().unwrap()).unwrap();
     let second = tree.build("app").expect("builds");
     assert_eq!(second.compiled(), 0, "the second build ran the compiler");
-    let second_bytes = std::fs::read(second.program.clone().unwrap()).unwrap();
+    let second_bytes = std::fs::read(second.artifact.clone().unwrap()).unwrap();
     assert_eq!(first_bytes, second_bytes, "the program bytes moved");
-    assert_eq!(first.program_semantic, second.program_semantic);
+    assert_eq!(first.artifact_id, second.artifact_id);
 }
 
 /// The rebuild gate: an edit to an exported body rebuilds the edited
@@ -194,7 +199,7 @@ fn a_body_edit_rebuilds_only_the_edited_package() {
         "the dependent recompiled although no interface moved"
     );
     assert!(report_of(&report, "app.main").cached);
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2 by 3 has 6 cells\n");
 }
 
@@ -249,7 +254,7 @@ fn the_program_artifact_is_thin_and_portable() {
     let tree = TempTree::new("closed");
     workspace(&tree);
     let report = tree.build("app").expect("builds");
-    let bytes = std::fs::read(report.program.clone().unwrap()).unwrap();
+    let bytes = std::fs::read(report.artifact.clone().unwrap()).unwrap();
     let artifact = lm_bytecode::artifact::decode(&bytes).expect("decodes");
     assert!(
         artifact
@@ -281,7 +286,7 @@ fn an_unused_module_stays_out_of_the_program() {
     let tree = TempTree::new("unused");
     workspace(&tree);
     let before = tree.build("app").expect("builds");
-    let small = std::fs::read(before.program.clone().unwrap()).unwrap();
+    let small = std::fs::read(before.artifact.clone().unwrap()).unwrap();
     tree.write(
         "mathlib/src/unused.lm",
         "class Heavy\n\
@@ -297,7 +302,7 @@ fn an_unused_module_stays_out_of_the_program() {
     );
     let after = tree.build("app").expect("builds");
     assert_eq!(after.modules.len(), 4, "the module did not build");
-    let big = std::fs::read(after.program.clone().unwrap()).unwrap();
+    let big = std::fs::read(after.artifact.clone().unwrap()).unwrap();
     assert_eq!(small, big, "an unused module reached the program");
 }
 
@@ -339,7 +344,7 @@ fn the_linked_program_shares_one_core() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(
         output, "got 7\n",
         "an Option built in one module did not match in another"
@@ -397,7 +402,7 @@ fn an_imported_enum_constructs_and_matches() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "dot line 4 7\n");
 }
 
@@ -448,7 +453,7 @@ fn imported_generics_keep_their_arity() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "7 text\n");
 }
 
@@ -499,7 +504,7 @@ fn an_imported_class_holds_its_mutable_methods() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "4\n");
 }
 
@@ -536,16 +541,16 @@ fn a_transitive_type_materializes_without_its_own_use_line() {
          run()\n",
     );
     let report = tree.build("app").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "1x1 has 1 cells\n");
     // The main unit keeps its exact transitive dependency graph.
-    let bytes = std::fs::read(report.program.unwrap()).unwrap();
+    let bytes = std::fs::read(report.artifact.unwrap()).unwrap();
     let artifact = lm_bytecode::artifact::decode(&bytes).expect("decodes");
     assert!(artifact
         .units()
         .iter()
         .any(|unit| unit.module_path() == "mathlib.matrix"));
-    lm_testkit::link_artifact_bytes(&bytes).expect("the artifact links");
+    lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact links");
 }
 
 /// An exported effect-polymorphic function keeps its effect
@@ -585,7 +590,7 @@ fn an_imported_effect_parameter_survives_the_interface() {
          run()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "tick\ntick\n6\n");
 }
 
@@ -698,11 +703,10 @@ fn an_import_grants_no_authority() {
         "use lib.say\n\ndef run() with Io.Write\n  say.shout(\"hi\")\nend\n\nrun()\n",
     );
     let report = tree.build("prog").expect("builds");
-    let bytes = std::fs::read(report.program.clone().unwrap()).unwrap();
-    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("links");
-    let loaded = lm_vm::load(linked.module).expect("loads");
+    let bytes = std::fs::read(report.artifact.clone().unwrap()).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     let outcome = world.run_root();
     assert_eq!(
         world.show_outcome(&outcome),
@@ -725,12 +729,16 @@ fn a_package_links_a_requested_standard_module() {
     );
     let report = tree.build("app").expect("the package builds");
     assert_eq!(report.modules.len(), 1);
-    let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
-    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    assert!(loaded.module().imports.is_empty());
+    let bytes = std::fs::read(report.artifact.expect("the program exists")).expect("it reads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("the program loads");
+    assert!(arena
+        .namespace(namespace)
+        .expect("the namespace exists")
+        .active_unit("std.http")
+        .is_some());
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -738,7 +746,7 @@ fn a_package_links_a_requested_standard_module() {
     assert_eq!(world.show_outcome(&outcome), "Done(128)");
     let second = tree.build("app").expect("the cached package builds");
     assert_eq!(second.compiled(), 0);
-    assert!(second.program_cached);
+    assert!(second.artifact_cached);
 }
 
 /// A public interface can expose a standard type to its caller.
@@ -767,11 +775,11 @@ fn a_standard_type_crosses_a_package_interface() {
         "use lib.config\n\nconfig.default_config().max_buffer_bytes\n",
     );
     let report = tree.build("app").expect("the package graph builds");
-    let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
-    let linked = lm_testkit::link_artifact_bytes(&bytes).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let bytes = std::fs::read(report.artifact.expect("the program exists")).expect("it reads");
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -794,7 +802,7 @@ fn the_scaffold_builds_and_runs() {
         "[package]\nname = \"hello\"\nversion = \"0.1.0\"\n"
     );
     let report = tree.build("hello").expect("builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello world!\n");
 }
 
@@ -882,7 +890,7 @@ fn a_directory_becomes_a_module_path() {
     let report = tree.build("pkg").expect("builds");
     let paths: Vec<&str> = report.modules.iter().map(|m| m.path.as_str()).collect();
     assert!(paths.contains(&"pkg.geometry.shapes"), "{paths:?}");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "4\n");
 }
 
@@ -893,7 +901,7 @@ fn a_library_package_builds_no_program() {
     let tree = TempTree::new("library");
     workspace(&tree);
     let report = tree.build("mathlib").expect("builds");
-    assert!(report.program.is_none());
+    assert!(report.artifact.is_none());
     assert_eq!(report.modules.len(), 1);
 }
 
@@ -918,7 +926,7 @@ fn a_damaged_cache_entry_is_a_miss() {
     let tree = TempTree::new("damaged");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
-    let good = std::fs::read(first.program.clone().unwrap()).unwrap();
+    let good = std::fs::read(first.artifact.clone().unwrap()).unwrap();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(tree.path("build/cache/modules"))
         .expect("the cache directory exists")
         .map(|e| e.expect("entry").path())
@@ -929,7 +937,7 @@ fn a_damaged_cache_entry_is_a_miss() {
     std::fs::write(&entries[0], b"not an artifact").expect("writes");
     let second = tree.build("app").expect("builds");
     assert_eq!(second.compiled(), 1, "the damaged entry did not miss");
-    let again = std::fs::read(second.program.clone().unwrap()).unwrap();
+    let again = std::fs::read(second.artifact.clone().unwrap()).unwrap();
     assert_eq!(good, again, "the rebuild changed the program");
 }
 
@@ -943,8 +951,8 @@ fn the_program_bytes_are_deterministic() {
     let second = build_package(&tree.path("app"), &tree.path("build-b")).expect("builds");
     assert_eq!(first.compiled(), 3);
     assert_eq!(second.compiled(), 3, "the second directory reused an entry");
-    let a = std::fs::read(first.program.unwrap()).unwrap();
-    let b = std::fs::read(second.program.unwrap()).unwrap();
+    let a = std::fs::read(first.artifact.unwrap()).unwrap();
+    let b = std::fs::read(second.artifact.unwrap()).unwrap();
     assert_eq!(a, b, "the program bytes are not reproducible");
 }
 
@@ -957,7 +965,7 @@ fn the_program_bytes_are_deterministic() {
 /// request the typed entry, and run it.
 #[test]
 fn the_typed_environments_compile_link_and_run_by_hand() {
-    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv};
+    use lm_compiler::{compile_module, CompileEnv, LinkEnv};
     use lm_source::SourceFile;
 
     // The provider module compiles against an empty environment.
@@ -974,7 +982,7 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
 
     // The program binds the interface under the root name `lib`.
     let mut env = CompileEnv::new();
-    env.bind_interface(library.interface.clone())
+    env.bind_projection(library.interface.clone())
         .expect("the interface binds");
     env.bind_root("lib", "lib").expect("the root binds");
     let program = compile_module(
@@ -987,44 +995,37 @@ fn the_typed_environments_compile_link_and_run_by_hand() {
         true,
     )
     .expect("the program compiles");
-    // The program artifact carries the import slot and never loads.
+    // The compiled module carries unresolved import declarations.
     assert!(!program.module.imports.is_empty());
-    assert!(lm_vm::load(program.module.clone()).is_err());
 
     let mut link_env = LinkEnv::new();
     link_env
-        .bind(lm_compiler::core_link_unit().expect("the core builds"))
+        .bind_unit(lm_compiler::core_link_unit().expect("the core builds"))
         .expect("the core binds");
     for unit in [&library, &program] {
-        link_env
-            .bind_module(
-                unit.path.clone(),
-                unit.module.clone(),
-                unit.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, unit.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("links");
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the artifact publishes");
+    let linked = arena.namespace(namespace).expect("the namespace exists");
     // The typed entry: the result type and the empty row.
     linked
-        .entry()
-        .expect(&lm_bytecode::BcType::Int, &[])
+        .expect_entry(&lm_bytecode::BcType::Int, &[])
         .expect("the entry matches");
-    assert!(linked
-        .entry()
-        .expect(&lm_bytecode::BcType::Str, &[])
-        .is_err());
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    assert!(linked.expect_entry(&lm_bytecode::BcType::Str, &[]).is_err());
+    let mut vm = lm_vm::Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(42)");
 }
 
-/// A pin that no longer matches the provider is a link error, and the
-/// message names the rebuild as the fix.
+/// A pin that no longer matches the provider rejects at publication.
 #[test]
 fn a_stale_pin_fails_to_link() {
-    use lm_compiler::{link, LinkEnv};
+    use lm_compiler::LinkEnv;
     let tree = TempTree::new("stale-pin");
     workspace(&tree);
     let report = tree.build("app").expect("builds");
@@ -1032,7 +1033,7 @@ fn a_stale_pin_fails_to_link() {
     // Compile the importer against the first provider interface.
     let mut link_env = LinkEnv::new();
     link_env
-        .bind(lm_compiler::core_link_unit().expect("the core builds"))
+        .bind_unit(lm_compiler::core_link_unit().expect("the core builds"))
         .expect("the core binds");
     let mut units = Vec::new();
     let mut seen = Vec::new();
@@ -1060,23 +1061,22 @@ fn a_stale_pin_fails_to_link() {
     );
     for (idx, unit) in units.iter().enumerate() {
         let unit = if idx == 0 { &changed } else { unit };
-        link_env
-            .bind_module(
-                unit.path.clone(),
-                unit.module.clone(),
-                unit.interface.clone(),
-            )
-            .expect("binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, unit.clone()).expect("binds");
     }
-    let error = link("app.main", &link_env.freeze()).expect_err("the stale pin must reject");
-    assert!(error.0.contains("no longer provides"), "{error}");
-    assert!(error.0.contains("rebuild"), "{error}");
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the artifact graph builds");
+    let error = lm_testkit::publish_artifact(&artifact)
+        .expect_err("the stale pin must reject at publication");
+    assert!(error.to_string().contains("no longer provides"), "{error}");
+    assert!(error.to_string().contains("rebuild"), "{error}");
 }
 
 /// Collection rejects an invalid requested export before graph traversal.
 #[test]
 fn the_linker_rejects_a_crafted_export_table() {
-    use lm_compiler::{link, LinkEnv};
+    use lm_compiler::LinkEnv;
     let tree = TempTree::new("crafted");
     workspace(&tree);
     let mut seen = Vec::new();
@@ -1102,7 +1102,7 @@ fn the_linker_rejects_a_crafted_export_table() {
     for (needle, damage) in cases {
         let mut link_env = LinkEnv::new();
         link_env
-            .bind(lm_compiler::core_link_unit().expect("the core builds"))
+            .bind_unit(lm_compiler::core_link_unit().expect("the core builds"))
             .expect("the core binds");
         for (idx, unit) in units.iter().enumerate() {
             let mut module = unit.module.clone();
@@ -1110,28 +1110,23 @@ fn the_linker_rejects_a_crafted_export_table() {
             if idx == 0 {
                 damage(&mut module);
                 if needle == "twice" {
-                    let mut items: Vec<lm_bytecode::interface::IfaceItem> = interface
-                        .exports
-                        .iter()
-                        .map(|entry| entry.item.clone())
-                        .collect();
-                    items.push(items[0].clone());
                     let identity = lm_bytecode::identity::module_identity(&module)
                         .expect("the crafted module has an identity");
-                    let slots = interface.slots.clone();
-                    interface = lm_bytecode::interface::build_interface(
-                        &module, &identity, &unit.path, &items,
-                    )
-                    .expect("the crafted interface builds");
-                    interface.slots = slots;
+                    interface =
+                        lm_bytecode::interface::derive_interface(&module, &identity, &unit.path)
+                            .expect("the crafted interface derives");
                 }
             }
-            link_env
-                .bind_module(unit.path.clone(), module, interface)
-                .expect("binds");
+            let linked = link_env
+                .prepare_unit(unit.path.clone(), module, interface)
+                .expect("the unit builds");
+            link_env.bind_unit(linked).expect("binds");
         }
-        let error = link("app.main", &link_env.freeze()).expect_err("the table must reject");
-        assert!(error.0.contains(needle), "{needle}: {error}");
+        let error = link_env
+            .freeze()
+            .artifact("app.main")
+            .expect_err("the table must reject");
+        assert!(error.to_string().contains(needle), "{needle}: {error}");
     }
 }
 
@@ -1148,7 +1143,7 @@ fn compile_one(
     let text = std::fs::read_to_string(tree.path(file)).expect("reads");
     let mut env = CompileEnv::new();
     for interface in seen.iter() {
-        env.bind_interface(interface.clone()).expect("binds");
+        env.bind_projection(interface.clone()).expect("binds");
     }
     env.bind_root("mathlib", "mathlib").expect("binds");
     env.bind_root("greeting", "app.greeting").expect("binds");
@@ -1173,6 +1168,6 @@ fn the_example_workspace_runs() {
         &out.path("build"),
     )
     .expect("the example builds");
-    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Write"]);
+    let output = run_artifact(&report.artifact.clone().unwrap(), &["Io.Write"]);
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }

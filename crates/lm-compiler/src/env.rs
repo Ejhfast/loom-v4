@@ -70,13 +70,20 @@ impl CompileEnv {
         CompileEnv::default()
     }
 
-    /// Make one interface visible without binding a root name. A
-    /// signature of a bound module may name a class of this one.
+    /// Make one compiled unit visible to source compilation.
+    pub fn bind_unit(&mut self, unit: &LinkUnit) -> Result<(), CompileEnvError> {
+        self.bind_projection(unit.interface().clone())
+    }
+
+    /// Make one cached `.lmi` projection visible to compilation.
+    ///
+    /// Normal compilation uses `bind_unit`. This method serves the
+    /// separate-compilation cache and interface inspection tests.
     ///
     /// Binding the same interface twice is allowed, because a build
     /// may reach one module through two paths. Binding a different
     /// interface at one module path is an error.
-    pub fn bind_interface(&mut self, interface: Interface) -> Result<(), CompileEnvError> {
+    pub fn bind_projection(&mut self, interface: Interface) -> Result<(), CompileEnvError> {
         let path = interface.module_path.clone();
         if let Some(old) = self.env.modules.get(&path) {
             if *old != interface {

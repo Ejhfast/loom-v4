@@ -59,11 +59,27 @@ pub struct CompiledModule {
     /// The full module path, for example `mathlib.matrix`.
     pub path: String,
     pub module: Module,
-    pub artifact: Vec<u8>,
     pub interface: Interface,
-    pub interface_bytes: Vec<u8>,
     pub semantic_hash: [u8; 32],
-    pub container_hash: [u8; 32],
+}
+
+impl CompiledModule {
+    /// Bind this compiler result to its exact provider units.
+    pub fn into_link_unit(
+        self,
+        env: &lm_link::LinkEnv,
+    ) -> Result<lm_link::LinkUnit, lm_link::LinkEnvError> {
+        env.prepare_unit(self.path, self.module, self.interface)
+    }
+
+    /// Bind this compiler result under one immutable ABI bundle.
+    pub fn into_link_unit_with_bundle(
+        self,
+        env: &lm_link::LinkEnv,
+        bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    ) -> Result<lm_link::LinkUnit, lm_link::LinkEnvError> {
+        env.prepare_unit_with_bundle(self.path, self.module, self.interface, bundle)
+    }
 }
 
 /// Compile one module. `Err` carries fully rendered diagnostic text.
@@ -178,17 +194,11 @@ pub fn compile_module_with_options_and_bundle(
     let interface =
         lm_bytecode::interface::derive_interface_with_bundle(&module, &identity, path, bundle)
             .map_err(|e| format!("error: `{path}`: {e}\n"))?;
-    let interface_bytes = lm_bytecode::interface::encode_interface(&interface);
-    let artifact = lm_bytecode::encode_with_bundle(&module, bundle);
-    let container_hash = lm_bytecode::identity::container_hash(&artifact);
     Ok(CompiledModule {
         path: path.to_string(),
         module,
-        artifact,
         interface,
-        interface_bytes,
         semantic_hash: identity.semantic_hash,
-        container_hash,
     })
 }
 
@@ -1396,17 +1406,29 @@ mod tests {
             .flatten()
     }
 
-    fn link_compiled(unit: &CompiledModule) -> Module {
+    fn link_compiled(unit: &CompiledModule) -> lm_bytecode::CodeTables {
         let mut env = crate::core_link_env().expect("the core link environment builds");
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("the compiled module binds");
-        crate::link(&unit.path, &env.freeze())
-            .expect("the compiled module links")
-            .module
+        let linked = unit
+            .clone()
+            .into_link_unit(&env)
+            .expect("the compiled unit builds");
+        env.bind_unit(linked).expect("the compiled unit binds");
+        let artifact = env
+            .freeze()
+            .artifact(&unit.path)
+            .expect("the compiled artifact builds");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(
+                artifact,
+                Some(crate::core_link_unit().expect("the core unit builds")),
+            )
+            .expect("the compiled artifact publishes");
+        arena
+            .namespace(namespace)
+            .expect("the namespace exists")
+            .tables()
+            .clone()
     }
 
     #[test]
@@ -1458,13 +1480,23 @@ mod tests {
             .pop()
             .expect("the imported core carries conformances");
         let mut env = crate::core_link_env().expect("the core link environment builds");
-        env.bind_module(compiled.path.clone(), compiled.module, compiled.interface)
-            .expect("the forged module binds");
-        let linked = crate::link(&compiled.path, &env.freeze())
+        let path = compiled.path.clone();
+        let unit = compiled
+            .into_link_unit(&env)
+            .expect("the forged unit builds");
+        env.bind_unit(unit).expect("the forged unit binds");
+        let artifact = env.freeze().artifact(&path).expect("the artifact builds");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(
+                artifact,
+                Some(crate::core_link_unit().expect("the core unit builds")),
+            )
             .expect("the exact provider supplies its conformances");
+        let linked = arena.namespace(namespace).expect("the namespace exists");
         let core = crate::core_link_unit().expect("the core link unit builds");
         assert_eq!(
-            linked.module.conformances.len(),
+            linked.tables().conformances.len(),
             core.module().conformances.len()
         );
     }
@@ -1480,8 +1512,8 @@ mod tests {
         let explicit =
             compile_module_with_options("probe", &source, &env, true, &CompileOptions::new())
                 .expect("the probe compiles");
-        assert_eq!(plain.artifact, explicit.artifact);
-        assert_eq!(plain.interface_bytes, explicit.interface_bytes);
+        assert_eq!(plain.module, explicit.module);
+        assert_eq!(plain.interface, explicit.interface);
         assert!(!instructions(&plain.module).any(|instruction| matches!(
             instruction,
             Instr::Extended(ExtendedInstr::CallSlot { .. })
@@ -1549,8 +1581,9 @@ mod tests {
         )));
         assert_eq!(compiled.interface.slots.len(), 1);
         assert!(compiled.interface.slots[0].late);
-        let decoded = lm_bytecode::interface::decode_interface(&compiled.interface_bytes)
-            .expect("the interface decodes");
+        let encoded = lm_bytecode::interface::encode_interface(&compiled.interface);
+        let decoded =
+            lm_bytecode::interface::decode_interface(&encoded).expect("the interface decodes");
         assert_eq!(decoded, compiled.interface);
     }
 
@@ -1779,7 +1812,7 @@ mod tests {
         .expect("the library compiles");
         let mut compile_env = crate::CompileEnv::new();
         compile_env
-            .bind_interface(library.interface.clone())
+            .bind_projection(library.interface.clone())
             .expect("the interface binds");
         compile_env.bind_root("lib", "lib").expect("the root binds");
         let program = compile_module(
@@ -1799,15 +1832,24 @@ mod tests {
 
         let mut link_env = crate::core_link_env().expect("the core link environment builds");
         for unit in [&library, &program] {
-            link_env
-                .bind_module(
-                    unit.path.clone(),
-                    unit.module.clone(),
-                    unit.interface.clone(),
-                )
-                .expect("the unit binds");
+            let unit = unit
+                .clone()
+                .into_link_unit(&link_env)
+                .expect("the unit builds");
+            link_env.bind_unit(unit).expect("the unit binds");
         }
-        let linked = crate::link("app.main", &link_env.freeze()).expect("the program links");
+        let artifact = link_env
+            .freeze()
+            .artifact("app.main")
+            .expect("the program artifact builds");
+        let mut arena = lm_link::CodeArena::new();
+        let namespace = arena
+            .publish(
+                artifact,
+                Some(crate::core_link_unit().expect("the core unit builds")),
+            )
+            .expect("the program publishes");
+        let linked = arena.namespace(namespace).expect("the namespace exists");
         let key = library
             .interface
             .slots
@@ -1815,7 +1857,7 @@ mod tests {
             .find(|slot| slot.binding.ends_with(".twice"))
             .expect("the library publishes twice")
             .key;
-        assert!(linked.module.slots.iter().any(|slot| slot.key == key));
+        assert!(linked.tables().slots.iter().any(|slot| slot.key == key));
     }
 
     #[test]
@@ -1837,7 +1879,7 @@ mod tests {
 
         let mut compile_env = crate::CompileEnv::new();
         compile_env
-            .bind_interface(library.interface.clone())
+            .bind_projection(library.interface.clone())
             .expect("the interface binds");
         compile_env.bind_root("lib", "lib").expect("the root binds");
         let program = compile_module(
@@ -1901,36 +1943,5 @@ mod tests {
             Instr::Extended(ExtendedInstr::CallSlot { slot, .. })
                 if compiled.module.slots[*slot as usize].key == quote.key
         )));
-    }
-
-    #[test]
-    fn runtime_append_keeps_every_existing_index() {
-        let base = compile(
-            "def base(): Int\n  1\nend\nbase()\n",
-            &CompileOptions::new(),
-        );
-        let addition = compile_module_with_options(
-            "revision",
-            &SourceFile::new("revision.lm", "def added(): Int\n  2\nend\nadded()\n"),
-            &crate::CompileEnv::new().freeze(),
-            true,
-            &CompileOptions::new().late_function("added"),
-        )
-        .expect("the addition compiles");
-        let base = link_compiled(&base);
-        let addition = link_compiled(&addition);
-        let appended =
-            lm_bytecode::append::append_linked(&base, &addition).expect("the module appends");
-        assert_eq!(
-            &appended.module.strings[..base.strings.len()],
-            &base.strings
-        );
-        assert_eq!(&appended.module.types[..base.types.len()], &base.types);
-        assert_eq!(
-            &appended.module.classes[..base.classes.len()],
-            &base.classes
-        );
-        assert_eq!(&appended.module.funcs[..base.funcs.len()], &base.funcs);
-        lm_verify::verify_module(&appended.module).expect("the appended module verifies");
     }
 }

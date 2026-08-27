@@ -381,8 +381,11 @@ pub enum SlotChangeKind {
 pub struct PortableCode {
     pub kind: PortableCodeKind,
     pub bytes: SharedBytes,
-    pub interface: Option<SharedBytes>,
-    pub index: u32,
+    /// The selected slot for a `SlotSpec` view.
+    ///
+    /// A function or class artifact selects its definition through
+    /// its sole root export. Other views do not use this value.
+    pub slot: Option<u32>,
     /// The selected debug definition origin, when source data exists.
     pub origin: Option<[u8; 32]>,
 }
@@ -1250,9 +1253,7 @@ impl Object {
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
                 | Object::NativeHandle { .. } => VALUE_COST,
-                Object::NativeCode(code) => code.interface.as_ref().map_or(VALUE_COST, |bytes| {
-                    VALUE_COST.saturating_add(bytes.retained_capacity())
-                }),
+                Object::NativeCode(_) => VALUE_COST,
                 Object::NativeFileHandle { .. }
                 | Object::NativeResourceHandle { .. }
                 | Object::NativeWait { .. }
@@ -1704,8 +1705,7 @@ mod tests {
             Object::NativeCode(Box::new(PortableCode {
                 kind: PortableCodeKind::Artifact,
                 bytes: vec![1, 2].into(),
-                interface: None,
-                index: 0,
+                slot: None,
                 origin: None,
             })),
             Object::NativeCodeHandle {
@@ -1910,8 +1910,7 @@ mod tests {
             Object::NativeCode(Box::new(PortableCode {
                 kind: PortableCodeKind::Artifact,
                 bytes: SharedBytes::new(),
-                interface: None,
-                index: 0,
+                slot: None,
                 origin: None,
             })),
             Object::NativeCodeHandle {

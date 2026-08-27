@@ -1,17 +1,19 @@
 //! Week-10 native collection and iteration behavior.
 
 use lm_bytecode::{BcInterfaceUse, BcType, ExtendedInstr, Instr};
-use lm_compiler::{compile_module, link, CompileEnv};
+use lm_compiler::{compile_module, CompileEnv};
 use lm_heap::{Object, StructuralEpoch};
 use lm_source::SourceFile;
-use lm_testkit::{compile_text, run_allowed};
+use lm_testkit::{
+    compile_module_text, compile_text, load_snapshot_for_artifact, publish_artifact, run_allowed,
+};
 use lm_vm::snapshot::{codec, ImageReason, LoadLimits};
 use lm_vm::{RecordingHost, RootEvent, Vm, VmConfig, World};
 
 fn run(source: &str) -> (String, lm_vm::HeapStats) {
-    let module = compile_text("collections.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     (vm.show_outcome(&outcome), vm.heap().stats())
 }
@@ -21,7 +23,7 @@ fn outcome(source: &str) -> String {
 }
 
 fn error(source: &str) -> String {
-    compile_text("collections.lm", source).expect_err("the source must fail")
+    compile_module_text("collections.lm", source).expect_err("the source must fail")
 }
 
 #[test]
@@ -37,7 +39,7 @@ fn typed_option_values_allocate_no_guest_object() {
 
 #[test]
 fn collection_get_uses_one_native_lookup() {
-    let module = compile_text(
+    let module = compile_module_text(
         "collections.lm",
         "xs = [1]\nm = {1: 2}\n(xs.get(0), m.get(1))\n",
     )
@@ -66,7 +68,7 @@ fn collection_get_uses_one_native_lookup() {
 
 #[test]
 fn an_unused_map_put_discards_its_option_result() {
-    let module = compile_text(
+    let module = compile_module_text(
         "collections.lm",
         "table: Map[Int, Int] = {}\ntable.put(1, 2)\ntable.put(1, 3)\n",
     )
@@ -100,7 +102,7 @@ fn interface_contracts_cross_module_boundaries() {
     .expect("the library compiles");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("metrics", "lib.metrics")
@@ -120,17 +122,14 @@ fn interface_contracts_cross_module_boundaries() {
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(9)");
 }
@@ -154,7 +153,7 @@ fn interface_inheritance_crosses_module_boundaries() {
     .expect("the library compiles");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("labels", "lib.labels")
@@ -175,17 +174,14 @@ fn interface_inheritance_crosses_module_boundaries() {
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"item:ready\")");
 }
@@ -213,7 +209,8 @@ end
 
 Item()
 "#;
-    let module = compile_text("interface-inheritance.lm", source).expect("the source compiles");
+    let module =
+        compile_module_text("interface-inheritance.lm", source).expect("the source compiles");
     let item = module
         .classes
         .iter()
@@ -310,7 +307,7 @@ end
         lm_bytecode::interface::decode_interface(&encoded).expect("the exported interface decodes");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(interface)
+        .bind_projection(interface)
         .expect("the interface binds");
     compile_env
         .bind_root("catalog", "lib.catalog")
@@ -337,17 +334,14 @@ describe(catalog.Shelf())
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"loom:12\")");
 }
@@ -423,7 +417,7 @@ end
 
 1
 "#;
-    compile_text("identical_interface_methods.lm", identical)
+    compile_module_text("identical_interface_methods.lm", identical)
         .expect("identical interface methods merge");
 
     let ambiguous = error(
@@ -567,7 +561,7 @@ end
 
 #[test]
 fn core_display_interpolation_keeps_native_builder_instructions() {
-    let module = compile_text(
+    let module = compile_module_text(
         "native_display.lm",
         "number = 7\nflag = true\ntext = \"ok\"\nletter = case text.at(0)\n\
          in Some(value) then value\nin None then panic(\"the text is empty\")\nend\n\
@@ -675,7 +669,7 @@ end
 NameOnly()
 Shelf()
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let module = compile_module_text("collections.lm", source).expect("the source compiles");
     let catalog = module
         .interfaces
         .iter()
@@ -978,7 +972,7 @@ end
 "#;
     assert_eq!(outcome(source), "Done((6, 33, 330, 9, 1))");
 
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let module = compile_module_text("collections.lm", source).expect("the source compiles");
     let entry = &module.funcs[module.entry as usize];
     let instructions: Vec<&Instr> = entry.blocks.iter().flatten().collect();
     assert!(instructions
@@ -1047,7 +1041,7 @@ count(IntBag([4, 5, 6]))
 "#;
     assert_eq!(outcome(source), "Done(3)");
 
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let module = compile_module_text("collections.lm", source).expect("the source compiles");
     let count = module
         .funcs
         .iter()
@@ -1342,7 +1336,7 @@ sorted.sort_by() { |left: Int, right: Int|
 
 #[test]
 fn list_map_keeps_its_explicit_override() {
-    let module = compile_text(
+    let module = compile_module_text(
         "collections.lm",
         "[1, 2, 3].map(do |value: Int|: Int value + 1 end)\n",
     )
@@ -1498,7 +1492,7 @@ end
     .expect("the library compiles");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("keys", "lib.keys")
@@ -1522,17 +1516,14 @@ table.at(keys.Key(7).freeze())
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(9)");
 }
@@ -1741,7 +1732,7 @@ end
 
 query(Map[Key, Int](), Key(1).freeze())
 "#;
-    let module = compile_text("hashable_map.lm", source).expect("the source compiles");
+    let module = compile_module_text("hashable_map.lm", source).expect("the source compiles");
     let query = module
         .funcs
         .iter()
@@ -1833,7 +1824,8 @@ table.put("a", 10)
 #[test]
 fn callbacks_do_not_allocate_guest_closures() {
     let source = "values = [1, 2, 3]\nvalues.map() { |value: Int| value + 1 }\n";
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let module = artifact.root().module();
     let entry = &module.funcs[module.entry as usize];
     assert_eq!(
         entry
@@ -1850,8 +1842,8 @@ fn callbacks_do_not_allocate_guest_closures() {
         .flatten()
         .any(|item| matches!(item, Instr::MakeClosure { .. })));
 
-    let loaded = lm_vm::load(module).expect("the module loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let result = vm.run();
     assert_eq!(vm.show_outcome(&result), "Done([2, 3, 4])");
     assert_eq!(vm.heap().stats().slots, 2);
@@ -1895,7 +1887,7 @@ relay() { |value: Int| value + 3 }
         "def leak(f: () -> Int): Int\n  inner = { ||: Int f() }\n  inner()\nend\nleak() { || 1 }\n",
         "def id[T](value: T): T\n  value\nend\ndef leak(f: () -> Int): Int\n  id(f)()\nend\nleak() { || 1 }\n",
     ] {
-        let failure = compile_text("collections.lm", invalid);
+        let failure = compile_module_text("collections.lm", invalid);
         assert!(failure.is_err(), "{invalid}");
         assert!(failure.unwrap_err().contains("E1064"), "{invalid}");
     }
@@ -1924,7 +1916,7 @@ saved = keep() { || 7 }
 saved()
 "#;
     assert_eq!(outcome(source), "Done(7)");
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let module = compile_module_text("collections.lm", source).expect("the source compiles");
     let entry = &module.funcs[module.entry as usize];
     assert!(entry
         .blocks
@@ -1958,10 +1950,11 @@ end
 
 go()
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1973,9 +1966,9 @@ go()
         .expect("the callback creates an image");
     assert_eq!(image.world().machines[0].callbacks.len(), 1);
 
-    let admitted = codec::load_external(
+    let admitted = load_snapshot_for_artifact(
+        &artifact,
         image.bytes().expect("the image encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the callback image loads");
@@ -1985,8 +1978,10 @@ go()
         image.bytes().expect("the image encodes").as_ref()
     );
 
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2008,10 +2003,11 @@ slice = [1, 2, 3].slice_view(1, 2)
 table = {"a": 1, "b": 2}
 (slice, table.keys(), table.values(), table.entries())
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2021,9 +2017,9 @@ table = {"a": 1, "b": 2}
     let image = world
         .capture_snapshot(gate, 0, false)
         .expect("the terminal view snapshot succeeds");
-    let admitted = codec::load_external(
+    let admitted = load_snapshot_for_artifact(
+        &artifact,
         image.bytes().expect("the image encodes"),
-        &loaded,
         LoadLimits::default(),
     )
     .expect("the view snapshot loads");
@@ -2033,8 +2029,10 @@ table = {"a": 1, "b": 2}
         image.bytes().expect("the image encodes").as_ref()
     );
 
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2062,10 +2060,11 @@ table.reserve(20)
 table.put(1, 2)
 (values, table)
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2086,10 +2085,12 @@ table.put(1, 2)
     assert_eq!(collection_capacities(&decoded), before);
     assert_eq!(collection_map_hashes(&decoded), before_hashes);
 
-    let admitted = codec::load_external(&bytes, &loaded, LoadLimits::default())
+    let admitted = load_snapshot_for_artifact(&artifact, &bytes, LoadLimits::default())
         .expect("the image is admitted");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2111,10 +2112,11 @@ table.remove(1)
 table.remove(4)
 table
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let artifact = compile_text("collections.lm", source).expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2206,10 +2208,11 @@ fn heap_collection_capacities(heap: &lm_heap::Heap) -> (usize, usize) {
 
 #[test]
 fn snapshot_decoder_rejects_epochs_outside_supported_range() {
-    let module = compile_text("collections.lm", "[1]\n").expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let artifact = compile_text("collections.lm", "[1]\n").expect("the source compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2229,10 +2232,11 @@ fn snapshot_decoder_rejects_epochs_outside_supported_range() {
             _ => None,
         })
         .expect("the snapshot contains a list");
-    *epoch = StructuralEpoch(u32::MAX);
+    let marker = 0x0bad_f00d;
+    *epoch = StructuralEpoch(marker);
 
     let mut bytes = codec::encode(&image, usize::MAX).expect("the edited image encodes");
-    let valid = u64::from(u32::MAX).to_le_bytes();
+    let valid = u64::from(marker).to_le_bytes();
     let position = bytes
         .windows(valid.len())
         .position(|window| window == valid)
@@ -2398,7 +2402,7 @@ end
 
 use_callback() { |value: Int| value + 1 }
 "#;
-    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let module = compile_module_text("collections.lm", source).expect("the source compiles");
     let callback = module
         .types
         .iter()
@@ -2411,7 +2415,10 @@ use_callback() { |value: Int| value + 1 }
     assert!(failure.message.contains("inside another type"));
 
     let mut applied = module;
-    applied.apps[0].types[0] = callback;
+    applied.apps.push(lm_bytecode::TypeApp {
+        types: vec![callback],
+        rows: Vec::new(),
+    });
     let failure =
         lm_verify::verify_module(&applied).expect_err("the callback application verifies");
     assert!(failure.message.contains("nonescaping callback"));
@@ -2439,7 +2446,7 @@ end
 
 Numbers()
 "#;
-    let mut module = compile_text("collections.lm", source).expect("the source compiles");
+    let mut module = compile_module_text("collections.lm", source).expect("the source compiles");
     let iterable = module
         .interfaces
         .iter()
@@ -2459,7 +2466,7 @@ Numbers()
 
 #[test]
 fn option_payload_requires_the_some_case_type() {
-    let mut module = compile_text(
+    let mut module = compile_module_text(
         "collections.lm",
         "case Some(1)\nin Some(value) then value\nin None then 0\nend\n",
     )
@@ -2477,11 +2484,7 @@ fn option_payload_requires_the_some_case_type() {
 
 #[test]
 fn the_verifier_rejects_forged_view_operations() {
-    let mut list = compile_text(
-        "collections.lm",
-        "view = [1, 2].slice_view(0, 1)\nview.len()\n",
-    )
-    .expect("the list view compiles");
+    let mut list = lm_hir::core_image();
     let operation = list
         .funcs
         .iter_mut()
@@ -2492,8 +2495,7 @@ fn the_verifier_rejects_forged_view_operations() {
     let failure = lm_verify::verify_module(&list).expect_err("the forged list view verifies");
     assert!(failure.message.contains("map"));
 
-    let mut map = compile_text("collections.lm", "view = {1: 2}.keys()\nview.at(0)\n")
-        .expect("the map view compiles");
+    let mut map = lm_hir::core_image();
     let operation = map
         .funcs
         .iter_mut()

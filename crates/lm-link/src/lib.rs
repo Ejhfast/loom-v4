@@ -34,9 +34,10 @@ use lm_bytecode::artifact::{Artifact, ArtifactId, CORE_MODULE_PATH};
 use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
-    BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module,
-    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
+    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, CodeTables, Export, ExtendedInstr, Func,
+    FuncBinding, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget, TypeApp,
+    NO_CLASS, NO_PARENT,
 };
 use std::collections::HashMap;
 
@@ -127,7 +128,7 @@ impl LinkEnv {
     }
 
     /// Bind one module to its canonical path.
-    pub fn bind<U>(&mut self, unit: U) -> Result<(), LinkEnvError>
+    pub fn bind_unit<U>(&mut self, unit: U) -> Result<(), LinkEnvError>
     where
         U: Into<Arc<LinkUnit>>,
     {
@@ -141,25 +142,25 @@ impl LinkEnv {
         Ok(())
     }
 
-    /// Bind compiled module parts to their exact providers.
-    pub fn bind_module(
-        &mut self,
+    /// Build one link unit against the exact providers in this environment.
+    pub fn prepare_unit(
+        &self,
         path: impl Into<String>,
         module: Module,
         interface: Interface,
-    ) -> Result<(), LinkEnvError> {
+    ) -> Result<LinkUnit, LinkEnvError> {
         let bundle = lm_abi::standard_bundle();
-        self.bind_module_with_bundle(path, module, interface, &bundle)
+        self.prepare_unit_with_bundle(path, module, interface, &bundle)
     }
 
-    /// Bind compiled module parts under one immutable ABI bundle.
-    pub fn bind_module_with_bundle(
-        &mut self,
+    /// Build one link unit under one immutable ABI bundle.
+    pub fn prepare_unit_with_bundle(
+        &self,
         path: impl Into<String>,
         module: Module,
         interface: Interface,
         bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    ) -> Result<(), LinkEnvError> {
+    ) -> Result<LinkUnit, LinkEnvError> {
         let path = path.into();
         if self.units.contains_key(&path) {
             return Err(LinkEnvError::DuplicateModule(path));
@@ -191,9 +192,8 @@ impl LinkEnv {
                 );
             }
         }
-        let unit = LinkUnit::new_with_bundle(path, module, interface, dependencies, bundle)
-            .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))?;
-        self.bind(unit)
+        LinkUnit::new_with_bundle(path, module, interface, dependencies, bundle)
+            .map_err(|error| LinkEnvError::InvalidUnit(error.to_string()))
     }
 
     fn validate_dependencies(&self, unit: &LinkUnit) -> Result<(), LinkEnvError> {
@@ -274,6 +274,35 @@ pub struct FrozenLinkEnv {
     units: BTreeMap<String, Arc<LinkUnit>>,
 }
 
+/// One definition selected from an artifact root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionSelection {
+    Function(u32),
+    Class(u32),
+}
+
+/// Build one exact portable definition artifact.
+pub fn select_definition_artifact(
+    artifact: Artifact,
+    runtime_core: Option<Arc<LinkUnit>>,
+    selection: DefinitionSelection,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Artifact, LinkError> {
+    let (root, env) =
+        resolve_artifact(artifact, runtime_core).map_err(|error| fail(error.to_string()))?;
+    let root_path = env
+        .paths()
+        .into_iter()
+        .find(|path| env.unit(path).is_some_and(|unit| unit.id() == root))
+        .ok_or_else(|| fail("the artifact root unit is missing"))?
+        .to_string();
+    let source = env
+        .unit(&root_path)
+        .ok_or_else(|| fail("the artifact root unit is missing"))?;
+    let (module, definition) = prepare_definition_module(source.module(), selection)?;
+    build_definition_artifact(source, module, definition, &env, bundle)
+}
+
 impl FrozenLinkEnv {
     /// Return the module at one canonical path.
     pub fn unit(&self, path: &str) -> Option<&LinkUnit> {
@@ -301,6 +330,12 @@ impl FrozenLinkEnv {
         let selected = collect_environment(root, self, &bundle)?;
         let order = link_order(root, &selected)?;
         artifact_from_order(root, &selected, &order, true)
+    }
+
+    /// Build a thin artifact that keeps the root module surface.
+    pub fn complete_artifact(&self, root: &str) -> Result<Artifact, LinkError> {
+        let order = link_order(root, self)?;
+        artifact_from_order(root, self, &order, false)
     }
 }
 
@@ -396,7 +431,7 @@ pub fn resolve_artifact(
         let unit = units[position]
             .take()
             .expect("one artifact unit enters the link environment once");
-        env.bind(unit)?;
+        env.bind_unit(unit)?;
         linked += 1;
         for successor in &successors[position] {
             indegree[*successor] -= 1;
@@ -435,6 +470,15 @@ fn collect_environment(
     env: &FrozenLinkEnv,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<FrozenLinkEnv, LinkError> {
+    collect_environment_with_root(root, env, bundle, None)
+}
+
+fn collect_environment_with_root(
+    root: &str,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    definition: Option<collect::DefinitionRoot>,
+) -> Result<FrozenLinkEnv, LinkError> {
     let order = link_order(root, env)?;
     let mut requests: BTreeMap<String, Vec<(String, ImportKind)>> = BTreeMap::new();
     let mut selected: BTreeMap<String, Module> = BTreeMap::new();
@@ -448,7 +492,10 @@ fn collect_environment(
             continue;
         }
         let result = if path == root {
-            collect::collect_link_root(unit.module())
+            match definition {
+                Some(definition) => collect::collect_link_definition(unit.module(), definition),
+                None => collect::collect_link_root(unit.module()),
+            }
         } else {
             let Some(exports) = requests.remove(path) else {
                 continue;
@@ -489,13 +536,16 @@ fn collect_environment(
                 .cloned()
                 .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
             rebuilt
-                .bind(source)
+                .bind_unit(source)
                 .map_err(|error| fail(error.to_string()))?;
             continue;
         }
         let interface = collected_interface(source, &module, bundle)?;
+        let unit = rebuilt
+            .prepare_unit_with_bundle(path.clone(), module, interface, bundle)
+            .map_err(|error| fail(error.to_string()))?;
         rebuilt
-            .bind_module_with_bundle(path.clone(), module, interface, bundle)
+            .bind_unit(unit)
             .map_err(|error| fail(error.to_string()))?;
     }
     Ok(rebuilt.freeze())
@@ -539,170 +589,727 @@ fn collected_interface(
     .map_err(|error| fail(format!("the collected interface does not build: {error}")))
 }
 
-/// One linked program and its deployable artifact bytes.
+/// One resolved code namespace.
+///
+/// The namespace owns relocated tables and one exact artifact graph.
+/// A VM executes this value. It never executes a `Module` payload.
 #[derive(Debug, Clone)]
-pub struct LinkedProgram {
-    pub module: Module,
-    pub artifact_id: ArtifactId,
-    pub artifact: Vec<u8>,
-    /// The artifact closure identity in its legacy hash field.
-    pub semantic_hash: [u8; 32],
-    pub container_hash: [u8; 32],
+pub struct CodeNamespace {
+    artifact_id: ArtifactId,
+    artifacts: Vec<std::sync::Arc<Artifact>>,
+    units: BTreeMap<ArtifactId, std::sync::Arc<LinkUnit>>,
+    active_units: BTreeMap<String, ArtifactId>,
+    relocations: BTreeMap<ArtifactId, UnitRelocation>,
+    core_artifact: Option<ArtifactId>,
+    tables: std::sync::Arc<CodeTables>,
+    entry: u32,
+    core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
+    exports: Vec<Export>,
+    bindings: Vec<FuncBinding>,
+    class_hashes: Vec<[u8; 32]>,
+    interface_hashes: Vec<[u8; 32]>,
+    func_hashes: Vec<[u8; 32]>,
+    type_hashes: Vec<[u8; 32]>,
+    slot_initials: Vec<Option<SlotTarget>>,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
 }
 
-impl LinkedProgram {
-    /// The typed entry of the program: the parameter types, the
-    /// result type, and the effect row of the entry function.
-    ///
-    /// `LinkedEntry` is the typed handle specification 3.6 requests.
-    /// A caller states the expected shape and receives an error when
-    /// the program does not match.
-    pub fn entry(&self) -> LinkedEntry<'_> {
-        let func = &self.module.funcs[self.module.entry as usize];
-        LinkedEntry {
-            module: &self.module,
-            func,
+impl CodeNamespace {
+    pub fn artifact_id(&self) -> ArtifactId {
+        self.artifact_id
+    }
+
+    pub fn artifact(&self) -> &Artifact {
+        &self.artifacts[0]
+    }
+
+    pub fn artifacts(&self) -> &[std::sync::Arc<Artifact>] {
+        &self.artifacts
+    }
+
+    pub fn unit(&self, id: ArtifactId) -> Option<&LinkUnit> {
+        self.units.get(&id).map(std::sync::Arc::as_ref)
+    }
+
+    pub fn active_unit(&self, path: &str) -> Option<&LinkUnit> {
+        let id = self.active_units.get(path)?;
+        self.unit(*id)
+    }
+
+    pub fn relocation(&self, id: ArtifactId) -> Option<&UnitRelocation> {
+        self.relocations.get(&id)
+    }
+
+    pub fn contains_function(&self, function: u32) -> bool {
+        self.relocations
+            .values()
+            .any(|relocation| relocation.functions().contains(&function))
+    }
+
+    pub fn contains_class(&self, class: u32) -> bool {
+        self.relocations
+            .values()
+            .any(|relocation| relocation.classes().contains(&class))
+    }
+
+    pub fn contains_slot(&self, slot: u32) -> bool {
+        self.relocations
+            .values()
+            .any(|relocation| relocation.slots().contains(&slot))
+    }
+
+    pub fn core_artifact(&self) -> Option<ArtifactId> {
+        self.core_artifact
+    }
+
+    pub fn tables(&self) -> &CodeTables {
+        &self.tables
+    }
+
+    pub fn table_store(&self) -> std::sync::Arc<CodeTables> {
+        self.tables.clone()
+    }
+
+    pub fn entry(&self) -> u32 {
+        self.entry
+    }
+
+    pub fn core_roles(&self) -> &[u32; lm_bytecode::CORE_ROLE_COUNT] {
+        &self.core_roles
+    }
+
+    pub fn exports(&self) -> &[Export] {
+        &self.exports
+    }
+
+    pub fn bindings(&self) -> &[FuncBinding] {
+        &self.bindings
+    }
+
+    pub fn class_hashes(&self) -> &[[u8; 32]] {
+        &self.class_hashes
+    }
+
+    pub fn interface_hashes(&self) -> &[[u8; 32]] {
+        &self.interface_hashes
+    }
+
+    pub fn func_hashes(&self) -> &[[u8; 32]] {
+        &self.func_hashes
+    }
+
+    pub fn type_hashes(&self) -> &[[u8; 32]] {
+        &self.type_hashes
+    }
+
+    pub fn slot_initials(&self) -> &[Option<SlotTarget>] {
+        &self.slot_initials
+    }
+
+    /// Build exact table maps into another publication of this graph.
+    pub fn relocation_to(&self, target: &CodeNamespace) -> Result<CodeRelocation, LinkError> {
+        let mut maps = CodeRelocation::with_source(self.tables.as_ref());
+        for (id, source) in &self.relocations {
+            let target = target
+                .relocations
+                .get(id)
+                .ok_or_else(|| fail(format!("the target namespace lacks unit {id}")))?;
+            maps.merge_unit(source, target)?;
         }
-    }
-}
-
-/// A typed handle on the program entry.
-pub struct LinkedEntry<'a> {
-    module: &'a Module,
-    func: &'a Func,
-}
-
-impl LinkedEntry<'_> {
-    /// The result type of the entry, as an index into the module type
-    /// table.
-    pub fn result_type(&self) -> u32 {
-        self.func.ret
+        Ok(maps)
     }
 
-    /// The effect row the entry charges.
-    pub fn row(&self) -> &[BcRow] {
-        &self.func.row
+    pub fn bundle(&self) -> &std::sync::Arc<lm_abi::AbiBundle> {
+        &self.bundle
     }
 
-    /// Check the entry against an expected result type and row. The
-    /// row names operations by manifest name.
-    pub fn expect(&self, result: &BcType, row: &[&str]) -> Result<(), LinkError> {
-        let found = &self.module.types[self.func.ret as usize];
+    /// Build one portable artifact for an arena function.
+    pub fn function_artifact(&self, function: u32) -> Result<Artifact, LinkError> {
+        let (unit, local) = self.local_function(function)?;
+        let (module, definition) =
+            prepare_definition_module(unit.module(), DefinitionSelection::Function(local))?;
+        self.build_definition_artifact(unit, module, definition)
+    }
+
+    /// Build one portable artifact for an arena class.
+    pub fn class_artifact(&self, class: u32) -> Result<Artifact, LinkError> {
+        let (unit, local) = self.local_class(class)?;
+        let (module, definition) =
+            prepare_definition_module(unit.module(), DefinitionSelection::Class(local))?;
+        self.build_definition_artifact(unit, module, definition)
+    }
+
+    fn local_function(&self, function: u32) -> Result<(&LinkUnit, u32), LinkError> {
+        for (id, unit) in &self.units {
+            let Some(reloc) = self.relocations.get(id) else {
+                continue;
+            };
+            let externs = unit.module().extern_funcs();
+            for (local, target) in reloc.functions().iter().copied().enumerate() {
+                if target == function && !externs[local] {
+                    return Ok((unit, local as u32));
+                }
+            }
+        }
+        Err(fail("the function has no artifact unit"))
+    }
+
+    fn local_class(&self, class: u32) -> Result<(&LinkUnit, u32), LinkError> {
+        for (id, unit) in &self.units {
+            let Some(reloc) = self.relocations.get(id) else {
+                continue;
+            };
+            let externs = unit.module().extern_classes();
+            for (local, target) in reloc.classes().iter().copied().enumerate() {
+                if target == class && !externs[local] {
+                    return Ok((unit, local as u32));
+                }
+            }
+        }
+        Err(fail("the class has no artifact unit"))
+    }
+
+    fn build_definition_artifact(
+        &self,
+        source: &LinkUnit,
+        module: Module,
+        definition: collect::DefinitionRoot,
+    ) -> Result<Artifact, LinkError> {
+        let mut units = BTreeMap::new();
+        for (path, id) in &self.active_units {
+            let unit = self
+                .units
+                .get(id)
+                .cloned()
+                .ok_or_else(|| fail("the portable unit dependency is missing"))?;
+            units.insert(path.clone(), unit);
+        }
+        let env = FrozenLinkEnv { units };
+        build_definition_artifact(source, module, definition, &env, &self.bundle)
+    }
+
+    /// Check the root entry against one expected result and effect row.
+    pub fn expect_entry(&self, result: &BcType, row: &[&str]) -> Result<(), LinkError> {
+        let func = &self.tables.funcs[self.entry as usize];
+        let found = &self.tables.types[func.ret as usize];
         if found != result {
             return Err(fail(format!(
                 "the entry returns {found:?}, and the caller expects {result:?}"
             )));
         }
-        let mut names: Vec<&str> = self
-            .func
+        let mut names: Vec<&str> = func
             .row
             .iter()
-            .map(|elem| match elem {
-                BcRow::Op(idx) => self.module.strings[*idx as usize].as_str(),
+            .map(|element| match element {
+                BcRow::Op(index) => self.tables.strings[*index as usize].as_str(),
                 BcRow::Var(_) => "?",
             })
             .collect();
         names.sort_unstable();
-        let mut want: Vec<&str> = row.to_vec();
-        want.sort_unstable();
-        if names != want {
+        let mut wanted = row.to_vec();
+        wanted.sort_unstable();
+        if names != wanted {
             return Err(fail(format!(
                 "the entry charges [{}], and the caller expects [{}]",
                 names.join(", "),
-                want.join(", ")
+                wanted.join(", ")
             )));
         }
         Ok(())
     }
 }
 
-/// The merged tables of one link step.
+fn prepare_definition_module(
+    source: &Module,
+    selection: DefinitionSelection,
+) -> Result<(Module, collect::DefinitionRoot), LinkError> {
+    let mut module = source.clone();
+    let (export, definition) = match selection {
+        DefinitionSelection::Function(function) => {
+            let export = module
+                .exports
+                .iter()
+                .find(|export| {
+                    export.kind == lm_bytecode::ExportKind::Function && export.def == function
+                })
+                .cloned()
+                .or_else(|| {
+                    let binding = module
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.class == NO_CLASS && binding.func == function)?;
+                    Some(Export {
+                        kind: lm_bytecode::ExportKind::Function,
+                        name: binding
+                            .key
+                            .rsplit_once('.')
+                            .map_or(binding.key.clone(), |(_, name)| name.to_string()),
+                        def: function,
+                        ctor: lm_bytecode::NO_CTOR,
+                    })
+                })
+                .ok_or_else(|| fail("the function has no portable export"))?;
+            (export, collect::DefinitionRoot::Function(function))
+        }
+        DefinitionSelection::Class(class) => {
+            let constructor = module
+                .slots
+                .iter()
+                .find_map(|slot| match slot.initial {
+                    Some(SlotTarget::Class {
+                        class: candidate,
+                        constructor,
+                    }) if candidate == class => Some(constructor),
+                    _ => None,
+                })
+                .unwrap_or(lm_bytecode::NO_CTOR);
+            let source = module
+                .classes
+                .get(class as usize)
+                .ok_or_else(|| fail("the portable class is missing"))?;
+            if source.has_init && constructor == lm_bytecode::NO_CTOR {
+                return Err(fail("the class has no portable constructor binding"));
+            }
+            let kind = match source.kind {
+                BcClassKind::Normal => lm_bytecode::ExportKind::Class,
+                BcClassKind::Abstract => lm_bytecode::ExportKind::Enum,
+                BcClassKind::Case => lm_bytecode::ExportKind::EnumCase,
+            };
+            let export = module
+                .exports
+                .iter()
+                .find(|export| export.kind.is_class() && export.def == class)
+                .cloned()
+                .unwrap_or_else(|| Export {
+                    kind,
+                    name: source.name.clone(),
+                    def: class,
+                    ctor: constructor,
+                });
+            (export, collect::DefinitionRoot::Class(class))
+        }
+    };
+    module.exports = vec![export];
+    Ok((module, definition))
+}
+
+fn build_definition_artifact(
+    source: &LinkUnit,
+    module: Module,
+    definition: collect::DefinitionRoot,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Artifact, LinkError> {
+    let replacement = LinkUnit::from_module_with_bundle(
+        source.module_path(),
+        module,
+        source.dependencies().to_vec(),
+        bundle,
+    )
+    .map_err(|error| fail(format!("the portable unit is invalid: {error}")))?;
+    let mut units = env.units.clone();
+    units.insert(source.module_path().to_string(), Arc::new(replacement));
+    let env = FrozenLinkEnv { units };
+    let selected =
+        collect_environment_with_root(source.module_path(), &env, bundle, Some(definition))?;
+    let order = link_order(source.module_path(), &selected)?;
+    artifact_from_order(source.module_path(), &selected, &order, false)
+}
+
+/// The stable index of one published namespace in a world arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NamespaceId(u32);
+
+impl NamespaceId {
+    pub const ROOT: NamespaceId = NamespaceId(0);
+
+    pub fn from_index(index: u32) -> NamespaceId {
+        NamespaceId(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// The published code namespaces of one world.
+#[derive(Debug)]
+pub struct CodeArena {
+    merged: Merged,
+    namespaces: Vec<std::sync::Arc<CodeNamespace>>,
+    by_artifact: HashMap<ArtifactId, NamespaceId>,
+    by_chain: HashMap<Vec<ArtifactId>, NamespaceId>,
+    verified: BTreeSet<ArtifactId>,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+}
+
+impl Default for CodeArena {
+    fn default() -> CodeArena {
+        CodeArena::new()
+    }
+}
+
+impl CodeArena {
+    pub fn new() -> CodeArena {
+        CodeArena::with_bundle(lm_abi::standard_bundle())
+    }
+
+    pub fn with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> CodeArena {
+        CodeArena {
+            merged: Merged::default(),
+            namespaces: Vec::new(),
+            by_artifact: HashMap::new(),
+            by_chain: HashMap::new(),
+            verified: BTreeSet::new(),
+            bundle,
+        }
+    }
+
+    /// Resolve, verify, relocate, and publish one artifact.
+    pub fn publish(
+        &mut self,
+        artifact: Artifact,
+        runtime_core: Option<Arc<LinkUnit>>,
+    ) -> Result<NamespaceId, LinkError> {
+        let id = artifact.id();
+        if let Some(namespace) = self.by_artifact.get(&id) {
+            return Ok(*namespace);
+        }
+        let retained = std::sync::Arc::new(artifact.clone());
+        let root_path = artifact.root().module_path().to_string();
+        let untrusted: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let (root, env) = resolve_artifact(artifact, runtime_core)
+            .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
+        let root_unit = env
+            .unit(&root_path)
+            .ok_or_else(|| fail(format!("the artifact root `{root_path}` is not bound")))?;
+        if root_unit.id() != root {
+            return Err(fail(format!(
+                "the artifact root `{root_path}` has another identity"
+            )));
+        }
+        let unchecked: BTreeSet<ArtifactId> =
+            untrusted.difference(&self.verified).copied().collect();
+        validate_untrusted_units(&env, &unchecked, &self.bundle)?;
+
+        let order = link_order(&root_path, &env)?;
+        let slot_scope = env
+            .unit(CORE_MODULE_PATH)
+            .map(LinkUnit::id)
+            .ok_or_else(|| fail("the artifact has no core dependency"))?;
+        let mut merged = self.merged.clone();
+        let mut view = NamespaceBuild::default();
+        let mut entry = None;
+        let mut root_exports = Vec::new();
+        let mut relocations = BTreeMap::new();
+        let mut units = BTreeMap::new();
+        let mut active_units = BTreeMap::new();
+        for path in &order {
+            let unit = env
+                .unit(path)
+                .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+            let reloc = match merged.units.get(&unit.id()).cloned() {
+                Some(reloc) => {
+                    bind_unit(&mut view, &merged, unit, path, &reloc)?;
+                    reloc
+                }
+                None => {
+                    let reloc =
+                        merge_unit(&mut merged, &mut view, unit, path, slot_scope, &self.bundle)?;
+                    merged.units.insert(unit.id(), reloc.clone());
+                    reloc
+                }
+            };
+            relocations.insert(unit.id(), UnitRelocation(reloc.clone()));
+            units.insert(unit.id(), Arc::new(unit.clone()));
+            active_units.insert(path.clone(), unit.id());
+            if path == &root_path {
+                entry = reloc.funcs.get(unit.module().entry as usize).copied();
+                root_exports = relocated_exports(unit.module(), &reloc)?;
+            }
+        }
+        let entry = entry.ok_or_else(|| fail("the artifact root has no entry"))?;
+        let core_artifact = active_units.get(CORE_MODULE_PATH).copied();
+        view.slot_initials.resize(merged.slots.len(), None);
+        let namespace = CodeNamespace {
+            artifact_id: root,
+            artifacts: vec![retained],
+            units,
+            active_units,
+            relocations,
+            core_artifact,
+            tables: std::sync::Arc::new(tables_of(&merged)),
+            entry,
+            core_roles: view.core_roles,
+            exports: root_exports,
+            bindings: view.bindings,
+            class_hashes: merged.class_hashes.clone(),
+            interface_hashes: merged.interface_hashes.clone(),
+            func_hashes: merged.func_hashes.clone(),
+            type_hashes: merged.type_hashes.clone(),
+            slot_initials: view.slot_initials,
+            bundle: self.bundle.clone(),
+        };
+        let index = u32::try_from(self.namespaces.len())
+            .map_err(|_| fail("the world has too many code namespaces"))?;
+        let id = NamespaceId(index);
+        self.namespaces.push(std::sync::Arc::new(namespace));
+        self.by_artifact
+            .insert(id_of(&self.namespaces[id.index()]), id);
+        self.by_chain
+            .insert(vec![id_of(&self.namespaces[id.index()])], id);
+        self.merged = merged;
+        self.verified.extend(unchecked);
+        Ok(id)
+    }
+
+    /// Replay one verified namespace into this arena.
+    ///
+    /// The source namespace proves each artifact unit. This operation
+    /// repeats linking, but it does not repeat bytecode verification.
+    pub fn replay_namespace(&mut self, source: &CodeNamespace) -> Result<NamespaceId, LinkError> {
+        let mut artifacts = source.artifacts.iter();
+        let root = artifacts
+            .next()
+            .ok_or_else(|| fail("the source namespace has no root artifact"))?;
+        let core = source
+            .core_artifact
+            .and_then(|id| source.units.get(&id).cloned());
+        let mut namespace = self.publish_known(root.as_ref().clone(), core)?;
+        for artifact in artifacts {
+            namespace = self.extend_known(namespace, artifact.as_ref().clone())?;
+        }
+        Ok(namespace)
+    }
+
+    fn publish_known(
+        &mut self,
+        artifact: Artifact,
+        runtime_core: Option<Arc<LinkUnit>>,
+    ) -> Result<NamespaceId, LinkError> {
+        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        self.verified.extend(units);
+        self.publish(artifact, runtime_core)
+    }
+
+    fn extend_known(
+        &mut self,
+        base: NamespaceId,
+        artifact: Artifact,
+    ) -> Result<NamespaceId, LinkError> {
+        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        self.verified.extend(units);
+        self.extend(base, artifact)
+    }
+
+    /// Extend one namespace with one exact artifact graph.
+    ///
+    /// The new namespace keeps the base entry and core. Existing
+    /// namespaces remain immutable.
+    pub fn extend(
+        &mut self,
+        base: NamespaceId,
+        artifact: Artifact,
+    ) -> Result<NamespaceId, LinkError> {
+        let base = self
+            .namespace(base)
+            .cloned()
+            .ok_or_else(|| fail("the base code namespace is missing"))?;
+        let mut chain: Vec<ArtifactId> = base.artifacts.iter().map(|item| item.id()).collect();
+        if !chain.contains(&artifact.id()) {
+            chain.push(artifact.id());
+        }
+        if let Some(namespace) = self.by_chain.get(&chain) {
+            return Ok(*namespace);
+        }
+        let runtime_core = base
+            .core_artifact
+            .and_then(|id| base.units.get(&id).cloned());
+        let retained = Arc::new(artifact.clone());
+        let untrusted: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let root_path = artifact.root().module_path().to_string();
+        let (root, env) = resolve_artifact(artifact, runtime_core)
+            .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
+        let root_unit = env
+            .unit(&root_path)
+            .ok_or_else(|| fail(format!("the artifact root `{root_path}` is not bound")))?;
+        if root_unit.id() != root {
+            return Err(fail(format!(
+                "the artifact root `{root_path}` has another identity"
+            )));
+        }
+        let graph_core = env.unit(CORE_MODULE_PATH).map(LinkUnit::id);
+        if graph_core != base.core_artifact {
+            return Err(fail("installed code needs another core artifact"));
+        }
+        let unchecked: BTreeSet<ArtifactId> =
+            untrusted.difference(&self.verified).copied().collect();
+        validate_untrusted_units(&env, &unchecked, &self.bundle)?;
+
+        let order = link_order(&root_path, &env)?;
+        let slot_scope = graph_core.ok_or_else(|| fail("the artifact has no core dependency"))?;
+        let mut merged = self.merged.clone();
+        let mut addition = NamespaceBuild::default();
+        let mut root_exports = Vec::new();
+        let mut relocations = base.relocations.clone();
+        let mut units = base.units.clone();
+        let mut active_units = base.active_units.clone();
+        for path in &order {
+            let unit = env
+                .unit(path)
+                .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+            let reloc = match merged.units.get(&unit.id()).cloned() {
+                Some(reloc) => {
+                    bind_unit(&mut addition, &merged, unit, path, &reloc)?;
+                    reloc
+                }
+                None => {
+                    let reloc = merge_unit(
+                        &mut merged,
+                        &mut addition,
+                        unit,
+                        path,
+                        slot_scope,
+                        &self.bundle,
+                    )?;
+                    merged.units.insert(unit.id(), reloc.clone());
+                    reloc
+                }
+            };
+            relocations.insert(unit.id(), UnitRelocation(reloc.clone()));
+            units.insert(unit.id(), Arc::new(unit.clone()));
+            active_units.insert(path.clone(), unit.id());
+            if path == &root_path {
+                root_exports = relocated_exports(unit.module(), &reloc)?;
+            }
+        }
+
+        let mut slot_initials = base.slot_initials.clone();
+        slot_initials.resize(merged.slots.len(), None);
+        addition.slot_initials.resize(merged.slots.len(), None);
+        for (index, initial) in addition.slot_initials.into_iter().enumerate() {
+            if initial.is_some() {
+                slot_initials[index] = initial;
+            }
+        }
+        let mut binding_by_key: BTreeMap<String, FuncBinding> = base
+            .bindings
+            .iter()
+            .cloned()
+            .map(|binding| (binding.key.clone(), binding))
+            .collect();
+        for binding in addition.bindings {
+            binding_by_key.insert(binding.key.clone(), binding);
+        }
+        let mut artifacts = base.artifacts.clone();
+        if !artifacts.iter().any(|item| item.id() == retained.id()) {
+            artifacts.push(retained);
+        }
+        let namespace = CodeNamespace {
+            artifact_id: base.artifact_id,
+            artifacts,
+            units,
+            active_units,
+            relocations,
+            core_artifact: base.core_artifact,
+            tables: Arc::new(tables_of(&merged)),
+            entry: base.entry,
+            core_roles: base.core_roles,
+            exports: base.exports.clone(),
+            bindings: binding_by_key.into_values().collect(),
+            class_hashes: merged.class_hashes.clone(),
+            interface_hashes: merged.interface_hashes.clone(),
+            func_hashes: merged.func_hashes.clone(),
+            type_hashes: merged.type_hashes.clone(),
+            slot_initials,
+            bundle: self.bundle.clone(),
+        };
+        let index = u32::try_from(self.namespaces.len())
+            .map_err(|_| fail("the world has too many code namespaces"))?;
+        let id = NamespaceId(index);
+        self.namespaces.push(Arc::new(namespace));
+        self.by_chain.insert(chain, id);
+        self.merged = merged;
+        self.verified.extend(unchecked);
+        let _ = root_exports;
+        Ok(id)
+    }
+
+    pub fn namespace(&self, id: NamespaceId) -> Option<&std::sync::Arc<CodeNamespace>> {
+        self.namespaces.get(id.index())
+    }
+
+    pub fn namespace_count(&self) -> usize {
+        self.namespaces.len()
+    }
+}
+
+fn id_of(namespace: &CodeNamespace) -> ArtifactId {
+    namespace.artifact_id()
+}
+
+/// The append-only dense tables of one code arena.
+#[derive(Debug, Clone, Default)]
 struct Merged {
     strings: Vec<String>,
     string_index: HashMap<String, u32>,
     bytes: Vec<Vec<u8>>,
     bytes_index: HashMap<Vec<u8>, u32>,
     types: Vec<BcType>,
+    type_hashes: Vec<[u8; 32]>,
     type_index: HashMap<BcType, u32>,
     selectors: Vec<String>,
     selector_index: HashMap<String, u32>,
     apps: Vec<TypeApp>,
     app_index: HashMap<TypeApp, u32>,
     classes: Vec<BcClass>,
+    class_hashes: Vec<[u8; 32]>,
     class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
     interfaces: Vec<BcInterface>,
+    interface_hashes: Vec<[u8; 32]>,
     conformances: Vec<BcConformance>,
     funcs: Vec<Func>,
+    func_hashes: Vec<[u8; 32]>,
     func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
-    /// Late-bound slots, merged by their stable key.
+    /// Late-bound slot contracts, merged by stable key and contract.
     slots: Vec<SlotSpec>,
-    slot_by_key: HashMap<[u8; 32], u32>,
-    /// The merged core role table. Every module pins the same core
-    /// provider and names the same relocated classes.
-    core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
-    /// (qualified key, structural hash) to merged class index. The
-    /// pair is the whole merge rule for a class.
-    class_by_def: HashMap<(String, [u8; 32]), u32>,
-    /// The one structural hash every qualified key carries, and the
-    /// module that first provided it. A second version of one key is
-    /// a rejection, and the message names both providers.
-    class_version: HashMap<String, ([u8; 32], String)>,
-    /// One merged interface slot per nominal key.
-    interface_by_key: HashMap<String, (u32, String)>,
-    /// The named function bindings of the merged program, in link
-    /// order. Several bindings may name one function value.
-    bindings: Vec<lm_bytecode::FuncBinding>,
+    slot_by_contract: HashMap<(ArtifactId, [u8; 32], [u8; 32]), u32>,
     /// Optional source data after table relocation.
     debug: lm_bytecode::debug::DebugInfo,
-    /// The one structural hash every binding key carries, and the
-    /// module that first provided it. A second version of one key is a
-    /// rejection, and the message names both providers.
-    binding_version: HashMap<String, ([u8; 32], String)>,
-    /// (module path, export name) to the merged class index.
-    class_exports: HashMap<(String, String), u32>,
-    /// (module path, export name) to the merged interface index.
-    interface_exports: HashMap<(String, String), u32>,
-    /// (module path, export name) to the merged function index.
-    func_exports: HashMap<(String, String), u32>,
-    /// (module path, class export name) to the merged constructor.
-    ctor_exports: HashMap<(String, String), u32>,
-    /// The interface hash of every export, for the pin check.
-    export_hash: HashMap<(String, String), [u8; 32]>,
+    /// One permanent relocation for each exact unit.
+    units: HashMap<ArtifactId, Reloc>,
 }
 
-impl Default for Merged {
-    fn default() -> Merged {
-        Merged {
-            strings: Vec::new(),
-            string_index: HashMap::new(),
-            bytes: Vec::new(),
-            bytes_index: HashMap::new(),
-            types: Vec::new(),
-            type_index: HashMap::new(),
-            selectors: Vec::new(),
-            selector_index: HashMap::new(),
-            apps: Vec::new(),
-            app_index: HashMap::new(),
-            classes: Vec::new(),
-            class_bounds: Vec::new(),
-            interfaces: Vec::new(),
-            conformances: Vec::new(),
-            funcs: Vec::new(),
-            func_bounds: Vec::new(),
-            slots: Vec::new(),
-            slot_by_key: HashMap::new(),
+/// One artifact graph's bindings over arena indices.
+#[derive(Debug, Clone)]
+struct NamespaceBuild {
+    core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
+    class_version: HashMap<String, (u32, [u8; 32], String)>,
+    interface_by_key: HashMap<String, (u32, String)>,
+    bindings: Vec<lm_bytecode::FuncBinding>,
+    binding_version: HashMap<String, ([u8; 32], String)>,
+    class_exports: HashMap<(String, String), u32>,
+    interface_exports: HashMap<(String, String), u32>,
+    func_exports: HashMap<(String, String), u32>,
+    ctor_exports: HashMap<(String, String), u32>,
+    export_hash: HashMap<(String, String), [u8; 32]>,
+    slot_initials: Vec<Option<SlotTarget>>,
+}
+
+impl Default for NamespaceBuild {
+    fn default() -> NamespaceBuild {
+        NamespaceBuild {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
-            class_by_def: HashMap::new(),
             class_version: HashMap::new(),
             interface_by_key: HashMap::new(),
             bindings: Vec::new(),
-            debug: lm_bytecode::debug::DebugInfo::default(),
             binding_version: HashMap::new(),
             class_exports: HashMap::new(),
             interface_exports: HashMap::new(),
             func_exports: HashMap::new(),
             ctor_exports: HashMap::new(),
             export_hash: HashMap::new(),
+            slot_initials: Vec::new(),
         }
     }
 }
@@ -739,14 +1346,18 @@ impl Merged {
         idx
     }
 
-    fn ty(&mut self, ty: BcType) -> u32 {
+    fn ty(&mut self, ty: BcType, hash: [u8; 32]) -> Result<u32, LinkError> {
         if let Some(idx) = self.type_index.get(&ty) {
-            return *idx;
+            if self.type_hashes[*idx as usize] != hash {
+                return Err(fail("two resolved types have different identities"));
+            }
+            return Ok(*idx);
         }
         let idx = self.types.len() as u32;
         self.types.push(ty.clone());
+        self.type_hashes.push(hash);
         self.type_index.insert(ty, idx);
-        idx
+        Ok(idx)
     }
 
     fn app(&mut self, app: TypeApp) -> u32 {
@@ -761,6 +1372,7 @@ impl Merged {
 }
 
 /// One module's relocation maps.
+#[derive(Debug, Clone)]
 struct Reloc {
     strings: Vec<u32>,
     bytes: Vec<u32>,
@@ -773,127 +1385,454 @@ struct Reloc {
     slots: Vec<u32>,
 }
 
-/// Link one program from its root module.
-///
-/// The order is a topological order of the import graph: a module
-/// links after every module it imports.
-pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError> {
-    let bundle = lm_abi::standard_bundle();
-    link_with_bundle(root, env, &bundle)
-}
+/// Stable arena indices for one exact link unit.
+#[derive(Debug, Clone)]
+pub struct UnitRelocation(Reloc);
 
-/// Resolve and link one decoded artifact.
-pub fn link_artifact(
-    artifact: Artifact,
-    runtime_core: Option<Arc<LinkUnit>>,
-) -> Result<LinkedProgram, LinkError> {
-    let bundle = lm_abi::standard_bundle();
-    link_artifact_with_bundle(artifact, runtime_core, &bundle)
-}
-
-/// Resolve and link one decoded artifact under one ABI bundle.
-pub fn link_artifact_with_bundle(
-    artifact: Artifact,
-    runtime_core: Option<Arc<LinkUnit>>,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<LinkedProgram, LinkError> {
-    let root_path = artifact.root().module_path().to_string();
-    let untrusted = artifact.units().iter().map(LinkUnit::id).collect();
-    let (root, env) = resolve_artifact(artifact, runtime_core)
-        .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
-    let unit = env
-        .unit(&root_path)
-        .ok_or_else(|| fail(format!("the artifact root `{root_path}` is not bound")))?;
-    if unit.id() != root {
-        return Err(fail(format!(
-            "the artifact root `{root_path}` has another identity"
-        )));
+impl UnitRelocation {
+    pub fn strings(&self) -> &[u32] {
+        &self.0.strings
     }
-    validate_untrusted_units(&env, &untrusted, bundle)?;
-    link_resolved_with_bundle(&root_path, &env, bundle)
+
+    pub fn bytes(&self) -> &[u32] {
+        &self.0.bytes
+    }
+
+    pub fn types(&self) -> &[u32] {
+        &self.0.types
+    }
+
+    pub fn selectors(&self) -> &[u32] {
+        &self.0.selectors
+    }
+
+    pub fn applications(&self) -> &[u32] {
+        &self.0.apps
+    }
+
+    pub fn classes(&self) -> &[u32] {
+        &self.0.classes
+    }
+
+    pub fn interfaces(&self) -> &[u32] {
+        &self.0.interfaces
+    }
+
+    pub fn functions(&self) -> &[u32] {
+        &self.0.funcs
+    }
+
+    pub fn slots(&self) -> &[u32] {
+        &self.0.slots
+    }
 }
 
-/// Link one program against an immutable ABI bundle.
-pub fn link_with_bundle(
-    root: &str,
-    env: &FrozenLinkEnv,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<LinkedProgram, LinkError> {
-    let selected = collect_environment(root, env, bundle)?;
-    link_resolved_with_bundle(root, &selected, bundle)
+/// Exact dense-index maps between two publications of one graph.
+#[derive(Debug, Clone)]
+pub struct CodeRelocation {
+    identity: bool,
+    strings: Vec<Option<u32>>,
+    bytes: Vec<Option<u32>>,
+    types: Vec<Option<u32>>,
+    selectors: Vec<Option<u32>>,
+    applications: Vec<Option<u32>>,
+    classes: Vec<Option<u32>>,
+    interfaces: Vec<Option<u32>>,
+    functions: Vec<Option<u32>>,
+    slots: Vec<Option<u32>>,
 }
 
-fn link_resolved_with_bundle(
-    root: &str,
-    env: &FrozenLinkEnv,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<LinkedProgram, LinkError> {
-    let order = link_order(root, env)?;
-    let mut merged = Merged::default();
-    let mut entry: Option<u32> = None;
-    for path in &order {
-        let unit = env
-            .unit(path)
-            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
-        let reloc = merge_unit(&mut merged, unit, path, bundle)?;
-        if path == root {
-            entry = Some(reloc.funcs[unit.module().entry as usize]);
+impl CodeRelocation {
+    fn with_source(source: &CodeTables) -> CodeRelocation {
+        CodeRelocation {
+            identity: false,
+            strings: vec![None; source.strings.len()],
+            bytes: vec![None; source.bytes.len()],
+            types: vec![None; source.types.len()],
+            selectors: vec![None; source.selectors.len()],
+            applications: vec![None; source.apps.len()],
+            classes: vec![None; source.classes.len()],
+            interfaces: vec![None; source.interfaces.len()],
+            functions: vec![None; source.funcs.len()],
+            slots: vec![None; source.slots.len()],
         }
     }
-    let entry = entry.ok_or_else(|| fail("the root module is not bound"))?;
-    let module = Module {
-        strings: merged.strings,
-        bytes: merged.bytes,
-        types: merged.types,
-        selectors: merged.selectors,
-        apps: merged.apps,
-        imports: Vec::new(),
-        slots: merged.slots,
-        core_roles: merged.core_roles,
-        classes: merged.classes,
-        class_bounds: merged.class_bounds,
-        interfaces: merged.interfaces,
-        conformances: merged.conformances,
-        funcs: merged.funcs,
-        func_bounds: merged.func_bounds,
-        entry,
-        exports: Vec::new(),
-        bindings: merged.bindings,
+
+    /// Build the identity map for one shared arena.
+    pub fn identity() -> CodeRelocation {
+        CodeRelocation {
+            identity: true,
+            strings: Vec::new(),
+            bytes: Vec::new(),
+            types: Vec::new(),
+            selectors: Vec::new(),
+            applications: Vec::new(),
+            classes: Vec::new(),
+            interfaces: Vec::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    /// True when every source index is also its target index.
+    pub fn is_identity(&self) -> bool {
+        self.identity
+    }
+
+    fn merge_unit(
+        &mut self,
+        source: &UnitRelocation,
+        target: &UnitRelocation,
+    ) -> Result<(), LinkError> {
+        merge_index_map(
+            &mut self.strings,
+            source.strings(),
+            target.strings(),
+            "string",
+        )?;
+        merge_index_map(
+            &mut self.bytes,
+            source.bytes(),
+            target.bytes(),
+            "byte literal",
+        )?;
+        merge_index_map(&mut self.types, source.types(), target.types(), "type")?;
+        merge_index_map(
+            &mut self.selectors,
+            source.selectors(),
+            target.selectors(),
+            "selector",
+        )?;
+        merge_index_map(
+            &mut self.applications,
+            source.applications(),
+            target.applications(),
+            "type application",
+        )?;
+        merge_index_map(
+            &mut self.classes,
+            source.classes(),
+            target.classes(),
+            "class",
+        )?;
+        merge_index_map(
+            &mut self.interfaces,
+            source.interfaces(),
+            target.interfaces(),
+            "interface",
+        )?;
+        merge_index_map(
+            &mut self.functions,
+            source.functions(),
+            target.functions(),
+            "function",
+        )?;
+        merge_index_map(&mut self.slots, source.slots(), target.slots(), "slot")?;
+        Ok(())
+    }
+
+    /// Add every resolved index from another compatible map.
+    pub fn merge(&mut self, other: &CodeRelocation) -> Result<(), LinkError> {
+        if self.identity || other.identity {
+            if self.identity && other.identity {
+                return Ok(());
+            }
+            return Err(fail("an identity relocation cannot merge with another map"));
+        }
+        merge_optional_map(&mut self.strings, &other.strings, "string")?;
+        merge_optional_map(&mut self.bytes, &other.bytes, "byte literal")?;
+        merge_optional_map(&mut self.types, &other.types, "type")?;
+        merge_optional_map(&mut self.selectors, &other.selectors, "selector")?;
+        merge_optional_map(
+            &mut self.applications,
+            &other.applications,
+            "type application",
+        )?;
+        merge_optional_map(&mut self.classes, &other.classes, "class")?;
+        merge_optional_map(&mut self.interfaces, &other.interfaces, "interface")?;
+        merge_optional_map(&mut self.functions, &other.functions, "function")?;
+        merge_optional_map(&mut self.slots, &other.slots, "slot")?;
+        Ok(())
+    }
+
+    pub fn string(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.strings, source)
+    }
+
+    pub fn bytes(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.bytes, source)
+    }
+
+    pub fn ty(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.types, source)
+    }
+
+    pub fn selector(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.selectors, source)
+    }
+
+    pub fn application(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.applications, source)
+    }
+
+    pub fn class(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.classes, source)
+    }
+
+    pub fn interface(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.interfaces, source)
+    }
+
+    pub fn function(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.functions, source)
+    }
+
+    pub fn slot(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.slots, source)
+    }
+}
+
+fn merge_optional_map(
+    target: &mut Vec<Option<u32>>,
+    source: &[Option<u32>],
+    what: &str,
+) -> Result<(), LinkError> {
+    target.resize(target.len().max(source.len()), None);
+    for (index, value) in source.iter().copied().enumerate() {
+        let Some(value) = value else {
+            continue;
+        };
+        match target[index] {
+            Some(current) if current != value => {
+                return Err(fail(format!(
+                    "the {what} index {index} has conflicting relocation targets"
+                )));
+            }
+            Some(_) => {}
+            None => target[index] = Some(value),
+        }
+    }
+    Ok(())
+}
+
+fn map_index(map: &[Option<u32>], source: u32) -> Option<u32> {
+    map.get(source as usize).copied().flatten()
+}
+
+fn merge_index_map(
+    map: &mut [Option<u32>],
+    source: &[u32],
+    target: &[u32],
+    kind: &str,
+) -> Result<(), LinkError> {
+    if source.len() != target.len() {
+        return Err(fail(format!("the {kind} relocation has another length")));
+    }
+    for (source, target) in source.iter().copied().zip(target.iter().copied()) {
+        let entry = map
+            .get_mut(source as usize)
+            .ok_or_else(|| fail(format!("the source {kind} index is outside its tables")))?;
+        match *entry {
+            Some(existing) if existing != target => {
+                return Err(fail(format!("the shared {kind} has two target indices")))
+            }
+            Some(_) => {}
+            None => *entry = Some(target),
+        }
+    }
+    Ok(())
+}
+
+fn tables_of(merged: &Merged) -> CodeTables {
+    CodeTables {
+        strings: merged.strings.clone(),
+        bytes: merged.bytes.clone(),
+        types: merged.types.clone(),
+        selectors: merged.selectors.clone(),
+        apps: merged.apps.clone(),
+        slots: merged.slots.clone(),
+        classes: merged.classes.clone(),
+        class_bounds: merged.class_bounds.clone(),
+        interfaces: merged.interfaces.clone(),
+        conformances: merged.conformances.clone(),
+        funcs: merged.funcs.clone(),
+        func_bounds: merged.func_bounds.clone(),
         debug: if merged.debug.sources.is_empty() {
             Vec::new()
         } else {
             lm_bytecode::debug::encode(&merged.debug)
         },
-    };
-    let package = artifact_from_order(root, env, &order, false)?;
-    let artifact_id = package.id();
-    let artifact = lm_bytecode::artifact::encode_with_bundle(&package, bundle)
-        .map_err(|error| fail(format!("the artifact does not encode: {error}")))?;
-    let container_hash = lm_bytecode::identity::container_hash(&artifact);
-    let semantic_hash = artifact_id.into_bytes();
-    Ok(LinkedProgram {
-        module,
-        artifact_id,
-        artifact,
-        semantic_hash,
-        container_hash,
-    })
+    }
+}
+
+fn relocated_exports(module: &Module, reloc: &Reloc) -> Result<Vec<Export>, LinkError> {
+    module
+        .exports
+        .iter()
+        .map(|export| {
+            let def = if export.kind.is_class() {
+                reloc.classes.get(export.def as usize)
+            } else if export.kind.is_interface() {
+                reloc.interfaces.get(export.def as usize)
+            } else {
+                reloc.funcs.get(export.def as usize)
+            }
+            .copied()
+            .ok_or_else(|| fail("an export names a missing relocated definition"))?;
+            let ctor = if export.ctor == lm_bytecode::NO_CTOR {
+                lm_bytecode::NO_CTOR
+            } else {
+                reloc
+                    .funcs
+                    .get(export.ctor as usize)
+                    .copied()
+                    .ok_or_else(|| fail("an export names a missing relocated constructor"))?
+            };
+            Ok(Export {
+                kind: export.kind,
+                name: export.name.clone(),
+                def,
+                ctor,
+            })
+        })
+        .collect()
 }
 
 /// Merge one validated unit.
 fn merge_unit(
     merged: &mut Merged,
+    view: &mut NamespaceBuild,
     unit: &LinkUnit,
     path: &str,
+    slot_scope: ArtifactId,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<Reloc, LinkError> {
     if unit.interface().bundle_digest != bundle.digest() {
         return Err(fail(format!("the module `{path}` uses another ABI bundle")));
     }
     let identity = unit.identity();
-    let reloc = relocate(merged, unit.module(), identity, path)?;
-    register_exports(merged, unit.module(), unit.interface(), path, &reloc)?;
+    let reloc = relocate(
+        merged,
+        view,
+        unit.module(),
+        identity,
+        path,
+        slot_scope,
+        bundle,
+    )?;
+    bind_unit(view, merged, unit, path, &reloc)?;
     Ok(reloc)
+}
+
+/// Bind one relocated unit into one artifact namespace.
+fn bind_unit(
+    view: &mut NamespaceBuild,
+    merged: &Merged,
+    unit: &LinkUnit,
+    path: &str,
+    reloc: &Reloc,
+) -> Result<(), LinkError> {
+    let module = unit.module();
+    let identity = unit.identity();
+    let extern_classes = module.extern_classes();
+    for (index, class) in module.classes.iter().enumerate() {
+        if extern_classes[index] {
+            continue;
+        }
+        let target = reloc.classes[index];
+        let hash = identity.class_hashes[index];
+        match view.class_version.get(&class.key) {
+            Some((found, _, provider)) if *found != target => {
+                return Err(fail(format!(
+                    "the class `{}` is provided by `{provider}` and `{path}`",
+                    class.key
+                )));
+            }
+            Some(_) => {}
+            None => {
+                view.class_version
+                    .insert(class.key.clone(), (target, hash, path.to_string()));
+            }
+        }
+    }
+    for (index, interface) in module.interfaces.iter().enumerate() {
+        let target = reloc.interfaces[index];
+        match view.interface_by_key.get(&interface.key) {
+            Some((found, provider)) if *found != target => {
+                return Err(fail(format!(
+                    "the interface `{}` is provided by `{provider}` and `{path}`",
+                    interface.key
+                )));
+            }
+            Some(_) => {}
+            None => {
+                view.interface_by_key
+                    .insert(interface.key.clone(), (target, path.to_string()));
+            }
+        }
+    }
+    view.slot_initials.resize(merged.slots.len(), None);
+    for (index, source) in module.slots.iter().enumerate() {
+        let target = reloc.slots[index] as usize;
+        let initial = source.initial.map(|value| reloc_slot_target(value, reloc));
+        match (view.slot_initials[target], initial) {
+            (Some(found), Some(wanted)) if found != wanted => {
+                return Err(fail(format!(
+                    "the slot {index} of `{path}` has another initial target"
+                )));
+            }
+            (None, Some(wanted)) => view.slot_initials[target] = Some(wanted),
+            _ => {}
+        }
+    }
+    for (role, source) in module.core_roles.iter().enumerate() {
+        if *source == lm_bytecode::NO_ROLE {
+            continue;
+        }
+        let target = reloc
+            .classes
+            .get(*source as usize)
+            .copied()
+            .ok_or_else(|| fail(format!("the core role {role} of `{path}` is invalid")))?;
+        match view.core_roles[role] {
+            lm_bytecode::NO_ROLE => view.core_roles[role] = target,
+            found if found == target => {}
+            _ => {
+                return Err(fail(format!(
+                    "the module `{path}` uses another class for core role {role}"
+                )));
+            }
+        }
+    }
+    merge_bindings(view, module, identity, path, reloc)?;
+    register_exports(view, module, unit.interface(), path, reloc)
 }
 
 fn artifact_from_order(
@@ -968,9 +1907,12 @@ fn link_order(root: &str, env: &FrozenLinkEnv) -> Result<Vec<String>, LinkError>
 /// Relocate one module into the merged tables.
 fn relocate(
     merged: &mut Merged,
+    view: &NamespaceBuild,
     module: &Module,
     identity: &ModuleIdentity,
     path: &str,
+    slot_scope: ArtifactId,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<Reloc, LinkError> {
     let extern_classes = module.extern_classes();
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
@@ -992,7 +1934,7 @@ fn relocate(
         if import.kind != ImportKind::Class {
             continue;
         }
-        let target = resolve_class_import(merged, import, path, idx)?;
+        let target = resolve_class_import(view, module, import, path, idx, bundle)?;
         classes[import.def as usize] = target;
     }
     // Types reference only earlier types, so one ascending pass is
@@ -1005,59 +1947,42 @@ fn relocate(
     // therefore assigned first, and the bodies fill after the types
     // relocate.
     let mut created_classes: Vec<u32> = Vec::new();
-    let mut shared_classes: Vec<u32> = Vec::new();
     for idx in 0..module.classes.len() as u32 {
         if classes[idx as usize] != u32::MAX {
             continue;
         }
         let source = &module.classes[idx as usize];
         let hash = identity.class_hashes[idx as usize];
-        // The merge table of specification 3.6. One qualified key
-        // carries one structural hash inside one program.
-        match merged.class_version.get(&source.key) {
-            Some((seen, provider)) if *seen != hash => {
+        match view.class_version.get(&source.key) {
+            Some((_, seen, provider)) if *seen != hash => {
                 return Err(fail(format!(
                     "the class `{}` arrives with two implementations, from `{provider}` and \
                      from `{path}`; rebuild both against one version",
                     source.key
                 )));
             }
-            Some(_) => {}
-            None => {
-                merged
-                    .class_version
-                    .insert(source.key.clone(), (hash, path.to_string()));
-            }
+            _ => {}
         }
-        let key = (source.key.clone(), hash);
-        match merged.class_by_def.get(&key) {
-            Some(existing) => {
-                classes[idx as usize] = *existing;
-                shared_classes.push(idx);
-            }
-            None => {
-                let at = merged.classes.len() as u32;
-                merged.classes.push(BcClass {
-                    name: source.name.clone(),
-                    key: source.key.clone(),
-                    is_final: source.is_final,
-                    is_frozen: source.is_frozen,
-                    parent: NO_PARENT,
-                    parent_args: Vec::new(),
-                    type_params: source.type_params,
-                    kind: source.kind,
-                    fields: Vec::new(),
-                    field_defaults: Vec::new(),
-                    own_start: 0,
-                    has_init: false,
-                    methods: Vec::new(),
-                });
-                merged.class_bounds.push(Vec::new());
-                merged.class_by_def.insert(key, at);
-                classes[idx as usize] = at;
-                created_classes.push(idx);
-            }
-        }
+        let at = merged.classes.len() as u32;
+        merged.classes.push(BcClass {
+            name: source.name.clone(),
+            key: source.key.clone(),
+            is_final: source.is_final,
+            is_frozen: source.is_frozen,
+            parent: NO_PARENT,
+            parent_args: Vec::new(),
+            type_params: source.type_params,
+            kind: source.kind,
+            fields: Vec::new(),
+            field_defaults: Vec::new(),
+            own_start: 0,
+            has_init: false,
+            methods: Vec::new(),
+        });
+        merged.class_hashes.push(hash);
+        merged.class_bounds.push(Vec::new());
+        classes[idx as usize] = at;
+        created_classes.push(idx);
     }
     // Interface keys are nominal. Assign every merged index before
     // type relocation because a projection names an interface.
@@ -1065,7 +1990,7 @@ fn relocate(
     let mut created_interfaces: Vec<u32> = Vec::new();
     let mut shared_interfaces: Vec<u32> = Vec::new();
     for (idx, source) in module.interfaces.iter().enumerate() {
-        if let Some((existing, _)) = merged.interface_by_key.get(&source.key) {
+        if let Some((existing, _)) = view.interface_by_key.get(&source.key) {
             interfaces[idx] = *existing;
             shared_interfaces.push(idx as u32);
             continue;
@@ -1087,15 +2012,13 @@ fn relocate(
             associated: Vec::new(),
             methods: Vec::new(),
         });
-        merged
-            .interface_by_key
-            .insert(source.key.clone(), (at, path.to_string()));
+        merged.interface_hashes.push(identity.interface_hashes[idx]);
         interfaces[idx] = at;
         created_interfaces.push(idx as u32);
     }
     for (idx, ty) in module.types.iter().enumerate() {
         let relocated = reloc_type(ty, &types, &classes, &interfaces, &strings);
-        types[idx] = merged.ty(relocated);
+        types[idx] = merged.ty(relocated, identity.type_hashes[idx])?;
     }
     for (idx, app) in module.apps.iter().enumerate() {
         let relocated = TypeApp {
@@ -1116,7 +2039,7 @@ fn relocate(
         if import.kind == ImportKind::Class {
             continue;
         }
-        let target = resolve_func_import(merged, module, import, path, idx, &selectors)?;
+        let target = resolve_func_import(view, merged, module, import, path, idx, bundle)?;
         funcs[import.def as usize] = target;
     }
     let mut created_funcs: Vec<u32> = Vec::new();
@@ -1140,6 +2063,7 @@ fn relocate(
             local_types: Vec::new(),
             blocks: Vec::new(),
         });
+        merged.func_hashes.push(identity.func_hashes[idx]);
         merged.func_bounds.push(Vec::new());
         funcs[idx] = at;
         created_funcs.push(idx as u32);
@@ -1157,25 +2081,14 @@ fn relocate(
     };
     for (slot, source) in module.slots.iter().enumerate() {
         let contract = reloc_slot_contract(&source.contract, &reloc);
-        let initial = source
-            .initial
-            .map(|target| reloc_slot_target(target, &reloc));
-        let merged_slot = match merged.slot_by_key.get(&source.key).copied() {
+        let slot_key = (slot_scope, source.key, source.contract_hash);
+        let merged_slot = match merged.slot_by_contract.get(&slot_key).copied() {
             Some(existing) => {
                 let found = &mut merged.slots[existing as usize];
-                if found.contract_hash != source.contract_hash || found.contract != contract {
+                if found.contract_hash != source.contract_hash {
                     return Err(fail(format!(
-                        "the slot {slot} of `{path}` has a contract that conflicts with its key"
+                        "the slot {slot} of `{path}` has another contract"
                     )));
-                }
-                match (found.initial, initial) {
-                    (Some(left), Some(right)) if left != right => {
-                        return Err(fail(format!(
-                            "the slot {slot} of `{path}` has a conflicting initial target"
-                        )));
-                    }
-                    (None, Some(target)) => found.initial = Some(target),
-                    _ => {}
                 }
                 existing
             }
@@ -1187,64 +2100,27 @@ fn relocate(
                     key: source.key,
                     contract_hash: source.contract_hash,
                     contract,
-                    initial,
+                    initial: None,
                 });
-                merged.slot_by_key.insert(source.key, index);
+                merged.slot_by_contract.insert(slot_key, index);
                 index
             }
         };
         reloc.slots.push(merged_slot);
     }
-    // The core role table: every module carries the same core, and the
-    // merge keeps one class per core key, so every module must name
-    // the same merged class for a role.
-    for (role, slot) in module.core_roles.iter().enumerate() {
-        if *slot == lm_bytecode::NO_ROLE {
-            continue;
-        }
-        if *slot as usize >= reloc.classes.len() {
-            return Err(fail(format!(
-                "the core role {role} of `{path}` names a class outside the module"
-            )));
-        }
-        let target = reloc.classes[*slot as usize];
-        if merged.core_roles[role] == lm_bytecode::NO_ROLE {
-            merged.core_roles[role] = target;
-        } else if merged.core_roles[role] != target {
-            return Err(fail(format!(
-                "the module `{path}` fills the core role {role} with another class; \
-                 rebuild the program against one core"
-            )));
-        }
-    }
     // Fill the created definitions, and prove that every shared one
     // really is the definition its hash claims.
-    for idx in created_classes.iter().chain(shared_classes.iter()) {
+    for idx in &created_classes {
         let source = &module.classes[*idx as usize];
         let at = reloc.classes[*idx as usize] as usize;
         let filled = reloc_class(source, &reloc);
-        if created_classes.contains(idx) {
-            merged.classes[at] = filled;
-        } else if merged.classes[at] != filled {
-            return Err(fail(format!(
-                "the class `{}` of `{path}` shares a qualified key and a structural \
-                 hash with a different definition",
-                source.key
-            )));
-        }
+        merged.classes[at] = filled;
         let bounds = module
             .class_bounds
             .get(*idx as usize)
             .map(|items| reloc_bounds(items, &reloc))
             .unwrap_or_default();
-        if created_classes.contains(idx) {
-            merged.class_bounds[at] = bounds;
-        } else if merged.class_bounds[at] != bounds {
-            return Err(fail(format!(
-                "the class `{}` of `{path}` shares a definition with different interface bounds",
-                source.key
-            )));
-        }
+        merged.class_bounds[at] = bounds;
     }
     for idx in created_interfaces.iter().chain(shared_interfaces.iter()) {
         let source = &module.interfaces[*idx as usize];
@@ -1253,7 +2129,7 @@ fn relocate(
         if created_interfaces.contains(idx) {
             merged.interfaces[at] = filled;
         } else if merged.interfaces[at] != filled {
-            let provider = &merged.interface_by_key[&source.key].1;
+            let provider = &view.interface_by_key[&source.key].1;
             return Err(fail(format!(
                 "the interface `{}` arrives with two contracts, from `{provider}` and from `{path}`",
                 source.key
@@ -1284,7 +2160,6 @@ fn relocate(
             merged.conformances.push(filled);
         }
     }
-    merge_bindings(merged, module, identity, path, &reloc)?;
     let debug = lm_bytecode::debug::decode(&module.debug)
         .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
     lm_bytecode::debug::validate(&debug, module)
@@ -1350,7 +2225,7 @@ fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
 /// Their constructors carry one binding key and two structural
 /// hashes, and this rule rejects them.
 fn merge_bindings(
-    merged: &mut Merged,
+    view: &mut NamespaceBuild,
     module: &Module,
     identity: &ModuleIdentity,
     path: &str,
@@ -1372,7 +2247,7 @@ fn merge_bindings(
             continue;
         }
         let hash = identity.func_hashes[local];
-        match merged.binding_version.get(&binding.key) {
+        match view.binding_version.get(&binding.key) {
             Some((seen, provider)) if *seen != hash => {
                 return Err(fail(format!(
                     "the function `{}` arrives with two implementations, from \
@@ -1382,12 +2257,11 @@ fn merge_bindings(
             }
             Some(_) => continue,
             None => {
-                merged
-                    .binding_version
+                view.binding_version
                     .insert(binding.key.clone(), (hash, path.to_string()));
             }
         }
-        merged.bindings.push(lm_bytecode::FuncBinding {
+        view.bindings.push(lm_bytecode::FuncBinding {
             key: binding.key.clone(),
             func: reloc.funcs[local],
             class: if binding.class == lm_bytecode::NO_CLASS {
@@ -1402,14 +2276,16 @@ fn merge_bindings(
 
 /// Resolve one class import slot against the provided definitions.
 fn resolve_class_import(
-    merged: &Merged,
+    view: &NamespaceBuild,
+    module: &Module,
     import: &Import,
     path: &str,
     slot: usize,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<u32, LinkError> {
     let key = (import.module.clone(), import.name.clone());
-    check_pin(merged, import, path, slot)?;
-    merged.class_exports.get(&key).copied().ok_or_else(|| {
+    check_pin(view, module, import, path, slot, bundle)?;
+    view.class_exports.get(&key).copied().ok_or_else(|| {
         fail(format!(
             "`{path}` slot {slot} names the type `{}.{}`, which the module does \
              not export",
@@ -1419,7 +2295,14 @@ fn resolve_class_import(
 }
 
 /// Compare the pinned interface hash with the provider export.
-fn check_pin(merged: &Merged, import: &Import, path: &str, slot: usize) -> Result<(), LinkError> {
+fn check_pin(
+    view: &NamespaceBuild,
+    module: &Module,
+    import: &Import,
+    path: &str,
+    slot: usize,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<(), LinkError> {
     // A method slot pins the interface hash of its class, so the
     // lookup drops the method name.
     let export_name = match import.kind {
@@ -1431,7 +2314,21 @@ fn check_pin(merged: &Merged, import: &Import, path: &str, slot: usize) -> Resul
         _ => import.name.clone(),
     };
     let key = (import.module.clone(), export_name.clone());
-    let Some(found) = merged.export_hash.get(&key) else {
+    let (_, declared_name, declared) = lm_bytecode::interface::import_contract_hash_with_bundle(
+        module, import, bundle,
+    )
+    .map_err(|error| {
+        fail(format!(
+            "`{path}` slot {slot} has an invalid declaration: {error}"
+        ))
+    })?;
+    if declared_name != export_name || declared != import.hash {
+        return Err(fail(format!(
+            "`{path}` slot {slot} declares another contract for `{}.{export_name}`",
+            import.module
+        )));
+    }
+    let Some(found) = view.export_hash.get(&key) else {
         return Err(fail(format!(
             "`{path}` slot {slot} names `{}.{export_name}`, which the module does \
              not export",
@@ -1450,18 +2347,19 @@ fn check_pin(merged: &Merged, import: &Import, path: &str, slot: usize) -> Resul
 
 /// Resolve one function, constructor, or method import slot.
 fn resolve_func_import(
-    merged: &Merged,
+    view: &NamespaceBuild,
+    tables: &Merged,
     module: &Module,
     import: &Import,
     path: &str,
     slot: usize,
-    selectors: &[u32],
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<u32, LinkError> {
-    check_pin(merged, import, path, slot)?;
+    check_pin(view, module, import, path, slot, bundle)?;
     match import.kind {
         ImportKind::Func => {
             let key = (import.module.clone(), import.name.clone());
-            merged.func_exports.get(&key).copied().ok_or_else(|| {
+            view.func_exports.get(&key).copied().ok_or_else(|| {
                 fail(format!(
                     "`{path}` slot {slot} names the function `{}.{}`, which the \
                      module does not export",
@@ -1471,7 +2369,7 @@ fn resolve_func_import(
         }
         ImportKind::Ctor => {
             let key = (import.module.clone(), import.name.clone());
-            merged.ctor_exports.get(&key).copied().ok_or_else(|| {
+            view.ctor_exports.get(&key).copied().ok_or_else(|| {
                 fail(format!(
                     "`{path}` slot {slot} names the constructor of `{}.{}`, which \
                      the module does not export",
@@ -1487,7 +2385,7 @@ fn resolve_func_import(
                 )));
             };
             let key = (import.module.clone(), class_name.to_string());
-            let class = merged.class_exports.get(&key).copied().ok_or_else(|| {
+            let class = view.class_exports.get(&key).copied().ok_or_else(|| {
                 fail(format!(
                     "`{path}` slot {slot} names a method of `{}.{class_name}`, \
                      which the module does not export",
@@ -1496,7 +2394,7 @@ fn resolve_func_import(
             })?;
             // The local selector table holds the method name, so the
             // merged selector index comes from the relocation map.
-            let local = module
+            module
                 .selectors
                 .iter()
                 .position(|s| s == method)
@@ -1506,8 +2404,12 @@ fn resolve_func_import(
                          the module does not call"
                     ))
                 })?;
-            let selector = selectors[local];
-            merged.classes[class as usize]
+            let selector = tables.selector_index.get(method).copied().ok_or_else(|| {
+                fail(format!(
+                    "`{path}` slot {slot} names the unknown method `{method}`"
+                ))
+            })?;
+            tables.classes[class as usize]
                 .methods
                 .iter()
                 .find(|(sel, _)| *sel == selector)
@@ -1526,7 +2428,7 @@ fn resolve_func_import(
 
 /// Record the exports of one module for the modules that follow.
 fn register_exports(
-    merged: &mut Merged,
+    view: &mut NamespaceBuild,
     module: &Module,
     interface: &Interface,
     path: &str,
@@ -1536,7 +2438,7 @@ fn register_exports(
     let extern_funcs = module.extern_funcs();
     for export in &module.exports {
         let key = (path.to_string(), export.name.clone());
-        if merged.export_hash.contains_key(&key) {
+        if view.export_hash.contains_key(&key) {
             return Err(fail(format!(
                 "the module `{path}` exports the name `{}` twice",
                 export.name
@@ -1584,23 +2486,19 @@ fn register_exports(
                 export.name
             ))
         })?;
-        merged.export_hash.insert(key.clone(), entry.iface_hash);
+        view.export_hash.insert(key.clone(), entry.iface_hash);
         if export.kind.is_class() {
-            merged
-                .class_exports
+            view.class_exports
                 .insert(key.clone(), reloc.classes[export.def as usize]);
             if export.ctor != lm_bytecode::NO_CTOR {
-                merged
-                    .ctor_exports
+                view.ctor_exports
                     .insert(key, reloc.funcs[export.ctor as usize]);
             }
         } else if export.kind.is_interface() {
-            merged
-                .interface_exports
+            view.interface_exports
                 .insert(key, reloc.interfaces[export.def as usize]);
         } else {
-            merged
-                .func_exports
+            view.func_exports
                 .insert(key, reloc.funcs[export.def as usize]);
         }
     }

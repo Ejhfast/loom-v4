@@ -4,7 +4,7 @@
 //!
 //! Equality reads `__eq__` through `PartialEq`.
 
-use lm_testkit::{compile_text, repo_root, run_allowed, run_text};
+use lm_testkit::{compile_module_text, repo_root, run_allowed, run_text};
 use lm_vm::VmConfig;
 
 fn run(source: &str) -> String {
@@ -16,7 +16,7 @@ fn allowed(source: &str, allow: &[&str]) -> String {
 }
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("ops.lm", source).unwrap_err();
+    let rendered = compile_module_text("ops.lm", source).unwrap_err();
     rendered[6..11].to_string()
 }
 
@@ -198,7 +198,7 @@ end
         run(source),
         "Done((true, true, true, true, true, true, true))"
     );
-    let module = compile_text("partial_eq.lm", source).expect("the program compiles");
+    let module = compile_module_text("partial_eq.lm", source).expect("the program compiles");
     let same = module
         .funcs
         .iter()
@@ -237,7 +237,7 @@ fn partial_eq_enforces_finality_and_its_method_contract() {
 end
 Open() == Open()
 ";
-    let error = compile_text("open_eq.lm", open).expect_err("the class rejects");
+    let error = compile_module_text("open_eq.lm", open).expect_err("the class rejects");
     assert!(
         error.contains("a non-final class cannot conform"),
         "{error}"
@@ -251,7 +251,7 @@ Open() == Open()
 end
 Loud() == Loud()
 ";
-    let error = compile_text("effectful_eq.lm", effectful).expect_err("the method rejects");
+    let error = compile_module_text("effectful_eq.lm", effectful).expect_err("the method rejects");
     assert!(
         error.contains("does not satisfy interface `PartialEq`: the effect row is too wide"),
         "{error}"
@@ -307,7 +307,7 @@ b + 1
 /// a spelling and removes no rule.
 #[test]
 fn core_operators_keep_their_lowering() {
-    let module = compile_text(
+    let module = compile_module_text(
         "ops.lm",
         "def f(a: Int, b: Int): Int\n  a + b * 2\nend\nf(3, 4)\n",
     )

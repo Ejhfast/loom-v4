@@ -13,20 +13,26 @@
 //! A witness is provenance. Every case that changes one proves that
 //! the value semantics do not move with it.
 
+use lm_bytecode::artifact::Artifact;
 use lm_heap::Object;
-use lm_testkit::compile_to_bytes;
+use lm_testkit::{compile_text, load_snapshot_for_artifact, publish_artifact};
 use lm_value::Value;
 use lm_vm::snapshot::{codec, Image, ImageReason};
-use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, Vm, VmConfig, World};
+use lm_vm::{Outcome, RecordingHost, RootEvent, Vm, VmConfig, World};
 
-fn program(source: &str) -> LoadedModule {
-    let bytes = compile_to_bytes("witness.lm", source).expect("the program compiles");
-    load_bytes(&bytes).expect("the program loads")
+fn program(source: &str) -> Artifact {
+    compile_text("witness.lm", source).expect("the program compiles")
 }
 
 /// Capture the machine world at each instruction boundary of the root.
-fn boundaries(loaded: &LoadedModule, allow: &[&str], limit: usize) -> Vec<Image> {
-    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+fn boundaries(artifact: &Artifact, allow: &[&str], limit: usize) -> Vec<Image> {
+    let (arena, namespace) = publish_artifact(artifact).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }
@@ -55,9 +61,9 @@ fn pick(images: &[Image], what: &str, ok: impl Fn(&Image) -> bool) -> Image {
 
 /// Admit one container. The result is the rule it broke, or `None`
 /// when the container admits.
-fn admit(loaded: &LoadedModule, image: &Image) -> Option<ImageReason> {
+fn admit(artifact: &Artifact, image: &Image) -> Option<ImageReason> {
     let bytes = codec::encode(image, usize::MAX).expect("the image encodes");
-    match codec::load_external(&bytes, loaded, lm_vm::snapshot::LoadLimits::default()) {
+    match load_snapshot_for_artifact(artifact, &bytes, lm_vm::snapshot::LoadLimits::default()) {
         Ok(_) => None,
         Err(error) => Some(error.reason),
     }
@@ -92,8 +98,9 @@ grow(1, 40)
 /// other rule decides the outcome.
 #[test]
 fn the_type_environment_table_is_bounded() {
-    let loaded = program(POLYMORPHIC_RECURSION);
-    let mut open = Vm::new(&loaded, VmConfig::default());
+    let artifact = program(POLYMORPHIC_RECURSION);
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut open = Vm::new(arena, namespace, VmConfig::default());
     assert_eq!(open.run(), Outcome::Done(Value::Int(0)));
     for (types, envs) in [(8u32, 1024u32), (1024, 4)] {
         let capped = VmConfig {
@@ -101,7 +108,8 @@ fn the_type_environment_table_is_bounded() {
             max_type_envs: envs,
             ..VmConfig::default()
         };
-        let mut vm = Vm::new(&loaded, capped);
+        let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+        let mut vm = Vm::new(arena, namespace, capped);
         assert_eq!(
             vm.run(),
             Outcome::Fault(lm_vm::FaultCode::BoundaryLimit),
@@ -136,8 +144,9 @@ go()
 /// direction.
 #[test]
 fn two_closures_of_two_activations_digest_by_content() {
-    let loaded = program(TWO_ACTIVATIONS);
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = program(TWO_ACTIVATIONS);
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     assert_eq!(vm.run(), Outcome::Done(Value::Bool(false)));
 }
 
@@ -172,8 +181,9 @@ go()
 
 #[test]
 fn a_witness_never_enters_a_guest_digest() {
-    let loaded = program(WITNESS_FREE_DIGEST);
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = program(WITNESS_FREE_DIGEST);
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     assert_eq!(vm.run(), Outcome::Done(Value::Bool(true)));
 }
 
@@ -253,7 +263,9 @@ fn a_nonbottom_frame_environment_must_resolve() {
     frame.env = u32::MAX;
 
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let available = arena.namespace(namespace).expect("the namespace exists");
+    let error = lm_vm::snapshot::admit(broken, Some(available), &mut budget)
         .expect_err("the missing environment rejects");
     assert_eq!(error.reason, ImageReason::Reference);
 }
@@ -483,8 +495,11 @@ fn an_uninitialized_field_outside_construction_admits() {
     // A complete instance that a local names carries no marker. The
     // edit puts one back at a boundary the construction function has
     // already left, so no frame of the machine allocates that class.
-    let builder = loaded
-        .module()
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let builder = arena
+        .namespace(namespace)
+        .expect("the namespace exists")
+        .tables()
         .funcs
         .iter()
         .position(|f| f.name == "<new Slow>")
@@ -549,8 +564,10 @@ go()
 #[test]
 fn a_restored_world_re_interns_its_type_environments() {
     let loaded = program(RESTORE_SOURCE);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -570,8 +587,10 @@ fn a_restore_past_the_type_cap_leaves_the_target_unchanged() {
     // One admitted image of a world whose child machine runs a
     // generic entry function.
     let source = {
+        let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -598,7 +617,8 @@ fn a_restore_past_the_type_cap_leaves_the_target_unchanged() {
         max_type_envs: 1,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, capped, Box::new(RecordingHost::new(1)));
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let mut world = World::new(arena, namespace, capped, Box::new(RecordingHost::new(1)));
     let target = world.new_child(0).expect("the budget holds one child");
     let before = world.machine_count();
     assert_eq!(
@@ -608,8 +628,10 @@ fn a_restore_past_the_type_cap_leaves_the_target_unchanged() {
     assert_eq!(world.machine_count(), before);
     assert_eq!(world.state_of(target), lm_vm::MachineState::Empty);
     // The same image restores into a world with the default caps.
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut open = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

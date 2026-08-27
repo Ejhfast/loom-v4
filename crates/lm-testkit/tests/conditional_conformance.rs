@@ -1,8 +1,8 @@
 //! Conditional conformance tests.
 
-use lm_compiler::{compile_module, link, CompileEnv};
+use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
-use lm_testkit::{compile_text, run_allowed};
+use lm_testkit::{compile_module_text, run_allowed};
 use lm_vm::{Vm, VmConfig};
 
 fn run(source: &str) -> Result<String, String> {
@@ -340,7 +340,7 @@ end
 
 Box[Word]().label()
 "#;
-    let module = compile_text("conditional.lm", source).expect("the source compiles");
+    let module = compile_module_text("conditional.lm", source).expect("the source compiles");
     let box_class = module
         .classes
         .iter()
@@ -392,7 +392,7 @@ Box[Word]().label()
 
 #[test]
 fn the_verifier_checks_interface_default_witnesses() {
-    let mut short = compile_text(
+    let mut short = compile_module_text(
         "defaults.lm",
         "interface Named\n  def name(self): String\n    \"default\"\n  end\nend\n\
          final class Item implements Named\nend\nItem().name()\n",
@@ -412,7 +412,7 @@ fn the_verifier_checks_interface_default_witnesses() {
         .clear();
     verify_rejection(&short, "method witness table does not match");
 
-    let mut missing = compile_text(
+    let mut missing = compile_module_text(
         "required.lm",
         "interface Named\n  def name(self): String\nend\n\
          final class Item implements Named\n\
@@ -432,7 +432,7 @@ fn the_verifier_checks_interface_default_witnesses() {
         .method_overrides[0] = false;
     verify_rejection(&missing, "selects a missing default");
 
-    let mut diamond = compile_text(
+    let mut diamond = compile_module_text(
         "diamond.lm",
         "interface Left\n  def name(self): String\n    \"left\"\n  end\nend\n\
          interface Right\n  def name(self): String\n    \"right\"\n  end\nend\n\
@@ -498,7 +498,7 @@ end
 
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("labels", "lib.labels")
@@ -519,17 +519,15 @@ end
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"box word\")");
 }
@@ -549,7 +547,7 @@ fn interface_defaults_cross_module_boundaries() {
     .expect("the default library compiles");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("defaults", "lib.defaults")
@@ -568,24 +566,22 @@ fn interface_defaults_cross_module_boundaries() {
     .expect("the default caller compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"default:default\")");
 }
 
 #[test]
 fn sparse_interface_witnesses_follow_class_inheritance() {
-    let module = compile_text(
+    let module = compile_module_text(
         "defaults.lm",
         "interface Named\n  def name(self): String\n    \"default\"\n  end\nend\n\
          class DefaultParent implements Named\nend\n\
@@ -597,15 +593,18 @@ fn sparse_interface_witnesses_follow_class_inheritance() {
          \"#{name(DefaultChild())}:#{name(OverrideChild())}\"\n",
     )
     .expect("the inherited default program compiles");
-    let loaded = lm_vm::load(module).expect("the inherited default program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = lm_testkit::artifact_with_core_from_module("defaults", module)
+        .expect("the inherited default artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the inherited default artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"default:parent\")");
 }
 
 #[test]
 fn sparse_interface_witnesses_select_multiple_defaults() {
-    let module = compile_text(
+    let module = compile_module_text(
         "defaults.lm",
         "interface First\n  def first(self): Int\n    1\n  end\nend\n\
          interface Second\n  def second(self): Int\n    2\n  end\nend\n\
@@ -615,8 +614,11 @@ fn sparse_interface_witnesses_select_multiple_defaults() {
          (first(Both()), second(Both()))\n",
     )
     .expect("the multiple default program compiles");
-    let loaded = lm_vm::load(module).expect("the multiple default program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = lm_testkit::artifact_with_core_from_module("defaults", module)
+        .expect("the multiple default artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the multiple default artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done((1, 2))");
 }
@@ -655,7 +657,7 @@ end
     .expect("the library compiles");
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("domain", "lib.domain")
@@ -675,24 +677,22 @@ end
     .expect("the program compiles");
     let mut link_env = lm_compiler::core_link_env().expect("the core link environment builds");
     for module in [&library, &main] {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .expect("the module binds");
+        lm_testkit::bind_compiled_unit(&mut link_env, module.clone()).expect("the module binds");
     }
-    let linked = link("app.main", &link_env.freeze()).expect("the program links");
-    let loaded = lm_vm::load(linked.module).expect("the program loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = link_env
+        .freeze()
+        .artifact("app.main")
+        .expect("the program artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(16)");
 }
 
 #[test]
 fn a_receiver_mismatch_names_the_method_class_and_interface() {
-    let mut module = compile_text(
+    let mut module = compile_module_text(
         "receiver.lm",
         r#"
 interface Cursor
@@ -763,7 +763,7 @@ end
 
     let mut compile_env = CompileEnv::new();
     compile_env
-        .bind_interface(library.interface.clone())
+        .bind_projection(library.interface.clone())
         .expect("the interface binds");
     compile_env
         .bind_root("frozenlib", "lib.frozen")

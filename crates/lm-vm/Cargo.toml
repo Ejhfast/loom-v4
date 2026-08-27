@@ -9,5 +9,6 @@ lm-abi = { path = "../lm-abi" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-graph = { path = "../lm-graph" }
 lm-heap = { path = "../lm-heap" }
+lm-link = { path = "../lm-link" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }

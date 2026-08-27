@@ -172,6 +172,47 @@ pub(crate) fn collect_link_root(module: &Module) -> Result<(Module, CollectionSt
     collect_from_roots(module, offsets, &roots, true, &HashSet::new())
 }
 
+/// One definition selected as an artifact root.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DefinitionRoot {
+    Function(u32),
+    Class(u32),
+}
+
+/// Collect one definition and the small artifact entry.
+pub(crate) fn collect_link_definition(
+    module: &Module,
+    root: DefinitionRoot,
+) -> Result<(Module, CollectionStats), String> {
+    if module.entry as usize >= module.funcs.len() {
+        return Err("dependency collection received an invalid entry".to_string());
+    }
+    let offsets = Offsets::new(module);
+    if offsets.total > u32::MAX as usize {
+        return Err("dependency collection has too many table entries".to_string());
+    }
+    let root = match root {
+        DefinitionRoot::Function(function) => {
+            if function as usize >= module.funcs.len() {
+                return Err("the portable function is outside its module".to_string());
+            }
+            offsets.func(function)
+        }
+        DefinitionRoot::Class(class) => {
+            if class as usize >= module.classes.len() {
+                return Err("the portable class is outside its module".to_string());
+            }
+            offsets.class(class)
+        }
+    };
+    let exports = module
+        .exports
+        .iter()
+        .map(|export| export.name.clone())
+        .collect();
+    collect_from_roots(module, offsets, &[root], true, &exports)
+}
+
 /// Collect the exports requested from one provider module.
 pub(crate) fn collect_link_exports(
     module: &Module,
@@ -350,6 +391,38 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
         }
     }
     for import in &module.imports {
+        if matches!(import.kind, ImportKind::Ctor | ImportKind::Method) {
+            let class_name = if import.kind == ImportKind::Method {
+                import
+                    .name
+                    .rsplit_once('.')
+                    .map_or(import.name.as_str(), |(class, _)| class)
+            } else {
+                import.name.as_str()
+            };
+            if let Some(class) = module.imports.iter().find(|candidate| {
+                candidate.kind == ImportKind::Class
+                    && candidate.module == import.module
+                    && candidate.name == class_name
+            }) {
+                graph[offsets.func(import.def) as usize].push(offsets.class(class.def));
+            }
+        }
+        if import.kind == ImportKind::Class
+            && module
+                .classes
+                .get(import.def as usize)
+                .is_some_and(|class| class.has_init)
+        {
+            let ctor = module.imports.iter().find(|candidate| {
+                candidate.kind == ImportKind::Ctor
+                    && candidate.module == import.module
+                    && candidate.name == import.name
+            });
+            if let Some(ctor) = ctor {
+                graph[offsets.class(import.def) as usize].push(offsets.func(ctor.def));
+            }
+        }
         if import.kind != ImportKind::Method {
             continue;
         }

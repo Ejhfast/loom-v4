@@ -1,5 +1,5 @@
 //! The build loop: compile every module of the dependency graph and
-//! link the program.
+//! build the root artifact.
 //!
 //! The loop walks the packages in dependency order and the modules of
 //! each package in import order. Every module compiles against the
@@ -7,12 +7,9 @@
 //! of another package. A cached module skips the compiler and keeps
 //! its recorded artifact.
 
-use crate::cache::{
-    compile_key, interface_identity, program_key, write_atomic, BuildDir, ProgramEntry,
-};
+use crate::cache::{compile_key, interface_identity, write_atomic, BuildDir};
 use crate::env::CompileEnv;
 use crate::graph::{load_workspace, module_order, Workspace};
-use crate::link::link;
 use crate::module::compile_module;
 use lm_source::SourceFile;
 use std::collections::BTreeMap;
@@ -34,13 +31,12 @@ pub struct ModuleReport {
 pub struct BuildReport {
     pub root: String,
     pub modules: Vec<ModuleReport>,
-    /// The linked program artifact, when the root package has a
-    /// `src/main.lm`.
-    pub program: Option<PathBuf>,
-    pub program_semantic: Option<[u8; 32]>,
-    pub program_container: Option<[u8; 32]>,
-    /// True when the stage-2 cache supplied the artifact bytes.
-    pub program_cached: bool,
+    /// The root artifact, when the package has `src/main.lm`.
+    pub artifact: Option<PathBuf>,
+    pub artifact_id: Option<lm_bytecode::artifact::ArtifactId>,
+    pub container_hash: Option<[u8; 32]>,
+    /// True when the artifact cache supplied the LMAR bytes.
+    pub artifact_cached: bool,
 }
 
 impl BuildReport {
@@ -61,8 +57,6 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let mut interfaces: BTreeMap<String, [u8; 32]> = BTreeMap::new();
     let mut link_env = crate::core_link_env()?;
     let mut modules: Vec<ModuleReport> = Vec::new();
-    // The stage-2 key inputs, in link order.
-    let mut contents: Vec<(String, [u8; 32])> = Vec::new();
     let standard_uses: Vec<Vec<String>> = workspace
         .order
         .iter()
@@ -73,15 +67,17 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     for module in &standard {
         let interface_id = interface_identity(&module.interface);
         interfaces.insert(module.path.clone(), interface_id);
-        env.bind_interface(module.interface.clone())
-            .map_err(|error| format!("error: {error}\n"))?;
-        contents.push((module.path.clone(), module.container_hash));
-        link_env
-            .bind_module(
+        let unit = link_env
+            .prepare_unit(
                 module.path.clone(),
                 module.module.clone(),
                 module.interface.clone(),
             )
+            .map_err(|error| format!("error: {error}\n"))?;
+        env.bind_unit(&unit)
+            .map_err(|error| format!("error: {error}\n"))?;
+        link_env
+            .bind_unit(unit)
             .map_err(|error| format!("error: {error}\n"))?;
     }
     for package_name in &workspace.order {
@@ -130,11 +126,8 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                     compiled = Some(crate::module::CompiledModule {
                         path: module.path.clone(),
                         semantic_hash: interface.semantic_hash,
-                        container_hash: lm_bytecode::identity::container_hash(&artifact),
                         module: decoded,
-                        artifact,
                         interface,
-                        interface_bytes,
                     });
                 }
             }
@@ -153,26 +146,29 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                     let source = SourceFile::new(display_name(&module.file), text.clone());
                     let entry =
                         compile_module(&module.path, &source, &local.freeze(), module.is_main)?;
-                    dir.write(&key, &entry.artifact, &entry.interface_bytes)?;
+                    let module_bytes = lm_bytecode::encode(&entry.module);
+                    let interface_bytes =
+                        lm_bytecode::interface::encode_interface(&entry.interface);
+                    dir.write(&key, &module_bytes, &interface_bytes)?;
                     entry
                 }
             };
             let interface_id = interface_identity(&compiled.interface);
+            let semantic_hash = compiled.semantic_hash;
             interfaces.insert(module.path.clone(), interface_id);
-            env.bind_interface(compiled.interface.clone())
-                .map_err(|e| format!("error: {e}\n"))?;
+            let unit = link_env
+                .prepare_unit(compiled.path, compiled.module, compiled.interface)
+                .map_err(|error| format!("error: {error}\n"))?;
+            env.bind_unit(&unit).map_err(|e| format!("error: {e}\n"))?;
             modules.push(ModuleReport {
                 package: package_name.clone(),
                 path: module.path.clone(),
                 cached,
-                semantic_hash: compiled.semantic_hash,
+                semantic_hash,
                 interface_id,
             });
-            contents.push((compiled.path.clone(), compiled.container_hash));
-            // The unit takes the compiled module, so a build moves
-            // one module and never copies it.
             link_env
-                .bind_module(compiled.path, compiled.module, compiled.interface)
+                .bind_unit(unit)
                 .map_err(|error| format!("error: {error}\n"))?;
         }
     }
@@ -180,51 +176,41 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let mut report = BuildReport {
         root: workspace.root.clone(),
         modules,
-        program: None,
-        program_semantic: None,
-        program_container: None,
-        program_cached: false,
+        artifact: None,
+        artifact_id: None,
+        container_hash: None,
+        artifact_cached: false,
     };
     if !root_package.has_main() {
         return Ok(report);
     }
     let main_path = format!("{}.main", workspace.root);
-    // Stage 2: the module set fixes the merged program, so an
-    // unchanged module set reuses the artifact bytes. A damaged entry
-    // is a miss.
-    //
-    // A hit resolves and verifies every unit. The two reported hashes
-    // come from the artifact bytes. A failing entry causes a fresh
-    // artifact build.
-    let key = program_key(&main_path, &contents);
-    let checked = dir
-        .read_program(&key)
-        .and_then(|entry| verified_program_entry(&entry.artifact));
-    let entry = match checked {
-        Some(entry) => {
-            report.program_cached = true;
-            entry
+    let artifact = link_env
+        .freeze()
+        .artifact(&main_path)
+        .map_err(|e| format!("error: {e}\n"))?;
+    let artifact_id = artifact.id();
+    let bytes = match dir.read_artifact(&artifact_id) {
+        Some(bytes) => {
+            report.artifact_cached = true;
+            bytes
         }
         None => {
-            let program =
-                link(&main_path, &link_env.freeze()).map_err(|e| format!("error: {e}\n"))?;
-            let entry = ProgramEntry {
-                artifact: program.artifact,
-                semantic_hash: program.semantic_hash,
-                container_hash: program.container_hash,
-            };
-            dir.write_program(&key, &entry)?;
-            entry
+            let bytes =
+                lm_bytecode::artifact::encode(&artifact).map_err(|e| format!("error: {e}\n"))?;
+            dir.write_artifact(&artifact_id, &bytes)?;
+            bytes
         }
     };
+    let container_hash = lm_bytecode::identity::container_hash(&bytes);
     let debug = dir.debug();
     std::fs::create_dir_all(&debug)
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", debug.display()))?;
     let path = debug.join(format!("{}.lma", workspace.root));
-    write_atomic(&path, &entry.artifact)?;
-    report.program = Some(path);
-    report.program_semantic = Some(entry.semantic_hash);
-    report.program_container = Some(entry.container_hash);
+    write_atomic(&path, &bytes)?;
+    report.artifact = Some(path);
+    report.artifact_id = Some(artifact_id);
+    report.container_hash = Some(container_hash);
     Ok(report)
 }
 
@@ -237,20 +223,4 @@ fn display_name(path: &Path) -> String {
 /// tests.
 pub fn workspace_of(start: &Path) -> Result<Workspace, String> {
     load_workspace(start)
-}
-
-/// Check one stage-2 entry and rebuild its two hashes from its bytes.
-///
-/// A stage-2 entry is a file in the build directory, so it carries no
-/// trust. The check resolves and verifies every unit. It computes both
-/// hashes from the bytes. `None` marks an entry the build cannot emit.
-fn verified_program_entry(artifact: &[u8]) -> Option<ProgramEntry> {
-    let decoded = lm_bytecode::artifact::decode(artifact).ok()?;
-    let core = crate::core_link_unit().ok()?;
-    let linked = crate::link_artifact(decoded, Some(core)).ok()?;
-    Some(ProgramEntry {
-        artifact: artifact.to_vec(),
-        semantic_hash: linked.semantic_hash,
-        container_hash: lm_bytecode::identity::container_hash(artifact),
-    })
 }

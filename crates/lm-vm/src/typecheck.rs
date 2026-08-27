@@ -12,9 +12,12 @@
 //! and instance fields. It also checks a closure signature before the
 //! closure can execute in the receiving machine.
 
+use crate::NamespaceRuntime;
 use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
-use lm_bytecode::{BcType, Module};
+use lm_bytecode::BcType;
+#[cfg(test)]
+use lm_bytecode::Module;
 use lm_heap::{Heap, Object};
 use lm_value::{TypeEnvId, Value};
 use std::collections::HashSet;
@@ -38,7 +41,7 @@ pub(crate) struct BoundaryScratch {
 /// The immutable inputs for one boundary check.
 #[derive(Clone, Copy)]
 pub(crate) struct BoundaryContext<'a> {
-    module: &'a Module,
+    module: &'a NamespaceRuntime,
     bundle: &'a lm_abi::AbiBundle,
     heap: &'a Heap,
 }
@@ -46,7 +49,7 @@ pub(crate) struct BoundaryContext<'a> {
 impl<'a> BoundaryContext<'a> {
     /// Create one boundary-check context.
     pub(crate) fn new(
-        module: &'a Module,
+        module: &'a NamespaceRuntime,
         bundle: &'a lm_abi::AbiBundle,
         heap: &'a Heap,
     ) -> BoundaryContext<'a> {
@@ -204,7 +207,7 @@ enum Node {
 
 /// Check one value and expected type pair.
 fn check_one(
-    module: &Module,
+    module: &NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
     heap: &Heap,
     envs: &mut TypeEnvs,
@@ -285,7 +288,11 @@ fn check_one(
     }
 }
 
-fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
+fn resolve(
+    module: &NamespaceRuntime,
+    envs: &TypeEnvs,
+    expect: ClosedTypeId,
+) -> Result<Node, FaultCode> {
     let node = envs.ty(expect).ok_or(FaultCode::MalformedState)?;
     Ok(match node {
         ClosedType::Unit => Node::Scalar(Scalar::Unit),
@@ -476,7 +483,7 @@ fn kind_of(object: &Object) -> Kind {
 
 /// Check one object and add its typed children.
 fn check_object(
-    module: &Module,
+    module: &NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
@@ -535,7 +542,7 @@ fn check_object(
 }
 
 fn child(
-    module: &Module,
+    module: &NamespaceRuntime,
     envs: &TypeEnvs,
     expect: ClosedTypeId,
     at: usize,
@@ -559,7 +566,7 @@ fn child(
 
 /// Check a closure's callable type before it can execute.
 fn check_closure(
-    module: &Module,
+    module: &NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
@@ -596,7 +603,7 @@ fn check_closure(
 
 /// Check the closed subtype relation used by callable values.
 fn closed_is_subtype(
-    module: &Module,
+    module: &NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
@@ -685,7 +692,7 @@ fn closed_is_subtype(
 }
 
 fn row_included(
-    module: &Module,
+    module: &NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
     sub: &ClosedRow,
     sup: &ClosedRow,
@@ -705,7 +712,7 @@ fn row_included(
 
 /// Check one instance against one closed class position.
 fn check_instance(
-    module: &Module,
+    module: &NamespaceRuntime,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     class: u32,
@@ -756,12 +763,73 @@ mod tests {
     use super::*;
     use lm_bytecode::{BcClass, BcClassKind, BcRow, Func, NO_PARENT};
     use lm_value::Witness;
+    use std::sync::Arc;
 
     const TY_INT: u32 = 2;
     const TY_STR: u32 = 3;
 
-    fn module(types: Vec<BcType>, classes: Vec<BcClass>, funcs: Vec<Func>) -> Module {
-        Module {
+    fn module(
+        types: Vec<BcType>,
+        classes: Vec<BcClass>,
+        mut funcs: Vec<Func>,
+    ) -> Arc<NamespaceRuntime> {
+        if funcs.is_empty() {
+            funcs.push(Func {
+                name: "main".to_string(),
+                param_names: Vec::new(),
+                type_params: 0,
+                effect_params: 0,
+                params: Vec::new(),
+                param_muts: Vec::new(),
+                ret: 0,
+                row: Vec::new(),
+                captures: Vec::new(),
+                local_types: Vec::new(),
+                blocks: vec![vec![
+                    lm_bytecode::Instr::ConstUnit,
+                    lm_bytecode::Instr::Return,
+                ]],
+            });
+        }
+        for function in &mut funcs {
+            if function.blocks.is_empty() {
+                function.blocks = vec![vec![
+                    lm_bytecode::Instr::LoadLocal(0),
+                    lm_bytecode::Instr::Return,
+                ]];
+            }
+        }
+        let entry = if funcs[0].params.is_empty() && funcs[0].captures.is_empty() {
+            0
+        } else {
+            let entry = funcs.len() as u32;
+            funcs.push(Func {
+                name: "main".to_string(),
+                param_names: Vec::new(),
+                type_params: 0,
+                effect_params: 0,
+                params: Vec::new(),
+                param_muts: Vec::new(),
+                ret: 0,
+                row: Vec::new(),
+                captures: Vec::new(),
+                local_types: Vec::new(),
+                blocks: vec![vec![
+                    lm_bytecode::Instr::ConstUnit,
+                    lm_bytecode::Instr::Return,
+                ]],
+            });
+            entry
+        };
+        let class_bounds = classes
+            .iter()
+            .map(|class| vec![Vec::new(); class.type_params as usize])
+            .collect();
+        let func_bounds = funcs
+            .iter()
+            .map(|function| vec![Vec::new(); function.type_params as usize])
+            .collect();
+        crate::unit_from_module_for_test(Module {
             strings: vec!["Io.Write".to_string()],
             bytes: vec![],
             types,
@@ -769,18 +837,19 @@ mod tests {
             apps: Vec::new(),
             interfaces: Vec::new(),
             conformances: Vec::new(),
-            class_bounds: vec![Vec::new(); classes.len()],
-            func_bounds: vec![Vec::new(); funcs.len()],
+            class_bounds,
+            func_bounds,
             imports: Vec::new(),
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             classes,
             funcs,
-            entry: 0,
+            entry,
             exports: Vec::new(),
             bindings: Vec::new(),
             debug: Vec::new(),
-        }
+        })
+        .expect("the boundary test unit verifies")
     }
 
     fn base_types() -> Vec<BcType> {

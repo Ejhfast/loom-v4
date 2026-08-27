@@ -317,8 +317,10 @@ impl World {
         self.machines[parent as usize].vm.nested = None;
         let value = match kind {
             ExitKind::Terminal => self.build_terminal_event(act.vm, parent, act.family),
-            ExitKind::Ran => self.make_instance(parent, self.core.step_ran, vec![]),
-            ExitKind::Waiting => self.make_instance(parent, self.core.step_waiting, vec![]),
+            ExitKind::Ran => self.make_instance(parent, self.core_of(parent).step_ran, vec![]),
+            ExitKind::Waiting => {
+                self.make_instance(parent, self.core_of(parent).step_waiting, vec![])
+            }
             ExitKind::Bounded => self.pending_option_none(parent),
         };
         match value {
@@ -403,7 +405,7 @@ impl World {
         let built = match t {
             T::Done(value) => match self.transfer(child, parent, value) {
                 Ok(value) => {
-                    let class = self.done_arm(family);
+                    let class = self.done_arm(parent, family);
                     self.make_instance(parent, class, vec![value])
                 }
                 Err(code) => {
@@ -450,20 +452,20 @@ impl World {
     /// `deliver_event` answers a mock exit before it reads an arm, so
     /// the mock family reaches neither call. `None` here becomes a
     /// machine fault at `make_instance`.
-    pub(super) fn done_arm(&self, family: Family) -> Option<u32> {
+    pub(super) fn done_arm(&self, vm: VmId, family: Family) -> Option<u32> {
         match family {
-            Family::Run => self.core.result_ok,
-            Family::Step => self.core.step_done,
-            Family::Drive | Family::DriveFor => self.core.drive_done,
+            Family::Run => self.core_of(vm).result_ok,
+            Family::Step => self.core_of(vm).step_done,
+            Family::Drive | Family::DriveFor => self.core_of(vm).drive_done,
             Family::Mock => None,
         }
     }
 
-    pub(super) fn fault_arm(&self, family: Family) -> Option<u32> {
+    pub(super) fn fault_arm(&self, vm: VmId, family: Family) -> Option<u32> {
         match family {
-            Family::Run => self.core.result_err,
-            Family::Step => self.core.step_fault,
-            Family::Drive | Family::DriveFor => self.core.drive_fault,
+            Family::Run => self.core_of(vm).result_err,
+            Family::Step => self.core_of(vm).step_fault,
+            Family::Drive | Family::DriveFor => self.core_of(vm).drive_fault,
             Family::Mock => None,
         }
     }
@@ -480,7 +482,7 @@ impl World {
             op: rec.op,
             trace: rec.trace.clone().into_boxed_slice(),
         })?;
-        let class = self.fault_arm(family);
+        let class = self.fault_arm(parent, family);
         self.make_instance(parent, class, vec![fault])
     }
 
@@ -512,20 +514,28 @@ impl World {
 
     pub(super) fn close_option_family(
         &mut self,
+        vm: VmId,
         ty: u32,
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, FaultCode> {
+        let code = self.code_of(vm).clone();
         let closed = self
             .envs
-            .close(&self.module, ty, env)
+            .close(code.as_ref(), ty, env)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let (class, argument) = match self.envs.ty(closed) {
             Some(ClosedType::Inst(class, args)) if args.len() == 1 => (*class, args[0]),
             _ => return Err(FaultCode::MalformedState),
         };
-        let option = self.core.option.ok_or(FaultCode::MalformedState)?;
-        let some = self.core.option_some.ok_or(FaultCode::MalformedState)?;
-        let none = self.core.option_none.ok_or(FaultCode::MalformedState)?;
+        let option = self.core_of(vm).option.ok_or(FaultCode::MalformedState)?;
+        let some = self
+            .core_of(vm)
+            .option_some
+            .ok_or(FaultCode::MalformedState)?;
+        let none = self
+            .core_of(vm)
+            .option_none
+            .ok_or(FaultCode::MalformedState)?;
         if class != option && class != some && class != none {
             return Err(FaultCode::MalformedState);
         }
@@ -539,16 +549,17 @@ impl World {
 
     pub(super) fn native_option_none(
         &mut self,
+        vm: VmId,
         ty: u32,
         env: TypeEnvId,
     ) -> Result<Value, FaultCode> {
-        let ty = self.close_option_family(ty, env)?;
+        let ty = self.close_option_family(vm, ty, env)?;
         Ok(Value::EmptyCase { ty, arm: 1 })
     }
 
     pub(super) fn pending_option_none(&mut self, vm: VmId) -> Result<Value, FaultCode> {
         let (ty, env) = self.reply_type(vm)?;
-        self.native_option_none(ty, env)
+        self.native_option_none(vm, ty, env)
     }
 
     /// The reply of one perform carries the type the instruction
@@ -571,7 +582,7 @@ impl World {
             .ok_or(FaultCode::MalformedState)?;
         let at = frame.ip.checked_sub(1).ok_or(FaultCode::MalformedState)?;
         let instr = self
-            .module
+            .code_of(vm)
             .funcs
             .get(frame.func as usize)
             .and_then(|code| code.blocks.get(frame.block as usize))
@@ -594,10 +605,14 @@ impl World {
             return Ok(());
         }
         let (reply_ty, env) = self.reply_type(vm)?;
-        let module = self.module.clone();
+        let module = self.code_of(vm).clone();
         let machine = &self.machines[vm as usize];
         crate::typecheck::check_boundary_value(
-            crate::typecheck::BoundaryContext::new(&module, self.loaded.bundle(), &machine.vm.heap),
+            crate::typecheck::BoundaryContext::new(
+                module.as_ref(),
+                module.bundle(),
+                &machine.vm.heap,
+            ),
             &mut self.envs,
             &mut self.check,
             value,
@@ -625,7 +640,7 @@ impl World {
         if !self.restored_any {
             return Ok(());
         }
-        let module = self.module.clone();
+        let module = self.code_of(vm).clone();
         let code = module
             .funcs
             .get(func as usize)
@@ -637,8 +652,8 @@ impl World {
         for (value, ty) in args.iter().zip(code.params.iter()) {
             crate::typecheck::check_boundary_value(
                 crate::typecheck::BoundaryContext::new(
-                    &module,
-                    self.loaded.bundle(),
+                    module.as_ref(),
+                    module.bundle(),
                     &machine.vm.heap,
                 ),
                 &mut self.envs,
@@ -674,7 +689,7 @@ impl World {
             }
             Some(lm_abi::OP_TCP_CLOSE)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.net_closed) =>
+                    || self.value_is_result_error_class(vm, value, self.core_of(vm).net_closed) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Net)
             }
@@ -683,13 +698,17 @@ impl World {
             }
             Some(lm_abi::OP_TLS_CLOSE)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.tls_closed) =>
+                    || self.value_is_result_error_class(vm, value, self.core_of(vm).tls_closed) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Tls)
             }
             Some(lm_abi::OP_TTY_EXIT_RAW)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.tty_error_closed) =>
+                    || self.value_is_result_error_class(
+                        vm,
+                        value,
+                        self.core_of(vm).tty_error_closed,
+                    ) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Tty)
             }
@@ -698,26 +717,34 @@ impl World {
                     || self.value_is_result_error_class(
                         vm,
                         value,
-                        self.core.signal_error_closed,
+                        self.core_of(vm).signal_error_closed,
                     ) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Signal)
             }
             Some(lm_abi::OP_PIPE_CLOSE)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.pipe_error_closed) =>
+                    || self.value_is_result_error_class(
+                        vm,
+                        value,
+                        self.core_of(vm).pipe_error_closed,
+                    ) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Pipe)
             }
             Some(lm_abi::OP_EXEC_WAIT) | Some(lm_abi::OP_EXEC_CLOSE)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.exec_error_closed) =>
+                    || self.value_is_result_error_class(
+                        vm,
+                        value,
+                        self.core_of(vm).exec_error_closed,
+                    ) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Exec)
             }
             Some(lm_abi::OP_UDP_CLOSE)
                 if self.value_is_result_ok(vm, value)
-                    || self.value_is_result_error_class(vm, value, self.core.net_closed) =>
+                    || self.value_is_result_error_class(vm, value, self.core_of(vm).net_closed) =>
             {
                 self.pending_resource_of(vm, ResourceErrors::Net)
             }
@@ -810,15 +837,16 @@ impl World {
         env: TypeEnvId,
     ) -> Result<Value, FaultCode> {
         let extension_schema = (op >= lm_abi::OP_COUNT)
-            .then(|| self.loaded.bundle().op(op))
+            .then(|| self.code_of(vm).bundle().op(op))
             .flatten()
             .map(|operation| operation.reply);
         if extension_schema.is_some_and(|schema| !extension_reply_matches(reply, schema)) {
             return Err(FaultCode::TypeMismatch);
         }
+        let code = self.code_of(vm).clone();
         let expected = self
             .envs
-            .close(&self.module, reply_ty, env)
+            .close(code.as_ref(), reply_ty, env)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let first_resource = self.next_resource;
         let built = self.build_host_value(vm, reply, expected);

@@ -3,7 +3,7 @@
 //! generous wall-clock bound that an exponential algorithm would
 //! break by orders of magnitude.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 use std::time::{Duration, Instant};
 
@@ -154,8 +154,8 @@ fn nested_pattern_analysis_stays_inside_its_budget() {
 fn compile_twice_is_deterministic_for_week3_surfaces() {
     for example in ["examples/03-types/expr.lm", "examples/03-types/generics.lm"] {
         let source = std::fs::read_to_string(lm_testkit::repo_root().join(example)).unwrap();
-        let a = lm_bytecode::encode(&compile_text(example, &source).unwrap());
-        let b = lm_bytecode::encode(&compile_text(example, &source).unwrap());
+        let a = lm_bytecode::encode(&compile_module_text(example, &source).unwrap());
+        let b = lm_bytecode::encode(&compile_module_text(example, &source).unwrap());
         assert_eq!(a, b, "bytecode bytes differ for {example}");
     }
 }

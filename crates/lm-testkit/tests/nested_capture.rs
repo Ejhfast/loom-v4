@@ -6,7 +6,8 @@
 //! records, so a restore rebuilds the chain.
 
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, RecordingHost, TaskKey, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{RecordingHost, TaskKey, VmConfig, World};
 
 const SRC: &str = r#"
 w = sys.vm.Vm().activate_or_fault(do ||: Int
@@ -33,9 +34,10 @@ end
 #[test]
 fn a_nested_suspended_stack_captures_and_restores() {
     let bytes = compile_to_bytes("nested.lm", SRC).expect("the probe compiles");
-    let loaded = load_bytes(&bytes).expect("the probe loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the probe loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -82,8 +84,10 @@ fn a_nested_suspended_stack_captures_and_restores() {
 
     // The restored world must rebuild the nested control chain from
     // the stored edges and reach the same result.
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the probe reloads");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

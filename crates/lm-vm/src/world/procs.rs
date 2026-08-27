@@ -245,7 +245,7 @@ impl World {
         // The birth grant of specification 18.3. A mailbox-bearing
         // proc needs the `Proc` group to receive, and the spawner
         // already carries `Proc.Spawn`, so it may pass the group.
-        let Some(group) = self.loaded.bundle().group_by_name("Proc") else {
+        let Some(group) = self.code_of(vm).bundle().group_by_name("Proc") else {
             self.machines.pop();
             self.machines[vm as usize].children -= 1;
             self.fault_caller(
@@ -256,7 +256,7 @@ impl World {
             );
             return;
         };
-        let (birth_ops, birth_groups) = self.declared_grants(body_func);
+        let (birth_ops, birth_groups) = self.declared_grants(child, body_func);
         let limit = self.machines[child as usize].config.mailbox_limit;
         {
             let m = &mut self.machines[child as usize];
@@ -290,8 +290,9 @@ impl World {
             );
             return;
         }
+        let code = self.code_of(child).clone();
         self.machines[child as usize].load_frame(
-            &self.module,
+            code.as_ref(),
             func,
             ctor_args,
             Some(ctor),
@@ -438,7 +439,8 @@ impl World {
             self.fault_caller(vm, op, code, "the proc closure is not nullary");
             return;
         }
-        let (birth_ops, birth_groups) = self.declared_grants(func);
+        let (birth_ops, birth_groups) = self.declared_grants(child, func);
+        let code = self.code_of(child).clone();
         {
             let child_machine = &mut self.machines[child as usize];
             for operation in birth_ops {
@@ -453,7 +455,7 @@ impl World {
             child_machine.is_proc = true;
             child_machine.body_func = Some(func);
             child_machine.witness = env;
-            child_machine.load_frame(&self.module, func, Vec::new(), Some(reference), env);
+            child_machine.load_frame(code.as_ref(), func, Vec::new(), Some(reference), env);
         }
         let generation = self.machines[child as usize].generation;
         let built = self.machines[vm as usize].alloc(Object::NativeHandle {
@@ -498,7 +500,7 @@ impl World {
         if !self.proc_running(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the target proc is dead")
-                .and_then(|fault| self.make_instance(vm, self.core.send_fault, vec![fault]));
+                .and_then(|fault| self.make_instance(vm, self.core_of(vm).send_fault, vec![fault]));
             self.record(TraceEvent::Send {
                 from: vm,
                 to: proc,
@@ -509,7 +511,7 @@ impl World {
         }
         let mailbox = &self.machines[proc as usize].vm.mailbox;
         if mailbox.closed {
-            let built = self.make_instance(vm, self.core.send_closed, vec![]);
+            let built = self.make_instance(vm, self.core_of(vm).send_closed, vec![]);
             self.record(TraceEvent::Send {
                 from: vm,
                 to: proc,
@@ -555,7 +557,7 @@ impl World {
             to: proc,
             accepted: true,
         });
-        let built = self.make_instance(vm, self.core.send_sent, vec![]);
+        let built = self.make_instance(vm, self.core_of(vm).send_sent, vec![]);
         self.reply_or_fault(vm, op, built);
     }
 
@@ -568,7 +570,7 @@ impl World {
         if !self.proc_running(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the target proc is dead")
-                .and_then(|fault| self.make_instance(vm, self.core.send_fault, vec![fault]));
+                .and_then(|fault| self.make_instance(vm, self.core_of(vm).send_fault, vec![fault]));
             self.reply_or_fault(vm, op, built);
             return;
         }
@@ -582,9 +584,9 @@ impl World {
         self.emit_wake(WakeKey::Send(target));
         self.record(TraceEvent::Close { proc, first });
         let arm = if first {
-            self.core.send_sent
+            self.core_of(vm).send_sent
         } else {
-            self.core.send_closed
+            self.core_of(vm).send_closed
         };
         let built = self.make_instance(vm, arm, vec![]);
         self.reply_or_fault(vm, op, built);
@@ -614,7 +616,7 @@ impl World {
                     proc: vm,
                     closed: false,
                 });
-                let built = self.make_instance(vm, self.core.recv_msg, vec![value]);
+                let built = self.make_instance(vm, self.core_of(vm).recv_msg, vec![value]);
                 self.reply_or_fault(vm, op, built);
             }
             None if self.machines[vm as usize].vm.mailbox.closed => {
@@ -622,7 +624,7 @@ impl World {
                     proc: vm,
                     closed: true,
                 });
-                let built = self.make_instance(vm, self.core.recv_closed, vec![]);
+                let built = self.make_instance(vm, self.core_of(vm).recv_closed, vec![]);
                 self.reply_or_fault(vm, op, built);
             }
             // The mailbox is open and empty: wait for a message or a
@@ -639,7 +641,7 @@ impl World {
         if !self.proc_alive(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the proc reference is stale")
-                .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault]));
+                .and_then(|fault| self.make_instance(vm, self.core_of(vm).result_err, vec![fault]));
             self.reply_or_fault(vm, op, built);
             return;
         }
@@ -774,10 +776,12 @@ impl World {
         };
         let built = match t {
             T::Done(value) => match self.transfer(proc, vm, value) {
-                Ok(value) => self.make_instance(vm, self.core.result_ok, vec![value]),
+                Ok(value) => self.make_instance(vm, self.core_of(vm).result_ok, vec![value]),
                 Err(code) => self
                     .make_fault(vm, code, "the terminal value did not cross the boundary")
-                    .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault])),
+                    .and_then(|fault| {
+                        self.make_instance(vm, self.core_of(vm).result_err, vec![fault])
+                    }),
             },
             T::Fault(rec) => self.machines[vm as usize]
                 .alloc(Object::NativeFault {
@@ -786,7 +790,7 @@ impl World {
                     op: rec.op,
                     trace: rec.trace.clone().into_boxed_slice(),
                 })
-                .and_then(|fault| self.make_instance(vm, self.core.result_err, vec![fault])),
+                .and_then(|fault| self.make_instance(vm, self.core_of(vm).result_err, vec![fault])),
         };
         self.reply_or_fault(vm, op, built);
     }
@@ -797,11 +801,11 @@ impl World {
             return;
         };
         let arm = if !self.proc_running(proc, generation) {
-            self.core.proc_error_dead
+            self.core_of(vm).proc_error_dead
         } else if self.machines[proc as usize].paused {
-            self.core.proc_error_already_paused
+            self.core_of(vm).proc_error_already_paused
         } else if self.machines[proc as usize].active > 0 {
-            self.core.proc_error_in_use
+            self.core_of(vm).proc_error_in_use
         } else {
             let key = TaskKey {
                 vm: proc,
@@ -813,13 +817,15 @@ impl World {
             self.record(TraceEvent::Pause { proc });
             let built = self.machines[vm as usize]
                 .alloc(Object::NativeRun { vm: proc })
-                .and_then(|handle| self.make_instance(vm, self.core.result_ok, vec![handle]));
+                .and_then(|handle| {
+                    self.make_instance(vm, self.core_of(vm).result_ok, vec![handle])
+                });
             self.reply_or_fault(vm, op, built);
             return;
         };
         let built = self
             .make_instance(vm, arm, vec![])
-            .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+            .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error]));
         self.reply_or_fault(vm, op, built);
     }
 
@@ -829,11 +835,11 @@ impl World {
             return;
         };
         let arm = if !self.proc_running(proc, generation) {
-            self.core.proc_error_dead
+            self.core_of(vm).proc_error_dead
         } else if !self.machines[proc as usize].paused {
-            self.core.proc_error_not_paused
+            self.core_of(vm).proc_error_not_paused
         } else if self.machines[proc as usize].active > 0 {
-            self.core.proc_error_in_use
+            self.core_of(vm).proc_error_in_use
         } else {
             if let Err(code) = self.prepare_scheduler_proc(proc) {
                 self.fault_caller(vm, op, code, "the scheduler has no task capacity");
@@ -843,13 +849,13 @@ impl World {
             self.machines[proc as usize].paused = false;
             self.activate_scheduler_proc_prepared(proc);
             self.record(TraceEvent::Resume { proc });
-            let built = self.make_instance(vm, self.core.result_ok, vec![Value::Unit]);
+            let built = self.make_instance(vm, self.core_of(vm).result_ok, vec![Value::Unit]);
             self.reply_or_fault(vm, op, built);
             return;
         };
         let built = self
             .make_instance(vm, arm, vec![])
-            .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+            .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error]));
         self.reply_or_fault(vm, op, built);
     }
 
@@ -981,10 +987,11 @@ impl World {
             return;
         };
         let name = self
-            .loaded
+            .code_of(rv)
             .bundle()
             .op_name(op)
-            .unwrap_or("<invalid operation>");
+            .unwrap_or("<invalid operation>")
+            .to_string();
         let built = self.machines[vm as usize].alloc(Object::Str(name.into()));
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
@@ -1028,7 +1035,7 @@ impl World {
                 op,
             })
         } else {
-            self.native_option_none(ty, env)
+            self.native_option_none(vm, ty, env)
         };
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
@@ -1044,20 +1051,19 @@ impl World {
     pub(super) fn handle_digest(&mut self, vm: VmId, value: ObjRef, ty: u32, env: TypeEnvId) {
         // The machine that asks for the digest pays for the walk.
         let limits = self.machines[vm as usize].config.graph;
-        let loaded = self.loaded.clone();
-        let module = self.module.clone();
-        let built = match loaded.identity() {
+        let code = self.code_of(vm).clone();
+        let built = match code.identity() {
             Ok(identity) => {
                 let expected = self
                     .envs
-                    .close(&module, ty, env)
+                    .close(code.as_ref(), ty, env)
                     .map_err(|_| FaultCode::BoundaryLimit);
                 let mut codes = ModuleCodes {
                     identity,
-                    bundle: loaded.bundle(),
-                    module: &module,
+                    bundle: code.bundle(),
+                    module: code.as_ref(),
                     envs: &mut self.envs,
-                    core: self.core,
+                    core: code.core_layout(),
                 };
                 let heap = &mut self.machines[vm as usize].vm.heap;
                 expected.and_then(|expected| {

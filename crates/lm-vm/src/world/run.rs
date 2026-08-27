@@ -25,23 +25,35 @@ fn execution_fault_message(code: FaultCode) -> &'static str {
 
 impl World {
     /// Create a world with the entry loaded into the root machine.
-    pub fn new(loaded: &LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World {
-        World::new_with_limits(loaded, config, WorldLimits::default(), host)
+    pub fn new(
+        arena: lm_link::CodeArena,
+        namespace: lm_link::NamespaceId,
+        config: VmConfig,
+        host: Box<dyn Host>,
+    ) -> World {
+        World::new_with_limits(arena, namespace, config, WorldLimits::default(), host)
     }
 
     /// Create a world with exact structural and resource limits.
     pub fn new_with_limits(
-        loaded: &LoadedModule,
+        arena: lm_link::CodeArena,
+        namespace: lm_link::NamespaceId,
         config: VmConfig,
         limits: WorldLimits,
         host: Box<dyn Host>,
     ) -> World {
-        let module = loaded.module_store();
+        let linked = arena
+            .namespace(namespace)
+            .expect("the root namespace belongs to its arena")
+            .clone();
+        let loaded = Arc::new(crate::prepare_namespace(linked));
+        let module = loaded.clone();
         let budget = WorldBudget::new(limits);
         let machine_collection_at = record_reclamation_threshold(1, budget.limits.max_machines);
         let vm_image_collection_at = record_reclamation_threshold(0, budget.limits.max_vm_images);
         let mut root =
             Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone());
+        root.namespace = namespace;
         root.table.set_bundle(loaded.bundle().clone());
         root.load_frame(
             &module,
@@ -50,21 +62,21 @@ impl World {
             None,
             lm_value::TypeEnvId::EMPTY,
         );
-        let dispatch = loaded.dispatch_store();
         let execution_code = Arc::new(crate::executor::ExecutionCode::new(
             module.clone(),
-            dispatch.clone(),
+            loaded.dispatch_store(),
         ));
+        let mut namespaces = vec![None; arena.namespace_count()];
+        namespaces[namespace.index()] = Some(loaded.clone());
+        let mut namespace_execution = vec![None; arena.namespace_count()];
+        namespace_execution[namespace.index()] = Some(execution_code.clone());
         World {
             world_id: next_world_id(),
-            base_loaded: loaded.clone(),
-            loaded: loaded.clone(),
-            module,
-            dispatch,
-            execution_code,
-            core: loaded.core_layout(),
-            base_slot_count: loaded.module().slots.len(),
-            installations: Vec::new(),
+            arena,
+            root_namespace: namespace,
+            namespaces,
+            namespace_execution,
+            arena_execution: execution_code,
             machines: vec![root.into()],
             vm_images: Vec::new(),
             vm_image_free: Vec::new(),
@@ -98,6 +110,75 @@ impl World {
             metrics: WorldMetrics::default(),
             poisoned: false,
         }
+    }
+
+    pub(crate) fn register_namespace(
+        &mut self,
+        namespace: lm_link::NamespaceId,
+    ) -> Result<std::sync::Arc<NamespaceRuntime>, String> {
+        if let Some(code) = self
+            .namespaces
+            .get(namespace.index())
+            .and_then(Option::as_ref)
+        {
+            return Ok(code.clone());
+        }
+        let linked = self
+            .arena
+            .namespace(namespace)
+            .cloned()
+            .ok_or_else(|| "the published code namespace is missing".to_string())?;
+        let code = Arc::new(crate::prepare_namespace(linked));
+        let execution = Arc::new(crate::executor::ExecutionCode::new(
+            code.clone(),
+            code.dispatch_store(),
+        ));
+        self.namespaces.resize(namespace.index() + 1, None);
+        self.namespace_execution.resize(namespace.index() + 1, None);
+        self.namespaces[namespace.index()] = Some(code.clone());
+        self.namespace_execution[namespace.index()] = Some(execution.clone());
+        self.arena_execution = execution;
+        Ok(code)
+    }
+
+    pub(crate) fn namespace_of(&self, vm: VmId) -> lm_link::NamespaceId {
+        self.machines[vm as usize].namespace
+    }
+
+    pub(crate) fn code_for_namespace(
+        &self,
+        namespace: lm_link::NamespaceId,
+    ) -> &std::sync::Arc<NamespaceRuntime> {
+        self.namespaces[namespace.index()]
+            .as_ref()
+            .expect("a published namespace has runtime code")
+    }
+
+    pub(crate) fn code_of(&self, vm: VmId) -> &std::sync::Arc<NamespaceRuntime> {
+        self.code_for_namespace(self.namespace_of(vm))
+    }
+
+    pub(crate) fn core_for_namespace(&self, namespace: lm_link::NamespaceId) -> CoreLayout {
+        self.code_for_namespace(namespace).core_layout()
+    }
+
+    pub(crate) fn core_of(&self, vm: VmId) -> CoreLayout {
+        self.code_of(vm).core_layout()
+    }
+
+    pub(crate) fn root_code(&self) -> &std::sync::Arc<NamespaceRuntime> {
+        self.code_of(0)
+    }
+
+    pub(crate) fn root_core(&self) -> CoreLayout {
+        self.core_of(0)
+    }
+
+    pub(crate) fn execution_code_of(
+        &self,
+        _vm: VmId,
+    ) -> std::sync::Arc<crate::executor::ExecutionCode> {
+        self.arena_execution.clone()
     }
 
     /// The current scheduler measurement counters.
@@ -187,7 +268,7 @@ impl World {
     /// Grant one root policy target by name: an exact operation such
     /// as `Io.Write`, or a whole group such as `Clock`.
     pub fn allow(&mut self, name: &str) -> Result<(), String> {
-        let bundle = self.loaded.bundle();
+        let bundle = self.root_code().bundle().clone();
         let table = &mut self.machines[0].table;
         if let Some(op) = bundle.op_by_name(name) {
             table.set_exact(op, Some(Action::Pass));
@@ -487,22 +568,22 @@ impl World {
     /// group name. The launch paths pass exactly this row to a new
     /// machine, and each caller charges the same row, so a launch
     /// creates no authority.
-    pub(super) fn declared_grants(&self, func: u32) -> (Vec<u32>, Vec<u32>) {
+    pub(super) fn declared_grants(&self, vm: VmId, func: u32) -> (Vec<u32>, Vec<u32>) {
         let mut ops: Vec<u32> = Vec::new();
         let mut groups: Vec<u32> = Vec::new();
-        let Some(entry) = self.module.funcs.get(func as usize) else {
+        let Some(entry) = self.code_of(vm).funcs.get(func as usize) else {
             return (ops, groups);
         };
         for elem in &entry.row {
             let lm_bytecode::BcRow::Op(idx) = elem else {
                 continue;
             };
-            let Some(text) = self.module.strings.get(*idx as usize) else {
+            let Some(text) = self.code_of(vm).strings.get(*idx as usize) else {
                 continue;
             };
-            if let Some(op) = self.loaded.bundle().op_by_name(text) {
+            if let Some(op) = self.code_of(vm).bundle().op_by_name(text) {
                 ops.push(op);
-            } else if let Some(group) = self.loaded.bundle().group_by_name(text) {
+            } else if let Some(group) = self.code_of(vm).bundle().group_by_name(text) {
                 groups.push(group);
             }
         }
@@ -511,7 +592,7 @@ impl World {
 
     /// Grant one root policy target to one machine, for tools.
     pub fn allow_on(&mut self, vm: VmId, name: &str) -> Result<(), String> {
-        let bundle = self.loaded.bundle();
+        let bundle = self.code_of(vm).bundle().clone();
         let table = &mut self.machines[vm as usize].table;
         if let Some(op) = bundle.op_by_name(name) {
             table.set_exact(op, Some(Action::Pass));
@@ -536,7 +617,7 @@ impl World {
 
     /// True when the table of one machine passes one group by name.
     pub fn table_passes_group(&self, vm: VmId, name: &str) -> bool {
-        let Some(group) = self.loaded.bundle().group_by_name(name) else {
+        let Some(group) = self.code_of(vm).bundle().group_by_name(name) else {
             return false;
         };
         matches!(
@@ -671,6 +752,9 @@ impl World {
     }
 
     fn execute_inline(&mut self, vm: VmId, limit: u32) -> crate::executor::InlineExecutionReport {
+        let execution = self.arena_execution.clone();
+        let code = execution.module();
+        let dispatch = execution.dispatch();
         let image = self.machines[vm as usize].image;
         let slots = image.and_then(|key| {
             self.vm_images.get(key.image as usize).and_then(|record| {
@@ -680,8 +764,8 @@ impl World {
         });
         crate::executor::execute_inline(
             &mut self.machines[vm as usize],
-            self.module.as_ref(),
-            self.dispatch.as_ref(),
+            code.as_ref(),
+            dispatch.as_ref(),
             &mut self.envs,
             slots,
             limit,

@@ -14,9 +14,10 @@ use crate::machine::{
     PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry, WaitSource,
 };
 use crate::world::{InstalledInstance, VmImageRecord, World};
-use crate::{LoadedModule, VmConfig};
+use crate::VmConfig;
 use lm_bytecode::closed::TypeImportPlan;
 use lm_heap::{Heap, Object, SharedBytes};
+use lm_link::{CodeRelocation, NamespaceId};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::sync::Arc;
 
@@ -33,8 +34,6 @@ pub(crate) struct RestorePlan {
     image_appended: usize,
     image_replacement: Option<(u32, VmImageRecord)>,
     image_config_update: Option<(u32, VmConfig)>,
-    loaded: Option<LoadedModule>,
-    installations: Vec<SharedBytes>,
 }
 
 /// Portable image records prepared before restore commit.
@@ -187,35 +186,7 @@ impl World {
         attach_target_image: bool,
         admitted: &SnapshotImage,
     ) -> Result<RestorePlan, RestoreFail> {
-        let identity = admitted.identity();
-        let base = self
-            .base_identity()
-            .map_err(|_| RestoreFail::IncompatibleImage)?;
-        if identity.base_semantic != base.semantic_hash
-            || identity.base_verification != self.base_verification_hash()
-            || identity.bundle_digest != self.loaded.bundle().digest()
-        {
-            return Err(RestoreFail::IncompatibleImage);
-        }
-        let aggregate_matches = identity.module_semantic
-            == self
-                .identity()
-                .map_err(|_| RestoreFail::IncompatibleImage)?
-                .semantic_hash
-            && identity.verification == self.verification_hash();
-        let current_is_base = self.verification_hash() == self.base_verification_hash();
-        if !aggregate_matches && !current_is_base {
-            return Err(RestoreFail::IncompatibleImage);
-        }
-        let loaded = (!aggregate_matches).then(|| admitted.loaded().clone());
-        if aggregate_matches
-            && (self.installations.len() != admitted.world().installations.len()
-                || self
-                    .installations
-                    .iter()
-                    .zip(&admitted.world().installations)
-                    .any(|(left, right)| left.as_slice() != right.as_slice()))
-        {
+        if admitted.identity().bundle_digest != self.root_code().bundle().digest() {
             return Err(RestoreFail::IncompatibleImage);
         }
         if self.machines.get(restorer as usize).is_none()
@@ -267,49 +238,24 @@ impl World {
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
         let image = admitted.world();
-        let installation_base = if loaded.is_some() {
-            u32::try_from(self.installations.len()).map_err(|_| RestoreFail::LimitExceeded)?
-        } else {
-            0
-        };
-        let mut artifact_table = try_vec(image.installations.len())?;
-        let mut installations = try_vec(if loaded.is_some() {
-            image.installations.len()
-        } else {
-            0
-        })?;
-        if loaded.is_some() {
-            self.installations
-                .try_reserve_exact(image.installations.len())
-                .map_err(|_| RestoreFail::LimitExceeded)?;
-            for artifact in &image.installations {
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(artifact.len())
-                    .map_err(|_| RestoreFail::LimitExceeded)?;
-                bytes.extend_from_slice(artifact);
-                let bytes = SharedBytes::from(bytes);
-                artifact_table.push(bytes.clone());
-                installations.push(bytes);
-            }
-        } else {
-            artifact_table.extend(self.installations.iter().cloned());
-        }
-        if let Some(code) = &loaded {
-            let count = code.module().slots.len();
-            for image in &mut self.vm_images {
-                if image.live && image.slots.len() < count {
-                    let additional = count - image.slots.len();
-                    Arc::make_mut(&mut image.slots)
-                        .try_reserve_exact(additional)
-                        .map_err(|_| RestoreFail::LimitExceeded)?;
+        let (namespace_ids, code_map) = self.prepare_snapshot_code(admitted)?;
+        let mut source_types = try_vec(image.types.len())?;
+        for ty in &image.types {
+            let mut ty = ty.clone();
+            match &mut ty {
+                lm_bytecode::closed::ClosedType::Class(class)
+                | lm_bytecode::closed::ClosedType::Inst(class, _) => {
+                    *class = code_map
+                        .class(*class)
+                        .ok_or(RestoreFail::IncompatibleImage)?;
                 }
+                _ => {}
             }
+            source_types.push(ty);
         }
-
         let types = self
             .envs
-            .prepare_import(&image.types, &image.envs)
+            .prepare_import(&source_types, &image.envs)
             .map_err(|_| RestoreFail::LimitExceeded)?;
         let env_map = types.env_map();
         let type_map = types.type_map();
@@ -344,8 +290,9 @@ impl World {
             &ids,
             env_map,
             type_map,
-            installation_base,
-            &artifact_table,
+            &namespace_ids,
+            &code_map,
+            admitted,
         )?;
 
         let ceiling = target
@@ -389,6 +336,9 @@ impl World {
         let mut machines = try_vec(count)?;
         for (ordinal, source) in image.machines.iter().enumerate() {
             let mut machine = self.empty_machine(configs[ordinal], None, source.generation);
+            machine.namespace = *namespace_ids
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let refs = restore_heap(
                 &mut machine,
                 source,
@@ -396,7 +346,17 @@ impl World {
                 &prepared_images.keys,
                 env_map,
                 type_map,
+                &code_map,
             )?;
+            let source_code = admitted
+                .code()
+                .namespace(source.namespace)
+                .ok_or(RestoreFail::IncompatibleImage)?;
+            let target_code = self.code_for_namespace(machine.namespace);
+            let target_string_count = target_code.strings.len();
+            let literal_count = target_string_count
+                .checked_add(target_code.bytes.len())
+                .ok_or(RestoreFail::LimitExceeded)?;
             restore_state(
                 &mut machine,
                 source,
@@ -404,7 +364,12 @@ impl World {
                 &generations,
                 env_map,
                 type_map,
+                &code_map,
                 &refs,
+                source_code.strings.len(),
+                source_code.bytes.len(),
+                target_string_count,
+                literal_count,
                 restorer,
                 gate,
                 child_counts[ordinal],
@@ -430,9 +395,45 @@ impl World {
             image_appended: prepared_images.appended,
             image_replacement: prepared_images.replacement,
             image_config_update: prepared_images.config_update,
-            loaded,
-            installations,
         })
+    }
+
+    /// Replay admitted snapshot namespaces into this world arena.
+    fn prepare_snapshot_code(
+        &mut self,
+        admitted: &SnapshotImage,
+    ) -> Result<(Vec<NamespaceId>, CodeRelocation), RestoreFail> {
+        let mut ids = try_vec(admitted.code().namespaces().len())?;
+        let mut combined: Option<CodeRelocation> = None;
+        for source in admitted.code().namespaces() {
+            let source = source.code_namespace();
+            let target_id = self
+                .arena
+                .replay_namespace(source)
+                .map_err(|_| RestoreFail::IncompatibleImage)?;
+            self.register_namespace(target_id)
+                .map_err(|_| RestoreFail::LimitExceeded)?;
+            let target = self
+                .arena
+                .namespace(target_id)
+                .ok_or(RestoreFail::IncompatibleImage)?;
+            let map = if Arc::ptr_eq(source, target) {
+                CodeRelocation::identity()
+            } else {
+                source
+                    .relocation_to(target)
+                    .map_err(|_| RestoreFail::IncompatibleImage)?
+            };
+            match &mut combined {
+                Some(combined) => combined
+                    .merge(&map)
+                    .map_err(|_| RestoreFail::IncompatibleImage)?,
+                None => combined = Some(map),
+            }
+            ids.push(target_id);
+        }
+        let combined = combined.ok_or(RestoreFail::IncompatibleImage)?;
+        Ok((ids, combined))
     }
 
     /// Plan portable VM image records without changing the registry.
@@ -446,8 +447,9 @@ impl World {
         ids: &[VmId],
         env_map: &[TypeEnvId],
         type_map: &[u32],
-        installation_base: u32,
-        artifacts: &[SharedBytes],
+        namespace_ids: &[NamespaceId],
+        code_map: &CodeRelocation,
+        admitted: &SnapshotImage,
     ) -> Result<PreparedImages, RestoreFail> {
         if reused_source.is_some() != target_key.is_some() {
             return Err(RestoreFail::IncompatibleImage);
@@ -459,13 +461,17 @@ impl World {
             let source = &image.vm_images[0];
             let key = target_key.ok_or(RestoreFail::IncompatibleImage)?;
             let config = clamp_image(&source.limits, ceiling);
+            let namespace = *namespace_ids
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let target = self
                 .vm_images
                 .get(key.image as usize)
                 .ok_or(RestoreFail::IncompatibleImage)?;
             let reuses_pristine_image = target.live
                 && target.generation == key.generation
-                && same_image_slots(&target.slots, &source.slots)
+                && target.namespace == namespace
+                && same_image_slots(&target.slots, &source.slots, code_map)
                 && target.slot_versions == source.slot_versions
                 && target.heap.live_count() == 0
                 && target.heap.slot_count() == 0
@@ -530,17 +536,36 @@ impl World {
         for (ordinal, source) in image.vm_images.iter().enumerate() {
             let key = keys[ordinal];
             let config = clamp_image(&source.limits, ceiling);
+            let namespace = *namespace_ids
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let mut heap = self.empty_image_heap(config);
-            let refs = restore_objects(&mut heap, &source.objects, ids, &keys, env_map, type_map)?;
+            let refs = restore_objects(
+                &mut heap,
+                &source.objects,
+                ids,
+                &keys,
+                env_map,
+                type_map,
+                code_map,
+            )?;
             let mut slots = try_vec(source.slots.len())?;
             for target in &source.slots {
                 slots.push(match target {
                     super::ImageSlotTarget::Empty => RuntimeSlotTarget::Empty,
-                    super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(*func),
+                    super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(
+                        code_map
+                            .function(*func)
+                            .ok_or(RestoreFail::IncompatibleImage)?,
+                    ),
                     super::ImageSlotTarget::Class { class, constructor } => {
                         RuntimeSlotTarget::Class {
-                            class: *class,
-                            constructor: *constructor,
+                            class: code_map
+                                .class(*class)
+                                .ok_or(RestoreFail::IncompatibleImage)?,
+                            constructor: code_map
+                                .function(*constructor)
+                                .ok_or(RestoreFail::IncompatibleImage)?,
                         }
                     }
                     super::ImageSlotTarget::Value(value) => {
@@ -556,49 +581,34 @@ impl World {
             }
             let mut instances = try_vec(source.instances.len())?;
             for instance in &source.instances {
-                let artifact = artifacts
-                    .get(instance.installation as usize)
+                let artifact = admitted
+                    .code()
+                    .artifact(instance.artifact)
                     .ok_or(RestoreFail::IncompatibleImage)?;
-                let module =
-                    lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
-                        .map_err(|_| RestoreFail::IncompatibleImage)?;
-                let mut exports = try_vec(module.exports.len())?;
-                for export in &module.exports {
-                    if export.kind != lm_bytecode::ExportKind::Function {
-                        continue;
-                    }
-                    let function = *instance
-                        .funcs
-                        .get(export.def as usize)
-                        .ok_or(RestoreFail::IncompatibleImage)?;
-                    let mut name = String::new();
-                    name.try_reserve_exact(export.name.len())
-                        .map_err(|_| RestoreFail::LimitExceeded)?;
-                    name.push_str(&export.name);
-                    exports.push((name, function));
-                }
-                let mut funcs = try_vec(instance.funcs.len())?;
-                funcs.extend_from_slice(&instance.funcs);
-                let mut classes = try_vec(instance.classes.len())?;
-                classes.extend_from_slice(&instance.classes);
-                let mut instance_slots = try_vec(instance.slots.len())?;
-                instance_slots.extend_from_slice(&instance.slots);
+                let module = artifact.root().module();
+                let target = self.code_for_namespace(namespace).code_namespace();
+                let reloc = target
+                    .relocation(artifact.id())
+                    .ok_or(RestoreFail::IncompatibleImage)?;
                 let mut binding_targets = try_vec(module.slots.len())?;
                 for slot in &module.slots {
                     let target = match slot.initial {
                         Some(lm_bytecode::SlotTarget::Function(function)) => {
                             RuntimeSlotTarget::Function(
-                                *funcs
+                                *reloc
+                                    .functions()
                                     .get(function as usize)
                                     .ok_or(RestoreFail::IncompatibleImage)?,
                             )
                         }
                         Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
                             RuntimeSlotTarget::Class {
-                                class: *classes
+                                class: *reloc
+                                    .classes()
                                     .get(class as usize)
                                     .ok_or(RestoreFail::IncompatibleImage)?,
-                                constructor: *funcs
+                                constructor: *reloc
+                                    .functions()
                                     .get(constructor as usize)
                                     .ok_or(RestoreFail::IncompatibleImage)?,
                             }
@@ -607,22 +617,43 @@ impl World {
                     };
                     binding_targets.push(target);
                 }
+                let mut artifact_bytes = Vec::new();
+                let source_bytes = image
+                    .artifacts
+                    .get(instance.artifact as usize)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+                artifact_bytes
+                    .try_reserve_exact(source_bytes.len())
+                    .map_err(|_| RestoreFail::LimitExceeded)?;
+                artifact_bytes.extend_from_slice(source_bytes);
                 instances.push(InstalledInstance {
-                    installation: installation_base
-                        .checked_add(instance.installation)
-                        .ok_or(RestoreFail::LimitExceeded)?,
-                    artifact: artifact.clone(),
-                    interface: instance.interface.clone().map(SharedBytes::from),
-                    semantic_hash: instance.semantic_hash,
-                    entry: instance.entry,
-                    funcs,
-                    classes,
-                    slots: instance_slots,
+                    artifact: SharedBytes::from(artifact_bytes),
+                    entry: *reloc
+                        .functions()
+                        .get(module.entry as usize)
+                        .ok_or(RestoreFail::IncompatibleImage)?,
+                    funcs: reloc.functions().to_vec(),
+                    classes: reloc.classes().to_vec(),
+                    slots: reloc.slots().to_vec(),
                     binding_targets,
-                    exports,
+                    exports: module
+                        .exports
+                        .iter()
+                        .filter(|export| export.kind == lm_bytecode::ExportKind::Function)
+                        .map(|export| {
+                            Ok((
+                                export.name.clone(),
+                                *reloc
+                                    .functions()
+                                    .get(export.def as usize)
+                                    .ok_or(RestoreFail::IncompatibleImage)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, RestoreFail>>()?,
                 });
             }
             let record = VmImageRecord {
+                namespace,
                 generation: key.generation,
                 live: true,
                 config,
@@ -676,22 +707,7 @@ impl World {
             image_appended,
             image_replacement,
             image_config_update,
-            loaded,
-            installations,
         } = plan;
-        if let Some(loaded) = loaded {
-            self.loaded = loaded;
-            self.module = self.loaded.module_store();
-            self.dispatch = self.loaded.dispatch_store();
-            self.core = self.loaded.core_layout();
-            let slot_count = self.module.slots.len();
-            for image in &mut self.vm_images {
-                if image.live {
-                    Arc::make_mut(&mut image.slots).resize(slot_count, RuntimeSlotTarget::Empty);
-                }
-            }
-        }
-        self.installations.extend(installations);
         if let Some((slot, record)) = image_replacement {
             self.vm_images[slot as usize] = record;
         }
@@ -772,6 +788,7 @@ fn restore_heap(
     image_keys: &[VmImageKey],
     env_map: &[TypeEnvId],
     type_map: &[u32],
+    code_map: &CodeRelocation,
 ) -> Result<Vec<ObjRef>, RestoreFail> {
     restore_objects(
         &mut machine.vm.heap,
@@ -780,6 +797,7 @@ fn restore_heap(
         image_keys,
         env_map,
         type_map,
+        code_map,
     )
 }
 
@@ -791,6 +809,7 @@ fn restore_objects(
     image_keys: &[VmImageKey],
     env_map: &[TypeEnvId],
     type_map: &[u32],
+    code_map: &CodeRelocation,
 ) -> Result<Vec<ObjRef>, RestoreFail> {
     let mut bytes = 0usize;
     for entry in objects {
@@ -814,7 +833,7 @@ fn restore_objects(
             .object
             .try_clone_remapped(|child| refs[child.slot as usize])
             .map_err(|_| RestoreFail::LimitExceeded)?;
-        relocate_metadata(&mut object, ids, image_keys, env_map, type_map);
+        relocate_metadata(&mut object, ids, image_keys, env_map, type_map, code_map)?;
         let reference = heap
             .try_alloc(object)
             .map_err(|_| RestoreFail::LimitExceeded)?;
@@ -848,7 +867,12 @@ fn restore_state(
     generations: &[u32],
     env_map: &[TypeEnvId],
     type_map: &[u32],
+    code_map: &CodeRelocation,
     refs: &[ObjRef],
+    source_string_count: usize,
+    source_byte_count: usize,
+    target_string_count: usize,
+    literal_count: usize,
     restorer: VmId,
     gate: u32,
     children: u32,
@@ -869,7 +893,9 @@ fn restore_state(
         callbacks.push(CallbackSlot {
             generation: 0,
             descriptor: Some(CallbackDescriptor {
-                func: callback.func,
+                func: code_map
+                    .function(callback.func)
+                    .ok_or(RestoreFail::IncompatibleImage)?,
                 captures,
                 env: env_map[callback.env as usize],
                 owner_depth: callback.owner_depth,
@@ -885,7 +911,9 @@ fn restore_state(
             None => None,
         };
         frames.push(Frame {
-            func: frame.func,
+            func: code_map
+                .function(frame.func)
+                .ok_or(RestoreFail::IncompatibleImage)?,
             block: frame.block,
             ip: frame.ip,
             base_local: frame.base_local,
@@ -898,13 +926,37 @@ fn restore_state(
     locals.extend(source.locals.iter().copied().map(object_value));
     let mut operands = try_vec(source.operands.len())?;
     operands.extend(source.operands.iter().copied().map(object_value));
-    let mut literals = try_vec(source.literals.len())?;
-    literals.extend(
-        source
-            .literals
-            .iter()
-            .map(|slot| slot.map(|ordinal| refs[ordinal as usize])),
-    );
+    let mut literals = try_vec(literal_count)?;
+    literals.resize(literal_count, None);
+    for (source_index, slot) in source.literals.iter().enumerate() {
+        let Some(ordinal) = slot else {
+            continue;
+        };
+        let target_index = if source_index < source_string_count {
+            let source_string =
+                u32::try_from(source_index).map_err(|_| RestoreFail::IncompatibleImage)?;
+            code_map
+                .string(source_string)
+                .ok_or(RestoreFail::IncompatibleImage)? as usize
+        } else {
+            let source_byte = source_index
+                .checked_sub(source_string_count)
+                .filter(|index| *index < source_byte_count)
+                .ok_or(RestoreFail::IncompatibleImage)?;
+            let source_byte =
+                u32::try_from(source_byte).map_err(|_| RestoreFail::IncompatibleImage)?;
+            let target_byte = code_map
+                .bytes(source_byte)
+                .ok_or(RestoreFail::IncompatibleImage)? as usize;
+            target_string_count
+                .checked_add(target_byte)
+                .ok_or(RestoreFail::LimitExceeded)?
+        };
+        let target = literals
+            .get_mut(target_index)
+            .ok_or(RestoreFail::IncompatibleImage)?;
+        *target = Some(refs[*ordinal as usize]);
+    }
     let pending = match &source.pending {
         Some(record) => {
             let mut args = try_vec(record.args.len())?;
@@ -927,7 +979,9 @@ fn restore_state(
                 .map_err(|_| RestoreFail::LimitExceeded)?;
             message.push_str(&record.message);
             let mut trace = try_vec(record.trace.len())?;
-            trace.extend_from_slice(&record.trace);
+            for site in record.trace.iter().copied() {
+                trace.push(relocate_fault_site(site, code_map)?);
+            }
             Some(Terminal::Fault(FaultRec {
                 code: record.code,
                 message,
@@ -971,7 +1025,14 @@ fn restore_state(
     }
     machine.children = children;
     machine.is_proc = source.is_proc;
-    machine.body_func = source.body_func;
+    machine.body_func = source
+        .body_func
+        .map(|function| {
+            code_map
+                .function(function)
+                .ok_or(RestoreFail::IncompatibleImage)
+        })
+        .transpose()?;
     machine.witness = env_map[source.witness as usize];
     machine.gate = gate;
     machine.vm.fuel = source.fuel.min(machine.config.fuel);
@@ -1066,7 +1127,11 @@ fn try_vec<T>(count: usize) -> Result<Vec<T>, RestoreFail> {
 }
 
 /// Test whether two slot tables hold the same static targets.
-fn same_image_slots(left: &[RuntimeSlotTarget], right: &[super::ImageSlotTarget]) -> bool {
+fn same_image_slots(
+    left: &[RuntimeSlotTarget],
+    right: &[super::ImageSlotTarget],
+    code_map: &CodeRelocation,
+) -> bool {
     left.len() == right.len()
         && left
             .iter()
@@ -1074,7 +1139,7 @@ fn same_image_slots(left: &[RuntimeSlotTarget], right: &[super::ImageSlotTarget]
             .all(|(left, right)| match (left, right) {
                 (RuntimeSlotTarget::Empty, super::ImageSlotTarget::Empty) => true,
                 (RuntimeSlotTarget::Function(left), super::ImageSlotTarget::Function(right)) => {
-                    left == right
+                    Some(*left) == code_map.function(*right)
                 }
                 (
                     RuntimeSlotTarget::Class {
@@ -1085,7 +1150,10 @@ fn same_image_slots(left: &[RuntimeSlotTarget], right: &[super::ImageSlotTarget]
                         class: right_class,
                         constructor: right_constructor,
                     },
-                ) => left_class == right_class && left_constructor == right_constructor,
+                ) => {
+                    Some(*left_class) == code_map.class(*right_class)
+                        && Some(*left_constructor) == code_map.function(*right_constructor)
+                }
                 _ => false,
             })
 }
@@ -1145,7 +1213,8 @@ fn relocate_metadata(
     image_keys: &[VmImageKey],
     env_map: &[TypeEnvId],
     type_map: &[u32],
-) {
+    code_map: &CodeRelocation,
+) -> Result<(), RestoreFail> {
     let remap = |value: &mut Value| {
         if let Value::EmptyCase { ty, .. } = value {
             *ty = type_map[*ty as usize];
@@ -1173,7 +1242,16 @@ fn relocate_metadata(
         _ => {}
     }
     match object {
-        Object::Instance { env, .. } | Object::Closure { env, .. } => {
+        Object::Instance { class, env, .. } => {
+            *class = code_map
+                .class(*class)
+                .ok_or(RestoreFail::IncompatibleImage)?;
+            *env = Witness(env_map[env.env().0 as usize]);
+        }
+        Object::Closure { func, env, .. } => {
+            *func = code_map
+                .function(*func)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             *env = Witness(env_map[env.env().0 as usize]);
         }
         Object::NativeVm { image, generation } => {
@@ -1182,14 +1260,35 @@ fn relocate_metadata(
             *generation = key.generation;
         }
         Object::NativeCodeHandle {
-            image, generation, ..
-        }
-        | Object::NativeSlotChange {
-            image, generation, ..
+            image,
+            generation,
+            kind,
+            index,
+            ..
         } => {
             let key = image_keys[*image as usize];
             *image = key.image;
             *generation = key.generation;
+            *index = match kind {
+                lm_heap::CodeHandleKind::Function => code_map.function(*index),
+                lm_heap::CodeHandleKind::Class => code_map.class(*index),
+                lm_heap::CodeHandleKind::Slot => code_map.slot(*index),
+                lm_heap::CodeHandleKind::Instance
+                | lm_heap::CodeHandleKind::FunctionBinding
+                | lm_heap::CodeHandleKind::ClassBinding => Some(*index),
+            }
+            .ok_or(RestoreFail::IncompatibleImage)?;
+        }
+        Object::NativeSlotChange {
+            image,
+            generation,
+            slot,
+            ..
+        } => {
+            let key = image_keys[*image as usize];
+            *image = key.image;
+            *generation = key.generation;
+            *slot = code_map.slot(*slot).ok_or(RestoreFail::IncompatibleImage)?;
         }
         Object::NativeRun { vm }
         | Object::NativeTable { vm }
@@ -1206,6 +1305,22 @@ fn relocate_metadata(
         Object::NativeWait { owner, .. } => {
             *owner = ids[*owner as usize];
         }
+        Object::NativeFault { trace, .. } => {
+            for site in trace.iter_mut() {
+                *site = relocate_fault_site(*site, code_map)?;
+            }
+        }
         _ => {}
     }
+    Ok(())
+}
+
+fn relocate_fault_site(
+    mut site: lm_heap::FaultSite,
+    code_map: &CodeRelocation,
+) -> Result<lm_heap::FaultSite, RestoreFail> {
+    site.function = code_map
+        .function(site.function)
+        .ok_or(RestoreFail::IncompatibleImage)?;
+    Ok(site)
 }

@@ -1,11 +1,11 @@
 //! Focused checker tests: one negative case for each rule, plus
 //! positive coverage for the lowered CFG dump.
 
-use lm_testkit::{compile_text, run_allowed, run_text};
+use lm_testkit::{compile_module_text, run_allowed, run_text};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
-    let rendered = match compile_text("t.lm", source) {
+    let rendered = match compile_module_text("t.lm", source) {
         Err(error) => error,
         Ok(_) => panic!("negative source compiled:\n{source}"),
     };
@@ -17,7 +17,7 @@ fn code_of(source: &str) -> String {
 fn associated_type_diagnostics_use_source_names() {
     let source = "interface Shaped\n  type Unit\n  def area(self): Self.Unit\nend\n\
                   def total[S: Shaped](a: S): Int\n  a.area()\nend\n";
-    let error = compile_text("t.lm", source).expect_err("the source must fail");
+    let error = compile_module_text("t.lm", source).expect_err("the source must fail");
     assert!(error.contains("expected Int, found S.Unit"), "{error}");
     assert!(!error.contains("<interface"), "{error}");
 }
@@ -27,7 +27,7 @@ fn interface_type_diagnostics_name_the_bound_rule() {
     let source = "interface Priced\n  def price(self): Int\nend\n\
                   final class Book implements Priced\n  def price(self): Int\n    1\n  end\nend\n\
                   def read(item: Priced): Int\n  item.price()\nend\n";
-    let error = compile_text("t.lm", source).expect_err("the interface is not a value type");
+    let error = compile_module_text("t.lm", source).expect_err("the interface is not a value type");
     assert!(
         error.contains("`Priced` is an interface; use it as a generic bound"),
         "{error}"
@@ -37,7 +37,7 @@ fn interface_type_diagnostics_name_the_bound_rule() {
 #[test]
 fn associated_type_diagnostics_suggest_self_projection() {
     let source = "interface Source\n  type Item\n  def next(self): Item\nend\n";
-    let error = compile_text("t.lm", source).expect_err("the projection needs Self");
+    let error = compile_module_text("t.lm", source).expect_err("the projection needs Self");
     assert!(
         error.contains("`Item` is an associated type; write `Self.Item`"),
         "{error}"
@@ -341,7 +341,7 @@ fn subclass_values_join_at_the_common_ancestor() {
 
 #[test]
 fn cfg_dump_shows_signatures_blocks_and_jumps() {
-    let module = compile_text(
+    let module = compile_module_text(
         "t.lm",
         "def half(n: Int): Int\n  n / 2\nend\n\nx = 0\nwhile x < 4\n  x = x + 1\nend\nhalf(x)\n",
     )
@@ -364,7 +364,7 @@ fn cfg_dump_shows_signatures_blocks_and_jumps() {
 
 #[test]
 fn cfg_dump_covers_classes_selectors_and_closures() {
-    let module = compile_text(
+    let module = compile_module_text(
         "t.lm",
         "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
          self.value = self.value + n\n    self.value\n  end\nend\n\
@@ -372,14 +372,13 @@ fn cfg_dump_covers_classes_selectors_and_closures() {
     )
     .unwrap();
     let dump = lm_hir::dump_cfg(&module);
-    // The core classes register first, so a module class never takes
-    // index zero. The test reads the index from the module.
+    // Collection can place the local class at any dense index.
+    // Read that index from the module.
     let counter = module
         .classes
         .iter()
         .position(|c| c.name == "Counter")
         .expect("the module declares Counter");
-    assert!(counter > 0, "a module class follows the core classes");
     let sel_index = module
         .selectors
         .iter()

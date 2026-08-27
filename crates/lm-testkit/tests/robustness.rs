@@ -3,11 +3,11 @@
 //! The parser must reject input that nests deeper than its limit.
 //! It must return a diagnostic. It must not overflow the Rust stack.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = compile_module_text("t.lm", source).unwrap_err();
     rendered[6..11].to_string()
 }
 

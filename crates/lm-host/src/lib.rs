@@ -2048,10 +2048,8 @@ impl Drop for CliHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lm_testkit::compile_to_bytes;
-    use lm_vm::{
-        load_bytes, CoreCtor, HostOpenOptions, HostRenameMode, HostSeekFrom, VmConfig, World,
-    };
+    use lm_testkit::{compile_to_bytes, publish_artifact_bytes};
+    use lm_vm::{CoreCtor, HostOpenOptions, HostRenameMode, HostSeekFrom, VmConfig, World};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     use std::io::{Read, Write};
@@ -3241,8 +3239,13 @@ end
         );
         let bytes =
             compile_to_bytes("local_https.lm", &source).expect("the HTTPS program compiles");
-        let loaded = load_bytes(&bytes).expect("the HTTPS program loads");
-        let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the HTTPS program loads");
+        let mut world = World::new(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(CliHost::new(1)),
+        );
         world
             .allow("Http.Client")
             .expect("the secure HTTP grant exists");

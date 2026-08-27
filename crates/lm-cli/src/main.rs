@@ -59,10 +59,10 @@ const USAGE: &str = "usage:
   lm inspect --shapes
   lm inspect <file.lmi | file.lma>
   lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>
-  lm inspect <file.lms> [--program <file.lm | file.lma>]
+  lm inspect <file.lms>
   lm snapshot save [--allow LIST] <file.lm> <out.lms>
-  lm snapshot verify [--program <file.lm | file.lma>] <file.lms>
-  lm snapshot run [--allow LIST] [--program <file>] <file.lms>";
+  lm snapshot verify <file.lms>
+  lm snapshot run [--allow LIST] <file.lms>";
 
 fn main() -> ExitCode {
     let args: Result<Vec<String>, _> = std::env::args_os()
@@ -105,9 +105,8 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             // program and `build` writes it.
             let options = parse_options(rest)?;
             let source = read_source(&options.file)?;
-            let module = compile(&source)?;
-            lm_verify::verify_module(&module)
-                .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
+            let artifact = compile_file(&source)?.artifact;
+            publish_artifact(artifact)?;
             Ok(ExitCode::SUCCESS)
         }
         "new" => {
@@ -135,23 +134,23 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             let options = parse_run_options(rest, Some("."))?;
             if is_package(&options.file) {
                 let report = build_package(&options.file, true)?;
-                let program = report.program.ok_or_else(|| {
+                let artifact = report.artifact.ok_or_else(|| {
                     format!(
                         "error: the package `{}` has no `src/main.lm`, so it \
-                         builds no program\n",
+                         builds no executable artifact\n",
                         report.root
                     )
                 })?;
                 let mut options = options;
-                options.file = program.display().to_string();
+                options.file = artifact.display().to_string();
                 return run_program(options);
             }
             run_program(options)
         }
         "disasm" => {
             let options = parse_options(rest)?;
-            let module = read_module(&options.file)?;
-            out!("{}", lm_hir::dump_cfg(&module));
+            let artifact = read_artifact(&options.file)?;
+            out!("{}", lm_hir::dump_cfg(artifact.root().module()));
             Ok(ExitCode::SUCCESS)
         }
         "inspect" => {
@@ -164,10 +163,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             if options.live {
-                let loaded = load_program(&options.file)?;
+                let (arena, namespace) = load_artifact(&options.file)?;
                 let host = Box::new(lm_host::CliHost::new(options.rand_seed));
                 let mut world =
-                    World::new_with_limits(&loaded, options.config, options.limits, host);
+                    World::new_with_limits(arena, namespace, options.config, options.limits, host);
                 for grant in &options.allow {
                     world
                         .allow(grant)
@@ -196,8 +195,9 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
                     let artifact_id = artifact.id();
                     let unit_count = artifact.units().len();
-                    let module = link_artifact(artifact)?.module;
-                    let identity = lm_bytecode::identity::module_identity(&module)
+                    let unit = artifact.root();
+                    let module = unit.module();
+                    let identity = lm_bytecode::identity::module_identity(module)
                         .map_err(|e| format!("error: {e}\n"))?;
                     outln!("artifact {}", artifact_id);
                     outln!("module   {}", hex(&identity.semantic_hash));
@@ -244,41 +244,31 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
-/// The program one snapshot container belongs to.
-///
-/// A container names its program by semantic hash, and admission
-/// (specification 17.8) reads the code hashes of that program. The
-/// tool therefore needs the program beside the container: `--program`
-/// names it, and the default is the file with the same stem.
-fn program_of(options: &Options) -> Result<String, String> {
-    if let Some(path) = &options.program {
-        return Ok(path.clone());
-    }
-    let base = Path::new(&options.file).with_extension("");
-    for ext in ["lma", "lm"] {
-        let candidate = base.with_extension(ext);
-        if candidate.is_file() {
-            return Ok(candidate.display().to_string());
-        }
-    }
-    Err(format!(
-        "error: no program found beside `{}`; name it with `--program`\n",
-        options.file
-    ))
+/// Publish the exact runtime core as one artifact namespace.
+fn runtime_core() -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let unit = lm_compiler::core_link_unit()?;
+    let artifact = lm_bytecode::artifact::Artifact::new(unit.as_ref().clone(), Vec::new())
+        .map_err(|error| format!("error: the runtime core artifact is invalid: {error}\n"))?;
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact, None)
+        .map_err(|error| format!("error: the runtime core did not publish: {error}\n"))?;
+    Ok((arena, namespace))
 }
 
-/// Load and check one snapshot container against its program.
+/// Load and check one self-describing snapshot container.
 fn load_image(options: &Options) -> Result<lm_vm::snapshot::SnapshotImage, String> {
-    let program = program_of(options)?;
-    let loaded = load_program(&program)?;
+    let (arena, namespace) = runtime_core()?;
     let bytes = read_bytes(&options.file)?;
-    let limits = lm_vm::snapshot::LoadLimits {
-        max_machines: options.limits.max_machines,
-        max_vm_images: options.limits.max_vm_images,
-        max_waits: options.limits.max_waits,
-        ..lm_vm::snapshot::LoadLimits::default()
-    };
-    lm_vm::snapshot::load_external(&bytes, &loaded, limits)
+    let mut world = World::new_with_limits(
+        arena,
+        namespace,
+        options.config,
+        options.limits,
+        Box::new(lm_vm::NullHost),
+    );
+    world
+        .load_snapshot_bytes(&bytes)
         .map_err(|e| format!("error: the snapshot did not load: {e}\n"))
 }
 
@@ -289,9 +279,9 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
         .extra
         .take()
         .ok_or_else(|| format!("error: `lm snapshot save` needs an output file\n{USAGE}\n"))?;
-    let loaded = load_program(&options.file)?;
+    let (arena, namespace) = load_artifact(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new_with_limits(&loaded, options.config, options.limits, host);
+    let mut world = World::new_with_limits(arena, namespace, options.config, options.limits, host);
     for grant in &options.allow {
         world
             .allow(grant)
@@ -322,11 +312,10 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
 /// Restore one snapshot container and drive the restored world.
 fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     let options = parse_options(args)?;
-    let program = program_of(&options)?;
-    let loaded = load_program(&program)?;
+    let (arena, namespace) = runtime_core()?;
     let bytes = read_bytes(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new_with_limits(&loaded, options.config, options.limits, host);
+    let mut world = World::new_with_limits(arena, namespace, options.config, options.limits, host);
     // The external byte path decodes and admits the container once.
     // The restore below reads the admitted image and repeats nothing.
     let image = world
@@ -420,26 +409,25 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
             short(&module.semantic_hash)
         ));
     }
-    match (&report.program, report.program_semantic) {
-        (Some(program), Some(semantic)) => {
-            let verb = if report.program_cached {
+    match (&report.artifact, report.artifact_id) {
+        (Some(artifact), Some(id)) => {
+            let verb = if report.artifact_cached {
                 "cached"
             } else {
-                "linked"
+                "built "
             };
             lines.push(format!(
-                "{verb} {}  sem={} container={}",
+                "{verb} {}  artifact={} container={}",
                 report.root,
-                short(&semantic),
-                short(
-                    &report
-                        .program_container
-                        .expect("a linked program has bytes")
-                )
+                short(id.as_bytes()),
+                short(&report.container_hash.expect("an artifact has bytes"))
             ));
-            lines.push(format!("  {}", relative_to_here(program).display()));
+            lines.push(format!("  {}", relative_to_here(artifact).display()));
         }
-        _ => lines.push(format!("library {} builds no program", report.root)),
+        _ => lines.push(format!(
+            "library {} builds no executable artifact",
+            report.root
+        )),
     }
     for line in lines {
         if to_stderr {
@@ -453,7 +441,7 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
 
 /// Load and run one program with the given policy grants.
 fn run_program(options: Options) -> Result<ExitCode, String> {
-    let loaded = load_program(&options.file)?;
+    let (arena, namespace) = load_artifact(&options.file)?;
     // The whole machine world lives on one worker thread with a
     // bounded stack, and only the rendered outcome comes back. That
     // is the thread-backed baseline of specification 22.12.
@@ -461,7 +449,8 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
     let arguments = options.command_args;
     let result = lm_proc::run_on_worker_with_scheduler_and_limits(
-        &loaded,
+        arena,
+        namespace,
         options.config,
         options.limits,
         options.scheduler,
@@ -498,67 +487,33 @@ fn extension(path: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Load a runnable program: a prebuilt artifact for `.lma`, a source
-/// compilation otherwise. Both paths admit code through the one
-/// verifier.
-fn load_program(path: &str) -> Result<lm_vm::LoadedModule, String> {
+/// Read one artifact from a built file or a source file.
+fn read_artifact(path: &str) -> Result<lm_bytecode::artifact::Artifact, String> {
     if extension(path) == "lma" {
         let bytes = read_bytes(path)?;
-        let artifact = lm_bytecode::artifact::decode(&bytes)
-            .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
-        let module = link_artifact(artifact)?.module;
-        load_stored(Path::new(path), module)
-            .map_err(|e| format!("error: the loader rejected the artifact: {e}\n"))
+        lm_bytecode::artifact::decode(&bytes)
+            .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))
     } else {
         let source = read_source(path)?;
-        let module = compile(&source)?;
-        lm_vm::load(module).map_err(|e| format!("error: the verifier rejected the module: {e}\n"))
+        compile_file(&source).map(|compiled| compiled.artifact)
     }
 }
 
-/// Admit one decoded artifact through the persistent verified-code
-/// store.
-///
-/// A hit skips the verifier pass. The key comes
-/// from the decoded content on every load, so no stored value enters
-/// it, and `lm_vm::load_with_record` rejects a record filed under any
-/// other key.
-fn load_stored(
-    path: &Path,
-    module: lm_bytecode::Module,
-) -> Result<lm_vm::LoadedModule, lm_vm::VerifyError> {
-    let store = lm_compiler::VerifiedStore::for_artifact(path);
-    let key = lm_vm::verified_key(&module);
-    lm_compiler::load_through_store(
-        &store,
-        &key,
-        module,
-        |module, _verdict| lm_vm::load_with_record(module, &key, &lm_vm::VerifiedRecord),
-        |module| {
-            let loaded = lm_vm::load(module)?;
-            Ok((loaded, lm_compiler::Verdict))
-        },
-    )
-}
-
-/// Read a decoded module from an artifact or a source file.
-fn read_module(path: &str) -> Result<lm_bytecode::Module, String> {
-    if extension(path) == "lma" {
-        let bytes = read_bytes(path)?;
-        let artifact = lm_bytecode::artifact::decode(&bytes)
-            .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
-        Ok(link_artifact(artifact)?.module)
-    } else {
-        let source = read_source(path)?;
-        compile(&source)
-    }
-}
-
-fn link_artifact(
+/// Publish one artifact against the runtime core.
+fn publish_artifact(
     artifact: lm_bytecode::artifact::Artifact,
-) -> Result<lm_compiler::LinkedProgram, String> {
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
     let core = lm_compiler::core_link_unit()?;
-    lm_compiler::link_artifact(artifact, Some(core)).map_err(|error| format!("error: {error}\n"))
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact, Some(core))
+        .map_err(|error| format!("error: {error}\n"))?;
+    Ok((arena, namespace))
+}
+
+/// Load one artifact into a new code arena.
+fn load_artifact(path: &str) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    publish_artifact(read_artifact(path)?)
 }
 
 /// Build one source file into `build/debug/<name>.lma` plus
@@ -577,21 +532,18 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
     // The file name names the output files only. It never names the
     // module: a single file has no module path.
     let compiled = compile_file(&source)?;
-    let module = compiled.program;
-    lm_verify::verify_module(&module)
-        .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
-    let identity =
-        lm_bytecode::identity::module_identity(&module).map_err(|e| format!("error: {e}\n"))?;
-    let container = compiled.artifact;
+    let identity = compiled.artifact.id();
+    let container = lm_bytecode::artifact::encode(&compiled.artifact)
+        .map_err(|error| format!("error: the artifact did not encode: {error}\n"))?;
     let container_hash = lm_bytecode::identity::container_hash(&container);
-    let interface_bytes = compiled.root.interface_bytes;
+    let interface_bytes = lm_bytecode::interface::encode_interface(&compiled.root.interface);
     let dir = Path::new("build").join("debug");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", dir.display()))?;
     write_atomic(&dir.join(format!("{stem}.lma")), &container)?;
     write_atomic(&dir.join(format!("{stem}.lmi")), &interface_bytes)?;
     outln!("built {stem}");
-    outln!("  semantic  {}", hex(&identity.semantic_hash));
+    outln!("  artifact  {identity}");
     outln!("  container {}", hex(&container_hash));
     Ok(ExitCode::SUCCESS)
 }
@@ -608,8 +560,6 @@ struct Options {
     /// A second positional input, for example the output of
     /// `lm snapshot save`.
     extra: Option<String>,
-    /// The program one snapshot container belongs to.
-    program: Option<String>,
     show_result: bool,
     live: bool,
     shapes: bool,
@@ -645,7 +595,6 @@ fn parse_options_mode(
 ) -> Result<Options, String> {
     let mut file = None;
     let mut extra = None;
-    let mut program = None;
     let mut show_result = false;
     let mut live = false;
     let mut shapes = false;
@@ -674,13 +623,6 @@ fn parse_options_mode(
                     .next()
                     .ok_or_else(|| "error: `--allow` needs a list of grants\n".to_string())?;
                 allow.extend(list.split(',').map(|s| s.trim().to_string()));
-            }
-            "--program" => {
-                program = Some(
-                    iter.next()
-                        .ok_or_else(|| "error: `--program` needs a file\n".to_string())?
-                        .clone(),
-                );
             }
             "--rand-seed" => rand_seed = flag_value(&mut iter, "--rand-seed")?,
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
@@ -735,7 +677,6 @@ fn parse_options_mode(
     Ok(Options {
         file,
         extra,
-        program,
         show_result,
         live,
         shapes,
@@ -829,11 +770,6 @@ const SINGLE_FILE_MODULE_PATH: &str = "";
 /// Compile one source file and its selected standard modules.
 fn compile_file(source: &SourceFile) -> Result<lm_compiler::CompiledSource, String> {
     lm_compiler::compile_source(SINGLE_FILE_MODULE_PATH, source, true)
-}
-
-/// Compile one source file to decoded bytecode.
-fn compile(source: &SourceFile) -> Result<lm_bytecode::Module, String> {
-    lm_compiler::compile_program(SINGLE_FILE_MODULE_PATH, source)
 }
 
 #[cfg(test)]

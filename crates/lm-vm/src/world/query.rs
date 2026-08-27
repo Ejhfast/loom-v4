@@ -158,7 +158,9 @@ impl World {
             ..crate::snapshot::LoadLimits::default()
         };
         self.record_snapshot_check();
-        let image = crate::snapshot::codec::load_external(bytes, &self.base_loaded, limits)?;
+        let available = self.root_code().clone();
+        let known = self.namespaces.iter().flatten().cloned().collect();
+        let image = crate::snapshot::codec::load_external_known(bytes, available, known, limits)?;
         self.trust_image(&image);
         Ok(image)
     }
@@ -408,7 +410,7 @@ impl World {
                 crate::ResourceKind::PendingOperation => {
                     format!(
                         "a pending {}",
-                        self.loaded
+                        self.code_of(vm)
                             .bundle()
                             .op_name(record.op)
                             .unwrap_or("<invalid operation>")
@@ -425,10 +427,10 @@ impl World {
                 crate::ResourceKind::Child => "child handle".to_string(),
                 crate::ResourceKind::UdpSocket => "UDP socket".to_string(),
                 crate::ResourceKind::Extension(identity) => self
-                    .loaded
+                    .code_of(vm)
                     .bundle()
                     .resource_by_identity(identity)
-                    .and_then(|slot| self.loaded.bundle().resource(slot))
+                    .and_then(|slot| self.code_of(vm).bundle().resource(slot))
                     .map(|resource| resource.name.clone())
                     .unwrap_or_else(|| "extension resource".to_string()),
             });
@@ -468,10 +470,10 @@ impl World {
                     crate::ResourceKind::UdpSocket => "UDP socket".to_string(),
                     crate::ResourceKind::PendingOperation => "pending operation".to_string(),
                     crate::ResourceKind::Extension(identity) => self
-                        .loaded
+                        .code_of(vm)
                         .bundle()
                         .resource_by_identity(identity)
-                        .and_then(|slot| self.loaded.bundle().resource(slot))
+                        .and_then(|slot| self.code_of(vm).bundle().resource(slot))
                         .map(|resource| resource.name.clone())
                         .unwrap_or_else(|| "extension resource".to_string()),
                 })
@@ -483,16 +485,9 @@ impl World {
         self.machines[vm as usize].active
     }
 
-    /// The verified semantic identity of the loaded program.
+    /// The verified semantic identity of the root namespace.
     pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
-        self.loaded.identity()
-    }
-
-    /// The semantic identity of the module that started this world.
-    pub(crate) fn base_identity(
-        &self,
-    ) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
-        self.base_loaded.identity()
+        self.root_code().identity()
     }
 
     /// Store one admitted image in the world table and name its slot.
@@ -516,29 +511,6 @@ impl World {
     /// The admitted image one slot names.
     pub(crate) fn image_at(&self, slot: u32) -> Option<crate::snapshot::SnapshotImage> {
         self.images.get(slot as usize).and_then(|e| e.clone())
-    }
-
-    /// The verification hash of the loaded program.
-    ///
-    /// Snapshot capture and restore both name the program by this
-    /// hash. The module computes it once (`LoadedModule`).
-    pub(crate) fn verification_hash(&self) -> [u8; 32] {
-        self.loaded.verification_hash()
-    }
-
-    /// The verification hash of the module that started this world.
-    pub(crate) fn base_verification_hash(&self) -> [u8; 32] {
-        self.base_loaded.verification_hash()
-    }
-
-    /// The current verified aggregate code.
-    pub(crate) fn loaded_code(&self) -> LoadedModule {
-        self.loaded.clone()
-    }
-
-    /// The loaded program.
-    pub fn module(&self) -> &Module {
-        &self.module
     }
 
     /// The resource limits of one machine.

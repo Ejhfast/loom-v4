@@ -25,13 +25,14 @@
 //! network. The command-line tool reads and writes `.lms` files.
 
 pub mod admit;
+mod code;
 pub mod codec;
 pub mod dump;
 pub mod restore;
 pub mod write;
 
-pub use admit::{admit, AdmissionBudget, AdmissionCache};
-pub use codec::{load_external, load_external_cached, DecodeBudget};
+pub use admit::{admit, AdmissionBudget};
+pub use codec::{load_external, DecodeBudget};
 pub use write::{CutError, CutReport};
 
 use crate::machine::VmId;
@@ -83,7 +84,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 29 stores floating-point values.
 /// Version 30 adds closed terminal and signal resource values.
 /// Version 31 stores homogeneous dynamic wait sets.
-pub const FORMAT_VERSION: u32 = 31;
+pub const FORMAT_VERSION: u32 = 32;
 
 /// The section kinds, in canonical order.
 ///
@@ -286,6 +287,8 @@ pub struct ImageLimits {
 /// One persistent VM image in a portable snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageVm {
+    /// The code namespace used by this persistent image.
+    pub namespace: u32,
     /// The resource ceiling for runs that this image activates.
     pub limits: ImageLimits,
     /// The current target of each immutable module slot contract.
@@ -301,20 +304,8 @@ pub struct ImageVm {
 /// One module instance in a portable VM image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageInstance {
-    /// The artifact ordinal in `Image::installations`.
-    pub installation: u32,
-    /// Canonical interface bytes, when the compiler supplied them.
-    pub interface: Option<Vec<u8>>,
-    /// The source module semantic hash.
-    pub semantic_hash: [u8; 32],
-    /// The relocated entry function.
-    pub entry: u32,
-    /// Source function indices mapped into the aggregate code store.
-    pub funcs: Vec<u32>,
-    /// Source class indices mapped into the aggregate code store.
-    pub classes: Vec<u32>,
-    /// Source slot indices mapped into the aggregate slot store.
-    pub slots: Vec<u32>,
+    /// The artifact ordinal in `Image::artifacts`.
+    pub artifact: u32,
 }
 
 /// One portable target in a VM image slot table.
@@ -330,6 +321,8 @@ pub enum ImageSlotTarget {
 /// One captured machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageMachine {
+    /// The code namespace used by this machine.
+    pub namespace: u32,
     /// The captured parent, as a machine ordinal. `None` means the
     /// parent is outside the world; restore re-roots such a machine
     /// on the restoring machine (specification 17.5).
@@ -399,6 +392,13 @@ pub struct ImageObject {
     pub object: Object,
 }
 
+/// One exact artifact chain that forms a code namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageNamespace {
+    /// Artifact ordinals in publication order.
+    pub artifacts: Vec<u32>,
+}
+
 /// One decoded machine world.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Image {
@@ -406,8 +406,6 @@ pub struct Image {
     pub abi_version: u32,
     pub compiler_abi: u32,
     pub verifier_version: u32,
-    /// The semantic hash of the program this world runs.
-    pub module_semantic: [u8; 32],
     /// The selected run for a typed run snapshot.
     ///
     /// A full VM snapshot has no selected run. The encoded value uses
@@ -424,12 +422,10 @@ pub struct Image {
     /// text, so it never depends on a numeric slot of one linked
     /// program. A machine with no body function records zeros.
     pub result_type: [u8; 32],
-    /// Every referenced function slot with its definition hash.
-    pub funcs: Vec<(u32, [u8; 32])>,
-    /// Every referenced class slot with its definition hash.
-    pub classes: Vec<(u32, [u8; 32])>,
-    /// Verified artifacts in successful installation order.
-    pub installations: Vec<Vec<u8>>,
+    /// Canonical LMAR values used by the namespace manifests.
+    pub artifacts: Vec<Vec<u8>>,
+    /// Exact artifact chains used by captured machines and images.
+    pub namespaces: Vec<ImageNamespace>,
     /// The closed type table of this image.
     ///
     /// No entry holds a free type variable, and every child index
@@ -467,10 +463,12 @@ impl Image {
     /// Estimate the retained storage of this decoded image.
     pub fn resident_bytes(&self) -> usize {
         let mut bytes = std::mem::size_of::<Image>();
-        bytes = bytes.saturating_add(self.funcs.len() * std::mem::size_of::<(u32, [u8; 32])>());
-        bytes = bytes.saturating_add(self.classes.len() * std::mem::size_of::<(u32, [u8; 32])>());
-        for artifact in &self.installations {
+        for artifact in &self.artifacts {
             bytes = bytes.saturating_add(artifact.len());
+        }
+        bytes = bytes.saturating_add(self.namespaces.len() * std::mem::size_of::<ImageNamespace>());
+        for namespace in &self.namespaces {
+            bytes = bytes.saturating_add(namespace.artifacts.len() * std::mem::size_of::<u32>());
         }
         bytes = bytes.saturating_add(
             self.types.len() * std::mem::size_of::<lm_bytecode::closed::ClosedType>(),
@@ -504,12 +502,6 @@ impl Image {
             }
             bytes =
                 bytes.saturating_add(image.instances.len() * std::mem::size_of::<ImageInstance>());
-            for instance in &image.instances {
-                bytes = bytes.saturating_add(instance.interface.as_ref().map_or(0, Vec::len));
-                bytes = bytes.saturating_add(instance.funcs.len() * std::mem::size_of::<u32>());
-                bytes = bytes.saturating_add(instance.classes.len() * std::mem::size_of::<u32>());
-                bytes = bytes.saturating_add(instance.slots.len() * std::mem::size_of::<u32>());
-            }
         }
         for machine in &self.machines {
             bytes =
@@ -567,21 +559,9 @@ pub enum Origin {
     ExternalContainer,
 }
 
-/// What one admission proved the image against.
-///
-/// The container hash identifies bytes. It does not say which program
-/// admitted them, so the admitted state carries this record beside the
-/// bytes. Restore compares it with the running program.
+/// The format identities checked during admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionIdentity {
-    /// The semantic hash of the module that started the world.
-    pub base_semantic: [u8; 32],
-    /// The verification hash of the module that started the world.
-    pub base_verification: [u8; 32],
-    /// The semantic hash of the program the image runs.
-    pub module_semantic: [u8; 32],
-    /// The verification hash of that exact verified module.
-    pub verification: [u8; 32],
     pub format: u32,
     pub abi_version: u32,
     pub compiler_abi: u32,
@@ -611,8 +591,8 @@ pub struct SnapshotImage {
     /// restores inside one process encodes nothing.
     bytes: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
     world: std::sync::Arc<Image>,
-    /// The verified aggregate code that admission reconstructed.
-    loaded: crate::LoadedModule,
+    /// The verified artifacts and namespaces of this image.
+    code: code::SnapshotCode,
     /// The container hash of the bytes. It follows the bytes.
     hash: std::sync::OnceLock<[u8; 32]>,
     /// The program and ABI identity this image passed admission
@@ -634,8 +614,13 @@ impl SnapshotImage {
         if let Some(bytes) = self.bytes.get() {
             return Ok(bytes);
         }
-        let written =
-            codec::encode_with_bundle(&self.world, self.byte_limit, self.loaded.bundle())?;
+        let bundle = self.code.bundle().ok_or_else(|| {
+            SnapshotFail::Fault(
+                lm_abi::FaultCode::MalformedState,
+                "the snapshot has no code namespace".to_string(),
+            )
+        })?;
+        let written = codec::encode_with_bundle(&self.world, self.byte_limit, bundle)?;
         let hash = codec::stored_container_hash(&written);
         let _ = self.bytes.set(std::sync::Arc::new(written));
         let _ = self.hash.set(hash);
@@ -650,9 +635,9 @@ impl SnapshotImage {
         &self.world
     }
 
-    /// The verified aggregate code of this image.
-    pub(crate) fn loaded(&self) -> &crate::LoadedModule {
-        &self.loaded
+    /// The verified artifacts and namespaces of this image.
+    pub(crate) fn code(&self) -> &code::SnapshotCode {
+        &self.code
     }
 
     /// One editable copy of the admitted world.

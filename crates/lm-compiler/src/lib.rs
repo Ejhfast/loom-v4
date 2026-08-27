@@ -7,8 +7,8 @@
 //!   dependency DAG;
 //! - `env` and `module`: the explicit typed environments and the
 //!   compilation of one module against dependency interfaces;
-//! - `link`: the pure linker that merges modules into one program;
-//! - `cache` and `build`: the three-stage content-addressed build
+//! - `link`: artifact resolution and namespace publication;
+//! - `cache` and `build`: the two-stage content-addressed build
 //!   directory and the build loop.
 //!
 //! The layer above `lm-verify` never runs code. Every artifact this
@@ -26,21 +26,15 @@ pub mod scaffold;
 pub mod standard;
 
 pub use build::{build_package, BuildReport, ModuleReport};
-pub use cache::{
-    compile_key_with_bundle, load_through_store, program_key_with_bundle, user_cache_dir,
-    write_atomic, Verdict, VerdictKey, VerifiedStore,
-};
+pub use cache::{compile_key_with_bundle, write_atomic};
 pub use core::{
     core_link_env, core_link_env_with_bundle, core_link_unit, core_link_unit_with_bundle,
 };
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
-pub use lm_link::{
-    link, link_artifact, link_artifact_with_bundle, link_with_bundle, resolve_artifact,
-    LinkedProgram,
-};
+pub use lm_link::{resolve_artifact, CodeArena, CodeNamespace, NamespaceId};
 pub use manifest::{parse_manifest, Manifest};
 pub use module::{
     compile_module, compile_module_with_bundle, compile_module_with_options,
     compile_module_with_options_and_bundle, CompileOptions, CompiledModule,
 };
-pub use standard::{compile_program, compile_source, CompiledSource, StandardCatalog};
+pub use standard::{compile_source, CompiledSource, StandardCatalog};

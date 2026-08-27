@@ -3,8 +3,7 @@
 //! cases cover the week-2 table and instruction surfaces.
 
 use lm_bytecode::{BcClassKind, BcRow, BcType, Instr};
-use lm_testkit::compile_to_bytes;
-use lm_vm::LoadError;
+use lm_testkit::{compile_module_text, compile_to_bytes};
 
 const SOURCE: &str = "def factorial(n: Int): Int
   if n <= 1
@@ -95,15 +94,15 @@ const DIGEST_SOURCE: &str = "xs = [[1], [2]]\nxs.freeze()\nd = xs.digest()\n\
      n = xs.len()\nif n == 2\n  d\nelse\n  d\nend\n";
 
 fn valid_bytes() -> Vec<u8> {
-    compile_to_bytes("corrupt.lm", SOURCE).unwrap()
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", SOURCE).unwrap())
 }
 
 fn week3_bytes() -> Vec<u8> {
-    compile_to_bytes("corrupt.lm", WEEK3_SOURCE).unwrap()
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", WEEK3_SOURCE).unwrap())
 }
 
 fn object_bytes() -> Vec<u8> {
-    compile_to_bytes("corrupt.lm", OBJECT_SOURCE).unwrap()
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", OBJECT_SOURCE).unwrap())
 }
 
 /// The class index of one declared class. The core classes take
@@ -117,26 +116,25 @@ fn class_index(module: &lm_bytecode::Module, name: &str) -> usize {
 }
 
 fn expect_verify_reject(bytes: &[u8], needle: &str) {
-    match lm_vm::load_bytes(bytes) {
-        Err(LoadError::Verify(e)) => {
-            assert!(e.message.contains(needle), "wrong rejection: {e}");
-        }
-        other => panic!("expected a verifier rejection with `{needle}`, got {other:?}"),
-    }
+    let module = lm_bytecode::decode(bytes).expect("the damaged module decodes");
+    let error = lm_verify::verify_module(&module).expect_err("the verifier accepts the damage");
+    assert!(error.message.contains(needle), "wrong rejection: {error}");
 }
 
 #[test]
 fn valid_bytes_load_and_run() {
-    let loaded = lm_vm::load_bytes(&valid_bytes()).unwrap();
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let bytes = compile_to_bytes("corrupt.lm", SOURCE).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(3628800)");
 }
 
 #[test]
 fn valid_object_bytes_load_and_run() {
-    let loaded = lm_vm::load_bytes(&object_bytes()).unwrap();
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let bytes = compile_to_bytes("corrupt.lm", OBJECT_SOURCE).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"woof 2 2\")");
 }
@@ -189,11 +187,7 @@ fn type_confusion_is_rejected_by_the_verifier() {
         }
     }
     assert!(patched);
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    expect_verify_reject(&lm_bytecode::encode(&module), "type");
 }
 
 #[test]
@@ -236,11 +230,7 @@ fn field_type_out_of_range_is_rejected() {
     module.classes[animal].fields[0].1 = bad;
     // The child layout no longer extends the parent, or the type index
     // is invalid; either rejection is before execution.
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 #[test]
@@ -358,8 +348,9 @@ fn entry_with_captures_is_rejected() {
 
 #[test]
 fn valid_week3_bytes_load_and_run() {
-    let loaded = lm_vm::load_bytes(&week3_bytes()).unwrap();
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let bytes = compile_to_bytes("corrupt.lm", WEEK3_SOURCE).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(9)");
 }
@@ -408,7 +399,7 @@ fn row_variable_outside_the_arity_is_rejected() {
 fn widened_callee_row_is_rejected() {
     // Give the recursive target a claimed row. The entry function has
     // an empty row, so its call must fail row inclusion.
-    let bytes = compile_to_bytes(
+    let module = compile_module_text(
         "corrupt.lm",
         "def names_row() with Io.Write\n\
          end\n\
@@ -422,7 +413,7 @@ fn widened_callee_row_is_rejected() {
          row_target(2)\n",
     )
     .unwrap();
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = module;
     let target = module
         .funcs
         .iter()
@@ -515,11 +506,7 @@ fn tuple_new_count_mismatch_is_rejected() {
         }
     }
     assert!(patched, "the sample builds a tuple");
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 #[test]
@@ -552,11 +539,7 @@ fn cast_between_unrelated_classes_is_rejected() {
         }
     }
     assert!(patched, "the sample tests a case class");
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 #[test]
@@ -568,11 +551,7 @@ fn class_arity_flip_is_rejected() {
         .position(|c| c.name == "Box")
         .expect("the sample defines Box");
     module.classes[boxc].type_params = 2;
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 #[test]
@@ -591,28 +570,35 @@ fn an_overflowing_interface_arity_is_rejected() {
 fn every_truncated_stream_is_rejected_by_the_decoder() {
     for bytes in [valid_bytes(), object_bytes(), week3_bytes()] {
         for len in 0..bytes.len() {
-            match lm_vm::load_bytes(&bytes[..len]) {
-                Err(LoadError::Decode(_)) => {}
-                other => panic!("prefix length {len}: expected a decode error, got {other:?}"),
-            }
+            assert!(
+                lm_bytecode::decode(&bytes[..len]).is_err(),
+                "prefix length {len} must reject"
+            );
         }
     }
 }
 
 #[test]
 fn unknown_opcode_is_rejected_by_the_decoder() {
-    let mut bytes = valid_bytes();
-    // The semantic region ends with the entry index; the final
-    // Return opcode sits directly before it.
+    let module = compile_module_text("corrupt.lm", "\"a\".pad_start(2)\n").unwrap();
+    let bytes = lm_bytecode::encode(&module);
     let sem_at = u32::from_le_bytes(bytes[38..42].try_into().unwrap()) as usize;
     let sem_len = u32::from_le_bytes(bytes[42..46].try_into().unwrap()) as usize;
-    let pos = sem_at + sem_len - 5;
-    assert_eq!(bytes[pos], 0x34, "the semantic region ends with Return");
-    bytes[pos] = 0xfe;
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Decode(_))
-    ));
+    let positions: Vec<usize> = bytes[sem_at..sem_at + sem_len]
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, window)| (window == [0xfe, 0x00]).then_some(index + sem_at))
+        .collect();
+    assert!(!positions.is_empty(), "the program uses one text extension");
+    let rejects = positions.into_iter().any(|pos| {
+        let mut damaged = bytes.clone();
+        damaged[pos + 1] = 0xff;
+        matches!(
+            lm_bytecode::decode(&damaged),
+            Err(lm_bytecode::DecodeError::BadOpcode(0xfe))
+        )
+    });
+    assert!(rejects, "an unknown text extension must reject");
 }
 
 /// Source with a generic virtual call and an enum-arm cast, for the
@@ -641,13 +627,14 @@ end
 ";
 
 fn review_bytes() -> Vec<u8> {
-    compile_to_bytes("corrupt.lm", REVIEW_SOURCE).unwrap()
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", REVIEW_SOURCE).unwrap())
 }
 
 #[test]
 fn valid_review_bytes_load_and_run() {
-    let loaded = lm_vm::load_bytes(&review_bytes()).unwrap();
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let bytes = compile_to_bytes("corrupt.lm", REVIEW_SOURCE).unwrap();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(3)");
 }
@@ -735,8 +722,7 @@ fn cast_that_changes_generic_arguments_is_rejected() {
 /// so the VM never meets a value that carries no graph.
 #[test]
 fn digest_on_a_scalar_is_rejected_by_the_verifier() {
-    let bytes = compile_to_bytes("corrupt.lm", DIGEST_SOURCE).unwrap();
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = compile_module_text("corrupt.lm", DIGEST_SOURCE).unwrap();
     // Feed the digest instruction a constant instead of the graph.
     let mut patched = false;
     'outer: for func in &mut module.funcs {
@@ -761,8 +747,7 @@ fn digest_on_a_scalar_is_rejected_by_the_verifier() {
 #[test]
 fn digest_comparison_on_other_types_is_rejected_by_the_verifier() {
     for (name, forged) in [("EqDigest", Instr::EqDigest), ("NeDigest", Instr::NeDigest)] {
-        let bytes = compile_to_bytes("corrupt.lm", DIGEST_SOURCE).unwrap();
-        let mut module = lm_bytecode::decode(&bytes).unwrap();
+        let mut module = compile_module_text("corrupt.lm", DIGEST_SOURCE).unwrap();
         // Replace the integer comparison with the digest comparison.
         let mut patched = false;
         'outer: for func in &mut module.funcs {
@@ -807,7 +792,7 @@ h.done()
 ";
 
 fn proc_bytes() -> Vec<u8> {
-    compile_to_bytes("proc.lm", PROC_SOURCE).unwrap()
+    lm_bytecode::encode(&compile_module_text("proc.lm", PROC_SOURCE).unwrap())
 }
 
 /// The class entry carries the parent type arguments. A forged count
@@ -827,11 +812,7 @@ fn a_parent_argument_out_of_range_is_rejected() {
     let worker = class_index(&module, "Worker");
     let bad = module.types.len() as u32 + 3;
     module.classes[worker].parent_args[0] = bad;
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 /// A parent type argument may not hold a type variable: the subclass
@@ -891,17 +872,13 @@ fn a_forged_handle_message_type_is_rejected() {
         }
     }
     assert!(patched, "the sample uses a proc handle");
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 /// A `Proc.Recv` whose receiver is not a proc instance rejects.
 #[test]
 fn a_receive_on_a_foreign_receiver_is_rejected() {
-    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let mut module = lm_hir::core_image();
     let mut patched = false;
     'outer: for func in module.funcs.iter_mut() {
         for block in func.blocks.iter_mut() {
@@ -922,9 +899,5 @@ fn a_receive_on_a_foreign_receiver_is_rejected() {
         }
     }
     assert!(patched, "the sample performs Proc.Recv");
-    let bytes = lm_bytecode::encode(&module);
-    assert!(matches!(
-        lm_vm::load_bytes(&bytes),
-        Err(LoadError::Verify(_))
-    ));
+    assert!(lm_verify::verify_module(&module).is_err());
 }

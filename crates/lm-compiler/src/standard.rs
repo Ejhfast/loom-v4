@@ -7,8 +7,8 @@
 //! process. A later release bundle can replace the source builder
 //! with decoded artifacts without changing its callers.
 
-use crate::{compile_module, link, CompileEnv, CompiledModule};
-use lm_bytecode::Module;
+use crate::{compile_module, CompileEnv, CompiledModule};
+use lm_bytecode::artifact::{Artifact, LinkUnit};
 use lm_source::SourceFile;
 use std::sync::OnceLock;
 
@@ -36,15 +36,13 @@ static HTTP: OnceLock<CompiledModule> = OnceLock::new();
 static BASE64: OnceLock<CompiledModule> = OnceLock::new();
 static JSON: OnceLock<CompiledModule> = OnceLock::new();
 
-/// One source compilation and its runnable linked program.
+/// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
 pub struct CompiledSource {
     /// The independently compiled source module.
     pub root: CompiledModule,
-    /// The closed module that the VM can load.
-    pub program: Module,
-    /// The program artifact that contains the selected source units.
-    pub artifact: Vec<u8>,
+    /// The artifact that contains the selected source units.
+    pub artifact: Artifact,
     /// The bundled modules selected by the source imports.
     pub standard_modules: Vec<String>,
 }
@@ -122,21 +120,24 @@ impl StandardCatalog {
         ))
     }
 
-    /// Bind selected standard interfaces into one compile environment.
-    ///
-    /// The returned modules can enter the matching link environment.
-    pub fn bind(
-        self,
-        env: &mut CompileEnv,
-        paths: &[&str],
-    ) -> Result<Vec<&'static CompiledModule>, String> {
+    /// Bind selected standard units into one compile environment.
+    pub fn bind(self, env: &mut CompileEnv, paths: &[&str]) -> Result<Vec<LinkUnit>, String> {
         let modules = self.select(paths)?;
+        let mut links = crate::core_link_env()?;
+        let mut units = Vec::with_capacity(modules.len());
         env.bind_standard_root();
-        for module in &modules {
-            env.bind_interface(module.interface.clone())
+        for module in modules {
+            let unit = module
+                .clone()
+                .into_link_unit(&links)
                 .map_err(|error| error.to_string())?;
+            env.bind_unit(&unit).map_err(|error| error.to_string())?;
+            links
+                .bind_unit(unit.clone())
+                .map_err(|error| error.to_string())?;
+            units.push(unit);
         }
-        Ok(modules)
+        Ok(units)
     }
 }
 
@@ -147,10 +148,19 @@ fn compile_bundled(
     dependencies: &[&CompiledModule],
 ) -> CompiledModule {
     let mut env = CompileEnv::new();
+    let mut links = crate::core_link_env()
+        .unwrap_or_else(|error| panic!("the core link environment is invalid: {error}"));
     env.bind_standard_root();
     for dependency in dependencies {
-        env.bind_interface(dependency.interface.clone())
+        let unit = (*dependency)
+            .clone()
+            .into_link_unit(&links)
+            .unwrap_or_else(|error| panic!("the bundled dependency is invalid: {error}"));
+        env.bind_unit(&unit)
             .unwrap_or_else(|error| panic!("the bundled module environment is invalid: {error}"));
+        links
+            .bind_unit(unit)
+            .unwrap_or_else(|error| panic!("the bundled link environment is invalid: {error}"));
     }
     compile_module(path, &SourceFile::new(file, source), &env.freeze(), false)
         .unwrap_or_else(|error| panic!("the bundled module `{path}` does not compile:\n{error}"))
@@ -281,41 +291,36 @@ pub fn compile_source(
     let uses: Vec<Vec<String>> = ast.uses.iter().map(|item| item.path.clone()).collect();
     let standard = modules_for_uses(&uses);
     let mut env = CompileEnv::new();
+    let mut link_env = crate::core_link_env()?;
     env.bind_standard_root();
     for module in &standard {
-        env.bind_interface(module.interface.clone())
+        let unit = (*module)
+            .clone()
+            .into_link_unit(&link_env)
+            .map_err(|error| format!("error: {error}\n"))?;
+        env.bind_unit(&unit)
+            .map_err(|error| format!("error: {error}\n"))?;
+        link_env
+            .bind_unit(unit)
             .map_err(|error| format!("error: {error}\n"))?;
     }
     let root = compile_module(path, source, &env.freeze(), is_main)?;
-    let mut link_env = crate::core_link_env()?;
-    for module in &standard {
-        link_env
-            .bind_module(
-                module.path.clone(),
-                module.module.clone(),
-                module.interface.clone(),
-            )
-            .map_err(|error| format!("error: {error}\n"))?;
-    }
-    let link_path = if path.is_empty() { "test.entry" } else { path };
-    let mut root_interface = root.interface.clone();
-    root_interface.module_path = link_path.to_string();
-    link_env
-        .bind_module(link_path, root.module.clone(), root_interface)
+    let root_unit = root
+        .clone()
+        .into_link_unit(&link_env)
         .map_err(|error| format!("error: {error}\n"))?;
-    let linked =
-        link(link_path, &link_env.freeze()).map_err(|error| format!("error: {error}\n"))?;
+    link_env
+        .bind_unit(root_unit)
+        .map_err(|error| format!("error: {error}\n"))?;
+    let artifact = link_env
+        .freeze()
+        .artifact(path)
+        .map_err(|error| format!("error: {error}\n"))?;
     Ok(CompiledSource {
-        program: linked.module,
-        artifact: linked.artifact,
+        artifact,
         standard_modules: standard.iter().map(|module| module.path.clone()).collect(),
         root,
     })
-}
-
-/// Compile one runnable source module.
-pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String> {
-    Ok(compile_source(path, source, true)?.program)
 }
 
 #[cfg(test)]

@@ -35,7 +35,7 @@ pub fn core_link_env() -> Result<LinkEnv, String> {
 /// Create a core link environment for one ABI bundle.
 pub fn core_link_env_with_bundle(bundle: &Arc<lm_abi::AbiBundle>) -> Result<LinkEnv, String> {
     let mut env = LinkEnv::new();
-    env.bind(core_link_unit_with_bundle(bundle)?)
+    env.bind_unit(core_link_unit_with_bundle(bundle)?)
         .map_err(|error| format!("error: {error}\n"))?;
     Ok(env)
 }

@@ -15,26 +15,30 @@
 //! The cases keep the heap canonical after every edit, so the
 //! canonical-order rule never fires in place of the rule under test.
 
+use lm_bytecode::artifact::Artifact;
 use lm_heap::Object;
 use lm_host::CliHost;
-use lm_testkit::compile_to_bytes;
+use lm_testkit::{compile_text, load_snapshot_for_artifact, publish_artifact};
 use lm_value::{ObjRef, Value};
 use lm_vm::snapshot::{codec, Image, ImageMachine, ImageObject, ImageReason, ImageTerminal};
-use lm_vm::{
-    load_bytes, FaultCode, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, World,
-};
+use lm_vm::{FaultCode, Outcome, RecordingHost, RootEvent, VmConfig, World};
 
-fn program(source: &str) -> LoadedModule {
-    let bytes = compile_to_bytes("admission.lm", source).expect("the program compiles");
-    load_bytes(&bytes).expect("the program loads")
+fn program(source: &str) -> Artifact {
+    compile_text("admission.lm", source).expect("the program compiles")
 }
 
 /// Capture the machine world at each instruction boundary of the root.
 ///
 /// The capture runs from the host, so the test needs no guest snapshot
 /// code and reaches every program point of the entry function.
-fn boundaries(loaded: &LoadedModule, allow: &[&str], limit: usize) -> Vec<Image> {
-    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+fn boundaries(loaded: &Artifact, allow: &[&str], limit: usize) -> Vec<Image> {
+    let (arena, namespace) = publish_artifact(loaded).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }
@@ -63,39 +67,54 @@ fn pick(images: &[Image], what: &str, ok: impl Fn(&Image) -> bool) -> Image {
 
 /// Admit one container. The result is the rule it broke, or `None`
 /// when the container admits.
-fn admit(loaded: &LoadedModule, image: &Image) -> Option<ImageReason> {
+fn admit(loaded: &Artifact, image: &Image) -> Option<ImageReason> {
     let bytes = codec::encode(image, usize::MAX).expect("the image encodes");
-    match codec::load_external(&bytes, loaded, lm_vm::snapshot::LoadLimits::default()) {
+    match load_snapshot_for_artifact(loaded, &bytes, lm_vm::snapshot::LoadLimits::default()) {
         Ok(_) => None,
         Err(error) => Some(error.reason),
     }
 }
 
+fn admit_image(
+    loaded: &Artifact,
+    image: Image,
+    budget: &mut lm_vm::snapshot::AdmissionBudget,
+) -> Result<lm_vm::snapshot::SnapshotImage, lm_vm::snapshot::ImageError> {
+    let (arena, namespace) = publish_artifact(loaded).map_err(|message| {
+        lm_vm::snapshot::ImageError::admission(lm_vm::snapshot::ImageReason::Code, message)
+    })?;
+    let available = arena.namespace(namespace).expect("the namespace exists");
+    lm_vm::snapshot::admit(image, Some(available), budget)
+}
+
+fn code_tables(loaded: &Artifact) -> std::sync::Arc<lm_bytecode::CodeTables> {
+    let (arena, namespace) = publish_artifact(loaded).expect("the artifact publishes");
+    arena
+        .namespace(namespace)
+        .expect("the namespace exists")
+        .table_store()
+}
+
 #[test]
-fn repeated_code_admission_rechecks_mutable_image_state() {
+fn repeated_namespace_admission_rechecks_mutable_image_state() {
     let loaded = program(
         "def add(value: Int): Int\n  value + 1\nend\ndef go(): Int with Vm\n  image = sys.vm.Vm()\n  case image.install(add)\n  in Ok(_) then 42\n  in Err(_) then 0\n  end\nend\ngo()\n",
     );
     let images = boundaries(&loaded, &["Vm"], 200);
     let image = pick(&images, "one installed definition", |image| {
-        image.installations.len() == 1
-            && image.vm_images.len() == 1
-            && image.vm_images[0].instances.len() == 1
+        image.vm_images.len() == 1 && image.vm_images[0].instances.len() == 1
     });
     let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
     let limits = lm_vm::snapshot::LoadLimits::default();
-    let mut cache = lm_vm::snapshot::AdmissionCache::default();
-    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect("the first image admits");
-    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect("the repeated image admits");
+    load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the first image admits");
+    load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the repeated image admits");
 
     let mut broken = image;
-    broken.vm_images[0].instances[0].semantic_hash[0] ^= 1;
+    broken.vm_images[0].instances[0].artifact = u32::MAX;
     let bytes = codec::encode(&broken, usize::MAX).expect("the changed image encodes");
-    let error = codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect_err("the cache must not hide changed instance state");
-    assert_eq!(error.reason, ImageReason::Code);
+    let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
+        .expect_err("the changed instance must reject");
+    assert_eq!(error.reason, ImageReason::Reference);
 }
 
 #[test]
@@ -116,12 +135,9 @@ fn repeated_portable_code_admission_rechecks_changed_bytes() {
         })
     });
     let limits = lm_vm::snapshot::LoadLimits::default();
-    let mut cache = lm_vm::snapshot::AdmissionCache::default();
     let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
-    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect("the first image admits");
-    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect("the repeated image admits");
+    load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the first image admits");
+    load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the repeated image admits");
 
     let mut changed = false;
     for machine in &mut image.machines {
@@ -144,8 +160,8 @@ fn repeated_portable_code_admission_rechecks_changed_bytes() {
     }
     assert!(changed, "the capture holds no portable function");
     let bytes = codec::encode(&image, usize::MAX).expect("the changed image encodes");
-    let error = codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
-        .expect_err("the cache must not hide changed portable code");
+    let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
+        .expect_err("the changed portable code must reject");
     assert_eq!(error.reason, ImageReason::Code);
 }
 
@@ -155,11 +171,18 @@ fn repeated_portable_code_admission_rechecks_changed_bytes() {
 /// The call answers the fault the restored root took, or `None` when
 /// it reached a value. The host must survive either answer, so a
 /// return of any kind is the containment this suite states.
-fn restore_and_drive(loaded: &LoadedModule, image: &Image, allow: &[&str]) -> Option<FaultCode> {
+fn restore_and_drive(loaded: &Artifact, image: &Image, allow: &[&str]) -> Option<FaultCode> {
     let bytes = codec::encode(image, usize::MAX).expect("the image encodes");
-    let admitted = codec::load_external(&bytes, loaded, lm_vm::snapshot::LoadLimits::default())
-        .expect("the container admits");
-    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+    let admitted =
+        load_snapshot_for_artifact(loaded, &bytes, lm_vm::snapshot::LoadLimits::default())
+            .expect("the container admits");
+    let (arena, namespace) = publish_artifact(loaded).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
     // A restored machine starts default-deny and passes through the
     // table of the machine that restored it, so the restorer holds the
     // grants the capture ran under.
@@ -218,11 +241,11 @@ fn restore_and_drive(loaded: &LoadedModule, image: &Image, allow: &[&str]) -> Op
 
 /// A wrong-typed container admits, restores, and stops the machine it
 /// damaged instead of the host.
-fn contained(loaded: &LoadedModule, image: &Image) {
+fn contained(loaded: &Artifact, image: &Image) {
     contained_with(loaded, image, &[]);
 }
 
-fn contained_with(loaded: &LoadedModule, image: &Image, allow: &[&str]) {
+fn contained_with(loaded: &Artifact, image: &Image, allow: &[&str]) {
     assert_eq!(
         admit(loaded, image),
         None,
@@ -232,7 +255,7 @@ fn contained_with(loaded: &LoadedModule, image: &Image, allow: &[&str]) {
 }
 
 /// A wrong-typed container admits, and the restored world faults.
-fn faults(loaded: &LoadedModule, image: &Image, allow: &[&str]) -> FaultCode {
+fn faults(loaded: &Artifact, image: &Image, allow: &[&str]) -> FaultCode {
     assert_eq!(
         admit(loaded, image),
         None,
@@ -905,8 +928,8 @@ fn a_frame_inside_an_overridden_method_admits() {
     // names it never resolves through the static receiver type
     // `Animal`, because `Animal` resolves the selector to its own
     // method.
-    let dog = loaded
-        .module()
+    let tables = code_tables(&loaded);
+    let dog = tables
         .classes
         .iter()
         .find(|c| c.name == "Dog")
@@ -950,8 +973,8 @@ describe(Book())
 #[test]
 fn a_frame_inside_a_generic_interface_call_admits() {
     let loaded = program(INTERFACE_FRAME_SOURCE);
-    let method = loaded
-        .module()
+    let tables = code_tables(&loaded);
+    let method = tables
         .classes
         .iter()
         .find(|class| class.name == "Book")
@@ -1051,6 +1074,7 @@ go()
 fn a_machine_handle_that_names_another_result_type_faults() {
     let loaded = program(TWO_MACHINES_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
+    let tables = code_tables(&loaded);
     // Two run handles name two loaded machines of two result
     // types. The swap then keeps the lifecycle state of both targets,
     // so only the result-type rule catches it.
@@ -1077,7 +1101,7 @@ fn a_machine_handle_that_names_another_result_type_faults() {
                 // type.
                 let ret = |vm: u32| -> Option<u32> {
                     let func = image.machines[vm as usize].body_func?;
-                    Some(loaded.module().funcs[func as usize].ret)
+                    Some(tables.funcs[func as usize].ret)
                 };
                 if ret(a) != ret(b) {
                     return Some((first, second));
@@ -1380,7 +1404,8 @@ fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
     });
     let mut broken = image.clone();
     let caller = broken.machines[0].frames[0].func;
-    let locals = loaded.module().funcs[caller as usize].local_count() as usize;
+    let tables = code_tables(&loaded);
+    let locals = tables.funcs[caller as usize].local_count() as usize;
     // The frame runs the caller function instead of the callee the
     // call site names. The local arena follows the new frame chain, so
     // the arena rule stays true and the chain rule fires alone.
@@ -1725,12 +1750,11 @@ fn an_admission_budget_that_runs_out_rejects() {
         image.machines[0].objects.len() >= 2
     });
     let mut budget = lm_vm::snapshot::AdmissionBudget::new(1);
-    let error = lm_vm::snapshot::admit(image.clone(), &loaded, &mut budget)
-        .expect_err("the budget runs out");
+    let error = admit_image(&loaded, image.clone(), &mut budget).expect_err("the budget runs out");
     assert_eq!(error.reason, ImageReason::Budget);
     // The same image admits under the default budget.
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    lm_vm::snapshot::admit(image, &loaded, &mut budget).expect("the image admits");
+    admit_image(&loaded, image, &mut budget).expect("the image admits");
     assert!(budget.used() > 0);
 }
 
@@ -1749,7 +1773,7 @@ fn the_budget_charges_every_stored_object() {
     });
     let objects = image.machines[0].objects.len() as u64;
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    lm_vm::snapshot::admit(image.clone(), &loaded, &mut budget).expect("the image admits");
+    admit_image(&loaded, image.clone(), &mut budget).expect("the image admits");
     assert!(
         budget.used() >= objects,
         "the ledger charged {} units for {objects} objects",
@@ -1757,8 +1781,7 @@ fn the_budget_charges_every_stored_object() {
     );
     // A ledger below the object count stops the pass.
     let mut small = lm_vm::snapshot::AdmissionBudget::new(objects / 2);
-    let error =
-        lm_vm::snapshot::admit(image, &loaded, &mut small).expect_err("the small budget runs out");
+    let error = admit_image(&loaded, image, &mut small).expect_err("the small budget runs out");
     assert_eq!(error.reason, ImageReason::Budget);
 }
 
@@ -1794,7 +1817,7 @@ fn an_operation_slot_past_the_manifest_rejects() {
     }));
     recanonicalize(&mut broken.machines[at]);
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    let error = lm_vm::snapshot::admit(broken.clone(), &loaded, &mut budget)
+    let error = admit_image(&loaded, broken.clone(), &mut budget)
         .expect_err("the operation slot must reject");
     assert_eq!(error.reason, ImageReason::Code);
     // The image has no encoding either: the encoder reports the slot
@@ -1813,8 +1836,8 @@ fn a_sealed_image_past_the_byte_limit_reports_the_limit_rule() {
         image.machines[0].objects.len() >= 2
     });
     let mut budget = lm_vm::snapshot::AdmissionBudget::default().with_byte_limit(64);
-    let error = lm_vm::snapshot::admit(image, &loaded, &mut budget)
-        .expect_err("the container passes the byte limit");
+    let error =
+        admit_image(&loaded, image, &mut budget).expect_err("the container passes the byte limit");
     assert_eq!(error.reason, ImageReason::LimitExceeded);
     assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Admission);
 }
@@ -1877,7 +1900,8 @@ go()
 fn an_instance_of_an_abstract_class_rejects() {
     let loaded = program(ABSTRACT_SOURCE);
     let images = boundaries(&loaded, &[], 60);
-    let classes = &loaded.module().classes;
+    let tables = code_tables(&loaded);
+    let classes = &tables.classes;
     // One abstract family with a case class of the same field count.
     let image = pick(&images, "an instance of an enum case", |image| {
         image.machines.iter().any(|m| {
@@ -1911,15 +1935,7 @@ fn an_instance_of_an_abstract_class_rejects() {
         }
     }
     let parent = damaged.expect("the capture holds an enum case instance");
-    // The manifest must name the family, so the abstract rule fires
-    // instead of the manifest rule.
-    let hash = loaded
-        .identity()
-        .expect("the program has an identity")
-        .class_hashes[parent as usize];
-    broken.classes.push((parent, hash));
-    broken.classes.sort_by_key(|(slot, _)| *slot);
-    broken.classes.dedup_by_key(|(slot, _)| *slot);
+    assert!(parent < classes.len() as u32);
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
 }
 
@@ -1943,8 +1959,8 @@ fn a_container_of_an_older_build_rejects() {
             _ => broken.verifier_version -= 1,
         }
         let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-        let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
-            .expect_err("an older version must reject");
+        let error =
+            admit_image(&loaded, broken, &mut budget).expect_err("an older version must reject");
         assert_eq!(error.reason, ImageReason::Version, "field {edit}");
         assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Admission);
     }
@@ -1956,67 +1972,55 @@ fn a_container_of_an_older_build_rejects() {
     let end = old.len() - 32;
     let hash = codec::container_hash(&old[..end]);
     old[end..].copy_from_slice(&hash);
-    let error = codec::load_external(&old, &loaded, lm_vm::snapshot::LoadLimits::default())
+    let error = load_snapshot_for_artifact(&loaded, &old, lm_vm::snapshot::LoadLimits::default())
         .expect_err("an old container must reject");
     assert_eq!(error.reason, ImageReason::Version);
     assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Decode);
 }
 
-/// An admitted image records the program and the ABI it passed
-/// against, beside its canonical bytes.
+/// An admitted image records the format and ABI it passed.
 #[test]
 fn an_admitted_image_records_its_admission_identity() {
     let loaded = program(INIT_SOURCE);
     let images = boundaries(&loaded, &[], 5);
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    let admitted = lm_vm::snapshot::admit(images[0].clone(), &loaded, &mut budget)
-        .expect("the capture admits");
+    let admitted =
+        admit_image(&loaded, images[0].clone(), &mut budget).expect("the capture admits");
     let identity = admitted.identity();
-    assert_eq!(
-        identity.module_semantic,
-        loaded
-            .identity()
-            .expect("the program has an identity")
-            .semantic_hash
-    );
-    assert_eq!(
-        identity.verification,
-        lm_bytecode::identity::verification_hash(loaded.module())
-    );
+    assert_eq!(identity.format, lm_vm::snapshot::FORMAT_VERSION);
     assert_eq!(identity.abi_version, lm_abi::ABI_VERSION);
+    assert_eq!(identity.bundle_digest, lm_abi::standard_bundle().digest());
     assert_eq!(
         admitted.origin(),
         lm_vm::snapshot::Origin::ExternalContainer
     );
 }
 
-/// `World::restore_image` is public, so it proves in every build that
-/// the admitted image names the running program.
-///
-/// The rule was a debug assertion, so a release build performed no
-/// check at all. The image then named function slots, class slots, and
-/// literal slots of another module.
+/// A self-contained image restores in another program.
 #[test]
-fn a_restore_of_another_program_rejects() {
+fn a_restore_of_another_program_uses_the_image_artifacts() {
     let captured = program(INIT_SOURCE);
     let running = program(SHARED_SOURCE);
     let images = boundaries(&captured, &[], 10);
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    let admitted = lm_vm::snapshot::admit(images[1].clone(), &captured, &mut budget)
+    let admitted = admit_image(&captured, images[1].clone(), &mut budget)
         .expect("the capture admits against its own program");
+    let (arena, namespace) = publish_artifact(&running).expect("the artifact publishes");
     let mut world = World::new(
-        &running,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
     let target = world.new_child(0).expect("a child budget");
-    assert_eq!(
-        world.restore_image(0, target, &admitted),
-        Err(lm_vm::snapshot::RestoreFail::IncompatibleImage)
-    );
+    world
+        .restore_image(0, target, &admitted)
+        .expect("the image restores in another program");
     // The same image restores into the program it names.
+    let (arena, namespace) = publish_artifact(&captured).expect("the artifact publishes");
     let mut own = World::new(
-        &captured,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2074,8 +2078,8 @@ fn a_nonzero_image_reference_generation_rejects() {
     reference.generation = 1;
 
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
-        .expect_err("the nonzero generation rejects");
+    let error =
+        admit_image(&loaded, broken, &mut budget).expect_err("the nonzero generation rejects");
     assert_eq!(error.reason, ImageReason::Reference);
 }
 // ---------------------------------------------------------------
@@ -2126,8 +2130,10 @@ go()
 #[test]
 fn a_generic_entry_parameter_crosses_the_vm_boundary() {
     let loaded = program(GENERIC_ENTRY);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2308,33 +2314,28 @@ fn collect_lm(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 ///
 /// The call answers one line per capture that did not admit.
 fn gate_sweep(label: &str, source: &str) -> Vec<String> {
-    let bytes = compile_to_bytes("gate.lm", source)
-        .unwrap_or_else(|e| panic!("{label} does not compile: {e}"));
-    let loaded = load_bytes(&bytes).unwrap_or_else(|e| panic!("{label} does not load: {e}"));
+    let artifact =
+        compile_text("gate.lm", source).unwrap_or_else(|e| panic!("{label} does not compile: {e}"));
+    let (arena, namespace) =
+        publish_artifact(&artifact).unwrap_or_else(|e| panic!("{label} does not load: {e}"));
     let uses_compiler_host = source.contains("sys.compiler.") || source.contains("sys.reflect.");
     let host: Box<dyn lm_vm::Host> = if uses_compiler_host {
         Box::new(CliHost::new(1))
     } else {
         Box::new(RecordingHost::new(1))
     };
-    let mut world = World::new(&loaded, VmConfig::default(), host);
+    let mut world = World::new(arena, namespace, VmConfig::default(), host);
     for grant in GATE_GRANTS {
         world.allow(grant).expect("the grant names a group");
     }
     let mut out: Vec<String> = Vec::new();
     let mut captures = 0usize;
-    let mut admission_cache = lm_vm::snapshot::AdmissionCache::default();
     for boundary in 0..GATE_BOUNDARIES {
         let gate = world.next_gate();
         if let Ok(image) = world.capture_snapshot(gate, 0, false) {
             captures += 1;
             let bytes = image.bytes().expect("the image encodes");
-            if let Err(e) = codec::load_external_cached(
-                bytes,
-                &loaded,
-                lm_vm::snapshot::LoadLimits::default(),
-                &mut admission_cache,
-            ) {
+            if let Err(e) = world.load_snapshot_bytes(bytes) {
                 out.push(format!("{label} boundary {boundary}: {e}"));
             }
         }
@@ -2449,13 +2450,15 @@ fn a_restored_machine_takes_the_fuel_ceiling_of_its_target() {
     );
 
     let bytes = codec::encode(&broken, usize::MAX).expect("the image encodes");
-    let admitted = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
-        .expect("the container admits");
+    let admitted =
+        load_snapshot_for_artifact(&loaded, &bytes, lm_vm::snapshot::LoadLimits::default())
+            .expect("the container admits");
     let ceiling = VmConfig {
         fuel: 2000,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, ceiling, Box::new(RecordingHost::new(1)));
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let mut world = World::new(arena, namespace, ceiling, Box::new(RecordingHost::new(1)));
     let target = world.new_child(0).expect("a child budget");
     let root = world
         .restore_image(0, target, &admitted)
@@ -2490,8 +2493,10 @@ fn a_restore_turns_the_boundary_check_on_for_its_world() {
     let images = boundaries(&loaded, &[], 60);
     let image = pick(&images, "any captured world", |_| true);
 
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -2501,8 +2506,9 @@ fn a_restore_turns_the_boundary_check_on_for_its_world() {
     );
 
     let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
-    let admitted = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
-        .expect("the container admits");
+    let admitted =
+        load_snapshot_for_artifact(&loaded, &bytes, lm_vm::snapshot::LoadLimits::default())
+            .expect("the container admits");
     let target = world.new_child(0).expect("a child budget");
     world
         .restore_image(0, target, &admitted)

@@ -1,11 +1,11 @@
 //! Week-5 surface suites: the `sys` casing rule, the `use` keyword
 //! with fixed-binding aliases, and the request pattern.
 
-use lm_testkit::{compile_text, run_allowed, run_text, run_world};
+use lm_testkit::{compile_module_text, run_allowed, run_text, run_world};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = compile_module_text("t.lm", source).unwrap_err();
     rendered[6..11].to_string()
 }
 
@@ -36,14 +36,14 @@ fn callable_sys_members_are_snake_case() {
 
 #[test]
 fn capitalized_callable_members_get_the_casing_rule() {
-    let rendered = compile_text(
+    let rendered = compile_module_text(
         "t.lm",
         "def f() with Io.Write\n  sys.io.Write(b\"x\")\nend\n1\n",
     )
     .unwrap_err();
     assert!(rendered.starts_with("error[E1051]"), "{rendered}");
     assert!(rendered.contains("write `sys.io.write`"), "{rendered}");
-    let rendered = compile_text(
+    let rendered = compile_module_text(
         "t.lm",
         "def f() with Io.ReadBytes\n  sys.io.ReadBytes(1)\nend\n1\n",
     )
@@ -183,7 +183,7 @@ fn use_rejects_non_fixed_paths() {
     // A single file carries no compile environment, so a module
     // import has no root to resolve against. Week 6 changed the
     // wording: the fix is a package, not a later week.
-    let rendered = compile_text("t.lm", "use mathlib.matrix\n1\n").unwrap_err();
+    let rendered = compile_module_text("t.lm", "use mathlib.matrix\n1\n").unwrap_err();
     assert!(rendered.starts_with("error[E1052]"), "{rendered}");
     assert!(rendered.contains("package"), "{rendered}");
     // `use sys` alone binds nothing.
@@ -194,7 +194,7 @@ fn use_rejects_non_fixed_paths() {
     // A path with too many segments.
     assert_eq!(code_of("use sys.io.write.extra\n1\n"), "E1052");
     // The casing rule applies inside `use` paths.
-    let rendered = compile_text("t.lm", "use sys.io.Write\n1\n").unwrap_err();
+    let rendered = compile_module_text("t.lm", "use sys.io.Write\n1\n").unwrap_err();
     assert!(rendered.contains("use sys.io.write"), "{rendered}");
 }
 

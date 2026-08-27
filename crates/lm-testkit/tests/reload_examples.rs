@@ -6,8 +6,9 @@
 //! that quietly stops being true.
 
 use lm_host::CliHost;
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, VmConfig, World};
+use lm_vm::{VmConfig, World};
 
 /// Run one example on the command-line host, which is the host that
 /// answers `Compiler` and `Reflect`. The recording host does not
@@ -15,8 +16,13 @@ use lm_vm::{load_bytes, VmConfig, World};
 fn run_example(path: &str, allow: &[&str]) -> String {
     let source = std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
     let bytes = compile_to_bytes(path, &source).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }

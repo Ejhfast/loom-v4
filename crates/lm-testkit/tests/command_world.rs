@@ -29,14 +29,20 @@ go()
 #[test]
 fn standard_command_operations_cross_one_checked_boundary() {
     let bytes = compile_to_bytes("command.lm", SOURCE).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = vec![0xff, 0, 0xfe];
     host.borrow_mut().set_env("LOOM_NAME", "loom");
     host.borrow_mut().arguments = vec!["first".to_string(), "second".to_string()];
     host.borrow_mut().current_dir = "/work".to_string();
     host.borrow_mut().console_write_limit = 2;
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(host.clone()),
+    );
     for grant in [
         "Io.ReadBytes",
         "Io.Write",
@@ -71,10 +77,11 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("lines.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = b"one\r\ntwo\nlast".to_vec();
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world
         .allow("Io.ReadBytes")
         .expect("the operation has a grant");
@@ -110,10 +117,11 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("limits.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = b"long\nmore".to_vec();
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world
         .allow("Io.ReadBytes")
         .expect("the operation has a grant");
@@ -144,9 +152,11 @@ end
 write_all_to(PartialSink(), Bytes("abcdef")).expect("the write completes")
 "#;
     let bytes = compile_to_bytes("writer.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -158,9 +168,11 @@ write_all_to(PartialSink(), Bytes("abcdef")).expect("the write completes")
 fn command_operations_still_need_policy_grants() {
     let source = "def go(): Int with Entropy.Bytes\n  sys.entropy.bytes(1).expect(\"entropy works\").len()\nend\ngo()\n";
     let bytes = compile_to_bytes("denied.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -177,9 +189,11 @@ fn args_needs_a_declared_row_and_policy_grant() {
 
     let source = "def go(): Int with Args\n  sys.args().len()\nend\ngo()\n";
     let bytes = compile_to_bytes("args-policy.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -191,9 +205,11 @@ fn args_needs_a_declared_row_and_policy_grant() {
 fn a_pending_byte_read_blocks_snapshot_creation() {
     let source = "def go(): Int with Io.ReadBytes\n  sys.io.read_bytes(1).expect(\"input works\").len()\nend\ngo()\n";
     let bytes = compile_to_bytes("pending-input.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -254,10 +270,16 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("core-output.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().console_write_limit = 2;
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(host.clone()),
+    );
     world.allow("Io.Write").expect("the operation has a grant");
     world
         .allow("Io.WriteError")
@@ -282,10 +304,11 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("core-lines.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = b"one\r\ntwo\nlast\r".to_vec();
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world
         .allow("Io.ReadBytes")
         .expect("the operation has a grant");
@@ -314,10 +337,11 @@ end
 go()
 "#;
     let bytes = compile_to_bytes("invalid-line.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact verifies");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = vec![0xff, b'\n'];
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world
         .allow("Io.ReadBytes")
         .expect("the operation has a grant");

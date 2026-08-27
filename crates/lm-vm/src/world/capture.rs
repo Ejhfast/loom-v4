@@ -40,7 +40,9 @@ impl World {
                 let slot = self.intern_image(image);
                 self.machines[vm as usize]
                     .alloc(Object::NativeSnapshotRef { image: slot })
-                    .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
+                    .and_then(|value| {
+                        self.make_instance(vm, self.core_of(vm).result_ok, vec![value])
+                    })
             }
             Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
                 self.fault_caller(vm, op, code, &message);
@@ -48,7 +50,7 @@ impl World {
             }
             Err(fail) => self
                 .build_snapshot_error(vm, &fail)
-                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+                .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error])),
         };
         self.reply_or_fault(vm, op, built);
     }
@@ -61,7 +63,7 @@ impl World {
     ) -> Result<Value, FaultCode> {
         match fail {
             crate::snapshot::SnapshotFail::LimitExceeded => {
-                self.make_instance(vm, self.core.snapshot_limit_exceeded, vec![])
+                self.make_instance(vm, self.core_of(vm).snapshot_limit_exceeded, vec![])
             }
             crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
                 let items: Vec<Value> = path.iter().map(|p| Value::Int(*p as i64)).collect();
@@ -76,11 +78,15 @@ impl World {
                 let text = self.machines[vm as usize].alloc(Object::Str(kind.clone().into()));
                 self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
                 let text = text?;
-                self.make_instance(vm, self.core.snapshot_resource_active, vec![list, text])
+                self.make_instance(
+                    vm,
+                    self.core_of(vm).snapshot_resource_active,
+                    vec![list, text],
+                )
             }
             crate::snapshot::SnapshotFail::Fault(_, message) => {
                 let text = self.machines[vm as usize].alloc(Object::Str(message.clone().into()))?;
-                self.make_instance(vm, self.core.snapshot_bad_image, vec![text])
+                self.make_instance(vm, self.core_of(vm).snapshot_bad_image, vec![text])
             }
         }
     }
@@ -107,14 +113,16 @@ impl World {
                 let slot = self.intern_image(image);
                 self.machines[vm as usize]
                     .alloc(Object::NativeSnapshotRef { image: slot })
-                    .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
+                    .and_then(|value| {
+                        self.make_instance(vm, self.core_of(vm).result_ok, vec![value])
+                    })
             }
             Err(error) => self.machines[vm as usize]
                 .alloc(Object::Str(error.to_string().into()))
                 .and_then(|reason| {
-                    self.make_instance(vm, self.core.snapshot_bad_image, vec![reason])
+                    self.make_instance(vm, self.core_of(vm).snapshot_bad_image, vec![reason])
                 })
-                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+                .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error])),
         };
         self.reply_or_fault(vm, op, built);
     }
@@ -128,10 +136,10 @@ impl World {
             Ok(bytes) => SharedBytes::try_from_slice(bytes.as_slice())
                 .map_err(|_| FaultCode::HeapLimit)
                 .and_then(|bytes| self.machines[vm as usize].alloc(Object::Bytes(bytes)))
-                .and_then(|bytes| self.make_instance(vm, self.core.result_ok, vec![bytes])),
+                .and_then(|bytes| self.make_instance(vm, self.core_of(vm).result_ok, vec![bytes])),
             Err(fail) => self
                 .build_snapshot_error(vm, &fail)
-                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+                .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error])),
         };
         self.reply_or_fault(vm, op, built);
     }
@@ -217,9 +225,9 @@ impl World {
                 return None;
             }
             Err(fail) => {
-                let built = self
-                    .build_branch_error(vm, &fail)
-                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+                let built = self.build_branch_error(vm, &fail).and_then(|error| {
+                    self.make_instance(vm, self.core_of(vm).result_err, vec![error])
+                });
                 self.reply_or_fault(vm, op, built);
                 return None;
             }
@@ -305,7 +313,7 @@ impl World {
     ) -> Result<Value, FaultCode> {
         match fail {
             crate::snapshot::SnapshotFail::LimitExceeded => {
-                self.make_instance(vm, self.core.branch_limit_exceeded, vec![])
+                self.make_instance(vm, self.core_of(vm).branch_limit_exceeded, vec![])
             }
             crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
                 let items: Vec<Value> = path.iter().map(|part| Value::Int(*part as i64)).collect();
@@ -318,7 +326,11 @@ impl World {
                 let text = self.machines[vm as usize].alloc(Object::Str(kind.clone().into()));
                 self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
                 let text = text?;
-                self.make_instance(vm, self.core.branch_resource_active, vec![list, text])
+                self.make_instance(
+                    vm,
+                    self.core_of(vm).branch_resource_active,
+                    vec![list, text],
+                )
             }
             crate::snapshot::SnapshotFail::Fault(code, _) => Err(*code),
         }
@@ -327,8 +339,8 @@ impl World {
     /// Reply with the branch limit error.
     fn install_branch_limit_error(&mut self, vm: VmId, op: u32) {
         let built = self
-            .make_instance(vm, self.core.branch_limit_exceeded, vec![])
-            .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+            .make_instance(vm, self.core_of(vm).branch_limit_exceeded, vec![])
+            .and_then(|error| self.make_instance(vm, self.core_of(vm).result_err, vec![error]));
         self.reply_or_fault(vm, op, built);
     }
 
@@ -394,9 +406,9 @@ impl World {
                     self.discard_restore_reply(vm, reply);
                     self.rollback_run_target(vm, target);
                     break self
-                        .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                        .make_instance(vm, self.core_of(vm).restore_limit_exceeded, vec![])
                         .and_then(|error| {
-                            self.make_instance(vm, self.core.result_err, vec![error])
+                            self.make_instance(vm, self.core_of(vm).result_err, vec![error])
                         });
                 }
                 Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
@@ -502,9 +514,9 @@ impl World {
                 Ok(plan) => plan,
                 Err(crate::snapshot::RestoreFail::LimitExceeded) => {
                     let built = self
-                        .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                        .make_instance(vm, self.core_of(vm).restore_limit_exceeded, vec![])
                         .and_then(|error| {
-                            self.make_instance(vm, self.core.result_err, vec![error])
+                            self.make_instance(vm, self.core_of(vm).result_err, vec![error])
                         });
                     self.reply_or_fault(vm, op, built);
                     return;
@@ -562,7 +574,10 @@ impl World {
         vm: VmId,
         image: VmImageKey,
     ) -> Result<PreparedRestoreReply, FaultCode> {
-        let class = self.core.result_ok.ok_or(FaultCode::MalformedState)?;
+        let class = self
+            .core_of(vm)
+            .result_ok
+            .ok_or(FaultCode::MalformedState)?;
         let handle = Object::NativeVm {
             image: image.image,
             generation: image.generation,
@@ -623,7 +638,10 @@ impl World {
         vm: VmId,
         target: VmId,
     ) -> Result<PreparedRestoreReply, FaultCode> {
-        let class = self.core.result_ok.ok_or(FaultCode::MalformedState)?;
+        let class = self
+            .core_of(vm)
+            .result_ok
+            .ok_or(FaultCode::MalformedState)?;
         let handle = Object::NativeRun { vm: target };
         let mut fields = Vec::new();
         fields
@@ -826,7 +844,7 @@ impl World {
     /// Clear the route after one validated reply consumes its token.
     pub(super) fn consume_reply_sink(&mut self, sink: ReplySink) {
         debug_assert!(sink.ordinal > 0);
-        debug_assert!(sink.op < self.loaded.bundle().op_count());
+        debug_assert!(sink.op < self.code_of(sink.target).bundle().op_count());
         if sink.surface != sink.target {
             debug_assert!(self.machines[sink.surface as usize]
                 .vm

@@ -7,6 +7,7 @@ use lm_vm::{
     CompletionKey, CoreCtor, HostCompileEnv, HostCompileOptions, HostCompletion, HostValue,
     SharedText,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 
 const MAX_PENDING_COMPILES: usize = 64;
@@ -77,22 +78,33 @@ fn compile(request: CompileRequest) -> HostValue {
 
 fn compile_inner(request: CompileRequest) -> Result<HostValue, String> {
     let mut env = CompileEnv::new();
+    let core = lm_compiler::core_link_unit()?;
+    let mut units = BTreeMap::new();
+    units.insert(core.module_path().to_string(), core.as_ref().clone());
     for module in request.env.modules {
-        let decoded = lm_bytecode::decode(module.artifact.as_slice())
-            .map_err(|error| format!("the compile module did not decode: {error}"))?;
-        lm_verify::verify_module(&decoded)
-            .map_err(|error| format!("the compile module did not verify: {error}"))?;
-        let interface = lm_bytecode::interface::decode_interface(module.interface.as_slice())
-            .map_err(|error| format!("the compile interface did not decode: {error}"))?;
-        if lm_bytecode::interface::encode_interface(&interface) != module.interface.as_slice() {
-            return Err("the compile interface is not canonical".to_string());
+        let artifact = lm_bytecode::artifact::decode(module.artifact.as_slice())
+            .map_err(|error| format!("the compile artifact did not decode: {error}"))?;
+        let (_, linked) = lm_compiler::resolve_artifact(artifact, Some(core.clone()))
+            .map_err(|error| format!("the compile artifact did not resolve: {error}"))?;
+        for path in linked.paths() {
+            let unit = linked
+                .unit(path)
+                .expect("a resolved path has one link unit")
+                .clone();
+            if path != lm_bytecode::artifact::CORE_MODULE_PATH {
+                env.bind_unit(&unit)
+                    .map_err(|error| format!("compile environment error: {error}"))?;
+            }
+            match units.get(path) {
+                Some(found) if found.id() != unit.id() => {
+                    return Err(format!("the compile module `{path}` has two identities"));
+                }
+                Some(_) => {}
+                None => {
+                    units.insert(path.to_string(), unit);
+                }
+            }
         }
-        let identity = lm_bytecode::identity::module_identity(&decoded)
-            .map_err(|error| format!("the compile module has no identity: {error}"))?;
-        lm_bytecode::interface::validate_interface(&decoded, &identity, &interface)
-            .map_err(|error| format!("the compile interface is invalid: {error}"))?;
-        env.bind_interface(interface)
-            .map_err(|error| format!("compile environment error: {error}"))?;
     }
     for (name, prefix) in request.env.roots {
         env.bind_root(name.as_str(), prefix.as_str())
@@ -122,10 +134,46 @@ fn compile_inner(request: CompileRequest) -> Result<HostValue, String> {
         request.options.is_main,
         &options,
     )?;
-    Ok(HostValue::Artifact {
-        module: compiled.artifact.into(),
-        interface: compiled.interface_bytes.into(),
-    })
+    let mut links = lm_compiler::LinkEnv::new();
+    bind_units(&mut links, units)?;
+    let unit = links
+        .prepare_unit(compiled.path, compiled.module, compiled.interface)
+        .map_err(|error| format!("compile link error: {error}"))?;
+    links
+        .bind_unit(unit)
+        .map_err(|error| format!("compile link error: {error}"))?;
+    let artifact = links
+        .freeze()
+        .complete_artifact(request.module_name.as_str())
+        .map_err(|error| format!("compile artifact error: {error}"))?;
+    let bytes = lm_bytecode::artifact::encode(&artifact)
+        .map_err(|error| format!("the compile artifact did not encode: {error}"))?;
+    Ok(HostValue::Artifact(bytes.into()))
+}
+
+fn bind_units(
+    env: &mut lm_compiler::LinkEnv,
+    mut units: BTreeMap<String, lm_compiler::LinkUnit>,
+) -> Result<(), String> {
+    let mut bound = BTreeSet::new();
+    while !units.is_empty() {
+        let ready = units.iter().find_map(|(path, unit)| {
+            unit.dependencies()
+                .iter()
+                .all(|dependency| bound.contains(dependency.module_path()))
+                .then(|| path.clone())
+        });
+        let Some(path) = ready else {
+            return Err("the compile artifact dependencies contain a cycle".to_string());
+        };
+        let unit = units
+            .remove(&path)
+            .expect("the selected compile unit remains pending");
+        env.bind_unit(unit)
+            .map_err(|error| format!("compile link error: {error}"))?;
+        bound.insert(path);
+    }
+    Ok(())
 }
 
 fn bind_definition(
@@ -152,8 +200,8 @@ fn bind_definition(
             definition.local_name
         ));
     };
-    let first_module = decode_compile_slot(first)?;
-    validate_definition_identity(&first_module, &definition)?;
+    let first_artifact = decode_compile_slot(first)?;
+    validate_definition_identity(first_artifact.root().module(), &definition)?;
 
     for slot in &definition.slots {
         if slot.artifact != first.artifact {
@@ -162,12 +210,13 @@ fn bind_definition(
                 definition.qualified_key
             ));
         }
-        let module = decode_compile_slot(slot)?;
+        let artifact = decode_compile_slot(slot)?;
+        let module = artifact.root().module();
         let spec = module
             .slots
             .get(slot.index as usize)
             .ok_or_else(|| "a definition slot index is invalid".to_string())?;
-        let (binding, kind) = definition_slot_binding(&module, slot, spec, &definition)?;
+        let (binding, kind) = definition_slot_binding(&artifact, spec, &definition)?;
         let in_family = binding == definition.qualified_key.as_str()
             || binding
                 .strip_prefix(definition.qualified_key.as_str())
@@ -184,23 +233,11 @@ fn bind_definition(
     Ok(())
 }
 
-fn decode_compile_slot(slot: &lm_vm::HostCompileSlot) -> Result<lm_bytecode::Module, String> {
-    let module = lm_bytecode::decode(slot.artifact.as_slice())
-        .map_err(|error| format!("the definition module did not decode: {error}"))?;
-    lm_verify::verify_module(&module)
-        .map_err(|error| format!("the definition module did not verify: {error}"))?;
-    if let Some(bytes) = &slot.interface {
-        let interface = lm_bytecode::interface::decode_interface(bytes.as_slice())
-            .map_err(|error| format!("the definition interface did not decode: {error}"))?;
-        if lm_bytecode::interface::encode_interface(&interface) != bytes.as_slice() {
-            return Err("the definition interface is not canonical".to_string());
-        }
-        let identity = lm_bytecode::identity::module_identity(&module)
-            .map_err(|error| format!("the definition module has no identity: {error}"))?;
-        lm_bytecode::interface::validate_interface(&module, &identity, &interface)
-            .map_err(|error| format!("the definition interface is invalid: {error}"))?;
-    }
-    Ok(module)
+fn decode_compile_slot(
+    slot: &lm_vm::HostCompileSlot,
+) -> Result<lm_bytecode::artifact::Artifact, String> {
+    lm_bytecode::artifact::decode(slot.artifact.as_slice())
+        .map_err(|error| format!("the definition artifact did not decode: {error}"))
 }
 
 fn validate_definition_identity(
@@ -258,26 +295,28 @@ fn validate_definition_identity(
 }
 
 fn definition_slot_binding(
-    module: &lm_bytecode::Module,
-    source: &lm_vm::HostCompileSlot,
+    artifact: &lm_bytecode::artifact::Artifact,
     spec: &lm_bytecode::SlotSpec,
     definition: &lm_vm::HostCompileDefinition,
 ) -> Result<(String, lm_bytecode::interface::IfaceSlotKind), String> {
+    let module = artifact.root().module();
     let kind = match spec.contract {
         lm_bytecode::SlotContract::Function(_) => lm_bytecode::interface::IfaceSlotKind::Function,
         lm_bytecode::SlotContract::Method(_) => lm_bytecode::interface::IfaceSlotKind::Method,
         lm_bytecode::SlotContract::Class { .. } => lm_bytecode::interface::IfaceSlotKind::Class,
         _ => return Err("a definition contains a non-code slot".to_string()),
     };
-    if let Some(bytes) = &source.interface {
-        let interface = lm_bytecode::interface::decode_interface(bytes.as_slice())
-            .map_err(|error| format!("the definition interface did not decode: {error}"))?;
-        if let Some(found) = interface.slots.iter().find(|found| found.key == spec.key) {
-            if found.kind != kind {
-                return Err("a definition slot has another target kind".to_string());
-            }
-            return Ok((found.binding.clone(), kind));
+    if let Some(found) = artifact
+        .root()
+        .interface()
+        .slots
+        .iter()
+        .find(|found| found.key == spec.key)
+    {
+        if found.kind != kind {
+            return Err("a definition slot has another target kind".to_string());
         }
+        return Ok((found.binding.clone(), kind));
     }
     match spec.initial {
         Some(lm_bytecode::SlotTarget::Class { class, .. }) => {
@@ -339,7 +378,7 @@ mod tests {
                 late_classes: Vec::new(),
             },
         };
-        let HostValue::Artifact { module, interface } =
+        let HostValue::Artifact(bytes) =
             compile_inner(request).expect("the runtime source compiles")
         else {
             panic!("the compiler returned another value");
@@ -352,7 +391,8 @@ mod tests {
             &CompileOptions::new(),
         )
         .expect("the direct source compiles");
-        assert_eq!(module.as_slice(), direct.artifact);
-        assert_eq!(interface.as_slice(), direct.interface_bytes);
+        let artifact = lm_bytecode::artifact::decode(bytes.as_slice())
+            .expect("the runtime compiler returns an artifact");
+        assert_eq!(artifact.root().module(), &direct.module);
     }
 }

@@ -119,6 +119,7 @@ dependencies = [
  "lm-compiler",
  "lm-hir",
  "lm-host",
+ "lm-link",
  "lm-proc",
  "lm-source",
  "lm-types",
@@ -230,6 +231,7 @@ dependencies = [
  "lm-heap",
  "lm-hir",
  "lm-host",
+ "lm-link",
  "lm-proc",
  "lm-source",
  "lm-types",
@@ -265,6 +267,7 @@ dependencies = [
  "lm-bytecode",
  "lm-graph",
  "lm-heap",
+ "lm-link",
  "lm-value",
  "lm-verify",
 ]

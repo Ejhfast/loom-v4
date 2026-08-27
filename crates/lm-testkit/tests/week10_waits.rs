@@ -1,9 +1,10 @@
 //! Typed waits and selectable proc control.
 
 use lm_heap::Object;
-use lm_testkit::{compile_to_bytes, repo_root};
+use lm_testkit::publish_artifact_bytes;
+use lm_testkit::{compile_to_bytes, load_snapshot_for_artifact_bytes, repo_root};
 use lm_vm::snapshot::{codec, ImageBlock, ImageReason, ImageWaitSource};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World, WorldLimits};
+use lm_vm::{RecordingHost, VmConfig, World, WorldLimits};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -13,9 +14,10 @@ fn run(source: &str, grants: &[&str]) -> String {
 
 fn run_with_limits(source: &str, grants: &[&str], limits: WorldLimits) -> String {
     let bytes = compile_to_bytes("waits.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(RecordingHost::new(1)),
@@ -77,10 +79,15 @@ end
 (selected, hex)
 "#;
     let bytes = compile_to_bytes("host-wait-race.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes.extend_from_slice(b"abc");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+    );
     for grant in ["Clock", "Io", "Wait"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -161,10 +168,15 @@ in Err(_) then "error"
 end
 "#;
     let bytes = compile_to_bytes("mixed-wait-cleanup.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes.extend_from_slice(b"abc");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(Rc::clone(&host)));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+    );
     for grant in ["Proc", "Vm", "Io", "Clock"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -464,10 +476,11 @@ in Ok(_) then "captured"
 in Err(_) then "capture failed"
 end
 "#;
-    let bytes = compile_to_bytes("wait-snapshot.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let program_bytes = compile_to_bytes("wait-snapshot.lm", source).expect("the program compiles");
+    let (arena, namespace) = publish_artifact_bytes(&program_bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -496,12 +509,18 @@ end
         .expect("the image holds its active wait value");
     *held = next_wait;
     let bytes = codec::encode(&invalid, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
-        .expect_err("a future wait token rejects");
+    let error = load_snapshot_for_artifact_bytes(
+        &program_bytes,
+        &bytes,
+        lm_vm::snapshot::LoadLimits::default(),
+    )
+    .expect_err("a future wait token rejects");
     assert_eq!(error.reason, ImageReason::State);
 
+    let (arena, namespace) = publish_artifact_bytes(&program_bytes).expect("the program reloads");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -557,10 +576,12 @@ in Ok(_) then "captured"
 in Err(_) then "capture failed"
 end
 "#;
-    let bytes = compile_to_bytes("dynamic-wait-snapshot.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let program_bytes =
+        compile_to_bytes("dynamic-wait-snapshot.lm", source).expect("the program compiles");
+    let (arena, namespace) = publish_artifact_bytes(&program_bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -579,9 +600,12 @@ end
     }));
 
     let bytes = codec::encode(image.world(), usize::MAX).expect("the image encodes");
-    let loaded_image =
-        codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
-            .expect("the dynamic wait image admits");
+    let loaded_image = load_snapshot_for_artifact_bytes(
+        &program_bytes,
+        &bytes,
+        lm_vm::snapshot::LoadLimits::default(),
+    )
+    .expect("the dynamic wait image admits");
     assert!(loaded_image.world().machines.iter().any(|machine| {
         machine
             .waits
@@ -593,7 +617,7 @@ end
         max_waits: 2,
         ..lm_vm::snapshot::LoadLimits::default()
     };
-    let error = codec::load_external(&bytes, &loaded, tight)
+    let error = load_snapshot_for_artifact_bytes(&program_bytes, &bytes, tight)
         .expect_err("the snapshot wait limit rejects before admission");
     assert_eq!(error.reason, ImageReason::LimitExceeded);
 
@@ -601,8 +625,10 @@ end
         max_waits: 2,
         ..WorldLimits::default()
     };
+    let (arena, namespace) = publish_artifact_bytes(&program_bytes).expect("the program reloads");
     let mut fresh = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(RecordingHost::new(1)),
@@ -625,7 +651,11 @@ end
         .expect("the image has a dynamic wait");
     roots[1] = roots[0];
     let bytes = codec::encode(&invalid, usize::MAX).expect("the damaged image encodes");
-    let error = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
-        .expect_err("duplicate dynamic roots reject");
+    let error = load_snapshot_for_artifact_bytes(
+        &program_bytes,
+        &bytes,
+        lm_vm::snapshot::LoadLimits::default(),
+    )
+    .expect_err("duplicate dynamic roots reject");
     assert_eq!(error.reason, ImageReason::State);
 }

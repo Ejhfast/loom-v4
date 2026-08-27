@@ -1,7 +1,8 @@
 //! Bounded HTTP message tests.
 
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, run_text};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_vm::{RecordingHost, VmConfig, World};
 
 const HTTP_USES: &str = r#"use std.http.Http
 use std.http.HttpError
@@ -37,9 +38,10 @@ fn run_https(source: &str) -> String {
 fn run_network(source: &str) -> (String, usize) {
     let bytes =
         compile_to_bytes("http_network.lm", &with_http(source)).expect("the HTTP program compiles");
-    let loaded = load_bytes(&bytes).expect("the HTTP program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the HTTP program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

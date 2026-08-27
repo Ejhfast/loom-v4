@@ -1,8 +1,9 @@
 //! Week-7 resource suites: the host resource registry, the snapshot
 //! preflight, and the parent child-machine reservation.
 
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, MachineState, RecordingHost, RootEvent, VmConfig, World, WorldLimits};
+use lm_vm::{MachineState, RecordingHost, RootEvent, VmConfig, World, WorldLimits};
 
 /// A machine that waits on a suspending operation holds one live host
 /// attachment, and the completion closes it.
@@ -10,9 +11,10 @@ use lm_vm::{load_bytes, MachineState, RecordingHost, RootEvent, VmConfig, World,
 fn a_suspended_operation_registers_and_closes_one_resource() {
     let source = "def go() with Clock.Sleep\n  sys.clock.sleep(1)\nend\ngo()\n";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -77,8 +79,8 @@ fn a_host_that_suspends_a_machine_state_operation_faults() {
     // host call.
     let source = "def go(): Int with Clock.Now\n  sys.clock.now()\nend\ngo()\n";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(BadHost));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(BadHost));
     world.allow("Clock").expect("the grant names a group");
     let outcome = world.run_root();
     assert_eq!(
@@ -103,13 +105,14 @@ end
 go()
 ";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let limits = WorldLimits {
         max_vm_images: 2,
         ..WorldLimits::default()
     };
     let mut world = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(lm_vm::NullHost),
@@ -146,18 +149,24 @@ end
 go()
 ";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     // The root may mint one child, and that child may mint none.
     let config = VmConfig {
         max_children: 1,
         ..VmConfig::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(lm_vm::NullHost));
+    let mut world = World::new(arena, namespace, config, Box::new(lm_vm::NullHost));
     world.allow("Vm").expect("the grant names a group");
     let outcome = world.run_root();
     assert_eq!(world.show_outcome(&outcome), "Done(-2)");
     // A wider budget lets the same tower run.
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(lm_vm::NullHost));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program reloads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_vm::NullHost),
+    );
     world.allow("Vm").expect("the grant names a group");
     let outcome = world.run_root();
     assert_eq!(world.show_outcome(&outcome), "Done(7)");
@@ -169,8 +178,13 @@ go()
 fn the_snapshot_preflight_orders_a_clean_machine() {
     let source = "xs = [1, 2, 3]\nxs.freeze()\nxs.len()\n";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = load_bytes(&bytes).expect("the program loads");
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(lm_vm::NullHost));
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_vm::NullHost),
+    );
     let outcome = world.run_root();
     assert_eq!(world.show_outcome(&outcome), "Done(3)");
     let ordered = world
@@ -223,12 +237,12 @@ go()
 ";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
     for cap in (2_000usize..24_000).step_by(250) {
-        let loaded = load_bytes(&bytes).expect("the program loads");
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
         let config = VmConfig {
             heap_bytes: cap,
             ..VmConfig::default()
         };
-        let mut world = World::new(&loaded, config, Box::new(lm_vm::NullHost));
+        let mut world = World::new(arena, namespace, config, Box::new(lm_vm::NullHost));
         world.allow("Vm").expect("the grant names a group");
         let outcome = world.run_root();
         let text = world.show_outcome(&outcome);
@@ -269,9 +283,10 @@ go(COUNT)
     for performs in [10, 2_000] {
         let text = source.replace("COUNT", &performs.to_string());
         let bytes = compile_to_bytes("t.lm", &text).expect("the program compiles");
-        let loaded = load_bytes(&bytes).expect("the program loads");
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );

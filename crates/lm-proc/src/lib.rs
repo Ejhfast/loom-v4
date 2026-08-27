@@ -920,24 +920,34 @@ pub fn run_world(world: &mut World) -> Outcome {
 /// still never executes concurrently, because one worker owns the
 /// whole world.
 pub fn run_on_worker(
-    loaded: &lm_vm::LoadedModule,
+    arena: lm_vm::CodeArena,
+    namespace: lm_vm::NamespaceId,
     config: lm_vm::VmConfig,
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
-    run_on_worker_with_scheduler(loaded, config, SchedulerConfig::default(), grants, host)
+    run_on_worker_with_scheduler(
+        arena,
+        namespace,
+        config,
+        SchedulerConfig::default(),
+        grants,
+        host,
+    )
 }
 
 /// Run one program with an explicit scheduler configuration.
 pub fn run_on_worker_with_scheduler(
-    loaded: &lm_vm::LoadedModule,
+    arena: lm_vm::CodeArena,
+    namespace: lm_vm::NamespaceId,
     config: lm_vm::VmConfig,
     scheduler_config: SchedulerConfig,
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
     run_on_worker_with_scheduler_and_limits(
-        loaded,
+        arena,
+        namespace,
         config,
         lm_vm::WorldLimits::default(),
         scheduler_config,
@@ -948,7 +958,8 @@ pub fn run_on_worker_with_scheduler(
 
 /// Run one program with explicit world and scheduler limits.
 pub fn run_on_worker_with_scheduler_and_limits(
-    loaded: &lm_vm::LoadedModule,
+    arena: lm_vm::CodeArena,
+    namespace: lm_vm::NamespaceId,
     config: lm_vm::VmConfig,
     limits: lm_vm::WorldLimits,
     scheduler_config: SchedulerConfig,
@@ -959,7 +970,7 @@ pub fn run_on_worker_with_scheduler_and_limits(
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
             .spawn_scoped(scope, move || {
-                let mut world = World::new_with_limits(loaded, config, limits, host());
+                let mut world = World::new_with_limits(arena, namespace, config, limits, host());
                 for grant in grants {
                     world
                         .allow(grant)

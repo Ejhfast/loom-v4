@@ -7,10 +7,10 @@
 //! `lm run`, because a file is not open until the open completes.
 
 use lm_source::SourceFile;
-use lm_testkit::compile_to_bytes;
+use lm_testkit::{compile_to_bytes, publish_artifact_bytes};
 use lm_vm::{
-    load_bytes, CompletionKey, Host, HostArg, HostCompletion, HostStart, HostValue, RecordingHost,
-    VmConfig, World,
+    CompletionKey, Host, HostArg, HostCompletion, HostStart, HostValue, RecordingHost, VmConfig,
+    World,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -54,11 +54,11 @@ supervise(child)
 #[test]
 fn the_test_host_defers_a_file_open_like_the_command_line_host() {
     let bytes = compile_to_bytes("async.lm", SRC).expect("the probe compiles");
-    let loaded = load_bytes(&bytes).expect("the probe loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the probe loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("message.txt", b"hello from memory".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for g in ["Vm", "Fs"] {
         world.allow(g).expect("the grant exists");
     }
@@ -118,16 +118,24 @@ fn extension_operations_carry_float_values_across_the_host_boundary() {
     )
     .expect("the program compiles");
     let root = compiled.path.clone();
+    let core = lm_compiler::core_link_unit_with_bundle(&bundle).expect("the core unit builds");
     let mut link_env =
         lm_compiler::core_link_env_with_bundle(&bundle).expect("the core environment builds");
-    link_env
-        .bind_module_with_bundle(compiled.path, compiled.module, compiled.interface, &bundle)
-        .expect("the program binds");
-    let linked = lm_compiler::link_with_bundle(&root, &link_env.freeze(), &bundle)
-        .expect("the program links");
-    let loaded = lm_vm::load_with_bundle(linked.module, &bundle).expect("the program loads");
+    let unit = compiled
+        .into_link_unit_with_bundle(&link_env, &bundle)
+        .expect("the program unit builds");
+    link_env.bind_unit(unit).expect("the program binds");
+    let artifact = link_env
+        .freeze()
+        .complete_artifact(&root)
+        .expect("the program artifact builds");
+    let mut arena = lm_link::CodeArena::with_bundle(bundle.clone());
+    let namespace = arena
+        .publish(artifact, Some(core))
+        .expect("the program publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(FloatHost { operation }),
     );

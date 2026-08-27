@@ -2,19 +2,8 @@ use lm_bytecode::{
     corepin::{ROLE_BYTES, ROLE_BYTE_BUFFER, ROLE_STRING_BUILDER},
     BcType, Instr,
 };
-use lm_testkit::{compile_text, run_text, run_world};
+use lm_testkit::{compile_module_text, run_text, run_world};
 use lm_vm::{Vm, VmConfig};
-
-fn core_method(module: &lm_bytecode::Module, role: usize, name: &str) -> (u32, u32) {
-    let class = module.core_roles[role];
-    assert_ne!(class, lm_bytecode::NO_ROLE);
-    module.classes[class as usize]
-        .methods
-        .iter()
-        .find(|(selector, _)| module.selectors[*selector as usize] == name)
-        .copied()
-        .expect("the core method exists")
-}
 
 #[test]
 fn bytes_and_builders_cover_binary_data() {
@@ -66,32 +55,26 @@ lookup: {Bytes: Int} = {Bytes("key"): 7}
 
 #[test]
 fn bytes_and_builder_intrinsics_use_native_instructions() {
-    let source = r#"
-bb = ByteBuffer()
-bb.append(1).extend(Bytes("x")).reserve(2).clear().append(2)
-bb.at(0)
-bb.find_from(Bytes("x"), 0)
-sb = StringBuilder()
-sb.append("x").clear().append("y")
-bytes = bb.build()
-(
-  bytes.at(0), bytes.get(1), bytes.concat(Bytes("z")),
-  bytes.starts_with(Bytes()), bytes.find(Bytes("z")), bytes.hex(),
-  bytes.utf8(), bytes == Bytes("x"), bytes != Bytes("y"),
-  sb.len(), sb.build(), bb.len()
-)
-"#;
-    let module = compile_text("bytes_instructions.lm", source).expect("the program compiles");
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let module = core.module();
     for role in [ROLE_BYTES, ROLE_STRING_BUILDER, ROLE_BYTE_BUFFER] {
         let class = module.core_roles[role];
         assert!(module.classes[class as usize].is_final);
         assert!(module.classes[class as usize].fields.is_empty());
     }
-    let instructions: Vec<Instr> = module
+    let mut instructions: Vec<Instr> = module
         .funcs
         .iter()
         .flat_map(|func| func.blocks.iter().flatten().copied())
         .collect();
+    let direct = compile_module_text("bytes_not_equal.lm", "Bytes(\"x\") != Bytes(\"y\")\n")
+        .expect("the direct bytes comparison compiles");
+    instructions.extend(
+        direct
+            .funcs
+            .iter()
+            .flat_map(|func| func.blocks.iter().flatten().copied()),
+    );
     for expected in [
         Instr::Native(lm_bytecode::NativeInstr::BytesAt),
         Instr::Native(lm_bytecode::NativeInstr::BytesGet),
@@ -195,30 +178,54 @@ buffer.find_from(Bytes("x"), 0)
 
 #[test]
 fn a_bytes_tag_supports_verified_virtual_dispatch() {
-    let mut module =
-        compile_text("bytes_virtual.lm", "Bytes(\"abc\").len()\n").expect("the program compiles");
-    let (selector, _) = core_method(&module, ROLE_BYTES, "len");
-    let literal = module
-        .strings
+    let mut module = lm_compiler::core_link_unit()
+        .expect("the core unit builds")
+        .module()
+        .clone();
+    let selector = module
+        .selectors
         .iter()
-        .position(|text| text == "abc")
-        .expect("the literal exists") as u32;
-    module.funcs[module.entry as usize].blocks = vec![vec![
-        Instr::ConstStr(literal),
-        Instr::Native(lm_bytecode::NativeInstr::BytesNew),
-        Instr::CallVirtual { selector, argc: 0 },
-        Instr::Return,
-    ]];
+        .position(|name| name == "len")
+        .expect("the core selector exists") as u32;
+    let literal = module.strings.len() as u32;
+    module.strings.push("abc".to_string());
+    let int_type = module
+        .types
+        .iter()
+        .position(|ty| *ty == BcType::Int)
+        .expect("the core Int type exists") as u32;
+    let entry = module.funcs.len() as u32;
+    module.funcs.push(lm_bytecode::Func {
+        name: "<entry>".to_string(),
+        type_params: 0,
+        effect_params: 0,
+        params: vec![],
+        param_muts: vec![],
+        ret: int_type,
+        row: vec![],
+        captures: vec![],
+        local_types: vec![],
+        blocks: vec![vec![
+            Instr::ConstStr(literal),
+            Instr::Native(lm_bytecode::NativeInstr::BytesNew),
+            Instr::CallVirtual { selector, argc: 0 },
+            Instr::Return,
+        ]],
+        param_names: vec![],
+    });
+    module.func_bounds.push(vec![]);
+    module.entry = entry;
     lm_verify::verify_module(&module).expect("the virtual call verifies");
-    let loaded = lm_vm::load(module).expect("the module loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let (arena, namespace) = lm_testkit::unit_from_module(module).expect("the unit publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(3)");
 }
 
 #[test]
 fn the_verifier_rejects_native_class_allocation() {
-    let mut module = compile_text("bytes_new.lm", "Bytes()\n").expect("the program compiles");
+    let mut module =
+        compile_module_text("bytes_new.lm", "Bytes()\n").expect("the program compiles");
     let class = module.core_roles[ROLE_BYTES];
     module.funcs[module.entry as usize].blocks = vec![vec![Instr::New(class), Instr::Return]];
     let error = lm_verify::verify_module(&module).expect_err("native allocation rejects");

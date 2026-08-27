@@ -1,8 +1,9 @@
 //! Complete file-system effects and portable boundary values.
 
 use lm_bytecode::corepin::ROLE_FILE_INFO;
-use lm_testkit::{compile_text, compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_testkit::publish_artifact_bytes;
+use lm_testkit::{compile_module_text, compile_to_bytes, repo_root};
+use lm_vm::{RecordingHost, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -37,9 +38,14 @@ go()
 #[test]
 fn durable_replacement_uses_the_required_sync_order() {
     let bytes = compile_to_bytes("durable_fs.lm", DURABLE_FLOW).expect("the flow compiles");
-    let loaded = load_bytes(&bytes).expect("the flow loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the flow loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(host.clone()),
+    );
     world.allow("Fs").expect("the file-system grant exists");
 
     let outcome = lm_proc::run_world(&mut world);
@@ -119,10 +125,10 @@ fn the_file_system_example_uses_portable_metadata() {
     let source = std::fs::read_to_string(path).expect("the example reads");
     let bytes =
         compile_to_bytes("15-filesystem-metadata.lm", &source).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("entry.bin", vec![1, 2, 3]);
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world.allow("Fs").expect("the file-system grant exists");
 
     let outcome = lm_proc::run_world(&mut world);
@@ -167,9 +173,10 @@ go()
     );
     let bytes = compile_to_bytes("invalid_directory_name.lm", &source)
         .expect("the directory probe compiles");
-    let loaded = load_bytes(&bytes).expect("the directory probe loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the directory probe loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(lm_host::CliHost::new(1)),
     );
@@ -187,7 +194,7 @@ go()
 #[test]
 fn the_verifier_checks_new_file_boundary_roles() {
     let mut module =
-        compile_text("file_roles.lm", "sys.fs.stat(\".\")\n").expect("the probe compiles");
+        compile_module_text("file_roles.lm", "sys.fs.stat(\".\")\n").expect("the probe compiles");
     let file_info = module.core_roles[ROLE_FILE_INFO] as usize;
     let int_ty = module
         .types

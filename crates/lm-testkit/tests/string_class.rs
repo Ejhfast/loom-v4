@@ -2,7 +2,7 @@ use lm_bytecode::{
     corepin::{ROLE_CHAR, ROLE_STRING, ROLE_SUBSTRING, ROLE_TEXT},
     BcType, Instr, SlotContract, SlotTarget,
 };
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::{Vm, VmConfig};
 
 fn string_method(module: &lm_bytecode::Module, name: &str) -> (u32, u32) {
@@ -69,7 +69,8 @@ fn string_intrinsics_inline_to_canonical_instructions() {
   1.5.fixed(2)
 )
 "#;
-    let module = compile_text("string_instructions.lm", source).expect("the program compiles");
+    let module =
+        compile_module_text("string_instructions.lm", source).expect("the program compiles");
     let class = module.core_roles[ROLE_STRING];
     assert!(module.classes[class as usize].is_final);
     let instructions: Vec<Instr> = module.funcs[module.entry as usize]
@@ -93,8 +94,9 @@ fn string_intrinsics_inline_to_canonical_instructions() {
     ] {
         assert!(instructions.contains(&expected), "missing {expected:?}");
     }
-    let (_, parse_float) = string_method(&module, "parse_float");
-    let parse_instructions: Vec<Instr> = module.funcs[parse_float as usize]
+    let core = lm_hir::core_image();
+    let (_, parse_float) = string_method(&core, "parse_float");
+    let parse_instructions: Vec<Instr> = core.funcs[parse_float as usize]
         .blocks
         .iter()
         .flatten()
@@ -116,8 +118,8 @@ fn string_intrinsics_inline_to_canonical_instructions() {
 
 #[test]
 fn interpolation_finishes_its_private_builder() {
-    let module =
-        compile_text("interpolation_finish.lm", "\"value=#{1}\"\n").expect("the program compiles");
+    let module = compile_module_text("interpolation_finish.lm", "\"value=#{1}\"\n")
+        .expect("the program compiles");
     let instructions: Vec<Instr> = module.funcs[module.entry as usize]
         .blocks
         .iter()
@@ -130,8 +132,8 @@ fn interpolation_finishes_its_private_builder() {
 
 #[test]
 fn a_string_tag_supports_verified_virtual_dispatch() {
-    let mut module =
-        compile_text("string_virtual.lm", "\"é\".byte_len()\n").expect("the program compiles");
+    let mut module = compile_module_text("string_virtual.lm", "\"é\".byte_len()\n")
+        .expect("the program compiles");
     let (selector, _) = string_method(&module, "byte_len");
     let literal = module
         .strings
@@ -144,15 +146,18 @@ fn a_string_tag_supports_verified_virtual_dispatch() {
         Instr::Return,
     ]];
     lm_verify::verify_module(&module).expect("the virtual call verifies");
-    let loaded = lm_vm::load(module).expect("the module loads");
-    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let artifact = lm_testkit::artifact_with_core_from_module("string_virtual", module)
+        .expect("the artifact builds");
+    let (arena, namespace) = lm_testkit::publish_artifact(&artifact).expect("the artifact loads");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(2)");
 }
 
 #[test]
 fn the_verifier_rejects_a_stateful_string_role() {
-    let mut module = compile_text("string_role.lm", "\"x\"\n").expect("the program compiles");
+    let mut module =
+        compile_module_text("string_role.lm", "\"x\"\n").expect("the program compiles");
     let class = module.core_roles[ROLE_STRING];
     let int_ty = module
         .types
@@ -173,7 +178,8 @@ fn the_verifier_rejects_a_stateful_string_role() {
 
 #[test]
 fn the_verifier_requires_the_complete_text_family() {
-    let mut module = compile_text("text_family.lm", "\"x\"\n").expect("the program compiles");
+    let mut module =
+        compile_module_text("text_family.lm", "\"x\"\n").expect("the program compiles");
     module.core_roles[ROLE_SUBSTRING] = lm_bytecode::NO_ROLE;
     let error = lm_verify::verify_module(&module).expect_err("the family rejects");
     assert!(
@@ -186,7 +192,7 @@ fn the_verifier_requires_the_complete_text_family() {
 
 #[test]
 fn the_verifier_rejects_an_extra_text_subclass() {
-    let mut module = compile_text("text_subclass.lm", "class Extra\nend\nExtra()\n0\n")
+    let mut module = compile_module_text("text_subclass.lm", "class Extra\nend\nExtra()\n0\n")
         .expect("the program compiles");
     let text = module.core_roles[ROLE_TEXT];
     let extra = module
@@ -206,7 +212,7 @@ fn the_verifier_rejects_an_extra_text_subclass() {
 
 #[test]
 fn the_verifier_rejects_heap_allocation_for_char() {
-    let mut module = compile_text("char_new.lm", "0\n").expect("the program compiles");
+    let mut module = compile_module_text("char_new.lm", "0\n").expect("the program compiles");
     let class = module.core_roles[ROLE_CHAR];
     let char_ty = module
         .types
@@ -238,7 +244,8 @@ fn the_verifier_rejects_heap_allocation_for_char() {
 fn text_views_and_chars_reject_direct_construction() {
     for name in ["Text", "Substring", "Char"] {
         let source = format!("{name}()\n");
-        let error = compile_text("native_text_new.lm", &source).expect_err("construction rejects");
+        let error =
+            compile_module_text("native_text_new.lm", &source).expect_err("construction rejects");
         assert!(
             error.contains(&format!("`{name}` values cannot be constructed directly")),
             "{error}"
@@ -304,8 +311,8 @@ mapped = "aé猫".map({ |value: Char| value })
         "Done((\"aé猫\", \"aé猫\"))"
     );
 
-    let module = compile_text("text_traversal.lm", source).expect("the program compiles");
-    assert!(module.funcs.iter().any(|func| {
+    let core = lm_hir::core_image();
+    assert!(core.funcs.iter().any(|func| {
         func.blocks
             .iter()
             .flatten()

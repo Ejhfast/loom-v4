@@ -1,7 +1,8 @@
 //! Week-10 file handles and snapshot behavior.
 
+use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
+use lm_vm::{RecordingHost, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -13,11 +14,11 @@ fn source(path: &str) -> String {
 fn a_recording_host_services_file_handles() {
     let text = source("examples/09-handles-and-supervision/01-read-file.lm");
     let bytes = compile_to_bytes("read-file.lm", &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("message.txt", b"hello from memory".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world.allow("Fs").expect("the filesystem grant exists");
 
     let outcome = lm_proc::run_world(&mut world);
@@ -30,9 +31,14 @@ fn a_recording_host_services_file_handles() {
 fn all_six_file_effects_complete_a_round_trip() {
     let text = source("examples/09-handles-and-supervision/02-round-trip-file.lm");
     let bytes = compile_to_bytes("round-trip-file.lm", &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(host.clone()),
+    );
     world.allow("Fs").expect("the filesystem grant exists");
 
     let outcome = lm_proc::run_world(&mut world);
@@ -49,11 +55,11 @@ fn all_six_file_effects_complete_a_round_trip() {
 fn a_holder_closes_live_handles_before_a_snapshot() {
     let text = source("examples/09-handles-and-supervision/08-checkpoint-now.lm");
     let bytes = compile_to_bytes("checkpoint-now.lm", &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("message.txt", b"snapshot data".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Vm", "Fs", "Io.Write"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -72,12 +78,12 @@ fn a_holder_closes_live_handles_before_a_snapshot() {
 fn run_example(path: &str, allow: &[&str], file: Option<(&str, &[u8])>) -> String {
     let text = source(path);
     let bytes = compile_to_bytes(path, &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     if let Some((path, bytes)) = file {
         host.borrow_mut().set_file(path, bytes.to_vec());
     }
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in allow {
         world.allow(grant).expect("the grant exists");
     }
@@ -167,10 +173,10 @@ in Err(_) then (false, false)
 end
 "#;
     let bytes = compile_to_bytes("mock-close.lm", text).expect("the test compiles");
-    let loaded = load_bytes(&bytes).expect("the test loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("message.txt", b"data".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     world.allow("Vm").expect("the VM grant exists");
     world.allow("Fs").expect("the filesystem grant exists");
 
@@ -228,9 +234,10 @@ in Fault(_) then false
 end
 "#;
     let bytes = compile_to_bytes("driver-exit.lm", text).expect("the test compiles");
-    let loaded = load_bytes(&bytes).expect("the test loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -249,11 +256,11 @@ fn snapshot_wait_advances_reachable_background_work() {
     let text = source("examples/09-handles-and-supervision/10-checkpoint-background-work.lm");
     let bytes =
         compile_to_bytes("checkpoint-background-work.lm", &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("message.txt", b"transient".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Vm", "Fs", "Proc"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -344,10 +351,10 @@ in Err(_) then "open failed"
 end
 "#;
     let bytes = compile_to_bytes("mailbox-snapshot-wait.lm", text).expect("the test compiles");
-    let loaded = load_bytes(&bytes).expect("the test loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("message.txt", b"data".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Vm", "Fs", "Proc"] {
         world.allow(grant).expect("the grant exists");
     }
@@ -366,9 +373,10 @@ fn a_closed_resource_control_survives_restore() {
     let text = source("examples/09-handles-and-supervision/11-closed-control-snapshot.lm");
     let bytes =
         compile_to_bytes("closed-control-snapshot.lm", &text).expect("the example compiles");
-    let loaded = load_bytes(&bytes).expect("the example loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -383,8 +391,10 @@ fn a_closed_resource_control_survives_restore() {
         .clone();
     assert_eq!(resource_controls(&image), vec![(1, 0)]);
 
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example reloads");
     let mut fresh = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

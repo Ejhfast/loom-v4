@@ -22,7 +22,7 @@
 
 use crate::hash::hash256;
 use crate::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
-use crate::{DecodeError, Module};
+use crate::{DecodeError, Import, ImportKind, Module, NO_CTOR};
 
 pub use crate::ExportKind;
 
@@ -423,55 +423,61 @@ pub fn interface_hash_with_bundle(
     hash256(&bytes)
 }
 
-/// Build one interface from the exported items and the computed
-/// identity. `items` aligns with `module.exports`.
-pub fn build_interface(
+/// Derive the contract hash declared by one import slot.
+///
+/// The verifier checks calls against this local declaration. The
+/// linker compares this hash with the provider export before it
+/// replaces the declaration.
+pub fn import_contract_hash_with_bundle(
     module: &Module,
-    identity: &ModuleIdentity,
-    module_path: &str,
-    items: &[IfaceItem],
-) -> Result<Interface, String> {
-    let bundle = lm_abi::standard_bundle();
-    build_interface_with_bundle(module, identity, module_path, items, &bundle)
-}
-
-/// Build one interface under an immutable ABI bundle.
-pub fn build_interface_with_bundle(
-    module: &Module,
-    identity: &ModuleIdentity,
-    module_path: &str,
-    items: &[IfaceItem],
+    import: &Import,
     bundle: &lm_abi::AbiBundle,
-) -> Result<Interface, String> {
-    if items.len() != module.exports.len() {
-        return Err("the interface items do not align with the export table".to_string());
-    }
-    let mut exports = Vec::with_capacity(items.len());
-    for (export, item) in module.exports.iter().zip(items) {
-        let def_hash = if export.kind.is_class() {
-            identity.class_hashes[export.def as usize]
-        } else if export.kind.is_interface() {
-            identity.interface_hashes[export.def as usize]
-        } else {
-            identity.func_hashes[export.def as usize]
-        };
-        exports.push(ExportEntry {
-            kind: export.kind,
-            name: export.name.clone(),
-            item: item.clone(),
-            iface_hash: interface_hash_with_bundle(bundle, export.kind, &export.name, item),
-            def_hash,
-        });
-    }
-    Ok(Interface {
-        abi_version: lm_abi::ABI_VERSION,
-        compiler_abi_version: COMPILER_ABI_VERSION,
-        bundle_digest: bundle.digest(),
-        module_path: module_path.to_string(),
-        semantic_hash: identity.semantic_hash,
-        exports,
-        slots: Vec::new(),
-    })
+) -> Result<(ExportKind, String, [u8; 32]), String> {
+    let view = ModuleSurface { module };
+    let (kind, name, item) = match import.kind {
+        ImportKind::Func => (
+            ExportKind::Function,
+            import.name.clone(),
+            IfaceItem::Func(view.function(import.def, false, None)?),
+        ),
+        ImportKind::Class | ImportKind::Ctor | ImportKind::Method => {
+            let class_name = match import.kind {
+                ImportKind::Method => import
+                    .name
+                    .rsplit_once('.')
+                    .map(|(class, _)| class)
+                    .ok_or_else(|| "an imported method has no class name".to_string())?,
+                _ => import.name.as_str(),
+            };
+            let class_import = module
+                .imports
+                .iter()
+                .find(|candidate| {
+                    candidate.kind == ImportKind::Class
+                        && candidate.module == import.module
+                        && candidate.name == class_name
+                })
+                .ok_or_else(|| "an imported member has no class declaration".to_string())?;
+            let ctor = module
+                .imports
+                .iter()
+                .find(|candidate| {
+                    candidate.kind == ImportKind::Ctor
+                        && candidate.module == import.module
+                        && candidate.name == class_name
+                })
+                .map_or(NO_CTOR, |candidate| candidate.def);
+            let class = view.class(class_import.def, ctor)?;
+            let kind = match class.kind {
+                IfaceClassKind::Normal => ExportKind::Class,
+                IfaceClassKind::EnumParent => ExportKind::Enum,
+                IfaceClassKind::EnumCase => ExportKind::EnumCase,
+            };
+            (kind, class_name.to_string(), IfaceItem::Class(class))
+        }
+    };
+    let hash = interface_hash_with_bundle(bundle, kind, &name, &item);
+    Ok((kind, name, hash))
 }
 
 /// Derive one compiler interface from canonical module tables.

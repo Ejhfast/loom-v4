@@ -1,25 +1,12 @@
 //! Names, qualified keys, and the verifier.
-//!
-//! A rename moves no structural hash, so a rename cannot move the
-//! core layout. A crafted qualified key still can, because the core
-//! layout resolves on `(qualified key, structural hash)`. The keys are
-//! therefore verifier inputs, and the cache key covers them.
 
 use lm_bytecode::identity::{module_identity, verification_hash};
-use lm_testkit::compile_to_bytes;
-
-/// A program that needs the pinned core `Option` definition.
-const SOURCE: &str = "def read(): String with Io.ReadBytes\n\
-                      \x20 case read_line(1048576)\n\
-                      \x20 in Ok(line)\n\
-                      \x20   case line\n\
-                      \x20   in Some(text) then text\n\
-                      \x20   in None then \"eof\"\n\
-                      \x20   end\n\
-                      \x20 in Err(_) then \"error\"\n\
-                      \x20 end\n\
-                      end\n\
-                      read()\n";
+fn core_module() -> lm_bytecode::Module {
+    lm_compiler::core_link_unit()
+        .expect("the core unit builds")
+        .module()
+        .clone()
+}
 
 /// Rename one definition in the export section only. The semantic
 /// region does not move, so the module means the same program to the
@@ -40,8 +27,7 @@ fn renamed(module: &lm_bytecode::Module, from: &str, to: &str) -> lm_bytecode::M
 /// method moves no core class hash and drops no core slot.
 #[test]
 fn a_crafted_function_rename_moves_no_structural_hash() {
-    let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = core_module();
     let twin = renamed(&module, "Option.is_some", "Aaa");
     let identity = module_identity(&module).unwrap();
     let twin_identity = module_identity(&twin).unwrap();
@@ -60,23 +46,13 @@ fn a_crafted_function_rename_moves_no_structural_hash() {
         format!("{twin_layout:?}"),
         "a rename moved the core layout"
     );
-    let twin_bytes = lm_bytecode::encode(&twin);
-    let plain = lm_vm::load_bytes(&twin_bytes).is_ok();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("the original loads");
-    let cached = lm_vm::load_bytes_cached(&twin_bytes, &mut cache).is_ok();
-    assert_eq!(
-        plain, cached,
-        "a cached load and an uncached load disagree on admission"
-    );
-    assert!(plain, "the rename changed nothing the verifier reads");
+    lm_testkit::unit_from_module(twin).expect("the rename keeps valid code");
 }
 
 /// A crafted class key changes the constructor rule that the verifier reads.
 #[test]
 fn a_crafted_qualified_key_moves_the_verifier_input() {
-    let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = core_module();
     let some = module
         .classes
         .iter()
@@ -89,16 +65,10 @@ fn a_crafted_qualified_key_moves_the_verifier_input() {
         verification_hash(&twin),
         "a key edit did not move the cache key"
     );
-    let twin_bytes = lm_bytecode::encode(&twin);
-    let plain = lm_vm::load_bytes(&twin_bytes).is_ok();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("the original loads");
-    let cached = lm_vm::load_bytes_cached(&twin_bytes, &mut cache).is_ok();
-    assert_eq!(
-        plain, cached,
-        "a cached load and an uncached load disagree on admission"
+    assert!(
+        lm_testkit::unit_from_module(twin).is_err(),
+        "the verifier admitted a mismatched constructor key"
     );
-    assert!(!plain, "the verifier admitted a mismatched constructor key");
 }
 
 /// A crafted core role table rejects, and a cached load and an
@@ -106,8 +76,7 @@ fn a_crafted_qualified_key_moves_the_verifier_input() {
 /// semantic region, so it moves the cache key.
 #[test]
 fn a_crafted_core_role_cannot_split_the_cache() {
-    let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = core_module();
     let some = lm_bytecode::corepin::role_index("Option.Some").expect("the role exists");
     let none = lm_bytecode::corepin::role_index("Option.None").expect("the role exists");
     let mut twin = module.clone();
@@ -120,16 +89,10 @@ fn a_crafted_core_role_cannot_split_the_cache() {
         verification_hash(&twin),
         "a role edit must move the cache key"
     );
-    let twin_bytes = lm_bytecode::encode(&twin);
-    let plain = lm_vm::load_bytes(&twin_bytes).is_ok();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("the original loads");
-    let cached = lm_vm::load_bytes_cached(&twin_bytes, &mut cache).is_ok();
-    assert_eq!(
-        plain, cached,
-        "a cached load and an uncached load disagree on admission"
+    assert!(
+        lm_testkit::unit_from_module(twin).is_err(),
+        "the crafted role table was admitted"
     );
-    assert!(!plain, "the crafted role table was admitted");
 }
 
 /// A declared core family must be complete. The verifier proves the
@@ -138,8 +101,7 @@ fn a_crafted_core_role_cannot_split_the_cache() {
 /// reach a slot the layout does not hold.
 #[test]
 fn a_partial_core_family_rejects() {
-    let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = core_module();
     let layout = lm_bytecode::corepin::declared_layout(&module);
     assert!(layout.option.is_some() && layout.option_some.is_some());
     lm_verify::verify_module(&module).expect("the whole family verifies");
@@ -150,8 +112,7 @@ fn a_partial_core_family_rejects() {
     assert!(error.message.contains("without every arm"), "{error:?}");
 }
 
-/// A rename never changes what the loader admits, and a cached load
-/// and an uncached load always agree.
+/// A rename keeps admission and the exact core layout.
 #[test]
 fn a_rename_keeps_the_admission_and_the_core_layout() {
     let source = "def even(n: Int): Bool\n\
@@ -169,24 +130,17 @@ fn a_rename_keeps_the_admission_and_the_core_layout() {
                   \x20 end\n\
                   end\n\
                   even(4)\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = lm_testkit::compile_module_text("t.lm", source).unwrap();
     let twin = renamed(&module, "even", "zzz");
-    let twin_bytes = lm_bytecode::encode(&twin);
     assert_eq!(
         module_identity(&module).unwrap().func_hashes,
         module_identity(&twin).unwrap().func_hashes,
         "a rename inside a cycle moved a structural hash"
     );
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    let loaded = lm_vm::load_bytes_cached(&twin_bytes, &mut cache).expect("loads");
-    let plain = lm_vm::load_bytes(&twin_bytes).expect("loads");
+    lm_verify::verify_module(&module).expect("the original verifies");
+    lm_verify::verify_module(&twin).expect("the rename verifies");
     assert_eq!(
-        format!("{:?}", loaded.core_layout()),
-        format!("{:?}", plain.core_layout()),
-        "a cached load and an uncached load disagree on the layout"
+        format!("{:?}", lm_bytecode::corepin::declared_layout(&module)),
+        format!("{:?}", lm_bytecode::corepin::declared_layout(&twin))
     );
-    // The rename moves no verifier input, so the twin rides the hit.
-    assert_eq!(cache.verifications, 1, "the rename cost a verifier run");
 }

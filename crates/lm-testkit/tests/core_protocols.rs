@@ -1,6 +1,6 @@
 //! Core protocol tests.
 
-use lm_testkit::{compile_text, run_allowed};
+use lm_testkit::run_allowed;
 use lm_vm::{RecordingHost, VmConfig, World};
 
 fn run(source: &str) -> Result<String, String> {
@@ -256,10 +256,13 @@ table.len()
 #[test]
 fn a_mutable_map_key_fault_names_the_repair() {
     let source = "table = {([1], 2): 3}\ntable.len()\n";
-    let module = compile_text("mutable-map-key.lm", source).expect("the source compiles");
-    let loaded = lm_vm::load(module).expect("the module loads");
+    let bytes =
+        lm_testkit::compile_to_bytes("mutable-map-key.lm", source).expect("the source compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

@@ -14,7 +14,7 @@
 
 use super::{
     codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageInstance, ImageLimits, ImageMachine,
-    ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest,
+    ImageMailbox, ImageNamespace, ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest,
     ImageSlotTarget, ImageState, ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource,
     SnapshotFail, SnapshotImage,
 };
@@ -25,8 +25,44 @@ use crate::world::World;
 use crate::FaultCode;
 use lm_bytecode::closed::{ClosedType, TypeEnv};
 use lm_heap::Object;
+use lm_link::{CodeRelocation, NamespaceId};
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+struct SnapshotLayout {
+    artifacts: Vec<Vec<u8>>,
+    namespaces: Vec<ImageNamespace>,
+    namespace_ordinals: HashMap<NamespaceId, u32>,
+    relocation: CodeRelocation,
+    code: super::code::SnapshotCode,
+}
+
+impl SnapshotLayout {
+    fn namespace(&self, source: NamespaceId) -> Result<u32, SnapshotFail> {
+        self.namespace_ordinals
+            .get(&source)
+            .copied()
+            .ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a captured machine has no code namespace".to_string(),
+                )
+            })
+    }
+
+    fn artifact(&self, source: &[u8]) -> Result<u32, SnapshotFail> {
+        self.artifacts
+            .binary_search_by(|candidate| candidate.as_slice().cmp(source))
+            .ok()
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "an installed instance has no snapshot artifact".to_string(),
+                )
+            })
+    }
+}
 
 /// Convert one runtime resource ceiling to its portable form.
 fn image_limits(config: crate::VmConfig) -> ImageLimits {
@@ -304,38 +340,13 @@ impl World {
         // Step 7: resume the original world, whatever the encoding
         // answered.
         self.release_cut(&report.set, true);
-        let image = built?;
+        let (image, code) = built?;
         let limit = self.snapshot_byte_limit(limit_holder);
         // The cut copies a stopped verified world, so the admission
         // invariant holds by construction (specification section 7.2).
         // The constructor stays inside the snapshot module, so no host
         // code can promote an arbitrary image through this path.
-        let identity = self.admission_identity()?;
-        codec::from_trusted_capture(image, identity, self.loaded_code(), limit)
-    }
-
-    /// The admission identity of the program this world runs.
-    fn admission_identity(&self) -> Result<super::AdmissionIdentity, SnapshotFail> {
-        let identity = self.identity().map_err(|code| {
-            SnapshotFail::Fault(code, "the program has no verified identity".to_string())
-        })?;
-        let base = self.base_identity().map_err(|code| {
-            SnapshotFail::Fault(
-                code,
-                "the base program has no verified identity".to_string(),
-            )
-        })?;
-        Ok(super::AdmissionIdentity {
-            base_semantic: base.semantic_hash,
-            base_verification: self.base_verification_hash(),
-            module_semantic: identity.semantic_hash,
-            verification: self.verification_hash(),
-            format: super::FORMAT_VERSION,
-            abi_version: lm_abi::ABI_VERSION,
-            compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
-            verifier_version: lm_verify::VERIFIER_VERSION,
-            bundle_digest: self.loaded.bundle().digest(),
-        })
+        codec::from_trusted_capture(image, code, limit)
     }
 
     /// The byte limit of one snapshot the machine `vm` asks for.
@@ -455,7 +466,7 @@ impl World {
         distinguished: Option<VmId>,
         full_vm: Option<VmImageKey>,
         self_root: bool,
-    ) -> Result<Image, SnapshotFail> {
+    ) -> Result<(Image, super::code::SnapshotCode), SnapshotFail> {
         let ordinal_of = |vm: VmId| -> Option<u32> {
             report.order.iter().position(|m| *m == vm).map(|i| i as u32)
         };
@@ -507,68 +518,23 @@ impl World {
                 .position(|candidate| *candidate == key)
                 .map(|index| index as u32)
         };
+        let mut namespace_ids = Vec::new();
+        for key in &image_order {
+            let namespace = self.vm_images[key.image as usize].namespace;
+            if !namespace_ids.contains(&namespace) {
+                namespace_ids.push(namespace);
+            }
+        }
+        for vm in report.order.iter().copied() {
+            let namespace = self.namespace_of(vm);
+            if !namespace_ids.contains(&namespace) {
+                namespace_ids.push(namespace);
+            }
+        }
+        let layout = self.build_snapshot_layout(&namespace_ids)?;
         let mut vm_images: Vec<ImageVm> = Vec::with_capacity(image_order.len());
         for key in &image_order {
-            vm_images.push(self.build_vm_image(*key, &ordinal_of)?);
-        }
-        let mut funcs: Vec<u32> = Vec::new();
-        let mut classes: Vec<u32> = Vec::new();
-        // A binding keeps its original target after its slot moves.
-        // Admission needs that immutable target in the code manifest.
-        for key in &image_order {
-            let record = &self.vm_images[key.image as usize];
-            for instance in &record.instances {
-                for target in &instance.binding_targets {
-                    match target {
-                        crate::machine::ImageSlotTarget::Function(func)
-                            if !funcs.contains(func) =>
-                        {
-                            funcs.push(*func);
-                        }
-                        crate::machine::ImageSlotTarget::Class { class, constructor } => {
-                            if !classes.contains(class) {
-                                classes.push(*class);
-                            }
-                            if !funcs.contains(constructor) {
-                                funcs.push(*constructor);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        for image in &vm_images {
-            for target in &image.slots {
-                match target {
-                    ImageSlotTarget::Function(func) if !funcs.contains(func) => funcs.push(*func),
-                    ImageSlotTarget::Class { class, constructor } => {
-                        if !classes.contains(class) {
-                            classes.push(*class);
-                        }
-                        if !funcs.contains(constructor) {
-                            funcs.push(*constructor);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            for entry in &image.objects {
-                match &entry.object {
-                    Object::Instance { class, .. } if !classes.contains(class) => {
-                        classes.push(*class);
-                    }
-                    Object::Closure { func, .. } if !funcs.contains(func) => funcs.push(*func),
-                    Object::NativeFault { trace, .. } => {
-                        for site in trace {
-                            if !funcs.contains(&site.function) {
-                                funcs.push(site.function);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            vm_images.push(self.build_vm_image(*key, &ordinal_of, &layout)?);
         }
         let mut machines: Vec<ImageMachine> = Vec::new();
         for vm in report.order.iter().copied() {
@@ -578,117 +544,118 @@ impl World {
                 self_root,
                 &ordinal_of,
                 &image_ordinal,
+                &layout,
             )?;
-            for entry in &machine.objects {
-                match &entry.object {
-                    Object::Instance { class, .. } => {
-                        if !classes.contains(class) {
-                            classes.push(*class);
-                        }
-                    }
-                    Object::Closure { func, .. } => {
-                        if !funcs.contains(func) {
-                            funcs.push(*func);
-                        }
-                    }
-                    Object::NativeFault { trace, .. } => {
-                        for site in trace {
-                            if !funcs.contains(&site.function) {
-                                funcs.push(site.function);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            for frame in &machine.frames {
-                if !funcs.contains(&frame.func) {
-                    funcs.push(frame.func);
-                }
-            }
-            for callback in &machine.callbacks {
-                if !funcs.contains(&callback.func) {
-                    funcs.push(callback.func);
-                }
-            }
-            // The machine witness names its body function, and a
-            // terminal machine keeps neither a frame nor a body
-            // closure, so the manifest must carry it too.
-            if let Some(func) = machine.body_func {
-                if !funcs.contains(&func) {
-                    funcs.push(func);
-                }
-            }
-            if let Some(ImageTerminal::Fault(record)) = &machine.terminal {
-                for site in &record.trace {
-                    if !funcs.contains(&site.function) {
-                        funcs.push(site.function);
-                    }
-                }
-            }
             machines.push(machine);
         }
-        // Every class the closed type table names joins the manifest,
-        // so admission resolves it and proves its definition hash.
-        let (types, envs) = self.build_type_tables(&mut vm_images, &mut machines);
-        for node in &types {
-            if let ClosedType::Class(class) | ClosedType::Inst(class, _) = node {
-                if !classes.contains(class) {
-                    classes.push(*class);
-                }
-            }
-        }
-        funcs.sort_unstable();
-        classes.sort_unstable();
-        // Keep a separate loaded-code handle while the result type closes.
-        // This avoids cloning every class hash for each snapshot.
-        let loaded = self.loaded_code();
-        let identity = loaded.identity().map_err(|code| {
-            SnapshotFail::Fault(code, "the program has no verified identity".to_string())
-        })?;
-        let funcs: Vec<(u32, [u8; 32])> = funcs
-            .into_iter()
-            .map(|slot| (slot, identity.func_hashes[slot as usize]))
-            .collect();
-        let classes: Vec<(u32, [u8; 32])> = classes
-            .into_iter()
-            .map(|slot| (slot, identity.class_hashes[slot as usize]))
-            .collect();
-        let semantic = identity.semantic_hash;
+        let (mut types, envs) = self.build_type_tables(&mut vm_images, &mut machines);
         // The header names the selected run result type. A full VM
         // snapshot has no selected run and records zeros.
         let result_type = match distinguished {
-            Some(machine) => self.machine_result_digest(machine, &identity.class_hashes)?,
+            Some(machine) => self.machine_result_digest(machine)?,
             None => [0u8; 32],
         };
-        let mut installations = Vec::new();
-        installations
-            .try_reserve_exact(self.installations.len())
-            .map_err(|_| SnapshotFail::LimitExceeded)?;
-        for artifact in &self.installations {
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(artifact.len())
-                .map_err(|_| SnapshotFail::LimitExceeded)?;
-            bytes.extend_from_slice(artifact.as_slice());
-            installations.push(bytes);
-        }
-        Ok(Image {
+        relocate_snapshot_code(
+            &layout.relocation,
+            &layout.code,
+            &mut types,
+            &mut vm_images,
+            &mut machines,
+        )?;
+        let image = Image {
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
             verifier_version: lm_verify::VERIFIER_VERSION,
-            module_semantic: semantic,
             distinguished: distinguished.and_then(ordinal_of),
             full_vm: full_vm.and_then(image_ordinal),
             result_type,
-            funcs,
-            classes,
-            installations,
+            artifacts: layout.artifacts,
+            namespaces: layout.namespaces,
             types,
             envs,
             vm_images,
             machines,
+        };
+        Ok((image, layout.code))
+    }
+
+    /// Build the artifact table and the canonical code arena of one image.
+    fn build_snapshot_layout(
+        &self,
+        namespace_ids: &[NamespaceId],
+    ) -> Result<SnapshotLayout, SnapshotFail> {
+        let first = namespace_ids.first().copied().ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a snapshot has no code namespace".to_string(),
+            )
+        })?;
+        let bundle = self.code_for_namespace(first).bundle().clone();
+        let namespace_ids: Vec<NamespaceId> = (0..self.arena.namespace_count())
+            .map(|index| NamespaceId::from_index(index as u32))
+            .collect();
+        let mut by_bytes = BTreeMap::new();
+        let mut bytes_by_id = BTreeMap::new();
+        for namespace in &namespace_ids {
+            let code = self.code_for_namespace(*namespace).code_namespace();
+            for artifact in code.artifacts() {
+                if bytes_by_id.contains_key(&artifact.id()) {
+                    continue;
+                }
+                let bytes = lm_bytecode::artifact::encode_with_bundle(artifact, &bundle).map_err(
+                    |error| {
+                        SnapshotFail::Fault(
+                            FaultCode::MalformedState,
+                            format!("an artifact did not encode: {error}"),
+                        )
+                    },
+                )?;
+                bytes_by_id.insert(artifact.id(), bytes.clone());
+                by_bytes.insert(bytes, artifact.clone());
+            }
+        }
+        let artifacts: Vec<Vec<u8>> = by_bytes.keys().cloned().collect();
+        let artifact_values: Vec<std::sync::Arc<lm_bytecode::artifact::Artifact>> =
+            by_bytes.into_values().collect();
+        let mut manifests = Vec::new();
+        let mut namespace_ordinals = HashMap::new();
+        let mut runtimes = Vec::new();
+        for namespace in &namespace_ids {
+            let code = self.code_for_namespace(*namespace).code_namespace();
+            let mut manifest = Vec::new();
+            manifest
+                .try_reserve_exact(code.artifacts().len())
+                .map_err(|_| SnapshotFail::LimitExceeded)?;
+            for artifact in code.artifacts() {
+                let bytes = bytes_by_id.get(&artifact.id()).ok_or_else(|| {
+                    SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "a namespace artifact is absent from its artifact table".to_string(),
+                    )
+                })?;
+                let ordinal = artifacts.binary_search(bytes).map_err(|_| {
+                    SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "a namespace artifact is absent from its artifact table".to_string(),
+                    )
+                })?;
+                manifest.push(u32::try_from(ordinal).map_err(|_| SnapshotFail::LimitExceeded)?);
+            }
+            let ordinal =
+                u32::try_from(manifests.len()).map_err(|_| SnapshotFail::LimitExceeded)?;
+            namespace_ordinals.insert(*namespace, ordinal);
+            manifests.push(ImageNamespace {
+                artifacts: manifest,
+            });
+            runtimes.push(self.code_for_namespace(*namespace).clone());
+        }
+        Ok(SnapshotLayout {
+            artifacts,
+            namespaces: manifests,
+            namespace_ordinals,
+            relocation: CodeRelocation::identity(),
+            code: super::code::SnapshotCode::new(artifact_values, runtimes),
         })
     }
 
@@ -719,8 +686,10 @@ impl World {
         &mut self,
         key: VmImageKey,
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
+        layout: &SnapshotLayout,
     ) -> Result<ImageVm, SnapshotFail> {
         let record = &self.vm_images[key.image as usize];
+        let namespace = layout.namespace(record.namespace)?;
         if record.slots.is_empty()
             && record.slot_versions.is_empty()
             && record.heap.live_count() == 0
@@ -728,6 +697,7 @@ impl World {
             && record.instances.is_empty()
         {
             return Ok(ImageVm {
+                namespace,
                 limits: image_limits(record.config),
                 slots: Vec::new(),
                 slot_versions: Vec::new(),
@@ -815,36 +785,12 @@ impl World {
             .try_reserve_exact(record.instances.len())
             .map_err(|_| SnapshotFail::LimitExceeded)?;
         for instance in &record.instances {
-            let copy = |source: &[u32]| -> Result<Vec<u32>, SnapshotFail> {
-                let mut target = Vec::new();
-                target
-                    .try_reserve_exact(source.len())
-                    .map_err(|_| SnapshotFail::LimitExceeded)?;
-                target.extend_from_slice(source);
-                Ok(target)
-            };
-            let interface = match &instance.interface {
-                Some(source) => {
-                    let mut target = Vec::new();
-                    target
-                        .try_reserve_exact(source.len())
-                        .map_err(|_| SnapshotFail::LimitExceeded)?;
-                    target.extend_from_slice(source.as_slice());
-                    Some(target)
-                }
-                None => None,
-            };
             instances.push(ImageInstance {
-                installation: instance.installation,
-                interface,
-                semantic_hash: instance.semantic_hash,
-                entry: instance.entry,
-                funcs: copy(&instance.funcs)?,
-                classes: copy(&instance.classes)?,
-                slots: copy(&instance.slots)?,
+                artifact: layout.artifact(instance.artifact.as_slice())?,
             });
         }
         Ok(ImageVm {
+            namespace,
             limits: image_limits(record.config),
             slots,
             slot_versions: record.slot_versions.clone(),
@@ -856,25 +802,26 @@ impl World {
     /// The canonical digest of the closed result type of one machine.
     ///
     /// A machine that never loaded a body function records zeros.
-    fn machine_result_digest(
-        &mut self,
-        vm: VmId,
-        class_hashes: &[[u8; 32]],
-    ) -> Result<[u8; 32], SnapshotFail> {
+    fn machine_result_digest(&mut self, vm: VmId) -> Result<[u8; 32], SnapshotFail> {
         let record = &self.machines[vm as usize];
         let Some(func) = record.body_func else {
             return Ok([0u8; 32]);
         };
         let witness = record.witness;
-        let ret = self.module.funcs[func as usize].ret;
-        let module = self.module.clone();
-        let closed = self.envs.close(&module, ret, witness).map_err(|_| {
+        let code = self.code_of(vm).clone();
+        let ret = code.funcs[func as usize].ret;
+        let closed = self.envs.close(code.as_ref(), ret, witness).map_err(|_| {
             SnapshotFail::Fault(
                 FaultCode::BoundaryLimit,
                 "the result type passed the closed type limit".to_string(),
             )
         })?;
-        Ok(self.envs.digest(&module, class_hashes, closed))
+        let identity = code.identity().map_err(|error| {
+            SnapshotFail::Fault(error, "the code namespace has no identity".to_string())
+        })?;
+        Ok(self
+            .envs
+            .digest(code.as_ref(), &identity.class_hashes, closed))
     }
 
     /// Build the closed type table and the environment table of one
@@ -1051,6 +998,7 @@ impl World {
         self_root: bool,
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
         image_ordinal: &impl Fn(VmImageKey) -> Option<u32>,
+        layout: &SnapshotLayout,
     ) -> Result<ImageMachine, SnapshotFail> {
         let limits = self.machines[vm as usize].config.graph;
         let roots = self.machines[vm as usize].snapshot_roots();
@@ -1228,8 +1176,14 @@ impl World {
             };
             objects.push(ImageObject { frozen, object });
         }
-        let mut record =
-            self.machine_record(vm, &map_value, &callback_order, ordinal_of, image_ordinal)?;
+        let mut record = self.machine_record(
+            vm,
+            &map_value,
+            &callback_order,
+            ordinal_of,
+            image_ordinal,
+            layout,
+        )?;
         record.objects = objects;
         if is_root {
             // The restored root is holder-controlled (specification
@@ -1265,6 +1219,7 @@ impl World {
         callback_order: &[CallbackRef],
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
         image_ordinal: &impl Fn(VmImageKey) -> Option<u32>,
+        layout: &SnapshotLayout,
     ) -> Result<ImageMachine, SnapshotFail> {
         let record = &self.machines[vm as usize];
         let m = &record.vm;
@@ -1389,6 +1344,7 @@ impl World {
             })
             .transpose()?;
         Ok(ImageMachine {
+            namespace: layout.namespace(record.namespace)?,
             parent,
             image: record.image.and_then(image_ordinal),
             state,
@@ -1454,6 +1410,142 @@ fn collect_empty_type(value: Value, out: &mut Vec<u32>) {
     if let Value::EmptyCase { ty, .. } = value {
         out.push(ty);
     }
+}
+
+fn relocate_snapshot_code(
+    map: &CodeRelocation,
+    code: &super::code::SnapshotCode,
+    types: &mut [ClosedType],
+    images: &mut [ImageVm],
+    machines: &mut [ImageMachine],
+) -> Result<(), SnapshotFail> {
+    if map.is_identity() {
+        return Ok(());
+    }
+    for ty in types {
+        match ty {
+            ClosedType::Class(class) | ClosedType::Inst(class, _) => {
+                *class = relocate_index(map.class(*class), "class")?;
+            }
+            _ => {}
+        }
+    }
+    for image in images {
+        for target in &mut image.slots {
+            relocate_slot_target(map, target)?;
+        }
+        for entry in &mut image.objects {
+            relocate_object_code(map, &mut entry.object)?;
+        }
+    }
+    for machine in machines {
+        machine.body_func = machine
+            .body_func
+            .map(|function| relocate_index(map.function(function), "body function"))
+            .transpose()?;
+        for callback in &mut machine.callbacks {
+            callback.func = relocate_index(map.function(callback.func), "callback function")?;
+        }
+        for frame in &mut machine.frames {
+            frame.func = relocate_index(map.function(frame.func), "frame function")?;
+        }
+        for entry in &mut machine.objects {
+            relocate_object_code(map, &mut entry.object)?;
+        }
+        if let Some(ImageTerminal::Fault(fault)) = &mut machine.terminal {
+            relocate_fault_trace(map, &mut fault.trace)?;
+        }
+        let target = code.namespace(machine.namespace).ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a machine has no prepared code namespace".to_string(),
+            )
+        })?;
+        let mut literals = vec![None; target.strings.len()];
+        for (source, literal) in machine.literals.iter().copied().enumerate() {
+            let Some(literal) = literal else {
+                continue;
+            };
+            let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
+            let target = relocate_index(map.string(source), "literal string")? as usize;
+            let slot = literals.get_mut(target).ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a literal string relocation is outside its namespace".to_string(),
+                )
+            })?;
+            *slot = Some(literal);
+        }
+        machine.literals = literals;
+    }
+    Ok(())
+}
+
+fn relocate_slot_target(
+    map: &CodeRelocation,
+    target: &mut ImageSlotTarget,
+) -> Result<(), SnapshotFail> {
+    match target {
+        ImageSlotTarget::Function(function) => {
+            *function = relocate_index(map.function(*function), "slot function")?;
+        }
+        ImageSlotTarget::Class { class, constructor } => {
+            *class = relocate_index(map.class(*class), "slot class")?;
+            *constructor = relocate_index(map.function(*constructor), "slot constructor")?;
+        }
+        ImageSlotTarget::Empty | ImageSlotTarget::Value(_) | ImageSlotTarget::Process { .. } => {}
+    }
+    Ok(())
+}
+
+fn relocate_object_code(map: &CodeRelocation, object: &mut Object) -> Result<(), SnapshotFail> {
+    match object {
+        Object::Instance { class, .. } => {
+            *class = relocate_index(map.class(*class), "object class")?;
+        }
+        Object::Closure { func, .. } => {
+            *func = relocate_index(map.function(*func), "closure function")?;
+        }
+        Object::NativeCodeHandle { kind, index, .. } => match kind {
+            lm_heap::CodeHandleKind::Function => {
+                *index = relocate_index(map.function(*index), "function handle")?;
+            }
+            lm_heap::CodeHandleKind::Class => {
+                *index = relocate_index(map.class(*index), "class handle")?;
+            }
+            lm_heap::CodeHandleKind::Slot => {
+                *index = relocate_index(map.slot(*index), "slot handle")?;
+            }
+            lm_heap::CodeHandleKind::Instance
+            | lm_heap::CodeHandleKind::FunctionBinding
+            | lm_heap::CodeHandleKind::ClassBinding => {}
+        },
+        Object::NativeSlotChange { slot, .. } => {
+            *slot = relocate_index(map.slot(*slot), "slot change")?;
+        }
+        Object::NativeFault { trace, .. } => relocate_fault_trace(map, trace)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn relocate_fault_trace(
+    map: &CodeRelocation,
+    trace: &mut [lm_heap::FaultSite],
+) -> Result<(), SnapshotFail> {
+    for site in trace {
+        site.function = relocate_index(map.function(site.function), "fault function")?;
+    }
+    Ok(())
+}
+
+fn relocate_index(value: Option<u32>, what: &str) -> Result<u32, SnapshotFail> {
+    value.ok_or_else(|| {
+        SnapshotFail::Fault(
+            FaultCode::MalformedState,
+            format!("the {what} is outside the captured artifact graph"),
+        )
+    })
 }
 
 fn for_object_values(object: &Object, out: &mut Vec<u32>) {

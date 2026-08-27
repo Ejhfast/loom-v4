@@ -3,11 +3,11 @@
 //! negative coverage, plus depth-guard cases for the new recursive
 //! productions.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = compile_module_text("t.lm", source).unwrap_err();
     // The rendered text starts with `error[CODE]:`.
     rendered[6..11].to_string()
 }
@@ -116,7 +116,7 @@ fn generic_bodies_are_shared_not_monomorphized() {
     // One `id` body serves two instantiations; the bytecode holds one
     // function for it. Recursion prevents inlining from removing the
     // shared body before collection.
-    let module = compile_text(
+    let module = compile_module_text(
         "t.lm",
         "def id[T](x: T, depth: Int): T\n  if depth == 0\n    x\n  else\n    id(x, depth - 1)\n  end\nend\n(id(1, 1), id(\"a\", 1))\n",
     )
@@ -443,7 +443,7 @@ fn row_rules() {
     );
     // Overrides may narrow but not widen; the widening case is the UI
     // test `row-widening-override.lm`. Narrowing compiles.
-    assert!(compile_text(
+    assert!(compile_module_text(
         "t.lm",
         "class A\n  def f(self): Int with Io\n    1\n  end\nend\n\
          class B < A\n  def f(self): Int with Io.Write\n    2\n  end\nend\n1\n",
@@ -543,7 +543,7 @@ fn depth_guards_cover_new_recursive_productions() {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let rendered = compile_text("deep.lm", &source).unwrap_err();
+                let rendered = compile_module_text("deep.lm", &source).unwrap_err();
                 assert_eq!(&rendered[6..11], "E1022");
             })
             .unwrap()

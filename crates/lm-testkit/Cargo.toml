@@ -11,6 +11,7 @@ lm-types = { path = "../lm-types" }
 lm-hir = { path = "../lm-hir" }
 lm-compiler = { path = "../lm-compiler" }
 lm-bytecode = { path = "../lm-bytecode" }
+lm-link = { path = "../lm-link" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }
 lm-graph = { path = "../lm-graph" }

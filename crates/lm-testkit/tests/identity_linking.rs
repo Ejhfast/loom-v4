@@ -6,9 +6,9 @@
 
 use lm_bytecode::identity::module_identity;
 use lm_bytecode::{BcType, DecodeError, Func, Instr, Module};
-use lm_compiler::{compile_module, link, CompileEnv};
+use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
-use lm_testkit::compile_text;
+use lm_testkit::compile_module_text;
 
 fn identity_of(source: &str) -> (Module, lm_bytecode::identity::ModuleIdentity) {
     let module = raw_module(source);
@@ -133,7 +133,7 @@ fn compile_one(
 ) -> lm_compiler::CompiledModule {
     let mut env = CompileEnv::new();
     for interface in seen {
-        env.bind_interface(interface.clone()).expect("binds");
+        env.bind_projection(interface.clone()).expect("binds");
     }
     env.bind_root("shapes", "app.shapes").expect("binds");
     env.bind_root("main", "app.main").expect("binds");
@@ -199,8 +199,7 @@ end
     );
     let expected = compiled.interface.clone();
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
-    env.bind_module(compiled.path, compiled.module, compiled.interface)
-        .expect("the module binds");
+    lm_testkit::bind_compiled_unit(&mut env, compiled).expect("the module binds");
     let env = env.freeze();
     let root = env
         .unit("app.surface")
@@ -213,23 +212,29 @@ end
     assert_eq!(decoded.root().interface(), &expected);
 }
 
-fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::LinkedProgram, String> {
+fn artifact_units(
+    units: &[lm_compiler::CompiledModule],
+) -> Result<lm_bytecode::artifact::Artifact, String> {
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in units {
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("binds");
     }
-    link("app.main", &env.freeze()).map_err(|e| e.0)
+    env.freeze()
+        .complete_artifact("app.main")
+        .map_err(|error| error.to_string())
+}
+
+fn link_units(
+    units: &[lm_compiler::CompiledModule],
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let artifact = artifact_units(units)?;
+    lm_testkit::publish_artifact(&artifact)
 }
 
 /// Link hand-built units through the untrusted artifact path.
 fn link_untrusted_units(
     units: &[lm_compiler::CompiledModule],
-) -> Result<lm_compiler::LinkedProgram, String> {
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for source in units {
         let mut unit = source.clone();
@@ -244,23 +249,16 @@ fn link_untrusted_units(
                 identity.func_hashes[export.def as usize]
             };
         }
-        env.bind_module(unit.path, unit.module, unit.interface)
-            .expect("the changed unit binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit).expect("the changed unit binds");
     }
-    let env = env.freeze();
-    let root = env.unit("app.main").expect("the root is bound").clone();
-    let embedded = env
-        .paths()
-        .into_iter()
-        .filter(|path| *path != "app.main")
-        .map(|path| env.unit(path).expect("the dependency is bound").clone())
-        .collect();
-    let artifact =
-        lm_bytecode::artifact::Artifact::new(root, embedded).expect("the artifact graph is valid");
-    lm_compiler::link_artifact(artifact, None).map_err(|error| error.0)
+    let artifact = env
+        .freeze()
+        .complete_artifact("app.main")
+        .map_err(|error| error.to_string())?;
+    lm_testkit::publish_artifact(&artifact)
 }
 
-fn link_selective_provider(unused_result: &str) -> lm_compiler::LinkedProgram {
+fn link_selective_provider(unused_result: &str) -> lm_bytecode::artifact::Artifact {
     let provider = compile_one(
         "app.shapes",
         &format!(
@@ -277,7 +275,13 @@ fn link_selective_provider(unused_result: &str) -> lm_compiler::LinkedProgram {
         std::slice::from_ref(&provider.interface),
         true,
     );
-    link_units(&[provider, main]).expect("the selective program links")
+    let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
+    for unit in [provider, main] {
+        lm_testkit::bind_compiled_unit(&mut env, unit).expect("the unit binds");
+    }
+    env.freeze()
+        .artifact("app.main")
+        .expect("the selective artifact builds")
 }
 
 #[test]
@@ -285,12 +289,7 @@ fn link_units_pin_exact_dependency_identities() {
     let units = two_module_program();
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in &units {
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("the unit binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("the unit binds");
     }
     let env = env.freeze();
     let provider = env.unit("app.shapes").expect("the provider is bound");
@@ -310,12 +309,7 @@ fn explicit_link_units_must_pin_the_bound_provider() {
     let units = two_module_program();
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
-    env.bind_module(
-        units[0].path.clone(),
-        units[0].module.clone(),
-        units[0].interface.clone(),
-    )
-    .expect("the provider binds");
+    lm_testkit::bind_compiled_unit(&mut env, units[0].clone()).expect("the provider binds");
     let importer = LinkUnit::new(
         units[1].path.clone(),
         units[1].module.clone(),
@@ -328,7 +322,7 @@ fn explicit_link_units_must_pin_the_bound_provider() {
     )
     .expect("the importer unit is valid");
     let error = env
-        .bind(importer)
+        .bind_unit(importer)
         .expect_err("the wrong identity must reject");
     assert!(
         error.to_string().contains("pins another identity"),
@@ -343,12 +337,7 @@ fn one_link_environment_resolves_fat_artifacts() {
     let units = two_module_program();
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in &units {
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("the unit binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("the unit binds");
     }
     let env = env.freeze();
     let root = env.unit("app.main").expect("the root is bound").clone();
@@ -372,12 +361,7 @@ fn a_thin_artifact_never_uses_an_ambient_non_core_module() {
     let units = two_module_program();
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in &units {
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("the unit binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("the unit binds");
     }
     let env = env.freeze();
     let root = env.unit("app.main").expect("the root is bound").clone();
@@ -395,8 +379,7 @@ fn thin_and_fat_core_resolution_use_one_link_environment() {
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
     let source = compile_one("app.main", "1\n", &[], true);
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
-    env.bind_module(source.path, source.module, source.interface)
-        .expect("the root binds");
+    lm_testkit::bind_compiled_unit(&mut env, source).expect("the root binds");
     let root = env
         .freeze()
         .unit("app.main")
@@ -430,12 +413,7 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
     let units = two_module_program();
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in &units {
-        env.bind_module(
-            unit.path.clone(),
-            unit.module.clone(),
-            unit.interface.clone(),
-        )
-        .expect("the unit binds");
+        lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("the unit binds");
     }
     let env = env.freeze();
     let core = env.unit("core").expect("the core is bound").clone();
@@ -449,20 +427,27 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
     assert!(thin.units().iter().all(|unit| unit.module_path() != "core"));
     assert!(fat.units().iter().any(|unit| unit.module_path() == "core"));
 
-    let thin_linked = lm_compiler::link_artifact(thin, Some(std::sync::Arc::new(core)))
-        .expect("the thin artifact links");
-    let fat_linked = lm_compiler::link_artifact(fat, None).expect("the fat artifact links");
-    assert_eq!(thin_linked.module, fat_linked.module);
-    assert_eq!(thin_linked.artifact_id, fat_linked.artifact_id);
+    let mut thin_arena = lm_link::CodeArena::new();
+    let thin_id = thin_arena
+        .publish(thin, Some(std::sync::Arc::new(core)))
+        .expect("the thin artifact publishes");
+    let mut fat_arena = lm_link::CodeArena::new();
+    let fat_id = fat_arena
+        .publish(fat, None)
+        .expect("the fat artifact publishes");
+    let thin_namespace = thin_arena.namespace(thin_id).expect("the namespace exists");
+    let fat_namespace = fat_arena.namespace(fat_id).expect("the namespace exists");
+    assert_eq!(thin_namespace.artifact_id(), fat_namespace.artifact_id());
+    assert_eq!(thin_namespace.tables(), fat_namespace.tables());
 }
 
 #[test]
 fn collection_keeps_one_import_and_removes_an_unused_cycle() {
     let first = link_selective_provider("0");
     let second = link_selective_provider("1");
-    assert_eq!(first.artifact_id, second.artifact_id);
+    assert_eq!(first.id(), second.id());
 
-    let artifact = lm_bytecode::artifact::decode(&first.artifact).expect("the artifact decodes");
+    let artifact = first;
     assert_eq!(artifact.units().len(), 2);
     let provider = artifact
         .units()
@@ -500,11 +485,9 @@ fn collection_keeps_one_import_and_removes_an_unused_cycle() {
         .iter()
         .any(|dependency| dependency.module_path() == "core"));
 
-    let core = lm_compiler::core_link_unit().expect("the core unit builds");
-    let linked =
-        lm_compiler::link_artifact(artifact, Some(core)).expect("the collected artifact links");
-    let loaded = lm_vm::load(linked.module).expect("the collected program loads");
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the collected artifact publishes");
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(7)");
 }
@@ -536,20 +519,21 @@ fn an_import_declaration_cannot_replace_the_provider_contract() {
         .position(|item| item == &BcType::Int)
         .expect("the program has Int") as u32;
     importer.funcs[imported.def as usize].ret = int_type;
-    let program = link_units(&units).expect("the provider contract links");
-    let loaded = lm_vm::load(program.module).expect("the linked program loads");
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
-    let outcome = vm.run();
-    assert_eq!(vm.show_outcome(&outcome), "Done(\"shape\")");
+    let error = link_units(&units).expect_err("the changed import contract linked");
+    assert!(
+        error.contains("contract") || error.contains("type"),
+        "{error}"
+    );
 }
 
 /// One core provider satisfies every exact core import. The linked
 /// program holds one copy of each core class.
 #[test]
 fn one_core_provider_satisfies_every_module() {
-    let program = link_units(&two_module_program()).expect("links");
-    let mut keys: Vec<&str> = program
-        .module
+    let (arena, namespace) = link_units(&two_module_program()).expect("links");
+    let namespace = arena.namespace(namespace).expect("the namespace exists");
+    let mut keys: Vec<&str> = namespace
+        .tables()
         .classes
         .iter()
         .map(|c| c.key.as_str())
@@ -591,10 +575,11 @@ fn two_equal_shapes_with_two_keys_stay_distinct() {
         id.class_hashes[idx]
     };
     assert_eq!(dot, spot, "the probe needs two structurally equal classes");
-    let program = link_units(&units).expect("links");
+    let (arena, namespace) = link_units(&units).expect("links");
+    let namespace = arena.namespace(namespace).expect("the namespace exists");
     let count = |key: &str| {
-        program
-            .module
+        namespace
+            .tables()
             .classes
             .iter()
             .filter(|c| c.key == key)
@@ -615,14 +600,11 @@ fn a_local_core_declaration_cannot_replace_the_provider() {
         .position(|c| c.key == "core.Option.Some")
         .expect("the core arm declaration exists");
     units[1].module.classes[some].fields[0].0 = "w".to_string();
-    let program = link_units(&units).expect("the exact core provider links");
-    let some = program
-        .module
-        .classes
-        .iter()
-        .find(|class| class.key == "core.Option.Some")
-        .expect("the linked program has Option.Some");
-    assert_ne!(some.fields[0].0, "w");
+    let error = link_units(&units).expect_err("the changed core declaration linked");
+    assert!(
+        error.contains("contract") || error.contains("field"),
+        "{error}"
+    );
 }
 
 /// A method body edit keeps the qualified key and moves the structural
@@ -653,15 +635,6 @@ fn a_method_body_edit_keeps_the_key_and_moves_the_hash() {
 // ---------------------------------------------------------------
 // Section 5: function bindings and function code.
 // ---------------------------------------------------------------
-
-/// The binding key of one function value in a compiled module.
-fn binding_of(module: &Module, key: &str) -> Option<u32> {
-    module
-        .bindings
-        .iter()
-        .find(|b| b.key == key)
-        .map(|b| b.func)
-}
 
 /// Give one class of a compiled module the qualified key of another
 /// provider, as a stale build-cache entry does. The rewrite keeps the
@@ -745,12 +718,8 @@ fn a_class_structural_hash_covers_no_constructor() {
     );
 }
 
-/// Row 2 of the function binding table: two providers of one class key
-/// whose field defaults differ reject.
-///
-/// The two classes share one structural hash, so the class table
-/// merges them. Their constructors carry one binding key and two
-/// structural hashes, and the binding table rejects.
+/// Two units cannot provide one class key, even when their class
+/// contracts have equal hashes.
 #[test]
 fn two_providers_of_one_key_with_two_field_defaults_reject() {
     let units = two_providers_of_one_class_key(
@@ -758,7 +727,7 @@ fn two_providers_of_one_key_with_two_field_defaults_reject() {
         "use shapes\nclass Spot\n  x: Int = 7\nend\n\
          d = shapes.make()\ns = Spot()\nd.x + s.x\n",
     );
-    // The class table alone cannot separate the two providers.
+    // The provider rule does not depend on the structural hash.
     let hash_of = |unit: &lm_compiler::CompiledModule| {
         let id = module_identity(&unit.module).expect("hashes");
         let idx = unit
@@ -774,16 +743,14 @@ fn two_providers_of_one_key_with_two_field_defaults_reject() {
         hash_of(&units[1]),
         "the probe needs one class key with one structural hash"
     );
-    let error = link_units(&units).expect_err("two constructors of one key must reject");
-    assert!(error.contains("app.shapes.Dot.<new>"), "{error}");
-    assert!(error.contains("two implementations"), "{error}");
+    let error = link_units(&units).expect_err("two providers of one key must reject");
+    assert!(error.contains("class `app.shapes.Dot`"), "{error}");
+    assert!(error.contains("is provided by"), "{error}");
     assert!(error.contains("app.shapes"), "{error}");
     assert!(error.contains("app.main"), "{error}");
-    assert!(error.contains("rebuild"), "{error}");
 }
 
-/// Row 2 again, with two `init` bodies. An `init` is not a method, so
-/// it enters no class structural hash either.
+/// The provider rule also applies when two constructor bodies differ.
 #[test]
 fn two_providers_of_one_key_with_two_init_bodies_reject() {
     let units = two_providers_of_one_class_key(
@@ -807,10 +774,9 @@ fn two_providers_of_one_key_with_two_init_bodies_reject() {
         hash_of(&units[1]),
         "the probe needs one class key with one structural hash"
     );
-    let error = link_units(&units).expect_err("two initializers of one key must reject");
-    assert!(error.contains("app.shapes.Dot."), "{error}");
-    assert!(error.contains("two implementations"), "{error}");
-    assert!(error.contains("rebuild"), "{error}");
+    let error = link_units(&units).expect_err("two providers of one key must reject");
+    assert!(error.contains("class `app.shapes.Dot`"), "{error}");
+    assert!(error.contains("is provided by"), "{error}");
 }
 
 /// A constructor binding is derived from the class key, so the linker
@@ -847,27 +813,34 @@ fn two_equal_bodies_keep_two_code_objects_and_two_bindings() {
         std::slice::from_ref(&shapes.interface),
         true,
     );
-    let program = link_units(&[shapes, main]).expect("links");
-    let first = binding_of(&program.module, "app.shapes.bump").expect("the first name survives");
-    let second =
-        binding_of(&program.module, "app.main.increment").expect("the second name survives");
+    let (arena, namespace) = link_units(&[shapes, main]).expect("links");
+    let namespace = arena.namespace(namespace).expect("the namespace exists");
+    let first = namespace
+        .bindings()
+        .iter()
+        .find(|binding| binding.key == "app.shapes.bump")
+        .map(|binding| binding.func)
+        .expect("the first name survives");
+    let second = namespace
+        .bindings()
+        .iter()
+        .find(|binding| binding.key == "app.main.increment")
+        .map(|binding| binding.func)
+        .expect("the second name survives");
     assert_ne!(
         first, second,
         "two units must keep distinct relocated function values"
     );
-    let listing = lm_hir::dump_cfg(&program.module);
-    assert!(listing.contains("binding app.shapes.bump"), "{listing}");
-    assert!(listing.contains("binding app.main.increment"), "{listing}");
 }
 
 /// One binding key with one structural hash is one binding. Core
 /// definitions arrive from one provider.
 #[test]
 fn every_binding_key_appears_once_in_the_merged_program() {
-    let program = link_units(&two_module_program()).expect("links");
-    let mut keys: Vec<&str> = program
-        .module
-        .bindings
+    let (arena, namespace) = link_units(&two_module_program()).expect("links");
+    let namespace = arena.namespace(namespace).expect("the namespace exists");
+    let mut keys: Vec<&str> = namespace
+        .bindings()
         .iter()
         .map(|b| b.key.as_str())
         .collect();
@@ -955,8 +928,10 @@ fn a_binding_key_never_enters_a_structural_hash() {
         "a module that binds other names must hash differently"
     );
     assert_eq!(
-        lm_vm::verified_key(&module),
-        lm_vm::verified_key(&identity_of("def f(n: Int): Int\n  n + 1\nend\nf(1)\n").0),
+        lm_bytecode::identity::verification_hash(&module),
+        lm_bytecode::identity::verification_hash(
+            &identity_of("def f(n: Int): Int\n  n + 1\nend\nf(1)\n").0
+        ),
         "a binding key must not reach the verifier"
     );
 }
@@ -976,7 +951,7 @@ const CYCLE: &str = "def even(n: Int): Bool\n\
 /// members by name is gone.
 #[test]
 fn a_rename_inside_a_cycle_moves_no_hash() {
-    let module = compile_text("t.lm", CYCLE).expect("compiles");
+    let module = compile_module_text("t.lm", CYCLE).expect("compiles");
     let identity = module_identity(&module).expect("hashes");
     for to in ["evenx", "aaa", "zzz"] {
         let mut twin = module.clone();
@@ -1032,8 +1007,8 @@ fn symmetric_members_share_one_structural_hash() {
     // The program still runs: the linker merges the two into one
     // definition, which is what indistinguishable means.
     let bytes = lm_testkit::compile_to_bytes("t.lm", source).expect("compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
-    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
+    let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(0)");
 }
@@ -1333,8 +1308,9 @@ fn a_misaligned_function_marker_vector_rejects_at_the_decoder() {
 /// The same rule holds for the marker vector of a function type.
 #[test]
 fn a_misaligned_type_marker_vector_rejects_at_the_decoder() {
-    let bytes = lm_testkit::compile_to_bytes("t.lm", "f = { |x: Int|: Int x + 1 }\nf(1)\n")
-        .expect("compiles");
+    let module =
+        compile_module_text("t.lm", "f = { |x: Int|: Int x + 1 }\nf(1)\n").expect("compiles");
+    let bytes = lm_bytecode::encode(&module);
     let mut module = lm_bytecode::decode(&bytes).expect("decodes");
     let idx = module
         .types
@@ -1376,20 +1352,23 @@ fn two_marker_shapes_write_two_semantic_regions() {
 // Section 8: slot resolution.
 // ---------------------------------------------------------------
 
-/// Every compiled module declares its core role slots. The table
-/// names imported core classes.
+/// Every published namespace declares its core role slots. Source
+/// modules import only the core classes that they use.
 #[test]
-fn a_compiled_module_declares_every_core_role() {
-    let module = compile_text("t.lm", "x = 1\nx\n").expect("compiles");
+fn a_published_namespace_declares_every_core_role() {
+    let artifact = lm_testkit::compile_text("t.lm", "x = 1\nx\n").expect("compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact(&artifact).expect("the artifact publishes");
+    let code = arena.namespace(namespace).expect("the namespace exists");
     for (role, label) in lm_bytecode::corepin::PINNED_LABELS.iter().enumerate() {
-        let slot = module.core_roles[role];
+        let slot = code.core_roles()[role];
         assert_ne!(
             slot,
             lm_bytecode::NO_ROLE,
-            "the module declares no slot for `{label}`"
+            "the namespace declares no slot for `{label}`"
         );
         assert_eq!(
-            module.classes[slot as usize].key,
+            code.tables().classes[slot as usize].key,
             lm_bytecode::corepin::pinned_key(label),
             "the slot of `{label}` names another class"
         );
@@ -1400,7 +1379,10 @@ fn a_compiled_module_declares_every_core_role() {
 /// points a role at a class with another shape rejects.
 #[test]
 fn a_crafted_core_role_shape_rejects() {
-    let module = compile_text("t.lm", "x = 1\nx\n").expect("compiles");
+    let module = lm_compiler::core_link_unit()
+        .expect("the core unit builds")
+        .module()
+        .clone();
     let some = lm_bytecode::corepin::role_index("Option.Some").expect("the role exists");
     let ok = lm_bytecode::corepin::role_index("Result.Ok").expect("the role exists");
     // `Result.Ok` has the right field but two type parameters and
@@ -1437,7 +1419,7 @@ fn display_name_edits_keep_the_verification_hash() {
     let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
                   self.value = self.value + n\n    self.value\n  end\nend\n\
                   c = Counter()\nc.add(1)\n";
-    let module = compile_text("t.lm", source).expect("compiles");
+    let module = compile_module_text("t.lm", source).expect("compiles");
     let mut twin = module.clone();
     for (idx, class) in twin.classes.iter_mut().enumerate() {
         class.name = format!("c{idx}");
@@ -1450,11 +1432,8 @@ fn display_name_edits_keep_the_verification_hash() {
         lm_bytecode::identity::verification_hash(&twin),
         "a rename moved the verification hash"
     );
-    // Both still load, and both agree with the uncached load.
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_cached(module, &mut cache).expect("loads");
-    lm_vm::load_cached(twin, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1, "the rename cost a verifier run");
+    lm_verify::verify_module(&module).expect("the original verifies");
+    lm_verify::verify_module(&twin).expect("the renamed module verifies");
 }
 
 /// The reserved module path `core` rejects with a clear diagnostic. A
@@ -1506,7 +1485,7 @@ fn measure_load_path() {
     let verify = start.elapsed() / ROUNDS;
     let start = std::time::Instant::now();
     for _ in 0..ROUNDS {
-        lm_vm::load_bytes(&bytes).expect("loads");
+        lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
     }
     let load = start.elapsed() / ROUNDS;
     println!(
@@ -1602,18 +1581,23 @@ fn a_constructor_binding_on_another_function_rejects() {
 /// Two constructor bindings for one class reject.
 #[test]
 fn two_constructor_bindings_for_one_class_reject() {
-    let mut units = dot_providers();
-    let copy = units[1]
+    let mut units = vec![compile_one(
+        "app.main",
+        "class Dot\nend\nDot()\n",
+        &[],
+        true,
+    )];
+    let copy = units[0]
         .module
         .bindings
         .iter()
-        .find(|b| b.key == "app.shapes.Dot.<new>")
+        .find(|b| b.key == "app.main.Dot.<new>")
         .cloned()
         .expect("the constructor binding exists");
-    units[1].module.bindings.push(copy);
+    units[0].module.bindings.push(copy);
     let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
-        error.contains("arrives with two implementations"),
+        error.contains("the binding `app.main.Dot.<new>` appears more than once"),
         "unexpected message: {error}"
     );
 }
@@ -1675,7 +1659,8 @@ fn an_export_and_a_binding_that_disagree_reject() {
 /// decoder. A class index out of range must reject, never panic.
 #[test]
 fn a_binding_class_index_out_of_range_rejects() {
-    let mut module = compile_text("t.lm", "class A\n  x: Int = 0\nend\na = A()\na.x\n").unwrap();
+    let mut module =
+        compile_module_text("t.lm", "class A\n  x: Int = 0\nend\na = A()\na.x\n").unwrap();
     module.bindings.push(lm_bytecode::FuncBinding {
         key: "t.Z.<new>".to_string(),
         func: 0,
@@ -1693,7 +1678,7 @@ fn a_binding_class_index_out_of_range_rejects() {
 /// The decoder checks an impossible binding count before it reserves memory.
 #[test]
 fn an_impossible_binding_count_rejects_before_the_reserve() {
-    let module = compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
+    let module = compile_module_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
     let good = lm_bytecode::encode(&module);
     assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
     let export_at = u32::from_le_bytes(good[46..50].try_into().unwrap()) as usize;
@@ -1798,7 +1783,7 @@ fn a_snapshot_classification_change_moves_the_verification_hash() {
         OP_CLOCK_NOW, OP_COUNT,
     };
     use lm_bytecode::identity::{verification_hash, verification_hash_with};
-    let module = compile_text("t.lm", "x = 1\nx\n").unwrap();
+    let module = compile_module_text("t.lm", "x = 1\nx\n").unwrap();
     let mut flipped = *op(OP_CLOCK_NOW);
     flipped.snapshot = SnapshotClass::HostAttachment;
     let name = op_name(OP_CLOCK_NOW);

@@ -4,10 +4,10 @@
 
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
 use lm_bytecode::{Func, Instr, Module};
-use lm_testkit::{compile_text, compile_to_bytes};
+use lm_testkit::{compile_module_text, compile_to_bytes};
 
 fn identity_of(source: &str) -> (Module, ModuleIdentity) {
-    let module = compile_text("t.lm", source).expect("compiles");
+    let module = compile_module_text("t.lm", source).expect("compiles");
     let identity = module_identity(&module).expect("hashes");
     (module, identity)
 }
@@ -165,8 +165,8 @@ fn scc_members_have_distinct_deterministic_hashes() {
 /// qualified keys keep them apart.
 #[test]
 fn a_referenced_qualified_key_separates_identical_shapes() {
-    let source = "x: Option[Int] = None\nx.is_none()\n";
-    let (module, identity) = identity_of(source);
+    let module = lm_hir::core_image();
+    let identity = module_identity(&module).expect("the core image hashes");
     assert_ne!(
         class_hash(&module, &identity, "StepEvent"),
         class_hash(&module, &identity, "DriveEvent")
@@ -268,8 +268,9 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
 #[test]
 fn the_loaded_module_carries_the_hash_resolved_core_layout() {
     let bytes = compile_to_bytes("t.lm", "xs = [1, 2]\nxs.get(0).is_some()\n").unwrap();
-    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
-    let core = loaded.core_layout();
+    let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
+    let vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
+    let core = vm.core_layout();
     assert!(core.option_some.is_some());
     assert!(core.option_none.is_some());
     assert!(core.result_ok.is_some());
@@ -281,8 +282,10 @@ fn the_loaded_module_carries_the_hash_resolved_core_layout() {
 /// the verifier proves it.
 #[test]
 fn a_corrupted_core_definition_fails_the_role_shape() {
-    let bytes = compile_to_bytes("t.lm", "xs = [1, 2]\nxs.get(0).is_some()\n").unwrap();
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = lm_compiler::core_link_unit()
+        .expect("the core unit builds")
+        .module()
+        .clone();
     // Flip the arm order of the embedded Option family record: swap
     // the field type of Some to String.
     let some = module
@@ -296,7 +299,7 @@ fn a_corrupted_core_definition_fails_the_role_shape() {
         layout.option_some.is_some(),
         "the declared role slot must survive the edit"
     );
-    let error = lm_vm::load(module).expect_err("the corrupted module was admitted");
+    let error = lm_verify::verify_module(&module).expect_err("the corrupted module was admitted");
     assert!(
         error.message.contains("wrong type"),
         "the rejection must name the shape: {error:?}"
@@ -304,75 +307,50 @@ fn a_corrupted_core_definition_fails_the_role_shape() {
 }
 
 // ---------------------------------------------------------------
-// The verified-code cache.
+// Artifact publication.
 // ---------------------------------------------------------------
 
 #[test]
-fn a_second_load_of_the_same_semantic_module_skips_verification() {
-    let bytes = compile_to_bytes("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(41)\n").unwrap();
-    let mut cache = lm_vm::VerifiedCache::new();
-    let loaded = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1);
-    let again = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1, "the second load re-verified");
-    // Both admissions execute.
-    for loaded in [&loaded, &again] {
-        let mut vm = lm_vm::Vm::new(loaded, lm_vm::VmConfig::default());
-        let outcome = vm.run();
-        assert_eq!(vm.show_outcome(&outcome), "Done(42)");
-    }
-    // A different module misses and verifies.
-    let other = compile_to_bytes("t.lm", "def f(n: Int): Int\n  n + 2\nend\nf(40)\n").unwrap();
-    lm_vm::load_bytes_cached(&other, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 2);
+fn publishing_the_same_artifact_reuses_one_namespace() {
+    let artifact =
+        lm_testkit::compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(41)\n").unwrap();
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let mut arena = lm_link::CodeArena::new();
+    let first = arena
+        .publish(artifact.clone(), Some(core.clone()))
+        .expect("the artifact publishes");
+    let second = arena
+        .publish(artifact, Some(core))
+        .expect("the artifact publishes again");
+    assert_eq!(first, second);
+    assert_eq!(arena.namespace_count(), 1);
+    let mut vm = lm_vm::Vm::new(arena, first, lm_vm::VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(42)");
 }
 
-/// Poisoning: the loader recomputes the semantic hash from the
-/// decoded content, so tampered bytes can never ride a cached entry.
-/// The tampered module misses the cache and the verifier rejects it.
 #[test]
-fn tampered_bytes_never_ride_a_cached_admission() {
+fn a_tampered_artifact_unit_never_publishes() {
     let source = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1);
-    // Tamper: retarget a jump in the entry to an invalid block. The
-    // bytes decode, but the semantics differ, so the recomputed hash
-    // misses the cache and the full verifier rejects the module.
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let artifact = lm_testkit::compile_text("t.lm", source).unwrap();
+    let mut module = artifact.root().module().clone();
     let entry = module.entry as usize;
     module.funcs[entry].blocks[0].insert(0, Instr::Jump(9999));
-    let tampered = lm_bytecode::encode(&module);
-    let result = lm_vm::load_bytes_cached(&tampered, &mut cache);
-    assert!(result.is_err(), "tampered bytes were admitted");
-    assert_eq!(cache.verifications, 1, "a rejection never enters the cache");
+    let tampered =
+        lm_testkit::replace_artifact_root(&artifact, module).expect("the damaged artifact builds");
+    assert!(lm_testkit::publish_artifact(&tampered).is_err());
 }
 
-/// Review regression: a dead duplicate pool entry keeps the semantic
-/// hash equal, because the hash covers referenced content only. The
-/// structural pass must still reject the stream on every load; the
-/// cache may skip only the function dataflow.
+/// A duplicate pool entry can keep semantic identity.
+/// The independent verifier still rejects the unit.
 #[test]
-fn hash_equal_noncanonical_bytes_reject_on_a_cache_hit() {
+fn hash_equal_noncanonical_code_rejects() {
     let source = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1);
-    // Append one dead duplicate type entry. The verifier rejects the
-    // table; the semantic hash does not change.
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = compile_module_text("t.lm", source).unwrap();
+    let before = module_identity(&module).unwrap().semantic_hash;
     module.types.push(lm_bytecode::BcType::Int);
-    let bad = lm_bytecode::encode(&module);
-    let plain = lm_vm::load_bytes(&bad);
-    assert!(plain.is_err(), "the uncached load accepted the table");
-    let cached = lm_vm::load_bytes_cached(&bad, &mut cache);
-    assert!(cached.is_err(), "the cached load bypassed the verifier");
-    assert_eq!(cache.verifications, 1);
-    // The valid bytes still hit the cache afterward.
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1);
+    assert_eq!(module_identity(&module).unwrap().semantic_hash, before);
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 /// Review regression: a duplicate selector name keeps the semantic
@@ -382,18 +360,11 @@ fn hash_equal_noncanonical_bytes_reject_on_a_cache_hit() {
 /// pass must reject the duplicate, or a cache hit admits a module that
 /// faults the dispatch table.
 #[test]
-fn a_duplicate_selector_name_rejects_on_a_cache_hit() {
+fn a_duplicate_selector_name_rejects() {
     let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
                   self.value = self.value + n\n    self.value\n  end\nend\n\
                   c = Counter()\nc.add(1)\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!(cache.verifications, 1);
-
-    // Append a copy of the selector a call already uses, then point
-    // that call at the copy.
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = compile_module_text("t.lm", source).unwrap();
     let before = module_identity(&module).unwrap().semantic_hash;
     let used = module
         .funcs
@@ -423,16 +394,7 @@ fn a_duplicate_selector_name_rejects_on_a_cache_hit() {
     let after = module_identity(&module).unwrap().semantic_hash;
     assert_eq!(after, before, "the duplicate name must keep the hash");
 
-    let bad = lm_bytecode::encode(&module);
-    assert!(
-        lm_vm::load_bytes(&bad).is_err(),
-        "the uncached load accepted the table"
-    );
-    assert!(
-        lm_vm::load_bytes_cached(&bad, &mut cache).is_err(),
-        "the cached load bypassed the verifier"
-    );
-    assert_eq!(cache.verifications, 1, "a rejection never enters the cache");
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 /// Review regression: the loader computes the identity of untrusted
@@ -442,7 +404,7 @@ fn a_duplicate_selector_name_rejects_on_a_cache_hit() {
 #[test]
 fn a_self_referential_closure_hashes_without_a_panic() {
     let source = "f = { |x: Int|: Int x + 1 }\nf(1)\n";
-    let mut module = compile_text("t.lm", source).unwrap();
+    let mut module = compile_module_text("t.lm", source).unwrap();
     let target = module
         .funcs
         .iter()
@@ -464,201 +426,7 @@ fn a_self_referential_closure_hashes_without_a_panic() {
     let first = module_identity(&module).expect("hashes").semantic_hash;
     let second = module_identity(&module).expect("hashes").semantic_hash;
     assert_eq!(first, second, "the cycle marker must be deterministic");
-    // The same bytes reach the loader, which must reject and not panic.
-    let bytes = lm_bytecode::encode(&module);
-    assert!(
-        lm_vm::load_bytes(&bytes).is_err(),
-        "the loader admitted a hand-built closure cycle"
-    );
-}
-
-/// The cache invariant: for one byte stream, a cached load and an
-/// uncached load must always agree on admission. This sweeps the four
-/// tables whose index the canonical encoding replaces with content.
-/// Each case copies the entry an instruction already names, then
-/// points that instruction at the copy.
-///
-/// The `stable` flag records whether the mutation keeps the module
-/// semantic hash. Four cases keep it, because the canonical encoding
-/// replaces the mutated index with content. The class twin no longer
-/// keeps it: compiler ABI version 2 makes class identity nominal, so
-/// `A` and `B` are different definitions and `New A` retargeted to
-/// `B` moves the module hash. The admission invariant is the durable
-/// part and holds in both directions.
-#[test]
-fn a_cached_load_and_an_uncached_load_always_agree() {
-    let class_src = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
-                     self.value = self.value + n\n    self.value\n  end\n  \
-                     def get(self): Int\n    self.value\n  end\nend\n\
-                     c = Counter()\nc.add(1)\nc.get()\n";
-    let str_src = "def label(n: Int): String\n  if n < 0\n    label(n)\n  else\n    \"hello\"\n  end\nend\nlabel(0)\n";
-    let gen_src = "def id[T](x: T): T\n  x\nend\nid[Int](1)\n";
-    let twin_src =
-        "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\nb = B()\na.x + b.x\n";
-
-    // (label, source, mutation, stable). Each mutation returns true
-    // when it applied. `stable` states whether the module semantic
-    // hash must survive the mutation.
-    type Mutation = fn(&mut Module) -> bool;
-    let cases: [(&str, &str, Mutation, bool); 7] = [
-        (
-            "selector",
-            class_src,
-            |m: &mut Module| {
-                let Some(used) = used_selector(m) else {
-                    return false;
-                };
-                let copy = m.selectors.len() as u32;
-                m.selectors.push(m.selectors[used as usize].clone());
-                point_selector(m, used, copy)
-            },
-            true,
-        ),
-        (
-            "string",
-            str_src,
-            |m: &mut Module| {
-                let Some(used) = used_string(m) else {
-                    return false;
-                };
-                let copy = m.strings.len() as u32;
-                m.strings.push(m.strings[used as usize].clone());
-                point_string(m, used, copy)
-            },
-            true,
-        ),
-        (
-            "application",
-            gen_src,
-            |m: &mut Module| {
-                let Some(used) = used_app(m) else {
-                    return false;
-                };
-                let copy = m.apps.len() as u32;
-                m.apps.push(m.apps[used as usize].clone());
-                point_app(m, used, copy)
-            },
-            true,
-        ),
-        (
-            "dead type",
-            class_src,
-            |m: &mut Module| {
-                m.types.push(lm_bytecode::BcType::Int);
-                true
-            },
-            true,
-        ),
-        // Two classes with identical structure kept one definition
-        // hash before compiler ABI version 2. Class identity is now
-        // nominal, so retargeting `New` between them moves the module
-        // hash. Only the dataflow pass sees the class index, so the
-        // admission verdict must still agree.
-        (
-            "class twin",
-            twin_src,
-            |m: &mut Module| {
-                let a = m.classes.iter().position(|c| c.name == "A").unwrap() as u32;
-                let b = m.classes.iter().position(|c| c.name == "B").unwrap() as u32;
-                point_new(m, a, b)
-            },
-            false,
-        ),
-        // Week 6: an import slot turns a definition into a
-        // declaration. The slot is inside the semantic region, so the
-        // module hash and the verification hash both move, and the
-        // loader rejects the module for its unresolved slot.
-        (
-            "import slot",
-            str_src,
-            |m: &mut Module| {
-                let target = m.funcs.iter().position(|f| f.name == "label").unwrap() as u32;
-                m.imports.push(lm_bytecode::Import {
-                    module: "other".to_string(),
-                    name: "label".to_string(),
-                    kind: lm_bytecode::ImportKind::Func,
-                    def: target,
-                    hash: [3u8; 32],
-                });
-                true
-            },
-            false,
-        ),
-        // A moved pin is a different import requirement, so the hash
-        // moves with it.
-        (
-            "moved pin",
-            str_src,
-            |m: &mut Module| {
-                let target = m.funcs.iter().position(|f| f.name == "label").unwrap() as u32;
-                m.funcs[target as usize].blocks.clear();
-                m.funcs[target as usize].local_types = m.funcs[target as usize].params.clone();
-                m.imports.push(lm_bytecode::Import {
-                    module: "other".to_string(),
-                    name: "label".to_string(),
-                    kind: lm_bytecode::ImportKind::Func,
-                    def: target,
-                    hash: [9u8; 32],
-                });
-                true
-            },
-            false,
-        ),
-    ];
-
-    for (label, source, mutate, stable) in cases {
-        let bytes = compile_to_bytes("t.lm", source).unwrap();
-        let mut cache = lm_vm::VerifiedCache::new();
-        lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-
-        let mut module = lm_bytecode::decode(&bytes).unwrap();
-        let before = module_identity(&module).unwrap().semantic_hash;
-        assert!(mutate(&mut module), "{label}: the mutation did not apply");
-        let after = module_identity(&module).unwrap().semantic_hash;
-        assert_eq!(
-            after == before,
-            stable,
-            "{label}: the module hash did not follow the recorded rule"
-        );
-
-        let bad = lm_bytecode::encode(&module);
-        let plain = lm_vm::load_bytes(&bad).is_ok();
-        let cached = lm_vm::load_bytes_cached(&bad, &mut cache).is_ok();
-        assert_eq!(plain, cached, "{label}: the cache changed the verdict");
-    }
-}
-
-fn used_selector(m: &Module) -> Option<u32> {
-    m.funcs
-        .iter()
-        .flat_map(|f| f.blocks.iter())
-        .flatten()
-        .find_map(|i| match i {
-            Instr::CallVirtual { selector, .. } => Some(*selector),
-            _ => None,
-        })
-}
-
-fn used_string(m: &Module) -> Option<u32> {
-    m.funcs
-        .iter()
-        .flat_map(|f| f.blocks.iter())
-        .flatten()
-        .find_map(|i| match i {
-            Instr::ConstStr(idx) => Some(*idx),
-            _ => None,
-        })
-}
-
-fn used_app(m: &Module) -> Option<u32> {
-    m.funcs
-        .iter()
-        .flat_map(|f| f.blocks.iter())
-        .flatten()
-        .find_map(|i| match i {
-            Instr::CallG { app, .. } => Some(*app),
-            _ => None,
-        })
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 fn point_selector(m: &mut Module, from: u32, to: u32) -> bool {
@@ -668,36 +436,6 @@ fn point_selector(m: &mut Module, from: u32, to: u32) -> bool {
             if let Instr::CallVirtual { selector, .. } = instr {
                 if *selector == from {
                     *selector = to;
-                    done = true;
-                }
-            }
-        }
-    }
-    done
-}
-
-fn point_string(m: &mut Module, from: u32, to: u32) -> bool {
-    let mut done = false;
-    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
-        for instr in block {
-            if let Instr::ConstStr(idx) = instr {
-                if *idx == from {
-                    *idx = to;
-                    done = true;
-                }
-            }
-        }
-    }
-    done
-}
-
-fn point_app(m: &mut Module, from: u32, to: u32) -> bool {
-    let mut done = false;
-    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
-        for instr in block {
-            if let Instr::CallG { app, .. } = instr {
-                if *app == from {
-                    *app = to;
                     done = true;
                 }
             }
@@ -721,22 +459,18 @@ fn point_new(m: &mut Module, from: u32, to: u32) -> bool {
     done
 }
 
-/// Review regression: two classes with one qualified key and one
-/// shape share a structural hash. The cache key must not rest on the
-/// semantic hash, or retargeting `New` between them rides a hit. This
-/// case survives every identity change, so the cache key is the
-/// load-bearing fix, not the hash domain.
+/// Two classes with one key can keep one semantic hash after retargeting.
+/// The verifier still rejects the invalid call shape.
 #[test]
-fn a_duplicate_class_key_cannot_use_a_cache_hit() {
+fn a_duplicate_class_key_cannot_bypass_verification() {
     let source =
         "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\nb = B()\na.x + b.x\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let mut module = compile_module_text("t.lm", source).unwrap();
     let a = module.classes.iter().position(|c| c.name == "A").unwrap() as u32;
     let b = module.classes.iter().position(|c| c.name == "B").unwrap() as u32;
 
-    // The baseline: two classes with one name and one key. This
-    // module is valid.
+    // Give two classes one name and one key. The verifier rejects
+    // the duplicate binding before any execution.
     module.classes[b as usize].name = "A".to_string();
     module.classes[b as usize].key = module.classes[a as usize].key.clone();
     for binding in &mut module.bindings {
@@ -744,9 +478,7 @@ fn a_duplicate_class_key_cannot_use_a_cache_hit() {
             binding.key = lm_bytecode::ctor_binding_key(&module.classes[b as usize].key);
         }
     }
-    let baseline = lm_bytecode::encode(&module);
-    let mut cache = lm_vm::VerifiedCache::new();
-    lm_vm::load_bytes_cached(&baseline, &mut cache).expect("loads");
+    lm_verify::verify_module(&module).expect_err("the duplicate binding rejects");
     let before = module_identity(&module).unwrap().semantic_hash;
 
     // Retarget `New A` to the second class named `A`.
@@ -754,11 +486,7 @@ fn a_duplicate_class_key_cannot_use_a_cache_hit() {
     let after = module_identity(&module).unwrap().semantic_hash;
     assert_eq!(after, before, "the retarget must keep the semantic hash");
 
-    let bad = lm_bytecode::encode(&module);
-    let plain = lm_vm::load_bytes(&bad).is_ok();
-    let cached = lm_vm::load_bytes_cached(&bad, &mut cache).is_ok();
-    assert!(!plain, "the uncached load accepted the retarget");
-    assert_eq!(plain, cached, "the cache changed the verdict");
+    assert!(lm_verify::verify_module(&module).is_err());
 }
 
 /// The verification hash answers a different question from the
@@ -771,8 +499,7 @@ fn the_verification_hash_keeps_every_index() {
     let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
                   self.value = self.value + n\n    self.value\n  end\nend\n\
                   c = Counter()\nc.add(1)\n";
-    let bytes = compile_to_bytes("t.lm", source).unwrap();
-    let module = lm_bytecode::decode(&bytes).unwrap();
+    let module = compile_module_text("t.lm", source).unwrap();
     let base = verification_hash(&module);
     assert_eq!(base, verification_hash(&module), "not deterministic");
 
@@ -815,8 +542,8 @@ fn a_published_rename_moves_the_verification_hash() {
                   def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    helper(n) + 1\n  end\nend\ncaller(3)\n";
     let after = "def assist(n: Int): Int\n  if n < 0\n    assist(n)\n  else\n    n * 2\n  end\nend\n\
                  def caller(n: Int): Int\n  if n < 0\n    caller(n)\n  else\n    assist(n) + 1\n  end\nend\ncaller(3)\n";
-    let ma = compile_text("t.lm", before).unwrap();
-    let mb = compile_text("t.lm", after).unwrap();
+    let ma = compile_module_text("t.lm", before).unwrap();
+    let mb = compile_module_text("t.lm", after).unwrap();
     assert_ne!(
         module_identity(&ma).unwrap().semantic_hash,
         module_identity(&mb).unwrap().semantic_hash,

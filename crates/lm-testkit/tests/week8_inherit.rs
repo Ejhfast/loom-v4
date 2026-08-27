@@ -4,7 +4,7 @@
 //! The proc classes need that path, so these cases prove it on an
 //! ordinary core class first.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
 fn run(source: &str) -> String {
@@ -66,7 +66,7 @@ fn a_subclass_adds_fields_after_the_core_layout() {
 /// always precedes its subclass in the verified class table.
 #[test]
 fn the_core_classes_precede_every_module_class() {
-    let module = compile_text(
+    let module = compile_module_text(
         "inherit.lm",
         "class Window < Range\n\
          \x20 def init(mut self)\n\
@@ -287,7 +287,7 @@ fn a_generic_parent_default_that_names_a_parameter_rejects() {
 /// reads them from the class table and no call site can forge them.
 #[test]
 fn the_class_entry_records_the_parent_type_arguments() {
-    let module = compile_text(
+    let module = compile_module_text(
         "inherit.lm",
         "class Cell[T]\n\
          \x20 def get(self): T\n\
@@ -317,7 +317,7 @@ fn the_class_entry_records_the_parent_type_arguments() {
 /// records, so the new byte format has a readable dump.
 #[test]
 fn the_class_listing_shows_the_parent_type_arguments() {
-    let module = compile_text(
+    let module = compile_module_text(
         "inherit.lm",
         "class Cell[T]\n\
          \x20 def get(self): T\n\

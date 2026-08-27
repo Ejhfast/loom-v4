@@ -7,22 +7,24 @@
 //! proves that the loader either rejects the result or reads a
 //! different but still canonical image. No input panics.
 
-use lm_testkit::{compile_to_bytes, repo_root};
+use lm_bytecode::artifact::Artifact;
+use lm_testkit::{compile_text, load_snapshot_for_artifact, publish_artifact, repo_root};
 use lm_vm::snapshot::{codec, ImageReason, LoadLimits};
-use lm_vm::{load_bytes, LoadedModule, RecordingHost, VmConfig, World};
+use lm_vm::{RecordingHost, VmConfig, World};
 
-fn program(source: &str) -> LoadedModule {
-    let bytes = compile_to_bytes("image.lm", source).expect("the program compiles");
-    load_bytes(&bytes).expect("the program loads")
+fn program(source: &str) -> Artifact {
+    compile_text("image.lm", source).expect("the program compiles")
 }
 
-fn asked_tree() -> (LoadedModule, Vec<u8>) {
+fn asked_tree() -> (Artifact, Vec<u8>) {
     let source = std::fs::read_to_string(repo_root().join("checkpoints/asked-tree.lm"))
         .expect("the checkpoint source reads");
     let loaded = program(&source);
     let bytes = {
+        let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -57,8 +59,8 @@ fn reseal(mut bytes: Vec<u8>) -> Vec<u8> {
 
 /// The rule one container breaks. The call runs decoding and
 /// admission, so a case states one rule whichever stage owns it.
-fn reject(loaded: &LoadedModule, bytes: &[u8]) -> ImageReason {
-    codec::load_external(bytes, loaded, LoadLimits::default())
+fn reject(loaded: &Artifact, bytes: &[u8]) -> ImageReason {
+    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
         .expect_err("the container must reject")
         .reason
 }
@@ -69,14 +71,14 @@ fn reject(loaded: &LoadedModule, bytes: &[u8]) -> ImageReason {
 /// fact, so a container that carries one admits. The interpreter tests
 /// the tag at each accessor, and the world checks each VM boundary, so
 /// the wrong type stops one machine at its first read.
-fn admits(loaded: &LoadedModule, bytes: &[u8]) {
-    codec::load_external(bytes, loaded, LoadLimits::default())
+fn admits(loaded: &Artifact, bytes: &[u8]) {
+    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
         .expect("the container admits, because admission proves structure alone");
 }
 
 /// The editable image of one container that decodes and admits.
-fn accept(loaded: &LoadedModule, bytes: &[u8]) -> lm_vm::snapshot::Image {
-    codec::load_external(bytes, loaded, LoadLimits::default())
+fn accept(loaded: &Artifact, bytes: &[u8]) -> lm_vm::snapshot::Image {
+    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
         .expect("the container loads")
         .into_image()
 }
@@ -100,6 +102,21 @@ fn after_leb(bytes: &[u8], mut at: usize) -> usize {
         if byte & 0x80 == 0 {
             return at;
         }
+    }
+}
+
+/// Read one LEB128 integer and return its end offset.
+fn read_leb(bytes: &[u8], mut at: usize) -> (u64, usize) {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = bytes[at];
+        at += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return (value, at);
+        }
+        shift += 7;
     }
 }
 
@@ -230,11 +247,11 @@ fn the_header_rules_reject_precisely() {
     let mut bad = bytes.clone();
     bad[distinguished] = 2;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Layout);
-    // The module semantic hash names this program.
+    // The result type must match the selected run.
     let mut bad = bytes.clone();
-    let module_hash = after_leb(&bytes, full_vm);
-    bad[module_hash] ^= 1;
-    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
+    let result_type = after_leb(&bytes, full_vm);
+    bad[result_type] ^= 1;
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::State);
 }
 
 #[test]
@@ -259,7 +276,7 @@ fn one_decode_budget_covers_all_container_allocations() {
         max_alloc_bytes: copy_limit,
         ..limits
     };
-    let error = codec::load_external(&bytes, &loaded, limits)
+    let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
         .expect_err("the container copy also charges the budget");
     assert_eq!(error.reason, ImageReason::LimitExceeded);
 }
@@ -268,20 +285,27 @@ fn one_decode_budget_covers_all_container_allocations() {
 fn the_code_manifest_rules_reject_precisely() {
     let (loaded, bytes) = asked_tree();
     let code = section_offset(&bytes, 1);
-    let first_func = after_leb(&bytes, code);
-    let first_hash = after_leb(&bytes, first_func);
-    // A damaged definition hash rejects: the slot exists, and its
-    // recorded identity does not match the program.
+    let (artifact_count, mut at) = read_leb(&bytes, code);
+    assert!(artifact_count > 0);
+    let (_, first_artifact) = read_leb(&bytes, at);
+    // A damaged artifact rejects before it can publish.
     let mut bad = bytes.clone();
-    bad[first_hash] ^= 1;
+    bad[first_artifact] ^= 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
-    // A function slot the program has not.
-    let first_func_end = after_leb(&bytes, first_func);
-    let unknown = encode_leb(loaded.module().funcs.len() as u64);
-    assert_eq!(unknown.len(), first_func_end - first_func);
+
+    for _ in 0..artifact_count {
+        let (length, payload) = read_leb(&bytes, at);
+        at = payload + length as usize;
+    }
+    let (namespace_count, namespace) = read_leb(&bytes, at);
+    assert!(namespace_count > 0);
+    let (_, first_ordinal) = read_leb(&bytes, namespace);
+    let ordinal_end = after_leb(&bytes, first_ordinal);
+    let unknown = encode_leb(artifact_count);
+    assert_eq!(unknown.len(), ordinal_end - first_ordinal);
     let mut bad = bytes.clone();
-    bad[first_func..first_func_end].copy_from_slice(&unknown);
-    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
+    bad[first_ordinal..ordinal_end].copy_from_slice(&unknown);
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Reference);
 }
 
 // ---------------------------------------------------------------
@@ -497,8 +521,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -617,8 +643,10 @@ go()
     std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(move || {
+            let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
             let mut world = World::new(
-                &loaded,
+                arena,
+                namespace,
                 VmConfig::default(),
                 Box::new(RecordingHost::new(1)),
             );
@@ -628,9 +656,9 @@ go()
                 .last_snapshot()
                 .expect("the program captured a world")
                 .clone();
-            let admitted = codec::load_external(
-                image.bytes().expect("the image encodes"),
+            let admitted = load_snapshot_for_artifact(
                 &loaded,
+                image.bytes().expect("the image encodes"),
                 LoadLimits::default(),
             )
             .expect("the container loads and admits");
@@ -704,8 +732,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -760,8 +790,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -839,8 +871,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -901,8 +935,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -980,8 +1016,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1112,8 +1150,10 @@ end
 go()
 ";
     let loaded = program(source);
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );

@@ -3,10 +3,10 @@
 //! table edits, and the `Unreachable` terminator.
 
 use lm_bytecode::{BcRow, BcType, ExtendedInstr, Instr, Module, SlotContract, SlotTarget};
-use lm_testkit::compile_text;
+use lm_testkit::compile_module_text;
 
 fn compile(source: &str) -> Module {
-    compile_text("t.lm", source).expect("the seed program compiles")
+    compile_module_text("t.lm", source).expect("the seed program compiles")
 }
 
 fn assert_rejected(module: &Module, needle: &str) {

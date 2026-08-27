@@ -2,7 +2,8 @@
 
 use lm_proc::{Scheduler, SchedulerStats};
 use lm_testkit::compile_to_bytes;
-use lm_vm::{load_bytes, RecordingHost, TraceEvent, VmConfig, World, WorldLimits};
+use lm_testkit::publish_artifact_bytes;
+use lm_vm::{RecordingHost, TraceEvent, VmConfig, World, WorldLimits};
 
 fn run_parallel_with(
     source: &str,
@@ -10,9 +11,10 @@ fn run_parallel_with(
     grants: &[&str],
 ) -> Result<(String, SchedulerStats), String> {
     let bytes = compile_to_bytes("parallel.lm", source)?;
-    let loaded = load_bytes(&bytes).map_err(|error| error.to_string())?;
+    let (arena, namespace) = publish_artifact_bytes(&bytes).map_err(|error| error.to_string())?;
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -35,16 +37,18 @@ fn compare_modes(
     grants: &[&str],
 ) -> Result<(String, String, SchedulerStats), String> {
     let bytes = compile_to_bytes("parallel-compare.lm", source)?;
-    let loaded = load_bytes(&bytes).map_err(|error| error.to_string())?;
-    let make_world = || {
-        World::new(
-            &loaded,
+    let make_world = || -> Result<World, String> {
+        let (arena, namespace) =
+            publish_artifact_bytes(&bytes).map_err(|error| error.to_string())?;
+        Ok(World::new(
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
-        )
+        ))
     };
-    let mut deterministic = make_world();
-    let mut parallel = make_world();
+    let mut deterministic = make_world()?;
+    let mut parallel = make_world()?;
     for grant in grants {
         deterministic.allow(grant)?;
         parallel.allow(grant)?;
@@ -279,9 +283,10 @@ exercise()
 
     let bytes =
         compile_to_bytes("branch-without-snapshot.lm", source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -610,13 +615,14 @@ spinner = Spinner.spawn()
 (parent.done(), spinner.done())
 "#;
     let bytes = compile_to_bytes("parallel-spawn.lm", source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let limits = WorldLimits {
         max_machines: 4,
         ..WorldLimits::default()
     };
     let mut world = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(RecordingHost::new(1)),
@@ -625,8 +631,10 @@ spinner = Spinner.spawn()
     let expected = lm_proc::run_world(&mut world);
     assert_eq!(world.show_outcome(&expected), "Done((Ok(14), Ok(300000)))");
 
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact reloads");
     let mut world = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(RecordingHost::new(1)),
@@ -812,13 +820,14 @@ right = Spinner.spawn()
 (left.done(), right.done())
 "#;
     let bytes = compile_to_bytes("parallel-fuel.lm", source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let limits = WorldLimits {
         fuel: 10_000,
         ..WorldLimits::default()
     };
     let mut world = World::new_with_limits(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         limits,
         Box::new(RecordingHost::new(1)),
@@ -1043,9 +1052,10 @@ closer.done()
 target.done()
 "#;
     let bytes = compile_to_bytes("parallel-race.lm", source).expect("the race source compiles");
-    let loaded = load_bytes(&bytes).expect("the race artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the race artifact loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1092,11 +1102,12 @@ quick.done()
 0
 "#;
     let bytes = compile_to_bytes("parallel-stop.lm", source).expect("the stop source compiles");
-    let loaded = load_bytes(&bytes).expect("the stop artifact loads");
     let mut saw_two_leases = false;
     for _ in 0..16 {
+        let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact publishes");
         let mut world = World::new(
-            &loaded,
+            arena,
+            namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),
         );
@@ -1140,9 +1151,10 @@ timer = Timer.spawn()
 (spinner.done(), timer.done())
 "#;
     let bytes = compile_to_bytes("parallel-wake.lm", source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(lm_host::CliHost::new(1)),
     );
@@ -1286,10 +1298,10 @@ in Err(_) then (false, -1, busy.done().value_or(-1))
 end
 "#;
     let bytes = compile_to_bytes("parallel-snapshot-wait.lm", source).expect("the source compiles");
-    let loaded = load_bytes(&bytes).expect("the artifact loads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let mut host = RecordingHost::new(1);
     host.set_file("message.txt", b"transient".to_vec());
-    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in ["Proc", "Vm", "Fs"] {
         world.allow(grant).expect("the grant exists");
     }

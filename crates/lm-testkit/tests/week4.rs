@@ -2,11 +2,11 @@
 //! VM driving modes.
 
 use lm_proc::{Scheduler, SchedulerMode};
-use lm_testkit::{compile_text, compile_to_bytes, run_allowed, run_text, run_world};
+use lm_testkit::{compile_module_text, compile_to_bytes, run_allowed, run_text, run_world};
 use lm_vm::{RecordingHost, VmConfig, World};
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = compile_module_text("t.lm", source).unwrap_err();
     rendered[6..11].to_string()
 }
 
@@ -42,8 +42,8 @@ fn direct_performs_charge_the_exact_operation() {
     // Perform without the row.
     assert_eq!(code_of("def f()\n  print(\"x\")\nend\n1\n"), "E1046");
     // The exact row admits the perform; the group admits it too.
-    assert!(compile_text("t.lm", "def f() with Io.Write\n  print(\"x\")\nend\n1\n").is_ok());
-    assert!(compile_text("t.lm", "def f() with Io\n  print(\"x\")\nend\n1\n").is_ok());
+    assert!(compile_module_text("t.lm", "def f() with Io.Write\n  print(\"x\")\nend\n1\n").is_ok());
+    assert!(compile_module_text("t.lm", "def f() with Io\n  print(\"x\")\nend\n1\n").is_ok());
     // A sibling exact operation does not admit it.
     assert_eq!(
         code_of("def f() with Io.WriteError\n  print(\"x\")\nend\n1\n"),
@@ -73,7 +73,7 @@ fn first_class_operation_values_carry_their_identity() {
         code_of("def f()\n  p = sys.io.write\n  p(b\"x\")\nend\n1\n"),
         "E1046"
     );
-    assert!(compile_text(
+    assert!(compile_module_text(
         "t.lm",
         "def f() with Io.Write\n  p = sys.io.write\n  p(b\"x\")\nend\n1\n"
     )
@@ -132,7 +132,7 @@ fn table_pass_charges_the_granter_row() {
         "E1046"
     );
     // Passing the exact operation under the exact row compiles.
-    assert!(compile_text(
+    assert!(compile_module_text(
         "t.lm",
         "def f(vm: Run[Int]) with Vm, Io.Write\n  vm.table().pass(Io.Write)\nend\n1\n"
     )
@@ -143,7 +143,7 @@ fn table_pass_charges_the_granter_row() {
         "E1046"
     );
     // block and mock charge nothing.
-    assert!(compile_text(
+    assert!(compile_module_text(
         "t.lm",
         "def f(vm: Run[Int]) with Vm\n  vm.table().block(Io)\n  \
          vm.table().mock(Clock.Now, { ||: Int 1 })\n  vm.table().clear(Io)\nend\n1\n"
@@ -506,9 +506,11 @@ fn a_denied_fault_stops_a_request_with_no_error_reply() {
 #[test]
 fn a_denied_fault_carries_its_reason_and_operation() {
     let bytes = compile_to_bytes("t.lm", DENY_CLOCK).expect("the program compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the program verifies");
     let mut world = World::new(
-        &loaded,
+        arena,
+        namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
     );
@@ -1129,12 +1131,14 @@ fn nested_towers_stay_off_the_rust_stack() {
         case vm.run()\n    in Ok(v) then v\n    in Err(_) then -1\n    end\n  \
         end\nend\ntower(60) + 1\n";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
-    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the program verifies");
     let out = std::thread::Builder::new()
         .stack_size(512 * 1024)
         .spawn(move || {
             let mut world = World::new(
-                &loaded,
+                arena,
+                namespace,
                 VmConfig::default(),
                 Box::new(RecordingHost::new(1)),
             );
@@ -1160,10 +1164,15 @@ fn read_line_reply_uses_the_pinned_core_result() {
     let (out, _) = {
         // A fresh world with one queued line.
         let bytes = lm_testkit::compile_to_bytes("t.lm", source).unwrap();
-        let loaded = lm_vm::load_bytes(&bytes).unwrap();
+        let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
         let host = std::rc::Rc::new(std::cell::RefCell::new(lm_vm::RecordingHost::new(1)));
         host.borrow_mut().input_bytes.extend_from_slice(b"hello\n");
-        let mut world = lm_vm::World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
+        let mut world = lm_vm::World::new(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(host.clone()),
+        );
         world.allow("Io.ReadBytes").unwrap();
         let outcome = world.run_root();
         (world.show_outcome(&outcome), host)
@@ -1252,8 +1261,8 @@ fn week4_examples_compile_twice_to_identical_bytes() {
         "examples/04-effects/effect-polymorphism.lm",
     ] {
         let source = std::fs::read_to_string(lm_testkit::repo_root().join(example)).unwrap();
-        let a = lm_bytecode::encode(&compile_text(example, &source).unwrap());
-        let b = lm_bytecode::encode(&compile_text(example, &source).unwrap());
+        let a = lm_bytecode::encode(&compile_module_text(example, &source).unwrap());
+        let b = lm_bytecode::encode(&compile_module_text(example, &source).unwrap());
         assert_eq!(a, b, "bytecode bytes differ for {example}");
     }
 }

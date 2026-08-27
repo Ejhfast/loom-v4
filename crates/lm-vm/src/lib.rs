@@ -54,10 +54,10 @@ pub use lm_heap::{
     dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc, SharedBytes, SharedText,
 };
 
-use lm_bytecode::{DecodeError, Module};
+use lm_bytecode::CodeTables;
+pub use lm_link::{CodeArena, CodeNamespace, NamespaceId};
 use lm_value::Value;
 pub use lm_verify::VerifyError;
-use std::fmt;
 
 /// A terminal execution result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,22 +174,6 @@ impl Default for WorldLimits {
     }
 }
 
-/// A load failure: a structural decode error or a verifier rejection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoadError {
-    Decode(DecodeError),
-    Verify(VerifyError),
-}
-
-impl fmt::Display for LoadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LoadError::Decode(e) => write!(f, "decode error: {e}"),
-            LoadError::Verify(e) => write!(f, "verify error: {e}"),
-        }
-    }
-}
-
 /// The sentinel for an empty dispatch-table entry.
 const NO_METHOD: u32 = u32::MAX;
 
@@ -250,28 +234,22 @@ impl DispatchRow {
     }
 }
 
-/// A module that passed the independent verifier, plus the resolved
-/// dispatch tables.
+/// Runtime indexes for one verified `CodeNamespace`.
 ///
-/// Construction through `load` is the only path, so every executed
-/// function has passed verification. The dispatch table maps
-/// `(class slot, selector slot)` to a function index with indexed
-/// loads and no name lookup.
+/// The dispatch table maps one class and selector to one function.
 #[derive(Debug, Clone)]
-pub struct LoadedModule {
-    module: std::sync::Arc<Module>,
+pub(crate) struct NamespaceRuntime {
+    code: std::sync::Arc<lm_link::CodeNamespace>,
+    tables: std::sync::Arc<CodeTables>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
     dispatch: std::sync::Arc<[DispatchRow]>,
     /// Functions that verified code can construct as closures.
     closure_bodies: std::sync::Arc<std::sync::OnceLock<Vec<bool>>>,
     core: lm_bytecode::corepin::CoreLayout,
-    /// The verifier input hash.
-    ///
-    /// The hash covers the operation manifest and every semantic
-    /// table of the module, so one pass reads the whole program.
-    /// Snapshot capture and restore both read the hash, and a search
-    /// restores many worlds. Loading computes it once.
-    verification: [u8; 32],
+    pub(crate) core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
+    pub(crate) entry: u32,
+    pub(crate) bindings: Vec<lm_bytecode::FuncBinding>,
+    pub(crate) slot_initials: Vec<Option<lm_bytecode::SlotTarget>>,
     /// The definition hash of every class and function.
     ///
     /// The canonical digest names code and classes by verified
@@ -280,13 +258,60 @@ pub struct LoadedModule {
     /// the first digest of the process.
     identity:
         std::sync::Arc<std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>>,
-    /// Canonical artifact bytes, created only when code reification needs them.
-    artifact: std::sync::Arc<std::sync::OnceLock<SharedBytes>>,
 }
 
-impl LoadedModule {
-    pub fn module(&self) -> &Module {
-        &self.module
+impl std::ops::Deref for NamespaceRuntime {
+    type Target = CodeTables;
+
+    fn deref(&self) -> &CodeTables {
+        &self.tables
+    }
+}
+
+impl lm_bytecode::CodeTableView for NamespaceRuntime {
+    fn strings(&self) -> &[String] {
+        &self.tables.strings
+    }
+
+    fn types(&self) -> &[lm_bytecode::BcType] {
+        &self.tables.types
+    }
+
+    fn apps(&self) -> &[lm_bytecode::TypeApp] {
+        &self.tables.apps
+    }
+
+    fn classes(&self) -> &[lm_bytecode::BcClass] {
+        &self.tables.classes
+    }
+
+    fn interfaces(&self) -> &[lm_bytecode::BcInterface] {
+        &self.tables.interfaces
+    }
+
+    fn conformances(&self) -> &[lm_bytecode::BcConformance] {
+        &self.tables.conformances
+    }
+
+    fn slots(&self) -> &[lm_bytecode::SlotSpec] {
+        &self.tables.slots
+    }
+
+    fn funcs(&self) -> &[lm_bytecode::Func] {
+        &self.tables.funcs
+    }
+
+    fn core_role(&self, index: usize) -> Option<u32> {
+        self.core_roles
+            .get(index)
+            .copied()
+            .filter(|class| *class != lm_bytecode::NO_ROLE)
+    }
+}
+
+impl NamespaceRuntime {
+    pub(crate) fn code_namespace(&self) -> &std::sync::Arc<lm_link::CodeNamespace> {
+        &self.code
     }
 
     /// Return the immutable ABI bundle used to verify this module.
@@ -294,21 +319,18 @@ impl LoadedModule {
         &self.bundle
     }
 
-    pub(crate) fn module_store(&self) -> std::sync::Arc<Module> {
-        self.module.clone()
-    }
-
-    /// The hash of every verified input in this module.
-    pub fn verification_hash(&self) -> [u8; 32] {
-        self.verification
-    }
-
     /// The verified semantic identity of this module.
     pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
         self.identity
             .get_or_init(|| {
-                lm_bytecode::identity::module_identity_with_bundle(&self.module, &self.bundle)
-                    .map_err(|e| e.to_string())
+                Ok(lm_bytecode::identity::ModuleIdentity {
+                    class_hashes: self.code.class_hashes().to_vec(),
+                    func_hashes: self.code.func_hashes().to_vec(),
+                    interface_hashes: self.code.interface_hashes().to_vec(),
+                    type_hashes: self.code.type_hashes().to_vec(),
+                    semantic_hash: self.code.artifact_id().into_bytes(),
+                    max_refine_rounds: 0,
+                })
             })
             .as_ref()
             .map_err(|_| FaultCode::BoundaryViolation)
@@ -322,8 +344,8 @@ impl LoadedModule {
     pub(crate) fn is_closure_body(&self, function: u32) -> bool {
         self.closure_bodies
             .get_or_init(|| {
-                let mut bodies = vec![false; self.module.funcs.len()];
-                for body in &self.module.funcs {
+                let mut bodies = vec![false; self.tables.funcs.len()];
+                for body in &self.tables.funcs {
                     for instruction in body.blocks.iter().flatten() {
                         if let lm_bytecode::Instr::MakeClosure { func, .. } = instruction {
                             bodies[*func as usize] = true;
@@ -335,15 +357,6 @@ impl LoadedModule {
             .get(function as usize)
             .copied()
             .unwrap_or(false)
-    }
-
-    /// Return the canonical verified bytes that supplied this module.
-    pub(crate) fn artifact_bytes(&self) -> SharedBytes {
-        self.artifact
-            .get_or_init(|| {
-                SharedBytes::from(lm_bytecode::encode_with_bundle(&self.module, &self.bundle))
-            })
-            .clone()
     }
 
     /// The core layout the artifact declares and the verifier proved.
@@ -365,231 +378,24 @@ impl LoadedModule {
     }
 }
 
-/// The key of one verified-code cache entry: the module verification
-/// hash, the compiler ABI version, and the verifier version.
-pub type VerifiedKey = ([u8; 32], u32, u32);
-
-/// The verified-code cache key of one decoded module.
-///
-/// The value comes from the decoded content alone. No hash stored in
-/// an artifact enters it, and the container stores no hash at all.
-pub fn verified_key(module: &Module) -> VerifiedKey {
-    let bundle = lm_abi::standard_bundle();
-    verified_key_with_bundle(module, &bundle)
-}
-
-/// Return the verified-code cache key under one ABI bundle.
-pub fn verified_key_with_bundle(
-    module: &Module,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> VerifiedKey {
-    (
-        lm_bytecode::identity::verification_hash_with_bundle(bundle, module),
-        lm_bytecode::identity::COMPILER_ABI_VERSION,
-        lm_verify::VERIFIER_VERSION,
-    )
-}
-
-/// One admission verdict.
-///
-/// The verdict carries no fact. The artifact declares its own core
-/// role table, and the verifier proves the shape of every filled slot,
-/// so a load reads the layout from the bytes and needs no side table.
-/// A store therefore records "the verifier admitted this key" and
-/// nothing else, and a damaged store entry can never supply a wrong
-/// resolved value.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct VerifiedRecord;
-
-/// The in-process verified-code cache.
-///
-/// A key is the module verification hash, the compiler ABI version,
-/// and the verifier version. The verification hash covers every
-/// verifier input, with each module-global index preserved, so a hit
-/// skips every verifier pass. The loader always computes the key from
-/// the decoded content, so a stored or forged hash never enters it.
-#[derive(Debug, Default)]
-pub struct VerifiedCache {
-    verified: std::collections::HashSet<VerifiedKey>,
-    /// The number of full verifier runs, for the cache-skip tests.
-    pub verifications: u64,
-}
-
-impl VerifiedCache {
-    pub fn new() -> VerifiedCache {
-        VerifiedCache::default()
-    }
-
-    /// True when the cache holds an admission under this key.
-    pub fn holds(&self, key: &VerifiedKey) -> bool {
-        self.verified.contains(key)
-    }
-
-    /// Record one admission. A caller that reads a verdict from a
-    /// store must admit the module through `load_with_record`, which
-    /// proves the verdict belongs to the module.
-    pub fn insert(&mut self, key: VerifiedKey, _record: VerifiedRecord) {
-        self.verified.insert(key);
-    }
-
-    /// The number of stored admissions.
-    pub fn len(&self) -> usize {
-        self.verified.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.verified.is_empty()
-    }
-}
-
-/// Verify a decoded module and admit it for execution.
-pub fn load(module: Module) -> Result<LoadedModule, VerifyError> {
-    let bundle = lm_abi::standard_bundle();
-    load_with_bundle(module, &bundle)
-}
-
-/// Verify and load one decoded module under an ABI bundle.
-pub fn load_with_bundle(
-    module: Module,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<LoadedModule, VerifyError> {
-    load_inner(module, bundle, None)
-}
-
-/// Admit a decoded module through the verified-code cache. A second
-/// load of the same semantic module under the same ABI and verifier
-/// version skips re-verification.
-pub fn load_cached(module: Module, cache: &mut VerifiedCache) -> Result<LoadedModule, VerifyError> {
-    let bundle = lm_abi::standard_bundle();
-    load_cached_with_bundle(module, &bundle, cache)
-}
-
-/// Load one decoded module through a bundle-bound verified cache.
-pub fn load_cached_with_bundle(
-    module: Module,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    cache: &mut VerifiedCache,
-) -> Result<LoadedModule, VerifyError> {
-    load_inner(module, bundle, Some(cache))
-}
-
-fn load_inner(
-    module: Module,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    cache: Option<&mut VerifiedCache>,
-) -> Result<LoadedModule, VerifyError> {
-    // Only a linked module executes. An import slot names a definition
-    // another module provides, so an unfulfilled slot has no body to
-    // run. The linker resolves every slot and produces a module with
-    // an empty import table.
-    if !module.imports.is_empty() {
-        return Err(VerifyError {
-            func: None,
-            message: format!(
-                "the module has {} unresolved import slot(s); link it before it runs",
-                module.imports.len()
-            ),
-        });
-    }
-    let verification = match cache {
-        Some(cache) => {
-            // The key is the verification hash, never the semantic
-            // hash. The semantic hash answers "same program meaning?"
-            // and replaces every module-global index with content, so
-            // two modules that differ only in an index share it. The
-            // verifier reads those indices, so such a key can certify
-            // a module the verifier rejects. The verification hash
-            // keeps every index and covers the operation manifest.
-            //
-            // The key therefore fixes every verifier input, so a hit
-            // skips every pass, not only the function dataflow.
-            let key = verified_key_with_bundle(&module, bundle);
-            if !cache.verified.contains(&key) {
-                lm_verify::verify_module_with_bundle(&module, bundle)?;
-                cache.verifications = cache.verifications.saturating_add(1);
-                cache.verified.insert(key);
-            }
-            key.0
-        }
-        None => {
-            lm_verify::verify_module_with_bundle(&module, bundle)?;
-            lm_bytecode::identity::verification_hash_with_bundle(bundle, &module)
-        }
-    };
-    Ok(admit(module, bundle.clone(), verification))
-}
-
-/// Admit a decoded module through a verdict an external store kept.
-///
-/// The verdict replaces the verifier pass, so the caller must prove it
-/// belongs to this module. The proof is the key: this function
-/// recomputes it from the decoded content and rejects a verdict filed
-/// under any other key. A store that returns a wrong or damaged
-/// verdict therefore cannot admit a module.
-///
-/// The verdict carries no resolved value, so a store cannot supply
-/// one. The core layout comes from the artifact, and the verifier
-/// proved it before the verdict existed.
-pub fn load_with_record(
-    module: Module,
-    key: &VerifiedKey,
-    _record: &VerifiedRecord,
-) -> Result<LoadedModule, VerifyError> {
-    let bundle = lm_abi::standard_bundle();
-    load_with_record_and_bundle(module, &bundle, key, _record)
-}
-
-/// Load one module through a stored verdict and an ABI bundle.
-pub fn load_with_record_and_bundle(
-    module: Module,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    key: &VerifiedKey,
-    _record: &VerifiedRecord,
-) -> Result<LoadedModule, VerifyError> {
-    let reject = |message: &str| VerifyError {
-        func: None,
-        message: message.to_string(),
-    };
-    if !module.imports.is_empty() {
-        return Err(reject("the module has unresolved import slots"));
-    }
-    let found = verified_key_with_bundle(&module, bundle);
-    if found != *key {
-        return Err(reject("the stored verdict does not belong to this module"));
-    }
-    // The key proves the verdict belongs to this module. It does not
-    // prove a verifier ever produced the verdict: a writer of the
-    // store computes the key of any module and files a verdict under
-    // it. An exact key stops a collision, never a forgery, so store
-    // integrity carries the whole property.
-    //
-    // The module-level structural pass therefore runs on every hit.
-    // It costs a small part of a verifier run, and it bounds the
-    // damage of a store an attacker reaches: the table rules of these
-    // exact bytes hold, whatever the verdict claims.
-    lm_verify::verify_structure_only_with_bundle(&module, bundle)?;
-    Ok(admit(module, bundle.clone(), found.0))
-}
-
-/// Build the sealed dispatch tables of an admitted module.
-fn admit(
-    module: Module,
-    bundle: std::sync::Arc<lm_abi::AbiBundle>,
-    verification: [u8; 32],
-) -> LoadedModule {
-    let core = lm_bytecode::corepin::declared_layout(&module);
+/// Build runtime indexes for one published namespace.
+fn prepare_namespace(code: std::sync::Arc<lm_link::CodeNamespace>) -> NamespaceRuntime {
+    let tables = code.table_store();
+    let bundle = code.bundle().clone();
+    let core_roles = *code.core_roles();
+    let core = lm_bytecode::corepin::layout_from_roles(&core_roles);
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
     // Parents precede children in the verified class table. Each row
     // spans only the selector range its class answers, so the table
     // memory follows the methods, not classes times selectors.
-    let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(module.classes.len());
-    let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(module.classes.len());
-    let mut conformances_by_class = vec![Vec::new(); module.classes.len()];
-    for (index, conformance) in module.conformances.iter().enumerate() {
+    let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(tables.classes.len());
+    let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(tables.classes.len());
+    let mut conformances_by_class = vec![Vec::new(); tables.classes.len()];
+    for (index, conformance) in tables.conformances.iter().enumerate() {
         conformances_by_class[conformance.class as usize].push(index);
     }
-    let interfaces_with_defaults: Vec<bool> = module
+    let interfaces_with_defaults: Vec<bool> = tables
         .interfaces
         .iter()
         .map(|interface| {
@@ -599,7 +405,7 @@ fn admit(
                 .any(|method| method.default != lm_bytecode::NO_FUNC)
         })
         .collect();
-    for (class_index, class) in module.classes.iter().enumerate() {
+    for (class_index, class) in tables.classes.iter().enumerate() {
         let mut methods: Vec<(u32, u32)> = match class.parent() {
             Some(p) => resolved[p as usize].clone(),
             None => Vec::new(),
@@ -610,7 +416,7 @@ fn admit(
         let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
         for conformance in conformances_by_class[class_index]
             .iter()
-            .map(|index| &module.conformances[*index])
+            .map(|index| &tables.conformances[*index])
         {
             let interface = conformance.application.interface as usize;
             if interfaces_with_defaults[interface] {
@@ -660,51 +466,53 @@ fn admit(
         resolved.push(methods);
         dispatch.push(row);
     }
-    LoadedModule {
-        module: std::sync::Arc::new(module),
+    NamespaceRuntime {
+        code: code.clone(),
+        tables,
         bundle,
         dispatch: dispatch.into(),
         closure_bodies: std::sync::Arc::new(std::sync::OnceLock::new()),
         core,
-        verification,
+        core_roles,
+        entry: code.entry(),
+        bindings: code.bindings().to_vec(),
+        slot_initials: code.slot_initials().to_vec(),
         identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-        artifact: std::sync::Arc::new(std::sync::OnceLock::new()),
     }
 }
 
-/// Decode serialized bytecode, verify it, and admit it for execution.
-pub fn load_bytes(bytes: &[u8]) -> Result<LoadedModule, LoadError> {
-    let bundle = lm_abi::standard_bundle();
-    load_bytes_with_bundle(bytes, &bundle)
+#[cfg(test)]
+fn unit_from_module_for_test(
+    module: lm_bytecode::Module,
+) -> Result<std::sync::Arc<NamespaceRuntime>, String> {
+    let unit = lm_bytecode::artifact::LinkUnit::from_module(
+        lm_bytecode::artifact::CORE_MODULE_PATH,
+        module,
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact = lm_bytecode::artifact::Artifact::new(unit, Vec::new())
+        .map_err(|error| error.to_string())?;
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish(artifact, None)
+        .map_err(|error| error.to_string())?;
+    let code = arena
+        .namespace(namespace)
+        .cloned()
+        .ok_or_else(|| "the test namespace is missing".to_string())?;
+    Ok(std::sync::Arc::new(prepare_namespace(code)))
 }
 
-/// Decode and load artifact bytes under one ABI bundle.
-pub fn load_bytes_with_bundle(
-    bytes: &[u8],
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<LoadedModule, LoadError> {
-    let module = lm_bytecode::decode_with_bundle(bytes, bundle).map_err(LoadError::Decode)?;
-    load_with_bundle(module, bundle).map_err(LoadError::Verify)
-}
-
-/// Decode serialized bytecode and admit it through the verified-code
-/// cache.
-pub fn load_bytes_cached(
-    bytes: &[u8],
-    cache: &mut VerifiedCache,
-) -> Result<LoadedModule, LoadError> {
-    let bundle = lm_abi::standard_bundle();
-    load_bytes_cached_with_bundle(bytes, &bundle, cache)
-}
-
-/// Decode artifact bytes through a bundle-bound verified cache.
-pub fn load_bytes_cached_with_bundle(
-    bytes: &[u8],
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    cache: &mut VerifiedCache,
-) -> Result<LoadedModule, LoadError> {
-    let module = lm_bytecode::decode_with_bundle(bytes, bundle).map_err(LoadError::Decode)?;
-    load_cached_with_bundle(module, bundle, cache).map_err(LoadError::Verify)
+#[cfg(test)]
+fn arena_from_test_unit(
+    code: &NamespaceRuntime,
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .replay_namespace(code.code_namespace())
+        .map_err(|error| error.to_string())?;
+    Ok((arena, namespace))
 }
 
 /// A single-machine view over one world with a null host and no
@@ -714,15 +522,30 @@ pub struct Vm {
 }
 
 impl Vm {
-    pub fn new(loaded: &LoadedModule, config: VmConfig) -> Vm {
+    pub fn new(arena: lm_link::CodeArena, namespace: lm_link::NamespaceId, config: VmConfig) -> Vm {
         Vm {
-            world: World::new(loaded, config, Box::new(NullHost)),
+            world: World::new(arena, namespace, config, Box::new(NullHost)),
         }
     }
 
     /// Read access to the root heap, for inspection and tests.
     pub fn heap(&self) -> &Heap {
         self.world.heap_of(0)
+    }
+
+    /// Return the sparse dispatch-table cell count.
+    pub fn dispatch_cells(&self) -> usize {
+        self.world.root_code().dispatch_cells()
+    }
+
+    /// Return the sparse interface witness count.
+    pub fn interface_witness_entries(&self) -> usize {
+        self.world.root_code().interface_witness_entries()
+    }
+
+    /// Return the verified core-role layout of the root namespace.
+    pub fn core_layout(&self) -> lm_bytecode::corepin::CoreLayout {
+        self.world.root_core()
     }
 
     /// Run the entry function to a terminal result.
@@ -751,9 +574,10 @@ impl Vm {
 mod tests {
     use super::*;
     use lm_bytecode::{BcClassKind, BcType, Func, Instr::*, Module};
+    use std::sync::Arc;
 
-    fn int_module(blocks: Vec<Vec<lm_bytecode::Instr>>) -> LoadedModule {
-        load(Module {
+    fn int_module(blocks: Vec<Vec<lm_bytecode::Instr>>) -> Arc<NamespaceRuntime> {
+        unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
@@ -788,10 +612,20 @@ mod tests {
         .unwrap()
     }
 
+    fn test_vm(code: &NamespaceRuntime, config: VmConfig) -> Vm {
+        let (arena, namespace) = arena_from_test_unit(code).expect("the test unit publishes");
+        Vm::new(arena, namespace, config)
+    }
+
+    fn test_world(code: &NamespaceRuntime) -> World {
+        let (arena, namespace) = arena_from_test_unit(code).expect("the test unit publishes");
+        World::new(arena, namespace, VmConfig::default(), Box::new(NullHost))
+    }
+
     #[test]
     fn runs_addition() {
         let loaded = int_module(vec![vec![ConstInt(40), ConstInt(2), Add, Return]]);
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let mut vm = test_vm(&loaded, VmConfig::default());
         assert_eq!(vm.run(), Outcome::Done(Value::Int(42)));
     }
 
@@ -799,7 +633,7 @@ mod tests {
     fn a_world_owns_its_verified_code_store() {
         let mut world = {
             let loaded = int_module(vec![vec![ConstInt(40), ConstInt(2), Add, Return]]);
-            World::new(&loaded, VmConfig::default(), Box::new(NullHost))
+            test_world(&loaded)
         };
         assert_eq!(world.run_root(), Outcome::Done(Value::Int(42)));
     }
@@ -807,14 +641,14 @@ mod tests {
     #[test]
     fn overflow_faults() {
         let loaded = int_module(vec![vec![ConstInt(i64::MAX), ConstInt(1), Add, Return]]);
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let mut vm = test_vm(&loaded, VmConfig::default());
         assert_eq!(vm.run(), Outcome::Fault(crate::FaultCode::IntegerOverflow));
     }
 
     #[test]
     fn divide_by_zero_faults() {
         let loaded = int_module(vec![vec![ConstInt(1), ConstInt(0), Div, Return]]);
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let mut vm = test_vm(&loaded, VmConfig::default());
         assert_eq!(vm.run(), Outcome::Fault(crate::FaultCode::DivideByZero));
     }
 
@@ -827,10 +661,10 @@ mod tests {
             (-7, -2, 3, -1),
         ] {
             let loaded = int_module(vec![vec![ConstInt(a), ConstInt(b), Div, Return]]);
-            let mut vm = Vm::new(&loaded, VmConfig::default());
+            let mut vm = test_vm(&loaded, VmConfig::default());
             assert_eq!(vm.run(), Outcome::Done(Value::Int(div)));
             let loaded = int_module(vec![vec![ConstInt(a), ConstInt(b), Rem, Return]]);
-            let mut vm = Vm::new(&loaded, VmConfig::default());
+            let mut vm = test_vm(&loaded, VmConfig::default());
             assert_eq!(vm.run(), Outcome::Done(Value::Int(rem)));
         }
     }
@@ -838,7 +672,7 @@ mod tests {
     #[test]
     fn fuel_exhaustion_faults() {
         let loaded = int_module(vec![vec![Jump(0)]]);
-        let mut vm = Vm::new(
+        let mut vm = test_vm(
             &loaded,
             VmConfig {
                 fuel: 1000,
@@ -887,7 +721,7 @@ mod tests {
             bindings: vec![],
             debug: Vec::new(),
         };
-        assert!(load(module).is_err());
+        assert!(unit_from_module_for_test(module).is_err());
     }
 
     #[test]
@@ -946,8 +780,8 @@ mod tests {
             bindings: vec![],
             debug: Vec::new(),
         };
-        let loaded = load(module).unwrap();
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let loaded = unit_from_module_for_test(module).unwrap();
+        let mut vm = test_vm(&loaded, VmConfig::default());
         assert_eq!(
             vm.run(),
             Outcome::Fault(crate::FaultCode::UninitializedField)
@@ -957,14 +791,14 @@ mod tests {
     #[test]
     fn unreachable_instruction_faults() {
         let loaded = int_module(vec![vec![Unreachable]]);
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let mut vm = test_vm(&loaded, VmConfig::default());
         assert_eq!(vm.run(), Outcome::Fault(crate::FaultCode::UnreachableCode));
     }
 
     #[test]
     fn shows_outcomes() {
         let loaded = int_module(vec![vec![ConstInt(3), Return]]);
-        let mut vm = Vm::new(&loaded, VmConfig::default());
+        let mut vm = test_vm(&loaded, VmConfig::default());
         let outcome = vm.run();
         assert_eq!(vm.show_outcome(&outcome), "Done(3)");
         assert_eq!(

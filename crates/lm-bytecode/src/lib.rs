@@ -8,7 +8,6 @@
 //! `lm-verify` validates tables, types, rows, type applications,
 //! jumps, calls, and stack shapes.
 
-pub mod append;
 pub mod artifact;
 pub mod closed;
 pub mod corepin;
@@ -1273,6 +1272,159 @@ pub struct Module {
     ///
     /// This content stays outside the semantic and verification regions.
     pub debug: Vec<u8>,
+}
+
+/// Dense tables used by one published code namespace.
+///
+/// A `Module` is one unresolved `LinkUnit` payload. These tables hold
+/// relocated definitions. They contain no import or export records.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CodeTables {
+    pub strings: Vec<String>,
+    pub bytes: Vec<Vec<u8>>,
+    pub types: Vec<BcType>,
+    pub selectors: Vec<String>,
+    pub apps: Vec<TypeApp>,
+    pub interfaces: Vec<BcInterface>,
+    pub conformances: Vec<BcConformance>,
+    pub class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    pub func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    pub slots: Vec<SlotSpec>,
+    pub classes: Vec<BcClass>,
+    pub funcs: Vec<Func>,
+    pub debug: Vec<u8>,
+}
+
+/// Read-only access to relocated code tables.
+///
+/// A compiler `Module` and a runtime `CodeTables` value both provide
+/// this view. Runtime code never needs module linkage records.
+pub trait CodeTableView {
+    fn strings(&self) -> &[String];
+    fn types(&self) -> &[BcType];
+    fn apps(&self) -> &[TypeApp];
+    fn classes(&self) -> &[BcClass];
+    fn interfaces(&self) -> &[BcInterface];
+    fn conformances(&self) -> &[BcConformance];
+    fn slots(&self) -> &[SlotSpec];
+    fn funcs(&self) -> &[Func];
+
+    fn core_role(&self, _index: usize) -> Option<u32> {
+        None
+    }
+}
+
+impl CodeTableView for Module {
+    fn strings(&self) -> &[String] {
+        &self.strings
+    }
+
+    fn types(&self) -> &[BcType] {
+        &self.types
+    }
+
+    fn apps(&self) -> &[TypeApp] {
+        &self.apps
+    }
+
+    fn classes(&self) -> &[BcClass] {
+        &self.classes
+    }
+
+    fn interfaces(&self) -> &[BcInterface] {
+        &self.interfaces
+    }
+
+    fn conformances(&self) -> &[BcConformance] {
+        &self.conformances
+    }
+
+    fn slots(&self) -> &[SlotSpec] {
+        &self.slots
+    }
+
+    fn funcs(&self) -> &[Func] {
+        &self.funcs
+    }
+
+    fn core_role(&self, index: usize) -> Option<u32> {
+        self.core_roles
+            .get(index)
+            .copied()
+            .filter(|class| *class != NO_ROLE)
+    }
+}
+
+impl CodeTableView for CodeTables {
+    fn strings(&self) -> &[String] {
+        &self.strings
+    }
+
+    fn types(&self) -> &[BcType] {
+        &self.types
+    }
+
+    fn apps(&self) -> &[TypeApp] {
+        &self.apps
+    }
+
+    fn classes(&self) -> &[BcClass] {
+        &self.classes
+    }
+
+    fn interfaces(&self) -> &[BcInterface] {
+        &self.interfaces
+    }
+
+    fn conformances(&self) -> &[BcConformance] {
+        &self.conformances
+    }
+
+    fn slots(&self) -> &[SlotSpec] {
+        &self.slots
+    }
+
+    fn funcs(&self) -> &[Func] {
+        &self.funcs
+    }
+}
+
+impl<T: CodeTableView + ?Sized> CodeTableView for std::sync::Arc<T> {
+    fn strings(&self) -> &[String] {
+        (**self).strings()
+    }
+
+    fn types(&self) -> &[BcType] {
+        (**self).types()
+    }
+
+    fn apps(&self) -> &[TypeApp] {
+        (**self).apps()
+    }
+
+    fn classes(&self) -> &[BcClass] {
+        (**self).classes()
+    }
+
+    fn interfaces(&self) -> &[BcInterface] {
+        (**self).interfaces()
+    }
+
+    fn conformances(&self) -> &[BcConformance] {
+        (**self).conformances()
+    }
+
+    fn slots(&self) -> &[SlotSpec] {
+        (**self).slots()
+    }
+
+    fn funcs(&self) -> &[Func] {
+        (**self).funcs()
+    }
+
+    fn core_role(&self, index: usize) -> Option<u32> {
+        (**self).core_role(index)
+    }
 }
 
 impl Module {
