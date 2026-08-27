@@ -857,7 +857,8 @@ impl World {
             lm_abi::OP_VM_SNAPSHOT_HELD
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
             | lm_abi::OP_VM_BRANCH
-            | lm_abi::OP_VM_BRANCH_ANSWER => {
+            | lm_abi::OP_VM_BRANCH_ANSWER
+            | lm_abi::OP_VM_STACK => {
                 vec![self.handle_run(source, first?)?]
             }
             lm_abi::OP_VM_SNAPSHOT_SELF => vec![source],

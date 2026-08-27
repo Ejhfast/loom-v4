@@ -55,7 +55,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 254;
+pub const CORE_ROLE_COUNT: usize = 255;
 
 /// Join a module path and a declaration name into one qualified key.
 ///

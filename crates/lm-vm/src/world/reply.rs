@@ -403,7 +403,7 @@ impl World {
             }),
         };
         let built = match t {
-            T::Done(value) => match self.transfer(child, parent, value) {
+            T::Done(value) => match self.cross_terminal_value(child, parent, value) {
                 Ok(value) => {
                     let class = self.done_arm(parent, family);
                     self.make_instance(parent, class, vec![value])
@@ -428,6 +428,43 @@ impl World {
             T::Fault(rec) => self.build_fault_event(parent, family, &rec),
         };
         self.wrap_turn(parent, family, built)
+    }
+
+    /// Move one terminal value from `child` into `parent`.
+    ///
+    /// A dynamic run packs its value first. The packed value is the
+    /// same `DynValue` that a `dynamic_result` compilation builds, so
+    /// it crosses under the same boundary rule.
+    fn cross_terminal_value(
+        &mut self,
+        child: VmId,
+        parent: VmId,
+        value: Value,
+    ) -> Result<Value, FaultCode> {
+        let value = if self.machines[child as usize].dynamic_result {
+            self.pack_dynamic_result(child, value)?
+        } else {
+            value
+        };
+        self.transfer(child, parent, value)
+    }
+
+    /// Pack the terminal value of `child` with its closed result type.
+    fn pack_dynamic_result(&mut self, child: VmId, value: Value) -> Result<Value, FaultCode> {
+        let machine = &self.machines[child as usize];
+        let func = machine.body_func.ok_or(FaultCode::MalformedState)?;
+        let witness = machine.witness;
+        let code = self.code_of(child).clone();
+        let ret = code
+            .funcs
+            .get(func as usize)
+            .ok_or(FaultCode::MalformedState)?
+            .ret;
+        let ty = self
+            .envs
+            .close(code.as_ref(), ret, witness)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        self.machines[child as usize].alloc(Object::DynValue { value, ty })
     }
 
     /// Wrap one drive event for a bounded turn.

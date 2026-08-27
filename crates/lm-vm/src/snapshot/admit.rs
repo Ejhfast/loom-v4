@@ -815,17 +815,20 @@ impl Admit<'_> {
     }
 
     /// Prove each captured target against its immutable module contract.
+    ///
+    /// Each image binds its own namespace, so the contract comes from
+    /// that namespace and not from the last one of the image.
     fn check_slot_state(&self) -> Result<(), ImageError> {
         for (image, vm) in self.image.vm_images.iter().enumerate() {
-            if vm.slots.len() != self.module.slots.len() || vm.slot_versions.len() != vm.slots.len()
-            {
+            let namespace = self.namespace(vm.namespace)?;
+            if vm.slots.len() != namespace.slots.len() || vm.slot_versions.len() != vm.slots.len() {
                 return fail(
                     ImageReason::Code,
                     format!("VM image {image} has a different slot table length"),
                 );
             }
             for (slot, target) in vm.slots.iter().enumerate() {
-                let spec = &self.module.slots[slot];
+                let spec = &namespace.slots[slot];
                 let valid = match (&spec.contract, target) {
                     (_, ImageSlotTarget::Empty) => true,
                     (SlotContract::Function(contract), ImageSlotTarget::Function(func)) => {
@@ -846,8 +849,8 @@ impl Admit<'_> {
                             constructor: target_constructor,
                         },
                     ) => {
-                        let target = self.module.classes.get(*class as usize);
-                        let contract_class = match self.module.types.get(*ty as usize) {
+                        let target = namespace.classes.get(*class as usize);
+                        let contract_class = match namespace.types.get(*ty as usize) {
                             Some(BcType::Class(class)) | Some(BcType::Inst(class, _)) => {
                                 Some(*class)
                             }
@@ -1141,6 +1144,9 @@ impl Admit<'_> {
     /// The canonical digest of the closed result type of one machine.
     fn machine_result_digest(&self, vm: u32) -> [u8; 32] {
         let machine = self.machine(vm);
+        if machine.dynamic_result {
+            return super::dynamic_result_type_digest();
+        }
         let Some(func) = machine.body_func else {
             return [0u8; 32];
         };

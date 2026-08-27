@@ -1,0 +1,64 @@
+# Inspect and drive a snapshot from another Loom program.
+#
+# Run with `--allow Fs.Open,Fs.Read,Fs.Close,Vm`.
+# Provide the captured program as `program.lms`.
+#
+# The snapshot carries its verified code. This debugger does not need
+# the debuggee source or artifact. It needs the same runtime core.
+#
+# `restore_dynamic` restores the run without its result type. The
+# result arrives as a `DynValue`, and `render` shows it as text.
+#
+# Operation identities are universal. The debugger can answer a known
+# request without any debuggee definition.
+
+def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close
+  file = sys.fs.open("program.lms", ReadOnly).map_error() {
+    |problem: FsError| display(problem)
+  }?
+  bytes = file.read(1048576).map_error() {
+    |problem: FsError| display(problem)
+  }
+  file.close()
+  bytes
+end
+
+def debug(): Result[(String, String), String] with Fs.Open, Fs.Read, Fs.Close, Vm
+  bytes = read_snapshot()?
+  snapshot = sys.vm.load_snapshot(bytes).map_error() {
+    |problem: SnapshotError| display(problem)
+  }?
+  image = sys.vm.Vm()
+  run = image.restore_dynamic(snapshot).map_error() {
+    |problem: RestoreError| display(problem)
+  }?
+
+  # The top frame names the debuggee source. The debugger never read
+  # that file.
+  stack = run.stack()
+  path = if stack.len() == 0
+    "no frame"
+  else
+    stack.at(0).path.value_or("no source")
+  end
+  last_operation = "no request"
+
+  loop do
+    case run.drive()
+    in Asked(request)
+      last_operation = request.op_name()
+      case request
+      in Call(Clock.Now, call, ())
+        run.answer(call, 100)
+      in _
+        run.reject(request, Fault.denied("the debugger rejected this operation"))
+      end
+    in Done(value)
+      return Ok((path, "#{last_operation} -> #{value.render()}"))
+    in Fault(problem)
+      return Err(problem.code())
+    end
+  end
+end
+
+debug()

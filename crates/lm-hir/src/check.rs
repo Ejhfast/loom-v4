@@ -1098,6 +1098,7 @@ impl CoreDemand {
             "drive" | "drive_wait" => self.name("DriveEvent"),
             "branch" | "branch_answer" => self.add_names(&["BranchError", "Result"]),
             "restore" => self.add_names(&["RestoreError", "Result"]),
+            "restore_dynamic" => self.add_names(&["RestoreError", "Result", "DynValue"]),
             "resource" => self.add_names(&["TcpResource", "TlsStream"]),
             "serve_tcp_stream" => self.name("SocketAddress"),
             "choose" => self.name("Choice"),
@@ -1105,6 +1106,7 @@ impl CoreDemand {
             "pause" | "resume" => self.add_names(&["ProcError", "Result"]),
             "site" => self.add_names(&["CodeLocation", "Option"]),
             "trace" => self.name("CodeLocation"),
+            "stack" => self.name("CodeLocation"),
             _ => {}
         }
     }

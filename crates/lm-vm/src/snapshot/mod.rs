@@ -84,7 +84,9 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 29 stores floating-point values.
 /// Version 30 adds closed terminal and signal resource values.
 /// Version 31 stores homogeneous dynamic wait sets.
-pub const FORMAT_VERSION: u32 = 32;
+/// Version 32 stores artifact tables and namespace manifests.
+/// Version 33 stores the dynamic result flag of a machine.
+pub const FORMAT_VERSION: u32 = 33;
 
 /// The section kinds, in canonical order.
 ///
@@ -352,6 +354,10 @@ pub struct ImageMachine {
     /// Admission proves this rule:
     /// A proc witness must name a class proc body or a nullary body.
     pub is_proc: bool,
+    /// True when the holder restored this run without its result type.
+    ///
+    /// The public result type of such a machine is the dynamic marker.
+    pub dynamic_result: bool,
     pub generation: u32,
     /// The remaining instruction budget.
     pub fuel: u64,
@@ -767,6 +773,14 @@ impl SnapshotImage {
             })
         }
     }
+}
+
+/// The canonical result type marker of a dynamic run.
+///
+/// A holder restored the run without its result type. The marker
+/// names no class, so no typed cast can select the run.
+pub(super) fn dynamic_result_type_digest() -> [u8; 32] {
+    lm_graph::digest::hash_parts(&[b"lm-snapshot-dynamic-result-v1\0"])
 }
 
 /// The result-type mismatch of one `cast_result`.

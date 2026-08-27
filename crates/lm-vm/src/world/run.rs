@@ -50,7 +50,7 @@ impl World {
         let module = loaded.clone();
         let budget = WorldBudget::new(limits);
         let machine_collection_at = record_reclamation_threshold(1, budget.limits.max_machines);
-        let vm_image_collection_at = record_reclamation_threshold(0, budget.limits.max_vm_images);
+        let vm_image_collection_at = record_reclamation_threshold(1, budget.limits.max_vm_images);
         let mut root =
             Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone());
         root.namespace = namespace;
@@ -70,7 +70,7 @@ impl World {
         namespaces[namespace.index()] = Some(loaded.clone());
         let mut namespace_execution = vec![None; arena.namespace_count()];
         namespace_execution[namespace.index()] = Some(execution_code.clone());
-        World {
+        let mut world = World {
             world_id: next_world_id(),
             arena,
             root_namespace: namespace,
@@ -109,7 +109,14 @@ impl World {
             check: crate::typecheck::BoundaryScratch::default(),
             metrics: WorldMetrics::default(),
             poisoned: false,
+        };
+        // A host root owns a VM image like every other run. A root
+        // snapshot therefore restores through the run snapshot path.
+        // A world with no image budget keeps a bare root.
+        if let Some(image) = world.new_vm_image(0) {
+            world.machines[0].image = Some(image);
         }
+        world
     }
 
     pub(crate) fn register_namespace(

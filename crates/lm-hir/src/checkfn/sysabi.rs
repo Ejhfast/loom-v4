@@ -1726,6 +1726,32 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Vm, "restore_dynamic") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`restore_dynamic` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let snapshot = self.check_expr(ctx, &args[0], lm_types::VM_SNAPSHOT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESTORE_DYNAMIC, span)?;
+                let dynamic = Self::core_class(ctx, "DynValue");
+                let run = ctx.store.intern(Type::Run(dynamic));
+                let error = Self::core_class(ctx, "RestoreError");
+                let ty = Self::core_inst(ctx, "Result", vec![run, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESTORE_DYNAMIC,
+                        args: vec![recv_h, snapshot],
+                    },
+                }
+            }
             (Type::Run(_), "table") => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(
@@ -1740,6 +1766,19 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_TABLE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Run(_), "stack") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_STACK, span)?;
+                let location = Self::core_class(ctx, "CodeLocation");
+                HExpr {
+                    ty: ctx.store.intern(Type::List(location)),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_STACK,
                         args: vec![recv_h],
                     },
                 }

@@ -2315,6 +2315,21 @@ impl World {
             }
             lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
             lm_abi::OP_VM_RESTORE_VM => self.restore_vm_snapshot(vm, op, args),
+            lm_abi::OP_VM_RESTORE_DYNAMIC => self.restore_dynamic_snapshot(vm, op, args),
+            lm_abi::OP_VM_STACK => {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let built = self.inspect_stack(vm, target);
+                self.reply_or_fault(vm, op, built);
+            }
             lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CHOOSE

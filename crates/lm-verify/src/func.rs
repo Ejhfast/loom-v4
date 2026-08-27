@@ -24,7 +24,8 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_KIND
             | lm_abi::OP_VM_ARTIFACT
             | lm_abi::OP_COMPILER_VERIFY
-            | lm_abi::OP_VM_INSTANCE_ENTRY => 1,
+            | lm_abi::OP_VM_INSTANCE_ENTRY
+            | lm_abi::OP_VM_STACK => 1,
             lm_abi::OP_VM_DISPATCH => 2,
             lm_abi::OP_VM_ACTIVATE
             | lm_abi::OP_VM_ACTIVATE_OR_FAULT
@@ -70,6 +71,7 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_VM_SNAPSHOT_BYTES
             | lm_abi::OP_VM_RESTORE_VM => 1,
             lm_abi::OP_VM_RESTORE
+            | lm_abi::OP_VM_RESTORE_DYNAMIC
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_SERVE_FILE
             | lm_abi::OP_VM_SERVE_TCP_LISTENER

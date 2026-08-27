@@ -351,6 +351,21 @@ impl World {
     /// path; any other bytes run the external loader once first, so no
     /// unchecked image ever builds a world.
     pub(super) fn restore_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        self.restore_run_snapshot(vm, op, args, false);
+    }
+
+    /// `sys.vm.Vm().restore_dynamic(snap)`.
+    ///
+    /// The holder does not know the result type of the run. The
+    /// restored machine packs its terminal value as a `DynValue`, so
+    /// the value crosses the boundary under the `DynValue` rule. A
+    /// snapshot without a distinguished run is an ordinary error.
+    pub(super) fn restore_dynamic_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        self.restore_run_snapshot(vm, op, args, true);
+    }
+
+    /// Restore one selected run into one persistent VM image.
+    fn restore_run_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>, dynamic: bool) {
         let Some(image_vm) = self.image_arg(vm, op, args[0]) else {
             return;
         };
@@ -397,6 +412,7 @@ impl World {
             match self.prepare_restore(vm, target, &image) {
                 Ok(plan) => match self.commit_restore(plan) {
                     Ok(_) => {
+                        self.machines[target as usize].dynamic_result |= dynamic;
                         self.install_prepared_restore_reply(vm, reply);
                         return;
                     }
@@ -414,13 +430,20 @@ impl World {
                 Err(crate::snapshot::RestoreFail::IncompatibleImage) => {
                     self.discard_restore_reply(vm, reply);
                     self.rollback_run_target(vm, target);
-                    self.fault_caller(
-                        vm,
-                        op,
-                        FaultCode::BoundaryViolation,
-                        "the snapshot image is incompatible with this machine world",
-                    );
-                    return;
+                    if !dynamic {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::BoundaryViolation,
+                            "the snapshot image is incompatible with this machine world",
+                        );
+                        return;
+                    }
+                    break self
+                        .make_instance(vm, self.core_of(vm).restore_incompatible_image, vec![])
+                        .and_then(|error| {
+                            self.make_instance(vm, self.core_of(vm).result_err, vec![error])
+                        });
                 }
             }
         };

@@ -684,6 +684,12 @@ pub struct Machine {
     /// Ownership does not determine this flag.
     /// `Proc.Run` transfers a plain machine and mints no grant.
     pub is_proc: bool,
+    /// True when the holder restored this run without its result type.
+    ///
+    /// The terminal value of such a run crosses the boundary as a
+    /// `DynValue`. The flag rides in a snapshot, so a branch or a
+    /// restore of the run keeps the same delivery.
+    pub dynamic_result: bool,
     /// The persistent image that owns this run.
     ///
     /// Host root machines and legacy host restore targets have no
@@ -1127,6 +1133,7 @@ impl Machine {
             body_func: None,
             witness: TypeEnvId::EMPTY,
             is_proc: false,
+            dynamic_result: false,
             image: None,
             gate: 0,
             start_body: None,
@@ -3970,6 +3977,7 @@ impl Machine {
     }
 
     /// Build one public source location for a compact fault coordinate.
+    /// Resolve one trace site to a code origin, then allocate it.
     fn alloc_fault_location(
         &mut self,
         module: &NamespaceRuntime,
@@ -3978,31 +3986,20 @@ impl Machine {
         identity: &lm_bytecode::identity::ModuleIdentity,
         site: FaultSite,
     ) -> Result<Value, FaultCode> {
-        let mapping = debug
-            .functions
-            .iter()
-            .rev()
-            .find(|mapping| mapping.function == site.function);
-        let source = mapping
-            .map(|mapping| debug.sources.get(mapping.source as usize).ok_or(BAD_STATE))
-            .transpose()?;
-        let function = module.funcs.get(site.function as usize).ok_or(BAD_STATE)?;
-        let block = function.blocks.get(site.block as usize).ok_or(BAD_STATE)?;
-        if site.instruction as usize >= block.len() {
-            return Err(BAD_STATE);
-        }
-        let mut offset = 0usize;
-        for prior in function.blocks.iter().take(site.block as usize) {
-            offset = offset.checked_add(prior.len()).ok_or(BAD_STATE)?;
-        }
-        offset = offset
-            .checked_add(site.instruction as usize)
-            .ok_or(BAD_STATE)?;
-        let offset = i64::try_from(offset).map_err(|_| BAD_STATE)?;
-        let digest = *identity
-            .func_hashes
-            .get(site.function as usize)
-            .ok_or(BAD_STATE)?;
+        let origin = code_origin(module, debug, identity, site)?;
+        self.alloc_code_location(module, envs, origin)
+    }
+
+    /// Allocate one `CodeLocation` for a resolved origin.
+    ///
+    /// `module` supplies the core roles of this machine. The origin
+    /// can come from the code of another machine.
+    pub(crate) fn alloc_code_location(
+        &mut self,
+        module: &NamespaceRuntime,
+        envs: &mut TypeEnvs,
+        origin: CodeOrigin,
+    ) -> Result<Value, FaultCode> {
         let range_class = module.core_roles[lm_bytecode::corepin::ROLE_SOURCE_RANGE];
         let location_class = module.core_roles[lm_bytecode::corepin::ROLE_CODE_LOCATION];
         if range_class == lm_bytecode::NO_ROLE || location_class == lm_bytecode::NO_ROLE {
@@ -4020,18 +4017,14 @@ impl Machine {
         let range_ty = location_fields[1].1;
 
         let root = self.vm.operands.len();
-        let (path, range) = match (mapping, source) {
-            (Some(mapping), Some(source)) => {
-                let path = SharedText::try_from_string(source.path.clone())
-                    .map_err(|_| FaultCode::HeapLimit)?;
+        let (path, range) = match origin.source {
+            Some((path, (lo, hi))) => {
+                let path = SharedText::try_from_string(path).map_err(|_| FaultCode::HeapLimit)?;
                 let path = self.alloc(Object::Str(path))?;
                 self.push(path)?;
                 let range = self.alloc(Object::Instance {
                     class: range_class,
-                    fields: vec![
-                        Value::Int(i64::from(mapping.lo)),
-                        Value::Int(i64::from(mapping.hi)),
-                    ],
+                    fields: vec![Value::Int(i64::from(lo)), Value::Int(i64::from(hi))],
                     env: Witness::EMPTY,
                 })?;
                 let range_ref = range.as_obj().ok_or(BAD_STATE)?;
@@ -4039,7 +4032,7 @@ impl Machine {
                 self.push(range)?;
                 (path, range)
             }
-            (None, None) => {
+            None => {
                 let path = Value::EmptyCase {
                     ty: self.close_option_family(module, envs, path_ty)?,
                     arm: 1,
@@ -4050,13 +4043,12 @@ impl Machine {
                 };
                 (path, range)
             }
-            _ => return Err(BAD_STATE),
         };
-        let digest = self.alloc(Object::NativeDigest(digest))?;
+        let digest = self.alloc(Object::NativeDigest(origin.digest))?;
         self.push(digest)?;
         let location = self.alloc(Object::Instance {
             class: location_class,
-            fields: vec![path, range, digest, Value::Int(offset)],
+            fields: vec![path, range, digest, Value::Int(origin.offset)],
             env: Witness::EMPTY,
         })?;
         let location_ref = location.as_obj().ok_or(BAD_STATE)?;
@@ -6447,4 +6439,57 @@ mod tests {
         assert_eq!(machine.vm.operands.capacity(), 0);
         assert_eq!(machine.vm.heap.get(reference), &Object::Str("live".into()));
     }
+}
+
+/// One resolved code position, before any allocation.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeOrigin {
+    /// The source path and byte range, when debug data names them.
+    pub(crate) source: Option<(String, (u32, u32))>,
+    /// The structural hash of the function.
+    pub(crate) digest: [u8; 32],
+    /// The instruction offset inside the function.
+    pub(crate) offset: i64,
+}
+
+/// Resolve one trace site against the code that executed it.
+pub(crate) fn code_origin(
+    module: &NamespaceRuntime,
+    debug: &lm_bytecode::debug::DebugInfo,
+    identity: &lm_bytecode::identity::ModuleIdentity,
+    site: FaultSite,
+) -> Result<CodeOrigin, FaultCode> {
+    let mapping = debug
+        .functions
+        .iter()
+        .rev()
+        .find(|mapping| mapping.function == site.function);
+    let source = mapping
+        .map(|mapping| debug.sources.get(mapping.source as usize).ok_or(BAD_STATE))
+        .transpose()?;
+    let function = module.funcs.get(site.function as usize).ok_or(BAD_STATE)?;
+    let block = function.blocks.get(site.block as usize).ok_or(BAD_STATE)?;
+    if site.instruction as usize >= block.len() {
+        return Err(BAD_STATE);
+    }
+    let mut offset = 0usize;
+    for prior in function.blocks.iter().take(site.block as usize) {
+        offset = offset.checked_add(prior.len()).ok_or(BAD_STATE)?;
+    }
+    offset = offset
+        .checked_add(site.instruction as usize)
+        .ok_or(BAD_STATE)?;
+    let offset = i64::try_from(offset).map_err(|_| BAD_STATE)?;
+    let digest = *identity
+        .func_hashes
+        .get(site.function as usize)
+        .ok_or(BAD_STATE)?;
+    let source = mapping
+        .zip(source)
+        .map(|(mapping, source)| (source.path.clone(), (mapping.lo, mapping.hi)));
+    Ok(CodeOrigin {
+        source,
+        digest,
+        offset,
+    })
 }

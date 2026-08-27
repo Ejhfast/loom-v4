@@ -104,8 +104,9 @@ fn repeated_namespace_admission_rechecks_mutable_image_state() {
         "def add(value: Int): Int\n  value + 1\nend\ndef go(): Int with Vm\n  image = sys.vm.Vm()\n  case image.install(add)\n  in Ok(_) then 42\n  in Err(_) then 0\n  end\nend\ngo()\n",
     );
     let images = boundaries(&loaded, &["Vm"], 200);
+    // The root image rides along with the installed image.
     let image = pick(&images, "one installed definition", |image| {
-        image.vm_images.len() == 1 && image.vm_images[0].instances.len() == 1
+        image.vm_images.iter().any(|vm| vm.instances.len() == 1)
     });
     let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
     let limits = lm_vm::snapshot::LoadLimits::default();
@@ -113,7 +114,12 @@ fn repeated_namespace_admission_rechecks_mutable_image_state() {
     load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the repeated image admits");
 
     let mut broken = image;
-    broken.vm_images[0].instances[0].artifact = u32::MAX;
+    let installed = broken
+        .vm_images
+        .iter_mut()
+        .find(|vm| vm.instances.len() == 1)
+        .expect("the installed image exists");
+    installed.instances[0].artifact = u32::MAX;
     let bytes = codec::encode(&broken, usize::MAX).expect("the changed image encodes");
     let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
         .expect_err("the changed instance must reject");

@@ -3149,6 +3149,37 @@ pub(crate) fn step(
                             let out = ctx.result_inst(vm, error).map_err(&fail)?;
                             push(state, out)?;
                         }
+                        lm_abi::OP_VM_RESTORE_DYNAMIC => {
+                            let snapshot = pop(state)?;
+                            let recv = pop(state)?;
+                            if ctx.ty(recv) != BcType::Vm {
+                                return Err(fail(
+                                    "`Vm.RestoreDynamic` needs a Vm receiver".to_string(),
+                                ));
+                            }
+                            if ctx.ty(snapshot) != BcType::VmSnapshot {
+                                return Err(fail(
+                                    "`Vm.RestoreDynamic` needs a VmSnapshot".to_string(),
+                                ));
+                            }
+                            let dynamic = ctx
+                                .plain_inst(ctx.core.dyn_value, "DynValue")
+                                .map_err(&fail)?;
+                            let run = ctx.intern(BcType::Run(dynamic));
+                            let error = ctx
+                                .plain_inst(ctx.core.restore_error, "RestoreError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(run, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_STACK => {
+                            pop_run(state)?;
+                            let location = ctx
+                                .plain_inst(ctx.core.code_location, "CodeLocation")
+                                .map_err(&fail)?;
+                            let list = ctx.intern(BcType::List(location));
+                            push(state, list)?;
+                        }
                         _ => unreachable!("every VmControl slot has a rule"),
                     }
                 }

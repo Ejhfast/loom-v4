@@ -41,9 +41,16 @@ end
 enum RestoreError implements Error
   # The restored world passed a machine, heap, or graph limit.
   RestoreLimitExceeded
+  # The snapshot does not select a run to restore.
+  IncompatibleImage
 
   def append_to(self, mut builder: StringBuilder)
-    builder.append("the restored world exceeds its limit")
+    case self
+    in RestoreLimitExceeded
+      builder.append("the restored world exceeds its limit")
+    in IncompatibleImage
+      builder.append("the snapshot does not select a run to restore")
+    end
   end
 end
 

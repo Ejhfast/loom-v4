@@ -476,6 +476,10 @@ It records module bindings, slots, exports, relocation maps, and core roles.
 
 Each machine stores one `NamespaceId`.
 
+Each machine, including a host root, owns one VM image record.
+
+A root snapshot therefore restores through the same path as a run snapshot.
+
 An execution lease pins its namespace view.
 
 The world has no global core-role layout.
@@ -636,6 +640,16 @@ The debuggee keeps the namespace stored in its snapshot.
 A debugger with core A can load a fat snapshot with compatible core B.
 
 The same debugger rejects a thin snapshot that requires core B.
+
+`Vm.restore_dynamic` restores the distinguished run of a loaded `VmSnapshot` as `Run[DynValue]`.
+
+`Run.stack` lists the frames of a stopped run as `List[CodeLocation]`.
+
+The terminal value of a dynamic run crosses the boundary as one `DynValue`.
+
+The machine keeps a dynamic result flag. A snapshot stores that flag.
+
+The public result type of a dynamic run is a fixed marker. No typed cast selects it.
 
 ## 15. Collection
 
@@ -932,6 +946,12 @@ Gate: admitted bytes never panic during restore or execution.
 - Drive the foreign program under debugger policy.
 
 Gate: the debugger loads a fat snapshot with another compatible core.
+
+Gate result: `examples/15-compiler-and-hot-code-reloading/12-debug-another-program.lm` loads a thin snapshot of an unrelated program.
+
+The debugger reads the top frame source, answers `Clock.Now`, and renders the result.
+
+The fat snapshot gate remains open. No writer embeds a core.
 
 ### Stage 10: limits and performance closeout
 

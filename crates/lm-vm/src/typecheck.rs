@@ -257,9 +257,15 @@ fn check_one(
         }
         Node::Callback => Err(FaultCode::BoundaryViolation),
         Node::Option { payload, case } => {
+            // A case instance of `Option` carries the family. A bare
+            // instance of another class is a native `Some` payload.
             if let Value::Obj(reference) = value {
                 if let Object::Instance { class, fields, .. } = heap.get(reference) {
-                    return check_instance(module, envs, scratch, *class, fields, expect);
+                    let some = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME];
+                    let none = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE];
+                    if *class == some || *class == none {
+                        return check_instance(module, envs, scratch, *class, fields, expect);
+                    }
                 }
             }
             let family = match envs.ty(expect).cloned() {

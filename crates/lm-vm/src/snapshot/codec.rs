@@ -798,6 +798,9 @@ fn section_machines(
         if machine.is_proc {
             flags |= 4;
         }
+        if machine.dynamic_result {
+            flags |= 8;
+        }
         out.u8(flags);
         // The machine witness: the body function and the environment
         // of its activation.
@@ -2498,12 +2501,13 @@ fn decode_machine(
     let state = ImageState::from_tag(cur.u8()?)
         .ok_or_else(|| ImageError::new(ImageReason::State, "a machine state tag is not legal"))?;
     let flags = cur.u8()?;
-    if flags & !0b111 != 0 {
+    if flags & !0b1111 != 0 {
         return err(ImageReason::State, "a machine flag byte holds a spare bit");
     }
     let scheduler_owned = flags & 1 != 0;
     let paused = flags & 2 != 0;
     let is_proc = flags & 4 != 0;
+    let dynamic_result = flags & 8 != 0;
     let body_func = match cur.leb()? {
         0 => None,
         raw => Some(u32::try_from(raw - 1).map_err(|_| {
@@ -2744,6 +2748,7 @@ fn decode_machine(
         scheduler_owned,
         paused,
         is_proc,
+        dynamic_result,
         body_func,
         witness,
         generation,

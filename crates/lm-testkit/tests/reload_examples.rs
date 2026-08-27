@@ -8,7 +8,9 @@
 use lm_host::CliHost;
 use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{VmConfig, World};
+use lm_vm::{RecordingHost, VmConfig, World};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Run one example on the command-line host, which is the host that
 /// answers `Compiler` and `Reflect`. The recording host does not
@@ -23,6 +25,36 @@ fn run_example(path: &str, allow: &[&str]) -> String {
         VmConfig::default(),
         Box::new(CliHost::new(1)),
     );
+    for grant in allow {
+        world.allow(grant).expect("the grant names a target");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    world.show_outcome(&outcome)
+}
+
+/// Run one example on the recording host with named files.
+///
+/// The recording host answers `Fs` operations from its file table,
+/// so an example can read a file that the test wrote.
+fn run_example_with_files(path: &str, allow: &[&str], files: &[(&str, Vec<u8>)]) -> String {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
+    run_source_with_files(path, &source, allow, files)
+}
+
+/// Run one source text on the recording host with named files.
+fn run_source_with_files(
+    path: &str,
+    source: &str,
+    allow: &[&str],
+    files: &[(&str, Vec<u8>)],
+) -> String {
+    let bytes = compile_to_bytes(path, source).expect("the example compiles");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the example loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    for (name, bytes) in files {
+        host.borrow_mut().set_file(*name, bytes.clone());
+    }
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
     }
@@ -191,5 +223,122 @@ fn a_snapshot_accepts_an_exporter_after_the_fact() {
             &["Vm", "Io.ReadBytes"],
         ),
         "Done(Ok((0, 18)))"
+    );
+}
+
+#[test]
+fn a_debugger_opens_another_program() {
+    // The debuggee is an unrelated program. The test captures it before
+    // it runs, writes the bytes as `program.lms`, and the debugger reads
+    // them. The debugger knows no debuggee definition; it names the top
+    // frame source, answers the one request, and renders the result.
+    let snapshot = independent_program_snapshot();
+
+    assert_eq!(
+        run_example_with_files(
+            "examples/15-compiler-and-hot-code-reloading/12-debug-another-program.lm",
+            &["Fs.Open", "Fs.Read", "Fs.Close", "Vm"],
+            &[("program.lms", snapshot)],
+        ),
+        "Done(Ok((\"independent-program.lm\", \"Clock.Now -> 42\")))"
+    );
+}
+
+/// Capture one unrelated program before it runs.
+fn independent_program_snapshot() -> Vec<u8> {
+    let source = "def calculate(): Int with Clock.Now\n  sys.clock.now()\n  42\nend\ncalculate()\n";
+    let bytes = compile_to_bytes("independent-program.lm", source).expect("the program compiles");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let gate = world.next_gate();
+    let snapshot = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the program captures");
+    snapshot.bytes().expect("the snapshot encodes").to_vec()
+}
+
+#[test]
+fn a_dynamic_restore_of_a_full_vm_snapshot_is_an_ordinary_error() {
+    // A full VM snapshot selects no run. The dynamic restore reports
+    // that as a value, because arbitrary bytes are ordinary input.
+    let source = "def go(): Result[String, String] with Vm\n\
+      image = sys.vm.Vm()\n\
+      snapshot = case image.snapshot()\n\
+      in Ok(value) then value\n\
+      in Err(problem) then return Err(display(problem))\n\
+      end\n\
+      case sys.vm.Vm().restore_dynamic(snapshot)\n\
+      in Ok(_) then Ok(\"restored\")\n\
+      in Err(problem) then Err(display(problem))\n\
+      end\n\
+    end\n\
+    go()\n";
+    assert_eq!(
+        run_source_with_files("full-vm.lm", source, &["Vm"], &[]),
+        "Done(Err(\"the snapshot does not select a run to restore\"))"
+    );
+}
+
+#[test]
+fn a_dynamic_run_keeps_its_result_view_across_a_snapshot() {
+    // A snapshot of a dynamic run restores as a dynamic run. The typed
+    // restore delivers the result as a `DynValue`, because the flag
+    // rides in the image.
+    let source = "def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close\n\
+      file = sys.fs.open(\"program.lms\", ReadOnly).map_error() {\n\
+        |problem: FsError| display(problem)\n\
+      }?\n\
+      bytes = file.read(1048576).map_error() {\n\
+        |problem: FsError| display(problem)\n\
+      }\n\
+      file.close()\n\
+      bytes\n\
+    end\n\
+    \n\
+    def go(): Result[String, String] with Fs.Open, Fs.Read, Fs.Close, Vm\n\
+      bytes = read_snapshot()?\n\
+      snapshot = sys.vm.load_snapshot(bytes).map_error() {\n\
+        |problem: SnapshotError| display(problem)\n\
+      }?\n\
+      run = sys.vm.Vm().restore_dynamic(snapshot).map_error() {\n\
+        |problem: RestoreError| display(problem)\n\
+      }?\n\
+      again = case run.snapshot()\n\
+      in Ok(value) then value\n\
+      in Err(problem) then return Err(display(problem))\n\
+      end\n\
+      restored = sys.vm.Vm().restore(again).map_error() {\n\
+        |problem: RestoreError| display(problem)\n\
+      }?\n\
+      loop do\n\
+        case restored.drive()\n\
+        in Asked(request)\n\
+          case request\n\
+          in Call(Clock.Now, call, ())\n\
+            restored.answer(call, 100)\n\
+          in _\n\
+            restored.reject(request, Fault.denied(\"rejected\"))\n\
+          end\n\
+        in Done(value)\n\
+          return Ok(value.render())\n\
+        in Fault(problem)\n\
+          return Err(problem.code())\n\
+        end\n\
+      end\n\
+    end\n\
+    go()\n";
+    assert_eq!(
+        run_source_with_files(
+            "dynamic-round-trip.lm",
+            source,
+            &["Fs.Open", "Fs.Read", "Fs.Close", "Vm"],
+            &[("program.lms", independent_program_snapshot())],
+        ),
+        "Done(Ok(\"42\"))"
     );
 }

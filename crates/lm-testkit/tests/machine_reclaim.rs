@@ -98,7 +98,8 @@ held.len()";
         run_with_config("reclaim-live.lm", source, VmConfig::default());
     assert_eq!(outcome, "Done(3000)");
     assert_eq!(machines, 3_001);
-    assert_eq!(images, 3_000);
+    // The root image plus one image for each activation.
+    assert_eq!(images, 3_001);
     assert!(metrics.reclamation_passes <= 2, "{metrics:?}");
     assert_eq!(metrics.machine_records_reclaimed, 0, "{metrics:?}");
     assert_eq!(metrics.vm_image_records_reclaimed, 0, "{metrics:?}");

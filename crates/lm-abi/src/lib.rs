@@ -62,7 +62,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 34 adds in-memory run branching.
 /// Version 35 adds homogeneous dynamic wait selection.
 /// Version 36 adds answered in-memory run branches.
-pub const ABI_VERSION: u32 = 36;
+/// Version 37 adds dynamic run restoration and run stack inspection.
+pub const ABI_VERSION: u32 = 37;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2299,9 +2300,15 @@ pub const OP_PROC_RUN_CLOSURE: OpSlot = 142;
 pub const OP_VM_BRANCH: OpSlot = 143;
 pub const OP_WAIT_ANY: OpSlot = 144;
 pub const OP_VM_BRANCH_ANSWER: OpSlot = 145;
+pub const OP_VM_RESTORE_DYNAMIC: OpSlot = 146;
+pub const OP_VM_STACK: OpSlot = 147;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 146] = [
+///
+/// `OP_COUNT` reads the length in a constant context, so the table
+/// stays a constant.
+#[allow(clippy::large_const_arrays)]
+pub const OPS: [OpDef; 148] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -3664,6 +3671,24 @@ pub const OPS: [OpDef; 146] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "[T,A,R](Run[T], PendingCall[A,R], R) -> Result[Run[T], BranchError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "RestoreDynamic",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, VmSnapshot) -> Result[Run[DynValue], RestoreError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Stack",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Run[T]) -> List[CodeLocation]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

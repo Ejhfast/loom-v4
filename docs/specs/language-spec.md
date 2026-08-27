@@ -2243,6 +2243,14 @@ SnapshotLimitExceeded
 
 It returns `Result[Run[T],RestoreError]`. A failed restore exposes no partial world.
 
+`Vm.restore_dynamic(snap: VmSnapshot)` imports the distinguished run without its result type.
+
+It returns `Result[Run[DynValue],RestoreError]`. The run delivers its result as one `DynValue`.
+
+`IncompatibleImage` reports a snapshot that selects no run.
+
+`Run[T].stack()` lists the frames of a stopped held run as `List[CodeLocation]`. The top frame comes first.
+
 `sys.vm.restore_vm(snap: VmSnapshot)` creates one stopped `Vm`.
 
 It returns no distinguished run. A failed restore exposes no partial VM.

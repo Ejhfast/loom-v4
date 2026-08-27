@@ -838,6 +838,9 @@ impl World {
     /// A machine that never loaded a body function records zeros.
     fn machine_result_digest(&mut self, vm: VmId) -> Result<[u8; 32], SnapshotFail> {
         let record = &self.machines[vm as usize];
+        if record.dynamic_result {
+            return Ok(super::dynamic_result_type_digest());
+        }
         let Some(func) = record.body_func else {
             return Ok([0u8; 32]);
         };
@@ -1386,6 +1389,7 @@ impl World {
             paused: record.paused,
             // The flag names machines from class and closure proc launches.
             is_proc: record.is_proc,
+            dynamic_result: record.dynamic_result,
             body_func: record.body_func,
             // The world environment identifier. `build_type_tables`
             // rewrites it to an image ordinal.

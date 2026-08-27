@@ -1073,6 +1073,7 @@ fn restore_state(
     }
     machine.children = children;
     machine.is_proc = source.is_proc;
+    machine.dynamic_result = source.dynamic_result;
     machine.body_func = if code_is_identity {
         source.body_func
     } else {

@@ -3590,8 +3590,17 @@ execute()
         }
     }
     let captured = captured.expect("a boundary follows installation");
-    assert_eq!(captured.world().vm_images.len(), 1);
-    assert_eq!(captured.world().vm_images[0].instances.len(), 1);
+    // The root image rides along with the installed image.
+    assert_eq!(captured.world().vm_images.len(), 2);
+    assert_eq!(
+        captured
+            .world()
+            .vm_images
+            .iter()
+            .filter(|vm| vm.instances.len() == 1)
+            .count(),
+        1
+    );
 
     let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
         &bytes,
@@ -3730,7 +3739,15 @@ execute()
     }
     let captured = captured.expect("a boundary follows the binding replacement");
     // Each selected definition carries one exact artifact.
-    assert_eq!(captured.world().vm_images[0].instances.len(), 3);
+    assert_eq!(
+        captured
+            .world()
+            .vm_images
+            .iter()
+            .map(|vm| vm.instances.len())
+            .max(),
+        Some(3)
+    );
     let kinds: Vec<_> = captured
         .world()
         .machines

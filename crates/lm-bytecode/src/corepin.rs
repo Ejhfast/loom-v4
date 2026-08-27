@@ -111,6 +111,7 @@ pub struct CoreLayout {
     pub snapshot_bad_image: Option<u32>,
     pub restore_error: Option<u32>,
     pub restore_limit_exceeded: Option<u32>,
+    pub restore_incompatible_image: Option<u32>,
     pub branch_error: Option<u32>,
     pub branch_resource_active: Option<u32>,
     pub branch_limit_exceeded: Option<u32>,
@@ -290,7 +291,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 254] = [
+pub const PINNED_LABELS: [&str; 255] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -545,6 +546,7 @@ pub const PINNED_LABELS: [&str; 254] = [
     "BranchError",
     "BranchError.ResourceActive",
     "BranchError.BranchLimitExceeded",
+    "RestoreError.IncompatibleImage",
 ];
 
 /// The core role of immediate integer values.
@@ -795,6 +797,7 @@ pub const ROLE_FILE_HANDLE: usize = 250;
 pub const ROLE_BRANCH_ERROR: usize = 251;
 pub const ROLE_BRANCH_RESOURCE_ACTIVE: usize = 252;
 pub const ROLE_BRANCH_LIMIT_EXCEEDED: usize = 253;
+pub const ROLE_RESTORE_INCOMPATIBLE_IMAGE: usize = 254;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -926,6 +929,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SnapshotError.BadImage" => &mut layout.snapshot_bad_image,
         "RestoreError" => &mut layout.restore_error,
         "RestoreError.RestoreLimitExceeded" => &mut layout.restore_limit_exceeded,
+        "RestoreError.IncompatibleImage" => &mut layout.restore_incompatible_image,
         "BranchError" => &mut layout.branch_error,
         "BranchError.ResourceActive" => &mut layout.branch_resource_active,
         "BranchError.BranchLimitExceeded" => &mut layout.branch_limit_exceeded,

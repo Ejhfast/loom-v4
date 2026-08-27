@@ -5,6 +5,70 @@
 use super::*;
 
 impl World {
+    /// Build the frame locations of one stopped run for its holder.
+    ///
+    /// The origins come from the code of `target`. The holder
+    /// allocates each `CodeLocation` with its own core roles. The top
+    /// frame comes first.
+    pub(super) fn inspect_stack(&mut self, holder: VmId, target: VmId) -> Result<Value, FaultCode> {
+        let origins = self.execution_origins(target)?;
+        let code = self.code_of(holder).clone();
+        let root = self.machines[holder as usize].vm.operands.len();
+        let mut locations = Vec::new();
+        locations
+            .try_reserve_exact(origins.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        let result = (|| {
+            for origin in origins {
+                let location = self.machines[holder as usize].alloc_code_location(
+                    code.as_ref(),
+                    &mut self.envs,
+                    origin,
+                )?;
+                self.machines[holder as usize].push(location)?;
+                locations.push(location);
+            }
+            self.machines[holder as usize].alloc(Object::List {
+                items: locations,
+                epoch: lm_heap::StructuralEpoch::default(),
+            })
+        })();
+        self.machines[holder as usize].vm.operands.truncate(root);
+        result
+    }
+
+    /// Resolve every frame of `target` to a code origin, top frame first.
+    fn execution_origins(
+        &self,
+        target: VmId,
+    ) -> Result<Vec<crate::machine::CodeOrigin>, FaultCode> {
+        let code = self.code_of(target);
+        let debug =
+            lm_bytecode::debug::decode(&code.debug).map_err(|_| FaultCode::MalformedState)?;
+        lm_bytecode::debug::validate(&debug, code.as_ref())
+            .map_err(|_| FaultCode::MalformedState)?;
+        let identity = code.identity()?;
+        let frames = &self.machines[target as usize].vm.frames;
+        let mut origins = Vec::new();
+        origins
+            .try_reserve_exact(frames.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for frame in frames.iter().rev() {
+            let site = lm_heap::FaultSite {
+                function: frame.func,
+                block: frame.block,
+                instruction: frame.ip.saturating_sub(1),
+            };
+            origins.push(crate::machine::code_origin(
+                code.as_ref(),
+                &debug,
+                identity,
+                site,
+            )?);
+        }
+        Ok(origins)
+    }
+
     /// Render a terminal outcome as stable text.
     pub fn show_outcome(&self, outcome: &Outcome) -> String {
         match outcome {
