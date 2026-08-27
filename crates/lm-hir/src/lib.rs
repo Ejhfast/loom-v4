@@ -44,7 +44,7 @@ pub fn core_image_with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> lm_b
     core_image_with_intrinsics(bundle).0
 }
 
-/// Compile the core provider and return its direct intrinsic summaries.
+/// Compile the core provider and return its intrinsic summaries.
 pub fn core_image_with_intrinsics(
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
 ) -> (lm_bytecode::Module, Vec<Option<lm_abi::IntrinsicSlot>>) {
@@ -59,13 +59,37 @@ pub fn core_image_with_intrinsics(
         },
     )
     .expect("the core image checks");
-    let intrinsics = hir.funcs.iter().map(direct_intrinsic).collect::<Vec<_>>();
+    let intrinsics = intrinsic_summaries(&hir);
     let exports = std::mem::take(&mut hir.core_exports);
     hir.exports = exports;
     (lower_module(&hir), intrinsics)
 }
 
-fn direct_intrinsic(function: &hir::HirFunc) -> Option<lm_abi::IntrinsicSlot> {
+/// Find pure functions that forward their parameters to one intrinsic.
+fn intrinsic_summaries(module: &HirModule) -> Vec<Option<lm_abi::IntrinsicSlot>> {
+    let mut summaries = vec![None; module.funcs.len()];
+    loop {
+        let mut changed = false;
+        for (index, function) in module.funcs.iter().enumerate() {
+            if summaries[index].is_some() {
+                continue;
+            }
+            let Some(intrinsic) = forwarded_intrinsic(function, &summaries) else {
+                continue;
+            };
+            summaries[index] = Some(intrinsic);
+            changed = true;
+        }
+        if !changed {
+            return summaries;
+        }
+    }
+}
+
+fn forwarded_intrinsic(
+    function: &hir::HirFunc,
+    summaries: &[Option<lm_abi::IntrinsicSlot>],
+) -> Option<lm_abi::IntrinsicSlot> {
     if !function.row.is_empty()
         || !function.captures.is_empty()
         || function.locals.len() != function.params.len()
@@ -75,13 +99,22 @@ fn direct_intrinsic(function: &hir::HirFunc) -> Option<lm_abi::IntrinsicSlot> {
     let [hir::HStmt::Expr(expression)] = function.body.as_slice() else {
         return None;
     };
-    let hir::HExprKind::Intrinsic { intrinsic, args } = &expression.kind else {
-        return None;
+    let (intrinsic, args) = match &expression.kind {
+        hir::HExprKind::Intrinsic { intrinsic, args } => (*intrinsic, args),
+        hir::HExprKind::Call {
+            func,
+            targs,
+            rowargs,
+            args,
+        } if targs.is_empty() && rowargs.is_empty() => {
+            (summaries.get(*func as usize).copied().flatten()?, args)
+        }
+        _ => return None,
     };
     let direct = args.iter().enumerate().all(|(index, argument)| {
         matches!(argument.kind, hir::HExprKind::Local(slot) if slot as usize == index)
     });
-    direct.then_some(*intrinsic)
+    direct.then_some(intrinsic)
 }
 
 /// Replace checked core bodies with exact import declarations.

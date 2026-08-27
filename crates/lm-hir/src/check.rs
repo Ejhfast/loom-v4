@@ -372,7 +372,7 @@ pub struct CheckOptions {
     /// The compiled core dependency used by an ordinary module.
     /// Core-provider compilation leaves this value empty.
     pub core: Option<std::sync::Arc<lm_bytecode::artifact::LinkUnit>>,
-    /// Trusted direct intrinsic summaries from the compiled core.
+    /// Trusted intrinsic summaries from the compiled core.
     pub core_intrinsics: std::sync::Arc<[Option<lm_abi::IntrinsicSlot>]>,
     /// Extra core definitions required by a lowering option.
     pub core_roots: BTreeSet<String>,

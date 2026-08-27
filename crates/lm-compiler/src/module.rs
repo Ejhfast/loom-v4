@@ -1392,7 +1392,7 @@ pub(crate) fn select_linkage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lm_bytecode::{ExtendedInstr, Instr, SlotContract};
+    use lm_bytecode::{ExtendedInstr, Instr, NumericInstr, SlotContract};
 
     fn compile(source: &str, options: &CompileOptions) -> CompiledModule {
         compile_module_with_options(
@@ -1465,6 +1465,19 @@ mod tests {
         );
         let core = crate::core_link_unit().expect("the core link unit builds");
         assert_eq!(linked.conformances.len(), core.module().conformances.len());
+    }
+
+    #[test]
+    fn a_core_forwarding_hook_lowers_to_its_intrinsic() {
+        let compiled = compile("1 ^ 2\n", &CompileOptions::new());
+        let entry = &compiled.module.funcs[compiled.module.entry as usize];
+        let instructions = entry.blocks.iter().flatten().collect::<Vec<_>>();
+        assert!(instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::Numeric(NumericInstr::IntBitXor))));
+        assert!(!instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::Call(_) | Instr::CallG { .. })));
     }
 
     #[test]
