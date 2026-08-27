@@ -1073,8 +1073,7 @@ fn a_stale_pin_fails_to_link() {
     assert!(error.0.contains("rebuild"), "{error}");
 }
 
-/// The linker takes decoded modules, so it checks the export table
-/// of a crafted unit instead of trusting it.
+/// Collection rejects an invalid requested export before graph traversal.
 #[test]
 fn the_linker_rejects_a_crafted_export_table() {
     use lm_compiler::{link, LinkEnv};
@@ -1091,29 +1090,13 @@ fn the_linker_rejects_a_crafted_export_table() {
     .collect();
     // Each case damages one export table and must reject.
     type Damage = fn(&mut lm_bytecode::Module);
-    let cases: [(&str, Damage); 3] = [
+    let cases: [(&str, Damage); 2] = [
         ("twice", |m: &mut lm_bytecode::Module| {
             let copy = m.exports[0].clone();
             m.exports.push(copy);
         }),
         ("outside the", |m: &mut lm_bytecode::Module| {
             m.exports[0].def = 9999;
-        }),
-        ("which it imports", |m: &mut lm_bytecode::Module| {
-            // The greeting module imports `Matrix`, so a re-export of
-            // that declaration must reject.
-            let import = m
-                .imports
-                .iter()
-                .find(|i| i.kind == lm_bytecode::ImportKind::Class)
-                .expect("the module imports a class")
-                .clone();
-            m.exports.push(lm_bytecode::Export {
-                kind: lm_bytecode::ExportKind::Class,
-                name: "Copy".to_string(),
-                def: import.def,
-                ctor: lm_bytecode::NO_CTOR,
-            });
         }),
     ];
     for (needle, damage) in cases {
@@ -1124,29 +1107,15 @@ fn the_linker_rejects_a_crafted_export_table() {
         for (idx, unit) in units.iter().enumerate() {
             let mut module = unit.module.clone();
             let mut interface = unit.interface.clone();
-            // The first two cases damage the provider; the third
-            // damages the importer.
-            let target = if needle == "which it imports" { 1 } else { 0 };
-            if idx == target {
+            if idx == 0 {
                 damage(&mut module);
-                if needle != "outside the" {
+                if needle == "twice" {
                     let mut items: Vec<lm_bytecode::interface::IfaceItem> = interface
                         .exports
                         .iter()
                         .map(|entry| entry.item.clone())
                         .collect();
-                    if needle == "twice" {
-                        items.push(items[0].clone());
-                    } else {
-                        items.push(
-                            units[0]
-                                .interface
-                                .find("Matrix")
-                                .expect("the provider exports Matrix")
-                                .item
-                                .clone(),
-                        );
-                    }
+                    items.push(items[0].clone());
                     let identity = lm_bytecode::identity::module_identity(&module)
                         .expect("the crafted module has an identity");
                     let slots = interface.slots.clone();

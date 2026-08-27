@@ -183,19 +183,27 @@ pub(crate) fn collect_link_exports(
     }
     let mut roots = Vec::with_capacity(requests.len());
     let mut exports = HashSet::with_capacity(requests.len());
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
     for (name, kind) in requests {
         let export_name = provider_export_name(name, *kind);
-        let export = module
+        let mut matches = module
             .exports
             .iter()
-            .find(|export| export.name == export_name)
+            .filter(|export| export.name == export_name);
+        let export = matches
+            .next()
             .ok_or_else(|| format!("the module does not export `{export_name}`"))?;
+        if matches.next().is_some() {
+            return Err(format!("the module exports `{export_name}` twice"));
+        }
         exports.insert(export_name.to_string());
         match kind {
             ImportKind::Class => {
                 if !export.kind.is_class() {
                     return Err(format!("the export `{export_name}` is not a class"));
                 }
+                checked_class_export(module, &extern_classes, export)?;
                 roots.push(offsets.class(export.def));
                 if export.ctor != NO_CTOR {
                     roots.push(offsets.func(export.ctor));
@@ -205,12 +213,14 @@ pub(crate) fn collect_link_exports(
                 if !export.kind.is_class() || export.ctor == NO_CTOR {
                     return Err(format!("the export `{export_name}` has no constructor"));
                 }
+                checked_class_export(module, &extern_classes, export)?;
                 roots.push(offsets.func(export.ctor));
             }
             ImportKind::Method => {
                 if !export.kind.is_class() {
                     return Err(format!("the export `{export_name}` is not a class"));
                 }
+                checked_class_export(module, &extern_classes, export)?;
                 roots.push(offsets.class(export.def));
                 if export.ctor != NO_CTOR {
                     roots.push(offsets.func(export.ctor));
@@ -220,6 +230,16 @@ pub(crate) fn collect_link_exports(
                 if export.kind != lm_bytecode::ExportKind::Function {
                     return Err(format!("the export `{export_name}` is not a function"));
                 }
+                if export.def as usize >= module.funcs.len() {
+                    return Err(format!(
+                        "the export `{export_name}` names a function outside the module"
+                    ));
+                }
+                if extern_funcs[export.def as usize] {
+                    return Err(format!(
+                        "the module exports `{export_name}`, which it imports"
+                    ));
+                }
                 roots.push(offsets.func(export.def));
             }
         }
@@ -227,6 +247,28 @@ pub(crate) fn collect_link_exports(
     roots.sort_unstable();
     roots.dedup();
     collect_from_roots(module, offsets, &roots, true, &exports)
+}
+
+fn checked_class_export(
+    module: &Module,
+    extern_classes: &[bool],
+    export: &Export,
+) -> Result<(), String> {
+    if export.def as usize >= module.classes.len()
+        || (export.ctor != NO_CTOR && export.ctor as usize >= module.funcs.len())
+    {
+        return Err(format!(
+            "the export `{}` names a definition outside the module",
+            export.name
+        ));
+    }
+    if extern_classes[export.def as usize] {
+        return Err(format!(
+            "the module exports `{}`, which it imports",
+            export.name
+        ));
+    }
+    Ok(())
 }
 
 fn provider_export_name(name: &str, kind: ImportKind) -> &str {

@@ -1176,7 +1176,7 @@ pub struct FuncBinding {
     /// the binding named any function of the module, an import slot
     /// included. Two providers then hid two constructors behind one
     /// harmless binding, and the conflict rule never fired. This field
-    /// makes the tie explicit, and the linker proves it.
+    /// makes the tie explicit, and the verifier proves it.
     pub class: u32,
 }
 

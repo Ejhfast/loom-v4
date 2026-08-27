@@ -737,6 +737,11 @@ fn a_duplicate_class_key_cannot_use_a_cache_hit() {
     // module is valid.
     module.classes[b as usize].name = "A".to_string();
     module.classes[b as usize].key = module.classes[a as usize].key.clone();
+    for binding in &mut module.bindings {
+        if binding.class == b {
+            binding.key = lm_bytecode::ctor_binding_key(&module.classes[b as usize].key);
+        }
+    }
     let baseline = lm_bytecode::encode(&module);
     let mut cache = lm_vm::VerifiedCache::new();
     lm_vm::load_bytes_cached(&baseline, &mut cache).expect("loads");

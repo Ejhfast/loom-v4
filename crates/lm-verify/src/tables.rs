@@ -307,6 +307,7 @@ pub(crate) fn verify_tables(
     verify_applications(&ctx)?;
     let interface_self = verify_interfaces(&ctx)?;
     verify_imports(&ctx)?;
+    verify_bindings(&ctx)?;
     verify_classes(&ctx)?;
     verify_conformances(&ctx, &interface_self)?;
     verify_map_key_types(&ctx)?;
@@ -919,6 +920,71 @@ fn verify_imports(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "the signature references an invalid type index",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The named function bindings.
+fn verify_bindings(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
+    let mut constructors = vec![Vec::new(); module.classes.len()];
+
+    for (index, binding) in module.bindings.iter().enumerate() {
+        let Some(function) = module.funcs.get(binding.func as usize) else {
+            return Err(terr(format!(
+                "binding {index} names a function outside the module"
+            )));
+        };
+        if binding.class == lm_bytecode::NO_CLASS {
+            continue;
+        }
+        let Some(class) = module.classes.get(binding.class as usize) else {
+            return Err(terr(format!(
+                "binding {index} names a class outside the module"
+            )));
+        };
+        let class_index = binding.class as usize;
+        if extern_classes[class_index] {
+            return Err(terr(format!(
+                "binding {index} names the imported class `{}`",
+                class.key
+            )));
+        }
+        if extern_funcs[binding.func as usize] {
+            return Err(terr(format!(
+                "binding {index} names the imported function `{}`",
+                function.name
+            )));
+        }
+        let expected = lm_bytecode::ctor_binding_key(&class.key);
+        if binding.key != expected {
+            return Err(terr(format!(
+                "binding {index} needs the constructor key `{expected}`"
+            )));
+        }
+        if !constructors[class_index].contains(&binding.func) {
+            constructors[class_index].push(binding.func);
+        }
+    }
+
+    for export in &module.exports {
+        if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
+            continue;
+        }
+        let Some(class) = module.classes.get(export.def as usize) else {
+            return Err(terr(format!(
+                "export `{}` names a class outside the module",
+                export.name
+            )));
+        };
+        if !constructors[export.def as usize].contains(&export.ctor) {
+            return Err(terr(format!(
+                "export `{}` does not use the constructor of `{}`",
+                export.name, class.key
+            )));
         }
     }
     Ok(())

@@ -255,6 +255,8 @@ fn tuple_core_arity(name: &str) -> Option<usize> {
 #[derive(Debug, Clone)]
 pub struct CheckOptions {
     pub prelude: bool,
+    /// Build the complete export surface of the pinned core provider.
+    pub build_core_provider: bool,
     /// The operation bundle available to this module.
     pub bundle: std::sync::Arc<lm_abi::AbiBundle>,
     /// The module path of the source under compilation, for example
@@ -272,6 +274,7 @@ impl Default for CheckOptions {
     fn default() -> CheckOptions {
         CheckOptions {
             prelude: true,
+            build_core_provider: false,
             bundle: lm_abi::standard_bundle(),
             module_path: String::new(),
             imports: crate::import::ImportEnv::new(),
@@ -2792,7 +2795,11 @@ pub fn check_module_with(
         locals,
         body,
     });
-    let core_exports = collect_core_exports(&ctx, core)?;
+    let core_exports = if options.build_core_provider {
+        collect_core_exports(&ctx, core)?
+    } else {
+        Vec::new()
+    };
     assemble(
         ctx,
         own_defaults,

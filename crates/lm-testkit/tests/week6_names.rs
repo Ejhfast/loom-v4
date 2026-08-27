@@ -72,11 +72,9 @@ fn a_crafted_function_rename_moves_no_structural_hash() {
     assert!(plain, "the rename changed nothing the verifier reads");
 }
 
-/// A crafted qualified key changes nothing the verifier reads. The
-/// core layout comes from the declared role table, so a key edit
-/// cannot drop a core slot.
+/// A crafted class key changes the constructor rule that the verifier reads.
 #[test]
-fn a_crafted_qualified_key_moves_no_verifier_input() {
+fn a_crafted_qualified_key_moves_the_verifier_input() {
     let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
     let module = lm_bytecode::decode(&bytes).unwrap();
     let some = module
@@ -86,10 +84,10 @@ fn a_crafted_qualified_key_moves_no_verifier_input() {
         .expect("the core arm is embedded");
     let mut twin = module.clone();
     twin.classes[some].key = "core.Option.Aaa".to_string();
-    assert_eq!(
+    assert_ne!(
         verification_hash(&module),
         verification_hash(&twin),
-        "a key edit moved the cache key"
+        "a key edit did not move the cache key"
     );
     let twin_bytes = lm_bytecode::encode(&twin);
     let plain = lm_vm::load_bytes(&twin_bytes).is_ok();
@@ -100,7 +98,7 @@ fn a_crafted_qualified_key_moves_no_verifier_input() {
         plain, cached,
         "a cached load and an uncached load disagree on admission"
     );
-    assert!(plain, "the key edit changed nothing the verifier reads");
+    assert!(!plain, "the verifier admitted a mismatched constructor key");
 }
 
 /// A crafted core role table rejects, and a cached load and an

@@ -558,7 +558,7 @@ fn link_artifact(
     artifact: lm_bytecode::artifact::Artifact,
 ) -> Result<lm_compiler::LinkedProgram, String> {
     let core = lm_compiler::core_link_unit()?;
-    lm_compiler::link_artifact(artifact, Some(&core)).map_err(|error| format!("error: {error}\n"))
+    lm_compiler::link_artifact(artifact, Some(core)).map_err(|error| format!("error: {error}\n"))
 }
 
 /// Build one source file into `build/debug/<name>.lma` plus

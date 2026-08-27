@@ -25,18 +25,18 @@
 //! code that the verifier did not admit.
 
 mod collect;
-mod contracts;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub use lm_bytecode::artifact::LinkUnit;
 use lm_bytecode::artifact::{Artifact, ArtifactId, CORE_MODULE_PATH};
 use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
-    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
-    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind,
-    Instr, Module, SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
+    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module,
+    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
 };
 use std::collections::HashMap;
 
@@ -117,7 +117,7 @@ impl std::error::Error for LinkEnvError {}
 /// A mutable set of modules for one link step.
 #[derive(Debug, Clone, Default)]
 pub struct LinkEnv {
-    units: BTreeMap<String, LinkUnit>,
+    units: BTreeMap<String, Arc<LinkUnit>>,
 }
 
 impl LinkEnv {
@@ -127,12 +127,16 @@ impl LinkEnv {
     }
 
     /// Bind one module to its canonical path.
-    pub fn bind(&mut self, unit: LinkUnit) -> Result<(), LinkEnvError> {
+    pub fn bind<U>(&mut self, unit: U) -> Result<(), LinkEnvError>
+    where
+        U: Into<Arc<LinkUnit>>,
+    {
+        let unit = unit.into();
         let path = unit.module_path().to_string();
         if self.units.contains_key(&path) {
             return Err(LinkEnvError::DuplicateModule(path));
         }
-        self.validate_dependencies(&unit)?;
+        self.validate_dependencies(unit.as_ref())?;
         self.units.insert(path, unit);
         Ok(())
     }
@@ -267,13 +271,13 @@ fn imported_module_paths(module: &Module) -> Vec<String> {
 /// An immutable set of modules for one link step.
 #[derive(Debug, Clone, Default)]
 pub struct FrozenLinkEnv {
-    units: BTreeMap<String, LinkUnit>,
+    units: BTreeMap<String, Arc<LinkUnit>>,
 }
 
 impl FrozenLinkEnv {
     /// Return the module at one canonical path.
     pub fn unit(&self, path: &str) -> Option<&LinkUnit> {
-        self.units.get(path)
+        self.units.get(path).map(Arc::as_ref)
     }
 
     /// Return all bound module paths in canonical order.
@@ -303,10 +307,11 @@ impl FrozenLinkEnv {
 /// Resolve one thin or fat artifact through the shared link environment.
 pub fn resolve_artifact(
     artifact: Artifact,
-    runtime_core: Option<&LinkUnit>,
+    runtime_core: Option<Arc<LinkUnit>>,
 ) -> Result<(ArtifactId, FrozenLinkEnv), LinkEnvError> {
     let (root, mut units) = artifact.into_units();
-    let mut available: BTreeSet<ArtifactId> = units.iter().map(LinkUnit::id).collect();
+    let mut units: Vec<Arc<LinkUnit>> = units.drain(..).map(Arc::new).collect();
+    let mut available: BTreeSet<ArtifactId> = units.iter().map(|unit| unit.id()).collect();
     let mut required_core = None;
     for unit in &units {
         for dependency in unit.dependencies() {
@@ -357,7 +362,7 @@ pub fn resolve_artifact(
             )));
         }
         available.insert(core.id());
-        units.push(core.clone());
+        units.push(core);
     }
     let mut index = BTreeMap::new();
     for (position, unit) in units.iter().enumerate() {
@@ -383,7 +388,7 @@ pub fn resolve_artifact(
             ready.insert((unit.id(), position));
         }
     }
-    let mut units: Vec<Option<LinkUnit>> = units.into_iter().map(Some).collect();
+    let mut units: Vec<Option<Arc<LinkUnit>>> = units.into_iter().map(Some).collect();
     let mut env = LinkEnv::new();
     let mut linked = 0usize;
     while let Some(&(id, position)) = ready.iter().next() {
@@ -430,7 +435,7 @@ fn collect_environment(
     env: &FrozenLinkEnv,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<FrozenLinkEnv, LinkError> {
-    let order = validate_environment(root, env, bundle)?;
+    let order = link_order(root, env)?;
     let mut requests: BTreeMap<String, Vec<(String, ImportKind)>> = BTreeMap::new();
     let mut selected: BTreeMap<String, Module> = BTreeMap::new();
 
@@ -478,21 +483,16 @@ fn collect_environment(
             .unit(path)
             .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
         if path == CORE_MODULE_PATH {
+            let source = env
+                .units
+                .get(path)
+                .cloned()
+                .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
             rebuilt
-                .bind(source.clone())
+                .bind(source)
                 .map_err(|error| fail(error.to_string()))?;
             continue;
         }
-        lm_verify::verify_module_with_bundle(&module, bundle).map_err(|error| {
-            let function = error
-                .func
-                .and_then(|index| module.funcs.get(index as usize))
-                .map(|function| format!(" in `{}`", function.name))
-                .unwrap_or_default();
-            fail(format!(
-                "the collected module `{path}` does not verify{function}: {error}"
-            ))
-        })?;
         let interface = collected_interface(source, &module, bundle)?;
         rebuilt
             .bind_module_with_bundle(path.clone(), module, interface, bundle)
@@ -501,27 +501,24 @@ fn collect_environment(
     Ok(rebuilt.freeze())
 }
 
-/// Validate every table and import before collection can remove code.
-fn validate_environment(
-    root: &str,
+/// Verify decoded artifact units before relocation.
+fn validate_untrusted_units(
     env: &FrozenLinkEnv,
+    units: &BTreeSet<ArtifactId>,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-) -> Result<Vec<String>, LinkError> {
-    let order = link_order(root, env)?;
-    for path in &order {
+) -> Result<(), LinkError> {
+    for path in env.paths() {
         let unit = env
             .unit(path)
             .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        if !units.contains(&unit.id()) {
+            continue;
+        }
         if unit.interface().bundle_digest != bundle.digest() {
             return Err(fail(format!("the module `{path}` uses another ABI bundle")));
         }
-        lm_verify::verify_structure_only_with_bundle(unit.module(), bundle).map_err(|error| {
-            fail(format!(
-                "the module `{path}` has an invalid structure: {error}"
-            ))
-        })?;
-        check_ctor_bindings(unit.module(), path)?;
-        validate_export_table(unit.module(), path)?;
+        lm_verify::verify_module_with_bundle(unit.module(), bundle)
+            .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
         lm_bytecode::interface::validate_interface_with_bundle(
             unit.module(),
             unit.identity(),
@@ -530,203 +527,7 @@ fn validate_environment(
         )
         .map_err(|error| fail(format!("the interface of `{path}` is invalid: {error}")))?;
     }
-    for path in &order {
-        let unit = env
-            .unit(path)
-            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
-        for (slot, import) in unit.module().imports.iter().enumerate() {
-            validate_import_contract(path, unit, import, slot, env)?;
-        }
-    }
-    Ok(order)
-}
-
-/// Validate exports before collection can remove an invalid entry.
-fn validate_export_table(module: &Module, path: &str) -> Result<(), LinkError> {
-    let extern_classes = module.extern_classes();
-    let extern_funcs = module.extern_funcs();
-    let mut names = BTreeSet::new();
-    for export in &module.exports {
-        if !names.insert(export.name.as_str()) {
-            return Err(fail(format!(
-                "the module `{path}` exports the name `{}` twice",
-                export.name
-            )));
-        }
-        let limit = if export.kind.is_class() {
-            module.classes.len()
-        } else if export.kind.is_interface() {
-            module.interfaces.len()
-        } else {
-            module.funcs.len()
-        };
-        if export.def as usize >= limit
-            || (export.ctor != lm_bytecode::NO_CTOR && export.ctor as usize >= module.funcs.len())
-        {
-            return Err(fail(format!(
-                "the export `{}` of `{path}` names a definition outside the module",
-                export.name
-            )));
-        }
-        let imported = if export.kind.is_class() {
-            extern_classes[export.def as usize]
-        } else if export.kind.is_interface() {
-            false
-        } else {
-            extern_funcs[export.def as usize]
-        };
-        if imported {
-            return Err(fail(format!(
-                "the module `{path}` exports `{}`, which it imports",
-                export.name
-            )));
-        }
-    }
     Ok(())
-}
-
-fn validate_import_contract(
-    path: &str,
-    importer: &LinkUnit,
-    import: &Import,
-    slot: usize,
-    env: &FrozenLinkEnv,
-) -> Result<(), LinkError> {
-    let provider = env.unit(&import.module).ok_or_else(|| {
-        fail(format!(
-            "`{path}` slot {slot} names the unbound module `{}`",
-            import.module
-        ))
-    })?;
-    let export_name = import_export_name(import)?;
-    let interface = provider.interface().find(export_name).ok_or_else(|| {
-        fail(format!(
-            "`{path}` slot {slot} names `{}.{export_name}`, which the module does not export",
-            import.module
-        ))
-    })?;
-    if interface.iface_hash != import.hash {
-        return Err(fail(format!(
-            "`{path}` slot {slot} pins an interface of `{}.{export_name}` that the module no longer provides; rebuild the importing module",
-            import.module
-        )));
-    }
-    let export = provider
-        .module()
-        .exports
-        .iter()
-        .find(|export| export.name == export_name)
-        .ok_or_else(|| {
-            fail(format!(
-                "`{path}` slot {slot} names `{}.{export_name}`, which the module does not export",
-                import.module
-            ))
-        })?;
-    let difference = match import.kind {
-        ImportKind::Class => {
-            if !export.kind.is_class() {
-                return Err(fail(format!(
-                    "`{path}` slot {slot} names `{}.{export_name}`, which is not a class",
-                    import.module
-                )));
-            }
-            contracts::class_difference(
-                importer.module(),
-                importer.identity(),
-                import.def,
-                provider.module(),
-                provider.identity(),
-                export.def,
-            )
-        }
-        ImportKind::Func => {
-            if export.kind != lm_bytecode::ExportKind::Function {
-                return Err(fail(format!(
-                    "`{path}` slot {slot} names `{}.{export_name}`, which is not a function",
-                    import.module
-                )));
-            }
-            contracts::function_difference(
-                importer.module(),
-                importer.identity(),
-                import.def,
-                provider.module(),
-                provider.identity(),
-                export.def,
-            )
-        }
-        ImportKind::Ctor => {
-            if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
-                return Err(fail(format!(
-                    "`{path}` slot {slot} names `{}.{export_name}`, which has no constructor",
-                    import.module
-                )));
-            }
-            contracts::function_difference(
-                importer.module(),
-                importer.identity(),
-                import.def,
-                provider.module(),
-                provider.identity(),
-                export.ctor,
-            )
-        }
-        ImportKind::Method => {
-            let (_, method_name) = import.name.rsplit_once('.').ok_or_else(|| {
-                fail(format!(
-                    "`{path}` slot {slot} names the method `{}` without a class",
-                    import.name
-                ))
-            })?;
-            let class = provider
-                .module()
-                .classes
-                .get(export.def as usize)
-                .ok_or_else(|| fail("an exported class index is invalid"))?;
-            let function = class
-                .methods
-                .iter()
-                .find(|(selector, _)| {
-                    provider
-                        .module()
-                        .selectors
-                        .get(*selector as usize)
-                        .map(String::as_str)
-                        == Some(method_name)
-                })
-                .map(|(_, function)| *function)
-                .ok_or_else(|| {
-                    fail(format!(
-                        "`{path}` slot {slot} names the method `{method_name}`, which `{}.{export_name}` does not answer",
-                        import.module
-                    ))
-                })?;
-            contracts::function_difference(
-                importer.module(),
-                importer.identity(),
-                import.def,
-                provider.module(),
-                provider.identity(),
-                function,
-            )
-        }
-    };
-    if let Some(difference) = difference {
-        return Err(import_contract_error(path, import, difference));
-    }
-    Ok(())
-}
-
-fn import_export_name(import: &Import) -> Result<&str, LinkError> {
-    if import.kind == ImportKind::Method {
-        import
-            .name
-            .rsplit_once('.')
-            .map(|(class, _)| class)
-            .ok_or_else(|| fail(format!("the method import `{}` has no class", import.name)))
-    } else {
-        Ok(&import.name)
-    }
 }
 
 fn collected_interface(
@@ -775,6 +576,7 @@ pub struct LinkedProgram {
     pub module: Module,
     pub artifact_id: ArtifactId,
     pub artifact: Vec<u8>,
+    /// The artifact closure identity in its legacy hash field.
     pub semantic_hash: [u8; 32],
     pub container_hash: [u8; 32],
 }
@@ -1014,7 +816,7 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
 /// Resolve and link one decoded artifact.
 pub fn link_artifact(
     artifact: Artifact,
-    runtime_core: Option<&LinkUnit>,
+    runtime_core: Option<Arc<LinkUnit>>,
 ) -> Result<LinkedProgram, LinkError> {
     let bundle = lm_abi::standard_bundle();
     link_artifact_with_bundle(artifact, runtime_core, &bundle)
@@ -1023,10 +825,11 @@ pub fn link_artifact(
 /// Resolve and link one decoded artifact under one ABI bundle.
 pub fn link_artifact_with_bundle(
     artifact: Artifact,
-    runtime_core: Option<&LinkUnit>,
+    runtime_core: Option<Arc<LinkUnit>>,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<LinkedProgram, LinkError> {
     let root_path = artifact.root().module_path().to_string();
+    let untrusted = artifact.units().iter().map(LinkUnit::id).collect();
     let (root, env) = resolve_artifact(artifact, runtime_core)
         .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
     let unit = env
@@ -1037,6 +840,7 @@ pub fn link_artifact_with_bundle(
             "the artifact root `{root_path}` has another identity"
         )));
     }
+    validate_untrusted_units(&env, &untrusted, bundle)?;
     link_resolved_with_bundle(&root_path, &env, bundle)
 }
 
@@ -1062,7 +866,7 @@ fn link_resolved_with_bundle(
         let unit = env
             .unit(path)
             .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
-        let reloc = merge_checked_unit(&mut merged, unit, path, bundle)?;
+        let reloc = merge_unit(&mut merged, unit, path, bundle)?;
         if path == root {
             entry = Some(reloc.funcs[unit.module().entry as usize]);
         }
@@ -1092,17 +896,12 @@ fn link_resolved_with_bundle(
             lm_bytecode::debug::encode(&merged.debug)
         },
     };
-    // The merged program meets the whole verifier before it runs.
-    lm_verify::verify_module_with_bundle(&module, bundle)
-        .map_err(|e| fail(format!("the linked program does not verify: {e}")))?;
     let package = artifact_from_order(root, env, &order, false)?;
     let artifact_id = package.id();
     let artifact = lm_bytecode::artifact::encode_with_bundle(&package, bundle)
         .map_err(|error| fail(format!("the artifact does not encode: {error}")))?;
     let container_hash = lm_bytecode::identity::container_hash(&artifact);
-    let semantic_hash = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
-        .map_err(|e| fail(format!("the linked program does not hash: {e}")))?
-        .semantic_hash;
+    let semantic_hash = artifact_id.into_bytes();
     Ok(LinkedProgram {
         module,
         artifact_id,
@@ -1112,8 +911,8 @@ fn link_resolved_with_bundle(
     })
 }
 
-/// Verify and merge one unit before publication.
-fn merge_checked_unit(
+/// Merge one validated unit.
+fn merge_unit(
     merged: &mut Merged,
     unit: &LinkUnit,
     path: &str,
@@ -1122,17 +921,8 @@ fn merge_checked_unit(
     if unit.interface().bundle_digest != bundle.digest() {
         return Err(fail(format!("the module `{path}` uses another ABI bundle")));
     }
-    lm_verify::verify_module_with_bundle(unit.module(), bundle)
-        .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
     let identity = unit.identity();
     let reloc = relocate(merged, unit.module(), identity, path)?;
-    lm_bytecode::interface::validate_interface_with_bundle(
-        unit.module(),
-        identity,
-        unit.interface(),
-        bundle,
-    )
-    .map_err(|error| fail(format!("the interface of `{path}` is invalid: {error}")))?;
     register_exports(merged, unit.module(), unit.interface(), path, &reloc)?;
     Ok(reloc)
 }
@@ -1213,7 +1003,6 @@ fn relocate(
     identity: &ModuleIdentity,
     path: &str,
 ) -> Result<Reloc, LinkError> {
-    check_ctor_bindings(module, path)?;
     let extern_classes = module.extern_classes();
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
     let bytes: Vec<u32> = module
@@ -1393,7 +1182,6 @@ fn relocate(
         funcs,
         slots: Vec::with_capacity(module.slots.len()),
     };
-    check_import_contracts(merged, module, path, &reloc)?;
     for (slot, source) in module.slots.iter().enumerate() {
         let contract = reloc_slot_contract(&source.contract, &reloc);
         let initial = source
@@ -1533,140 +1321,6 @@ fn relocate(
     Ok(reloc)
 }
 
-/// Compare every imported declaration with its resolved provider.
-fn check_import_contracts(
-    merged: &Merged,
-    module: &Module,
-    path: &str,
-    reloc: &Reloc,
-) -> Result<(), LinkError> {
-    for import in &module.imports {
-        match import.kind {
-            ImportKind::Class => {
-                let local = import.def as usize;
-                let target = reloc.classes[local] as usize;
-                let class = reloc_class(&module.classes[local], reloc);
-                let bounds = reloc_bounds(&module.class_bounds[local], reloc);
-                if merged.classes[target] != class || merged.class_bounds[target] != bounds {
-                    return Err(import_contract_error(
-                        path,
-                        import,
-                        "the class layout differs",
-                    ));
-                }
-                let local_conformances: Vec<BcConformance> = module
-                    .conformances
-                    .iter()
-                    .filter(|item| item.class as usize == local)
-                    .map(|item| reloc_conformance(item, reloc))
-                    .collect();
-                let provider_conformances: Vec<&BcConformance> = merged
-                    .conformances
-                    .iter()
-                    .filter(|item| item.class as usize == target)
-                    .collect();
-                if local_conformances.len() != provider_conformances.len()
-                    || local_conformances
-                        .iter()
-                        .any(|item| !provider_conformances.contains(&item))
-                {
-                    return Err(import_contract_error(
-                        path,
-                        import,
-                        "the conformance set differs",
-                    ));
-                }
-                let mut local_arms: Vec<u32> = module
-                    .classes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| {
-                        item.kind == BcClassKind::Case && item.parent() == Some(import.def)
-                    })
-                    .map(|(index, _)| reloc.classes[index])
-                    .collect();
-                let mut provider_arms: Vec<u32> = merged
-                    .classes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| {
-                        item.kind == BcClassKind::Case && item.parent() == Some(target as u32)
-                    })
-                    .map(|(index, _)| index as u32)
-                    .collect();
-                local_arms.sort_unstable();
-                provider_arms.sort_unstable();
-                if local_arms != provider_arms {
-                    return Err(import_contract_error(
-                        path,
-                        import,
-                        "the enum arm set differs",
-                    ));
-                }
-            }
-            ImportKind::Ctor | ImportKind::Method | ImportKind::Func => {
-                let local = import.def as usize;
-                let target = reloc.funcs[local] as usize;
-                let source = &module.funcs[local];
-                let provider = &merged.funcs[target];
-                let bounds = reloc_bounds(&module.func_bounds[local], reloc);
-                let params: Vec<u32> = source
-                    .params
-                    .iter()
-                    .map(|item| reloc.types[*item as usize])
-                    .collect();
-                let captures: Vec<u32> = source
-                    .captures
-                    .iter()
-                    .map(|item| reloc.types[*item as usize])
-                    .collect();
-                let difference = if source.type_params != provider.type_params {
-                    Some("the type parameter count differs".to_string())
-                } else if source.effect_params != provider.effect_params {
-                    Some("the effect parameter count differs".to_string())
-                } else if source.param_muts != provider.param_muts {
-                    Some("the parameter mutability differs".to_string())
-                } else if params != provider.params {
-                    Some("the parameter types differ".to_string())
-                } else if reloc.types[source.ret as usize] != provider.ret {
-                    Some("the result type differs".to_string())
-                } else if reloc_row(&source.row, &reloc.strings) != provider.row {
-                    Some("the effect row differs".to_string())
-                } else if captures != provider.captures {
-                    Some("the capture types differ".to_string())
-                } else if bounds != merged.func_bounds[target] {
-                    Some("the generic bounds differ".to_string())
-                } else {
-                    None
-                };
-                if let Some(difference) = difference {
-                    return Err(import_contract_error(path, import, &difference));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn import_contract_error(path: &str, import: &Import, difference: &str) -> LinkError {
-    fail(format!(
-        "the imported {} `{}` of `{path}` does not match `{}.{}`: {difference}",
-        import_kind_name(import.kind),
-        import.name,
-        import.module,
-        import.name
-    ))
-}
-
-fn import_kind_name(kind: ImportKind) -> &'static str {
-    match kind {
-        ImportKind::Class => "class",
-        ImportKind::Ctor => "constructor",
-        ImportKind::Method => "method",
-        ImportKind::Func => "function",
-    }
-}
-
 fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
     BcClass {
         name: source.name.clone(),
@@ -1700,109 +1354,6 @@ fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
             })
             .collect(),
     }
-}
-
-/// Prove that every class a module defines declares its constructor
-/// binding under the qualified key of that class.
-///
-/// The rule ties the two export-section tables together. A module that
-/// names a class one way and its constructor another way is not
-/// self-consistent, and the constructor merge rule would then read no
-/// class key at all. The compiler derives the binding from the key, so
-/// every module it writes passes.
-fn check_ctor_bindings(module: &Module, path: &str) -> Result<(), LinkError> {
-    let extern_classes = module.extern_classes();
-    let extern_funcs = module.extern_funcs();
-    // One pass over the bindings fills the constructor of every class,
-    // so the whole check stays linear in the module.
-    //
-    // A key alone proves nothing. A key check on its own let a binding
-    // name any function of the module, an import slot included, so two
-    // providers hid two constructors behind one binding hash and the
-    // conflict rule never fired.
-    let mut ctor_of: Vec<Option<u32>> = vec![None; module.classes.len()];
-    for binding in &module.bindings {
-        if binding.class == lm_bytecode::NO_CLASS {
-            continue;
-        }
-        // A hand-built module reaches the linker without a decoder, so
-        // the lookup is defensive.
-        let Some(class) = module.classes.get(binding.class as usize) else {
-            return Err(fail(format!(
-                "the binding `{}` of `{path}` names a class outside the module",
-                binding.key
-            )));
-        };
-        let idx = binding.class as usize;
-        if extern_classes[idx] {
-            return Err(fail(format!(
-                "the module `{path}` binds the constructor `{}` to the imported \
-                 class `{}`, which it does not define; rebuild the module",
-                binding.key, class.key
-            )));
-        }
-        let want = lm_bytecode::ctor_binding_key(&class.key);
-        if binding.key != want {
-            return Err(fail(format!(
-                "the module `{path}` binds `{}` to the class `{}`, which needs \
-                 the key `{want}`; rebuild the module",
-                binding.key, class.key
-            )));
-        }
-        if extern_funcs[binding.func as usize] {
-            return Err(fail(format!(
-                "the module `{path}` binds the constructor `{}` to an imported \
-                 declaration, which carries no body; rebuild the module",
-                binding.key
-            )));
-        }
-        if ctor_of[idx].is_some() {
-            return Err(fail(format!(
-                "the module `{path}` declares two constructor bindings for the \
-                 class `{}`; rebuild the module",
-                class.key
-            )));
-        }
-        ctor_of[idx] = Some(binding.func);
-    }
-    // Every class this module defines declares one constructor binding.
-    for (idx, class) in module.classes.iter().enumerate() {
-        if extern_classes[idx] || ctor_of[idx].is_some() {
-            continue;
-        }
-        return Err(fail(format!(
-            "the module `{path}` defines the class `{}` and declares no \
-             constructor binding `{}`; rebuild the module",
-            class.key,
-            lm_bytecode::ctor_binding_key(&class.key)
-        )));
-    }
-    // One pass over the exports. The export table records the
-    // construction function of a class export, and the two must name
-    // one function, or a caller reaches a constructor the binding
-    // never covered.
-    for export in &module.exports {
-        if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
-            continue;
-        }
-        let Some(class) = module.classes.get(export.def as usize) else {
-            return Err(fail(format!(
-                "the export `{}` of `{path}` names a class outside the module",
-                export.name
-            )));
-        };
-        let idx = export.def as usize;
-        if ctor_of[idx] != Some(export.ctor) {
-            return Err(fail(format!(
-                "the module `{path}` exports the class `{}` with one \
-                 construction function and binds `{}` to another; rebuild \
-                 the module",
-                class.key,
-                lm_bytecode::ctor_binding_key(&class.key)
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Merge the named function bindings of one module (specification
@@ -1839,10 +1390,7 @@ fn merge_bindings(
         if extern_funcs[local] {
             // An imported declaration carries no body, so the module
             // that declares it is not a provider of that name. A
-            // constructor binding never reaches this arm, because
-            // `check_ctor_bindings` rejects one that names an import
-            // slot. Without that rule a skip here switched the
-            // conflict test off for the exact case it must catch.
+            // The verifier rejects constructor bindings on imports.
             continue;
         }
         let hash = identity.func_hashes[local];

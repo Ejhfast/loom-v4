@@ -173,6 +173,40 @@ fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::Link
     link("app.main", &env.freeze()).map_err(|e| e.0)
 }
 
+/// Link hand-built units through the untrusted artifact path.
+fn link_untrusted_units(
+    units: &[lm_compiler::CompiledModule],
+) -> Result<lm_compiler::LinkedProgram, String> {
+    let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
+    for source in units {
+        let mut unit = source.clone();
+        let identity = module_identity(&unit.module).expect("the changed module has an identity");
+        unit.interface.semantic_hash = identity.semantic_hash;
+        for (entry, export) in unit.interface.exports.iter_mut().zip(&unit.module.exports) {
+            entry.def_hash = if export.kind.is_class() {
+                identity.class_hashes[export.def as usize]
+            } else if export.kind.is_interface() {
+                identity.interface_hashes[export.def as usize]
+            } else {
+                identity.func_hashes[export.def as usize]
+            };
+        }
+        env.bind_module(unit.path, unit.module, unit.interface)
+            .expect("the changed unit binds");
+    }
+    let env = env.freeze();
+    let root = env.unit("app.main").expect("the root is bound").clone();
+    let embedded = env
+        .paths()
+        .into_iter()
+        .filter(|path| *path != "app.main")
+        .map(|path| env.unit(path).expect("the dependency is bound").clone())
+        .collect();
+    let artifact =
+        lm_bytecode::artifact::Artifact::new(root, embedded).expect("the artifact graph is valid");
+    lm_compiler::link_artifact(artifact, None).map_err(|error| error.0)
+}
+
 fn link_selective_provider(unused_result: &str) -> lm_compiler::LinkedProgram {
     let provider = compile_one(
         "app.shapes",
@@ -296,7 +330,7 @@ fn a_thin_artifact_never_uses_an_ambient_non_core_module() {
     let root = env.unit("app.main").expect("the root is bound").clone();
     let core = env.unit("core").expect("the core is bound").clone();
     let artifact = Artifact::new(root, Vec::new()).expect("the thin artifact is valid");
-    let error = lm_compiler::resolve_artifact(artifact, Some(&core))
+    let error = lm_compiler::resolve_artifact(artifact, Some(std::sync::Arc::new(core)))
         .expect_err("a missing non-core module must reject");
     assert!(error.to_string().contains("app.shapes"), "{error}");
 }
@@ -317,9 +351,10 @@ fn thin_and_fat_core_resolution_use_one_link_environment() {
         .clone();
 
     let thin = Artifact::new(root.clone(), Vec::new()).expect("the thin artifact is valid");
-    let (thin_root, thin_env) =
-        lm_compiler::resolve_artifact(thin, Some(&core)).expect("the thin artifact resolves");
-    let fat = Artifact::new(root.clone(), vec![core.clone()]).expect("the fat artifact is valid");
+    let (thin_root, thin_env) = lm_compiler::resolve_artifact(thin, Some(core.clone()))
+        .expect("the thin artifact resolves");
+    let fat = Artifact::new(root.clone(), vec![core.as_ref().clone()])
+        .expect("the fat artifact is valid");
     let (fat_root, fat_env) =
         lm_compiler::resolve_artifact(fat, None).expect("the fat artifact resolves");
     assert_eq!(thin_root, root.id());
@@ -332,7 +367,7 @@ fn thin_and_fat_core_resolution_use_one_link_environment() {
     let other_core = LinkUnit::new("core", other_module, core.interface().clone(), Vec::new())
         .expect("the other core unit is valid");
     let thin = Artifact::new(root, Vec::new()).expect("the thin artifact is valid");
-    let error = lm_compiler::resolve_artifact(thin, Some(&other_core))
+    let error = lm_compiler::resolve_artifact(thin, Some(std::sync::Arc::new(other_core)))
         .expect_err("another core identity must reject");
     assert!(error.to_string().contains("runtime provides"), "{error}");
 }
@@ -361,8 +396,8 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
     assert!(thin.units().iter().all(|unit| unit.module_path() != "core"));
     assert!(fat.units().iter().any(|unit| unit.module_path() == "core"));
 
-    let thin_linked =
-        lm_compiler::link_artifact(thin, Some(&core)).expect("the thin artifact links");
+    let thin_linked = lm_compiler::link_artifact(thin, Some(std::sync::Arc::new(core)))
+        .expect("the thin artifact links");
     let fat_linked = lm_compiler::link_artifact(fat, None).expect("the fat artifact links");
     assert_eq!(thin_linked.module, fat_linked.module);
     assert_eq!(thin_linked.artifact_id, fat_linked.artifact_id);
@@ -414,7 +449,7 @@ fn collection_keeps_one_import_and_removes_an_unused_cycle() {
 
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
     let linked =
-        lm_compiler::link_artifact(artifact, Some(&core)).expect("the collected artifact links");
+        lm_compiler::link_artifact(artifact, Some(core)).expect("the collected artifact links");
     let loaded = lm_vm::load(linked.module).expect("the collected program loads");
     let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
     let outcome = vm.run();
@@ -422,7 +457,7 @@ fn collection_keeps_one_import_and_removes_an_unused_cycle() {
 }
 
 #[test]
-fn a_forged_import_contract_rejects_before_publication() {
+fn an_import_declaration_cannot_replace_the_provider_contract() {
     let provider = compile_one(
         "app.shapes",
         "def label(): String\n  \"shape\"\nend\n",
@@ -431,7 +466,7 @@ fn a_forged_import_contract_rejects_before_publication() {
     );
     let importer = compile_one(
         "app.main",
-        "use shapes\n1\n",
+        "use shapes.label\nlabel()\n",
         std::slice::from_ref(&provider.interface),
         true,
     );
@@ -448,9 +483,11 @@ fn a_forged_import_contract_rejects_before_publication() {
         .position(|item| item == &BcType::Int)
         .expect("the program has Int") as u32;
     importer.funcs[imported.def as usize].ret = int_type;
-    let error = link_units(&units).expect_err("the forged contract must reject");
-    assert!(error.contains("imported function"), "{error}");
-    assert!(error.contains("result type differs"), "{error}");
+    let program = link_units(&units).expect("the provider contract links");
+    let loaded = lm_vm::load(program.module).expect("the linked program loads");
+    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(\"shape\")");
 }
 
 /// One core provider satisfies every exact core import. The linked
@@ -514,9 +551,9 @@ fn two_equal_shapes_with_two_keys_stay_distinct() {
     assert_eq!(count("app.main.Spot"), 1);
 }
 
-/// A forged local core declaration rejects before publication.
+/// A local core declaration cannot replace the exact core provider.
 #[test]
-fn a_forged_core_import_contract_rejects() {
+fn a_local_core_declaration_cannot_replace_the_provider() {
     let mut units = two_module_program();
     let some = units[1]
         .module
@@ -525,11 +562,14 @@ fn a_forged_core_import_contract_rejects() {
         .position(|c| c.key == "core.Option.Some")
         .expect("the core arm declaration exists");
     units[1].module.classes[some].fields[0].0 = "w".to_string();
-    let error = link_units(&units).expect_err("the forged contract must reject");
-    assert!(error.contains("core.Option.Some"), "{error}");
-    assert!(error.contains("imported class"), "{error}");
-    assert!(error.contains("app.main"), "{error}");
-    assert!(error.contains("class layout differs"), "{error}");
+    let program = link_units(&units).expect("the exact core provider links");
+    let some = program
+        .module
+        .classes
+        .iter()
+        .find(|class| class.key == "core.Option.Some")
+        .expect("the linked program has Option.Some");
+    assert_ne!(some.fields[0].0, "w");
 }
 
 /// A method body edit keeps the qualified key and moves the structural
@@ -733,9 +773,8 @@ fn a_class_without_its_constructor_binding_rejects() {
         .position(|c| c.key == "app.main.Spot")
         .expect("the class exists");
     units[1].module.classes[spot].key = "app.shapes.Dot".to_string();
-    let error = link_units(&units).expect_err("an unbound constructor must reject");
-    assert!(error.contains("app.shapes.Dot.<new>"), "{error}");
-    assert!(error.contains("rebuild"), "{error}");
+    let error = link_untrusted_units(&units).expect_err("an unbound constructor must reject");
+    assert!(error.contains("constructor key"), "{error}");
 }
 
 /// Two names with one structural hash keep distinct relocated code
@@ -1337,10 +1376,9 @@ fn a_crafted_core_role_shape_rejects() {
     );
 }
 
-/// The verifier uses no source name in its decision. A rename of every
-/// class and function leaves the verification hash unchanged.
+/// Function and class display names do not affect verification.
 #[test]
-fn a_rename_of_every_definition_keeps_the_verification_hash() {
+fn display_name_edits_keep_the_verification_hash() {
     let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
                   self.value = self.value + n\n    self.value\n  end\nend\n\
                   c = Counter()\nc.add(1)\n";
@@ -1348,7 +1386,6 @@ fn a_rename_of_every_definition_keeps_the_verification_hash() {
     let mut twin = module.clone();
     for (idx, class) in twin.classes.iter_mut().enumerate() {
         class.name = format!("c{idx}");
-        class.key = format!("k{idx}");
     }
     for (idx, func) in twin.funcs.iter_mut().enumerate() {
         func.name = format!("f{idx}");
@@ -1470,9 +1507,9 @@ fn a_constructor_binding_on_an_import_slot_rejects() {
         .find(|b| b.key == "app.shapes.Dot.<new>")
         .expect("the constructor binding exists");
     binding.func = slot as u32;
-    let error = link_units(&units).expect_err("the crafted module linked");
+    let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
-        error.contains("imported declaration"),
+        error.contains("imported function"),
         "unexpected message: {error}"
     );
 }
@@ -1500,9 +1537,9 @@ fn a_constructor_binding_on_another_function_rejects() {
         .find(|b| b.key == "app.shapes.Dot.<new>")
         .expect("the constructor binding exists");
     binding.func = target;
-    let error = link_units(&units).expect_err("the crafted module linked");
+    let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
-        error.contains("construction function") || error.contains("needs the key"),
+        error.contains("does not use the constructor") || error.contains("needs the key"),
         "unexpected message: {error}"
     );
 }
@@ -1519,9 +1556,9 @@ fn two_constructor_bindings_for_one_class_reject() {
         .cloned()
         .expect("the constructor binding exists");
     units[1].module.bindings.push(copy);
-    let error = link_units(&units).expect_err("the crafted module linked");
+    let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
-        error.contains("two constructor bindings"),
+        error.contains("arrives with two implementations"),
         "unexpected message: {error}"
     );
 }
@@ -1548,7 +1585,7 @@ fn a_constructor_binding_on_an_imported_class_rejects() {
         func,
         class: imported as u32,
     });
-    let error = link_units(&units).expect_err("the crafted module linked");
+    let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
         error.contains("imported class"),
         "unexpected message: {error}"
@@ -1572,9 +1609,9 @@ fn an_export_and_a_binding_that_disagree_reject() {
     let other = (export.ctor + 1) % count;
     assert_ne!(export.ctor, other, "pick a different function");
     export.ctor = other;
-    let error = link_units(&units).expect_err("the crafted module linked");
+    let error = link_untrusted_units(&units).expect_err("the crafted module linked");
     assert!(
-        error.contains("construction function"),
+        error.contains("does not use the constructor"),
         "unexpected message: {error}"
     );
 }

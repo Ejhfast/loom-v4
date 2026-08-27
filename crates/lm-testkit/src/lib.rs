@@ -30,7 +30,7 @@ pub fn link_artifact_bytes(bytes: &[u8]) -> Result<lm_compiler::LinkedProgram, S
     let artifact = lm_bytecode::artifact::decode(bytes)
         .map_err(|error| format!("artifact decode error: {error}"))?;
     let core = lm_compiler::core_link_unit()?;
-    lm_compiler::link_artifact(artifact, Some(&core))
+    lm_compiler::link_artifact(artifact, Some(core))
         .map_err(|error| format!("artifact link error: {error}"))
 }
 

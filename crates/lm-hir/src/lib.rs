@@ -49,6 +49,7 @@ pub fn core_image_with_bundle(
         &empty,
         CheckOptions {
             prelude: false,
+            build_core_provider: true,
             bundle,
             ..CheckOptions::default()
         },
@@ -107,23 +108,27 @@ pub fn externalize_core(
             });
         }
     }
+    let mut core_ordinal = 0u32;
     for (index, function) in hir.funcs.iter().enumerate() {
-        if !function.core || methods.contains(&(index as u32)) {
+        if !function.core {
             continue;
         }
-        let export = hir
-            .core_exports
-            .iter()
-            .find(|export| {
-                export.kind == lm_bytecode::ExportKind::Function && export.def == index as u32
-            })
-            .ok_or_else(|| format!("core function {index} has no provider export"))?;
+        let ordinal = core_ordinal;
+        core_ordinal += 1;
+        if methods.contains(&(index as u32)) {
+            continue;
+        }
+        let name = interface
+            .find(&function.name)
+            .filter(|export| export.kind == lm_bytecode::ExportKind::Function)
+            .map(|_| function.name.clone())
+            .unwrap_or_else(|| format!("$internal.function.{ordinal}"));
         let provider = interface
-            .find(&export.name)
-            .ok_or_else(|| format!("the core exports no function `{}`", export.name))?;
+            .find(&name)
+            .ok_or_else(|| format!("core function {index} has no provider export"))?;
         imports.push(hir::HirImport {
             module: CORE_MODULE.to_string(),
-            name: export.name.clone(),
+            name,
             kind: ImportKind::Func,
             def: hir::HirImportDef::Func(index as u32),
             hash: provider.iface_hash,

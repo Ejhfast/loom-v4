@@ -1209,6 +1209,12 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
 #[test]
 fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
     on_supported_stack(|| {
+        let mut env = lm_compiler::CompileEnv::new();
+        let catalog = lm_compiler::StandardCatalog::bundled();
+        catalog
+            .bind(&mut env, catalog.paths())
+            .expect("the standard interfaces bind");
+        let env = env.freeze();
         let mut prng = Prng(SEED ^ 0x5eed);
         for (name, text) in seed_sources() {
             let base = text.into_bytes();
@@ -1224,7 +1230,8 @@ fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
             }
             run_parallel_cases(cases, |(name, source)| {
                 // Compile errors are fine; a panic is a failure.
-                let _ = lm_testkit::compile_text(&name, &source);
+                let source = lm_source::SourceFile::new(name.clone(), source);
+                let _ = lm_compiler::compile_module(&name, &source, &env, true);
             });
         }
     });

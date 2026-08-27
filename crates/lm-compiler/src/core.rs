@@ -4,24 +4,26 @@ use crate::LinkEnv;
 use lm_bytecode::artifact::{LinkUnit, CORE_MODULE_PATH};
 use std::sync::{Arc, OnceLock};
 
-static STANDARD_CORE: OnceLock<LinkUnit> = OnceLock::new();
+static STANDARD_CORE: OnceLock<Arc<LinkUnit>> = OnceLock::new();
 
 /// Return the canonical core unit.
-pub fn core_link_unit() -> Result<LinkUnit, String> {
+pub fn core_link_unit() -> Result<Arc<LinkUnit>, String> {
     let bundle = lm_abi::standard_bundle();
     core_link_unit_with_bundle(&bundle)
 }
 
 /// Return the canonical core unit for one ABI bundle.
-pub fn core_link_unit_with_bundle(bundle: &Arc<lm_abi::AbiBundle>) -> Result<LinkUnit, String> {
+pub fn core_link_unit_with_bundle(
+    bundle: &Arc<lm_abi::AbiBundle>,
+) -> Result<Arc<LinkUnit>, String> {
     let standard = lm_abi::standard_bundle();
     if bundle.digest() == standard.digest() {
         let unit = STANDARD_CORE.get_or_init(|| {
-            build_core_link_unit(&standard).expect("the standard core link unit builds")
+            Arc::new(build_core_link_unit(&standard).expect("the standard core link unit builds"))
         });
-        return Ok(unit.clone());
+        return Ok(Arc::clone(unit));
     }
-    build_core_link_unit(bundle)
+    build_core_link_unit(bundle).map(Arc::new)
 }
 
 /// Create a link environment with the canonical core.

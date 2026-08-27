@@ -302,11 +302,10 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// - it reads the core role table, which lives inside the semantic
 ///   region, and it proves the shape of every filled slot.
 ///
-/// Definition names and qualified export keys do not enter the digest
-/// directly. Published slot keys live in the semantic region. The
-/// verifier reads these slot keys. Changing only an export label
-/// preserves the hash. Recompiling a renamed published binding changes
-/// its slot key and hash.
+/// Function and class display names do not enter the digest.
+///
+/// Verifier-sensitive export data enters the digest. This data includes
+/// interface names, interface keys, class keys, bindings, and export targets.
 ///
 /// The `mut` marker vectors carry their own count inside the semantic
 /// section since container version 8, so the digest needs no separate
@@ -330,7 +329,54 @@ pub fn verification_hash_with(manifest: [u8; 32], module: &Module) -> [u8; 32] {
     bytes.extend_from_slice(TAG_VERIFICATION);
     bytes.extend_from_slice(&manifest);
     bytes.extend_from_slice(&crate::semantic_section(module));
+    write_verifier_exports(&mut bytes, module);
     hash256(&bytes)
+}
+
+fn write_verifier_exports(out: &mut Vec<u8>, module: &Module) {
+    write_verifier_u32(out, module.interfaces.len() as u32);
+    for interface in &module.interfaces {
+        write_str(out, &interface.name);
+        write_str(out, &interface.key);
+    }
+    write_verifier_u32(out, module.classes.len() as u32);
+    for class in &module.classes {
+        write_str(out, &class.key);
+    }
+    let constructor_count = module
+        .bindings
+        .iter()
+        .filter(|binding| binding.class != crate::NO_CLASS)
+        .count();
+    write_verifier_u32(out, constructor_count as u32);
+    for binding in module
+        .bindings
+        .iter()
+        .filter(|binding| binding.class != crate::NO_CLASS)
+    {
+        write_str(out, &binding.key);
+        write_verifier_u32(out, binding.func);
+        write_verifier_u32(out, binding.class);
+    }
+    let constructor_count = module
+        .exports
+        .iter()
+        .filter(|export| export.kind.is_class() && export.ctor != crate::NO_CTOR)
+        .count();
+    write_verifier_u32(out, constructor_count as u32);
+    for export in module
+        .exports
+        .iter()
+        .filter(|export| export.kind.is_class() && export.ctor != crate::NO_CTOR)
+    {
+        out.push(export.kind.tag());
+        write_verifier_u32(out, export.def);
+        write_verifier_u32(out, export.ctor);
+    }
+}
+
+fn write_verifier_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
 }
 
 // ----------------------------------------------------------------

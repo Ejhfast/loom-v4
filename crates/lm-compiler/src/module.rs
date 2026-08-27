@@ -155,6 +155,7 @@ pub fn compile_module_with_options_and_bundle(
         &ast,
         lm_hir::CheckOptions {
             prelude: true,
+            build_core_provider: false,
             bundle: bundle.clone(),
             module_path: path.to_string(),
             imports: env.imports().clone(),
@@ -1448,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn the_linker_rejects_a_changed_imported_conformance_set() {
+    fn the_linker_uses_the_provider_conformance_set() {
         let mut compiled = compile("1\n", &CompileOptions::new());
         compiled
             .module
@@ -1458,9 +1459,13 @@ mod tests {
         let mut env = crate::core_link_env().expect("the core link environment builds");
         env.bind_module(compiled.path.clone(), compiled.module, compiled.interface)
             .expect("the forged module binds");
-        let error = crate::link(&compiled.path, &env.freeze())
-            .expect_err("a changed conformance set must reject");
-        assert!(error.0.contains("conformance"), "{error}");
+        let linked = crate::link(&compiled.path, &env.freeze())
+            .expect("the exact provider supplies its conformances");
+        let core = crate::core_link_unit().expect("the core link unit builds");
+        assert_eq!(
+            linked.module.conformances.len(),
+            core.module().conformances.len()
+        );
     }
 
     #[test]

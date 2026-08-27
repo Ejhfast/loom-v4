@@ -247,7 +247,7 @@ pub fn workspace_of(start: &Path) -> Result<Workspace, String> {
 fn verified_program_entry(artifact: &[u8]) -> Option<ProgramEntry> {
     let decoded = lm_bytecode::artifact::decode(artifact).ok()?;
     let core = crate::core_link_unit().ok()?;
-    let linked = crate::link_artifact(decoded, Some(&core)).ok()?;
+    let linked = crate::link_artifact(decoded, Some(core)).ok()?;
     Some(ProgramEntry {
         artifact: artifact.to_vec(),
         semantic_hash: linked.semantic_hash,

@@ -1851,6 +1851,7 @@ fn bench_core_compilation() {
             &empty,
             lm_hir::CheckOptions {
                 prelude: false,
+                build_core_provider: true,
                 ..lm_hir::CheckOptions::default()
             },
         )
@@ -1899,7 +1900,7 @@ fn bench_core_compilation() {
         .sum();
     let bytes = lm_bytecode::encode(&module);
     let artifact_unit = lm_compiler::core_link_unit().expect("the core artifact has an identity");
-    let artifact = lm_bytecode::artifact::Artifact::new(artifact_unit, Vec::new())
+    let artifact = lm_bytecode::artifact::Artifact::new(artifact_unit.as_ref().clone(), Vec::new())
         .expect("the core artifact graph is valid");
     let artifact_bytes =
         lm_bytecode::artifact::encode(&artifact).expect("the core artifact encodes");
@@ -2114,6 +2115,15 @@ fn bench_program_artifact_linking() {
     let source = lm_source::SourceFile::new("tiny.lm", "1\n");
     let compiled = lm_compiler::compile_source("bench.main", &source, true)
         .expect("the tiny program compiles");
+    let mut source_env = lm_compiler::core_link_env().expect("the core environment builds");
+    source_env
+        .bind_module(
+            compiled.root.path.clone(),
+            compiled.root.module.clone(),
+            compiled.root.interface.clone(),
+        )
+        .expect("the tiny module binds");
+    let source_env = source_env.freeze();
     let bytes = compiled.artifact;
     let artifact = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
@@ -2121,6 +2131,8 @@ fn bench_program_artifact_linking() {
     let mut link_runs = Vec::new();
     let mut cold_runs = Vec::new();
     let mut compile_runs = Vec::new();
+    let mut collect_runs = Vec::new();
+    let mut trusted_link_runs = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
         let compiled = lm_compiler::compile_source("bench.main", &source, true)
@@ -2132,6 +2144,25 @@ fn bench_program_artifact_linking() {
         }
 
         let start = Instant::now();
+        let collected = source_env
+            .artifact("bench.main")
+            .expect("the tiny artifact collects");
+        let elapsed = start.elapsed();
+        std::hint::black_box(collected.id());
+        if round > 0 {
+            collect_runs.push(elapsed);
+        }
+
+        let start = Instant::now();
+        let linked =
+            lm_compiler::link("bench.main", &source_env).expect("the trusted program links");
+        let elapsed = start.elapsed();
+        std::hint::black_box(linked.module.funcs.len());
+        if round > 0 {
+            trusted_link_runs.push(elapsed);
+        }
+
+        let start = Instant::now();
         let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
         let elapsed = start.elapsed();
         std::hint::black_box(decoded.id());
@@ -2140,8 +2171,8 @@ fn bench_program_artifact_linking() {
         }
 
         let start = Instant::now();
-        let linked =
-            lm_compiler::link_artifact(artifact.clone(), Some(&core)).expect("the artifact links");
+        let linked = lm_compiler::link_artifact(artifact.clone(), Some(core.clone()))
+            .expect("the artifact links");
         let elapsed = start.elapsed();
         std::hint::black_box(linked.module.funcs.len());
         if round > 0 {
@@ -2150,7 +2181,8 @@ fn bench_program_artifact_linking() {
 
         let start = Instant::now();
         let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
-        let linked = lm_compiler::link_artifact(decoded, Some(&core)).expect("the artifact links");
+        let linked =
+            lm_compiler::link_artifact(decoded, Some(core.clone())).expect("the artifact links");
         let loaded = lm_vm::load(linked.module).expect("the artifact loads");
         let elapsed = start.elapsed();
         std::hint::black_box(loaded.dispatch_cells());
@@ -2172,6 +2204,14 @@ fn bench_program_artifact_linking() {
     println!(
         "LOOM\tprogram_artifact_compile\t{:.3}\tms",
         median(compile_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tprogram_artifact_collect\t{:.3}\tms",
+        median(collect_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tprogram_trusted_link\t{:.3}\tms",
+        median(trusted_link_runs).as_secs_f64() * 1e3
     );
     println!(
         "LOOM\tprogram_artifact_link\t{:.3}\tms",
