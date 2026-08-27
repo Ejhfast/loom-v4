@@ -525,10 +525,10 @@ fn proc_terminal_publication_smoke() {
 
 /// Time one snapshot workload: capture, encode, load, and restore.
 fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, restores: usize) {
-    use lm_vm::snapshot::LoadLimits;
     use lm_vm::{RecordingHost, World};
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source).unwrap();
     let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
+    let prepared = arena.clone();
     let mut world = World::new(
         arena,
         namespace,
@@ -554,19 +554,15 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
     assert_eq!(again.bytes().expect("the image encodes").len(), size);
     // The load time of the external byte path.
     let load_start = Instant::now();
-    let checked = lm_testkit::load_snapshot_for_artifact_bytes(
-        &bytes,
-        image.bytes().expect("the image encodes"),
-        LoadLimits::default(),
-    )
-    .expect("the container loads and admits");
+    let checked = world
+        .load_snapshot_bytes(image.bytes().expect("the image encodes"))
+        .expect("the container loads and admits");
     let load = load_start.elapsed();
     // The restore time, averaged over the requested count.
     let restore_start = Instant::now();
     for _ in 0..restores {
-        let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
         let mut fresh = World::new(
-            arena,
+            prepared.clone(),
             namespace,
             VmConfig::default(),
             Box::new(RecordingHost::new(1)),

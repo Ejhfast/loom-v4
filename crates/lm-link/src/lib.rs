@@ -602,15 +602,14 @@ pub struct CodeNamespace {
     relocations: BTreeMap<ArtifactId, UnitRelocation>,
     core_artifact: Option<ArtifactId>,
     tables: std::sync::Arc<CodeTables>,
+    dispatch: Arc<[DispatchRow]>,
     entry: u32,
     core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     exports: Vec<Export>,
-    bindings: Vec<FuncBinding>,
-    class_hashes: Vec<[u8; 32]>,
-    interface_hashes: Vec<[u8; 32]>,
-    func_hashes: Vec<[u8; 32]>,
-    type_hashes: Vec<[u8; 32]>,
-    slot_initials: Vec<Option<SlotTarget>>,
+    bindings: Arc<[FuncBinding]>,
+    identity: Arc<ModuleIdentity>,
+    closure_bodies: Arc<std::sync::OnceLock<Vec<bool>>>,
+    slot_initials: Arc<[Option<SlotTarget>]>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
 }
 
@@ -670,6 +669,10 @@ impl CodeNamespace {
         self.tables.clone()
     }
 
+    pub fn dispatch_store(&self) -> Arc<[DispatchRow]> {
+        self.dispatch.clone()
+    }
+
     pub fn entry(&self) -> u32 {
         self.entry
     }
@@ -686,24 +689,40 @@ impl CodeNamespace {
         &self.bindings
     }
 
+    pub fn binding_store(&self) -> Arc<[FuncBinding]> {
+        self.bindings.clone()
+    }
+
     pub fn class_hashes(&self) -> &[[u8; 32]] {
-        &self.class_hashes
+        &self.identity.class_hashes
     }
 
     pub fn interface_hashes(&self) -> &[[u8; 32]] {
-        &self.interface_hashes
+        &self.identity.interface_hashes
     }
 
     pub fn func_hashes(&self) -> &[[u8; 32]] {
-        &self.func_hashes
+        &self.identity.func_hashes
     }
 
     pub fn type_hashes(&self) -> &[[u8; 32]] {
-        &self.type_hashes
+        &self.identity.type_hashes
+    }
+
+    pub fn identity_store(&self) -> Arc<ModuleIdentity> {
+        self.identity.clone()
+    }
+
+    pub fn closure_body_store(&self) -> Arc<std::sync::OnceLock<Vec<bool>>> {
+        self.closure_bodies.clone()
     }
 
     pub fn slot_initials(&self) -> &[Option<SlotTarget>] {
         &self.slot_initials
+    }
+
+    pub fn slot_initial_store(&self) -> Arc<[Option<SlotTarget>]> {
+        self.slot_initials.clone()
     }
 
     /// Build exact table maps into another publication of this graph.
@@ -817,6 +836,137 @@ impl CodeNamespace {
         }
         Ok(())
     }
+}
+
+const NO_METHOD: u32 = u32::MAX;
+
+/// One sparse default-method witness.
+#[derive(Debug, Clone)]
+struct InterfaceWitness {
+    interface: u32,
+    method_overrides: Arc<[bool]>,
+}
+
+/// The sealed dispatch row of one class.
+#[derive(Debug, Clone, Default)]
+pub struct DispatchRow {
+    base: u32,
+    table: Vec<u32>,
+    interface_witnesses: Option<Arc<[InterfaceWitness]>>,
+}
+
+impl DispatchRow {
+    #[inline]
+    pub fn method(&self, selector: u32) -> Option<u32> {
+        let offset = selector.checked_sub(self.base)? as usize;
+        match self.table.get(offset).copied() {
+            Some(NO_METHOD) | None => None,
+            Some(function) => Some(function),
+        }
+    }
+
+    #[inline]
+    pub fn interface_override(&self, interface: u32, method: u32) -> Option<bool> {
+        let witnesses = self.interface_witnesses.as_deref()?;
+        let witness = witnesses
+            .binary_search_by_key(&interface, |witness| witness.interface)
+            .ok()
+            .map(|index| &witnesses[index])?;
+        witness.method_overrides.get(method as usize).copied()
+    }
+
+    #[inline]
+    pub fn cell_count(&self) -> usize {
+        self.table.len()
+    }
+
+    #[inline]
+    pub fn witness_count(&self) -> usize {
+        self.interface_witnesses.as_deref().map_or(0, <[_]>::len)
+    }
+}
+
+fn build_dispatch(tables: &CodeTables) -> Arc<[DispatchRow]> {
+    let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(tables.classes.len());
+    let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(tables.classes.len());
+    let mut conformances_by_class = vec![Vec::new(); tables.classes.len()];
+    for (index, conformance) in tables.conformances.iter().enumerate() {
+        conformances_by_class[conformance.class as usize].push(index);
+    }
+    let interfaces_with_defaults: Vec<bool> = tables
+        .interfaces
+        .iter()
+        .map(|interface| {
+            interface
+                .methods
+                .iter()
+                .any(|method| method.default != lm_bytecode::NO_FUNC)
+        })
+        .collect();
+    for (class_index, class) in tables.classes.iter().enumerate() {
+        let mut methods: Vec<(u32, u32)> = match class.parent() {
+            Some(parent) => resolved[parent as usize].clone(),
+            None => Vec::new(),
+        };
+        let inherited_witnesses = class
+            .parent()
+            .and_then(|parent| dispatch[parent as usize].interface_witnesses.clone());
+        let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
+        for conformance in conformances_by_class[class_index]
+            .iter()
+            .map(|index| &tables.conformances[*index])
+        {
+            let interface = conformance.application.interface as usize;
+            if interfaces_with_defaults[interface] {
+                let interface = interface as u32;
+                let witnesses = changed_witnesses.get_or_insert_with(|| {
+                    inherited_witnesses
+                        .as_deref()
+                        .map_or_else(Vec::new, <[_]>::to_vec)
+                });
+                let witness = InterfaceWitness {
+                    interface,
+                    method_overrides: conformance.method_overrides.clone().into(),
+                };
+                match witnesses.binary_search_by_key(&interface, |item| item.interface) {
+                    Ok(index) => witnesses[index] = witness,
+                    Err(index) => witnesses.insert(index, witness),
+                }
+            }
+        }
+        let interface_witnesses = changed_witnesses.map(Arc::from).or(inherited_witnesses);
+        for (selector, function) in &class.methods {
+            match methods.iter_mut().find(|(found, _)| found == selector) {
+                Some(entry) => entry.1 = *function,
+                None => methods.push((*selector, *function)),
+            }
+        }
+        let row = match methods.iter().map(|(selector, _)| *selector).min() {
+            Some(base) => {
+                let top = methods
+                    .iter()
+                    .map(|(selector, _)| *selector)
+                    .max()
+                    .expect("the method table is not empty");
+                let mut table = vec![NO_METHOD; (top - base + 1) as usize];
+                for (selector, function) in &methods {
+                    table[(*selector - base) as usize] = *function;
+                }
+                DispatchRow {
+                    base,
+                    table,
+                    interface_witnesses,
+                }
+            }
+            None => DispatchRow {
+                interface_witnesses,
+                ..DispatchRow::default()
+            },
+        };
+        resolved.push(methods);
+        dispatch.push(row);
+    }
+    dispatch.into()
 }
 
 fn prepare_definition_module(
@@ -933,13 +1083,13 @@ impl NamespaceId {
 }
 
 /// The published code namespaces of one world.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodeArena {
-    merged: Merged,
-    namespaces: Vec<std::sync::Arc<CodeNamespace>>,
-    by_artifact: HashMap<ArtifactId, NamespaceId>,
-    by_chain: HashMap<Vec<ArtifactId>, NamespaceId>,
-    verified: BTreeSet<ArtifactId>,
+    merged: Arc<Merged>,
+    namespaces: Arc<Vec<Arc<CodeNamespace>>>,
+    by_artifact: Arc<HashMap<ArtifactId, NamespaceId>>,
+    by_chain: Arc<HashMap<Vec<ArtifactId>, NamespaceId>>,
+    verified: Arc<BTreeSet<ArtifactId>>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
 }
 
@@ -956,11 +1106,11 @@ impl CodeArena {
 
     pub fn with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> CodeArena {
         CodeArena {
-            merged: Merged::default(),
-            namespaces: Vec::new(),
-            by_artifact: HashMap::new(),
-            by_chain: HashMap::new(),
-            verified: BTreeSet::new(),
+            merged: Arc::new(Merged::default()),
+            namespaces: Arc::new(Vec::new()),
+            by_artifact: Arc::new(HashMap::new()),
+            by_chain: Arc::new(HashMap::new()),
+            verified: Arc::new(BTreeSet::new()),
             bundle,
         }
     }
@@ -997,7 +1147,7 @@ impl CodeArena {
             .unit(CORE_MODULE_PATH)
             .map(LinkUnit::id)
             .ok_or_else(|| fail("the artifact has no core dependency"))?;
-        let mut merged = self.merged.clone();
+        let mut merged = self.merged.as_ref().clone();
         let mut view = NamespaceBuild::default();
         let mut entry = None;
         let mut root_exports = Vec::new();
@@ -1031,6 +1181,9 @@ impl CodeArena {
         let entry = entry.ok_or_else(|| fail("the artifact root has no entry"))?;
         let core_artifact = active_units.get(CORE_MODULE_PATH).copied();
         view.slot_initials.resize(merged.slots.len(), None);
+        let tables = Arc::new(tables_of(&merged));
+        let dispatch = build_dispatch(&tables);
+        let identity = Arc::new(namespace_identity(&merged, root));
         let namespace = CodeNamespace {
             artifact_id: root,
             artifacts: vec![retained],
@@ -1038,28 +1191,26 @@ impl CodeArena {
             active_units,
             relocations,
             core_artifact,
-            tables: std::sync::Arc::new(tables_of(&merged)),
+            tables,
+            dispatch,
             entry,
             core_roles: view.core_roles,
             exports: root_exports,
-            bindings: view.bindings,
-            class_hashes: merged.class_hashes.clone(),
-            interface_hashes: merged.interface_hashes.clone(),
-            func_hashes: merged.func_hashes.clone(),
-            type_hashes: merged.type_hashes.clone(),
-            slot_initials: view.slot_initials,
+            bindings: view.bindings.into(),
+            identity,
+            closure_bodies: Arc::new(std::sync::OnceLock::new()),
+            slot_initials: view.slot_initials.into(),
             bundle: self.bundle.clone(),
         };
         let index = u32::try_from(self.namespaces.len())
             .map_err(|_| fail("the world has too many code namespaces"))?;
         let id = NamespaceId(index);
-        self.namespaces.push(std::sync::Arc::new(namespace));
-        self.by_artifact
-            .insert(id_of(&self.namespaces[id.index()]), id);
-        self.by_chain
-            .insert(vec![id_of(&self.namespaces[id.index()])], id);
-        self.merged = merged;
-        self.verified.extend(unchecked);
+        Arc::make_mut(&mut self.namespaces).push(std::sync::Arc::new(namespace));
+        let published = id_of(&self.namespaces[id.index()]);
+        Arc::make_mut(&mut self.by_artifact).insert(published, id);
+        Arc::make_mut(&mut self.by_chain).insert(vec![published], id);
+        self.merged = Arc::new(merged);
+        Arc::make_mut(&mut self.verified).extend(unchecked);
         Ok(id)
     }
 
@@ -1068,6 +1219,14 @@ impl CodeArena {
     /// The source namespace proves each artifact unit. This operation
     /// repeats linking, but it does not repeat bytecode verification.
     pub fn replay_namespace(&mut self, source: &CodeNamespace) -> Result<NamespaceId, LinkError> {
+        let chain: Vec<ArtifactId> = source
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.id())
+            .collect();
+        if let Some(namespace) = self.by_chain.get(&chain) {
+            return Ok(*namespace);
+        }
         let mut artifacts = source.artifacts.iter();
         let root = artifacts
             .next()
@@ -1088,7 +1247,7 @@ impl CodeArena {
         runtime_core: Option<Arc<LinkUnit>>,
     ) -> Result<NamespaceId, LinkError> {
         let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
-        self.verified.extend(units);
+        Arc::make_mut(&mut self.verified).extend(units);
         self.publish(artifact, runtime_core)
     }
 
@@ -1098,7 +1257,7 @@ impl CodeArena {
         artifact: Artifact,
     ) -> Result<NamespaceId, LinkError> {
         let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
-        self.verified.extend(units);
+        Arc::make_mut(&mut self.verified).extend(units);
         self.extend(base, artifact)
     }
 
@@ -1148,7 +1307,7 @@ impl CodeArena {
 
         let order = link_order(&root_path, &env)?;
         let slot_scope = graph_core.ok_or_else(|| fail("the artifact has no core dependency"))?;
-        let mut merged = self.merged.clone();
+        let mut merged = self.merged.as_ref().clone();
         let mut addition = NamespaceBuild::default();
         let mut root_exports = Vec::new();
         let mut relocations = base.relocations.clone();
@@ -1184,7 +1343,7 @@ impl CodeArena {
             }
         }
 
-        let mut slot_initials = base.slot_initials.clone();
+        let mut slot_initials = base.slot_initials.to_vec();
         slot_initials.resize(merged.slots.len(), None);
         addition.slot_initials.resize(merged.slots.len(), None);
         for (index, initial) in addition.slot_initials.into_iter().enumerate() {
@@ -1205,6 +1364,9 @@ impl CodeArena {
         if !artifacts.iter().any(|item| item.id() == retained.id()) {
             artifacts.push(retained);
         }
+        let tables = Arc::new(tables_of(&merged));
+        let dispatch = build_dispatch(&tables);
+        let identity = Arc::new(namespace_identity(&merged, base.artifact_id));
         let namespace = CodeNamespace {
             artifact_id: base.artifact_id,
             artifacts,
@@ -1212,25 +1374,24 @@ impl CodeArena {
             active_units,
             relocations,
             core_artifact: base.core_artifact,
-            tables: Arc::new(tables_of(&merged)),
+            tables,
+            dispatch,
             entry: base.entry,
             core_roles: base.core_roles,
             exports: base.exports.clone(),
-            bindings: binding_by_key.into_values().collect(),
-            class_hashes: merged.class_hashes.clone(),
-            interface_hashes: merged.interface_hashes.clone(),
-            func_hashes: merged.func_hashes.clone(),
-            type_hashes: merged.type_hashes.clone(),
-            slot_initials,
+            bindings: binding_by_key.into_values().collect::<Vec<_>>().into(),
+            identity,
+            closure_bodies: Arc::new(std::sync::OnceLock::new()),
+            slot_initials: slot_initials.into(),
             bundle: self.bundle.clone(),
         };
         let index = u32::try_from(self.namespaces.len())
             .map_err(|_| fail("the world has too many code namespaces"))?;
         let id = NamespaceId(index);
-        self.namespaces.push(Arc::new(namespace));
-        self.by_chain.insert(chain, id);
-        self.merged = merged;
-        self.verified.extend(unchecked);
+        Arc::make_mut(&mut self.namespaces).push(Arc::new(namespace));
+        Arc::make_mut(&mut self.by_chain).insert(chain, id);
+        self.merged = Arc::new(merged);
+        Arc::make_mut(&mut self.verified).extend(unchecked);
         let _ = root_exports;
         Ok(id)
     }
@@ -1246,6 +1407,17 @@ impl CodeArena {
 
 fn id_of(namespace: &CodeNamespace) -> ArtifactId {
     namespace.artifact_id()
+}
+
+fn namespace_identity(merged: &Merged, artifact: ArtifactId) -> ModuleIdentity {
+    ModuleIdentity {
+        class_hashes: merged.class_hashes.clone(),
+        func_hashes: merged.func_hashes.clone(),
+        interface_hashes: merged.interface_hashes.clone(),
+        type_hashes: merged.type_hashes.clone(),
+        semantic_hash: artifact.into_bytes(),
+        max_refine_rounds: 0,
+    }
 }
 
 /// The append-only dense tables of one code arena.
@@ -1738,15 +1910,7 @@ fn merge_unit(
         return Err(fail(format!("the module `{path}` uses another ABI bundle")));
     }
     let identity = unit.identity();
-    let reloc = relocate(
-        merged,
-        view,
-        unit.module(),
-        identity,
-        path,
-        slot_scope,
-        bundle,
-    )?;
+    let reloc = relocate(merged, view, unit.module(), identity, path, slot_scope)?;
     bind_unit(view, merged, unit, path, &reloc)?;
     Ok(reloc)
 }
@@ -1912,7 +2076,6 @@ fn relocate(
     identity: &ModuleIdentity,
     path: &str,
     slot_scope: ArtifactId,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<Reloc, LinkError> {
     let extern_classes = module.extern_classes();
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
@@ -1934,7 +2097,7 @@ fn relocate(
         if import.kind != ImportKind::Class {
             continue;
         }
-        let target = resolve_class_import(view, module, import, path, idx, bundle)?;
+        let target = resolve_class_import(view, import, path, idx)?;
         classes[import.def as usize] = target;
     }
     // Types reference only earlier types, so one ascending pass is
@@ -2031,20 +2194,29 @@ fn relocate(
         };
         apps[idx] = merged.app(relocated);
     }
-    // The function map: an imported function resolves to a provided
-    // definition. Each local function gets one arena entry. A
-    // definition hash does not identify its relocated dependencies.
-    let mut funcs: Vec<u32> = vec![u32::MAX; module.funcs.len()];
+    let mut reloc = Reloc {
+        strings,
+        bytes,
+        types,
+        selectors,
+        apps,
+        classes,
+        interfaces,
+        funcs: vec![u32::MAX; module.funcs.len()],
+        slots: Vec::with_capacity(module.slots.len()),
+    };
+    // The function map resolves each imported declaration to one
+    // provider definition. Each local function gets one arena entry.
     for (idx, import) in module.imports.iter().enumerate() {
         if import.kind == ImportKind::Class {
             continue;
         }
-        let target = resolve_func_import(view, merged, module, import, path, idx, bundle)?;
-        funcs[import.def as usize] = target;
+        let target = resolve_func_import(view, merged, module, import, path, idx, &reloc)?;
+        reloc.funcs[import.def as usize] = target;
     }
     let mut created_funcs: Vec<u32> = Vec::new();
-    for idx in 0..module.funcs.len() {
-        if extern_funcs[idx] {
+    for (idx, is_extern) in extern_funcs.iter().copied().enumerate() {
+        if is_extern {
             continue;
         }
         let at = merged.funcs.len() as u32;
@@ -2065,20 +2237,14 @@ fn relocate(
         });
         merged.func_hashes.push(identity.func_hashes[idx]);
         merged.func_bounds.push(Vec::new());
-        funcs[idx] = at;
+        reloc.funcs[idx] = at;
         created_funcs.push(idx as u32);
     }
-    let mut reloc = Reloc {
-        strings,
-        bytes,
-        types,
-        selectors,
-        apps,
-        classes,
-        interfaces,
-        funcs,
-        slots: Vec::with_capacity(module.slots.len()),
-    };
+    for (idx, import) in module.imports.iter().enumerate() {
+        if import.kind == ImportKind::Class {
+            check_class_import_contract(merged, module, import, path, idx, &reloc)?;
+        }
+    }
     for (slot, source) in module.slots.iter().enumerate() {
         let contract = reloc_slot_contract(&source.contract, &reloc);
         let slot_key = (slot_scope, source.key, source.contract_hash);
@@ -2277,14 +2443,12 @@ fn merge_bindings(
 /// Resolve one class import slot against the provided definitions.
 fn resolve_class_import(
     view: &NamespaceBuild,
-    module: &Module,
     import: &Import,
     path: &str,
     slot: usize,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<u32, LinkError> {
     let key = (import.module.clone(), import.name.clone());
-    check_pin(view, module, import, path, slot, bundle)?;
+    check_pin(view, import, path, slot)?;
     view.class_exports.get(&key).copied().ok_or_else(|| {
         fail(format!(
             "`{path}` slot {slot} names the type `{}.{}`, which the module does \
@@ -2297,11 +2461,9 @@ fn resolve_class_import(
 /// Compare the pinned interface hash with the provider export.
 fn check_pin(
     view: &NamespaceBuild,
-    module: &Module,
     import: &Import,
     path: &str,
     slot: usize,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<(), LinkError> {
     // A method slot pins the interface hash of its class, so the
     // lookup drops the method name.
@@ -2314,20 +2476,6 @@ fn check_pin(
         _ => import.name.clone(),
     };
     let key = (import.module.clone(), export_name.clone());
-    let (_, declared_name, declared) = lm_bytecode::interface::import_contract_hash_with_bundle(
-        module, import, bundle,
-    )
-    .map_err(|error| {
-        fail(format!(
-            "`{path}` slot {slot} has an invalid declaration: {error}"
-        ))
-    })?;
-    if declared_name != export_name || declared != import.hash {
-        return Err(fail(format!(
-            "`{path}` slot {slot} declares another contract for `{}.{export_name}`",
-            import.module
-        )));
-    }
     let Some(found) = view.export_hash.get(&key) else {
         return Err(fail(format!(
             "`{path}` slot {slot} names `{}.{export_name}`, which the module does \
@@ -2353,10 +2501,10 @@ fn resolve_func_import(
     import: &Import,
     path: &str,
     slot: usize,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    reloc: &Reloc,
 ) -> Result<u32, LinkError> {
-    check_pin(view, module, import, path, slot, bundle)?;
-    match import.kind {
+    check_pin(view, import, path, slot)?;
+    let target = match import.kind {
         ImportKind::Func => {
             let key = (import.module.clone(), import.name.clone());
             view.func_exports.get(&key).copied().ok_or_else(|| {
@@ -2423,7 +2571,130 @@ fn resolve_func_import(
                 })
         }
         ImportKind::Class => unreachable!("a class slot never reaches the function map"),
+    }?;
+    check_function_import_contract(tables, module, import, path, slot, target, reloc)?;
+    Ok(target)
+}
+
+/// Compare one sparse callable declaration with its provider.
+fn check_function_import_contract(
+    tables: &Merged,
+    module: &Module,
+    import: &Import,
+    path: &str,
+    slot: usize,
+    target: u32,
+    reloc: &Reloc,
+) -> Result<(), LinkError> {
+    let source = module
+        .funcs
+        .get(import.def as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no function declaration")))?;
+    let found = tables
+        .funcs
+        .get(target as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no provider function")))?;
+    let source_bounds = module
+        .func_bounds
+        .get(import.def as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no function bounds")))?;
+    let params: Vec<u32> = source
+        .params
+        .iter()
+        .map(|ty| reloc.types[*ty as usize])
+        .collect();
+    let captures: Vec<u32> = source
+        .captures
+        .iter()
+        .map(|ty| reloc.types[*ty as usize])
+        .collect();
+    let matches = source.type_params == found.type_params
+        && source.effect_params == found.effect_params
+        && reloc_bounds(source_bounds, reloc) == tables.func_bounds[target as usize]
+        && params == found.params
+        && source.param_muts == found.param_muts
+        && source.param_names == found.param_names
+        && reloc.types[source.ret as usize] == found.ret
+        && reloc_row(&source.row, &reloc.strings) == found.row
+        && captures == found.captures;
+    if !matches {
+        return Err(fail(format!(
+            "`{path}` slot {slot} declares another callable contract for `{}.{}`",
+            import.module, import.name
+        )));
     }
+    Ok(())
+}
+
+/// Compare one sparse class declaration with its provider.
+fn check_class_import_contract(
+    tables: &Merged,
+    module: &Module,
+    import: &Import,
+    path: &str,
+    slot: usize,
+    reloc: &Reloc,
+) -> Result<(), LinkError> {
+    let source = module
+        .classes
+        .get(import.def as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no class declaration")))?;
+    let target_index = reloc.classes[import.def as usize];
+    let found = tables
+        .classes
+        .get(target_index as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no provider class")))?;
+    let parent = source
+        .parent()
+        .map(|parent| reloc.classes[parent as usize])
+        .unwrap_or(NO_PARENT);
+    let parent_args: Vec<u32> = source
+        .parent_args
+        .iter()
+        .map(|ty| reloc.types[*ty as usize])
+        .collect();
+    let fields: Vec<(String, u32)> = source
+        .fields
+        .iter()
+        .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
+        .collect();
+    let bounds = module
+        .class_bounds
+        .get(import.def as usize)
+        .ok_or_else(|| fail(format!("`{path}` slot {slot} has no class bounds")))?;
+    let layout_matches = source.name == found.name
+        && source.key == found.key
+        && source.is_final == found.is_final
+        && source.is_frozen == found.is_frozen
+        && parent == found.parent
+        && parent_args == found.parent_args
+        && source.type_params == found.type_params
+        && source.kind == found.kind
+        && fields == found.fields
+        && source.field_defaults == found.field_defaults
+        && source.own_start == found.own_start
+        && source.has_init == found.has_init
+        && reloc_bounds(bounds, reloc) == tables.class_bounds[target_index as usize];
+    let methods_match = source.methods.iter().all(|(selector, function)| {
+        let method = (
+            reloc.selectors[*selector as usize],
+            reloc.funcs[*function as usize],
+        );
+        found.methods.contains(&method)
+    });
+    let conformances_match = module
+        .conformances
+        .iter()
+        .filter(|item| item.class == import.def)
+        .map(|item| reloc_conformance(item, reloc))
+        .all(|item| tables.conformances.contains(&item));
+    if !(layout_matches && methods_match && conformances_match) {
+        return Err(fail(format!(
+            "`{path}` slot {slot} declares another class contract for `{}.{}`",
+            import.module, import.name
+        )));
+    }
+    Ok(())
 }
 
 /// Record the exports of one module for the modules that follow.

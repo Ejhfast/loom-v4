@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured tree follows checkpoint `149d859`.
+The measured tree includes correctness checkpoint `580ea17` and the performance pass.
 
 The tree contains the one-surface artifact correction.
 
@@ -37,19 +37,19 @@ The snapshot format version is 31.
 | Core LMBC | 305,056 bytes |
 | Core LMAR | 305,178 bytes |
 | LMAR wrapper | 122 bytes |
-| LMAR encoding | 0.133 ms |
-| LMAR decoding and identity | 3.614 ms |
-| Core checking | 2.505 ms |
-| Core lowering | 1.040 ms |
-| Core compilation | 3.999 ms |
-| Core decoding | 0.455 ms |
-| Core verification | 1.429 ms |
-| Structural verification | 0.537 ms |
+| LMAR encoding | 0.131 ms |
+| LMAR decoding and identity | 3.592 ms |
+| Core checking | 2.510 ms |
+| Core lowering | 1.031 ms |
+| Core compilation | 3.975 ms |
+| Core decoding | 0.457 ms |
+| Core verification | 1.462 ms |
+| Structural verification | 0.580 ms |
 | Verification hash | 0.140 ms |
-| Semantic identity | 2.505 ms |
-| Decoded loading | 1.631 ms |
-| Core loading | 2.101 ms |
-| Cached core loading | 0.172 ms |
+| Semantic identity | 2.440 ms |
+| Core namespace publication | 4.094 ms |
+| External core artifact load | 7.282 ms |
+| Repeated artifact publication | 0.754 ms |
 | Default interface witnesses | 11 of 3,588 possible entries |
 
 LMBC stores compiler surface facts once.
@@ -69,23 +69,24 @@ Each process reports one median from nine measured runs.
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
 | Core LMBC | 274,657 bytes | 305,056 bytes | +11.1% |
-| Core checking | 2.396 ms | 2.505 ms | +4.5% |
-| Core lowering | 1.000 ms | 1.040 ms | +4.0% |
-| Core compilation | 3.788 ms | 3.999 ms | +5.6% |
-| Core decoding | 0.411 ms | 0.455 ms | +10.7% |
-| Core verification | 1.411 ms | 1.429 ms | +1.3% |
-| Structural verification | 0.516 ms | 0.537 ms | +4.1% |
+| Core checking | 2.396 ms | 2.510 ms | +4.8% |
+| Core lowering | 1.000 ms | 1.031 ms | +3.1% |
+| Core compilation | 3.788 ms | 3.975 ms | +4.9% |
+| Core decoding | 0.411 ms | 0.457 ms | +11.2% |
+| Core verification | 1.411 ms | 1.462 ms | +3.6% |
+| Structural verification | 0.516 ms | 0.580 ms | +12.4% |
 | Verification hash | 0.137 ms | 0.140 ms | +2.2% |
-| Semantic identity | 2.538 ms | 2.505 ms | -1.3% |
-| Decoded loading | 1.603 ms | 1.631 ms | +1.7% |
-| Core loading | 2.010 ms | 2.101 ms | +4.5% |
-| Cached core loading | 0.165 ms | 0.172 ms | +4.2% |
+| Semantic identity | 2.538 ms | 2.440 ms | -3.9% |
 
 The LMBC growth stores exact source contract facts.
 
 The function and class records keep compiler-only fields after execution fields.
 
 This layout keeps the execution record prefix stable.
+
+The external core load verifies one untrusted core artifact.
+
+Normal program loads use the exact runtime core and do not repeat its verification.
 
 ## Thin program artifact
 
@@ -94,19 +95,19 @@ The program contains source `1`.
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
 | Artifact bytes | 274,942 | 1,699 | -99.4% |
-| Source compilation | 8.342 ms | 6.885 ms | -17.5% |
-| Cold artifact load | 2.033 ms | 2.471 ms | +21.5% |
-| Compilation and cold load | 10.375 ms | 9.356 ms | -9.8% |
+| Source compilation | 8.342 ms | 6.215 ms | -25.5% |
+| Cold artifact load | 2.033 ms | 1.411 ms | -30.6% |
+| Compilation and cold load | 10.375 ms | 7.626 ms | -26.5% |
 
 The root unit contains one function and no class.
 
-Artifact decoding takes 0.025 milliseconds.
+Artifact decoding takes 0.009 milliseconds.
 
-Dependency collection takes 0.654 milliseconds.
+Dependency collection takes 0.843 milliseconds.
 
-Trusted linking takes 1.427 milliseconds.
+Namespace publication takes 1.464 milliseconds.
 
-Artifact linking takes 0.780 milliseconds.
+The cold-load timing measures decoding and publication together.
 
 ## Execution gate
 
@@ -114,23 +115,23 @@ This comparison uses three pinned processes for each revision.
 
 | Operation | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Direct call | 31.8 ns | 30.5 ns | -4.1% |
-| Virtual call | 64.0 ns | 65.8 ns | +2.8% |
-| List index | 44.4 ns | 43.6 ns | -1.8% |
-| String interpolation | 208.5 ns | 214.1 ns | +2.7% |
-| Interface default | 234.2 ns | 230.5 ns | -1.6% |
-| List hash | 844.0 ns | 827.5 ns | -2.0% |
-| List sort | 19,528.0 ns | 19,165.0 ns | -1.9% |
-| Map hashable lookup | 216.9 ns | 213.6 ns | -1.5% |
-| String builder | 39.9 ns | 42.0 ns | +5.3% |
-| Text iteration | 76.8 ns | 75.9 ns | -1.2% |
+| Direct call | 31.4 ns | 30.4 ns | -3.2% |
+| Virtual call | 64.0 ns | 65.4 ns | +2.2% |
+| List index | 51.6 ns | 45.8 ns | -11.2% |
+| String interpolation | 200.0 ns | 197.3 ns | -1.4% |
+| Interface default | 248.1 ns | 244.7 ns | -1.4% |
+| List hash | 864.5 ns | 814.6 ns | -5.8% |
+| List sort | 19,019.1 ns | 19,027.1 ns | +0.0% |
+| Map hashable lookup | 218.8 ns | 213.9 ns | -2.2% |
+| String builder | 40.9 ns | 40.5 ns | -1.0% |
+| Text iteration | 78.1 ns | 75.6 ns | -3.2% |
 | Large bytes decode | 911.6 ns | 940.2 ns | +3.1% |
-| Byte buffer | 42.5 ns | 44.8 ns | +5.4% |
-| Direct clock | 111.9 ns | 113.2 ns | +1.2% |
+| Byte buffer | 37.6 ns | 38.4 ns | +2.1% |
+| Direct clock | 113.4 ns | 114.7 ns | +1.1% |
 
-The mean operation ratio increases by 0.5 percent.
+The mean operation ratio decreases by 1.6 percent.
 
-The largest measured increase is 5.4 percent.
+The largest measured increase is 3.1 percent.
 
 ## Workspace suite
 
@@ -138,12 +139,19 @@ The warm debug suite uses Cargo's default concurrency and full coverage.
 
 | Revision | Tests | Time |
 | --- | ---: | ---: |
-| `main` | 1,638 | 49.51 s |
-| Current | 1,684 | 56.43 s |
+| `main` | 1,638 | 49.35 s |
+| Current | 1,684 | 47.30 s |
 
 The current tree adds 46 tests.
 
-The absolute suite time increases by 14.0 percent.
+The current suite is 4.1 percent faster.
+
+| Test binary | `main` | Current | Change |
+| --- | ---: | ---: | ---: |
+| Snapshot admission | 11.68 s | 5.66 s | -51.5% |
+| Snapshot mutation fuzzing | 13.89 s | 14.64 s | +5.4% |
+| Snapshot image rules | 0.17 s | 0.23 s | +0.06 s |
+| Snapshot restore rules | 0.36 s | 0.46 s | +0.10 s |
 
 Each test executable builds one process-local core `LinkUnit` when required.
 

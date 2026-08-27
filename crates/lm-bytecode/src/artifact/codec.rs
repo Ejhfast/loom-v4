@@ -188,6 +188,30 @@ pub fn encode_with_bundle(
     Ok(out)
 }
 
+/// Read the stated artifact identity from one encoded header.
+///
+/// The caller must compare the complete bytes before it trusts this
+/// identity. This function only narrows an exact-byte lookup.
+pub fn encoded_id_with_bundle(
+    bytes: &[u8],
+    bundle: &lm_abi::AbiBundle,
+) -> Result<ArtifactId, ArtifactDecodeError> {
+    let mut cursor = Cursor::new(bytes);
+    if cursor.take(4)? != MAGIC {
+        return Err(ArtifactDecodeError::BadMagic);
+    }
+    let version = cursor.u16()?;
+    if version != FORMAT_VERSION {
+        return Err(ArtifactDecodeError::BadVersion(version));
+    }
+    let found = cursor.digest()?;
+    let expected = bundle.digest();
+    if found != expected {
+        return Err(ArtifactDecodeError::BadBundle { expected, found });
+    }
+    Ok(ArtifactId::from_bytes(cursor.digest()?))
+}
+
 /// Decode one artifact under the standard ABI bundle and default limits.
 pub fn decode(bytes: &[u8]) -> Result<Artifact, ArtifactDecodeError> {
     let bundle = lm_abi::standard_bundle();

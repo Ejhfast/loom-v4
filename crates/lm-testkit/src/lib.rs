@@ -67,6 +67,7 @@ pub fn load_snapshot_for_artifact(
     })?;
     let available = arena
         .namespace(namespace)
+        .cloned()
         .expect("the published namespace exists");
     lm_vm::snapshot::codec::load_external(snapshot_bytes, Some(available), limits)
 }

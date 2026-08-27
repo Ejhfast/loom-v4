@@ -337,11 +337,35 @@ fn collect_from_roots(
     canonical_roots.extend_from_slice(roots);
     canonical_roots.push(offsets.func(module.entry));
     canonical_roots.extend((0..module.types.len().min(4) as u32).map(|index| offsets.ty(index)));
-    let (_, component_of) = lm_scc::components_from_roots(offsets.total, &graph, &canonical_roots);
-    let live: Vec<bool> = component_of
-        .iter()
-        .map(|component| *component != u32::MAX)
-        .collect();
+    let extern_classes = module.extern_classes();
+    let live = loop {
+        let (_, component_of) =
+            lm_scc::components_from_roots(offsets.total, &graph, &canonical_roots);
+        let mut added = Vec::new();
+        for (index, class) in module.classes.iter().enumerate() {
+            if !extern_classes[index]
+                || component_of[offsets.class(index as u32) as usize] == u32::MAX
+            {
+                continue;
+            }
+            for (selector, function) in &class.methods {
+                if component_of[offsets.selector(*selector) as usize] != u32::MAX
+                    && component_of[offsets.func(*function) as usize] == u32::MAX
+                {
+                    added.push(offsets.func(*function));
+                }
+            }
+        }
+        if added.is_empty() {
+            break component_of
+                .iter()
+                .map(|component| *component != u32::MAX)
+                .collect::<Vec<_>>();
+        }
+        canonical_roots.extend(added);
+        canonical_roots.sort_unstable();
+        canonical_roots.dedup();
+    };
     let reloc = Reloc::from_live(module, offsets, &live);
     let collected = relocate_module(module, &reloc, keep_imports, exports)?;
     let stats = CollectionStats::from_modules(module, &collected);
@@ -350,6 +374,7 @@ fn collect_from_roots(
 
 fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
     let mut graph = vec![Vec::new(); offsets.total];
+    let extern_classes = module.extern_classes();
     let type_index: HashMap<BcType, u32> = module
         .types
         .iter()
@@ -379,7 +404,7 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
     }
     for (index, class) in module.classes.iter().enumerate() {
         let edges = &mut graph[offsets.class(index as u32) as usize];
-        class_edges(module, offsets, index, class, edges);
+        class_edges(module, offsets, index, class, !extern_classes[index], edges);
     }
     for conformance in &module.conformances {
         let edges = &mut graph[offsets.class(conformance.class) as usize];
@@ -711,6 +736,7 @@ fn class_edges(
     offsets: Offsets,
     index: usize,
     class: &BcClass,
+    keep_all_methods: bool,
     edges: &mut Vec<u32>,
 ) {
     if let Some(parent) = class.parent() {
@@ -720,9 +746,11 @@ fn class_edges(
     for (_, ty) in &class.fields {
         edges.push(offsets.ty(*ty));
     }
-    for (selector, func) in &class.methods {
-        edges.push(offsets.selector(*selector));
-        edges.push(offsets.func(*func));
+    if keep_all_methods {
+        for (selector, func) in &class.methods {
+            edges.push(offsets.selector(*selector));
+            edges.push(offsets.func(*func));
+        }
     }
     if let Some(bounds) = module.class_bounds.get(index) {
         bounds_edges(offsets, bounds, edges);
@@ -1754,11 +1782,10 @@ fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
         methods: source
             .methods
             .iter()
-            .map(|(selector, function)| {
-                (
-                    reloc.selectors[*selector as usize],
-                    reloc.funcs[*function as usize],
-                )
+            .filter_map(|(selector, function)| {
+                let selector = reloc.selectors[*selector as usize];
+                let function = reloc.funcs[*function as usize];
+                (selector != DEAD && function != DEAD).then_some((selector, function))
             })
             .collect(),
     }

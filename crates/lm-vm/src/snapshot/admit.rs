@@ -118,19 +118,22 @@ impl Default for AdmissionBudget {
 /// identity.
 pub fn admit(
     image: Image,
-    available: Option<&lm_link::CodeNamespace>,
+    available: Option<std::sync::Arc<lm_link::CodeNamespace>>,
     budget: &mut AdmissionBudget,
 ) -> Result<SnapshotImage, ImageError> {
     let bundle = available
+        .as_ref()
         .map(|namespace| namespace.bundle().clone())
         .unwrap_or_else(lm_abi::standard_bundle);
-    let runtime_core = available.and_then(|namespace| {
-        namespace
-            .active_unit(lm_bytecode::artifact::CORE_MODULE_PATH)
-            .cloned()
-            .map(std::sync::Arc::new)
-    });
-    let code = super::code::prepare_external(&image, runtime_core, bundle, None)?;
+    let runtime_core = available
+        .as_ref()
+        .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
+    let known = available
+        .as_ref()
+        .map(|namespace| crate::prepare_namespace(namespace.clone()))
+        .map(std::sync::Arc::new);
+    let known = known.as_ref().map(std::slice::from_ref);
+    let code = super::code::prepare_external(&image, runtime_core, bundle, known)?;
     let identity = prove(&image, &code, budget)?;
     codec::seal_admitted(image, identity, code, budget.byte_limit())
 }

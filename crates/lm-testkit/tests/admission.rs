@@ -83,7 +83,10 @@ fn admit_image(
     let (arena, namespace) = publish_artifact(loaded).map_err(|message| {
         lm_vm::snapshot::ImageError::admission(lm_vm::snapshot::ImageReason::Code, message)
     })?;
-    let available = arena.namespace(namespace).expect("the namespace exists");
+    let available = arena
+        .namespace(namespace)
+        .cloned()
+        .expect("the namespace exists");
     lm_vm::snapshot::admit(image, Some(available), budget)
 }
 

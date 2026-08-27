@@ -392,7 +392,8 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
                     .expect("an accepted image encodes");
                 assert_eq!(again, bytes, "an accepted mutant has two spellings");
                 let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-                let Ok(admitted) = lm_vm::snapshot::admit(image, Some(available), &mut budget)
+                let Ok(admitted) =
+                    lm_vm::snapshot::admit(image, Some(available.clone()), &mut budget)
                 else {
                     continue;
                 };
@@ -1077,7 +1078,6 @@ go()
 fn mutated_snapshot_images_never_panic_the_runtime() {
     on_supported_stack(|| {
         let mut prng = Prng(SEED ^ 0x1_5eed_1a6e);
-        let limits = lm_vm::snapshot::LoadLimits::default();
         let mut admitted_count = 0usize;
         let mut restored_count = 0usize;
         let mut ran_count = 0usize;
@@ -1095,7 +1095,15 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
                 (artifact, base, &[][..], RICH_IMAGE_ROUNDS)
             },
         ] {
-            let seed_image = lm_testkit::load_snapshot_for_artifact(&artifact, &base, limits)
+            let (arena, namespace) = publish_artifact(&artifact).expect("the seed loads");
+            let mut loader = lm_vm::World::new(
+                arena.clone(),
+                namespace,
+                VmConfig::default(),
+                Box::new(lm_vm::RecordingHost::new(1)),
+            );
+            let seed_image = loader
+                .load_snapshot_bytes(&base)
                 .expect("the seed admits")
                 .into_image();
             // A valid seed can exceed the general byte limit as core grows.
@@ -1108,7 +1116,7 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
                     let Ok(bytes) = lm_vm::snapshot::codec::encode(&image, case_limit) else {
                         continue;
                     };
-                    let _ = lm_testkit::load_snapshot_for_artifact(&artifact, &bytes, limits);
+                    let _ = loader.load_snapshot_bytes(&bytes);
                 }
             }
             for _round in 0..rounds {
@@ -1126,17 +1134,14 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
                     bytes.len(),
                     base.len()
                 );
-                let Ok(admitted) =
-                    lm_testkit::load_snapshot_for_artifact(&artifact, &bytes, limits)
-                else {
+                let Ok(admitted) = loader.load_snapshot_bytes(&bytes) else {
                     continue;
                 };
                 admitted_count += 1;
                 // The heap cap includes installed core objects.
                 // The fuel cap bounds mutant execution.
-                let (arena, namespace) = publish_artifact(&artifact).expect("the seed loads");
                 let mut world = lm_vm::World::new(
-                    arena,
+                    arena.clone(),
                     namespace,
                     VmConfig {
                         fuel: 20_000,

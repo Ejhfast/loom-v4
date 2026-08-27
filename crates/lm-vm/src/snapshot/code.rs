@@ -2,8 +2,9 @@
 
 use super::{Image, ImageError, ImageReason};
 use crate::NamespaceRuntime;
-use lm_bytecode::artifact::{Artifact, ArtifactLimits, LinkUnit};
+use lm_bytecode::artifact::{Artifact, ArtifactId, ArtifactLimits, LinkUnit};
 use lm_link::CodeArena;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Verified code namespaces used by one admitted image.
@@ -64,10 +65,16 @@ impl SnapshotCode {
 /// Decode, verify, and publish the code of one external image.
 pub(crate) fn prepare_external(
     image: &Image,
-    runtime_core: Option<Arc<LinkUnit>>,
+    runtime_core: Option<&LinkUnit>,
     bundle: Arc<lm_abi::AbiBundle>,
     known: Option<&[Arc<NamespaceRuntime>]>,
 ) -> Result<SnapshotCode, ImageError> {
+    if let Some(known) = known {
+        if let Some(code) = prepare_exact_known(image, &bundle, known)? {
+            return Ok(code);
+        }
+    }
+    let runtime_core = runtime_core.cloned().map(Arc::new);
     let mut artifacts = Vec::new();
     artifacts
         .try_reserve_exact(image.artifacts.len())
@@ -167,4 +174,79 @@ pub(crate) fn prepare_external(
         namespaces.push(Arc::new(crate::prepare_namespace(linked)));
     }
     Ok(SnapshotCode::new(artifacts, namespaces))
+}
+
+/// Reuse code when every stored artifact equals published bytes.
+fn prepare_exact_known(
+    image: &Image,
+    bundle: &lm_abi::AbiBundle,
+    known: &[Arc<NamespaceRuntime>],
+) -> Result<Option<SnapshotCode>, ImageError> {
+    type EncodedArtifact = (Arc<Artifact>, Vec<u8>);
+
+    let mut by_id: BTreeMap<ArtifactId, Vec<EncodedArtifact>> = BTreeMap::new();
+    for artifact in known
+        .iter()
+        .flat_map(|runtime| runtime.code_namespace().artifacts())
+    {
+        let bytes =
+            lm_bytecode::artifact::encode_with_bundle(artifact, bundle).map_err(|error| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("a published artifact did not encode: {error}"),
+                )
+            })?;
+        let candidates = by_id.entry(artifact.id()).or_default();
+        if !candidates
+            .iter()
+            .any(|(candidate, _)| Arc::ptr_eq(candidate, artifact))
+        {
+            candidates.push((artifact.clone(), bytes));
+        }
+    }
+    let mut artifacts = Vec::new();
+    artifacts
+        .try_reserve_exact(image.artifacts.len())
+        .map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the artifact table is too large")
+        })?;
+    for bytes in &image.artifacts {
+        let Ok(id) = lm_bytecode::artifact::encoded_id_with_bundle(bytes, bundle) else {
+            return Ok(None);
+        };
+        let Some(found) = by_id.get(&id).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|(_, expected)| expected.as_slice() == bytes.as_slice())
+                .map(|(artifact, _)| artifact.clone())
+        }) else {
+            return Ok(None);
+        };
+        artifacts.push(found);
+    }
+    let mut namespaces = Vec::new();
+    namespaces
+        .try_reserve_exact(image.namespaces.len())
+        .map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the namespace table is too large")
+        })?;
+    for manifest in &image.namespaces {
+        let Some(found) = known.iter().find(|runtime| {
+            let chain = runtime.code_namespace().artifacts();
+            manifest.artifacts.len() == chain.len()
+                && manifest
+                    .artifacts
+                    .iter()
+                    .zip(chain.iter())
+                    .all(|(ordinal, expected)| {
+                        artifacts
+                            .get(*ordinal as usize)
+                            .is_some_and(|artifact| artifact.id() == expected.id())
+                    })
+        }) else {
+            return Ok(None);
+        };
+        namespaces.push((*found).clone());
+    }
+    Ok(Some(SnapshotCode::new(artifacts, namespaces)))
 }

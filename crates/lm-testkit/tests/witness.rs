@@ -264,7 +264,10 @@ fn a_nonbottom_frame_environment_must_resolve() {
 
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
     let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let available = arena.namespace(namespace).expect("the namespace exists");
+    let available = arena
+        .namespace(namespace)
+        .cloned()
+        .expect("the namespace exists");
     let error = lm_vm::snapshot::admit(broken, Some(available), &mut budget)
         .expect_err("the missing environment rejects");
     assert_eq!(error.reason, ImageReason::Reference);

@@ -1158,7 +1158,7 @@ struct Ctx {
 /// admitted image and repeats nothing (specification 17.8).
 pub fn load_external(
     bytes: &[u8],
-    available: Option<&lm_link::CodeNamespace>,
+    available: Option<std::sync::Arc<lm_link::CodeNamespace>>,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
     load_external_inner(bytes, available, None, limits)
@@ -1172,12 +1172,12 @@ pub(crate) fn load_external_known(
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
     let namespace = available.code_namespace().clone();
-    load_external_inner(bytes, Some(namespace.as_ref()), Some(known), limits)
+    load_external_inner(bytes, Some(namespace), Some(known), limits)
 }
 
 fn load_external_inner(
     bytes: &[u8],
-    available: Option<&lm_link::CodeNamespace>,
+    available: Option<std::sync::Arc<lm_link::CodeNamespace>>,
     known: Option<Vec<std::sync::Arc<crate::NamespaceRuntime>>>,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
@@ -1192,18 +1192,23 @@ fn load_external_inner(
         );
     }
     let bundle = available
+        .as_ref()
         .map(|namespace| namespace.bundle().clone())
         .unwrap_or_else(lm_abi::standard_bundle);
-    let runtime_core = available.and_then(|namespace| {
-        namespace
-            .active_unit(lm_bytecode::artifact::CORE_MODULE_PATH)
-            .cloned()
-            .map(std::sync::Arc::new)
-    });
+    let runtime_core = available
+        .as_ref()
+        .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
+    let prepared_known = match (&known, &available) {
+        (None, Some(namespace)) => Some(vec![std::sync::Arc::new(crate::prepare_namespace(
+            namespace.clone(),
+        ))]),
+        _ => None,
+    };
+    let known = known.as_deref().or(prepared_known.as_deref());
     let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
     let (image, hash) = decode_inner(bytes, limits, &decode_budget, &bundle)?;
     decode_budget.charge(bytes.len(), "container copy")?;
-    let code = super::code::prepare_external(&image, runtime_core, bundle, known.as_deref())?;
+    let code = super::code::prepare_external(&image, runtime_core, bundle, known)?;
     let mut admission_budget = AdmissionBudget::default();
     let identity = super::admit::prove(&image, &code, &mut admission_budget)?;
     // The decoder accepts one byte string for one image, so the bytes

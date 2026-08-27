@@ -346,7 +346,7 @@ impl World {
         let code = self.code_of(holder).clone();
         let mut slots = Vec::new();
         slots.try_reserve_exact(code.slots.len()).ok()?;
-        for initial in &code.slot_initials {
+        for initial in code.slot_initials.iter() {
             slots.push(match initial {
                 Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(*func),
                 Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {

@@ -12,8 +12,8 @@ use std::fmt;
 mod codec;
 
 pub use codec::{
-    decode, decode_with_bundle, encode, encode_with_bundle, ArtifactDecodeError,
-    ArtifactEncodeError, ArtifactLimits, FORMAT_VERSION,
+    decode, decode_with_bundle, encode, encode_with_bundle, encoded_id_with_bundle,
+    ArtifactDecodeError, ArtifactEncodeError, ArtifactLimits, FORMAT_VERSION,
 };
 
 const ARTIFACT_ID_TAG: &[u8] = b"lm-artifact-id-v1\0";

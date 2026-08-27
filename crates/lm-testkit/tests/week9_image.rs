@@ -8,26 +8,64 @@
 //! different but still canonical image. No input panics.
 
 use lm_bytecode::artifact::Artifact;
-use lm_testkit::{compile_text, load_snapshot_for_artifact, publish_artifact, repo_root};
+use lm_testkit::{compile_text, publish_artifact, repo_root};
 use lm_vm::snapshot::{codec, ImageReason, LoadLimits};
 use lm_vm::{RecordingHost, VmConfig, World};
 
-fn program(source: &str) -> Artifact {
-    compile_text("image.lm", source).expect("the program compiles")
+struct TestProgram {
+    artifact: Artifact,
+    arena: lm_link::CodeArena,
+    namespace: lm_link::NamespaceId,
 }
 
-fn asked_tree() -> (Artifact, Vec<u8>) {
+impl std::ops::Deref for TestProgram {
+    type Target = Artifact;
+
+    fn deref(&self) -> &Artifact {
+        &self.artifact
+    }
+}
+
+impl TestProgram {
+    fn world(&self) -> World {
+        World::new(
+            self.arena.clone(),
+            self.namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        )
+    }
+
+    fn load_snapshot(
+        &self,
+        bytes: &[u8],
+        limits: LoadLimits,
+    ) -> Result<lm_vm::snapshot::SnapshotImage, lm_vm::snapshot::ImageError> {
+        let namespace = self
+            .arena
+            .namespace(self.namespace)
+            .cloned()
+            .expect("the published namespace exists");
+        codec::load_external(bytes, Some(namespace), limits)
+    }
+}
+
+fn program(source: &str) -> TestProgram {
+    let artifact = compile_text("image.lm", source).expect("the program compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the artifact publishes");
+    TestProgram {
+        artifact,
+        arena,
+        namespace,
+    }
+}
+
+fn asked_tree() -> (TestProgram, Vec<u8>) {
     let source = std::fs::read_to_string(repo_root().join("checkpoints/asked-tree.lm"))
         .expect("the checkpoint source reads");
     let loaded = program(&source);
     let bytes = {
-        let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-        let mut world = World::new(
-            arena,
-            namespace,
-            VmConfig::default(),
-            Box::new(RecordingHost::new(1)),
-        );
+        let mut world = loaded.world();
         for grant in ["Proc", "Vm", "Clock"] {
             world.allow(grant).expect("the grant names a target");
         }
@@ -59,8 +97,9 @@ fn reseal(mut bytes: Vec<u8>) -> Vec<u8> {
 
 /// The rule one container breaks. The call runs decoding and
 /// admission, so a case states one rule whichever stage owns it.
-fn reject(loaded: &Artifact, bytes: &[u8]) -> ImageReason {
-    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
+fn reject(loaded: &TestProgram, bytes: &[u8]) -> ImageReason {
+    loaded
+        .load_snapshot(bytes, LoadLimits::default())
         .expect_err("the container must reject")
         .reason
 }
@@ -71,14 +110,16 @@ fn reject(loaded: &Artifact, bytes: &[u8]) -> ImageReason {
 /// fact, so a container that carries one admits. The interpreter tests
 /// the tag at each accessor, and the world checks each VM boundary, so
 /// the wrong type stops one machine at its first read.
-fn admits(loaded: &Artifact, bytes: &[u8]) {
-    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
+fn admits(loaded: &TestProgram, bytes: &[u8]) {
+    loaded
+        .load_snapshot(bytes, LoadLimits::default())
         .expect("the container admits, because admission proves structure alone");
 }
 
 /// The editable image of one container that decodes and admits.
-fn accept(loaded: &Artifact, bytes: &[u8]) -> lm_vm::snapshot::Image {
-    load_snapshot_for_artifact(loaded, bytes, LoadLimits::default())
+fn accept(loaded: &TestProgram, bytes: &[u8]) -> lm_vm::snapshot::Image {
+    loaded
+        .load_snapshot(bytes, LoadLimits::default())
         .expect("the container loads")
         .into_image()
 }
@@ -276,7 +317,8 @@ fn one_decode_budget_covers_all_container_allocations() {
         max_alloc_bytes: copy_limit,
         ..limits
     };
-    let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
+    let error = loaded
+        .load_snapshot(&bytes, limits)
         .expect_err("the container copy also charges the budget");
     assert_eq!(error.reason, ImageReason::LimitExceeded);
 }
@@ -521,13 +563,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     world.allow("Vm").expect("the grant names a target");
     lm_proc::run_world(&mut world);
     let bytes = world
@@ -556,6 +592,23 @@ go()
 // The blanket sweep.
 // ---------------------------------------------------------------
 
+/// Build one complete small container for quadratic prefix sweeps.
+///
+/// The artifact codec has its own payload mutation and truncation
+/// tests. The cases above test the snapshot code manifest directly.
+fn small_container() -> Vec<u8> {
+    let loaded = program("xs = [1, 2, 3]\nxs\n");
+    let mut world = loaded.world();
+    lm_proc::run_world(&mut world);
+    let gate = world.next_gate();
+    world
+        .capture_snapshot(gate, 0, false)
+        .expect("the small world captures")
+        .bytes()
+        .expect("the small image encodes")
+        .to_vec()
+}
+
 /// Every single-bit change to one container either rejects with a
 /// precise reason, or reads as a different image that still encodes
 /// back to exactly the bytes it came from.
@@ -564,7 +617,7 @@ go()
 /// string, so a reader can never accept two spellings of one world.
 #[test]
 fn every_single_bit_change_rejects_or_stays_canonical() {
-    let (_loaded, bytes) = asked_tree();
+    let bytes = small_container();
     let mut rejected = 0usize;
     let mut accepted = 0usize;
     for at in 0..bytes.len() - 32 {
@@ -591,7 +644,7 @@ fn every_single_bit_change_rejects_or_stays_canonical() {
 /// A truncated container never panics and never reads past its end.
 #[test]
 fn every_truncation_rejects() {
-    let (_loaded, bytes) = asked_tree();
+    let bytes = small_container();
     for len in 0..bytes.len() {
         let cut = &bytes[..len];
         assert!(
@@ -643,10 +696,9 @@ go()
     std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(move || {
-            let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
             let mut world = World::new(
-                arena,
-                namespace,
+                loaded.arena.clone(),
+                loaded.namespace,
                 VmConfig::default(),
                 Box::new(RecordingHost::new(1)),
             );
@@ -656,12 +708,12 @@ go()
                 .last_snapshot()
                 .expect("the program captured a world")
                 .clone();
-            let admitted = load_snapshot_for_artifact(
-                &loaded,
-                image.bytes().expect("the image encodes"),
-                LoadLimits::default(),
-            )
-            .expect("the container loads and admits");
+            let admitted = loaded
+                .load_snapshot(
+                    image.bytes().expect("the image encodes"),
+                    LoadLimits::default(),
+                )
+                .expect("the container loads and admits");
             assert_eq!(admitted.world().machine_count(), 1);
             let target = world.new_child(0).expect("the budget holds a child");
             world
@@ -732,13 +784,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     for grant in ["Vm", "Clock"] {
         world.allow(grant).expect("the grant names a target");
     }
@@ -790,13 +836,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     world.allow("Vm").expect("the grant names a target");
     lm_proc::run_world(&mut world);
     let bytes = world
@@ -871,13 +911,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     world.allow("Vm").expect("the grant names a target");
     lm_proc::run_world(&mut world);
     let bytes = world
@@ -935,13 +969,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     world.allow("Vm").expect("the grant names a target");
     lm_proc::run_world(&mut world);
     let bytes = world
@@ -1016,13 +1044,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     for grant in ["Vm", "Rand"] {
         world.allow(grant).expect("the grant names a target");
     }
@@ -1150,13 +1172,7 @@ end
 go()
 ";
     let loaded = program(source);
-    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
-    let mut world = World::new(
-        arena,
-        namespace,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let mut world = loaded.world();
     world.allow("Vm").expect("the grant names a target");
     lm_proc::run_world(&mut world);
     let bytes = world
