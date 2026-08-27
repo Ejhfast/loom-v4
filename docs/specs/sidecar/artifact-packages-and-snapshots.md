@@ -1,8 +1,8 @@
 # Artifacts and Portable Snapshots
 
-Status: accepted design. Stages 0 through 3 are complete.
+Status: accepted design. Stages 0 through 4 are complete.
 
-Stage 4 dependency collection is in progress.
+Stage 5 shared arena work is next.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -326,7 +326,7 @@ It has no source compiler, filesystem, host, network, or clock dependency.
 
 `lm-bytecode` owns the `LinkUnit` data and artifact codec.
 
-`lm-link` owns `LinkEnv`, graph resolution, contract checks, and relocation plans.
+`lm-link` owns `LinkEnv`, graph resolution, dependency collection, and relocation plans.
 
 `lm-compiler` can re-export its existing `LinkEnv` surface.
 
@@ -388,7 +388,17 @@ Cross-version admission remains deferred.
 
 ## 8. Linking and verification
 
-The verifier checks each `LinkUnit` before publication.
+The compiler verifies each emitted `LinkUnit` once.
+
+Trusted compiler linking does not repeat verification or interface validation.
+
+An artifact decoder treats each embedded unit as untrusted code.
+
+The artifact linker verifies each decoded embedded unit once before relocation.
+
+The exact runtime core is already verified.
+
+The artifact linker does not verify that core again.
 
 An imported declaration has no executable body.
 
@@ -401,15 +411,17 @@ An import identifies these values.
 - An export kind.
 - An interface contract hash.
 
-The linker compares the importer declaration with the provider declaration.
+The provider interface hash and export kind select one exact provider.
 
-The comparison covers the complete relocated contract.
+The importer declaration has no authority after resolution.
 
-For functions, it covers parameters, result, rows, generic bounds, and mutability.
+Relocation replaces each imported declaration with the provider definition.
 
-For classes, it covers layout, parent, methods, conformances, and constructor contract.
+The VM verifies the final relocated executable before any function runs.
 
-An interface hash pin never replaces this structural comparison.
+That verification checks each call against the actual provider signature.
+
+Unit verification rejects conformances that attach to imported classes.
 
 The linker rejects unresolved imports before executable publication.
 
@@ -659,6 +671,10 @@ Later phases share the decoded value.
 
 Normal source compilation must not pay snapshot packaging costs.
 
+Trusted compilation performs collection, relocation, identity calculation, and encoding.
+
+Trusted compilation does not repeat unit verification or interface validation.
+
 Normal execution must not pay namespace lookup costs per instruction.
 
 Core verification can be reused by exact `ArtifactId`.
@@ -754,8 +770,6 @@ Gate: semantic identity returns an error or a value for every decoded payload.
 
 Package builds and artifact loads now use one `LinkEnv`.
 
-The linker compares complete imported contracts before publication.
-
 The compiler builds core once and emits source-module core imports.
 
 Local functions keep separate arena entries after relocation.
@@ -769,12 +783,16 @@ The `.lma` file now contains the canonical Artifact container.
 - Emit source-module core references as imports.
 - Replace the flattened `.lma` payload with the Artifact container.
 - Resolve imports across artifact units.
-- Compare complete importer and provider contracts.
+- Replace local extern declarations with exact provider definitions.
 - Reject executable extern declarations.
 - Reject foreign conformance attachment.
 - Publish links as one transaction.
 
-Gate: a correct hash with a wrong local declaration rejects.
+Gate: decoded artifact units verify before relocation.
+
+Gate: trusted compiler units do not verify twice.
+
+Gate: incompatible relocated calls reject during final VM verification.
 
 Gate: a source module contains no copied core function body.
 
@@ -800,6 +818,10 @@ Gate: the cold path does not use compression or a cache result.
 Gate: program `1` keeps one local entry and no local core class.
 
 Gate: `use m.f` removes unrelated exports.
+
+Gate result: program `1` keeps one function and no class in its root unit.
+
+Gate result: one selected import removes unrelated exports and an unused cycle.
 
 ### Stage 5: shared arena and namespaces
 
@@ -948,3 +970,65 @@ The tiny program uses source `1`.
 These results are the Stage 4 baseline.
 
 Stage 4 must reduce raw bytes and cold load time without compression or cached verification.
+
+## 22. Stage 4 performance record
+
+The Stage 4 result uses revision `0f742b2`.
+
+The `main` result uses revision `8f7ba66` from the same session.
+
+The tiny program contains source `1`.
+
+| Tiny program measurement | `main` | Stage 4 | Change |
+| --- | ---: | ---: | ---: |
+| Raw artifact bytes | 274,942 | 1,776 | -99.4% |
+| Source compilation | 8.357 ms | 6.617 ms | -20.8% |
+| Cold artifact load | 2.040 ms | 2.433 ms | +19.3% |
+
+The Stage 4 root contains one function and no class.
+
+Artifact decoding takes 0.020 milliseconds.
+
+Dependency collection takes 0.589 milliseconds.
+
+Trusted linking takes 1.327 milliseconds.
+
+Artifact linking takes 0.754 milliseconds.
+
+These measurements use raw bytes without compression.
+
+These measurements do not use cached verification.
+
+Cold loading adds 0.393 milliseconds against `main`.
+
+The current loader relocates the complete core into one flat executable module.
+
+Stage 5 removes that flattening step through the shared `CodeArena`.
+
+The warm workspace suite took 60.54 seconds on `main`.
+
+The same suite took 57.63 seconds on Stage 4.
+
+Stage 4 reduced the measured suite time by 4.8 percent.
+
+The focused runtime gate used three pinned processes for each revision.
+
+| Operation | `main` | Stage 4 | Change |
+| --- | ---: | ---: | ---: |
+| Direct call | 31.7 ns | 31.4 ns | -0.9% |
+| Virtual call | 63.7 ns | 65.4 ns | +2.7% |
+| String interpolation | 217.1 ns | 204.6 ns | -5.8% |
+| Interface default | 233.7 ns | 254.7 ns | +9.0% |
+| Map hashable lookup | 213.3 ns | 215.3 ns | +0.9% |
+| String builder | 39.5 ns | 39.6 ns | +0.3% |
+| Text iteration | 75.5 ns | 75.8 ns | +0.4% |
+| Byte buffer | 41.3 ns | 42.8 ns | +3.6% |
+| Direct clock | 111.3 ns | 112.6 ns | +1.2% |
+
+The mean ratio across these operations increased by approximately 1.3 percent.
+
+The interface-default row is the only clear outlier.
+
+Stage 4 does not change the VM instruction path.
+
+Stage 5 repeats the direct-call and interface-call gates after arena relocation.

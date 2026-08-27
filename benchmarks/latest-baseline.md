@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured source revision is `e1c73d4`.
+The measured source revision is `0f742b2`.
 
 The measurements use release builds unless this file states a different build.
 
@@ -16,7 +16,7 @@ The operating system selects processors for scheduler benchmark processes.
 
 The bytecode version is 56.
 
-The verifier version is 36.
+The verifier version is 37.
 
 The snapshot format version is 31.
 
@@ -30,21 +30,21 @@ The snapshot format version is 31.
 | Bytecode functions | 896 |
 | Bytecode instructions | 18,877 |
 | Decoded instruction width | 16 bytes |
-| Artifact size | 274,657 bytes |
-| Artifact package size | 274,771 bytes |
-| Artifact package encoding | 0.128 ms |
-| Artifact package decoding and identity | 2.786 ms |
-| Core checking | 2.407 ms |
-| Core lowering | 1.002 ms |
-| Core compilation | 3.802 ms |
-| Core decoding | 0.399 ms |
-| Core verification | 1.390 ms |
-| Structural verification | 0.507 ms |
-| Verification hash | 0.136 ms |
-| Semantic identity | 2.514 ms |
-| Decoded loading | 1.596 ms |
-| Core loading | 2.009 ms |
-| Cached core loading | 0.163 ms |
+| Artifact size | 287,158 bytes |
+| Artifact package size | 456,464 bytes |
+| Artifact package encoding | 0.170 ms |
+| Artifact package decoding and identity | 3.093 ms |
+| Core checking | 2.715 ms |
+| Core lowering | 0.984 ms |
+| Core compilation | 4.577 ms |
+| Core decoding | 0.406 ms |
+| Core verification | 1.439 ms |
+| Structural verification | 0.540 ms |
+| Verification hash | 0.139 ms |
+| Semantic identity | 2.465 ms |
+| Decoded loading | 1.632 ms |
+| Core loading | 2.059 ms |
+| Cached core loading | 0.166 ms |
 | Default interface witnesses | 11 of 3,588 possible entries |
 
 ### Growth from the scheduler foundation
@@ -57,14 +57,14 @@ This comparison uses revision `308b55e` with the same processor placement.
 | HIR types | 534 | 565 | +5.8% |
 | Bytecode functions | 873 | 896 | +2.6% |
 | Bytecode instructions | 17,905 | 18,877 | +5.4% |
-| Artifact size | 264,401 bytes | 274,657 bytes | +3.9% |
-| Core checking | 2.065 ms | 2.407 ms | +16.6% |
-| Core lowering | 0.945 ms | 1.002 ms | +6.0% |
-| Core compilation | 3.335 ms | 3.802 ms | +14.0% |
-| Core verification | 1.278 ms | 1.390 ms | +8.8% |
-| Core loading | 1.837 ms | 2.009 ms | +9.4% |
+| Artifact size | 264,401 bytes | 287,158 bytes | +8.6% |
+| Core checking | 2.065 ms | 2.715 ms | +31.5% |
+| Core lowering | 0.945 ms | 0.984 ms | +4.1% |
+| Core compilation | 3.335 ms | 4.577 ms | +37.2% |
+| Core verification | 1.278 ms | 1.439 ms | +12.6% |
+| Core loading | 1.837 ms | 2.059 ms | +12.1% |
 
-The larger core adds 0.342 milliseconds to core checking.
+The larger core and complete provider interface add 0.650 milliseconds to core checking.
 
 Large checker inputs retain the prior scaling slope.
 
