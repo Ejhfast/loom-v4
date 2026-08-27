@@ -1274,24 +1274,325 @@ pub struct Module {
     pub debug: Vec<u8>,
 }
 
+/// One append-only table in a published code revision.
+///
+/// A publication adds one immutable chunk. Older revisions keep
+/// their chunk lists and never copy existing entries.
+pub struct CodeTable<T> {
+    first: std::sync::Arc<Vec<T>>,
+    later: std::sync::Arc<Vec<CodeChunk<T>>>,
+    len: usize,
+}
+
+struct CodeChunk<T> {
+    start: usize,
+    values: std::sync::Arc<Vec<T>>,
+}
+
+impl<T> Clone for CodeChunk<T> {
+    fn clone(&self) -> CodeChunk<T> {
+        CodeChunk {
+            start: self.start,
+            values: self.values.clone(),
+        }
+    }
+}
+
+impl<T> Clone for CodeTable<T> {
+    fn clone(&self) -> CodeTable<T> {
+        CodeTable {
+            first: self.first.clone(),
+            later: self.later.clone(),
+            len: self.len,
+        }
+    }
+}
+
+impl<T> Default for CodeTable<T> {
+    fn default() -> CodeTable<T> {
+        CodeTable {
+            first: std::sync::Arc::new(Vec::new()),
+            later: std::sync::Arc::new(Vec::new()),
+            len: 0,
+        }
+    }
+}
+
+impl<T> CodeTable<T> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len {
+            return None;
+        }
+        if index < self.first.len() {
+            return self.first.get(index);
+        }
+        let chunks = self.later.as_slice();
+        if let Some(last) = chunks.last() {
+            if index >= last.start {
+                return last.values.get(index - last.start);
+            }
+        }
+        let chunk = chunks
+            .binary_search_by(|chunk| {
+                if index < chunk.start {
+                    std::cmp::Ordering::Greater
+                } else if index >= chunk.start + chunk.values.len() {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        let chunk = &chunks[chunk];
+        chunk.values.get(index - chunk.start)
+    }
+
+    pub fn iter(&self) -> CodeTableIter<'_, T> {
+        CodeTableIter {
+            first: self.first.iter(),
+            chunks: self.later.iter(),
+            values: None,
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        if self.later.is_empty()
+            && (self.first.is_empty() || std::sync::Arc::strong_count(&self.first) == 1)
+        {
+            if self.first.is_empty() {
+                self.first = std::sync::Arc::new(vec![value]);
+            } else {
+                std::sync::Arc::get_mut(&mut self.first)
+                    .expect("an extendable first code chunk is unique")
+                    .push(value);
+            }
+            self.len += 1;
+            return;
+        }
+        let chunks = std::sync::Arc::make_mut(&mut self.later);
+        let can_extend = chunks
+            .last()
+            .is_some_and(|chunk| std::sync::Arc::strong_count(&chunk.values) == 1);
+        if can_extend {
+            let chunk = chunks.last_mut().expect("the last chunk exists");
+            std::sync::Arc::get_mut(&mut chunk.values)
+                .expect("an extendable code chunk is unique")
+                .push(value);
+        } else {
+            chunks.push(CodeChunk {
+                start: self.len,
+                values: std::sync::Arc::new(vec![value]),
+            });
+        }
+        self.len += 1;
+    }
+
+    pub fn replace_recent(&mut self, index: usize, value: T) -> Result<(), T> {
+        if index < self.first.len() {
+            let Some(target) =
+                std::sync::Arc::get_mut(&mut self.first).and_then(|values| values.get_mut(index))
+            else {
+                return Err(value);
+            };
+            *target = value;
+            return Ok(());
+        }
+        let chunks = std::sync::Arc::make_mut(&mut self.later);
+        let Some(chunk) = chunks.last_mut() else {
+            return Err(value);
+        };
+        if index < chunk.start || std::sync::Arc::strong_count(&chunk.values) != 1 {
+            return Err(value);
+        }
+        let Some(target) = std::sync::Arc::get_mut(&mut chunk.values)
+            .and_then(|values| values.get_mut(index - chunk.start))
+        else {
+            return Err(value);
+        };
+        *target = value;
+        Ok(())
+    }
+
+    pub fn contains(&self, value: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.iter().any(|item| item == value)
+    }
+
+    pub fn to_vec(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.iter().cloned().collect()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        usize::from(!self.first.is_empty()) + self.later.len()
+    }
+}
+
+impl<T> From<Vec<T>> for CodeTable<T> {
+    fn from(values: Vec<T>) -> CodeTable<T> {
+        let len = values.len();
+        CodeTable {
+            first: std::sync::Arc::new(values),
+            later: std::sync::Arc::new(Vec::new()),
+            len,
+        }
+    }
+}
+
+impl<T> std::ops::Index<usize> for CodeTable<T> {
+    type Output = T;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> &T {
+        self.get(index).expect("the code-table index is in range")
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for CodeTable<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<T: PartialEq> PartialEq for CodeTable<T> {
+    fn eq(&self, other: &CodeTable<T>) -> bool {
+        self.len == other.len && self.iter().eq(other.iter())
+    }
+}
+
+impl<T: Eq> Eq for CodeTable<T> {}
+
+pub struct CodeTableIter<'a, T> {
+    first: std::slice::Iter<'a, T>,
+    chunks: std::slice::Iter<'a, CodeChunk<T>>,
+    values: Option<std::slice::Iter<'a, T>>,
+}
+
+impl<'a, T> Iterator for CodeTableIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        if let Some(value) = self.first.next() {
+            return Some(value);
+        }
+        loop {
+            if let Some(value) = self.values.as_mut().and_then(Iterator::next) {
+                return Some(value);
+            }
+            self.values = Some(self.chunks.next()?.values.iter());
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let current = self.first.len() + self.values.as_ref().map_or(0, ExactSizeIterator::len);
+        let later: usize = self
+            .chunks
+            .as_slice()
+            .iter()
+            .map(|chunk| chunk.values.len())
+            .sum();
+        let remaining = current + later;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for CodeTableIter<'_, T> {}
+
+impl<'a, T> IntoIterator for &'a CodeTable<T> {
+    type Item = &'a T;
+    type IntoIter = CodeTableIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// A table view from one module or one runtime revision.
+pub enum CodeTableRef<'a, T> {
+    Slice(&'a [T]),
+    Chunks(&'a CodeTable<T>),
+}
+
+impl<'a, T> CodeTableRef<'a, T> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            CodeTableRef::Slice(values) => values.len(),
+            CodeTableRef::Chunks(values) => values.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<&'a T> {
+        match self {
+            CodeTableRef::Slice(values) => values.get(index),
+            CodeTableRef::Chunks(values) => values.get(index),
+        }
+    }
+
+    #[inline]
+    pub fn iter(&self) -> CodeTableRefIter<'a, T> {
+        match self {
+            CodeTableRef::Slice(values) => CodeTableRefIter::Slice(values.iter()),
+            CodeTableRef::Chunks(values) => CodeTableRefIter::Chunks(values.iter()),
+        }
+    }
+}
+
+pub enum CodeTableRefIter<'a, T> {
+    Slice(std::slice::Iter<'a, T>),
+    Chunks(CodeTableIter<'a, T>),
+}
+
+impl<'a, T> Iterator for CodeTableRefIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        match self {
+            CodeTableRefIter::Slice(values) => values.next(),
+            CodeTableRefIter::Chunks(values) => values.next(),
+        }
+    }
+}
+
 /// Dense tables used by one published code namespace.
 ///
 /// A `Module` is one unresolved `LinkUnit` payload. These tables hold
 /// relocated definitions. They contain no import or export records.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CodeTables {
-    pub strings: Vec<String>,
-    pub bytes: Vec<Vec<u8>>,
-    pub types: Vec<BcType>,
-    pub selectors: Vec<String>,
-    pub apps: Vec<TypeApp>,
-    pub interfaces: Vec<BcInterface>,
-    pub conformances: Vec<BcConformance>,
-    pub class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
-    pub func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
-    pub slots: Vec<SlotSpec>,
-    pub classes: Vec<BcClass>,
-    pub funcs: Vec<Func>,
+    pub strings: CodeTable<String>,
+    pub bytes: CodeTable<Vec<u8>>,
+    pub types: CodeTable<BcType>,
+    pub selectors: CodeTable<String>,
+    pub apps: CodeTable<TypeApp>,
+    pub interfaces: CodeTable<BcInterface>,
+    pub conformances: CodeTable<BcConformance>,
+    pub class_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
+    pub func_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
+    pub slots: CodeTable<SlotSpec>,
+    pub classes: CodeTable<BcClass>,
+    pub funcs: CodeTable<Func>,
     pub debug: Vec<u8>,
 }
 
@@ -1300,14 +1601,14 @@ pub struct CodeTables {
 /// A compiler `Module` and a runtime `CodeTables` value both provide
 /// this view. Runtime code never needs module linkage records.
 pub trait CodeTableView {
-    fn strings(&self) -> &[String];
-    fn types(&self) -> &[BcType];
-    fn apps(&self) -> &[TypeApp];
-    fn classes(&self) -> &[BcClass];
-    fn interfaces(&self) -> &[BcInterface];
-    fn conformances(&self) -> &[BcConformance];
-    fn slots(&self) -> &[SlotSpec];
-    fn funcs(&self) -> &[Func];
+    fn strings(&self) -> CodeTableRef<'_, String>;
+    fn types(&self) -> CodeTableRef<'_, BcType>;
+    fn apps(&self) -> CodeTableRef<'_, TypeApp>;
+    fn classes(&self) -> CodeTableRef<'_, BcClass>;
+    fn interfaces(&self) -> CodeTableRef<'_, BcInterface>;
+    fn conformances(&self) -> CodeTableRef<'_, BcConformance>;
+    fn slots(&self) -> CodeTableRef<'_, SlotSpec>;
+    fn funcs(&self) -> CodeTableRef<'_, Func>;
 
     fn core_role(&self, _index: usize) -> Option<u32> {
         None
@@ -1315,36 +1616,36 @@ pub trait CodeTableView {
 }
 
 impl CodeTableView for Module {
-    fn strings(&self) -> &[String] {
-        &self.strings
+    fn strings(&self) -> CodeTableRef<'_, String> {
+        CodeTableRef::Slice(&self.strings)
     }
 
-    fn types(&self) -> &[BcType] {
-        &self.types
+    fn types(&self) -> CodeTableRef<'_, BcType> {
+        CodeTableRef::Slice(&self.types)
     }
 
-    fn apps(&self) -> &[TypeApp] {
-        &self.apps
+    fn apps(&self) -> CodeTableRef<'_, TypeApp> {
+        CodeTableRef::Slice(&self.apps)
     }
 
-    fn classes(&self) -> &[BcClass] {
-        &self.classes
+    fn classes(&self) -> CodeTableRef<'_, BcClass> {
+        CodeTableRef::Slice(&self.classes)
     }
 
-    fn interfaces(&self) -> &[BcInterface] {
-        &self.interfaces
+    fn interfaces(&self) -> CodeTableRef<'_, BcInterface> {
+        CodeTableRef::Slice(&self.interfaces)
     }
 
-    fn conformances(&self) -> &[BcConformance] {
-        &self.conformances
+    fn conformances(&self) -> CodeTableRef<'_, BcConformance> {
+        CodeTableRef::Slice(&self.conformances)
     }
 
-    fn slots(&self) -> &[SlotSpec] {
-        &self.slots
+    fn slots(&self) -> CodeTableRef<'_, SlotSpec> {
+        CodeTableRef::Slice(&self.slots)
     }
 
-    fn funcs(&self) -> &[Func] {
-        &self.funcs
+    fn funcs(&self) -> CodeTableRef<'_, Func> {
+        CodeTableRef::Slice(&self.funcs)
     }
 
     fn core_role(&self, index: usize) -> Option<u32> {
@@ -1356,69 +1657,69 @@ impl CodeTableView for Module {
 }
 
 impl CodeTableView for CodeTables {
-    fn strings(&self) -> &[String] {
-        &self.strings
+    fn strings(&self) -> CodeTableRef<'_, String> {
+        CodeTableRef::Chunks(&self.strings)
     }
 
-    fn types(&self) -> &[BcType] {
-        &self.types
+    fn types(&self) -> CodeTableRef<'_, BcType> {
+        CodeTableRef::Chunks(&self.types)
     }
 
-    fn apps(&self) -> &[TypeApp] {
-        &self.apps
+    fn apps(&self) -> CodeTableRef<'_, TypeApp> {
+        CodeTableRef::Chunks(&self.apps)
     }
 
-    fn classes(&self) -> &[BcClass] {
-        &self.classes
+    fn classes(&self) -> CodeTableRef<'_, BcClass> {
+        CodeTableRef::Chunks(&self.classes)
     }
 
-    fn interfaces(&self) -> &[BcInterface] {
-        &self.interfaces
+    fn interfaces(&self) -> CodeTableRef<'_, BcInterface> {
+        CodeTableRef::Chunks(&self.interfaces)
     }
 
-    fn conformances(&self) -> &[BcConformance] {
-        &self.conformances
+    fn conformances(&self) -> CodeTableRef<'_, BcConformance> {
+        CodeTableRef::Chunks(&self.conformances)
     }
 
-    fn slots(&self) -> &[SlotSpec] {
-        &self.slots
+    fn slots(&self) -> CodeTableRef<'_, SlotSpec> {
+        CodeTableRef::Chunks(&self.slots)
     }
 
-    fn funcs(&self) -> &[Func] {
-        &self.funcs
+    fn funcs(&self) -> CodeTableRef<'_, Func> {
+        CodeTableRef::Chunks(&self.funcs)
     }
 }
 
 impl<T: CodeTableView + ?Sized> CodeTableView for std::sync::Arc<T> {
-    fn strings(&self) -> &[String] {
+    fn strings(&self) -> CodeTableRef<'_, String> {
         (**self).strings()
     }
 
-    fn types(&self) -> &[BcType] {
+    fn types(&self) -> CodeTableRef<'_, BcType> {
         (**self).types()
     }
 
-    fn apps(&self) -> &[TypeApp] {
+    fn apps(&self) -> CodeTableRef<'_, TypeApp> {
         (**self).apps()
     }
 
-    fn classes(&self) -> &[BcClass] {
+    fn classes(&self) -> CodeTableRef<'_, BcClass> {
         (**self).classes()
     }
 
-    fn interfaces(&self) -> &[BcInterface] {
+    fn interfaces(&self) -> CodeTableRef<'_, BcInterface> {
         (**self).interfaces()
     }
 
-    fn conformances(&self) -> &[BcConformance] {
+    fn conformances(&self) -> CodeTableRef<'_, BcConformance> {
         (**self).conformances()
     }
 
-    fn slots(&self) -> &[SlotSpec] {
+    fn slots(&self) -> CodeTableRef<'_, SlotSpec> {
         (**self).slots()
     }
 
-    fn funcs(&self) -> &[Func] {
+    fn funcs(&self) -> CodeTableRef<'_, Func> {
         (**self).funcs()
     }
 
@@ -4040,6 +4341,19 @@ fn decode_optional_index(cur: &mut Cursor<'_>) -> Result<u32, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_table_revisions_keep_their_prefix() {
+        let mut current = CodeTable::from(vec![10, 20]);
+        let earlier = current.clone();
+
+        current.push(30);
+
+        assert_eq!(earlier.to_vec(), vec![10, 20]);
+        assert_eq!(current.to_vec(), vec![10, 20, 30]);
+        assert_eq!(earlier.chunk_count(), 1);
+        assert_eq!(current.chunk_count(), 2);
+    }
 
     fn plain_func(name: &str, ret: u32, blocks: Vec<Vec<Instr>>) -> Func {
         Func {

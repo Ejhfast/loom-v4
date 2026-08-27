@@ -35,9 +35,9 @@ use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
     BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
-    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, CodeTables, Export, ExtendedInstr, Func,
-    FuncBinding, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget, TypeApp,
-    NO_CLASS, NO_PARENT,
+    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, CodeTable, CodeTables, Export, ExtendedInstr,
+    Func, FuncBinding, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget,
+    TypeApp, NO_CLASS, NO_PARENT,
 };
 use std::collections::HashMap;
 
@@ -607,9 +607,10 @@ pub struct CodeNamespace {
     relocations: BTreeMap<ArtifactId, UnitRelocation>,
     core_artifact: Option<ArtifactId>,
     tables: std::sync::Arc<CodeTables>,
-    dispatch: Arc<[DispatchRow]>,
+    dispatch: Arc<CodeTable<DispatchRow>>,
     entry: u32,
     core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
+    core: lm_bytecode::corepin::CoreLayout,
     exports: Vec<Export>,
     bindings: Arc<[FuncBinding]>,
     identity: Arc<ModuleIdentity>,
@@ -674,7 +675,7 @@ impl CodeNamespace {
         self.tables.clone()
     }
 
-    pub fn dispatch_store(&self) -> Arc<[DispatchRow]> {
+    pub fn dispatch_store(&self) -> Arc<CodeTable<DispatchRow>> {
         self.dispatch.clone()
     }
 
@@ -684,6 +685,10 @@ impl CodeNamespace {
 
     pub fn core_roles(&self) -> &[u32; lm_bytecode::CORE_ROLE_COUNT] {
         &self.core_roles
+    }
+
+    pub fn core_layout(&self) -> &lm_bytecode::corepin::CoreLayout {
+        &self.core
     }
 
     pub fn exports(&self) -> &[Export] {
@@ -891,89 +896,6 @@ impl DispatchRow {
     }
 }
 
-fn build_dispatch(tables: &CodeTables) -> Arc<[DispatchRow]> {
-    let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(tables.classes.len());
-    let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(tables.classes.len());
-    let mut conformances_by_class = vec![Vec::new(); tables.classes.len()];
-    for (index, conformance) in tables.conformances.iter().enumerate() {
-        conformances_by_class[conformance.class as usize].push(index);
-    }
-    let interfaces_with_defaults: Vec<bool> = tables
-        .interfaces
-        .iter()
-        .map(|interface| {
-            interface
-                .methods
-                .iter()
-                .any(|method| method.default != lm_bytecode::NO_FUNC)
-        })
-        .collect();
-    for (class_index, class) in tables.classes.iter().enumerate() {
-        let mut methods: Vec<(u32, u32)> = match class.parent() {
-            Some(parent) => resolved[parent as usize].clone(),
-            None => Vec::new(),
-        };
-        let inherited_witnesses = class
-            .parent()
-            .and_then(|parent| dispatch[parent as usize].interface_witnesses.clone());
-        let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
-        for conformance in conformances_by_class[class_index]
-            .iter()
-            .map(|index| &tables.conformances[*index])
-        {
-            let interface = conformance.application.interface as usize;
-            if interfaces_with_defaults[interface] {
-                let interface = interface as u32;
-                let witnesses = changed_witnesses.get_or_insert_with(|| {
-                    inherited_witnesses
-                        .as_deref()
-                        .map_or_else(Vec::new, <[_]>::to_vec)
-                });
-                let witness = InterfaceWitness {
-                    interface,
-                    method_overrides: conformance.method_overrides.clone().into(),
-                };
-                match witnesses.binary_search_by_key(&interface, |item| item.interface) {
-                    Ok(index) => witnesses[index] = witness,
-                    Err(index) => witnesses.insert(index, witness),
-                }
-            }
-        }
-        let interface_witnesses = changed_witnesses.map(Arc::from).or(inherited_witnesses);
-        for (selector, function) in &class.methods {
-            match methods.iter_mut().find(|(found, _)| found == selector) {
-                Some(entry) => entry.1 = *function,
-                None => methods.push((*selector, *function)),
-            }
-        }
-        let row = match methods.iter().map(|(selector, _)| *selector).min() {
-            Some(base) => {
-                let top = methods
-                    .iter()
-                    .map(|(selector, _)| *selector)
-                    .max()
-                    .expect("the method table is not empty");
-                let mut table = vec![NO_METHOD; (top - base + 1) as usize];
-                for (selector, function) in &methods {
-                    table[(*selector - base) as usize] = *function;
-                }
-                DispatchRow {
-                    base,
-                    table,
-                    interface_witnesses,
-                }
-            }
-            None => DispatchRow {
-                interface_witnesses,
-                ..DispatchRow::default()
-            },
-        };
-        resolved.push(methods);
-        dispatch.push(row);
-    }
-    dispatch.into()
-}
-
 fn prepare_definition_module(
     source: &Module,
     selection: DefinitionSelection,
@@ -1171,7 +1093,7 @@ impl CodeArena {
                 None => {
                     let reloc =
                         merge_unit(&mut merged, &mut view, unit, path, slot_scope, &self.bundle)?;
-                    merged.units.insert(unit.id(), reloc.clone());
+                    Arc::make_mut(&mut merged.units).insert(unit.id(), reloc.clone());
                     reloc
                 }
             };
@@ -1186,8 +1108,9 @@ impl CodeArena {
         let entry = entry.ok_or_else(|| fail("the artifact root has no entry"))?;
         let core_artifact = active_units.get(CORE_MODULE_PATH).copied();
         view.slot_initials.resize(merged.slots.len(), None);
+        extend_dispatch(&mut merged);
         let tables = Arc::new(tables_of(&merged));
-        let dispatch = build_dispatch(&tables);
+        let dispatch = Arc::new(merged.dispatch.clone());
         let identity = Arc::new(namespace_identity(&merged, root));
         let namespace = CodeNamespace {
             artifact_id: root,
@@ -1200,6 +1123,7 @@ impl CodeArena {
             dispatch,
             entry,
             core_roles: view.core_roles,
+            core: lm_bytecode::corepin::layout_from_roles(&view.core_roles),
             exports: root_exports,
             bindings: view.bindings.into(),
             identity,
@@ -1336,7 +1260,7 @@ impl CodeArena {
                         slot_scope,
                         &self.bundle,
                     )?;
-                    merged.units.insert(unit.id(), reloc.clone());
+                    Arc::make_mut(&mut merged.units).insert(unit.id(), reloc.clone());
                     reloc
                 }
             };
@@ -1369,8 +1293,9 @@ impl CodeArena {
         if !artifacts.iter().any(|item| item.id() == retained.id()) {
             artifacts.push(retained);
         }
+        extend_dispatch(&mut merged);
         let tables = Arc::new(tables_of(&merged));
-        let dispatch = build_dispatch(&tables);
+        let dispatch = Arc::new(merged.dispatch.clone());
         let identity = Arc::new(namespace_identity(&merged, base.artifact_id));
         let namespace = CodeNamespace {
             artifact_id: base.artifact_id,
@@ -1383,6 +1308,7 @@ impl CodeArena {
             dispatch,
             entry: base.entry,
             core_roles: base.core_roles,
+            core: base.core,
             exports: base.exports.clone(),
             bindings: binding_by_key.into_values().collect::<Vec<_>>().into(),
             identity,
@@ -1416,45 +1342,49 @@ fn id_of(namespace: &CodeNamespace) -> ArtifactId {
 
 fn namespace_identity(merged: &Merged, artifact: ArtifactId) -> ModuleIdentity {
     ModuleIdentity {
-        class_hashes: merged.class_hashes.clone(),
-        func_hashes: merged.func_hashes.clone(),
-        interface_hashes: merged.interface_hashes.clone(),
-        type_hashes: merged.type_hashes.clone(),
+        class_hashes: merged.class_hashes.to_vec(),
+        func_hashes: merged.func_hashes.to_vec(),
+        interface_hashes: merged.interface_hashes.to_vec(),
+        type_hashes: merged.type_hashes.to_vec(),
         semantic_hash: artifact.into_bytes(),
         max_refine_rounds: 0,
     }
 }
 
 /// The append-only dense tables of one code arena.
+type SlotContractKey = (ArtifactId, [u8; 32], [u8; 32]);
+
 #[derive(Debug, Clone, Default)]
 struct Merged {
-    strings: Vec<String>,
-    string_index: HashMap<String, u32>,
-    bytes: Vec<Vec<u8>>,
-    bytes_index: HashMap<Vec<u8>, u32>,
-    types: Vec<BcType>,
-    type_hashes: Vec<[u8; 32]>,
-    type_index: HashMap<BcType, u32>,
-    selectors: Vec<String>,
-    selector_index: HashMap<String, u32>,
-    apps: Vec<TypeApp>,
-    app_index: HashMap<TypeApp, u32>,
-    classes: Vec<BcClass>,
-    class_hashes: Vec<[u8; 32]>,
-    class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
-    interfaces: Vec<BcInterface>,
-    interface_hashes: Vec<[u8; 32]>,
-    conformances: Vec<BcConformance>,
-    funcs: Vec<Func>,
-    func_hashes: Vec<[u8; 32]>,
-    func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    strings: CodeTable<String>,
+    string_index: Arc<HashMap<String, u32>>,
+    bytes: CodeTable<Vec<u8>>,
+    bytes_index: Arc<HashMap<Vec<u8>, u32>>,
+    types: CodeTable<BcType>,
+    type_hashes: CodeTable<[u8; 32]>,
+    type_index: Arc<HashMap<BcType, u32>>,
+    selectors: CodeTable<String>,
+    selector_index: Arc<HashMap<String, u32>>,
+    apps: CodeTable<TypeApp>,
+    app_index: Arc<HashMap<TypeApp, u32>>,
+    classes: CodeTable<BcClass>,
+    class_hashes: CodeTable<[u8; 32]>,
+    class_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
+    interfaces: CodeTable<BcInterface>,
+    interface_hashes: CodeTable<[u8; 32]>,
+    conformances: CodeTable<BcConformance>,
+    funcs: CodeTable<Func>,
+    func_hashes: CodeTable<[u8; 32]>,
+    func_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
+    /// One sealed dispatch row for each arena class.
+    dispatch: CodeTable<DispatchRow>,
     /// Late-bound slot contracts, merged by stable key and contract.
-    slots: Vec<SlotSpec>,
-    slot_by_contract: HashMap<(ArtifactId, [u8; 32], [u8; 32]), u32>,
+    slots: CodeTable<SlotSpec>,
+    slot_by_contract: Arc<HashMap<SlotContractKey, u32>>,
     /// Optional source data after table relocation.
-    debug: lm_bytecode::debug::DebugInfo,
+    debug: Arc<lm_bytecode::debug::DebugInfo>,
     /// One permanent relocation for each exact unit.
-    units: HashMap<ArtifactId, Reloc>,
+    units: Arc<HashMap<ArtifactId, Reloc>>,
 }
 
 /// One artifact graph's bindings over arena indices.
@@ -1498,7 +1428,7 @@ impl Merged {
         }
         let idx = self.strings.len() as u32;
         self.strings.push(text.to_string());
-        self.string_index.insert(text.to_string(), idx);
+        Arc::make_mut(&mut self.string_index).insert(text.to_string(), idx);
         idx
     }
 
@@ -1508,7 +1438,7 @@ impl Merged {
         }
         let idx = self.selectors.len() as u32;
         self.selectors.push(name.to_string());
-        self.selector_index.insert(name.to_string(), idx);
+        Arc::make_mut(&mut self.selector_index).insert(name.to_string(), idx);
         idx
     }
 
@@ -1519,7 +1449,7 @@ impl Merged {
         let idx = self.bytes.len() as u32;
         let value = value.to_vec();
         self.bytes.push(value.clone());
-        self.bytes_index.insert(value, idx);
+        Arc::make_mut(&mut self.bytes_index).insert(value, idx);
         idx
     }
 
@@ -1533,7 +1463,7 @@ impl Merged {
         let idx = self.types.len() as u32;
         self.types.push(ty.clone());
         self.type_hashes.push(hash);
-        self.type_index.insert(ty, idx);
+        Arc::make_mut(&mut self.type_index).insert(ty, idx);
         Ok(idx)
     }
 
@@ -1543,8 +1473,93 @@ impl Merged {
         }
         let idx = self.apps.len() as u32;
         self.apps.push(app.clone());
-        self.app_index.insert(app, idx);
+        Arc::make_mut(&mut self.app_index).insert(app, idx);
         idx
+    }
+}
+
+/// Build dispatch rows only for classes in the new publication chunk.
+fn extend_dispatch(merged: &mut Merged) {
+    let first = merged.dispatch.len();
+    let mut conformances_by_class = vec![Vec::new(); merged.classes.len().saturating_sub(first)];
+    for conformance in merged.conformances.iter() {
+        let class = conformance.class as usize;
+        if class >= first {
+            conformances_by_class[class - first].push(conformance);
+        }
+    }
+    for class_index in first..merged.classes.len() {
+        let class = &merged.classes[class_index];
+        let inherited = class
+            .parent()
+            .map(|parent| &merged.dispatch[parent as usize]);
+        let mut methods = Vec::new();
+        if let Some(parent) = inherited {
+            methods.extend(
+                parent
+                    .table
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, function)| *function != NO_METHOD)
+                    .map(|(offset, function)| (parent.base + offset as u32, function)),
+            );
+        }
+        let inherited_witnesses = inherited.and_then(|row| row.interface_witnesses.clone());
+        let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
+        for conformance in &conformances_by_class[class_index - first] {
+            let interface = conformance.application.interface;
+            let has_default = merged.interfaces[interface as usize]
+                .methods
+                .iter()
+                .any(|method| method.default != lm_bytecode::NO_FUNC);
+            if !has_default {
+                continue;
+            }
+            let witnesses = changed_witnesses.get_or_insert_with(|| {
+                inherited_witnesses
+                    .as_deref()
+                    .map_or_else(Vec::new, <[_]>::to_vec)
+            });
+            let witness = InterfaceWitness {
+                interface,
+                method_overrides: conformance.method_overrides.clone().into(),
+            };
+            match witnesses.binary_search_by_key(&interface, |item| item.interface) {
+                Ok(index) => witnesses[index] = witness,
+                Err(index) => witnesses.insert(index, witness),
+            }
+        }
+        let interface_witnesses = changed_witnesses.map(Arc::from).or(inherited_witnesses);
+        for (selector, function) in &class.methods {
+            match methods.iter_mut().find(|(found, _)| found == selector) {
+                Some(entry) => entry.1 = *function,
+                None => methods.push((*selector, *function)),
+            }
+        }
+        let row = match methods.iter().map(|(selector, _)| *selector).min() {
+            Some(base) => {
+                let top = methods
+                    .iter()
+                    .map(|(selector, _)| *selector)
+                    .max()
+                    .expect("the method table is not empty");
+                let mut table = vec![NO_METHOD; (top - base + 1) as usize];
+                for (selector, function) in methods {
+                    table[(selector - base) as usize] = function;
+                }
+                DispatchRow {
+                    base,
+                    table,
+                    interface_witnesses,
+                }
+            }
+            None => DispatchRow {
+                interface_witnesses,
+                ..DispatchRow::default()
+            },
+        };
+        merged.dispatch.push(row);
     }
 }
 
@@ -1652,6 +1667,7 @@ impl CodeRelocation {
     }
 
     /// True when every source index is also its target index.
+    #[inline]
     pub fn is_identity(&self) -> bool {
         self.identity
     }
@@ -1732,6 +1748,7 @@ impl CodeRelocation {
         Ok(())
     }
 
+    #[inline]
     pub fn string(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1739,6 +1756,7 @@ impl CodeRelocation {
         map_index(&self.strings, source)
     }
 
+    #[inline]
     pub fn bytes(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1746,6 +1764,7 @@ impl CodeRelocation {
         map_index(&self.bytes, source)
     }
 
+    #[inline]
     pub fn ty(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1753,6 +1772,7 @@ impl CodeRelocation {
         map_index(&self.types, source)
     }
 
+    #[inline]
     pub fn selector(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1760,6 +1780,7 @@ impl CodeRelocation {
         map_index(&self.selectors, source)
     }
 
+    #[inline]
     pub fn application(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1767,6 +1788,7 @@ impl CodeRelocation {
         map_index(&self.applications, source)
     }
 
+    #[inline]
     pub fn class(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1774,6 +1796,7 @@ impl CodeRelocation {
         map_index(&self.classes, source)
     }
 
+    #[inline]
     pub fn interface(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1781,6 +1804,7 @@ impl CodeRelocation {
         map_index(&self.interfaces, source)
     }
 
+    #[inline]
     pub fn function(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -1788,6 +1812,7 @@ impl CodeRelocation {
         map_index(&self.functions, source)
     }
 
+    #[inline]
     pub fn slot(&self, source: u32) -> Option<u32> {
         if self.identity {
             return Some(source);
@@ -2255,7 +2280,7 @@ fn relocate(
         let slot_key = (slot_scope, source.key, source.contract_hash);
         let merged_slot = match merged.slot_by_contract.get(&slot_key).copied() {
             Some(existing) => {
-                let found = &mut merged.slots[existing as usize];
+                let found = &merged.slots[existing as usize];
                 if found.contract_hash != source.contract_hash {
                     return Err(fail(format!(
                         "the slot {slot} of `{path}` has another contract"
@@ -2273,7 +2298,7 @@ fn relocate(
                     contract,
                     initial: None,
                 });
-                merged.slot_by_contract.insert(slot_key, index);
+                Arc::make_mut(&mut merged.slot_by_contract).insert(slot_key, index);
                 index
             }
         };
@@ -2285,20 +2310,29 @@ fn relocate(
         let source = &module.classes[*idx as usize];
         let at = reloc.classes[*idx as usize] as usize;
         let filled = reloc_class(source, &reloc);
-        merged.classes[at] = filled;
+        merged
+            .classes
+            .replace_recent(at, filled)
+            .map_err(|_| fail("a new class left its publication chunk"))?;
         let bounds = module
             .class_bounds
             .get(*idx as usize)
             .map(|items| reloc_bounds(items, &reloc))
             .unwrap_or_default();
-        merged.class_bounds[at] = bounds;
+        merged
+            .class_bounds
+            .replace_recent(at, bounds)
+            .map_err(|_| fail("new class bounds left their publication chunk"))?;
     }
     for idx in created_interfaces.iter().chain(shared_interfaces.iter()) {
         let source = &module.interfaces[*idx as usize];
         let at = reloc.interfaces[*idx as usize] as usize;
         let filled = reloc_interface(source, &reloc);
         if created_interfaces.contains(idx) {
-            merged.interfaces[at] = filled;
+            merged
+                .interfaces
+                .replace_recent(at, filled)
+                .map_err(|_| fail("a new interface left its publication chunk"))?;
         } else if merged.interfaces[at] != filled {
             let provider = &view.interface_by_key[&source.key].1;
             return Err(fail(format!(
@@ -2316,8 +2350,14 @@ fn relocate(
             .get(*idx as usize)
             .map(|items| reloc_bounds(items, &reloc))
             .unwrap_or_default();
-        merged.funcs[at] = filled;
-        merged.func_bounds[at] = bounds;
+        merged
+            .funcs
+            .replace_recent(at, filled)
+            .map_err(|_| fail("a new function left its publication chunk"))?;
+        merged
+            .func_bounds
+            .replace_recent(at, bounds)
+            .map_err(|_| fail("new function bounds left their publication chunk"))?;
     }
     for source in &module.conformances {
         // An imported class carries its provider conformance set as
@@ -2335,8 +2375,7 @@ fn relocate(
         .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
     lm_bytecode::debug::validate(&debug, module)
         .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
-    merged
-        .debug
+    Arc::make_mut(&mut merged.debug)
         .append_relocated(&debug, &reloc.funcs, &reloc.classes)
         .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
     Ok(reloc)

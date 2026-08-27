@@ -23,6 +23,7 @@ use crate::machine::{
 };
 use crate::world::World;
 use crate::FaultCode;
+use lm_bytecode::artifact::{Artifact, ArtifactId};
 use lm_bytecode::closed::{ClosedType, TypeEnv};
 use lm_heap::Object;
 use lm_link::{CodeRelocation, NamespaceId};
@@ -30,8 +31,11 @@ use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 struct SnapshotLayout {
-    artifacts: Vec<Vec<u8>>,
+    artifacts: std::sync::Arc<[std::sync::Arc<Artifact>]>,
+    single_artifact: Option<ArtifactId>,
+    artifact_ordinals: BTreeMap<ArtifactId, u32>,
     namespaces: Vec<ImageNamespace>,
+    single_namespace: Option<NamespaceId>,
     namespace_ordinals: HashMap<NamespaceId, u32>,
     relocation: CodeRelocation,
     code: super::code::SnapshotCode,
@@ -39,6 +43,9 @@ struct SnapshotLayout {
 
 impl SnapshotLayout {
     fn namespace(&self, source: NamespaceId) -> Result<u32, SnapshotFail> {
+        if self.single_namespace == Some(source) {
+            return Ok(0);
+        }
         self.namespace_ordinals
             .get(&source)
             .copied()
@@ -50,17 +57,16 @@ impl SnapshotLayout {
             })
     }
 
-    fn artifact(&self, source: &[u8]) -> Result<u32, SnapshotFail> {
-        self.artifacts
-            .binary_search_by(|candidate| candidate.as_slice().cmp(source))
-            .ok()
-            .and_then(|index| u32::try_from(index).ok())
-            .ok_or_else(|| {
-                SnapshotFail::Fault(
-                    FaultCode::MalformedState,
-                    "an installed instance has no snapshot artifact".to_string(),
-                )
-            })
+    fn artifact(&self, id: ArtifactId) -> Result<u32, SnapshotFail> {
+        if self.single_artifact == Some(id) {
+            return Ok(0);
+        }
+        self.artifact_ordinals.get(&id).copied().ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "an installed instance has no snapshot artifact".to_string(),
+            )
+        })
     }
 }
 
@@ -570,13 +576,15 @@ impl World {
             distinguished: distinguished.and_then(ordinal_of),
             full_vm: full_vm.and_then(image_ordinal),
             result_type,
-            artifacts: layout.artifacts,
+            artifacts: Vec::new(),
+            artifact_values: None,
             namespaces: layout.namespaces,
             types,
             envs,
             vm_images,
             machines,
-        };
+        }
+        .with_artifact_values(layout.artifacts);
         Ok((image, layout.code))
     }
 
@@ -591,71 +599,97 @@ impl World {
                 "a snapshot has no code namespace".to_string(),
             )
         })?;
-        let bundle = self.code_for_namespace(first).bundle().clone();
-        let namespace_ids: Vec<NamespaceId> = (0..self.arena.namespace_count())
-            .map(|index| NamespaceId::from_index(index as u32))
-            .collect();
-        let mut by_bytes = BTreeMap::new();
-        let mut bytes_by_id = BTreeMap::new();
-        for namespace in &namespace_ids {
+        let first_runtime = self.code_for_namespace(first);
+        let first_code = first_runtime.code_namespace();
+        if namespace_ids.len() == 1 && first_code.artifacts().len() == 1 {
+            let artifact = first_code.artifacts()[0].clone();
+            let artifact_id = artifact.id();
+            let artifacts: std::sync::Arc<[std::sync::Arc<Artifact>]> = [artifact].into();
+            return Ok(SnapshotLayout {
+                artifacts: artifacts.clone(),
+                single_artifact: Some(artifact_id),
+                artifact_ordinals: BTreeMap::new(),
+                namespaces: vec![ImageNamespace { artifacts: vec![0] }],
+                single_namespace: Some(first),
+                namespace_ordinals: HashMap::new(),
+                relocation: CodeRelocation::identity(),
+                code: super::code::SnapshotCode::trusted(
+                    artifacts,
+                    vec![first_runtime.clone()],
+                    vec![first],
+                ),
+            });
+        }
+        let mut artifacts_by_id = BTreeMap::new();
+        for namespace in namespace_ids {
             let code = self.code_for_namespace(*namespace).code_namespace();
             for artifact in code.artifacts() {
-                if bytes_by_id.contains_key(&artifact.id()) {
-                    continue;
-                }
-                let bytes = lm_bytecode::artifact::encode_with_bundle(artifact, &bundle).map_err(
-                    |error| {
-                        SnapshotFail::Fault(
-                            FaultCode::MalformedState,
-                            format!("an artifact did not encode: {error}"),
-                        )
-                    },
-                )?;
-                bytes_by_id.insert(artifact.id(), bytes.clone());
-                by_bytes.insert(bytes, artifact.clone());
+                artifacts_by_id
+                    .entry(artifact.id())
+                    .or_insert_with(|| artifact.clone());
             }
         }
-        let artifacts: Vec<Vec<u8>> = by_bytes.keys().cloned().collect();
-        let artifact_values: Vec<std::sync::Arc<lm_bytecode::artifact::Artifact>> =
-            by_bytes.into_values().collect();
-        let mut manifests = Vec::new();
-        let mut namespace_ordinals = HashMap::new();
-        let mut runtimes = Vec::new();
-        for namespace in &namespace_ids {
+        let artifacts: std::sync::Arc<[std::sync::Arc<Artifact>]> =
+            artifacts_by_id.values().cloned().collect::<Vec<_>>().into();
+        let artifact_ordinals: BTreeMap<ArtifactId, u32> = artifacts_by_id
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(ordinal, id)| {
+                u32::try_from(ordinal)
+                    .map(|ordinal| (id, ordinal))
+                    .map_err(|_| SnapshotFail::LimitExceeded)
+            })
+            .collect::<Result<_, _>>()?;
+        let mut ordered_namespaces = Vec::new();
+        for namespace in namespace_ids {
             let code = self.code_for_namespace(*namespace).code_namespace();
             let mut manifest = Vec::new();
             manifest
                 .try_reserve_exact(code.artifacts().len())
                 .map_err(|_| SnapshotFail::LimitExceeded)?;
             for artifact in code.artifacts() {
-                let bytes = bytes_by_id.get(&artifact.id()).ok_or_else(|| {
-                    SnapshotFail::Fault(
-                        FaultCode::MalformedState,
-                        "a namespace artifact is absent from its artifact table".to_string(),
-                    )
-                })?;
-                let ordinal = artifacts.binary_search(bytes).map_err(|_| {
-                    SnapshotFail::Fault(
-                        FaultCode::MalformedState,
-                        "a namespace artifact is absent from its artifact table".to_string(),
-                    )
-                })?;
-                manifest.push(u32::try_from(ordinal).map_err(|_| SnapshotFail::LimitExceeded)?);
+                let ordinal = artifact_ordinals
+                    .get(&artifact.id())
+                    .copied()
+                    .ok_or_else(|| {
+                        SnapshotFail::Fault(
+                            FaultCode::MalformedState,
+                            "a namespace artifact is absent from its artifact table".to_string(),
+                        )
+                    })?;
+                manifest.push(ordinal);
             }
+            ordered_namespaces.push((
+                *namespace,
+                ImageNamespace {
+                    artifacts: manifest,
+                },
+                self.code_for_namespace(*namespace).clone(),
+            ));
+        }
+        ordered_namespaces.sort_by(|left, right| left.1.artifacts.cmp(&right.1.artifacts));
+        let mut manifests = Vec::new();
+        let mut namespace_ordinals = HashMap::new();
+        let mut runtimes = Vec::new();
+        let mut runtime_ids = Vec::new();
+        for (source, manifest, runtime) in ordered_namespaces {
             let ordinal =
                 u32::try_from(manifests.len()).map_err(|_| SnapshotFail::LimitExceeded)?;
-            namespace_ordinals.insert(*namespace, ordinal);
-            manifests.push(ImageNamespace {
-                artifacts: manifest,
-            });
-            runtimes.push(self.code_for_namespace(*namespace).clone());
+            namespace_ordinals.insert(source, ordinal);
+            manifests.push(manifest);
+            runtimes.push(runtime);
+            runtime_ids.push(source);
         }
         Ok(SnapshotLayout {
-            artifacts,
+            artifacts: artifacts.clone(),
+            single_artifact: None,
+            artifact_ordinals,
             namespaces: manifests,
+            single_namespace: None,
             namespace_ordinals,
             relocation: CodeRelocation::identity(),
-            code: super::code::SnapshotCode::new(artifact_values, runtimes),
+            code: super::code::SnapshotCode::trusted(artifacts, runtimes, runtime_ids),
         })
     }
 
@@ -786,7 +820,7 @@ impl World {
             .map_err(|_| SnapshotFail::LimitExceeded)?;
         for instance in &record.instances {
             instances.push(ImageInstance {
-                artifact: layout.artifact(instance.artifact.as_slice())?,
+                artifact: layout.artifact(instance.artifact.id())?,
             });
         }
         Ok(ImageVm {

@@ -1,8 +1,8 @@
 # Artifacts and Portable Snapshots
 
-Status: accepted design. Stages 0 through 4 are complete.
+Status: accepted design. The atomic runtime swap is complete.
 
-Stage 5 shared arena work is next.
+Performance closeout is active.
 
 This document refines the artifact, linker, VM, and snapshot rules.
 
@@ -434,9 +434,9 @@ The importer declaration has no authority after resolution.
 
 Relocation replaces each imported declaration with the provider definition.
 
-The VM verifies the final relocated executable before any function runs.
+The linker compares the imported contract with the exported contract before publication.
 
-That verification checks each call against the actual provider signature.
+It does not verify an aggregate arena after relocation.
 
 Unit verification rejects conformances that attach to imported classes.
 
@@ -450,11 +450,23 @@ One `World` owns one `CodeArena`.
 
 The arena holds dense executable tables.
 
+Each table uses immutable append-only chunks.
+
+A revision is a prefix view of those chunks.
+
+Publication never copies an existing semantic table entry.
+
+Publication costs `O(unit + artifact graph)` work.
+
 A `LinkUnit` enters the arena through one checked relocation.
 
 Existing indices never move.
 
 The arena deduplicates complete units by `ArtifactId`.
+
+The arena builds each class dispatch row when that class enters.
+
+It does not rebuild prior dispatch rows.
 
 The initial release does not deduplicate definitions across different units.
 
@@ -475,6 +487,10 @@ Host replies use the destination machine's namespace.
 Normal instruction dispatch uses dense arena indices.
 
 It performs no hash or namespace lookup.
+
+The first publication uses direct contiguous table storage.
+
+Later publications add immutable chunks without changing the first storage.
 
 Two namespaces can bind the same module path to different exact artifacts.
 
@@ -568,6 +584,10 @@ A snapshot never relies on the loader's ambient program.
 An in-memory snapshot shares immutable arena units and namespace views.
 
 Snapshot capture does not encode shared code until the caller requests bytes.
+
+Trusted capture retains shared `Artifact` values.
+
+The `bytes()` operation performs the first artifact encoding.
 
 A serialized thin snapshot stores program and installed-code units.
 
@@ -856,8 +876,11 @@ Gate result: one selected import removes unrelated exports and an unused cycle.
 ### Stage 5: shared arena and namespaces
 
 - Add one append-only `CodeArena` to `World`.
+- Store arena tables as immutable append-only chunks.
+- Define each revision as one prefix view.
 - Add `CodeNamespace` and `NamespaceId`.
 - Relocate each exact unit once.
+- Build dispatch rows only for new classes.
 - Deduplicate complete units by `ArtifactId`.
 - Keep different units separate despite equal definition hashes.
 - Move core roles from `World` into each namespace.
@@ -869,6 +892,8 @@ Gate: two namespaces can bind equal names to different definitions.
 Gate: two compatible cores operate in separate namespaces.
 
 Gate: direct-call performance stays within normal noise.
+
+Gate: publication 100 does not cost more than twice publication 1.
 
 ### Stage 6: `codeof` and runtime compilation
 

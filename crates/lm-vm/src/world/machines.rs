@@ -420,13 +420,12 @@ impl World {
             lm_bytecode::artifact::ArtifactLimits::default(),
         )
         .map_err(|error| format!("the artifact did not decode: {error}"))?;
-        self.install_resolved_artifact(key, artifact, decoded)
+        self.install_resolved_artifact(key, decoded)
     }
 
     pub(super) fn install_resolved_artifact(
         &mut self,
         key: VmImageKey,
-        artifact: SharedBytes,
         decoded: lm_bytecode::artifact::Artifact,
     ) -> Result<u32, String> {
         let base = self
@@ -446,6 +445,12 @@ impl World {
             .namespace(namespace)
             .cloned()
             .ok_or_else(|| "the installed namespace is missing".to_string())?;
+        let artifact = linked
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.id() == root)
+            .cloned()
+            .ok_or_else(|| "the installed artifact is missing".to_string())?;
         let reloc = linked
             .relocation(root)
             .cloned()
@@ -495,7 +500,7 @@ impl World {
         }
         target.namespace = namespace;
         target.instances.push(InstalledInstance {
-            artifact: artifact.clone(),
+            artifact,
             entry: reloc.functions()[source.entry as usize],
             funcs: reloc.functions().to_vec(),
             classes: reloc.classes().to_vec(),

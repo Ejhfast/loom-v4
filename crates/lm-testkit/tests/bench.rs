@@ -2243,6 +2243,70 @@ fn bench_program_artifact_linking() {
 
 #[test]
 #[ignore]
+fn bench_arena_publication_scaling() {
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    let core_artifact = lm_bytecode::artifact::Artifact::new(core.as_ref().clone(), Vec::new())
+        .expect("the core artifact builds");
+    let artifacts: Vec<_> = (0..100)
+        .map(|index| {
+            let path = format!("bench.unit{index}");
+            let source = lm_source::SourceFile::new(format!("unit-{index}.lm"), "1\n");
+            lm_compiler::compile_source(&path, &source, true)
+                .expect("the tiny unit compiles")
+                .artifact
+        })
+        .collect();
+    let mut first = Vec::with_capacity(ROUNDS);
+    let mut tenth = Vec::with_capacity(ROUNDS);
+    let mut hundredth = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let mut arena = lm_link::CodeArena::new();
+        arena
+            .publish(core_artifact.clone(), None)
+            .expect("the core artifact publishes");
+        for (index, artifact) in artifacts.iter().enumerate() {
+            let start = Instant::now();
+            arena
+                .publish(artifact.clone(), Some(core.clone()))
+                .expect("the tiny artifact publishes");
+            let elapsed = start.elapsed();
+            if round == 0 {
+                continue;
+            }
+            match index {
+                0 => first.push(elapsed),
+                9 => tenth.push(elapsed),
+                99 => hundredth.push(elapsed),
+                _ => {}
+            }
+        }
+    }
+    let first = median(first);
+    let tenth = median(tenth);
+    let hundredth = median(hundredth);
+    let ratio = hundredth.as_secs_f64() / first.as_secs_f64();
+    println!("LOOM\tarena_publish\tcount\ttime_us\tratio_to_first");
+    println!(
+        "LOOM\tarena_publish\t1\t{:.3}\t1.000",
+        first.as_secs_f64() * 1e6
+    );
+    println!(
+        "LOOM\tarena_publish\t10\t{:.3}\t{:.3}",
+        tenth.as_secs_f64() * 1e6,
+        tenth.as_secs_f64() / first.as_secs_f64()
+    );
+    println!(
+        "LOOM\tarena_publish\t100\t{:.3}\t{ratio:.3}",
+        hundredth.as_secs_f64() * 1e6
+    );
+    assert!(
+        ratio <= 2.0,
+        "the hundredth publication took {ratio:.3} times the first publication"
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_late_compilation() {
     use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
     use lm_source::SourceFile;

@@ -54,7 +54,7 @@ pub use lm_heap::{
     dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc, SharedBytes, SharedText,
 };
 
-use lm_bytecode::CodeTables;
+use lm_bytecode::{CodeTable, CodeTables};
 use lm_link::DispatchRow;
 pub use lm_link::{CodeArena, CodeNamespace, NamespaceId};
 use lm_value::Value;
@@ -183,7 +183,7 @@ pub(crate) struct NamespaceRuntime {
     code: std::sync::Arc<lm_link::CodeNamespace>,
     tables: std::sync::Arc<CodeTables>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
-    dispatch: std::sync::Arc<[DispatchRow]>,
+    dispatch: std::sync::Arc<CodeTable<DispatchRow>>,
     /// Functions that verified code can construct as closures.
     closure_bodies: std::sync::Arc<std::sync::OnceLock<Vec<bool>>>,
     core: lm_bytecode::corepin::CoreLayout,
@@ -203,36 +203,36 @@ impl std::ops::Deref for NamespaceRuntime {
 }
 
 impl lm_bytecode::CodeTableView for NamespaceRuntime {
-    fn strings(&self) -> &[String] {
-        &self.tables.strings
+    fn strings(&self) -> lm_bytecode::CodeTableRef<'_, String> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.strings)
     }
 
-    fn types(&self) -> &[lm_bytecode::BcType] {
-        &self.tables.types
+    fn types(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::BcType> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.types)
     }
 
-    fn apps(&self) -> &[lm_bytecode::TypeApp] {
-        &self.tables.apps
+    fn apps(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::TypeApp> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.apps)
     }
 
-    fn classes(&self) -> &[lm_bytecode::BcClass] {
-        &self.tables.classes
+    fn classes(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::BcClass> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.classes)
     }
 
-    fn interfaces(&self) -> &[lm_bytecode::BcInterface] {
-        &self.tables.interfaces
+    fn interfaces(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::BcInterface> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.interfaces)
     }
 
-    fn conformances(&self) -> &[lm_bytecode::BcConformance] {
-        &self.tables.conformances
+    fn conformances(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::BcConformance> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.conformances)
     }
 
-    fn slots(&self) -> &[lm_bytecode::SlotSpec] {
-        &self.tables.slots
+    fn slots(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::SlotSpec> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.slots)
     }
 
-    fn funcs(&self) -> &[lm_bytecode::Func] {
-        &self.tables.funcs
+    fn funcs(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::Func> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.funcs)
     }
 
     fn core_role(&self, index: usize) -> Option<u32> {
@@ -258,7 +258,7 @@ impl NamespaceRuntime {
         Ok(&self.identity)
     }
 
-    pub(crate) fn dispatch_store(&self) -> std::sync::Arc<[DispatchRow]> {
+    pub(crate) fn dispatch_store(&self) -> std::sync::Arc<CodeTable<DispatchRow>> {
         self.dispatch.clone()
     }
 
@@ -302,7 +302,7 @@ fn prepare_namespace(code: std::sync::Arc<lm_link::CodeNamespace>) -> NamespaceR
     let tables = code.table_store();
     let bundle = code.bundle().clone();
     let core_roles = *code.core_roles();
-    let core = lm_bytecode::corepin::layout_from_roles(&core_roles);
+    let core = *code.core_layout();
     let dispatch = code.dispatch_store();
     NamespaceRuntime {
         code: code.clone(),

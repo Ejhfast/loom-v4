@@ -2222,7 +2222,9 @@ fn snapshot_decoder_rejects_epochs_outside_supported_range() {
     let snapshot = world
         .capture_snapshot(gate, 0, false)
         .expect("the snapshot succeeds");
-    let mut image = snapshot.into_image();
+    let mut image = snapshot
+        .into_image()
+        .expect("the captured image materializes");
     let epoch = image
         .machines
         .iter_mut()

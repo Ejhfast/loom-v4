@@ -85,18 +85,11 @@ fn cached_binding_target(
 }
 
 fn installed_binding(
-    bundle: &lm_abi::AbiBundle,
     instance: &InstalledInstance,
     kind: PortableCodeKind,
     source_index: u32,
 ) -> Option<(u32, InstalledBindingTarget)> {
-    let artifact = lm_bytecode::artifact::decode_with_bundle(
-        instance.artifact.as_slice(),
-        bundle,
-        lm_bytecode::artifact::ArtifactLimits::default(),
-    )
-    .ok()?;
-    let source_slot = source_binding_slot(artifact.root().module(), kind, source_index)?;
+    let source_slot = source_binding_slot(instance.artifact.root().module(), kind, source_index)?;
     let target = cached_binding_target(instance, source_slot)?;
     Some((source_slot, target))
 }
@@ -117,7 +110,7 @@ fn installed_binding_target(
 
 fn reusable_definition_instance(
     image: &VmImageRecord,
-    artifact: &[u8],
+    artifact: lm_bytecode::artifact::ArtifactId,
     kind: CodeHandleKind,
     source_slot: u32,
 ) -> Option<u32> {
@@ -127,7 +120,7 @@ fn reusable_definition_instance(
         .enumerate()
         .rev()
         .find_map(|(index, instance)| {
-            if instance.artifact.as_slice() != artifact {
+            if instance.artifact.id() != artifact {
                 return None;
             }
             installed_binding_target(instance, kind, source_slot)?;
@@ -729,7 +722,7 @@ impl World {
             };
             let existing = reusable_definition_instance(
                 &self.vm_images[key.image as usize],
-                code.bytes.as_slice(),
+                source_artifact.id(),
                 handle_kind,
                 source_slot,
             );
@@ -757,7 +750,7 @@ impl World {
                 return;
             }
         };
-        match self.install_resolved_artifact(key, code.bytes, resolved) {
+        match self.install_resolved_artifact(key, resolved) {
             Ok(instance) => {
                 let selected = self.vm_images[key.image as usize]
                     .instances
@@ -851,12 +844,7 @@ impl World {
             let provider = self
                 .live_instance(handle)
                 .ok_or_else(|| "the link environment contains a stale instance".to_string())?;
-            let provider = lm_bytecode::artifact::decode_with_bundle(
-                provider.artifact.as_slice(),
-                self.code_of(vm).bundle(),
-                lm_bytecode::artifact::ArtifactLimits::default(),
-            )
-            .map_err(|error| format!("a link provider did not decode: {error}"))?;
+            let provider = provider.artifact.clone();
             for unit in provider.units() {
                 match units.get(&unit.id()) {
                     Some(existing) if existing != unit => {
@@ -1078,13 +1066,7 @@ impl World {
             }
         };
         let class = self.live_instance(handle).and_then(|instance| {
-            let artifact = lm_bytecode::artifact::decode_with_bundle(
-                instance.artifact.as_slice(),
-                self.code_of(vm).bundle(),
-                lm_bytecode::artifact::ArtifactLimits::default(),
-            )
-            .ok()?;
-            let source = artifact.root().module();
+            let source = instance.artifact.root().module();
             let export = source
                 .exports
                 .iter()
@@ -1119,19 +1101,8 @@ impl World {
             }
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let artifact = lm_bytecode::artifact::decode_with_bundle(
-                instance.artifact.as_slice(),
-                self.code_of(vm).bundle(),
-                lm_bytecode::artifact::ArtifactLimits::default(),
-            )
-            .ok()?;
-            let source = artifact.root().module();
-            installed_binding(
-                self.code_of(vm).bundle(),
-                instance,
-                PortableCodeKind::Function,
-                source.entry,
-            )
+            let source = instance.artifact.root().module();
+            installed_binding(instance, PortableCodeKind::Function, source.entry)
         });
         let Some((slot, InstalledBindingTarget::Function(function))) = binding else {
             self.finish_code_error(vm, op, "the module entry has no installed binding");
@@ -1152,13 +1123,7 @@ impl World {
             return;
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let artifact = lm_bytecode::artifact::decode_with_bundle(
-                instance.artifact.as_slice(),
-                self.code_of(vm).bundle(),
-                lm_bytecode::artifact::ArtifactLimits::default(),
-            )
-            .ok()?;
-            let source = artifact.root().module();
+            let source = instance.artifact.root().module();
             let suffix = format!(".{name}");
             let mut source_slots: Vec<u32> = source
                 .bindings
@@ -1202,23 +1167,12 @@ impl World {
             return;
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let artifact = lm_bytecode::artifact::decode_with_bundle(
-                instance.artifact.as_slice(),
-                self.code_of(vm).bundle(),
-                lm_bytecode::artifact::ArtifactLimits::default(),
-            )
-            .ok()?;
-            let source = artifact.root().module();
+            let source = instance.artifact.root().module();
             let export = source
                 .exports
                 .iter()
                 .find(|export| export.name == name && export.kind.is_class())?;
-            installed_binding(
-                self.code_of(vm).bundle(),
-                instance,
-                PortableCodeKind::Class,
-                export.def,
-            )
+            installed_binding(instance, PortableCodeKind::Class, export.def)
         });
         let Some((slot, InstalledBindingTarget::Class { .. })) = binding else {
             self.finish_code_error(
@@ -1323,9 +1277,23 @@ impl World {
         let source = self
             .live_binding_source(handle)
             .map(|(instance, source_slot)| (instance.artifact.clone(), source_slot));
-        let Some((bytes, index)) = source else {
+        let Some((artifact, index)) = source else {
             self.finish_code_error(vm, op, "the installed binding is not live");
             return;
+        };
+        let bytes = match lm_bytecode::artifact::encode_with_bundle(
+            artifact.as_ref(),
+            self.code_of(vm).bundle(),
+        ) {
+            Ok(bytes) => bytes.into(),
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the module artifact did not encode: {error}"),
+                );
+                return;
+            }
         };
         let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::SlotSpec,
@@ -1541,22 +1509,7 @@ impl World {
             self.finish_code_error(vm, op, "the module instance is not live");
             return;
         };
-        let artifact_bytes = instance.artifact.clone();
-        let artifact = match lm_bytecode::artifact::decode_with_bundle(
-            artifact_bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the module artifact did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let artifact = instance.artifact.clone();
         let unit = artifact.root();
         let module = unit.module();
         let interface = unit.interface();
@@ -1606,6 +1559,20 @@ impl World {
         let Ok(index) = u32::try_from(index) else {
             self.finish_code_error(vm, op, "the module slot index is too large");
             return;
+        };
+        let artifact_bytes = match lm_bytecode::artifact::encode_with_bundle(
+            artifact.as_ref(),
+            self.code_of(vm).bundle(),
+        ) {
+            Ok(bytes) => bytes.into(),
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the module artifact did not encode: {error}"),
+                );
+                return;
+            }
         };
         let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::SlotSpec,
@@ -1663,22 +1630,7 @@ impl World {
         };
         let target_artifact = instance.artifact.clone();
         let target_slots = instance.slots.clone();
-        let target_package = match lm_bytecode::artifact::decode_with_bundle(
-            target_artifact.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(target) => target,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the module artifact did not decode: {error}"),
-                );
-                return;
-            }
-        };
-        let target_unit = target_package.root();
+        let target_unit = target_artifact.root();
         let target = target_unit.module();
         let target_index = target.slots.iter().position(|slot| slot.key == wanted.key);
         let source_contract = source_unit
@@ -1693,7 +1645,7 @@ impl World {
             .iter()
             .find(|slot| slot.key == wanted.key)
             .map(|slot| slot.contract_hash);
-        let compatible = portable.bytes.as_slice() == target_artifact.as_slice()
+        let compatible = source_artifact.id() == target_artifact.id()
             || matches!((source_contract, target_contract), (Some(left), Some(right)) if left == right);
         let target_index = if compatible { target_index } else { None };
         let mapped = target_index.and_then(|index| target_slots.get(index).copied());
@@ -2396,15 +2348,7 @@ impl World {
             .filter(|image| image.live && image.generation == handle.generation)?
             .instances
             .get(handle.instance as usize)?;
-        let namespace = self.vm_images.get(handle.image as usize)?.namespace;
-        let code = self.namespaces.get(namespace.index())?.as_ref()?;
-        let artifact = lm_bytecode::artifact::decode_with_bundle(
-            instance.artifact.as_slice(),
-            code.bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        )
-        .ok()?;
-        let source = artifact.root().module();
+        let source = instance.artifact.root().module();
         let source_class = instance
             .classes
             .iter()

@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub(crate) struct SnapshotCode {
     artifacts: Arc<[Arc<Artifact>]>,
     namespaces: Arc<[Arc<NamespaceRuntime>]>,
+    namespace_ids: Option<Arc<[lm_link::NamespaceId]>>,
 }
 
 impl SnapshotCode {
@@ -22,6 +23,19 @@ impl SnapshotCode {
         SnapshotCode {
             artifacts: artifacts.into(),
             namespaces: namespaces.into(),
+            namespace_ids: None,
+        }
+    }
+
+    pub(crate) fn trusted(
+        artifacts: Arc<[Arc<Artifact>]>,
+        namespaces: Vec<Arc<NamespaceRuntime>>,
+        namespace_ids: Vec<lm_link::NamespaceId>,
+    ) -> SnapshotCode {
+        SnapshotCode {
+            artifacts,
+            namespaces: namespaces.into(),
+            namespace_ids: Some(namespace_ids.into()),
         }
     }
 
@@ -33,8 +47,20 @@ impl SnapshotCode {
         self.artifacts.get(ordinal as usize).map(Arc::as_ref)
     }
 
+    pub(crate) fn artifact_store(&self, ordinal: u32) -> Option<Arc<Artifact>> {
+        self.artifacts.get(ordinal as usize).cloned()
+    }
+
     pub(crate) fn namespace(&self, ordinal: u32) -> Option<&Arc<NamespaceRuntime>> {
         self.namespaces.get(ordinal as usize)
+    }
+
+    pub(crate) fn namespace_id(&self, ordinal: usize) -> Option<lm_link::NamespaceId> {
+        self.namespace_ids.as_deref()?.get(ordinal).copied()
+    }
+
+    pub(crate) fn namespace_id_store(&self) -> Option<Arc<[lm_link::NamespaceId]>> {
+        self.namespace_ids.clone()
     }
 
     pub(crate) fn namespaces(&self) -> &[Arc<NamespaceRuntime>] {
@@ -69,6 +95,39 @@ pub(crate) fn prepare_external(
     bundle: Arc<lm_abi::AbiBundle>,
     known: Option<&[Arc<NamespaceRuntime>]>,
 ) -> Result<SnapshotCode, ImageError> {
+    if let Some(artifacts) = image.artifact_values() {
+        let artifacts = artifacts.to_vec();
+        let mut namespaces = Vec::new();
+        namespaces
+            .try_reserve_exact(image.namespaces.len())
+            .map_err(|_| {
+                ImageError::admission(ImageReason::Budget, "the namespace table is too large")
+            })?;
+        if let Some(known) = known {
+            for manifest in &image.namespaces {
+                let found =
+                    known.iter().find(|runtime| {
+                        let chain = runtime.code_namespace().artifacts();
+                        manifest.artifacts.len() == chain.len()
+                            && manifest.artifacts.iter().zip(chain.iter()).all(
+                                |(ordinal, expected)| {
+                                    artifacts
+                                        .get(*ordinal as usize)
+                                        .is_some_and(|artifact| artifact.id() == expected.id())
+                                },
+                            )
+                    });
+                let Some(found) = found else {
+                    namespaces.clear();
+                    break;
+                };
+                namespaces.push((*found).clone());
+            }
+            if namespaces.len() == image.namespaces.len() {
+                return Ok(SnapshotCode::new(artifacts, namespaces));
+            }
+        }
+    }
     if let Some(known) = known {
         if let Some(code) = prepare_exact_known(image, &bundle, known)? {
             return Ok(code);
@@ -77,7 +136,7 @@ pub(crate) fn prepare_external(
     let runtime_core = runtime_core.cloned().map(Arc::new);
     let mut artifacts = Vec::new();
     artifacts
-        .try_reserve_exact(image.artifacts.len())
+        .try_reserve_exact(image.artifact_count())
         .map_err(|_| {
             ImageError::admission(ImageReason::Budget, "the artifact table is too large")
         })?;

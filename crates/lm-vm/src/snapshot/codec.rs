@@ -363,7 +363,9 @@ fn section_code(
         bundle,
         bad_op: None,
     };
-    if image.artifacts.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if image.artifact_values().is_none()
+        && image.artifacts.windows(2).any(|pair| pair[0] >= pair[1])
+    {
         return Err(SnapshotFail::Fault(
             FaultCode::MalformedState,
             "the artifact table is not in canonical order".to_string(),
@@ -379,12 +381,37 @@ fn section_code(
             "the namespace table is not in canonical order".to_string(),
         ));
     }
-    out.leb(image.artifacts.len() as u64);
-    for artifact in &image.artifacts {
-        out.leb(artifact.len() as u64);
-        out.bytes.extend_from_slice(artifact);
-        if out.over_limit() {
-            return Err(SnapshotFail::LimitExceeded);
+    out.leb(image.artifact_count() as u64);
+    if let Some(values) = image.artifact_values() {
+        let mut previous: Option<Vec<u8>> = None;
+        for artifact in values {
+            let bytes =
+                lm_bytecode::artifact::encode_with_bundle(artifact, bundle).map_err(|error| {
+                    SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        format!("an artifact did not encode: {error}"),
+                    )
+                })?;
+            if previous.as_ref().is_some_and(|prior| prior >= &bytes) {
+                return Err(SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "the artifact table is not in canonical order".to_string(),
+                ));
+            }
+            out.leb(bytes.len() as u64);
+            out.bytes.extend_from_slice(&bytes);
+            if out.over_limit() {
+                return Err(SnapshotFail::LimitExceeded);
+            }
+            previous = Some(bytes);
+        }
+    } else {
+        for artifact in &image.artifacts {
+            out.leb(artifact.len() as u64);
+            out.bytes.extend_from_slice(artifact);
+            if out.over_limit() {
+                return Err(SnapshotFail::LimitExceeded);
+            }
         }
     }
     out.leb(image.namespaces.len() as u64);
@@ -1725,6 +1752,7 @@ fn decode_inner(
             full_vm,
             result_type,
             artifacts,
+            artifact_values: None,
             namespaces,
             types,
             envs,

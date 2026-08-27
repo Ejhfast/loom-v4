@@ -16,7 +16,7 @@ use crate::machine::{
 use crate::world::{InstalledInstance, VmImageRecord, World};
 use crate::VmConfig;
 use lm_bytecode::closed::TypeImportPlan;
-use lm_heap::{Heap, Object, SharedBytes};
+use lm_heap::{Heap, Object};
 use lm_link::{CodeRelocation, NamespaceId};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::sync::Arc;
@@ -239,23 +239,29 @@ impl World {
 
         let image = admitted.world();
         let (namespace_ids, code_map) = self.prepare_snapshot_code(admitted)?;
-        let mut source_types = try_vec(image.types.len())?;
-        for ty in &image.types {
-            let mut ty = ty.clone();
-            match &mut ty {
-                lm_bytecode::closed::ClosedType::Class(class)
-                | lm_bytecode::closed::ClosedType::Inst(class, _) => {
-                    *class = code_map
-                        .class(*class)
-                        .ok_or(RestoreFail::IncompatibleImage)?;
+        let mut relocated_types;
+        let source_types = if code_map.is_identity() {
+            image.types.as_slice()
+        } else {
+            relocated_types = try_vec(image.types.len())?;
+            for ty in &image.types {
+                let mut ty = ty.clone();
+                match &mut ty {
+                    lm_bytecode::closed::ClosedType::Class(class)
+                    | lm_bytecode::closed::ClosedType::Inst(class, _) => {
+                        *class = code_map
+                            .class(*class)
+                            .ok_or(RestoreFail::IncompatibleImage)?;
+                    }
+                    _ => {}
                 }
-                _ => {}
+                relocated_types.push(ty);
             }
-            source_types.push(ty);
-        }
+            relocated_types.as_slice()
+        };
         let types = self
             .envs
-            .prepare_import(&source_types, &image.envs)
+            .prepare_import(source_types, &image.envs)
             .map_err(|_| RestoreFail::LimitExceeded)?;
         let env_map = types.env_map();
         let type_map = types.type_map();
@@ -348,15 +354,20 @@ impl World {
                 type_map,
                 &code_map,
             )?;
-            let source_code = admitted
-                .code()
-                .namespace(source.namespace)
-                .ok_or(RestoreFail::IncompatibleImage)?;
-            let target_code = self.code_for_namespace(machine.namespace);
-            let target_string_count = target_code.strings.len();
-            let literal_count = target_string_count
-                .checked_add(target_code.bytes.len())
-                .ok_or(RestoreFail::LimitExceeded)?;
+            let literal_layout = if code_map.is_identity() {
+                None
+            } else {
+                let source_code = admitted
+                    .code()
+                    .namespace(source.namespace)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+                let target_code = self.code_for_namespace(machine.namespace);
+                Some((
+                    source_code.strings.len(),
+                    source_code.bytes.len(),
+                    target_code.strings.len(),
+                ))
+            };
             restore_state(
                 &mut machine,
                 source,
@@ -366,10 +377,7 @@ impl World {
                 type_map,
                 &code_map,
                 &refs,
-                source_code.strings.len(),
-                source_code.bytes.len(),
-                target_string_count,
-                literal_count,
+                literal_layout,
                 restorer,
                 gate,
                 child_counts[ordinal],
@@ -402,15 +410,37 @@ impl World {
     fn prepare_snapshot_code(
         &mut self,
         admitted: &SnapshotImage,
-    ) -> Result<(Vec<NamespaceId>, CodeRelocation), RestoreFail> {
+    ) -> Result<(Arc<[NamespaceId]>, CodeRelocation), RestoreFail> {
+        if let Some(ids) = admitted.code().namespace_id_store() {
+            let exact = ids.len() == admitted.code().namespaces().len()
+                && ids.iter().copied().enumerate().all(|(ordinal, id)| {
+                    let source = admitted.code().namespaces()[ordinal].code_namespace();
+                    self.arena
+                        .namespace(id)
+                        .is_some_and(|target| Arc::ptr_eq(source, target))
+                });
+            if exact {
+                return Ok((ids, CodeRelocation::identity()));
+            }
+        }
         let mut ids = try_vec(admitted.code().namespaces().len())?;
         let mut combined: Option<CodeRelocation> = None;
-        for source in admitted.code().namespaces() {
+        for (ordinal, source) in admitted.code().namespaces().iter().enumerate() {
             let source = source.code_namespace();
-            let target_id = self
-                .arena
-                .replay_namespace(source)
-                .map_err(|_| RestoreFail::IncompatibleImage)?;
+            let target_id = match admitted.code().namespace_id(ordinal) {
+                Some(id)
+                    if self
+                        .arena
+                        .namespace(id)
+                        .is_some_and(|target| Arc::ptr_eq(source, target)) =>
+                {
+                    id
+                }
+                _ => self
+                    .arena
+                    .replay_namespace(source)
+                    .map_err(|_| RestoreFail::IncompatibleImage)?,
+            };
             self.register_namespace(target_id)
                 .map_err(|_| RestoreFail::LimitExceeded)?;
             let target = self
@@ -433,7 +463,7 @@ impl World {
             ids.push(target_id);
         }
         let combined = combined.ok_or(RestoreFail::IncompatibleImage)?;
-        Ok((ids, combined))
+        Ok((ids.into(), combined))
     }
 
     /// Plan portable VM image records without changing the registry.
@@ -583,7 +613,7 @@ impl World {
             for instance in &source.instances {
                 let artifact = admitted
                     .code()
-                    .artifact(instance.artifact)
+                    .artifact_store(instance.artifact)
                     .ok_or(RestoreFail::IncompatibleImage)?;
                 let module = artifact.root().module();
                 let target = self.code_for_namespace(namespace).code_namespace();
@@ -617,17 +647,8 @@ impl World {
                     };
                     binding_targets.push(target);
                 }
-                let mut artifact_bytes = Vec::new();
-                let source_bytes = image
-                    .artifacts
-                    .get(instance.artifact as usize)
-                    .ok_or(RestoreFail::IncompatibleImage)?;
-                artifact_bytes
-                    .try_reserve_exact(source_bytes.len())
-                    .map_err(|_| RestoreFail::LimitExceeded)?;
-                artifact_bytes.extend_from_slice(source_bytes);
                 instances.push(InstalledInstance {
-                    artifact: SharedBytes::from(artifact_bytes),
+                    artifact: artifact.clone(),
                     entry: *reloc
                         .functions()
                         .get(module.entry as usize)
@@ -869,14 +890,12 @@ fn restore_state(
     type_map: &[u32],
     code_map: &CodeRelocation,
     refs: &[ObjRef],
-    source_string_count: usize,
-    source_byte_count: usize,
-    target_string_count: usize,
-    literal_count: usize,
+    literal_layout: Option<(usize, usize, usize)>,
     restorer: VmId,
     gate: u32,
     children: u32,
 ) -> Result<(), RestoreFail> {
+    let code_is_identity = code_map.is_identity();
     let object_value = |value: Value| match value {
         Value::Obj(reference) => Value::Obj(refs[reference.slot as usize]),
         Value::EmptyCase { ty, arm } => Value::EmptyCase {
@@ -893,9 +912,13 @@ fn restore_state(
         callbacks.push(CallbackSlot {
             generation: 0,
             descriptor: Some(CallbackDescriptor {
-                func: code_map
-                    .function(callback.func)
-                    .ok_or(RestoreFail::IncompatibleImage)?,
+                func: if code_is_identity {
+                    callback.func
+                } else {
+                    code_map
+                        .function(callback.func)
+                        .ok_or(RestoreFail::IncompatibleImage)?
+                },
                 captures,
                 env: env_map[callback.env as usize],
                 owner_depth: callback.owner_depth,
@@ -911,9 +934,13 @@ fn restore_state(
             None => None,
         };
         frames.push(Frame {
-            func: code_map
-                .function(frame.func)
-                .ok_or(RestoreFail::IncompatibleImage)?,
+            func: if code_is_identity {
+                frame.func
+            } else {
+                code_map
+                    .function(frame.func)
+                    .ok_or(RestoreFail::IncompatibleImage)?
+            },
             block: frame.block,
             ip: frame.ip,
             base_local: frame.base_local,
@@ -926,36 +953,53 @@ fn restore_state(
     locals.extend(source.locals.iter().copied().map(object_value));
     let mut operands = try_vec(source.operands.len())?;
     operands.extend(source.operands.iter().copied().map(object_value));
-    let mut literals = try_vec(literal_count)?;
-    literals.resize(literal_count, None);
-    for (source_index, slot) in source.literals.iter().enumerate() {
-        let Some(ordinal) = slot else {
-            continue;
-        };
-        let target_index = if source_index < source_string_count {
-            let source_string =
-                u32::try_from(source_index).map_err(|_| RestoreFail::IncompatibleImage)?;
-            code_map
-                .string(source_string)
-                .ok_or(RestoreFail::IncompatibleImage)? as usize
-        } else {
-            let source_byte = source_index
-                .checked_sub(source_string_count)
-                .filter(|index| *index < source_byte_count)
-                .ok_or(RestoreFail::IncompatibleImage)?;
-            let source_byte =
-                u32::try_from(source_byte).map_err(|_| RestoreFail::IncompatibleImage)?;
-            let target_byte = code_map
-                .bytes(source_byte)
-                .ok_or(RestoreFail::IncompatibleImage)? as usize;
-            target_string_count
-                .checked_add(target_byte)
-                .ok_or(RestoreFail::LimitExceeded)?
-        };
-        let target = literals
-            .get_mut(target_index)
-            .ok_or(RestoreFail::IncompatibleImage)?;
-        *target = Some(refs[*ordinal as usize]);
+    let mut literals = try_vec(source.literals.len())?;
+    if code_is_identity {
+        literals.extend(
+            source
+                .literals
+                .iter()
+                .map(|slot| slot.map(|ordinal| refs[ordinal as usize])),
+        );
+    } else {
+        let (source_string_count, source_byte_count, target_string_count) =
+            literal_layout.ok_or(RestoreFail::IncompatibleImage)?;
+        for (source_index, slot) in source.literals.iter().enumerate() {
+            let Some(ordinal) = slot else {
+                continue;
+            };
+            let target_index = if source_index < source_string_count {
+                let source_string =
+                    u32::try_from(source_index).map_err(|_| RestoreFail::IncompatibleImage)?;
+                code_map
+                    .string(source_string)
+                    .ok_or(RestoreFail::IncompatibleImage)? as usize
+            } else {
+                let source_byte = source_index
+                    .checked_sub(source_string_count)
+                    .filter(|index| *index < source_byte_count)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+                let source_byte =
+                    u32::try_from(source_byte).map_err(|_| RestoreFail::IncompatibleImage)?;
+                let target_byte = code_map
+                    .bytes(source_byte)
+                    .ok_or(RestoreFail::IncompatibleImage)?
+                    as usize;
+                target_string_count
+                    .checked_add(target_byte)
+                    .ok_or(RestoreFail::LimitExceeded)?
+            };
+            let needed = target_index
+                .checked_add(1)
+                .ok_or(RestoreFail::LimitExceeded)?;
+            if literals.len() < needed {
+                literals
+                    .try_reserve_exact(needed - literals.len())
+                    .map_err(|_| RestoreFail::LimitExceeded)?;
+                literals.resize(needed, None);
+            }
+            literals[target_index] = Some(refs[*ordinal as usize]);
+        }
     }
     let pending = match &source.pending {
         Some(record) => {
@@ -980,7 +1024,11 @@ fn restore_state(
             message.push_str(&record.message);
             let mut trace = try_vec(record.trace.len())?;
             for site in record.trace.iter().copied() {
-                trace.push(relocate_fault_site(site, code_map)?);
+                trace.push(if code_is_identity {
+                    site
+                } else {
+                    relocate_fault_site(site, code_map)?
+                });
             }
             Some(Terminal::Fault(FaultRec {
                 code: record.code,
@@ -1025,14 +1073,18 @@ fn restore_state(
     }
     machine.children = children;
     machine.is_proc = source.is_proc;
-    machine.body_func = source
-        .body_func
-        .map(|function| {
-            code_map
-                .function(function)
-                .ok_or(RestoreFail::IncompatibleImage)
-        })
-        .transpose()?;
+    machine.body_func = if code_is_identity {
+        source.body_func
+    } else {
+        source
+            .body_func
+            .map(|function| {
+                code_map
+                    .function(function)
+                    .ok_or(RestoreFail::IncompatibleImage)
+            })
+            .transpose()?
+    };
     machine.witness = env_map[source.witness as usize];
     machine.gate = gate;
     machine.vm.fuel = source.fuel.min(machine.config.fuel);
@@ -1215,6 +1267,7 @@ fn relocate_metadata(
     type_map: &[u32],
     code_map: &CodeRelocation,
 ) -> Result<(), RestoreFail> {
+    let code_is_identity = code_map.is_identity();
     let remap = |value: &mut Value| {
         if let Value::EmptyCase { ty, .. } = value {
             *ty = type_map[*ty as usize];
@@ -1243,15 +1296,19 @@ fn relocate_metadata(
     }
     match object {
         Object::Instance { class, env, .. } => {
-            *class = code_map
-                .class(*class)
-                .ok_or(RestoreFail::IncompatibleImage)?;
+            if !code_is_identity {
+                *class = code_map
+                    .class(*class)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+            }
             *env = Witness(env_map[env.env().0 as usize]);
         }
         Object::Closure { func, env, .. } => {
-            *func = code_map
-                .function(*func)
-                .ok_or(RestoreFail::IncompatibleImage)?;
+            if !code_is_identity {
+                *func = code_map
+                    .function(*func)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+            }
             *env = Witness(env_map[env.env().0 as usize]);
         }
         Object::NativeVm { image, generation } => {
@@ -1269,15 +1326,17 @@ fn relocate_metadata(
             let key = image_keys[*image as usize];
             *image = key.image;
             *generation = key.generation;
-            *index = match kind {
-                lm_heap::CodeHandleKind::Function => code_map.function(*index),
-                lm_heap::CodeHandleKind::Class => code_map.class(*index),
-                lm_heap::CodeHandleKind::Slot => code_map.slot(*index),
-                lm_heap::CodeHandleKind::Instance
-                | lm_heap::CodeHandleKind::FunctionBinding
-                | lm_heap::CodeHandleKind::ClassBinding => Some(*index),
+            if !code_is_identity {
+                *index = match kind {
+                    lm_heap::CodeHandleKind::Function => code_map.function(*index),
+                    lm_heap::CodeHandleKind::Class => code_map.class(*index),
+                    lm_heap::CodeHandleKind::Slot => code_map.slot(*index),
+                    lm_heap::CodeHandleKind::Instance
+                    | lm_heap::CodeHandleKind::FunctionBinding
+                    | lm_heap::CodeHandleKind::ClassBinding => Some(*index),
+                }
+                .ok_or(RestoreFail::IncompatibleImage)?;
             }
-            .ok_or(RestoreFail::IncompatibleImage)?;
         }
         Object::NativeSlotChange {
             image,
@@ -1288,7 +1347,9 @@ fn relocate_metadata(
             let key = image_keys[*image as usize];
             *image = key.image;
             *generation = key.generation;
-            *slot = code_map.slot(*slot).ok_or(RestoreFail::IncompatibleImage)?;
+            if !code_is_identity {
+                *slot = code_map.slot(*slot).ok_or(RestoreFail::IncompatibleImage)?;
+            }
         }
         Object::NativeRun { vm }
         | Object::NativeTable { vm }
@@ -1306,8 +1367,10 @@ fn relocate_metadata(
             *owner = ids[*owner as usize];
         }
         Object::NativeFault { trace, .. } => {
-            for site in trace.iter_mut() {
-                *site = relocate_fault_site(*site, code_map)?;
+            if !code_is_identity {
+                for site in trace.iter_mut() {
+                    *site = relocate_fault_site(*site, code_map)?;
+                }
             }
         }
         _ => {}

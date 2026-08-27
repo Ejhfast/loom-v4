@@ -1102,7 +1102,11 @@ impl TypeEnvs {
                             parent_args.push(self.close(module, *template, owner)?);
                         }
                         args = parent_args;
-                    } else if module.classes()[parent as usize].type_params == 0 {
+                    } else if module
+                        .classes()
+                        .get(parent as usize)
+                        .is_some_and(|parent| parent.type_params == 0)
+                    {
                         args.clear();
                     }
                     class = parent;
@@ -1510,7 +1514,11 @@ impl TypeEnvs {
                     parent_args.push(self.close(module, *ty, owner)?);
                 }
                 class_args = parent_args;
-            } else if module.classes()[parent as usize].type_params == 0 {
+            } else if module
+                .classes()
+                .get(parent as usize)
+                .is_some_and(|parent| parent.type_params == 0)
+            {
                 class_args.clear();
             }
             class = parent;

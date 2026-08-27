@@ -1105,7 +1105,8 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
             let seed_image = loader
                 .load_snapshot_bytes(&base)
                 .expect("the seed admits")
-                .into_image();
+                .into_image()
+                .expect("the admitted image materializes");
             // A valid seed can exceed the general byte limit as core grows.
             // Structural mutations cannot change collection lengths.
             let case_limit = MAX_CASE_BYTES.max(base.len().saturating_add(64));
@@ -1571,7 +1572,8 @@ fn regenerate_fuzz_corpus() {
         let limits = lm_vm::snapshot::LoadLimits::default();
         let image = lm_testkit::load_snapshot_for_artifact(&artifact, &container, limits)
             .expect("the seed loads")
-            .into_image();
+            .into_image()
+            .expect("the admitted image materializes");
         let mut broken = image.clone();
         let closure = broken.machines[2].frames[0].closure;
         let frame = match closure {

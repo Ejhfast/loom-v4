@@ -122,6 +122,7 @@ fn accept(loaded: &TestProgram, bytes: &[u8]) -> lm_vm::snapshot::Image {
         .load_snapshot(bytes, LoadLimits::default())
         .expect("the container loads")
         .into_image()
+        .expect("the admitted image materializes")
 }
 
 /// Write one little-endian 32-bit field.

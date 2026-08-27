@@ -209,7 +209,7 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
         })?;
         Ok(())
     };
-    add(image.artifacts.len())?;
+    add(image.artifact_count())?;
     for artifact in &image.artifacts {
         add(artifact.len())?;
     }
@@ -343,7 +343,7 @@ fn check_identity(image: &Image, code: &super::code::SnapshotCode) -> Result<(),
             "the image names another ABI, compiler, or verifier version",
         );
     }
-    if image.artifacts.len() != code.artifacts().len()
+    if image.artifact_count() != code.artifacts().len()
         || image.namespaces.len() != code.namespaces().len()
     {
         return fail(
@@ -558,8 +558,18 @@ fn check_closed_row(
         }
     }
     for pair in row.windows(2) {
-        let first = &module.strings()[pair[0] as usize];
-        let second = &module.strings()[pair[1] as usize];
+        let first = module.strings().get(pair[0] as usize).ok_or_else(|| {
+            ImageError::admission(
+                ImageReason::Code,
+                "an effect name slot is outside the program",
+            )
+        })?;
+        let second = module.strings().get(pair[1] as usize).ok_or_else(|| {
+            ImageError::admission(
+                ImageReason::Code,
+                "an effect name slot is outside the program",
+            )
+        })?;
         if first >= second {
             return fail(
                 ImageReason::Layout,

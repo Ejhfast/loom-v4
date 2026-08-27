@@ -40,25 +40,25 @@ pub fn compile_verifier_fixture_text(
         .namespace(namespace)
         .ok_or_else(|| "the published namespace is missing".to_string())?;
     let tables = namespace.tables();
-    let mut slots = tables.slots.clone();
+    let mut slots = tables.slots.to_vec();
     for (slot, initial) in slots.iter_mut().zip(namespace.slot_initials()) {
         slot.initial = *initial;
     }
     Ok(lm_bytecode::Module {
-        strings: tables.strings.clone(),
-        bytes: tables.bytes.clone(),
-        types: tables.types.clone(),
-        selectors: tables.selectors.clone(),
-        apps: tables.apps.clone(),
-        interfaces: tables.interfaces.clone(),
-        conformances: tables.conformances.clone(),
-        class_bounds: tables.class_bounds.clone(),
-        func_bounds: tables.func_bounds.clone(),
+        strings: tables.strings.to_vec(),
+        bytes: tables.bytes.to_vec(),
+        types: tables.types.to_vec(),
+        selectors: tables.selectors.to_vec(),
+        apps: tables.apps.to_vec(),
+        interfaces: tables.interfaces.to_vec(),
+        conformances: tables.conformances.to_vec(),
+        class_bounds: tables.class_bounds.to_vec(),
+        func_bounds: tables.func_bounds.to_vec(),
         imports: Vec::new(),
         slots,
         core_roles: *namespace.core_roles(),
-        classes: tables.classes.clone(),
-        funcs: tables.funcs.clone(),
+        classes: tables.classes.to_vec(),
+        funcs: tables.funcs.to_vec(),
         entry: namespace.entry(),
         exports: namespace.exports().to_vec(),
         bindings: namespace.bindings().to_vec(),

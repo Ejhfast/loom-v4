@@ -49,7 +49,11 @@ const BAD_STATE: FaultCode = FaultCode::MalformedState;
 /// can name a class whose dispatch row does not answer the selector.
 /// The lookup therefore tests the row instead of indexing it.
 #[inline]
-fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Result<u32, FaultCode> {
+fn method_of(
+    dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
+    class: u32,
+    selector: u32,
+) -> Result<u32, FaultCode> {
     dispatch
         .get(class as usize)
         .and_then(|row| row.method(selector))
@@ -1911,7 +1915,7 @@ impl Machine {
     fn call_virtual_generic(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         selector: u32,
         argc: u32,
@@ -1937,7 +1941,7 @@ impl Machine {
     fn call_interface(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         call: InterfaceCallSite,
     ) -> Result<(), FaultCode> {
@@ -4665,7 +4669,7 @@ impl Machine {
     fn exec_instr(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         instr: Instr,
@@ -5489,7 +5493,7 @@ impl Machine {
     pub(crate) fn exec_for_quantum(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
@@ -5502,7 +5506,7 @@ impl Machine {
     pub(crate) fn exec_for_quantum_restricted(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
@@ -5513,7 +5517,7 @@ impl Machine {
     fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool>(
         &mut self,
         module: &NamespaceRuntime,
-        dispatch: &[crate::DispatchRow],
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,

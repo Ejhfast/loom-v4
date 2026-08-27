@@ -104,13 +104,13 @@ impl Drop for ExecutionFuelClaim {
 /// One immutable verified execution view.
 pub(crate) struct ExecutionCode {
     module: Arc<NamespaceRuntime>,
-    dispatch: Arc<[DispatchRow]>,
+    dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
 }
 
 impl ExecutionCode {
     pub(crate) fn new(
         module: Arc<NamespaceRuntime>,
-        dispatch: Arc<[DispatchRow]>,
+        dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
     ) -> ExecutionCode {
         ExecutionCode { module, dispatch }
     }
@@ -119,7 +119,7 @@ impl ExecutionCode {
         &self.module
     }
 
-    pub(crate) fn dispatch(&self) -> &Arc<[DispatchRow]> {
+    pub(crate) fn dispatch(&self) -> &Arc<lm_bytecode::CodeTable<DispatchRow>> {
         &self.dispatch
     }
 }
@@ -473,7 +473,7 @@ pub fn execute(mut lease: ExecutionLease) -> ExecutionReport {
 pub(crate) fn execute_inline(
     machine: &mut Machine,
     module: &NamespaceRuntime,
-    dispatch: &[DispatchRow],
+    dispatch: &lm_bytecode::CodeTable<DispatchRow>,
     envs: &mut TypeEnvs,
     slots: Option<&[ImageSlotTarget]>,
     instruction_limit: u32,
@@ -508,7 +508,7 @@ mod tests {
         assert_send::<Machine>();
         assert_send::<Box<Machine>>();
         assert_send::<Arc<NamespaceRuntime>>();
-        assert_send::<Arc<[DispatchRow]>>();
+        assert_send::<Arc<lm_bytecode::CodeTable<DispatchRow>>>();
         assert_send::<Arc<ExecutionCode>>();
         assert_send::<TypeEnvs>();
         assert_send::<Box<TypeEnvs>>();
@@ -577,7 +577,7 @@ mod tests {
                 lease: 1,
             },
             machine,
-            Arc::new(ExecutionCode::new(module, Vec::new().into())),
+            Arc::new(ExecutionCode::new(module, Arc::new(Vec::new().into()))),
             Box::default(),
             None,
             ExecutionLimits {
@@ -656,7 +656,7 @@ mod tests {
                 lease: 2,
             },
             machine,
-            Arc::new(ExecutionCode::new(module, Vec::new().into())),
+            Arc::new(ExecutionCode::new(module, Arc::new(Vec::new().into()))),
             Box::default(),
             None,
             ExecutionLimits {
@@ -733,7 +733,7 @@ mod tests {
                 lease: 2,
             },
             machine,
-            Arc::new(ExecutionCode::new(module, Vec::new().into())),
+            Arc::new(ExecutionCode::new(module, Arc::new(Vec::new().into()))),
             Box::default(),
             None,
             ExecutionLimits {

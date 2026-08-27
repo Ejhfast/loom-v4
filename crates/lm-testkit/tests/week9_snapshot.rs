@@ -261,6 +261,29 @@ fn asked_tree_image(loaded: &TestProgram) -> lm_vm::snapshot::SnapshotImage {
         .clone()
 }
 
+/// Trusted capture keeps artifact values until a caller requests bytes.
+#[test]
+fn trusted_capture_delays_artifact_encoding() {
+    let loaded = program("1\n");
+    let mut world = world_of(&loaded, &[]);
+    let outcome = drive(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(1)");
+
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the terminal capture succeeds");
+    let artifact_count = image.world().artifact_count();
+    assert!(artifact_count > 0);
+    assert!(image.world().artifacts.is_empty());
+
+    assert!(!image.bytes().expect("the image encodes").is_empty());
+    assert!(image.world().artifacts.is_empty());
+
+    let editable = image.into_image().expect("the image materializes");
+    assert_eq!(editable.artifacts.len(), artifact_count);
+}
+
 /// The machine ordinals follow reachability from the root, not the
 /// order in which the scheduler minted the machines.
 #[test]
@@ -862,7 +885,10 @@ fn malformed_routed_snapshot_state_rejects() {
     assert_eq!(machine.nested, Some(1));
     assert!(machine.routed.is_some());
 
-    let mut broken = image.clone().into_image();
+    let mut broken = image
+        .clone()
+        .into_image()
+        .expect("the captured image materializes");
     broken.machines[0].nested = None;
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     let error = loaded
@@ -870,7 +896,10 @@ fn malformed_routed_snapshot_state_rejects() {
         .expect_err("the incomplete nested edge rejects");
     assert_eq!(error.reason, ImageReason::State);
 
-    let mut broken = image.clone().into_image();
+    let mut broken = image
+        .clone()
+        .into_image()
+        .expect("the captured image materializes");
     broken.machines[0]
         .routed
         .as_mut()
@@ -892,7 +921,10 @@ fn a_zero_request_ordinal_rejects() {
     assert_eq!(image.world().machines[0].state, ImageState::Asked);
 
     // A stored pending ordinal of zero.
-    let mut broken = image.clone().into_image();
+    let mut broken = image
+        .clone()
+        .into_image()
+        .expect("the captured image materializes");
     broken.machines[0]
         .pending
         .as_mut()
@@ -919,7 +951,10 @@ fn a_zero_request_ordinal_rejects() {
         .iter()
         .position(|m| m.pending.is_none())
         .expect("one captured machine holds no pending request");
-    let mut broken = image.clone().into_image();
+    let mut broken = image
+        .clone()
+        .into_image()
+        .expect("the captured image materializes");
     broken.machines[idle].next_ordinal = 0;
     let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     let error = loaded

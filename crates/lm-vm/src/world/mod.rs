@@ -214,8 +214,8 @@ struct WorldBudget {
 /// One module installation inside one persistent VM image.
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledInstance {
-    /// Canonical source artifact bytes.
-    pub(crate) artifact: SharedBytes,
+    /// The verified source artifact.
+    pub(crate) artifact: Arc<lm_bytecode::artifact::Artifact>,
     /// The relocated entry function.
     pub(crate) entry: u32,
     /// Source function indices mapped into the world code store.

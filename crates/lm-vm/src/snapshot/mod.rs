@@ -424,6 +424,11 @@ pub struct Image {
     pub result_type: [u8; 32],
     /// Canonical LMAR values used by the namespace manifests.
     pub artifacts: Vec<Vec<u8>>,
+    /// Shared artifact values from one trusted capture.
+    ///
+    /// External images use `artifacts`. Trusted images keep these
+    /// values until a caller requests container bytes.
+    artifact_values: Option<std::sync::Arc<[std::sync::Arc<lm_bytecode::artifact::Artifact>]>>,
     /// Exact artifact chains used by captured machines and images.
     pub namespaces: Vec<ImageNamespace>,
     /// The closed type table of this image.
@@ -440,6 +445,50 @@ pub struct Image {
 }
 
 impl Image {
+    /// Return the number of artifact values in this image.
+    pub fn artifact_count(&self) -> usize {
+        self.artifact_values
+            .as_deref()
+            .map_or(self.artifacts.len(), <[_]>::len)
+    }
+
+    pub(crate) fn artifact_values(
+        &self,
+    ) -> Option<&[std::sync::Arc<lm_bytecode::artifact::Artifact>]> {
+        self.artifact_values.as_deref()
+    }
+
+    pub(crate) fn with_artifact_values(
+        mut self,
+        values: std::sync::Arc<[std::sync::Arc<lm_bytecode::artifact::Artifact>]>,
+    ) -> Image {
+        self.artifacts.clear();
+        self.artifact_values = Some(values);
+        self
+    }
+
+    fn materialize_artifacts(&mut self, bundle: &lm_abi::AbiBundle) -> Result<(), SnapshotFail> {
+        let Some(values) = self.artifact_values.take() else {
+            return Ok(());
+        };
+        let mut artifacts = Vec::new();
+        artifacts
+            .try_reserve_exact(values.len())
+            .map_err(|_| SnapshotFail::LimitExceeded)?;
+        for artifact in values.iter() {
+            let bytes =
+                lm_bytecode::artifact::encode_with_bundle(artifact, bundle).map_err(|error| {
+                    SnapshotFail::Fault(
+                        lm_abi::FaultCode::MalformedState,
+                        format!("an artifact did not encode: {error}"),
+                    )
+                })?;
+            artifacts.push(bytes);
+        }
+        self.artifacts = artifacts;
+        Ok(())
+    }
+
     /// The number of captured machines.
     pub fn machine_count(&self) -> usize {
         self.machines.len()
@@ -466,6 +515,11 @@ impl Image {
         for artifact in &self.artifacts {
             bytes = bytes.saturating_add(artifact.len());
         }
+        bytes = bytes.saturating_add(
+            self.artifact_values
+                .as_deref()
+                .map_or(0, std::mem::size_of_val),
+        );
         bytes = bytes.saturating_add(self.namespaces.len() * std::mem::size_of::<ImageNamespace>());
         for namespace in &self.namespaces {
             bytes = bytes.saturating_add(namespace.artifacts.len() * std::mem::size_of::<u32>());
@@ -645,8 +699,16 @@ impl SnapshotImage {
     /// An arbitrary edit destroys every admitted property, so the
     /// result is ordinary `Image` data. It needs admission again
     /// before it restores.
-    pub fn into_image(&self) -> Image {
-        (*self.world).clone()
+    pub fn into_image(&self) -> Result<Image, SnapshotFail> {
+        let bundle = self.code.bundle().ok_or_else(|| {
+            SnapshotFail::Fault(
+                lm_abi::FaultCode::MalformedState,
+                "the snapshot has no code namespace".to_string(),
+            )
+        })?;
+        let mut image = (*self.world).clone();
+        image.materialize_artifacts(bundle)?;
+        Ok(image)
     }
 
     /// The container hash.
