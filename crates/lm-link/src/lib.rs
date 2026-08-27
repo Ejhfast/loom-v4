@@ -519,13 +519,6 @@ fn validate_untrusted_units(
         }
         lm_verify::verify_module_with_bundle(unit.module(), bundle)
             .map_err(|error| fail(format!("the module `{path}` does not verify: {error}")))?;
-        lm_bytecode::interface::validate_interface_with_bundle(
-            unit.module(),
-            unit.identity(),
-            unit.interface(),
-            bundle,
-        )
-        .map_err(|error| fail(format!("the interface of `{path}` is invalid: {error}")))?;
     }
     Ok(())
 }
@@ -537,37 +530,13 @@ fn collected_interface(
 ) -> Result<Interface, LinkError> {
     let identity = lm_bytecode::identity::module_identity_with_bundle(module, bundle)
         .map_err(|error| fail(format!("the collected module does not hash: {error}")))?;
-    let mut items = Vec::with_capacity(module.exports.len());
-    for export in &module.exports {
-        let item = source
-            .interface()
-            .find(&export.name)
-            .filter(|entry| entry.kind == export.kind)
-            .ok_or_else(|| {
-                fail(format!(
-                    "the source interface does not describe export `{}`",
-                    export.name
-                ))
-            })?;
-        items.push(item.item.clone());
-    }
-    let mut interface = lm_bytecode::interface::build_interface_with_bundle(
+    lm_bytecode::interface::derive_interface_with_bundle(
         module,
         &identity,
         source.module_path(),
-        &items,
         bundle,
     )
-    .map_err(|error| fail(format!("the collected interface does not build: {error}")))?;
-    let slot_keys: BTreeSet<[u8; 32]> = module.slots.iter().map(|slot| slot.key).collect();
-    interface.slots = source
-        .interface()
-        .slots
-        .iter()
-        .filter(|slot| slot_keys.contains(&slot.key))
-        .cloned()
-        .collect();
-    Ok(interface)
+    .map_err(|error| fail(format!("the collected interface does not build: {error}")))
 }
 
 /// One linked program and its deployable artifact bytes.
@@ -1078,6 +1047,9 @@ fn relocate(
                     type_params: source.type_params,
                     kind: source.kind,
                     fields: Vec::new(),
+                    field_defaults: Vec::new(),
+                    own_start: 0,
+                    has_init: false,
                     methods: Vec::new(),
                 });
                 merged.class_bounds.push(Vec::new());
@@ -1161,6 +1133,7 @@ fn relocate(
             effect_params: 0,
             params: Vec::new(),
             param_muts: Vec::new(),
+            param_names: Vec::new(),
             ret: 0,
             row: Vec::new(),
             captures: Vec::new(),
@@ -1209,6 +1182,8 @@ fn relocate(
             None => {
                 let index = merged.slots.len() as u32;
                 merged.slots.push(SlotSpec {
+                    binding: source.binding.clone(),
+                    late: source.late,
                     key: source.key,
                     contract_hash: source.contract_hash,
                     contract,
@@ -1343,6 +1318,9 @@ fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
             .iter()
             .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
             .collect(),
+        field_defaults: source.field_defaults.clone(),
+        own_start: source.own_start,
+        has_init: source.has_init,
         methods: source
             .methods
             .iter()
@@ -1820,6 +1798,7 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
                     .map(|item| reloc.types[*item as usize])
                     .collect(),
                 param_muts: method.param_muts.clone(),
+                param_names: method.param_names.clone(),
                 ret: reloc.types[method.ret as usize],
                 row: reloc_row(&method.row, &reloc.strings),
                 default: if method.default == lm_bytecode::NO_FUNC {
@@ -1868,6 +1847,7 @@ fn reloc_func(func: &Func, reloc: &Reloc) -> Func {
             .map(|t| reloc.types[*t as usize])
             .collect(),
         param_muts: func.param_muts.clone(),
+        param_names: func.param_names.clone(),
         ret: reloc.types[func.ret as usize],
         row: reloc_row(&func.row, &reloc.strings),
         captures: func

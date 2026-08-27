@@ -160,6 +160,59 @@ fn two_module_program() -> Vec<lm_compiler::CompiledModule> {
     vec![shapes, main]
 }
 
+#[test]
+fn one_module_payload_preserves_its_complete_interface_view() {
+    let compiled = compile_one(
+        "app.surface",
+        r#"
+interface Source
+  type Item: Display
+
+  def item(self): Self.Item
+
+  def label(self): String
+    "source"
+  end
+end
+
+final class Box[T] implements Source when T: Display
+  type Item = T
+  value: T
+  note: String = "default"
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+
+  def item(self): T
+    self.value
+  end
+end
+
+enum State
+  Ready(value: Int)
+  Empty
+end
+"#,
+        &[],
+        false,
+    );
+    let expected = compiled.interface.clone();
+    let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
+    env.bind_module(compiled.path, compiled.module, compiled.interface)
+        .expect("the module binds");
+    let env = env.freeze();
+    let root = env
+        .unit("app.surface")
+        .expect("the module is bound")
+        .clone();
+    let artifact =
+        lm_bytecode::artifact::Artifact::new(root, Vec::new()).expect("the thin artifact builds");
+    let bytes = lm_bytecode::artifact::encode(&artifact).expect("the artifact encodes");
+    let decoded = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+    assert_eq!(decoded.root().interface(), &expected);
+}
+
 fn link_units(units: &[lm_compiler::CompiledModule]) -> Result<lm_compiler::LinkedProgram, String> {
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in units {
@@ -1018,6 +1071,7 @@ fn chain_cycle(n: usize) -> Module {
         block.push(Instr::Return);
         funcs.push(Func {
             name: format!("f{i}"),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1145,6 +1199,7 @@ fn many_chains(count: usize, per: usize, repeats: usize) -> Module {
             block.push(Instr::Return);
             funcs.push(Func {
                 name: format!("f{c}_{i}"),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1647,19 +1702,46 @@ fn an_impossible_binding_count_rejects_before_the_reserve() {
         + module
             .interfaces
             .iter()
-            .map(|interface| 8 + interface.name.len() + interface.key.len())
+            .map(|interface| {
+                8 + interface.name.len()
+                    + interface.key.len()
+                    + interface
+                        .methods
+                        .iter()
+                        .map(|method| {
+                            4 + method
+                                .param_names
+                                .iter()
+                                .map(|name| 4 + name.len())
+                                .sum::<usize>()
+                        })
+                        .sum::<usize>()
+            })
             .sum::<usize>()
         + 4
         + module
             .classes
             .iter()
-            .map(|class| 8 + class.name.len() + class.key.len())
+            .map(|class| 17 + class.name.len() + class.key.len() + class.fields.len())
             .sum::<usize>()
         + 4
         + module
             .funcs
             .iter()
-            .map(|function| 4 + function.name.len())
+            .map(|function| {
+                8 + function.name.len()
+                    + function
+                        .param_names
+                        .iter()
+                        .map(|name| 4 + name.len())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+        + 4
+        + module
+            .slots
+            .iter()
+            .map(|slot| 5 + slot.binding.len())
             .sum::<usize>();
     assert_eq!(
         &good[binding_at..binding_at + 4],

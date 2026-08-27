@@ -766,6 +766,7 @@ mod tests {
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -867,6 +868,7 @@ mod tests {
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -918,10 +920,14 @@ mod tests {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![("x".to_string(), 2)],
+                field_defaults: vec![false],
+                own_start: 0,
+                has_init: false,
                 methods: vec![],
             }],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],

@@ -1425,6 +1425,7 @@ impl<'o> FnChecker<'o> {
                 effect_params: effect_param_count,
                 params: ptys.clone(),
                 param_muts: pmuts.clone(),
+                param_names: param_names.clone(),
                 ret: body_ty,
                 row: closure_row.clone(),
                 captures: capture_tys,

@@ -391,6 +391,7 @@ mod tests {
     fn plain_func(name: &str, params: Vec<u32>, ret: u32, blocks: Vec<Vec<Instr>>) -> Func {
         Func {
             name: name.to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             param_muts: vec![false; params.len()],
@@ -463,6 +464,9 @@ mod tests {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![("value".to_string(), TY_INT)],
+                field_defaults: vec![false],
+                own_start: 0,
+                has_init: false,
                 methods: vec![(0, 1)],
             }],
             funcs: vec![
@@ -520,12 +524,16 @@ mod tests {
                 type_params: 1,
                 kind: BcClassKind::Normal,
                 fields: vec![("value".to_string(), 4)],
+                field_defaults: vec![false],
+                own_start: 0,
+                has_init: true,
                 methods: vec![],
             }],
             funcs: vec![
                 plain_func("main", vec![], TY_INT, entry_blocks),
                 Func {
                     name: "<new Box>".to_string(),
+                    param_names: vec!["value".to_string()],
                     type_params: 1,
                     effect_params: 0,
                     params: vec![4],
@@ -823,6 +831,8 @@ mod tests {
         module.func_bounds.push(vec![]);
         module.slots.push(lm_bytecode::SlotSpec {
             key: [1; 32],
+            binding: "slot_target".to_string(),
+            late: true,
             contract_hash: [0; 32],
             contract: SlotContract::Function(BcCallableContract {
                 type_params: 0,
@@ -850,6 +860,8 @@ mod tests {
         module.func_bounds.push(vec![]);
         module.slots.push(lm_bytecode::SlotSpec {
             key: [2; 32],
+            binding: "wrong".to_string(),
+            late: true,
             contract_hash: [0; 32],
             contract: SlotContract::Function(BcCallableContract {
                 type_params: 0,
@@ -982,6 +994,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Abstract,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         });
         let e = verify_module(&m).unwrap_err();
@@ -1001,6 +1016,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Abstract,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         });
         m.classes.push(BcClass {
@@ -1013,6 +1031,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Case,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         });
         m.classes.push(BcClass {
@@ -1025,6 +1046,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         });
         let e = verify_module(&m).unwrap_err();
@@ -1045,6 +1069,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         });
         let e = verify_module(&m).unwrap_err();
@@ -1058,6 +1085,7 @@ mod tests {
         m.strings = vec!["Io.Write".to_string()];
         m.funcs.push(Func {
             name: "printer".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1080,6 +1108,7 @@ mod tests {
         m.funcs[0].row = vec![BcRow::Op(1)];
         m.funcs.push(Func {
             name: "printer".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1116,6 +1145,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![("value".to_string(), TY_INT)],
+            field_defaults: vec![false],
+            own_start: 1,
+            has_init: false,
             methods: vec![(0, 2)],
         });
         let mut method = plain_func(
@@ -1212,6 +1244,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![("value".to_string(), TY_INT)],
+            field_defaults: vec![false],
+            own_start: 1,
+            has_init: false,
             methods: vec![(0, 2)],
         });
         m.funcs.push(plain_func(
@@ -1239,10 +1274,14 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![("value".to_string(), TY_INT)],
+            field_defaults: vec![false],
+            own_start: 1,
+            has_init: false,
             methods: vec![(0, 2)],
         });
         m.funcs.push(Func {
             name: "bump2".to_string(),
+            param_names: vec!["self".to_string()],
             type_params: 0,
             effect_params: 0,
             params: vec![5],
@@ -1271,6 +1310,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![("other".to_string(), TY_BOOL)],
+            field_defaults: vec![false],
+            own_start: 1,
+            has_init: false,
             methods: vec![],
         });
         let e = verify_module(&m).unwrap_err();
@@ -1282,6 +1324,7 @@ mod tests {
         let mut m = module_with(vec![vec![Call(1), Return]]);
         m.funcs.push(Func {
             name: "closure".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1310,6 +1353,7 @@ mod tests {
         ]]);
         m.funcs.push(Func {
             name: "closure".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1340,6 +1384,7 @@ mod tests {
             .push(BcType::Fn(vec![TY_INT], vec![false], TY_INT, vec![]));
         m.funcs.push(Func {
             name: "closure".to_string(),
+            param_names: vec!["value".to_string()],
             type_params: 0,
             effect_params: 0,
             params: vec![TY_INT],
@@ -1368,6 +1413,7 @@ mod tests {
             .push(BcType::Fn(vec![], vec![], TY_INT, vec![BcRow::Op(0)]));
         m.funcs.push(Func {
             name: "printer".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1501,6 +1547,9 @@ mod tests {
             type_params: 0,
             kind: BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         };
         let m = Module {
@@ -1516,6 +1565,7 @@ mod tests {
             classes: vec![class("Animal", NO_PARENT), class("Dog", 0), class("Cat", 0)],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1561,6 +1611,9 @@ mod tests {
             type_params: params,
             kind: lm_bytecode::BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         };
         let mut m = module_with(vec![vec![ConstInt(0), Return]]);
@@ -1594,6 +1647,9 @@ mod tests {
             type_params: params,
             kind: lm_bytecode::BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         };
         let mut m = module_with(vec![vec![ConstInt(0), Return]]);
@@ -1631,6 +1687,9 @@ mod tests {
             type_params: 0,
             kind: lm_bytecode::BcClassKind::Normal,
             fields: vec![],
+            field_defaults: vec![],
+            own_start: 0,
+            has_init: false,
             methods: vec![],
         };
         let mut types = base_types();
@@ -1713,6 +1772,9 @@ mod tests {
                     type_params: 0,
                     kind: lm_bytecode::BcClassKind::Normal,
                     fields: vec![],
+                    field_defaults: vec![],
+                    own_start: 0,
+                    has_init: false,
                     methods: vec![],
                 };
                 let mut types = base_types();

@@ -43,8 +43,6 @@ pub struct HirExport {
     /// The class index for a class-like export, the function index
     /// otherwise.
     pub def: u32,
-    /// The structural signature the interface publishes.
-    pub item: lm_bytecode::interface::IfaceItem,
 }
 
 /// The definition one import slot declares. The lowering pass turns
@@ -125,6 +123,7 @@ pub struct HirInterfaceMethod {
     pub premises: Vec<HirTypePremise>,
     pub params: Vec<TypeId>,
     pub param_muts: Vec<bool>,
+    pub param_names: Vec<String>,
     pub ret: TypeId,
     pub row: Row,
     pub default: Option<u32>,
@@ -247,6 +246,10 @@ pub struct HirClass {
     /// Full layout: inherited fields first, own fields after them.
     pub field_names: Vec<String>,
     pub field_tys: Vec<TypeId>,
+    /// Field default markers, aligned with the full layout.
+    pub field_defaults: Vec<bool>,
+    /// The first field declared by this class.
+    pub own_start: u32,
     /// Default expressions aligned with the layout. `None` marks a
     /// required field.
     pub defaults: Vec<Option<HExpr>>,
@@ -258,6 +261,8 @@ pub struct HirClass {
     pub methods: Vec<(String, u32)>,
     /// The `init` function index, when declared.
     pub init: Option<u32>,
+    /// Constructor parameter names, without `self`.
+    pub ctor_param_names: Vec<String>,
     /// Constructor parameter types, without `self`.
     pub ctor_params: Vec<TypeId>,
     /// Constructor parameter `mut` markers, aligned with `ctor_params`.
@@ -284,6 +289,8 @@ pub struct HirFunc {
     pub params: Vec<TypeId>,
     /// Parameter `mut` markers, aligned with `params`.
     pub param_muts: Vec<bool>,
+    /// Declared parameter names, aligned with `params` when present.
+    pub param_names: Vec<String>,
     pub ret: TypeId,
     /// The declared effect row in canonical order.
     pub row: Row,

@@ -861,12 +861,16 @@ fn installed_slot_artifact() -> Vec<u8> {
         .expect("the Int type exists") as u32;
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.value"),
+        binding: "fuzz-slots.value".to_string(),
+        late: true,
         contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.process"),
+        binding: "fuzz-slots.process".to_string(),
+        late: true,
         contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Process {
             message: int,
@@ -1398,10 +1402,14 @@ fn regenerate_fuzz_corpus() {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![],
+                field_defaults: vec![],
+                own_start: 0,
+                has_init: false,
                 methods: vec![],
             }],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1460,10 +1468,14 @@ fn regenerate_fuzz_corpus() {
                 type_params: 1,
                 kind: BcClassKind::Normal,
                 fields: vec![("v".to_string(), 4)],
+                field_defaults: vec![false],
+                own_start: 0,
+                has_init: false,
                 methods: vec![],
             }],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1527,6 +1539,7 @@ fn regenerate_fuzz_corpus() {
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],

@@ -119,6 +119,7 @@ pub struct BcInterfaceUse {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BcType {
     Unit,
+    Never,
     Bool,
     Int,
     Float,
@@ -223,6 +224,12 @@ pub struct BcClass {
     pub fields: Vec<(String, u32)>,
     /// Own method table: `(selector index, function index)`.
     pub methods: Vec<(u32, u32)>,
+    /// Field default markers, aligned with `fields`.
+    pub field_defaults: Vec<bool>,
+    /// The first field declared by this class.
+    pub own_start: u32,
+    /// True when the source class declares `init`.
+    pub has_init: bool,
 }
 
 /// One associated type requirement of a nominal interface.
@@ -245,6 +252,8 @@ pub struct BcInterfaceMethod {
     pub premises: Vec<BcTypePremise>,
     pub params: Vec<u32>,
     pub param_muts: Vec<bool>,
+    /// Declared parameter names, aligned with `params`.
+    pub param_names: Vec<String>,
     pub ret: u32,
     pub row: Vec<BcRow>,
     /// The interface-owned default function, or `NO_FUNC`.
@@ -337,6 +346,10 @@ pub enum SlotTarget {
 /// One portable late-binding declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotSpec {
+    /// The canonical source binding of this slot.
+    pub binding: String,
+    /// True when compiled calls read this slot.
+    pub late: bool,
     pub key: [u8; 32],
     /// The intrinsic, body-independent contract identity.
     pub contract_hash: [u8; 32],
@@ -1033,6 +1046,9 @@ pub struct Func {
     /// checks use the declared slot type.
     pub local_types: Vec<u32>,
     pub blocks: Vec<Vec<Instr>>,
+    /// Declared parameter names, aligned with `params` when present.
+    /// This compiler surface data stays after the execution fields.
+    pub param_names: Vec<String>,
 }
 
 impl Func {
@@ -1344,7 +1360,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 54 adds file-system boundary roles.
 /// Version 55 adds stream roles and child environment overlays.
 /// Version 56 adds interface defaults and compact interface calls.
-pub const VERSION: u16 = 56;
+/// Version 57 stores source contracts in the module export section.
+pub const VERSION: u16 = 57;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1609,6 +1626,7 @@ const TY_PROJECTION: u8 = 28;
 const TY_CALLBACK: u8 = 29;
 const TY_HOST_RESOURCE: u8 = 30;
 const TY_FLOAT: u8 = 31;
+const TY_NEVER: u8 = 32;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1928,15 +1946,36 @@ fn encode_exports(module: &Module) -> Vec<u8> {
     for interface in &module.interfaces {
         write_bytes(&mut out, interface.name.as_bytes());
         write_bytes(&mut out, interface.key.as_bytes());
+        for method in &interface.methods {
+            write_u32(&mut out, method.param_names.len() as u32);
+            for name in &method.param_names {
+                write_bytes(&mut out, name.as_bytes());
+            }
+        }
     }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_bytes(&mut out, class.name.as_bytes());
         write_bytes(&mut out, class.key.as_bytes());
+        write_u32(&mut out, class.field_defaults.len() as u32);
+        for marker in &class.field_defaults {
+            out.push(u8::from(*marker));
+        }
+        write_u32(&mut out, class.own_start);
+        out.push(u8::from(class.has_init));
     }
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
         write_bytes(&mut out, func.name.as_bytes());
+        write_u32(&mut out, func.param_names.len() as u32);
+        for name in &func.param_names {
+            write_bytes(&mut out, name.as_bytes());
+        }
+    }
+    write_u32(&mut out, module.slots.len() as u32);
+    for slot in &module.slots {
+        write_bytes(&mut out, slot.binding.as_bytes());
+        out.push(u8::from(slot.late));
     }
     write_u32(&mut out, module.bindings.len() as u32);
     for binding in &module.bindings {
@@ -1995,6 +2034,7 @@ fn encode_type_bounds(out: &mut Vec<u8>, bounds: &[Vec<BcInterfaceUse>]) {
 fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
     match ty {
         BcType::Unit => out.push(TY_UNIT),
+        BcType::Never => out.push(TY_NEVER),
         BcType::Bool => out.push(TY_BOOL),
         BcType::Int => out.push(TY_INT),
         BcType::Float => out.push(TY_FLOAT),
@@ -2912,6 +2952,17 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for interface in &mut module.interfaces {
         interface.name = cur.string()?;
         interface.key = cur.string()?;
+        for method in &mut interface.methods {
+            let name_count = cur.len()?;
+            if name_count != method.params.len() {
+                return Err(DecodeError::ExportCountMismatch);
+            }
+            let mut names = Vec::with_capacity(name_count);
+            for _ in 0..name_count {
+                names.push(cur.string()?);
+            }
+            method.param_names = names;
+        }
     }
     let class_count = cur.len()?;
     if class_count != module.classes.len() {
@@ -2920,6 +2971,17 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for class in &mut module.classes {
         class.name = cur.string()?;
         class.key = cur.string()?;
+        let default_count = cur.len()?;
+        if default_count != class.fields.len() {
+            return Err(DecodeError::ExportCountMismatch);
+        }
+        let mut defaults = Vec::with_capacity(default_count);
+        for _ in 0..default_count {
+            defaults.push(cur.flag()?);
+        }
+        class.field_defaults = defaults;
+        class.own_start = cur.u32()?;
+        class.has_init = cur.flag()?;
     }
     let func_count = cur.len()?;
     if func_count != module.funcs.len() {
@@ -2927,6 +2989,23 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     }
     for func in &mut module.funcs {
         func.name = cur.string()?;
+        let name_count = cur.len()?;
+        if name_count != 0 && name_count != func.params.len() {
+            return Err(DecodeError::ExportCountMismatch);
+        }
+        let mut names = Vec::with_capacity(name_count);
+        for _ in 0..name_count {
+            names.push(cur.string()?);
+        }
+        func.param_names = names;
+    }
+    let slot_count = cur.len()?;
+    if slot_count != module.slots.len() {
+        return Err(DecodeError::ExportCountMismatch);
+    }
+    for slot in &mut module.slots {
+        slot.binding = cur.string()?;
+        slot.late = cur.flag()?;
     }
     // One encoded binding needs at least twelve bytes: the key
     // length, the function index, and the class index. `len` bounds a
@@ -3110,6 +3189,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
                 premises,
                 params,
                 param_muts,
+                param_names: Vec::new(),
                 ret,
                 row,
                 default,
@@ -3227,6 +3307,8 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             _ => return Err(DecodeError::BadSlot),
         };
         slots.push(SlotSpec {
+            binding: String::new(),
+            late: false,
             key,
             contract_hash,
             contract,
@@ -3279,6 +3361,9 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             type_params,
             kind,
             fields,
+            field_defaults: Vec::new(),
+            own_start: 0,
+            has_init: false,
             methods,
         });
     }
@@ -3336,6 +3421,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             effect_params,
             params,
             param_muts,
+            param_names: Vec::new(),
             ret,
             row,
             captures,
@@ -3406,6 +3492,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
     let tag = cur.u8()?;
     let ty = match tag {
         TY_UNIT => BcType::Unit,
+        TY_NEVER => BcType::Never,
         TY_BOOL => BcType::Bool,
         TY_INT => BcType::Int,
         TY_FLOAT => BcType::Float,
@@ -3805,6 +3892,7 @@ mod tests {
     fn plain_func(name: &str, ret: u32, blocks: Vec<Vec<Instr>>) -> Func {
         Func {
             name: name.to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -3855,6 +3943,9 @@ mod tests {
                     type_params: 0,
                     kind: BcClassKind::Normal,
                     fields: vec![("value".to_string(), 1)],
+                    field_defaults: vec![false],
+                    own_start: 0,
+                    has_init: false,
                     methods: vec![(0, 1)],
                 },
                 BcClass {
@@ -3867,6 +3958,9 @@ mod tests {
                     type_params: 1,
                     kind: BcClassKind::Normal,
                     fields: vec![("value".to_string(), 9)],
+                    field_defaults: vec![false],
+                    own_start: 0,
+                    has_init: false,
                     methods: vec![],
                 },
             ],
@@ -3883,6 +3977,7 @@ mod tests {
                 ),
                 Func {
                     name: "add".to_string(),
+                    param_names: vec!["self".to_string(), "value".to_string()],
                     type_params: 0,
                     effect_params: 1,
                     params: vec![3, 1],
@@ -4059,18 +4154,24 @@ mod tests {
         module.slots = vec![
             SlotSpec {
                 key: [1; 32],
+                binding: "function".to_string(),
+                late: true,
                 contract_hash: [11; 32],
                 contract: SlotContract::Function(callable.clone()),
                 initial: Some(SlotTarget::Function(0)),
             },
             SlotSpec {
                 key: [2; 32],
+                binding: "method".to_string(),
+                late: true,
                 contract_hash: [12; 32],
                 contract: SlotContract::Method(callable),
                 initial: Some(SlotTarget::Function(1)),
             },
             SlotSpec {
                 key: [3; 32],
+                binding: "class".to_string(),
+                late: true,
                 contract_hash: [13; 32],
                 contract: SlotContract::Class {
                     type_params: 0,
@@ -4085,12 +4186,16 @@ mod tests {
             },
             SlotSpec {
                 key: [4; 32],
+                binding: "value".to_string(),
+                late: true,
                 contract_hash: [14; 32],
                 contract: SlotContract::Value { ty: 1 },
                 initial: None,
             },
             SlotSpec {
                 key: [5; 32],
+                binding: "process".to_string(),
+                late: true,
                 contract_hash: [15; 32],
                 contract: SlotContract::Process {
                     message: 2,

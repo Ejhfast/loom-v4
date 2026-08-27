@@ -1,6 +1,10 @@
 # Latest benchmark baseline
 
-The measured source revision is `0f742b2`.
+The measured tree follows checkpoint `149d859`.
+
+The tree contains the one-surface artifact correction.
+
+All comparisons use `main` revision `8f7ba66` in the same session.
 
 The measurements use release builds unless this file states a different build.
 
@@ -8,13 +12,13 @@ The host uses an AMD Ryzen 9 9950X processor.
 
 The host has 16 physical cores and 32 logical processors.
 
-Release runtime benchmarks use deterministic scheduler mode and zero scheduler workers unless stated otherwise.
+Release runtime benchmarks use deterministic mode unless this file states another mode.
 
-Core phase and language operation benchmarks pin each process to logical processor zero.
+Core and operation benchmarks pin each process to logical processor zero.
 
 The operating system selects processors for scheduler benchmark processes.
 
-The bytecode version is 56.
+The bytecode version is 57.
 
 The verifier version is 37.
 
@@ -30,126 +34,126 @@ The snapshot format version is 31.
 | Bytecode functions | 896 |
 | Bytecode instructions | 18,877 |
 | Decoded instruction width | 16 bytes |
-| Artifact size | 287,158 bytes |
-| Artifact package size | 456,464 bytes |
-| Artifact package encoding | 0.170 ms |
-| Artifact package decoding and identity | 3.093 ms |
-| Core checking | 2.715 ms |
-| Core lowering | 0.984 ms |
-| Core compilation | 4.577 ms |
-| Core decoding | 0.406 ms |
-| Core verification | 1.439 ms |
-| Structural verification | 0.540 ms |
-| Verification hash | 0.139 ms |
-| Semantic identity | 2.465 ms |
-| Decoded loading | 1.632 ms |
-| Core loading | 2.059 ms |
-| Cached core loading | 0.166 ms |
+| Core LMBC | 305,056 bytes |
+| Core LMAR | 305,178 bytes |
+| LMAR wrapper | 122 bytes |
+| LMAR encoding | 0.133 ms |
+| LMAR decoding and identity | 3.614 ms |
+| Core checking | 2.505 ms |
+| Core lowering | 1.040 ms |
+| Core compilation | 3.999 ms |
+| Core decoding | 0.455 ms |
+| Core verification | 1.429 ms |
+| Structural verification | 0.537 ms |
+| Verification hash | 0.140 ms |
+| Semantic identity | 2.505 ms |
+| Decoded loading | 1.631 ms |
+| Core loading | 2.101 ms |
+| Cached core loading | 0.172 ms |
 | Default interface witnesses | 11 of 3,588 possible entries |
 
-### Growth from the scheduler foundation
+LMBC stores compiler surface facts once.
 
-This comparison uses revision `308b55e` with the same processor placement.
+LMAR adds 122 bytes of package structure.
 
-| Measurement | Foundation | Current | Change |
-| --- | ---: | ---: | ---: |
-| HIR functions | 571 | 597 | +4.6% |
-| HIR types | 534 | 565 | +5.8% |
-| Bytecode functions | 873 | 896 | +2.6% |
-| Bytecode instructions | 17,905 | 18,877 | +5.4% |
-| Artifact size | 264,401 bytes | 287,158 bytes | +8.6% |
-| Core checking | 2.065 ms | 2.715 ms | +31.5% |
-| Core lowering | 0.945 ms | 0.984 ms | +4.1% |
-| Core compilation | 3.335 ms | 4.577 ms | +37.2% |
-| Core verification | 1.278 ms | 1.439 ms | +12.6% |
-| Core loading | 1.837 ms | 2.059 ms | +12.1% |
+LMAR does not store an `.lmi` type tree.
 
-The larger core and complete provider interface add 0.650 milliseconds to core checking.
+No compression or verification cache supplies these results.
 
-Large checker inputs retain the prior scaling slope.
+### Core comparison
 
-Each row subtracts the smallest input from the largest input.
-
-| Checker shape | Sizes | Foundation growth | Current growth | Change |
-| --- | ---: | ---: | ---: | ---: |
-| Method chain | 16 to 1,024 | 10.058 ms | 10.113 ms | +0.5% |
-| Interfaces | 16 to 256 | 1.777 ms | 1.819 ms | +2.4% |
-| Wide body | 64 to 1,024 | 0.776 ms | 0.736 ms | -5.2% |
-
-### Sparse default witness gate
-
-Each timing is the median of seven pinned release processes.
+Each timing is the median of three pinned processes.
 
 Each process reports one median from nine measured runs.
 
-Dense uses revision `4a2dc34`. Sparse uses revision `754db52`.
-
-Cached loading computes the verification hash and rebuilds dispatch tables.
-
-| Measurement | Dense | Sparse | Change |
+| Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Default interface call | 268.0 ns | 236.2 ns | -11.9% |
-| Cached core loading | 0.171 ms | 0.166 ms | -2.9% |
-| Decoded core loading | 1.602 ms | 1.600 ms | -0.1% |
-| Full core loading | 2.017 ms | 2.011 ms | -0.3% |
-| Witness entries | 3,552 | 11 | -99.7% |
+| Core LMBC | 274,657 bytes | 305,056 bytes | +11.1% |
+| Core checking | 2.396 ms | 2.505 ms | +4.5% |
+| Core lowering | 1.000 ms | 1.040 ms | +4.0% |
+| Core compilation | 3.788 ms | 3.999 ms | +5.6% |
+| Core decoding | 0.411 ms | 0.455 ms | +10.7% |
+| Core verification | 1.411 ms | 1.429 ms | +1.3% |
+| Structural verification | 0.516 ms | 0.537 ms | +4.1% |
+| Verification hash | 0.137 ms | 0.140 ms | +2.2% |
+| Semantic identity | 2.538 ms | 2.505 ms | -1.3% |
+| Decoded loading | 1.603 ms | 1.631 ms | +1.7% |
+| Core loading | 2.010 ms | 2.101 ms | +4.5% |
+| Cached core loading | 0.165 ms | 0.172 ms | +4.2% |
 
-## Language operations
+The LMBC growth stores exact source contract facts.
 
-Each result is the median of at least three benchmark processes.
+The function and class records keep compiler-only fields after execution fields.
 
-Each process reports one nine-run median.
+This layout keeps the execution record prefix stable.
 
-| Operation | Result |
-| --- | ---: |
-| `int_loop` | 31.4 ns |
-| `direct_call` | 30.5 ns |
-| `string_interp` | 208.1 ns |
-| `float_add` | 34.2 ns |
-| `string_builder` | 40.0 ns |
-| `byte_buffer` | 37.1 ns |
-| `direct_clock` | 114.5 ns |
+## Thin program artifact
 
-String and interpreter measurements can vary with process placement.
+The program contains source `1`.
 
-### Interface runtime gate
+| Measurement | `main` | Current | Change |
+| --- | ---: | ---: | ---: |
+| Artifact bytes | 274,942 | 1,699 | -99.4% |
+| Source compilation | 8.342 ms | 6.885 ms | -17.5% |
+| Cold artifact load | 2.033 ms | 2.471 ms | +21.5% |
+| Compilation and cold load | 10.375 ms | 9.356 ms | -9.8% |
+
+The root unit contains one function and no class.
+
+Artifact decoding takes 0.025 milliseconds.
+
+Dependency collection takes 0.654 milliseconds.
+
+Trusted linking takes 1.427 milliseconds.
+
+Artifact linking takes 0.780 milliseconds.
+
+## Execution gate
 
 This comparison uses three pinned processes for each revision.
 
-| Operation | Foundation | Current | Change |
+| Operation | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| `partial_eq` | 92.8 ns | 98.7 ns | +6.4% |
-| `list_eq` | 815.3 ns | 812.5 ns | -0.3% |
-| `list_hash` | 800.8 ns | 817.7 ns | +2.1% |
-| `tuple_hash` | 354.8 ns | 371.9 ns | +4.8% |
-| `map_hashable_lookup` | 205.8 ns | 217.0 ns | +5.4% |
-| `list_sort` | 19,162.1 ns | 19,011.0 ns | -0.8% |
+| Direct call | 31.8 ns | 30.5 ns | -4.1% |
+| Virtual call | 64.0 ns | 65.8 ns | +2.8% |
+| List index | 44.4 ns | 43.6 ns | -1.8% |
+| String interpolation | 208.5 ns | 214.1 ns | +2.7% |
+| Interface default | 234.2 ns | 230.5 ns | -1.6% |
+| List hash | 844.0 ns | 827.5 ns | -2.0% |
+| List sort | 19,528.0 ns | 19,165.0 ns | -1.9% |
+| Map hashable lookup | 216.9 ns | 213.6 ns | -1.5% |
+| String builder | 39.9 ns | 42.0 ns | +5.3% |
+| Text iteration | 76.8 ns | 75.9 ns | -1.2% |
+| Large bytes decode | 911.6 ns | 940.2 ns | +3.1% |
+| Byte buffer | 42.5 ns | 44.8 ns | +5.4% |
+| Direct clock | 111.9 ns | 113.2 ns | +1.2% |
 
-The largest measured interface delta is 6.4 percent.
+The mean operation ratio increases by 0.5 percent.
+
+The largest measured increase is 5.4 percent.
 
 ## Workspace suite
 
-The warm debug workspace suite completed in 49.56 seconds.
+The warm debug suite uses Cargo's default concurrency and full coverage.
 
-Revision `308b55e` completed in 43.95 seconds under the same settings.
+| Revision | Tests | Time |
+| --- | ---: | ---: |
+| `main` | 1,638 | 49.51 s |
+| Current | 1,684 | 56.43 s |
 
-| Target | Foundation | Current | Change |
-| --- | ---: | ---: | ---: |
-| Full workspace | 43.95 s | 49.56 s | +12.8% |
-| Snapshot admission | 10.93 s | 11.75 s | +7.5% |
-| Source mutation | 11.48 s | 13.12 s | +14.3% |
+The current tree adds 46 tests.
 
-Revision `754db52` completed the workspace suite in 48.55 seconds.
+The absolute suite time increases by 14.0 percent.
 
-The suite used Cargo's default test concurrency and full coverage.
+Each test executable builds one process-local core `LinkUnit` when required.
 
-The test harness used deterministic mode by default.
+This cost appears in compile-heavy test executables.
 
-Parallel scheduler tests used up to four workers.
+The test harness uses deterministic mode by default.
 
-CLI integration tests used the parallel default.
+Parallel scheduler tests use up to four workers.
 
-The standard codec modules link only when source imports them.
+CLI integration tests use the parallel default.
 
 ## Scheduler foundation
 

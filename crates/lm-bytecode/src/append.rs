@@ -156,6 +156,9 @@ pub fn append_resolved(
                 type_params: class.type_params,
                 kind: class.kind,
                 fields: Vec::new(),
+                field_defaults: Vec::new(),
+                own_start: 0,
+                has_init: false,
                 methods: Vec::new(),
             });
             merged.class_bounds.push(Vec::new());
@@ -273,6 +276,7 @@ pub fn append_resolved(
                 effect_params: 0,
                 params: Vec::new(),
                 param_muts: Vec::new(),
+                param_names: Vec::new(),
                 ret: 0,
                 row: Vec::new(),
                 captures: Vec::new(),
@@ -323,6 +327,8 @@ pub fn append_resolved(
         } else {
             let target = merged.slots.len() as u32;
             merged.slots.push(SlotSpec {
+                binding: slot.binding.clone(),
+                late: slot.late,
                 key: slot.key,
                 contract_hash: slot.contract_hash,
                 contract,
@@ -875,6 +881,9 @@ fn reloc_class(source: &BcClass, reloc: &AppendReloc) -> BcClass {
             .iter()
             .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
             .collect(),
+        field_defaults: source.field_defaults.clone(),
+        own_start: source.own_start,
+        has_init: source.has_init,
         methods: source
             .methods
             .iter()
@@ -940,6 +949,7 @@ fn reloc_interface(source: &BcInterface, reloc: &AppendReloc) -> BcInterface {
                     .map(|ty| reloc.types[*ty as usize])
                     .collect(),
                 param_muts: method.param_muts.clone(),
+                param_names: method.param_names.clone(),
                 ret: reloc.types[method.ret as usize],
                 row: reloc_row(&method.row, &reloc.strings),
                 default: if method.default == crate::NO_FUNC {
@@ -988,6 +998,7 @@ fn reloc_func(source: &Func, reloc: &AppendReloc) -> Func {
             .map(|ty| reloc.types[*ty as usize])
             .collect(),
         param_muts: source.param_muts.clone(),
+        param_names: source.param_names.clone(),
         ret: reloc.types[source.ret as usize],
         row: reloc_row(&source.row, &reloc.strings),
         captures: source
@@ -1298,6 +1309,7 @@ mod tests {
             funcs: vec![
                 Func {
                     name: "value".to_string(),
+                    param_names: vec!["value".to_string()],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![parameter],
@@ -1314,6 +1326,7 @@ mod tests {
                 },
                 Func {
                     name: "<entry>".to_string(),
+                    param_names: Vec::new(),
                     type_params: 0,
                     effect_params: 0,
                     params: Vec::new(),
@@ -1395,10 +1408,14 @@ mod tests {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: Vec::new(),
+                field_defaults: Vec::new(),
+                own_start: 0,
+                has_init: false,
                 methods: Vec::new(),
             }],
             funcs: vec![Func {
                 name: "<entry>".to_string(),
+                param_names: Vec::new(),
                 type_params: 0,
                 effect_params: 0,
                 params: Vec::new(),

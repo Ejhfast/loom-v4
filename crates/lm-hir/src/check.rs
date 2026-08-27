@@ -374,7 +374,6 @@ pub(crate) struct TypePremise {
 /// One declared nominal interface.
 #[derive(Clone)]
 pub(crate) struct InterfaceInfo {
-    pub(crate) imported: bool,
     pub(crate) origin: Option<(String, String)>,
     pub(crate) name: String,
     pub(crate) type_params: Vec<String>,
@@ -934,33 +933,25 @@ impl Ctx {
             )
     }
 
-    /// Where one class comes from. The registration order fixes the
-    /// three ranges: the core, then this module, then the imports.
-    pub(crate) fn class_origin(&self, class: u32) -> crate::iface::ClassOrigin {
+    /// Return the stable key of one class.
+    pub(crate) fn class_key(&self, class: u32, module_path: &str) -> String {
+        let info = &self.classes[class as usize];
         if class < self.user_start {
-            return crate::iface::ClassOrigin::Core;
+            return lm_bytecode::qualified_key(lm_bytecode::CORE_MODULE, &info.name);
         }
         if class < self.import_start {
-            return crate::iface::ClassOrigin::Local;
+            return lm_bytecode::qualified_key(module_path, &info.name);
         }
         for import in &self.imports {
             if import.kind == lm_bytecode::ImportKind::Class {
                 if let HirImportDef::Class(c) = import.def {
                     if c == class {
-                        return crate::iface::ClassOrigin::Imported(
-                            import.module.clone(),
-                            import.name.clone(),
-                        );
+                        return lm_bytecode::qualified_key(&import.module, &import.name);
                     }
                 }
             }
         }
-        crate::iface::ClassOrigin::Local
-    }
-
-    /// Report whether one interface belongs to core or this module.
-    pub(crate) fn interface_is_core(&self, interface: u32) -> bool {
-        interface < self.user_interface_start
+        lm_bytecode::qualified_key(module_path, &info.name)
     }
 
     /// Render one type with names from its lexical scope.
@@ -2699,6 +2690,7 @@ pub fn check_module_with(
             effect_params: effect_param_count,
             params: sig.params,
             param_muts: sig.param_muts,
+            param_names: sig.param_names,
             ret: sig.ret,
             row: sig.row,
             captures: vec![],
@@ -2752,6 +2744,7 @@ pub fn check_module_with(
             effect_params: effect_param_count,
             params: sig.params,
             param_muts: sig.param_muts,
+            param_names: sig.param_names,
             ret: sig.ret,
             row: sig.row,
             captures: vec![],
@@ -2789,6 +2782,7 @@ pub fn check_module_with(
         effect_params: 0,
         params: vec![],
         param_muts: vec![],
+        param_names: vec![],
         ret: entry_ty,
         row: entry_row,
         captures: vec![],
@@ -2825,10 +2819,9 @@ struct ExportSets {
 fn collect_exports(
     ctx: &Ctx,
     module: &ast::Module,
-    module_path: &str,
+    _module_path: &str,
     is_core: bool,
 ) -> Result<Vec<HirExport>, Diagnostic> {
-    let naming = crate::iface::Naming { ctx, module_path };
     let mut out: Vec<(lm_bytecode::ExportKind, String, u32)> = Vec::new();
     let class_index = |name: &str| -> u32 {
         let types = if is_core {
@@ -2891,12 +2884,7 @@ fn collect_exports(
     }
     Ok(out
         .into_iter()
-        .map(|(kind, name, def)| HirExport {
-            kind,
-            name,
-            def,
-            item: naming.item(kind, def),
-        })
+        .map(|(kind, name, def)| HirExport { kind, name, def })
         .collect())
 }
 
@@ -2912,10 +2900,6 @@ fn collect_core_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport
         .iter()
         .flat_map(|class| class.methods.iter().map(|method| method.func))
         .collect();
-    let naming = crate::iface::Naming {
-        ctx,
-        module_path: lm_bytecode::CORE_MODULE,
-    };
     let mut ordinal = 0u32;
     for (index, function) in ctx.funcs.iter().enumerate() {
         let Some(function) = function else {
@@ -2934,7 +2918,6 @@ fn collect_core_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport
             kind: lm_bytecode::ExportKind::Function,
             name: format!("$internal.function.{current}"),
             def: index,
-            item: naming.item(lm_bytecode::ExportKind::Function, index),
         });
     }
     Ok(exports)
@@ -3051,15 +3034,9 @@ fn assemble(
     source_funcs: usize,
     core_funcs: usize,
 ) -> Result<HirModule, Diagnostic> {
-    let keys: Vec<String> = {
-        let naming = crate::iface::Naming {
-            ctx: &ctx,
-            module_path,
-        };
-        (0..ctx.classes.len() as u32)
-            .map(|c| naming.key(c))
-            .collect()
-    };
+    let keys: Vec<String> = (0..ctx.classes.len() as u32)
+        .map(|class| ctx.class_key(class, module_path))
+        .collect();
     let parents: Vec<Option<u32>> = ctx.classes.iter().map(|info| info.parent).collect();
     let classes = std::mem::take(&mut ctx.classes);
     let mut hir_classes: Vec<HirClass> = Vec::with_capacity(classes.len());
@@ -3092,23 +3069,29 @@ fn assemble(
             CtorKind::Defaults
         };
         let mut init = info.init.take().map(take_method);
-        let (ctor_params, ctor_param_muts) = match (&mut init, info.kind, info.native_repr) {
-            (_, _, Some(NativeRepr::Tuple(_))) => {
-                let Type::Tuple(params) = ctx.store.get(info.self_ty) else {
-                    unreachable!("a tuple carrier has a tuple self type")
-                };
-                (params.clone(), vec![false; params.len()])
-            }
-            (_, ClassKind::EnumCase, _) => {
-                let count = info.field_tys.len();
-                (info.field_tys.clone(), vec![false; count])
-            }
-            (Some(init), _, _) => (
-                std::mem::take(&mut init.params),
-                std::mem::take(&mut init.param_muts),
-            ),
-            (None, _, _) => (vec![], vec![]),
-        };
+        let (ctor_params, ctor_param_muts, ctor_param_names) =
+            match (&mut init, info.kind, info.native_repr) {
+                (_, _, Some(NativeRepr::Tuple(_))) => {
+                    let Type::Tuple(params) = ctx.store.get(info.self_ty) else {
+                        unreachable!("a tuple carrier has a tuple self type")
+                    };
+                    (params.clone(), vec![false; params.len()], Vec::new())
+                }
+                (_, ClassKind::EnumCase, _) => {
+                    let count = info.field_tys.len();
+                    (
+                        info.field_tys.clone(),
+                        vec![false; count],
+                        info.field_names.clone(),
+                    )
+                }
+                (Some(init), _, _) => (
+                    std::mem::take(&mut init.params),
+                    std::mem::take(&mut init.param_muts),
+                    std::mem::take(&mut init.param_names),
+                ),
+                (None, _, _) => (vec![], vec![], vec![]),
+            };
         let ctor_row = init
             .as_mut()
             .map(|method| std::mem::take(&mut method.row))
@@ -3155,6 +3138,8 @@ fn assemble(
             ctor_kind,
             field_names: info.field_names,
             field_tys: info.field_tys,
+            field_defaults: info.has_default,
+            own_start: info.own_start as u32,
             defaults,
             default_locals,
             methods: info
@@ -3166,6 +3151,7 @@ fn assemble(
                 })
                 .collect(),
             init: init_func,
+            ctor_param_names,
             ctor_params,
             ctor_param_muts,
             ctor_row,
@@ -3229,6 +3215,7 @@ fn assemble(
                             .collect(),
                         params: method.params,
                         param_muts: method.param_muts,
+                        param_names: method.param_names,
                         ret: method.ret,
                         row: method.row,
                         default: method.default_func,
@@ -3384,7 +3371,6 @@ fn register_interface_names(
         let id = ctx.interfaces.len() as u32;
         map.insert(interface.name.clone(), id);
         ctx.interfaces.push(InterfaceInfo {
-            imported: false,
             origin: None,
             name: interface.name.clone(),
             type_params,
@@ -5643,6 +5629,7 @@ fn check_interface_defaults(
                 effect_params: effect_param_count,
                 params: sig.params,
                 param_muts: sig.param_muts,
+                param_names: sig.param_names,
                 ret: sig.ret,
                 row: sig.row,
                 captures: vec![],
@@ -5681,6 +5668,9 @@ fn check_method(
     let mut param_muts = Vec::with_capacity(sig.param_muts.len() + 1);
     param_muts.push(self_mut);
     param_muts.extend_from_slice(&sig.param_muts);
+    let mut param_names = Vec::with_capacity(sig.param_names.len() + 1);
+    param_names.push("self".to_string());
+    param_names.extend(sig.param_names.iter().cloned());
     let env = TyEnv {
         type_names,
         type_bounds: checker_bounds,
@@ -5733,6 +5723,7 @@ fn check_method(
         effect_params: effect_param_count,
         params,
         param_muts,
+        param_names,
         ret: sig.ret,
         row: sig.row.clone(),
         captures: vec![],

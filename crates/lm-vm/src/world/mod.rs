@@ -1009,6 +1009,7 @@ mod tests {
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1220,6 +1221,7 @@ mod tests {
             classes: vec![],
             funcs: vec![Func {
                 name: "revision".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1233,6 +1235,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [19; 32],
+                binding: "revision".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Function(contract),
                 initial: Some(SlotTarget::Function(0)),
@@ -1358,6 +1362,7 @@ mod tests {
         };
         let leaf = |name: &str, value: i64| Func {
             name: name.to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1382,6 +1387,7 @@ mod tests {
             funcs: vec![
                 Func {
                     name: "main".to_string(),
+                    param_names: vec![],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![],
@@ -1409,6 +1415,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [7; 32],
+                binding: "leaf".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Function(callable),
                 initial: Some(SlotTarget::Function(1)),
@@ -1455,6 +1463,7 @@ mod tests {
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -1471,6 +1480,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [8; 32],
+                binding: "value".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Value { ty: 3 },
                 initial: None,
@@ -1522,6 +1533,7 @@ mod tests {
     fn a_method_slot_accepts_only_exact_class_methods() {
         let method = |name: &str, value: i64| Func {
             name: name.to_string(),
+            param_names: vec!["self".to_string()],
             type_params: 0,
             effect_params: 0,
             params: vec![4],
@@ -1558,11 +1570,15 @@ mod tests {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![],
+                field_defaults: vec![],
+                own_start: 0,
+                has_init: false,
                 methods: vec![(0, 1), (1, 2)],
             }],
             funcs: vec![
                 Func {
                     name: "main".to_string(),
+                    param_names: vec![],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![],
@@ -1584,6 +1600,7 @@ mod tests {
                 method("new", 2),
                 Func {
                     name: "plain".to_string(),
+                    param_names: vec!["self".to_string()],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![4],
@@ -1598,6 +1615,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [9; 32],
+                binding: "method".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Method(BcCallableContract {
                     type_params: 0,
@@ -1649,6 +1668,7 @@ mod tests {
         };
         let constructor = |name: &str, value: i64| Func {
             name: name.to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -1693,11 +1713,15 @@ mod tests {
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![("value".to_string(), 2)],
+                field_defaults: vec![true],
+                own_start: 0,
+                has_init: false,
                 methods: vec![],
             }],
             funcs: vec![
                 Func {
                     name: "main".to_string(),
+                    param_names: vec![],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![],
@@ -1721,6 +1745,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [10; 32],
+                binding: "Cell".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Class {
                     type_params: 0,
@@ -1741,6 +1767,8 @@ mod tests {
             .class_hashes[0];
         module.slots[0] = SlotSpec {
             key: [10; 32],
+            binding: "Cell".to_string(),
+            late: true,
             contract_hash: abi,
             contract: SlotContract::Class {
                 type_params: 0,
@@ -1773,6 +1801,7 @@ mod tests {
     fn a_process_slot_checks_mailbox_and_terminal_types() {
         let body = |name: &str, ret: u32, value: Instr| Func {
             name: name.to_string(),
+            param_names: vec!["self".to_string()],
             type_params: 0,
             effect_params: 0,
             params: vec![5],
@@ -1811,6 +1840,9 @@ mod tests {
                     type_params: 1,
                     kind: BcClassKind::Normal,
                     fields: vec![],
+                    field_defaults: vec![],
+                    own_start: 0,
+                    has_init: false,
                     methods: vec![],
                 },
                 BcClass {
@@ -1823,12 +1855,16 @@ mod tests {
                     type_params: 0,
                     kind: BcClassKind::Normal,
                     fields: vec![],
+                    field_defaults: vec![],
+                    own_start: 0,
+                    has_init: false,
                     methods: vec![],
                 },
             ],
             funcs: vec![
                 Func {
                     name: "main".to_string(),
+                    param_names: vec![],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![],
@@ -1845,6 +1881,8 @@ mod tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [11; 32],
+                binding: "Worker".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Process {
                     message: 2,

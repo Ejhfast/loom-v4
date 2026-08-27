@@ -40,7 +40,7 @@ The source package model keeps its current parts.
 - `lm.package` defines one source package and its dependency aliases.
 - The source tree defines canonical module paths.
 - `CompileEnv` supplies visible interfaces to the compiler.
-- `LinkUnit` carries one compiled module and its interface.
+- `LinkUnit` carries one compiled module and its exact dependencies.
 - `LinkEnv` resolves canonical module paths.
 
 An artifact is the built form of one selected root.
@@ -84,7 +84,9 @@ source package graph
 
 `CompiledModule` is the unbound result of one compiler call.
 
-It contains one module, one interface, and build metadata.
+It contains one canonical module and build metadata.
+
+The compiler derives an `Interface` view from that module.
 
 The source build cache can store that result through its existing keys.
 
@@ -93,6 +95,10 @@ The package builder binds every import to an exact provider.
 That step produces one `LinkUnit`.
 
 `LinkUnit` is the only linkable module type.
+
+It can cache the derived interface view in memory.
+
+It does not encode that view beside the module.
 
 An `Artifact` stores one root and its reachable `LinkUnit` closure.
 
@@ -120,9 +126,16 @@ Stage 3 removes all legacy construction with missing dependency bindings.
 LinkUnit
   module_path: String
   module: Module
-  interface: Interface
   dependencies: List[ArtifactDependency]
 ```
+
+The module contains executable code and public contract facts once.
+
+The `.lmi` file is an optional derived compiler view.
+
+The build cache can store that view for separate compilation.
+
+The runtime artifact never stores the `.lmi` payload.
 
 One dependency contains a canonical module path and an exact identity.
 
@@ -164,13 +177,13 @@ The artifact header names the root by `ArtifactId`.
 
 Each embedded unit carries its direct dependency list.
 
-The units form a directed acyclic graph in version 1.
+The units form a directed acyclic graph in the initial release.
 
 The decoder rejects duplicate units and unreachable units.
 
 The decoder uses an explicit work stack for graph checks.
 
-Source module import cycles remain unsupported in version 1.
+Source module import cycles remain unsupported in the initial release.
 
 Definition cycles inside one unit remain supported.
 
@@ -180,7 +193,7 @@ The definition collector uses the shared SCC implementation.
 
 The artifact magic is `LMAR`.
 
-Artifact format version 1 uses this header.
+Artifact format version 2 uses this header.
 
 ```text
 magic:               4 bytes
@@ -202,9 +215,11 @@ dependency count:    u32
 dependencies:        repeated dependency records
 module length:       u32
 module payload:      LMBC bytes
-interface length:    u32
-interface payload:   LMI bytes
 ```
+
+The LMBC export section contains the facts that derive the compiler interface.
+
+The LMAR container does not store a second interface type tree.
 
 Each dependency uses this encoding.
 
@@ -236,8 +251,10 @@ It covers these values.
 
 - The canonical module path.
 - The module semantic hash.
-- The interface identity.
+- The derived interface identity.
 - Every dependency module path and `ArtifactId`.
+
+The derived interface identity uses facts from the same module payload.
 
 The module semantic hash owns format and ABI version coverage.
 
@@ -273,9 +290,9 @@ Semantic identity must return an error for every invalid decoded module.
 
 Semantic identity must never panic on decoded input.
 
-## 6. Version 1 resolution
+## 6. Initial resolution
 
-Version 1 has no local or network runtime artifact store.
+The initial release has no local or network runtime artifact store.
 
 The shared linker has two artifact sources.
 
@@ -439,7 +456,7 @@ Existing indices never move.
 
 The arena deduplicates complete units by `ArtifactId`.
 
-Version 1 does not deduplicate definitions across different units.
+The initial release does not deduplicate definitions across different units.
 
 One `CodeNamespace` is one relocated and immutable `LinkEnv`.
 
@@ -648,10 +665,9 @@ The initial limits cover these values.
 - Artifact unit count.
 - Direct dependency count.
 - Module payload bytes.
-- Interface payload bytes.
 - Total decoded code bytes.
 
-Version 1 uses these default limits.
+The initial release uses these default limits.
 
 | Limit | Value |
 | --- | ---: |
@@ -659,8 +675,7 @@ Version 1 uses these default limits.
 | Artifact units | 4,096 |
 | Direct dependencies per unit | 4,096 |
 | One module payload | 64 MiB |
-| One interface payload | 64 MiB |
-| Total module and interface bytes | 256 MiB |
+| Total module bytes | 256 MiB |
 | One dependency module path | 4 KiB |
 
 One operation decodes one artifact blob once.
@@ -749,7 +764,7 @@ Stages 1 and 2 do not replace the current execution loader.
 ### Stage 2R: package and linker reconciliation
 
 - Make the wire record contain one complete `LinkUnit`.
-- Store the canonical module path and interface.
+- Store the canonical module path and module payload.
 - Replace artifact namespaces with canonical module paths.
 - Reuse the existing container hash.
 - Remove the independent artifact resolver.
@@ -763,6 +778,21 @@ Gate: the artifact model defines no second package graph, resolver, cache, or by
 Gate: the decoder rejects every non-canonical ordering.
 
 Gate: semantic identity returns an error or a value for every decoded payload.
+
+### Stage 2S: one canonical module surface
+
+- Store public contract facts in the LMBC export section.
+- Derive compiler interfaces from canonical module tables.
+- Remove the second LMI payload from LMAR.
+- Keep `.lmi` as an optional build-cache projection.
+- Change the LMAR format version to 2.
+- Change the LMBC format version to 57.
+
+Gate: LMAR stores each module surface once.
+
+Gate: an encoded interface view adds zero bytes to LMAR.
+
+Gate: a decoded module derives the same interface view as trusted compilation.
 
 ### Stage 3: shared linking and core dependency
 
@@ -892,7 +922,7 @@ Gate: collected artifacts improve raw size and cold load time.
 
 ## 19. Deferred work
 
-These items remain outside version 1.
+These items remain outside the initial release.
 
 - A local artifact store.
 - A network artifact store.
@@ -903,7 +933,7 @@ These items remain outside version 1.
 - Arena reclamation.
 - Artifact compression.
 
-None of these items changes the version 1 identity model.
+None of these items changes the initial identity model.
 
 ## 20. Stage 2 performance record
 
@@ -942,6 +972,12 @@ Stage 4 makes ordinary root units much smaller than the core unit.
 
 The result uses the Stage 0 measurement settings.
 
+This record predates the one-surface correction in Stage 2S.
+
+Its LMAR stored a second interface view.
+
+It does not describe the current LMAR format.
+
 The current root unit still retains unused definitions before Stage 4.
 
 | Stage 3 measurement | Result |
@@ -973,7 +1009,7 @@ Stage 4 must reduce raw bytes and cold load time without compression or cached v
 
 ## 22. Stage 4 performance record
 
-The Stage 4 result uses revision `0f742b2`.
+The corrected Stage 4 tree follows checkpoint `149d859`.
 
 The `main` result uses revision `8f7ba66` from the same session.
 
@@ -981,53 +1017,78 @@ The tiny program contains source `1`.
 
 | Tiny program measurement | `main` | Stage 4 | Change |
 | --- | ---: | ---: | ---: |
-| Raw artifact bytes | 274,942 | 1,776 | -99.4% |
-| Source compilation | 8.357 ms | 6.617 ms | -20.8% |
-| Cold artifact load | 2.040 ms | 2.433 ms | +19.3% |
+| Raw artifact bytes | 274,942 | 1,699 | -99.4% |
+| Source compilation | 8.342 ms | 6.885 ms | -17.5% |
+| Cold artifact load | 2.033 ms | 2.471 ms | +21.5% |
+| Compilation and cold load | 10.375 ms | 9.356 ms | -9.8% |
 
 The Stage 4 root contains one function and no class.
 
-Artifact decoding takes 0.020 milliseconds.
+Artifact decoding takes 0.025 milliseconds.
 
-Dependency collection takes 0.589 milliseconds.
+Dependency collection takes 0.654 milliseconds.
 
-Trusted linking takes 1.327 milliseconds.
+Trusted linking takes 1.427 milliseconds.
 
-Artifact linking takes 0.754 milliseconds.
+Artifact linking takes 0.780 milliseconds.
 
 These measurements use raw bytes without compression.
 
 These measurements do not use cached verification.
 
-Cold loading adds 0.393 milliseconds against `main`.
+Cold loading adds 0.438 milliseconds against `main`.
+
+Compilation offsets that cost and improves the combined path by 9.8 percent.
+
+The current core LMBC is 305,056 bytes.
+
+The current core LMAR is 305,178 bytes.
+
+LMAR adds 122 bytes and stores no second interface tree.
+
+The former duplicate form used 456,464 bytes.
 
 The current loader relocates the complete core into one flat executable module.
 
 Stage 5 removes that flattening step through the shared `CodeArena`.
 
-The warm workspace suite took 60.54 seconds on `main`.
+The warm workspace suite took 49.51 seconds on `main`.
 
-The same suite took 57.63 seconds on Stage 4.
+The Stage 4 workspace suite took 56.43 seconds.
 
-Stage 4 reduced the measured suite time by 4.8 percent.
+Stage 4 contains 1,684 tests.
+
+The measured `main` tree contains 1,638 tests.
+
+The absolute suite time increases by 14.0 percent.
+
+Each test executable builds one process-local core `LinkUnit` when required.
 
 The focused runtime gate used three pinned processes for each revision.
 
 | Operation | `main` | Stage 4 | Change |
 | --- | ---: | ---: | ---: |
-| Direct call | 31.7 ns | 31.4 ns | -0.9% |
-| Virtual call | 63.7 ns | 65.4 ns | +2.7% |
-| String interpolation | 217.1 ns | 204.6 ns | -5.8% |
-| Interface default | 233.7 ns | 254.7 ns | +9.0% |
-| Map hashable lookup | 213.3 ns | 215.3 ns | +0.9% |
-| String builder | 39.5 ns | 39.6 ns | +0.3% |
-| Text iteration | 75.5 ns | 75.8 ns | +0.4% |
-| Byte buffer | 41.3 ns | 42.8 ns | +3.6% |
-| Direct clock | 111.3 ns | 112.6 ns | +1.2% |
+| Direct call | 31.8 ns | 30.5 ns | -4.1% |
+| Virtual call | 64.0 ns | 65.8 ns | +2.8% |
+| List index | 44.4 ns | 43.6 ns | -1.8% |
+| String interpolation | 208.5 ns | 214.1 ns | +2.7% |
+| Interface default | 234.2 ns | 230.5 ns | -1.6% |
+| List hash | 844.0 ns | 827.5 ns | -2.0% |
+| List sort | 19,528.0 ns | 19,165.0 ns | -1.9% |
+| Map hashable lookup | 216.9 ns | 213.6 ns | -1.5% |
+| String builder | 39.9 ns | 42.0 ns | +5.3% |
+| Text iteration | 76.8 ns | 75.9 ns | -1.2% |
+| Large bytes decode | 911.6 ns | 940.2 ns | +3.1% |
+| Byte buffer | 42.5 ns | 44.8 ns | +5.4% |
+| Direct clock | 111.9 ns | 113.2 ns | +1.2% |
 
-The mean ratio across these operations increased by approximately 1.3 percent.
+The mean ratio across these operations increases by 0.5 percent.
 
-The interface-default row is the only clear outlier.
+The largest measured increase is 5.4 percent.
+
+Compiler-only surface fields follow the execution fields in decoded records.
+
+This layout keeps the execution record prefix stable.
 
 Stage 4 does not change the VM instruction path.
 

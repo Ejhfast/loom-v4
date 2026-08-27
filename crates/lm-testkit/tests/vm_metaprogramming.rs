@@ -2201,12 +2201,16 @@ fn complete_slot_artifact() -> Vec<u8> {
         .expect("the Int type exists") as u32;
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("slot-kinds.value"),
+        binding: "slot-kinds.value".to_string(),
+        late: true,
         contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
     module.slots.push(lm_bytecode::SlotSpec {
         key: lm_bytecode::ad_hoc_slot_key("slot-kinds.process"),
+        binding: "slot-kinds.process".to_string(),
+        late: true,
         contract_hash: [0; 32],
         contract: lm_bytecode::SlotContract::Process {
             message: int,

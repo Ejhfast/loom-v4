@@ -49,6 +49,7 @@ fn loop_module() -> Module {
         classes: vec![],
         funcs: vec![Func {
             name: "main".to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],

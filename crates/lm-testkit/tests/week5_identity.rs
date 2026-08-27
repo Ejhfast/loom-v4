@@ -202,6 +202,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
     for i in 0..CHAIN {
         funcs.push(Func {
             name: format!("f{i}"),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -215,6 +216,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
     }
     funcs.push(Func {
         name: "last".to_string(),
+        param_names: vec![],
         type_params: 0,
         effect_params: 0,
         params: vec![],

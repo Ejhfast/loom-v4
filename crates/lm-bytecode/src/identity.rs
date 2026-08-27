@@ -459,6 +459,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
         };
         match ty {
             BcType::Unit
+            | BcType::Never
             | BcType::Bool
             | BcType::Int
             | BcType::Float
@@ -1903,6 +1904,7 @@ impl<'a> Resolver<'a> {
         out.extend_from_slice(TAG_TYPE);
         match ty {
             BcType::Unit => out.push(0),
+            BcType::Never => out.push(32),
             BcType::Bool => out.push(1),
             BcType::Int => out.push(2),
             BcType::Float => out.push(31),
@@ -3705,6 +3707,7 @@ mod slot_tests {
     fn function(name: &str, value: i64) -> Func {
         Func {
             name: name.to_string(),
+            param_names: vec![],
             type_params: 0,
             effect_params: 0,
             params: vec![],
@@ -3731,6 +3734,8 @@ mod slot_tests {
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [9; 32],
+                binding: "slot".to_string(),
+                late: true,
                 contract_hash: [0; 32],
                 contract: SlotContract::Function(BcCallableContract {
                     type_params: 0,
@@ -3748,6 +3753,7 @@ mod slot_tests {
             funcs: vec![
                 Func {
                     name: "caller".to_string(),
+                    param_names: vec![],
                     type_params: 0,
                     effect_params: 0,
                     params: vec![],

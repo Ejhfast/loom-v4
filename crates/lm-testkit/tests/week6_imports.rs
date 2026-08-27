@@ -32,6 +32,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
         funcs: vec![
             Func {
                 name: "add".to_string(),
+                param_names: vec!["value".to_string()],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![2],
@@ -44,6 +45,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
             },
             Func {
                 name: "<entry>".to_string(),
+                param_names: vec![],
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
@@ -177,6 +179,9 @@ fn a_class_and_its_methods_share_the_import_state() {
         type_params: 0,
         kind: lm_bytecode::BcClassKind::Normal,
         fields: vec![],
+        field_defaults: vec![],
+        own_start: 0,
+        has_init: false,
         methods: vec![(0, 0)],
     });
     module.class_bounds.push(Vec::new());

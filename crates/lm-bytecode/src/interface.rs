@@ -474,6 +474,568 @@ pub fn build_interface_with_bundle(
     })
 }
 
+/// Derive one compiler interface from canonical module tables.
+pub fn derive_interface(
+    module: &Module,
+    identity: &ModuleIdentity,
+    module_path: &str,
+) -> Result<Interface, String> {
+    let bundle = lm_abi::standard_bundle();
+    derive_interface_with_bundle(module, identity, module_path, &bundle)
+}
+
+/// Derive one compiler interface under an immutable ABI bundle.
+pub fn derive_interface_with_bundle(
+    module: &Module,
+    identity: &ModuleIdentity,
+    module_path: &str,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Interface, String> {
+    let view = ModuleSurface { module };
+    let mut exports = Vec::with_capacity(module.exports.len());
+    for export in &module.exports {
+        let item = if export.kind.is_class() {
+            IfaceItem::Class(view.class(export.def, export.ctor)?)
+        } else if export.kind.is_interface() {
+            IfaceItem::Interface(view.interface(export.def)?)
+        } else {
+            IfaceItem::Func(view.function(export.def, false, None)?)
+        };
+        let def_hash = if export.kind.is_class() {
+            *identity
+                .class_hashes
+                .get(export.def as usize)
+                .ok_or_else(|| "an export names no class definition".to_string())?
+        } else if export.kind.is_interface() {
+            *identity
+                .interface_hashes
+                .get(export.def as usize)
+                .ok_or_else(|| "an export names no interface definition".to_string())?
+        } else {
+            *identity
+                .func_hashes
+                .get(export.def as usize)
+                .ok_or_else(|| "an export names no function definition".to_string())?
+        };
+        exports.push(ExportEntry {
+            kind: export.kind,
+            name: export.name.clone(),
+            iface_hash: interface_hash_with_bundle(bundle, export.kind, &export.name, &item),
+            def_hash,
+            item,
+        });
+    }
+    let entry_binding = crate::qualified_key(module_path, "<entry>");
+    let mut slots = Vec::new();
+    for slot in &module.slots {
+        if slot.binding.is_empty() || slot.binding == entry_binding {
+            continue;
+        }
+        let (kind, local) = match (&slot.contract, slot.initial) {
+            (crate::SlotContract::Function(_), Some(crate::SlotTarget::Function(function))) => (
+                IfaceSlotKind::Function,
+                module.func_import(function).is_none(),
+            ),
+            (crate::SlotContract::Method(_), Some(crate::SlotTarget::Function(function))) => (
+                IfaceSlotKind::Method,
+                module.func_import(function).is_none(),
+            ),
+            (crate::SlotContract::Class { .. }, Some(crate::SlotTarget::Class { class, .. })) => {
+                (IfaceSlotKind::Class, module.class_import(class).is_none())
+            }
+            _ => continue,
+        };
+        if local {
+            slots.push(IfaceSlotSpec {
+                binding: slot.binding.clone(),
+                contract_hash: slot.contract_hash,
+                key: slot.key,
+                kind,
+                late: slot.late,
+            });
+        }
+    }
+    slots.sort();
+    Ok(Interface {
+        abi_version: lm_abi::ABI_VERSION,
+        compiler_abi_version: COMPILER_ABI_VERSION,
+        bundle_digest: bundle.digest(),
+        module_path: module_path.to_string(),
+        semantic_hash: identity.semantic_hash,
+        exports,
+        slots,
+    })
+}
+
+struct ModuleSurface<'a> {
+    module: &'a Module,
+}
+
+impl ModuleSurface<'_> {
+    fn qual(&self, key: &str, name: &str) -> Result<QualName, String> {
+        let module = if key == name {
+            ""
+        } else {
+            key.strip_suffix(name)
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .ok_or_else(|| format!("definition `{name}` has an invalid qualified key"))?
+        };
+        let module = if module == crate::CORE_MODULE {
+            ""
+        } else {
+            module
+        };
+        Ok(QualName::new(module, name))
+    }
+
+    fn class_qual(&self, index: u32) -> Result<QualName, String> {
+        let class = self
+            .module
+            .classes
+            .get(index as usize)
+            .ok_or_else(|| "an interface type names no class".to_string())?;
+        self.qual(&class.key, &class.name)
+    }
+
+    fn interface_qual(&self, index: u32) -> Result<QualName, String> {
+        let interface = self
+            .module
+            .interfaces
+            .get(index as usize)
+            .ok_or_else(|| "an interface use names no interface".to_string())?;
+        self.qual(&interface.key, &interface.name)
+    }
+
+    fn ty(&self, index: u32, depth: u32) -> Result<IfaceType, String> {
+        if depth >= MAX_TYPE_DEPTH {
+            return Err("an interface type exceeds the depth limit".to_string());
+        }
+        let next = depth + 1;
+        let ty = self
+            .module
+            .types
+            .get(index as usize)
+            .ok_or_else(|| "an interface type index is outside the module".to_string())?;
+        Ok(match ty {
+            crate::BcType::Unit => IfaceType::Unit,
+            crate::BcType::Never => IfaceType::Never,
+            crate::BcType::Bool => IfaceType::Bool,
+            crate::BcType::Int => IfaceType::Int,
+            crate::BcType::Float => IfaceType::Float,
+            crate::BcType::Str => IfaceType::Str,
+            crate::BcType::Class(class) => IfaceType::Named {
+                class: self.class_qual(*class)?,
+                args: Vec::new(),
+            },
+            crate::BcType::Inst(class, args) => IfaceType::Named {
+                class: self.class_qual(*class)?,
+                args: args
+                    .iter()
+                    .map(|index| self.ty(*index, next))
+                    .collect::<Result<_, _>>()?,
+            },
+            crate::BcType::List(element) => IfaceType::List(Box::new(self.ty(*element, next)?)),
+            crate::BcType::Map(key, value) => IfaceType::Map(
+                Box::new(self.ty(*key, next)?),
+                Box::new(self.ty(*value, next)?),
+            ),
+            crate::BcType::Tuple(elements) => IfaceType::Tuple(
+                elements
+                    .iter()
+                    .map(|index| self.ty(*index, next))
+                    .collect::<Result<_, _>>()?,
+            ),
+            crate::BcType::Fn(params, muts, ret, row) => IfaceType::Fn {
+                params: params
+                    .iter()
+                    .map(|index| self.ty(*index, next))
+                    .collect::<Result<_, _>>()?,
+                param_muts: muts.clone(),
+                ret: Box::new(self.ty(*ret, next)?),
+                row: self.row(row)?,
+            },
+            crate::BcType::Callback(params, muts, ret, row) => IfaceType::Callback {
+                params: params
+                    .iter()
+                    .map(|index| self.ty(*index, next))
+                    .collect::<Result<_, _>>()?,
+                param_muts: muts.clone(),
+                ret: Box::new(self.ty(*ret, next)?),
+                row: self.row(row)?,
+            },
+            crate::BcType::Var(index) => IfaceType::Var(*index),
+            crate::BcType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let name = self
+                    .module
+                    .interfaces
+                    .get(*interface as usize)
+                    .and_then(|item| item.associated.get(*assoc as usize))
+                    .map(|item| item.name.clone())
+                    .ok_or_else(|| "a projection names no associated type".to_string())?;
+                IfaceType::Projection {
+                    base: Box::new(self.ty(*base, next)?),
+                    interface: self.interface_qual(*interface)?,
+                    assoc: name,
+                }
+            }
+            crate::BcType::Fault => IfaceType::Fault,
+            crate::BcType::Request => IfaceType::Request,
+            crate::BcType::PolicyTable => IfaceType::PolicyTable,
+            crate::BcType::Vm => IfaceType::Vm,
+            crate::BcType::Run(result) => IfaceType::Run(Box::new(self.ty(*result, next)?)),
+            crate::BcType::Wait(result) => IfaceType::Wait(Box::new(self.ty(*result, next)?)),
+            crate::BcType::PendingCall(args, reply) => IfaceType::PendingCall(
+                Box::new(self.ty(*args, next)?),
+                Box::new(self.ty(*reply, next)?),
+            ),
+            crate::BcType::Handle(message, result) => IfaceType::Handle(
+                Box::new(self.ty(*message, next)?),
+                Box::new(self.ty(*result, next)?),
+            ),
+            crate::BcType::Op(op, function) => {
+                IfaceType::Op(*op, Box::new(self.ty(*function, next)?))
+            }
+            crate::BcType::Digest => IfaceType::Digest,
+            crate::BcType::VmSnapshot => IfaceType::VmSnapshot,
+            crate::BcType::RunSnapshot(result) => {
+                IfaceType::RunSnapshot(Box::new(self.ty(*result, next)?))
+            }
+            crate::BcType::Bytes => IfaceType::Bytes,
+            crate::BcType::FileHandle => IfaceType::FileHandle,
+            crate::BcType::ResourceHandle => IfaceType::ResourceHandle,
+            crate::BcType::HostResource => IfaceType::HostResource,
+        })
+    }
+
+    fn row(&self, row: &[crate::BcRow]) -> Result<Vec<IfaceRow>, String> {
+        row.iter()
+            .map(|item| match item {
+                crate::BcRow::Op(index) => self
+                    .module
+                    .strings
+                    .get(*index as usize)
+                    .cloned()
+                    .map(IfaceRow::Op)
+                    .ok_or_else(|| "an interface row names no operation".to_string()),
+                crate::BcRow::Var(index) => Ok(IfaceRow::Var(*index)),
+            })
+            .collect()
+    }
+
+    fn application(
+        &self,
+        application: &crate::BcInterfaceUse,
+    ) -> Result<IfaceInterfaceUse, String> {
+        Ok(IfaceInterfaceUse {
+            interface: self.interface_qual(application.interface)?,
+            types: application
+                .types
+                .iter()
+                .map(|index| self.ty(*index, 0))
+                .collect::<Result<_, _>>()?,
+            rows: application
+                .rows
+                .iter()
+                .map(|row| self.row(row))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn bounds(
+        &self,
+        bounds: &[Vec<crate::BcInterfaceUse>],
+    ) -> Result<Vec<Vec<IfaceInterfaceUse>>, String> {
+        bounds
+            .iter()
+            .map(|items| items.iter().map(|item| self.application(item)).collect())
+            .collect()
+    }
+
+    fn function(
+        &self,
+        index: u32,
+        drop_self: bool,
+        ret: Option<IfaceType>,
+    ) -> Result<IfaceFn, String> {
+        let function = self
+            .module
+            .funcs
+            .get(index as usize)
+            .ok_or_else(|| "an interface names no function".to_string())?;
+        let start = usize::from(drop_self);
+        if function.params.len() < start || function.param_muts.len() != function.params.len() {
+            return Err("an interface function has an invalid parameter shape".to_string());
+        }
+        if !function.param_names.is_empty() && function.param_names.len() != function.params.len() {
+            return Err("an interface function has invalid parameter names".to_string());
+        }
+        let names = if function.param_names.is_empty() {
+            (start..function.params.len())
+                .map(|position| format!("arg{position}"))
+                .collect()
+        } else {
+            function.param_names[start..].to_vec()
+        };
+        Ok(IfaceFn {
+            type_params: function.type_params,
+            type_bounds: self.bounds(
+                self.module
+                    .func_bounds
+                    .get(index as usize)
+                    .ok_or_else(|| "an interface function has no bounds".to_string())?,
+            )?,
+            effect_params: function.effect_params,
+            params: function.params[start..]
+                .iter()
+                .map(|index| self.ty(*index, 0))
+                .collect::<Result<_, _>>()?,
+            param_muts: function.param_muts[start..].to_vec(),
+            param_names: names,
+            ret: match ret {
+                Some(ret) => ret,
+                None => self.ty(function.ret, 0)?,
+            },
+            row: self.row(&function.row)?,
+        })
+    }
+
+    fn conformance(&self, conformance: &crate::BcConformance) -> Result<IfaceConformance, String> {
+        Ok(IfaceConformance {
+            application: self.application(&conformance.application)?,
+            premises: conformance
+                .premises
+                .iter()
+                .map(|premise| {
+                    Ok(IfaceConformancePremise {
+                        param: premise.param,
+                        bounds: premise
+                            .bounds
+                            .iter()
+                            .map(|item| self.application(item))
+                            .collect::<Result<_, _>>()?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            associated: conformance
+                .associated
+                .iter()
+                .map(|index| self.ty(*index, 0))
+                .collect::<Result<_, _>>()?,
+            method_overrides: conformance.method_overrides.clone(),
+        })
+    }
+
+    fn class(&self, index: u32, ctor: u32) -> Result<IfaceClass, String> {
+        let class = self
+            .module
+            .classes
+            .get(index as usize)
+            .ok_or_else(|| "an interface export names no class".to_string())?;
+        if class.field_defaults.len() != class.fields.len()
+            || class.own_start as usize > class.fields.len()
+        {
+            return Err("an interface class has invalid field metadata".to_string());
+        }
+        let cases: Vec<(u32, &crate::BcClass)> = self
+            .module
+            .classes
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.kind == crate::BcClassKind::Case && candidate.parent == index
+            })
+            .map(|(position, candidate)| (position as u32, candidate))
+            .collect();
+        let kind = match class.kind {
+            crate::BcClassKind::Normal => IfaceClassKind::Normal,
+            crate::BcClassKind::Case => IfaceClassKind::EnumCase,
+            crate::BcClassKind::Abstract if cases.is_empty() => IfaceClassKind::Normal,
+            crate::BcClassKind::Abstract => IfaceClassKind::EnumParent,
+        };
+        let fields = class
+            .fields
+            .iter()
+            .zip(&class.field_defaults)
+            .map(|((name, ty), has_default)| {
+                Ok(IfaceField {
+                    name: name.clone(),
+                    ty: self.ty(*ty, 0)?,
+                    has_default: *has_default,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let methods = class
+            .methods
+            .iter()
+            .map(|(selector, function)| {
+                let name = self
+                    .module
+                    .selectors
+                    .get(*selector as usize)
+                    .cloned()
+                    .ok_or_else(|| "a class method names no selector".to_string())?;
+                let mut_self = self
+                    .module
+                    .funcs
+                    .get(*function as usize)
+                    .and_then(|item| item.param_muts.first())
+                    .copied()
+                    .ok_or_else(|| "a class method has no receiver".to_string())?;
+                Ok(IfaceMethod {
+                    name,
+                    mut_self,
+                    sig: self.function(*function, true, None)?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let init = if class.has_init {
+            if ctor == crate::NO_CTOR {
+                return Err("an initialized class has no constructor".to_string());
+            }
+            Some(self.function(ctor, false, Some(IfaceType::Unit))?)
+        } else {
+            None
+        };
+        let family = if class.kind == crate::BcClassKind::Case {
+            Some(self.class_qual(class.parent)?)
+        } else {
+            None
+        };
+        let arm_short = if let Some(parent) = family.as_ref() {
+            class
+                .name
+                .strip_prefix(&format!("{}.", parent.name))
+                .unwrap_or(&class.name)
+                .to_string()
+        } else {
+            String::new()
+        };
+        let arms = cases
+            .iter()
+            .map(|(_, case)| {
+                case.name
+                    .strip_prefix(&format!("{}.", class.name))
+                    .unwrap_or(&case.name)
+                    .to_string()
+            })
+            .collect();
+        Ok(IfaceClass {
+            kind,
+            is_final: class.is_final,
+            is_frozen: class.is_frozen,
+            type_params: class.type_params,
+            type_bounds: self.bounds(
+                self.module
+                    .class_bounds
+                    .get(index as usize)
+                    .ok_or_else(|| "an interface class has no bounds".to_string())?,
+            )?,
+            conformances: self
+                .module
+                .conformances
+                .iter()
+                .filter(|item| item.class == index)
+                .map(|item| self.conformance(item))
+                .collect::<Result<_, _>>()?,
+            parent: class
+                .parent()
+                .map(|parent| self.class_qual(parent))
+                .transpose()?,
+            fields,
+            own_start: class.own_start,
+            methods,
+            init,
+            arms,
+            arm_short,
+            family,
+        })
+    }
+
+    fn interface(&self, index: u32) -> Result<IfaceInterface, String> {
+        let interface = self
+            .module
+            .interfaces
+            .get(index as usize)
+            .ok_or_else(|| "an interface export names no interface".to_string())?;
+        Ok(IfaceInterface {
+            type_params: interface.type_params,
+            effect_params: interface.effect_params,
+            generic_is_effect: interface.generic_is_effect.clone(),
+            parents: interface
+                .parents
+                .iter()
+                .map(|item| self.application(item))
+                .collect::<Result<_, _>>()?,
+            type_bounds: self.bounds(&interface.type_bounds)?,
+            associated: interface
+                .associated
+                .iter()
+                .map(|item| {
+                    Ok(IfaceAssociated {
+                        name: item.name.clone(),
+                        bounds: item
+                            .bounds
+                            .iter()
+                            .map(|bound| self.application(bound))
+                            .collect::<Result<_, _>>()?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            methods: interface
+                .methods
+                .iter()
+                .map(|method| {
+                    if method.param_names.len() != method.params.len() {
+                        return Err("an interface method has invalid parameter names".to_string());
+                    }
+                    let name = self
+                        .module
+                        .selectors
+                        .get(method.selector as usize)
+                        .cloned()
+                        .ok_or_else(|| "an interface method names no selector".to_string())?;
+                    Ok(IfaceInterfaceMethod {
+                        default: (method.default != crate::NO_FUNC)
+                            .then(|| format!("$default.{}.{}", interface.name, name)),
+                        name,
+                        mut_self: method.mut_self,
+                        type_params: method.type_params,
+                        type_bounds: self.bounds(&method.type_bounds)?,
+                        effect_params: method.effect_params,
+                        premises: method
+                            .premises
+                            .iter()
+                            .map(|premise| {
+                                Ok(IfaceTypePremise {
+                                    subject: self.ty(premise.subject, 0)?,
+                                    bounds: premise
+                                        .bounds
+                                        .iter()
+                                        .map(|bound| self.application(bound))
+                                        .collect::<Result<_, _>>()?,
+                                })
+                            })
+                            .collect::<Result<_, String>>()?,
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| self.ty(*param, 0))
+                            .collect::<Result<_, _>>()?,
+                        param_muts: method.param_muts.clone(),
+                        param_names: method.param_names.clone(),
+                        ret: self.ty(method.ret, 0)?,
+                        row: self.row(&method.row)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
+}
+
 /// Validate one decoded interface against its verified source module.
 pub fn validate_interface(
     module: &Module,

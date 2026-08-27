@@ -4,7 +4,7 @@
 //! hashes. The step is pure: it reads no file and writes no file.
 
 use crate::env::FrozenCompileEnv;
-use lm_bytecode::interface::{IfaceItem, IfaceSlotKind, IfaceSlotSpec, Interface};
+use lm_bytecode::interface::{IfaceSlotKind, IfaceSlotSpec, Interface};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, Module};
 use lm_hir::hir::{
     HExpr, HExprKind, HForKind, HInterpPart, HStmt, HirClass, HirInterfaceUse, HirModule,
@@ -162,7 +162,7 @@ pub fn compile_module_with_options_and_bundle(
         },
     )
     .map_err(|d| d.render(source))?;
-    let (linkage, interface_slots) = select_linkage(path, &hir, env, options)?;
+    let (linkage, _interface_slots) = select_linkage(path, &hir, env, options)?;
     lm_hir::externalize_core(&mut hir, core.interface())
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
@@ -175,12 +175,9 @@ pub fn compile_module_with_options_and_bundle(
     let identity = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
         .map_err(|e| format!("error: `{path}`: {e}\n"))?;
     attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
-    let items: Vec<IfaceItem> = hir.exports.iter().map(|e| e.item.clone()).collect();
-    let mut interface = lm_bytecode::interface::build_interface_with_bundle(
-        &module, &identity, path, &items, bundle,
-    )
-    .map_err(|e| format!("error: `{path}`: {e}\n"))?;
-    interface.slots = interface_slots;
+    let interface =
+        lm_bytecode::interface::derive_interface_with_bundle(&module, &identity, path, bundle)
+            .map_err(|e| format!("error: `{path}`: {e}\n"))?;
     let interface_bytes = lm_bytecode::interface::encode_interface(&interface);
     let artifact = lm_bytecode::encode_with_bundle(&module, bundle);
     let container_hash = lm_bytecode::identity::container_hash(&artifact);
@@ -1331,6 +1328,8 @@ pub(crate) fn select_linkage(
                 linkage.functions.insert(
                     function,
                     LateCallable {
+                        binding: binding.clone(),
+                        late: spec.late,
                         key: spec.key,
                         contract_hash: spec.contract_hash,
                         kind: if spec.kind == IfaceSlotKind::Method {
@@ -1354,6 +1353,8 @@ pub(crate) fn select_linkage(
                 linkage.classes.insert(
                     class,
                     lm_hir::LateClass {
+                        binding: binding.clone(),
+                        late: spec.late,
                         key: spec.key,
                         abi: spec.contract_hash,
                     },

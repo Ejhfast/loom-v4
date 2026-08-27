@@ -8,7 +8,6 @@ pub mod check;
 mod checkfn;
 pub mod exhaust;
 pub mod hir;
-pub mod iface;
 pub mod import;
 pub mod lower;
 
@@ -37,13 +36,11 @@ pub fn dump_cfg(module: &lm_bytecode::Module) -> String {
 /// bytes are pinned by hash.
 pub fn core_image() -> lm_bytecode::Module {
     let bundle = lm_abi::standard_bundle();
-    core_image_with_bundle(bundle).0
+    core_image_with_bundle(bundle)
 }
 
 /// Compile the core provider under one ABI bundle.
-pub fn core_image_with_bundle(
-    bundle: std::sync::Arc<lm_abi::AbiBundle>,
-) -> (lm_bytecode::Module, Vec<lm_bytecode::interface::IfaceItem>) {
+pub fn core_image_with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> lm_bytecode::Module {
     let empty = lm_source::parse::parse("").expect("the empty module parses");
     let mut hir = check_module_with(
         &empty,
@@ -56,9 +53,8 @@ pub fn core_image_with_bundle(
     )
     .expect("the core image checks");
     let exports = std::mem::take(&mut hir.core_exports);
-    let items = exports.iter().map(|export| export.item.clone()).collect();
     hir.exports = exports;
-    (lower_module(&hir), items)
+    lower_module(&hir)
 }
 
 /// Replace checked core bodies with exact import declarations.

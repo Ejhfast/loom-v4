@@ -790,6 +790,7 @@ mod tests {
     fn function(row: Vec<BcRow>) -> Func {
         Func {
             name: "body".to_string(),
+            param_names: vec!["value".to_string()],
             type_params: 0,
             effect_params: 0,
             params: vec![TY_INT],
@@ -896,6 +897,9 @@ mod tests {
             type_params,
             kind: BcClassKind::Normal,
             fields: Vec::new(),
+            field_defaults: Vec::new(),
+            own_start: 0,
+            has_init: false,
             methods: Vec::new(),
         };
         let classes = vec![

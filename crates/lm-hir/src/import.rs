@@ -202,7 +202,6 @@ impl<'a> Materializer<'a> {
         let id = ctx.interfaces.len() as u32;
         self.interfaces.insert(key, id);
         ctx.interfaces.push(InterfaceInfo {
-            imported: true,
             origin: Some((module.to_string(), name.to_string())),
             name: name.to_string(),
             type_params: (0..interface.type_params)
@@ -631,6 +630,7 @@ impl<'a> Materializer<'a> {
                         effect_params: sig.effect_params.len() as u32,
                         params: sig.params.clone(),
                         param_muts: sig.param_muts.clone(),
+                        param_names: sig.param_names.clone(),
                         ret: sig.ret,
                         row: sig.row.clone(),
                         captures: vec![],
@@ -709,6 +709,7 @@ impl<'a> Materializer<'a> {
                     effect_params: sig.effect_params.len() as u32,
                     params: sig.params.clone(),
                     param_muts: sig.param_muts.clone(),
+                    param_names: sig.param_names.clone(),
                     ret: sig.ret,
                     row: sig.row.clone(),
                     captures: vec![],
@@ -743,6 +744,7 @@ impl<'a> Materializer<'a> {
                     effect_params: sig.effect_params.len() as u32,
                     params: sig.params.clone(),
                     param_muts: sig.param_muts.clone(),
+                    param_names: sig.param_names.clone(),
                     ret: sig.ret,
                     row: sig.row.clone(),
                     captures: vec![],

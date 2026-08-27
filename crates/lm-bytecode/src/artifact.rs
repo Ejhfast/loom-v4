@@ -1,6 +1,6 @@
 //! Semantic artifact identities and exact module dependencies.
 //!
-//! A `LinkUnit` contains one module, its interface, and exact dependencies.
+//! A `LinkUnit` contains one module and its exact dependencies.
 //! An `Artifact` contains one root unit and its embedded dependency units.
 
 use crate::identity::{module_identity_with_bundle, IdentityError, ModuleIdentity};
@@ -93,6 +93,46 @@ pub struct LinkUnit {
 }
 
 impl LinkUnit {
+    /// Create one unit from its canonical module.
+    pub fn from_module(
+        module_path: impl Into<String>,
+        module: Module,
+        dependencies: Vec<ArtifactDependency>,
+    ) -> Result<LinkUnit, ArtifactError> {
+        let bundle = lm_abi::standard_bundle();
+        LinkUnit::from_module_with_bundle(module_path, module, dependencies, &bundle)
+    }
+
+    /// Create one unit from its canonical module under one ABI bundle.
+    pub fn from_module_with_bundle(
+        module_path: impl Into<String>,
+        module: Module,
+        mut dependencies: Vec<ArtifactDependency>,
+        bundle: &lm_abi::AbiBundle,
+    ) -> Result<LinkUnit, ArtifactError> {
+        let module_path = module_path.into();
+        validate_module_path(&module_path)?;
+        canonicalize_dependencies(&mut dependencies)?;
+        let identity = module_identity_with_bundle(&module, bundle)?;
+        let interface = crate::interface::derive_interface_with_bundle(
+            &module,
+            &identity,
+            &module_path,
+            bundle,
+        )
+        .map_err(ArtifactError::InvalidModuleSurface)?;
+        let id = compute_artifact_id(&module_path, &identity, &interface, &dependencies)?;
+        Ok(LinkUnit {
+            id,
+            bundle_digest: bundle.digest(),
+            identity,
+            path: module_path,
+            module,
+            interface,
+            dependencies,
+        })
+    }
+
     /// Create one unit under the standard ABI bundle.
     pub fn new(
         module_path: impl Into<String>,
@@ -352,6 +392,7 @@ pub enum ArtifactError {
     DuplicateModulePath(String),
     InterfacePathMismatch { unit: String, interface: String },
     TooManyDependencies,
+    InvalidModuleSurface(String),
     Identity(IdentityError),
 }
 
@@ -372,6 +413,9 @@ impl fmt::Display for ArtifactError {
             }
             ArtifactError::TooManyDependencies => {
                 out.write_str("the artifact has too many direct dependencies")
+            }
+            ArtifactError::InvalidModuleSurface(error) => {
+                write!(out, "the module surface is invalid: {error}")
             }
             ArtifactError::Identity(error) => error.fmt(out),
         }
@@ -481,6 +525,7 @@ mod tests {
             classes: Vec::new(),
             funcs: vec![Func {
                 name: "entry".to_string(),
+                param_names: Vec::new(),
                 type_params: 0,
                 effect_params: 0,
                 params: Vec::new(),
@@ -705,6 +750,30 @@ mod tests {
     }
 
     #[test]
+    fn artifact_bytes_store_the_module_surface_once() {
+        let mut module = module(42, &[]);
+        module.funcs[0].params = vec![0];
+        module.funcs[0].param_muts = vec![false];
+        module.funcs[0].param_names = vec!["value".to_string()];
+        module.funcs[0].local_types = vec![0];
+        module.exports.push(crate::Export {
+            kind: crate::ExportKind::Function,
+            name: "entry".to_string(),
+            def: 0,
+            ctor: crate::NO_CTOR,
+        });
+        let unit = LinkUnit::from_module("test.main", module, Vec::new()).unwrap();
+        let module_bytes = crate::encode(unit.module());
+        let artifact = Artifact::new(unit.clone(), Vec::new()).unwrap();
+        let bytes = encode(&artifact).unwrap();
+        let expected =
+            codec::HEADER_LEN + 32 + 4 + unit.module_path().len() + 4 + 4 + module_bytes.len();
+        assert_eq!(bytes.len(), expected);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.root().interface(), unit.interface());
+    }
+
+    #[test]
     fn decoder_recomputes_stored_unit_identity() {
         let root = unit(42, &[]);
         let artifact = Artifact::new(root, Vec::new()).unwrap();
@@ -919,21 +988,6 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Err(ArtifactDecodeError::NonCanonicalDependencies)
-        );
-    }
-
-    #[test]
-    fn decoder_checks_interface_bytes_before_interface_decode() {
-        let root = unit(42, &[]);
-        let bytes = encode(&Artifact::new(root, Vec::new()).unwrap()).unwrap();
-        let bundle = lm_abi::standard_bundle();
-        let limits = ArtifactLimits {
-            max_interface_bytes: 0,
-            ..ArtifactLimits::default()
-        };
-        assert_eq!(
-            decode_with_bundle(&bytes, &bundle, limits),
-            Err(ArtifactDecodeError::Limit("interface byte"))
         );
     }
 

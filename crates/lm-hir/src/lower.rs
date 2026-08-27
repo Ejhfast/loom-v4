@@ -70,16 +70,20 @@ pub enum LateCallableKind {
 }
 
 /// One late callable selected before bytecode lowering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LateCallable {
+    pub binding: String,
+    pub late: bool,
     pub key: [u8; 32],
     pub contract_hash: [u8; 32],
     pub kind: LateCallableKind,
 }
 
 /// One published class binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LateClass {
+    pub binding: String,
+    pub late: bool,
     pub key: [u8; 32],
     pub abi: [u8; 32],
 }
@@ -202,11 +206,11 @@ impl<'m> ModLowerer<'m> {
     }
 
     /// Convert an interned checker type to a type-table index.
-    /// `Never` types occupy unreachable value positions only, so they
-    /// share the unit entry.
+    /// Convert one checked type to its canonical bytecode type.
     fn bc_ty(&mut self, id: TypeId) -> u32 {
         match self.store.get(id).clone() {
-            Type::Unit | Type::Never => self.intern_type(BcType::Unit),
+            Type::Unit => self.intern_type(BcType::Unit),
+            Type::Never => self.intern_type(BcType::Never),
             Type::Bool => self.intern_type(BcType::Bool),
             Type::Int => self.intern_type(BcType::Int),
             Type::Float => self.intern_type(BcType::Float),
@@ -447,6 +451,7 @@ pub fn lower_module_with_linkage(
                         .collect(),
                     params: method.params.iter().map(|item| m.bc_ty(*item)).collect(),
                     param_muts: method.param_muts.clone(),
+                    param_names: method.param_names.clone(),
                     ret: m.bc_ty(method.ret),
                     row: m.bc_row(&method.row),
                     default: method.default.unwrap_or(lm_bytecode::NO_FUNC),
@@ -530,6 +535,9 @@ pub fn lower_module_with_linkage(
                 .zip(class.field_tys.iter())
                 .map(|(name, ty)| (name.clone(), m.bc_ty(*ty)))
                 .collect(),
+            field_defaults: class.field_defaults.clone(),
+            own_start: class.own_start,
+            has_init: class.init.is_some(),
             methods: class
                 .methods
                 .iter()
@@ -622,6 +630,8 @@ pub fn lower_module_with_linkage(
             row: func.row.clone(),
         };
         module.slots.push(SlotSpec {
+            binding: selected.binding.clone(),
+            late: selected.late,
             key: selected.key,
             contract_hash: selected.contract_hash,
             contract: match selected.kind {
@@ -652,6 +662,8 @@ pub fn lower_module_with_linkage(
             _ => return Err(format!("late class {class} has a native representation")),
         }
         module.slots.push(SlotSpec {
+            binding: selected.binding.clone(),
+            late: selected.late,
             key: selected.key,
             contract_hash: selected.abi,
             contract: SlotContract::Class {
@@ -2982,6 +2994,7 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
             effect_params: func.effect_params,
             params: params.clone(),
             param_muts: func.param_muts.clone(),
+            param_names: func.param_names.clone(),
             ret,
             row,
             captures,
@@ -3011,6 +3024,7 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
         effect_params: func.effect_params,
         params,
         param_muts: func.param_muts.clone(),
+        param_names: func.param_names.clone(),
         ret,
         row,
         captures,
@@ -3031,6 +3045,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 effect_params: 0,
                 params: vec![],
                 param_muts: vec![],
+                param_names: vec![],
                 ret: m.intern_type(BcType::Unit),
                 row: vec![],
                 captures: vec![],
@@ -3044,6 +3059,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 type_params,
                 effect_params: 0,
                 param_muts: vec![false; params.len()],
+                param_names: vec![],
                 local_types: params.clone(),
                 params,
                 ret,
@@ -3070,6 +3086,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: params.clone(),
             param_muts: class.ctor_param_muts.clone(),
+            param_names: class.ctor_param_names.clone(),
             ret: self_bc,
             row,
             captures: vec![],
@@ -3086,6 +3103,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: m.intern_type(BcType::Unit),
             row: vec![],
             captures: vec![],
@@ -3130,6 +3148,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret,
             row: vec![],
             captures: vec![],
@@ -3144,6 +3163,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: m.intern_type(BcType::Unit),
             row: vec![],
             captures: vec![],
@@ -3170,6 +3190,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: params.clone(),
             param_muts: vec![false; arity as usize],
+            param_names: vec![],
             ret: tuple,
             row: vec![],
             captures: vec![],
@@ -3185,6 +3206,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: int,
             row: vec![],
             captures: vec![],
@@ -3200,6 +3222,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: float,
             row: vec![],
             captures: vec![],
@@ -3215,6 +3238,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: bool_ty,
             row: vec![],
             captures: vec![],
@@ -3231,6 +3255,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: string_ty,
             row: vec![],
             captures: vec![],
@@ -3247,6 +3272,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: substring_ty,
             row: vec![],
             captures: vec![],
@@ -3269,6 +3295,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: char_ty,
             row: vec![],
             captures: vec![],
@@ -3290,6 +3317,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: bytes_ty,
             row: vec![],
             captures: vec![],
@@ -3309,6 +3337,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: builder,
             row: vec![],
             captures: vec![],
@@ -3327,6 +3356,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: buffer,
             row: vec![],
             captures: vec![],
@@ -3346,6 +3376,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: list,
             row: vec![],
             captures: vec![],
@@ -3363,6 +3394,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: vec![],
             param_muts: vec![],
+            param_names: vec![],
             ret: map,
             row: vec![],
             captures: vec![],
@@ -3392,6 +3424,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: params.clone(),
             param_muts: class.ctor_param_muts.clone(),
+            param_names: class.ctor_param_names.clone(),
             ret: self_bc,
             row,
             captures: vec![],
@@ -3410,6 +3443,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             effect_params: 0,
             params: params.clone(),
             param_muts: class.ctor_param_muts.clone(),
+            param_names: class.ctor_param_names.clone(),
             ret: self_bc,
             row,
             captures: vec![],
@@ -3481,6 +3515,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         effect_params: 0,
         params,
         param_muts: class.ctor_param_muts.clone(),
+        param_names: class.ctor_param_names.clone(),
         ret: self_bc,
         row,
         captures: vec![],
@@ -3567,6 +3602,7 @@ fn lower_new_dispatch_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) 
         effect_params: 0,
         params: params.clone(),
         param_muts: class.ctor_param_muts.clone(),
+        param_names: class.ctor_param_names.clone(),
         ret,
         row: m.bc_row(&class.ctor_row),
         captures: vec![],
@@ -4196,6 +4232,7 @@ fn row_text(module: &Module, row: &[BcRow]) -> String {
 fn type_text(module: &Module, idx: u32) -> String {
     match &module.types[idx as usize] {
         BcType::Unit => "()".to_string(),
+        BcType::Never => "Never".to_string(),
         BcType::Bool => "Bool".to_string(),
         BcType::Int => "Int".to_string(),
         BcType::Float => "Float".to_string(),

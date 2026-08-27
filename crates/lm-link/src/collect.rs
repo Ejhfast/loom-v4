@@ -452,6 +452,7 @@ fn core_role_family_edges(
 fn type_edges(_module: &Module, offsets: Offsets, ty: &BcType, edges: &mut Vec<u32>) {
     match ty {
         BcType::Unit
+        | BcType::Never
         | BcType::Bool
         | BcType::Int
         | BcType::Float
@@ -1641,6 +1642,8 @@ fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget {
 
 fn reloc_slot(source: &SlotSpec, reloc: &Reloc) -> SlotSpec {
     SlotSpec {
+        binding: source.binding.clone(),
+        late: source.late,
         key: source.key,
         contract_hash: source.contract_hash,
         contract: reloc_slot_contract(&source.contract, reloc),
@@ -1672,6 +1675,9 @@ fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
             .iter()
             .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
             .collect(),
+        field_defaults: source.field_defaults.clone(),
+        own_start: source.own_start,
+        has_init: source.has_init,
         methods: source
             .methods
             .iter()
@@ -1737,6 +1743,7 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
                     .map(|ty| reloc.types[*ty as usize])
                     .collect(),
                 param_muts: method.param_muts.clone(),
+                param_names: method.param_names.clone(),
                 ret: reloc.types[method.ret as usize],
                 row: reloc_row(&method.row, &reloc.strings),
                 default: if method.default == NO_FUNC {
@@ -1785,6 +1792,7 @@ fn reloc_func(source: &Func, reloc: &Reloc) -> Func {
             .map(|ty| reloc.types[*ty as usize])
             .collect(),
         param_muts: source.param_muts.clone(),
+        param_names: source.param_names.clone(),
         ret: reloc.types[source.ret as usize],
         row: reloc_row(&source.row, &reloc.strings),
         captures: source
@@ -2068,6 +2076,7 @@ mod tests {
     fn unit_function(name: &str, blocks: Vec<Vec<Instr>>) -> Func {
         Func {
             name: name.to_string(),
+            param_names: Vec::new(),
             type_params: 0,
             effect_params: 0,
             params: Vec::new(),

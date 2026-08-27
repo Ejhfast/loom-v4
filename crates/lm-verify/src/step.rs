@@ -2802,7 +2802,8 @@ pub(crate) fn step(
                             // `Proc.Spawn`. This form takes no message,
                             // so `M` is the bottom type, which the
                             // bytecode encodes as `()`.
-                            let handle = ctx.intern(BcType::Handle(TY_UNIT, t));
+                            let never = ctx.intern(BcType::Never);
+                            let handle = ctx.intern(BcType::Handle(never, t));
                             push(state, handle)?;
                         }
                         lm_abi::OP_PROC_RUN_CLOSURE => {
@@ -2815,7 +2816,8 @@ pub(crate) fn step(
                                     "`Proc.RunClosure` needs a nullary closure".to_string(),
                                 ));
                             }
-                            let handle = ctx.intern(BcType::Handle(TY_UNIT, result));
+                            let never = ctx.intern(BcType::Never);
+                            let handle = ctx.intern(BcType::Handle(never, result));
                             push(state, handle)?;
                         }
                         lm_abi::OP_PROC_SPAWN => {
