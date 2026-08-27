@@ -420,54 +420,6 @@ impl CoreDemand {
         let mut demand = CoreDemand::default();
         demand.name("PartialEq");
         demand.name("Hashable");
-        // Native control checking uses these result types after receiver
-        // resolution. Keep this checker support surface independent of syntax.
-        for name in [
-            "Artifact",
-            "BranchError",
-            "Child",
-            "ClassBinding",
-            "ClassCode",
-            "ClassDef",
-            "Choice",
-            "CodeError",
-            "CodeLocation",
-            "DefinitionSource",
-            "DefinitionSpec",
-            "DriveEvent",
-            "DynValue",
-            "FunctionBinding",
-            "FunctionCode",
-            "FunctionDef",
-            "Instance",
-            "LinkEnv",
-            "Option",
-            "PipeEnd",
-            "PipeReader",
-            "PipeWriter",
-            "ProcError",
-            "RawMode",
-            "Recv",
-            "RestoreError",
-            "Result",
-            "SendResult",
-            "SignalStream",
-            "Slot",
-            "SlotChange",
-            "SlotSpec",
-            "SnapshotError",
-            "SocketAddress",
-            "TcpListener",
-            "TcpResource",
-            "TcpStream",
-            "TlsStream",
-            "UdpSocket",
-            "VerifiedModule",
-            "_bytes_from_hex",
-            "_result_fault_value",
-        ] {
-            demand.name(name);
-        }
         for use_decl in &module.uses {
             if use_decl.path.first().map(String::as_str) != Some("sys") {
                 continue;
@@ -817,6 +769,7 @@ impl CoreDemand {
                 args,
                 ..
             } => {
+                self.add_native_method_surface(name);
                 if name == "spawn" {
                     self.name("Proc");
                 }
@@ -890,6 +843,7 @@ impl CoreDemand {
                 }
             }
             ExprKind::Select { arms } => {
+                self.name("Choice");
                 for arm in arms {
                     self.add_expr(bundle, &arm.wait);
                     self.add_stmts(bundle, &arm.body);
@@ -1071,6 +1025,87 @@ impl CoreDemand {
             "DriveEvent",
         ] {
             self.name(name);
+        }
+    }
+
+    fn add_names(&mut self, names: &[&str]) {
+        for name in names {
+            self.name(name);
+        }
+    }
+
+    /// Add the types that a native method result can name.
+    fn add_native_method_surface(&mut self, method: &str) {
+        match method {
+            "from_hex" => self.add_names(&["Bytes", "_bytes_from_hex"]),
+            "value" => self.add_names(&["Result", "_result_fault_value"]),
+            "source" => self.add_names(&["CodeError", "Result", "DefinitionSource", "Option"]),
+            "definition" => self.add_names(&["CodeError", "Result", "DefinitionSpec"]),
+            "verify" => self.add_names(&["CodeError", "Result", "VerifiedModule"]),
+            "entry_code" | "function_code" => {
+                self.add_names(&["CodeError", "Result", "FunctionCode"])
+            }
+            "class_code" => self.add_names(&["CodeError", "Result", "ClassCode"]),
+            "dynamic_entry" => self.add_names(&["CodeError", "Result", "DynValue", "FunctionDef"]),
+            "entry" | "function" | "entry_binding" | "function_binding" => {
+                self.add_names(&["CodeError", "Result", "FunctionDef", "FunctionBinding"])
+            }
+            "class_def" | "class_binding" => {
+                self.add_names(&["CodeError", "Result", "ClassDef", "ClassBinding"])
+            }
+            "slot_for" | "slot_spec" | "slot" | "spec" | "instance" | "target" => {
+                self.add_names(&[
+                    "CodeError",
+                    "Result",
+                    "Slot",
+                    "SlotSpec",
+                    "Instance",
+                    "FunctionDef",
+                    "ClassDef",
+                ])
+            }
+            "to_bytes" | "snapshot" => self.add_names(&["SnapshotError", "Result"]),
+            "activate" => {
+                self.add_names(&["CodeError", "Result", "FunctionDef", "FunctionBinding"])
+            }
+            "install" => self.add_names(&[
+                "CodeError",
+                "Result",
+                "VerifiedModule",
+                "Instance",
+                "FunctionCode",
+                "FunctionDef",
+                "ClassCode",
+                "ClassDef",
+                "LinkEnv",
+            ]),
+            "replace" | "replace_function" | "replace_class" | "replace_value"
+            | "replace_process" | "change" | "change_function" | "change_class"
+            | "change_value" | "change_process" | "replace_all" => self.add_names(&[
+                "CodeError",
+                "Result",
+                "Slot",
+                "SlotChange",
+                "FunctionDef",
+                "FunctionBinding",
+                "ClassDef",
+                "ClassBinding",
+            ]),
+            "snapshot_wait" => self.add_names(&["SnapshotError", "ProcError", "Result"]),
+            "drive_for" => self.add_names(&["DriveEvent", "Option"]),
+            "run" | "done" => self.name("Result"),
+            "step" => self.name("StepEvent"),
+            "drive" | "drive_wait" => self.name("DriveEvent"),
+            "branch" | "branch_answer" => self.add_names(&["BranchError", "Result"]),
+            "restore" => self.add_names(&["RestoreError", "Result"]),
+            "resource" => self.add_names(&["TcpResource", "TlsStream"]),
+            "serve_tcp_stream" => self.name("SocketAddress"),
+            "choose" => self.name("Choice"),
+            "send" | "close" => self.name("SendResult"),
+            "pause" | "resume" => self.add_names(&["ProcError", "Result"]),
+            "site" => self.add_names(&["CodeLocation", "Option"]),
+            "trace" => self.name("CodeLocation"),
+            _ => {}
         }
     }
 }
