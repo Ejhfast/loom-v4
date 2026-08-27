@@ -547,6 +547,13 @@ pub fn lower_module_with_linkage(
         .collect();
     // The construction function of class `c` sits at `new_base + c`.
     let new_base = hir.funcs.len() as u32;
+    for import in &hir.imports {
+        if import.kind == lm_bytecode::ImportKind::Method {
+            if let Some((_, method)) = import.name.rsplit_once('.') {
+                m.selector(method);
+            }
+        }
+    }
     let imports = hir
         .imports
         .iter()

@@ -250,6 +250,107 @@ fn tuple_core_arity(name: &str) -> Option<usize> {
     (2..=16).contains(&arity).then_some(arity)
 }
 
+pub(crate) fn core_native_repr(name: &str) -> Option<NativeRepr> {
+    match name {
+        "Unit" => Some(NativeRepr::Unit),
+        "Int" => Some(NativeRepr::Int),
+        "Float" => Some(NativeRepr::Float),
+        "Bool" => Some(NativeRepr::Bool),
+        "Text" => Some(NativeRepr::Text),
+        "String" => Some(NativeRepr::String),
+        "Substring" => Some(NativeRepr::Substring),
+        "Char" => Some(NativeRepr::Char),
+        "Bytes" => Some(NativeRepr::Bytes),
+        "StringBuilder" => Some(NativeRepr::StringBuilder),
+        "ByteBuffer" => Some(NativeRepr::ByteBuffer),
+        "List" => Some(NativeRepr::List),
+        "Map" => Some(NativeRepr::Map),
+        "FileHandle" => Some(NativeRepr::FileHandle),
+        "TcpResource" => Some(NativeRepr::TcpResource),
+        "TcpStream" => Some(NativeRepr::TcpStream),
+        "TcpListener" => Some(NativeRepr::TcpListener),
+        "TlsStream" => Some(NativeRepr::TlsStream),
+        "UdpSocket" => Some(NativeRepr::UdpSocket),
+        "Artifact" => Some(NativeRepr::Artifact),
+        "VerifiedModule" => Some(NativeRepr::VerifiedModule),
+        "FunctionCode" => Some(NativeRepr::FunctionCode),
+        "ClassCode" => Some(NativeRepr::ClassCode),
+        "SlotSpec" => Some(NativeRepr::SlotSpec),
+        "Instance" => Some(NativeRepr::CodeInstance),
+        "Slot" => Some(NativeRepr::Slot),
+        "FunctionDef" => Some(NativeRepr::FunctionDef),
+        "ClassDef" => Some(NativeRepr::ClassDef),
+        "FunctionBinding" => Some(NativeRepr::FunctionBinding),
+        "ClassBinding" => Some(NativeRepr::ClassBinding),
+        "DynValue" => Some(NativeRepr::DynValue),
+        name => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
+    }
+}
+
+pub(crate) fn register_core_native_class(store: &mut TypeStore, name: &str, class: ClassId) {
+    let primitive = match name {
+        "Unit" => Some(lm_types::UNIT),
+        "Int" => Some(lm_types::INT),
+        "Float" => Some(lm_types::FLOAT),
+        "Bool" => Some(lm_types::BOOL),
+        "String" => Some(lm_types::STRING),
+        "Bytes" => Some(lm_types::BYTES),
+        "FileHandle" => Some(lm_types::FILE_HANDLE),
+        _ => None,
+    };
+    if let Some(ty) = primitive {
+        store.set_native_class(ty, class);
+    }
+    match name {
+        "List" => store.set_native_list_class(class),
+        "Map" => store.set_native_map_class(class),
+        name => {
+            if let Some(arity) = tuple_core_arity(name) {
+                store.set_native_tuple_class(arity, class);
+            }
+        }
+    }
+}
+
+pub(crate) fn class_self_type(
+    store: &mut TypeStore,
+    class: ClassId,
+    type_params: u32,
+    native_repr: Option<NativeRepr>,
+) -> TypeId {
+    match native_repr {
+        Some(NativeRepr::Unit) => lm_types::UNIT,
+        Some(NativeRepr::Int) => lm_types::INT,
+        Some(NativeRepr::Float) => lm_types::FLOAT,
+        Some(NativeRepr::Bool) => lm_types::BOOL,
+        Some(NativeRepr::String) => lm_types::STRING,
+        Some(NativeRepr::Bytes) => lm_types::BYTES,
+        Some(NativeRepr::FileHandle) => lm_types::FILE_HANDLE,
+        Some(NativeRepr::List) => {
+            let element = store.intern(Type::Var(0));
+            store.intern(Type::List(element))
+        }
+        Some(NativeRepr::Map) => {
+            let key = store.intern(Type::Var(0));
+            let value = store.intern(Type::Var(1));
+            store.intern(Type::Map(key, value))
+        }
+        Some(NativeRepr::Tuple(arity)) => {
+            let elements = (0..arity)
+                .map(|index| store.intern(Type::Var(index as u32)))
+                .collect();
+            store.intern(Type::Tuple(elements))
+        }
+        _ if type_params == 0 => store.intern(Type::Class(class)),
+        _ => {
+            let args = (0..type_params)
+                .map(|index| store.intern(Type::Var(index)))
+                .collect();
+            store.intern(Type::Inst(class, args))
+        }
+    }
+}
+
 /// Checker options. `prelude` controls only unqualified name
 /// resolution; the core image itself never depends on it.
 #[derive(Debug, Clone)]
@@ -268,6 +369,13 @@ pub struct CheckOptions {
     /// The interfaces this module may import. The build tool
     /// constructs it from the manifest and the dependency interfaces.
     pub imports: crate::import::ImportEnv,
+    /// The compiled core dependency used by an ordinary module.
+    /// Core-provider compilation leaves this value empty.
+    pub core: Option<std::sync::Arc<lm_bytecode::artifact::LinkUnit>>,
+    /// Trusted direct intrinsic summaries from the compiled core.
+    pub core_intrinsics: std::sync::Arc<[Option<lm_abi::IntrinsicSlot>]>,
+    /// Extra core definitions required by a lowering option.
+    pub core_roots: BTreeSet<String>,
 }
 
 impl Default for CheckOptions {
@@ -278,6 +386,9 @@ impl Default for CheckOptions {
             bundle: lm_abi::standard_bundle(),
             module_path: String::new(),
             imports: crate::import::ImportEnv::new(),
+            core: None,
+            core_intrinsics: std::sync::Arc::from([]),
+            core_roots: BTreeSet::new(),
         }
     }
 }
@@ -289,6 +400,679 @@ fn core_ast() -> &'static ast::Module {
         assert!(module.entry.is_empty(), "the core has no entry expression");
         module
     })
+}
+
+fn empty_ast() -> &'static ast::Module {
+    static EMPTY: OnceLock<ast::Module> = OnceLock::new();
+    EMPTY.get_or_init(|| lm_source::parse::parse("").expect("the empty module parses"))
+}
+
+#[derive(Default)]
+struct CoreDemand {
+    names: HashSet<String>,
+    methods: HashSet<String>,
+    sys_groups: HashMap<String, String>,
+    sys_members: HashMap<String, (String, String)>,
+}
+
+impl CoreDemand {
+    fn for_module(module: &ast::Module, bundle: &lm_abi::AbiBundle) -> CoreDemand {
+        let mut demand = CoreDemand::default();
+        demand.name("PartialEq");
+        demand.name("Hashable");
+        // Native control checking uses these result types after receiver
+        // resolution. Keep this checker support surface independent of syntax.
+        for name in [
+            "Artifact",
+            "BranchError",
+            "Child",
+            "ClassBinding",
+            "ClassCode",
+            "ClassDef",
+            "Choice",
+            "CodeError",
+            "CodeLocation",
+            "DefinitionSource",
+            "DefinitionSpec",
+            "DriveEvent",
+            "DynValue",
+            "FunctionBinding",
+            "FunctionCode",
+            "FunctionDef",
+            "Instance",
+            "LinkEnv",
+            "Option",
+            "PipeEnd",
+            "PipeReader",
+            "PipeWriter",
+            "ProcError",
+            "RawMode",
+            "Recv",
+            "RestoreError",
+            "Result",
+            "SendResult",
+            "SignalStream",
+            "Slot",
+            "SlotChange",
+            "SlotSpec",
+            "SnapshotError",
+            "SocketAddress",
+            "TcpListener",
+            "TcpResource",
+            "TcpStream",
+            "TlsStream",
+            "UdpSocket",
+            "VerifiedModule",
+            "_bytes_from_hex",
+            "_result_fault_value",
+        ] {
+            demand.name(name);
+        }
+        for use_decl in &module.uses {
+            if use_decl.path.first().map(String::as_str) != Some("sys") {
+                continue;
+            }
+            let Some(surface_group) = use_decl.path.get(1) else {
+                continue;
+            };
+            let Some(group) = bundle.surface_group(surface_group) else {
+                continue;
+            };
+            match use_decl.path.get(2) {
+                Some(member) => {
+                    demand
+                        .sys_members
+                        .insert(member.clone(), (group.to_string(), member.clone()));
+                    demand.add_sys_member(bundle, group, member);
+                }
+                None => {
+                    demand
+                        .sys_groups
+                        .insert(surface_group.clone(), group.to_string());
+                }
+            }
+        }
+        for interface in &module.interfaces {
+            demand.add_generics(&interface.generics);
+            for parent in &interface.parents {
+                demand.add_interface(parent);
+            }
+            for associated in &interface.associated {
+                demand.add_associated(associated);
+            }
+            for method in &interface.methods {
+                demand.add_generics(&method.generics);
+                demand.add_params(&method.params);
+                demand.add_optional_type(method.ret.as_ref());
+                for premise in &method.premises {
+                    demand.add_type(&premise.subject);
+                    for bound in &premise.bounds {
+                        demand.add_interface(bound);
+                    }
+                }
+                if let Some(body) = &method.body {
+                    demand.add_stmts(bundle, body);
+                }
+            }
+        }
+        for class in &module.classes {
+            demand.add_generics(&class.generics);
+            if let Some(parent) = &class.parent {
+                demand.name(&parent.name);
+                for argument in &parent.args {
+                    demand.add_type(argument);
+                }
+            }
+            for conformance in &class.interfaces {
+                demand.add_conformance(conformance);
+            }
+            for associated in &class.associated {
+                demand.add_associated(associated);
+            }
+            for field in &class.fields {
+                demand.add_type(&field.ty);
+                if let Some(default) = &field.default {
+                    demand.add_expr(bundle, default);
+                }
+            }
+            for method in &class.methods {
+                demand.add_method(bundle, method);
+            }
+        }
+        for enum_def in &module.enums {
+            demand.add_generics(&enum_def.generics);
+            for conformance in &enum_def.interfaces {
+                demand.add_conformance(conformance);
+            }
+            for associated in &enum_def.associated {
+                demand.add_associated(associated);
+            }
+            for arm in &enum_def.arms {
+                for (_, ty) in &arm.fields {
+                    demand.add_type(ty);
+                }
+            }
+            for method in &enum_def.methods {
+                demand.add_method(bundle, method);
+            }
+        }
+        for function in &module.funcs {
+            demand.add_generics(&function.generics);
+            demand.add_params(&function.params);
+            demand.add_optional_type(function.ret.as_ref());
+            demand.add_stmts(bundle, &function.body);
+        }
+        demand.add_stmts(bundle, &module.entry);
+        demand
+    }
+
+    fn name(&mut self, name: &str) {
+        self.names.insert(name.to_string());
+    }
+
+    fn method(&mut self, name: &str) {
+        self.methods.insert(name.to_string());
+    }
+
+    fn add_generics(&mut self, generics: &[ast::GenericParam]) {
+        for generic in generics {
+            for bound in &generic.bounds {
+                self.add_interface(bound);
+            }
+        }
+    }
+
+    fn add_interface(&mut self, interface: &ast::InterfaceRef) {
+        self.name(&interface.name);
+        for argument in &interface.type_args {
+            self.add_type(argument);
+        }
+    }
+
+    fn add_conformance(&mut self, conformance: &ast::ConformanceRef) {
+        self.add_interface(&conformance.application);
+        self.add_generics(&conformance.premises);
+    }
+
+    fn add_associated(&mut self, associated: &ast::AssociatedType) {
+        for bound in &associated.bounds {
+            self.add_interface(bound);
+        }
+        self.add_optional_type(associated.value.as_ref());
+    }
+
+    fn add_optional_type(&mut self, ty: Option<&ast::TypeExpr>) {
+        if let Some(ty) = ty {
+            self.add_type(ty);
+        }
+    }
+
+    fn add_type(&mut self, ty: &ast::TypeExpr) {
+        match &ty.kind {
+            ast::TypeExprKind::Name(name) => self.name(name),
+            ast::TypeExprKind::Unit => {}
+            ast::TypeExprKind::Apply(name, arguments) => {
+                self.name(name);
+                for argument in arguments {
+                    self.add_type(argument);
+                }
+            }
+            ast::TypeExprKind::ListShort(element) => {
+                self.name("List");
+                self.add_type(element);
+            }
+            ast::TypeExprKind::MapShort(key, value) => {
+                self.name("Map");
+                self.add_type(key);
+                self.add_type(value);
+            }
+            ast::TypeExprKind::Tuple(elements) => {
+                self.add_tuple(elements.len());
+                for element in elements {
+                    self.add_type(element);
+                }
+            }
+            ast::TypeExprKind::Fn(params, _, ret, _) => {
+                for param in params {
+                    self.add_type(param);
+                }
+                self.add_type(ret);
+            }
+        }
+    }
+
+    fn add_tuple(&mut self, arity: usize) {
+        if (2..=16).contains(&arity) {
+            self.name(&format!("Tuple{arity}"));
+        }
+    }
+
+    fn add_params(&mut self, params: &[ast::Param]) {
+        for param in params {
+            self.add_type(&param.ty);
+        }
+    }
+
+    fn add_method(&mut self, bundle: &lm_abi::AbiBundle, method: &ast::MethodDef) {
+        self.add_generics(&method.generics);
+        self.add_params(&method.params);
+        self.add_optional_type(method.ret.as_ref());
+        self.add_generics(&method.premises);
+        self.add_stmts(bundle, &method.body);
+    }
+
+    fn add_stmts(&mut self, bundle: &lm_abi::AbiBundle, statements: &[ast::Stmt]) {
+        for statement in statements {
+            match &statement.kind {
+                ast::StmtKind::Assign { ty, value, .. } => {
+                    self.add_optional_type(ty.as_ref());
+                    self.add_expr(bundle, value);
+                }
+                ast::StmtKind::AssignField { recv, value, .. } => {
+                    self.add_expr(bundle, recv);
+                    self.add_expr(bundle, value);
+                }
+                ast::StmtKind::While { cond, body } => {
+                    self.add_expr(bundle, cond);
+                    self.add_stmts(bundle, body);
+                }
+                ast::StmtKind::For { value, body, .. } => {
+                    self.name("Iterable");
+                    self.name("Iterator");
+                    self.name("Option");
+                    self.name("Char");
+                    self.add_expr(bundle, value);
+                    self.add_stmts(bundle, body);
+                }
+                ast::StmtKind::Return { value } => {
+                    if let Some(value) = value {
+                        self.add_expr(bundle, value);
+                    }
+                }
+                ast::StmtKind::Expr(expr) => self.add_expr(bundle, expr),
+                ast::StmtKind::Break | ast::StmtKind::Continue => {}
+            }
+        }
+    }
+
+    fn add_expr(&mut self, bundle: &lm_abi::AbiBundle, expression: &ast::Expr) {
+        use ast::ExprKind;
+        match &expression.kind {
+            ExprKind::Str(_) => self.name("String"),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Unit
+            | ExprKind::SelfRef => {}
+            ExprKind::Name(name) => {
+                self.name(name);
+                if let Some((group, member)) = self.sys_members.get(name).cloned() {
+                    self.add_sys_member(bundle, &group, &member);
+                }
+            }
+            ExprKind::Interp(parts) => {
+                for name in [
+                    "Display",
+                    "StringBuilder",
+                    "Text",
+                    "Char",
+                    "Int",
+                    "Float",
+                    "Bool",
+                    "String",
+                    "Substring",
+                    "Bytes",
+                ] {
+                    self.name(name);
+                }
+                for part in parts {
+                    if let ast::InterpPart::Expr(expr) = part {
+                        self.add_expr(bundle, expr);
+                    }
+                }
+            }
+            ExprKind::Not(value) => {
+                self.name("Bool");
+                self.method("__not__");
+                self.add_expr(bundle, value);
+            }
+            ExprKind::Neg(value) => {
+                self.method("__neg__");
+                self.add_expr(bundle, value);
+            }
+            ExprKind::Invert(value) => {
+                self.method("__invert__");
+                self.add_expr(bundle, value);
+            }
+            ExprKind::Binary { op, left, right } => {
+                let hook = match op {
+                    ast::BinOp::Add => "__add__",
+                    ast::BinOp::Sub => "__sub__",
+                    ast::BinOp::Mul => "__mul__",
+                    ast::BinOp::Div => "__div__",
+                    ast::BinOp::Rem => "__rem__",
+                    ast::BinOp::Eq => "__eq__",
+                    ast::BinOp::Ne => "__ne__",
+                    ast::BinOp::Lt => "__lt__",
+                    ast::BinOp::Le => "__le__",
+                    ast::BinOp::Gt => "__gt__",
+                    ast::BinOp::Ge => "__ge__",
+                    ast::BinOp::BitAnd => "__and__",
+                    ast::BinOp::BitOr => "__or__",
+                    ast::BinOp::BitXor => "__xor__",
+                    ast::BinOp::Shl => "__shl__",
+                    ast::BinOp::Shr => "__shr__",
+                    ast::BinOp::Ushr => "__ushr__",
+                };
+                self.method(hook);
+                self.add_expr(bundle, left);
+                self.add_expr(bundle, right);
+            }
+            ExprKind::And(left, right) | ExprKind::Or(left, right) => {
+                self.add_expr(bundle, left);
+                self.add_expr(bundle, right);
+            }
+            ExprKind::Is { value, ty } | ExprKind::Cast { value, ty } => {
+                self.add_expr(bundle, value);
+                self.add_type(ty);
+            }
+            ExprKind::Call {
+                name,
+                type_args,
+                args,
+                ..
+            } => {
+                self.name(name);
+                if name == "codeof" {
+                    self.name("FunctionCode");
+                    self.name("ClassCode");
+                }
+                if let Some((group, member)) = self.sys_members.get(name).cloned() {
+                    self.add_sys_member(bundle, &group, &member);
+                }
+                for ty in type_args {
+                    self.add_type(ty);
+                }
+                for argument in args {
+                    self.add_expr(bundle, argument);
+                }
+            }
+            ExprKind::CallExpr { callee, args } => {
+                self.add_expr(bundle, callee);
+                for argument in args {
+                    self.add_expr(bundle, argument);
+                }
+            }
+            ExprKind::Field { recv, name, .. } => {
+                if let Some(group) = self.sys_group(recv) {
+                    self.add_sys_member(bundle, &group, name);
+                }
+                self.add_expr(bundle, recv);
+            }
+            ExprKind::MethodCall {
+                recv,
+                name,
+                type_args,
+                args,
+                ..
+            } => {
+                if name == "spawn" {
+                    self.name("Proc");
+                }
+                if let Some(group) = self.sys_group(recv) {
+                    self.add_sys_member(bundle, &group, name);
+                } else {
+                    self.method(name);
+                }
+                for ty in type_args {
+                    self.add_type(ty);
+                }
+                self.add_expr(bundle, recv);
+                for argument in args {
+                    self.add_expr(bundle, argument);
+                }
+            }
+            ExprKind::SuperCall { name, args, .. } => {
+                self.method(name);
+                for argument in args {
+                    self.add_expr(bundle, argument);
+                }
+            }
+            ExprKind::Index { recv, index } => {
+                self.add_expr(bundle, recv);
+                self.add_expr(bundle, index);
+            }
+            ExprKind::Propagate(value) => {
+                self.name("Result");
+                self.add_expr(bundle, value);
+            }
+            ExprKind::TupleLit(elements) => {
+                self.add_tuple(elements.len());
+                for element in elements {
+                    self.add_expr(bundle, element);
+                }
+            }
+            ExprKind::ListLit(elements) => {
+                self.name("List");
+                for element in elements {
+                    self.add_expr(bundle, element);
+                }
+            }
+            ExprKind::MapLit(entries) => {
+                self.name("Map");
+                for (key, value) in entries {
+                    self.add_expr(bundle, key);
+                    self.add_expr(bundle, value);
+                }
+            }
+            ExprKind::Closure {
+                params, ret, body, ..
+            } => {
+                self.add_params(params);
+                self.add_optional_type(ret.as_ref());
+                self.add_stmts(bundle, body);
+            }
+            ExprKind::If { arms, else_body } => {
+                for (condition, body) in arms {
+                    self.add_expr(bundle, condition);
+                    self.add_stmts(bundle, body);
+                }
+                if let Some(body) = else_body {
+                    self.add_stmts(bundle, body);
+                }
+            }
+            ExprKind::Case { scrut, arms } => {
+                self.add_expr(bundle, scrut);
+                for arm in arms {
+                    self.add_pattern(bundle, &arm.pattern);
+                    self.add_stmts(bundle, &arm.body);
+                }
+            }
+            ExprKind::Select { arms } => {
+                for arm in arms {
+                    self.add_expr(bundle, &arm.wait);
+                    self.add_stmts(bundle, &arm.body);
+                }
+            }
+            ExprKind::Labeled { value, .. } => self.add_expr(bundle, value),
+        }
+    }
+
+    fn add_pattern(&mut self, bundle: &lm_abi::AbiBundle, pattern: &ast::Pattern) {
+        match &pattern.kind {
+            ast::PatternKind::Name(name) => self.name(name),
+            ast::PatternKind::Ctor {
+                qualifier,
+                name,
+                args,
+                ..
+            } => {
+                if let Some(qualifier) = qualifier {
+                    self.name(qualifier);
+                    if let Some(group) = bundle
+                        .group_by_name(qualifier)
+                        .and_then(|slot| bundle.group_name(slot))
+                    {
+                        self.add_sys_member(bundle, group, name);
+                    }
+                }
+                self.name(name);
+                if name == "Call" {
+                    self.name("Option");
+                }
+                for argument in args {
+                    self.add_pattern(bundle, argument);
+                }
+            }
+            ast::PatternKind::Tuple(elements) => {
+                self.add_tuple(elements.len());
+                for element in elements {
+                    self.add_pattern(bundle, element);
+                }
+            }
+            ast::PatternKind::Wildcard
+            | ast::PatternKind::Int(_)
+            | ast::PatternKind::Bool(_)
+            | ast::PatternKind::Str(_) => {}
+        }
+    }
+
+    fn sys_group(&self, expression: &ast::Expr) -> Option<String> {
+        match &expression.kind {
+            ast::ExprKind::Field { recv, name, .. } if matches!(recv.kind, ast::ExprKind::Name(ref root) if root == "sys") => {
+                self.sys_groups
+                    .get(name)
+                    .cloned()
+                    .or_else(|| Some(camel_member(name)))
+            }
+            ast::ExprKind::Name(name) => self.sys_groups.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    fn add_sys_member(&mut self, bundle: &lm_abi::AbiBundle, group: &str, member: &str) {
+        match (group, member) {
+            ("Vm", "Vm") => self.add_vm_surface(),
+            ("Vm", "artifact") => self.name("Artifact"),
+            ("Vm", "snapshot_self" | "load_snapshot") => {
+                self.name("Result");
+                self.name("SnapshotError");
+            }
+            ("Vm", "restore_vm") => {
+                self.name("Result");
+                self.name("RestoreError");
+            }
+            ("Proc", "recv" | "recv_wait") => {
+                self.name("Proc");
+                self.name("Recv");
+            }
+            ("Proc", "run") => self.add_proc_surface(),
+            _ => {}
+        }
+        let fixed = if member
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
+        {
+            member.to_string()
+        } else {
+            camel_member(member)
+        };
+        let Some(operation) = bundle.fixed_member(group, &fixed) else {
+            return;
+        };
+        let Some(operation) = bundle.op(operation) else {
+            return;
+        };
+        for ty in operation.params.iter().chain([&operation.reply]) {
+            self.add_abi_type(*ty);
+        }
+    }
+
+    fn add_abi_type(&mut self, ty: lm_abi::AbiType) {
+        match ty {
+            lm_abi::AbiType::Core(core) => self.name(core.text()),
+            lm_abi::AbiType::Native(native) => self.name(native.text()),
+            lm_abi::AbiType::List(element) => {
+                self.name("List");
+                self.add_abi_type(*element);
+            }
+            lm_abi::AbiType::Map(key, value) => {
+                self.name("Map");
+                self.add_abi_type(*key);
+                self.add_abi_type(*value);
+            }
+            lm_abi::AbiType::Tuple(elements) => {
+                self.add_tuple(elements.len());
+                for element in elements {
+                    self.add_abi_type(*element);
+                }
+            }
+            lm_abi::AbiType::Apply(constructor, arguments) => {
+                self.name(constructor.text());
+                for argument in arguments {
+                    self.add_abi_type(*argument);
+                }
+            }
+            lm_abi::AbiType::Primitive(_)
+            | lm_abi::AbiType::Var(_)
+            | lm_abi::AbiType::Resource(_) => {}
+        }
+    }
+
+    fn add_vm_surface(&mut self) {
+        for name in [
+            "Artifact",
+            "VerifiedModule",
+            "FunctionCode",
+            "ClassCode",
+            "SlotSpec",
+            "Instance",
+            "Slot",
+            "FunctionDef",
+            "ClassDef",
+            "FunctionBinding",
+            "ClassBinding",
+            "DynValue",
+            "CodeError",
+            "DefinitionSource",
+            "DefinitionSpec",
+            "LinkEnv",
+            "SlotChange",
+            "SnapshotError",
+            "RestoreError",
+            "BranchError",
+            "StepEvent",
+            "DriveEvent",
+            "Choice",
+            "SendResult",
+            "ProcError",
+            "CodeLocation",
+            "Result",
+            "Option",
+            "Recv",
+            "TcpResource",
+            "TlsStream",
+            "SocketAddress",
+        ] {
+            self.name(name);
+        }
+    }
+
+    fn add_proc_surface(&mut self) {
+        for name in [
+            "Recv",
+            "SendResult",
+            "ProcError",
+            "SnapshotError",
+            "Result",
+            "Option",
+            "DriveEvent",
+        ] {
+            self.name(name);
+        }
+    }
 }
 
 /// One callable signature. Methods include `self` as parameter zero.
@@ -2397,7 +3181,32 @@ pub fn check_module_with(
             Span::new(0, 0),
         ));
     }
-    let core = core_ast();
+    let compiled_core = if options.build_core_provider {
+        None
+    } else {
+        options.core.as_deref()
+    };
+    if let Some(core) = compiled_core {
+        if core.module_path() != lm_bytecode::CORE_MODULE {
+            return Err(Diagnostic::new(
+                "E0290",
+                "the implicit core dependency has another module path",
+                Span::new(0, 0),
+            ));
+        }
+        if core.interface().bundle_digest != options.bundle.digest() {
+            return Err(Diagnostic::new(
+                "E0290",
+                "the implicit core dependency uses another ABI bundle",
+                Span::new(0, 0),
+            ));
+        }
+    }
+    let core = if compiled_core.is_some() {
+        empty_ast()
+    } else {
+        core_ast()
+    };
     let class_count = |module: &ast::Module| {
         module.classes.len()
             + module
@@ -2426,7 +3235,10 @@ pub fn check_module_with(
             .filter(|method| method.body.is_some())
             .count()
     };
-    let total_classes = class_count(core) + class_count(module);
+    let compiled_core_exports = compiled_core
+        .map(|unit| unit.interface().exports.len())
+        .unwrap_or(0);
+    let total_classes = class_count(core) + class_count(module) + compiled_core_exports;
     let total_funcs = core.funcs.len()
         + module.funcs.len()
         + method_count(core)
@@ -2442,14 +3254,18 @@ pub fn check_module_with(
         store,
         classes: Vec::new(),
         user_types: HashMap::with_capacity(module.classes.len() + module.enums.len()),
-        core_types: HashMap::with_capacity(core.classes.len() + core.enums.len()),
-        interfaces: Vec::with_capacity(core.interfaces.len() + module.interfaces.len()),
+        core_types: HashMap::with_capacity(
+            core.classes.len() + core.enums.len() + compiled_core_exports,
+        ),
+        interfaces: Vec::with_capacity(
+            core.interfaces.len() + module.interfaces.len() + compiled_core_exports,
+        ),
         user_interfaces: HashMap::with_capacity(module.interfaces.len()),
-        core_interfaces: HashMap::with_capacity(core.interfaces.len()),
+        core_interfaces: HashMap::with_capacity(core.interfaces.len() + compiled_core_exports),
         interface_defaults: HashMap::new(),
         prelude: options.prelude,
         func_index: HashMap::with_capacity(module.funcs.len()),
-        core_func_index: HashMap::with_capacity(core.funcs.len()),
+        core_func_index: HashMap::with_capacity(core.funcs.len() + compiled_core_exports),
         sigs: Vec::with_capacity(total_funcs),
         funcs: Vec::with_capacity(total_funcs),
         reified_functions: BTreeSet::new(),
@@ -2477,11 +3293,33 @@ pub fn check_module_with(
     // class index. Every later table reads that order: the verifier,
     // the dispatch builder, and the linker all require a parent to
     // precede its child.
-    register_interface_names(&mut ctx, core, true).expect("the core interfaces register");
+    let mut core_imports = crate::import::ImportEnv::new();
+    if let Some(unit) = compiled_core {
+        core_imports.modules.insert(
+            lm_bytecode::CORE_MODULE.to_string(),
+            unit.interface().clone(),
+        );
+    }
+    let mut core_materializer = crate::import::Materializer::new_core(&core_imports);
+    if let Some(unit) = compiled_core {
+        let mut demand = CoreDemand::for_module(module, &options.bundle);
+        demand.names.extend(options.core_roots.iter().cloned());
+        crate::import::add_used_core_names(&options.imports, &module.uses, &mut demand.names);
+        core_materializer.reserve_unit(
+            &mut ctx,
+            unit,
+            &options.core_intrinsics,
+            &demand.names,
+            &demand.methods,
+            Span::new(0, 0),
+        )?;
+    } else {
+        register_interface_names(&mut ctx, core, true).expect("the core interfaces register");
+        register_type_names(&mut ctx, core, true).expect("the core type names register");
+    }
     ctx.user_interface_start = ctx.interfaces.len() as u32;
     register_interface_names(&mut ctx, module, false)?;
     ctx.import_interface_start = ctx.interfaces.len() as u32;
-    register_type_names(&mut ctx, core, true).expect("the core type names register");
     ctx.user_start = ctx.store.class_count() as u32;
     register_type_names(&mut ctx, module, false)?;
     ctx.import_start = ctx.store.class_count() as u32;
@@ -2495,19 +3333,27 @@ pub fn check_module_with(
         .first()
         .map(|use_decl| use_decl.span)
         .unwrap_or(Span::new(0, 0));
-    link_class_parents(&mut ctx, core, true).expect("the core class parents link");
+    if compiled_core.is_none() {
+        link_class_parents(&mut ctx, core, true).expect("the core class parents link");
+    }
     link_class_parents(&mut ctx, module, false)?;
-    resolve_all_interfaces(&mut ctx, core, true).map_err(core_defect)?;
+    if compiled_core.is_some() {
+        core_materializer.finish_interfaces(&mut ctx, Span::new(0, 0))?;
+    } else {
+        resolve_all_interfaces(&mut ctx, core, true).map_err(core_defect)?;
+    }
     materializer.finish_interfaces(&mut ctx, import_span)?;
     resolve_all_interfaces(&mut ctx, module, false)?;
     index_interface_defaults(&mut ctx);
-    let option_class = ctx.core_types["Option"];
+    let option_class = ctx.core_types.get("Option").copied().unwrap_or(u32::MAX);
+    let some_class = option_class.saturating_add(1);
+    let none_class = option_class.saturating_add(2);
     let partial_eq_interface = ctx.core_interfaces["PartialEq"];
     let hashable_interface = ctx.core_interfaces["Hashable"];
     ctx.core = CoreIds {
         option_class,
-        some_class: option_class + 1,
-        none_class: option_class + 2,
+        some_class,
+        none_class,
         partial_eq_interface,
         partial_eq_method: ctx.interfaces[partial_eq_interface as usize]
             .methods
@@ -2599,16 +3445,29 @@ pub fn check_module_with(
     // fixed every index, so a later pass may fill the entries in any
     // order. The core resolves first, because a user class may name a
     // core class as its parent.
-    ctx.classes = (0..ctx.import_start).map(ClassInfo::placeholder).collect();
-    // Pass 2b: resolve core classes and enums.
-    resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
+    ctx.classes = (0..ctx.store.class_count() as u32)
+        .map(ClassInfo::placeholder)
+        .collect();
+    // Pass 2b: fill dependency declarations before local classes.
+    // A local class can inherit one dependency class.
+    let core_fields = if compiled_core.is_some() {
+        core_materializer.finish(&mut ctx, Span::new(0, 0))?
+    } else {
+        resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
+        Vec::new()
+    };
+    let import_fields = materializer.finish(&mut ctx, import_span)?;
     // Pass 2c: resolve user classes and enums in class-index order.
     resolve_all_classes(&mut ctx, module, false)?;
-    check_frozen_classes(&ctx, core, true).map_err(core_defect)?;
+    if compiled_core.is_none() {
+        check_frozen_classes(&ctx, core, true).map_err(core_defect)?;
+    }
     check_frozen_classes(&ctx, module, false)?;
     let self_dependent_interfaces = interface_self_dependencies(&ctx);
-    check_all_conformances(&mut ctx, core, true, &self_dependent_interfaces)
-        .map_err(core_defect)?;
+    if compiled_core.is_none() {
+        check_all_conformances(&mut ctx, core, true, &self_dependent_interfaces)
+            .map_err(core_defect)?;
+    }
     check_all_conformances(&mut ctx, module, false, &self_dependent_interfaces)?;
     // Pass 2d: check every mailbox message type. The walk reads the
     // declared fields, so it runs after every class resolves.
@@ -2626,25 +3485,21 @@ pub fn check_module_with(
         ret: UNIT,
         row: vec![],
     });
-    // Import phase B: fill the imported declarations. The class table
-    // holds the user and the core classes now, so an imported
-    // signature may name any of them. Phase B runs before any body
-    // and before any field default, because both may name an
-    // imported class.
-    let import_fields = materializer.finish(&mut ctx, import_span)?;
     check_deferred_map_keys(&mut ctx)?;
     // Pass 3: check field defaults. The table is index addressed, like
     // the class table.
     let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> =
-        vec![Vec::new(); ctx.import_start as usize];
+        vec![Vec::new(); ctx.classes.len()];
     check_defaults(&mut ctx, module, false, &mut own_defaults)?;
-    check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
+    if compiled_core.is_none() {
+        check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
+    }
     // An imported declaration carries no default expression: the
     // provider construction function evaluates its own defaults. The
     // entries follow the user and the core classes, so the table
     // stays aligned with the class indices.
-    for count in import_fields {
-        own_defaults.push(vec![(None, Vec::new()); count]);
+    for (class, count) in core_fields.into_iter().chain(import_fields) {
+        own_defaults[class as usize] = vec![(None, Vec::new()); count];
     }
     // Pass 4: check top-level function bodies.
     for (idx, func) in module.funcs.iter().enumerate() {
@@ -3934,28 +4789,7 @@ fn register_type_names(
             class.is_final,
         )?;
         if is_core {
-            let primitive = match class.name.as_str() {
-                "Unit" => Some(lm_types::UNIT),
-                "Int" => Some(lm_types::INT),
-                "Float" => Some(lm_types::FLOAT),
-                "Bool" => Some(lm_types::BOOL),
-                "String" => Some(lm_types::STRING),
-                "Bytes" => Some(lm_types::BYTES),
-                "FileHandle" => Some(lm_types::FILE_HANDLE),
-                _ => None,
-            };
-            if let Some(ty) = primitive {
-                ctx.store.set_native_class(ty, ClassId(idx));
-            }
-            match class.name.as_str() {
-                "List" => ctx.store.set_native_list_class(ClassId(idx)),
-                "Map" => ctx.store.set_native_map_class(ClassId(idx)),
-                name => {
-                    if let Some(arity) = tuple_core_arity(name) {
-                        ctx.store.set_native_tuple_class(arity, ClassId(idx));
-                    }
-                }
-            }
+            register_core_native_class(&mut ctx.store, &class.name, ClassId(idx));
         }
     }
     for enum_def in &module.enums {
@@ -4940,41 +5774,7 @@ fn resolve_class(
     // and it recorded the link in the type store.
     let parent = ctx.store.class_meta(ClassId(idx)).parent.map(|p| p.0);
     let (type_names, _) = split_generics(&class.generics);
-    let native_repr = match (is_core, class.name.as_str()) {
-        (true, "Unit") => Some(NativeRepr::Unit),
-        (true, "Int") => Some(NativeRepr::Int),
-        (true, "Float") => Some(NativeRepr::Float),
-        (true, "Bool") => Some(NativeRepr::Bool),
-        (true, "Text") => Some(NativeRepr::Text),
-        (true, "String") => Some(NativeRepr::String),
-        (true, "Substring") => Some(NativeRepr::Substring),
-        (true, "Char") => Some(NativeRepr::Char),
-        (true, "Bytes") => Some(NativeRepr::Bytes),
-        (true, "StringBuilder") => Some(NativeRepr::StringBuilder),
-        (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
-        (true, "List") => Some(NativeRepr::List),
-        (true, "Map") => Some(NativeRepr::Map),
-        (true, "FileHandle") => Some(NativeRepr::FileHandle),
-        (true, "TcpResource") => Some(NativeRepr::TcpResource),
-        (true, "TcpStream") => Some(NativeRepr::TcpStream),
-        (true, "TcpListener") => Some(NativeRepr::TcpListener),
-        (true, "TlsStream") => Some(NativeRepr::TlsStream),
-        (true, "UdpSocket") => Some(NativeRepr::UdpSocket),
-        (true, "Artifact") => Some(NativeRepr::Artifact),
-        (true, "VerifiedModule") => Some(NativeRepr::VerifiedModule),
-        (true, "FunctionCode") => Some(NativeRepr::FunctionCode),
-        (true, "ClassCode") => Some(NativeRepr::ClassCode),
-        (true, "SlotSpec") => Some(NativeRepr::SlotSpec),
-        (true, "Instance") => Some(NativeRepr::CodeInstance),
-        (true, "Slot") => Some(NativeRepr::Slot),
-        (true, "FunctionDef") => Some(NativeRepr::FunctionDef),
-        (true, "ClassDef") => Some(NativeRepr::ClassDef),
-        (true, "FunctionBinding") => Some(NativeRepr::FunctionBinding),
-        (true, "ClassBinding") => Some(NativeRepr::ClassBinding),
-        (true, "DynValue") => Some(NativeRepr::DynValue),
-        (true, name) => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
-        _ => None,
-    };
+    let native_repr = is_core.then(|| core_native_repr(&class.name)).flatten();
     let text_parent = ctx.core_types.get("Text").copied();
     let tcp_parent = ctx.core_types.get("TcpResource").copied();
     let valid_native_layout = match native_repr {
@@ -5015,65 +5815,12 @@ fn resolve_class(
             class.span,
         ));
     }
-    let self_ty = match native_repr {
-        Some(NativeRepr::Unit) => lm_types::UNIT,
-        Some(NativeRepr::Int) => lm_types::INT,
-        Some(NativeRepr::Float) => lm_types::FLOAT,
-        Some(NativeRepr::Bool) => lm_types::BOOL,
-        Some(NativeRepr::String) => lm_types::STRING,
-        Some(NativeRepr::Bytes) => lm_types::BYTES,
-        Some(NativeRepr::FileHandle) => lm_types::FILE_HANDLE,
-        Some(NativeRepr::List) => {
-            let element = ctx.store.intern(Type::Var(0));
-            ctx.store.intern(Type::List(element))
-        }
-        Some(NativeRepr::Map) => {
-            let key = ctx.store.intern(Type::Var(0));
-            let value = ctx.store.intern(Type::Var(1));
-            ctx.store.intern(Type::Map(key, value))
-        }
-        Some(NativeRepr::Tuple(arity)) => {
-            let elements = (0..arity)
-                .map(|index| ctx.store.intern(Type::Var(index as u32)))
-                .collect();
-            ctx.store.intern(Type::Tuple(elements))
-        }
-        Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef | NativeRepr::FunctionBinding) => {
-            let args = vec![
-                ctx.store.intern(Type::Var(0)),
-                ctx.store.intern(Type::Var(1)),
-            ];
-            ctx.store.intern(Type::Inst(ClassId(idx), args))
-        }
-        Some(
-            NativeRepr::Text
-            | NativeRepr::Substring
-            | NativeRepr::Char
-            | NativeRepr::StringBuilder
-            | NativeRepr::ByteBuffer
-            | NativeRepr::TcpResource
-            | NativeRepr::TcpStream
-            | NativeRepr::TcpListener
-            | NativeRepr::TlsStream
-            | NativeRepr::UdpSocket
-            | NativeRepr::Artifact
-            | NativeRepr::VerifiedModule
-            | NativeRepr::ClassCode
-            | NativeRepr::SlotSpec
-            | NativeRepr::CodeInstance
-            | NativeRepr::Slot
-            | NativeRepr::ClassDef
-            | NativeRepr::ClassBinding
-            | NativeRepr::DynValue,
-        ) => ctx.store.intern(Type::Class(ClassId(idx))),
-        None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
-        None => {
-            let vars: Vec<TypeId> = (0..type_names.len())
-                .map(|i| ctx.store.intern(Type::Var(i as u32)))
-                .collect();
-            ctx.store.intern(Type::Inst(ClassId(idx), vars))
-        }
-    };
+    let self_ty = class_self_type(
+        &mut ctx.store,
+        ClassId(idx),
+        type_names.len() as u32,
+        native_repr,
+    );
     let mut env = TyEnv {
         type_names: type_names.clone(),
         type_bounds: vec![Vec::new(); type_names.len()],

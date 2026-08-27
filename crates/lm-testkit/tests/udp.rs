@@ -1,7 +1,7 @@
 //! UDP effects, datagram waits, and resource behavior.
 
 use lm_testkit::publish_artifact_bytes;
-use lm_testkit::{compile_module_text, compile_to_bytes, repo_root};
+use lm_testkit::{compile_to_bytes, repo_root};
 use lm_vm::{RecordingHost, VmConfig, World};
 
 const LOOPBACK: &str = r#"
@@ -201,7 +201,8 @@ send_large()
 
 #[test]
 fn the_verifier_rejects_a_forged_udp_datagram_role() {
-    let mut module = compile_module_text("udp-role.lm", "1\n").expect("the program compiles");
+    let mut module = lm_testkit::compile_verifier_fixture_text("udp-role.lm", "1\n")
+        .expect("the verifier fixture compiles");
     let role = lm_bytecode::corepin::role_index("UdpDatagram").expect("the role exists");
     let class = module.core_roles[role];
     module.classes[class as usize].fields.pop();

@@ -2,7 +2,7 @@ use lm_bytecode::{
     corepin::{ROLE_CHAR, ROLE_STRING, ROLE_SUBSTRING, ROLE_TEXT},
     BcType, Instr, SlotContract, SlotTarget,
 };
-use lm_testkit::{compile_module_text, run_text};
+use lm_testkit::{compile_module_text, compile_verifier_fixture_text, run_text};
 use lm_vm::{Vm, VmConfig};
 
 fn string_method(module: &lm_bytecode::Module, name: &str) -> (u32, u32) {
@@ -132,8 +132,8 @@ fn interpolation_finishes_its_private_builder() {
 
 #[test]
 fn a_string_tag_supports_verified_virtual_dispatch() {
-    let mut module = compile_module_text("string_virtual.lm", "\"é\".byte_len()\n")
-        .expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("string_virtual.lm", "\"é\".byte_len()\n")
+        .expect("the verifier fixture compiles");
     let (selector, _) = string_method(&module, "byte_len");
     let literal = module
         .strings
@@ -146,9 +146,8 @@ fn a_string_tag_supports_verified_virtual_dispatch() {
         Instr::Return,
     ]];
     lm_verify::verify_module(&module).expect("the virtual call verifies");
-    let artifact = lm_testkit::artifact_with_core_from_module("string_virtual", module)
-        .expect("the artifact builds");
-    let (arena, namespace) = lm_testkit::publish_artifact(&artifact).expect("the artifact loads");
+    let (arena, namespace) =
+        lm_testkit::unit_from_module(module).expect("the verifier fixture loads");
     let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(2)");
@@ -156,8 +155,8 @@ fn a_string_tag_supports_verified_virtual_dispatch() {
 
 #[test]
 fn the_verifier_rejects_a_stateful_string_role() {
-    let mut module =
-        compile_module_text("string_role.lm", "\"x\"\n").expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("string_role.lm", "\"x\"\n")
+        .expect("the verifier fixture compiles");
     let class = module.core_roles[ROLE_STRING];
     let int_ty = module
         .types
@@ -178,8 +177,8 @@ fn the_verifier_rejects_a_stateful_string_role() {
 
 #[test]
 fn the_verifier_requires_the_complete_text_family() {
-    let mut module =
-        compile_module_text("text_family.lm", "\"x\"\n").expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("text_family.lm", "\"x\"\n")
+        .expect("the verifier fixture compiles");
     module.core_roles[ROLE_SUBSTRING] = lm_bytecode::NO_ROLE;
     let error = lm_verify::verify_module(&module).expect_err("the family rejects");
     assert!(
@@ -192,8 +191,9 @@ fn the_verifier_requires_the_complete_text_family() {
 
 #[test]
 fn the_verifier_rejects_an_extra_text_subclass() {
-    let mut module = compile_module_text("text_subclass.lm", "class Extra\nend\nExtra()\n0\n")
-        .expect("the program compiles");
+    let mut module =
+        compile_verifier_fixture_text("text_subclass.lm", "class Extra\nend\nExtra()\n0\n")
+            .expect("the verifier fixture compiles");
     let text = module.core_roles[ROLE_TEXT];
     let extra = module
         .classes
@@ -212,7 +212,8 @@ fn the_verifier_rejects_an_extra_text_subclass() {
 
 #[test]
 fn the_verifier_rejects_heap_allocation_for_char() {
-    let mut module = compile_module_text("char_new.lm", "0\n").expect("the program compiles");
+    let mut module =
+        compile_verifier_fixture_text("char_new.lm", "0\n").expect("the verifier fixture compiles");
     let class = module.core_roles[ROLE_CHAR];
     let char_ty = module
         .types

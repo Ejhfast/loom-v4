@@ -172,6 +172,48 @@ pub(crate) fn collect_link_root(module: &Module) -> Result<(Module, CollectionSt
     collect_from_roots(module, offsets, &roots, true, &HashSet::new())
 }
 
+/// Collect one compiled module and keep its complete local surface.
+pub(crate) fn collect_compiled_unit(module: &Module) -> Result<(Module, CollectionStats), String> {
+    if module.entry as usize >= module.funcs.len() {
+        return Err("dependency collection received an invalid entry".to_string());
+    }
+    let offsets = Offsets::new(module);
+    if offsets.total > u32::MAX as usize {
+        return Err("dependency collection has too many table entries".to_string());
+    }
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
+    let mut roots = vec![offsets.func(module.entry)];
+    let mut exports = HashSet::with_capacity(module.exports.len());
+    for export in &module.exports {
+        exports.insert(export.name.clone());
+        if export.kind.is_class() {
+            checked_class_export(module, &extern_classes, export)?;
+            roots.push(offsets.class(export.def));
+            if export.ctor != NO_CTOR {
+                roots.push(offsets.func(export.ctor));
+            }
+        } else if export.kind == lm_bytecode::ExportKind::Function {
+            if export.def as usize >= module.funcs.len() {
+                return Err(format!(
+                    "the export `{}` names a function outside the module",
+                    export.name
+                ));
+            }
+            if extern_funcs[export.def as usize] {
+                return Err(format!(
+                    "the module exports `{}`, which it imports",
+                    export.name
+                ));
+            }
+            roots.push(offsets.func(export.def));
+        }
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    collect_from_roots(module, offsets, &roots, true, &exports)
+}
+
 /// One definition selected as an artifact root.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DefinitionRoot {
@@ -497,34 +539,7 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
             None => {}
         }
     }
-    for roles in [
-        &[
-            lm_bytecode::corepin::ROLE_TCP_RESOURCE,
-            lm_bytecode::corepin::ROLE_TCP_STREAM,
-            lm_bytecode::corepin::ROLE_TCP_LISTENER,
-        ][..],
-        &[
-            lm_bytecode::corepin::ROLE_PIPE_END,
-            lm_bytecode::corepin::ROLE_PIPE_READER,
-            lm_bytecode::corepin::ROLE_PIPE_WRITER,
-        ],
-        &[
-            lm_bytecode::corepin::ROLE_TEXT,
-            lm_bytecode::corepin::ROLE_STRING,
-            lm_bytecode::corepin::ROLE_SUBSTRING,
-        ],
-        &[
-            lm_bytecode::corepin::ROLE_SYNTAX_TREE,
-            lm_bytecode::corepin::ROLE_SYNTAX_ELEMENT,
-            lm_bytecode::corepin::ROLE_SYNTAX_NODE,
-            lm_bytecode::corepin::ROLE_SYNTAX_TOKEN,
-            lm_bytecode::corepin::ROLE_SYNTAX_TRIVIA,
-            lm_bytecode::corepin::ROLE_SYNTAX_BUILDER,
-            lm_bytecode::corepin::ROLE_PARSE_STATUS,
-            lm_bytecode::corepin::ROLE_SYNTAX_DIAGNOSTIC,
-            lm_bytecode::corepin::ROLE_SYNTAX_PARSE,
-        ],
-    ] {
+    for roles in lm_bytecode::corepin::ROLE_FAMILIES {
         core_role_family_edges(module, offsets, roles, &mut graph);
     }
     graph

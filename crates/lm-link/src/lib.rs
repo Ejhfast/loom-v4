@@ -41,6 +41,11 @@ use lm_bytecode::{
 };
 use std::collections::HashMap;
 
+/// Remove dependency declarations that local code cannot reach.
+pub fn collect_compiled_unit(module: &Module) -> Result<Module, String> {
+    collect::collect_compiled_unit(module).map(|(module, _)| module)
+}
+
 /// A failure to build a link environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEnvError {
@@ -2540,8 +2545,26 @@ fn resolve_func_import(
                     import.module
                 ))
             })?;
-            // The local selector table holds the method name, so the
-            // merged selector index comes from the relocation map.
+            if method == "init" {
+                let key = lm_bytecode::qualified_key(&import.module, &format!("{class_name}.init"));
+                let target = view
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.key == key)
+                    .map(|binding| binding.func)
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "`{path}` slot {slot} names the initializer of \
+                             `{}.{class_name}`, which the module does not provide",
+                            import.module
+                        ))
+                    })?;
+                return check_function_import_contract(
+                    tables, module, import, path, slot, target, reloc,
+                )
+                .map(|()| target);
+            }
+            // The local selector table holds the method name.
             module
                 .selectors
                 .iter()

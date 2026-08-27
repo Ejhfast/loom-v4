@@ -103,11 +103,11 @@ fn a_referenced_qualified_key_separates_two_equal_signatures() {
 }
 
 /// The qualified key of a class follows its module path. The core
-/// image keeps the reserved path `core` in every module.
+/// unit keeps the reserved `core` path.
 #[test]
 fn a_qualified_key_carries_the_module_path() {
     let module = compile_one("app.shapes", "class Dot\n  x: Int = 0\nend\n", &[], false).module;
-    let key_of = |name: &str| {
+    let key_of = |module: &Module, name: &str| {
         module
             .classes
             .iter()
@@ -115,9 +115,10 @@ fn a_qualified_key_carries_the_module_path() {
             .map(|c| c.key.clone())
             .unwrap_or_else(|| panic!("no class `{name}`"))
     };
-    assert_eq!(key_of("Dot"), "app.shapes.Dot");
-    assert_eq!(key_of("Option"), "core.Option");
-    assert_eq!(key_of("Option.Some"), "core.Option.Some");
+    let core = lm_compiler::core_link_unit().expect("the core unit builds");
+    assert_eq!(key_of(&module, "Dot"), "app.shapes.Dot");
+    assert_eq!(key_of(core.module(), "Option"), "core.Option");
+    assert_eq!(key_of(core.module(), "Option.Some"), "core.Option.Some");
 }
 
 // ---------------------------------------------------------------
@@ -589,18 +590,19 @@ fn two_equal_shapes_with_two_keys_stay_distinct() {
     assert_eq!(count("app.main.Spot"), 1);
 }
 
-/// A local core declaration cannot replace the exact core provider.
+/// A changed core import cannot replace the exact core provider.
 #[test]
 fn a_local_core_declaration_cannot_replace_the_provider() {
-    let mut units = two_module_program();
-    let some = units[1]
+    let source = "case Some(1)\nin Some(value) then value\nin None then 0\nend\n";
+    let mut units = vec![compile_one("app.main", source, &[], true)];
+    let some = units[0]
         .module
         .classes
         .iter()
-        .position(|c| c.key == "core.Option.Some")
-        .expect("the core arm declaration exists");
-    units[1].module.classes[some].fields[0].0 = "w".to_string();
-    let error = link_units(&units).expect_err("the changed core declaration linked");
+        .position(|class| class.key == "core.Option.Some")
+        .expect("the Option.Some import exists");
+    units[0].module.classes[some].fields[0].0 = "changed".to_string();
+    let error = link_untrusted_units(&units).expect_err("the changed core import linked");
     assert!(
         error.contains("contract") || error.contains("field"),
         "{error}"
@@ -1606,7 +1608,7 @@ fn two_constructor_bindings_for_one_class_reject() {
 /// the constructor of a class it defines, never one it imports.
 #[test]
 fn a_constructor_binding_on_an_imported_class_rejects() {
-    let mut units = dot_providers();
+    let mut units = two_module_program();
     let extern_classes = units[1].module.extern_classes();
     let Some(imported) = extern_classes.iter().position(|e| *e) else {
         panic!("the module imports no class");

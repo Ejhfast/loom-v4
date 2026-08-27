@@ -745,6 +745,24 @@ pub const ROLE_PIPE_ERROR_FAILED: usize = 218;
 pub const ROLE_PIPE_END: usize = 219;
 pub const ROLE_PIPE_READER: usize = 220;
 pub const ROLE_PIPE_WRITER: usize = 221;
+
+/// Core role groups that must remain complete when one member exists.
+pub const ROLE_FAMILIES: &[&[usize]] = &[
+    &[ROLE_TCP_RESOURCE, ROLE_TCP_STREAM, ROLE_TCP_LISTENER],
+    &[ROLE_PIPE_END, ROLE_PIPE_READER, ROLE_PIPE_WRITER],
+    &[ROLE_TEXT, ROLE_STRING, ROLE_SUBSTRING],
+    &[
+        ROLE_SYNTAX_TREE,
+        ROLE_SYNTAX_ELEMENT,
+        ROLE_SYNTAX_NODE,
+        ROLE_SYNTAX_TOKEN,
+        ROLE_SYNTAX_TRIVIA,
+        ROLE_SYNTAX_BUILDER,
+        ROLE_PARSE_STATUS,
+        ROLE_SYNTAX_DIAGNOSTIC,
+        ROLE_SYNTAX_PARSE,
+    ],
+];
 pub const ROLE_CHILD_INPUT: usize = 222;
 pub const ROLE_CHILD_INPUT_INHERIT: usize = 223;
 pub const ROLE_CHILD_INPUT_NULL: usize = 224;

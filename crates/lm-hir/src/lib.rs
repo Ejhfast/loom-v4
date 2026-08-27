@@ -41,6 +41,13 @@ pub fn core_image() -> lm_bytecode::Module {
 
 /// Compile the core provider under one ABI bundle.
 pub fn core_image_with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> lm_bytecode::Module {
+    core_image_with_intrinsics(bundle).0
+}
+
+/// Compile the core provider and return its direct intrinsic summaries.
+pub fn core_image_with_intrinsics(
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+) -> (lm_bytecode::Module, Vec<Option<lm_abi::IntrinsicSlot>>) {
     let empty = lm_source::parse::parse("").expect("the empty module parses");
     let mut hir = check_module_with(
         &empty,
@@ -52,9 +59,29 @@ pub fn core_image_with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> lm_b
         },
     )
     .expect("the core image checks");
+    let intrinsics = hir.funcs.iter().map(direct_intrinsic).collect::<Vec<_>>();
     let exports = std::mem::take(&mut hir.core_exports);
     hir.exports = exports;
-    lower_module(&hir)
+    (lower_module(&hir), intrinsics)
+}
+
+fn direct_intrinsic(function: &hir::HirFunc) -> Option<lm_abi::IntrinsicSlot> {
+    if !function.row.is_empty()
+        || !function.captures.is_empty()
+        || function.locals.len() != function.params.len()
+    {
+        return None;
+    }
+    let [hir::HStmt::Expr(expression)] = function.body.as_slice() else {
+        return None;
+    };
+    let hir::HExprKind::Intrinsic { intrinsic, args } = &expression.kind else {
+        return None;
+    };
+    let direct = args.iter().enumerate().all(|(index, argument)| {
+        matches!(argument.kind, hir::HExprKind::Local(slot) if slot as usize == index)
+    });
+    direct.then_some(*intrinsic)
 }
 
 /// Replace checked core bodies with exact import declarations.

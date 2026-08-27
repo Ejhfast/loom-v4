@@ -1,6 +1,6 @@
 //! Terminal and process signal effects.
 
-use lm_testkit::{compile_module_text, compile_to_bytes, repo_root};
+use lm_testkit::{compile_to_bytes, repo_root};
 use lm_vm::{HostSignalKind, HostStdStream, Object, RecordingHost, VmConfig, World};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -358,7 +358,8 @@ fn terminal_and_signal_operations_need_rows_and_policy_grants() {
 
 #[test]
 fn the_verifier_rejects_a_forged_terminal_size_role() {
-    let mut module = compile_module_text("tty-role.lm", "1\n").expect("the program compiles");
+    let mut module = lm_testkit::compile_verifier_fixture_text("tty-role.lm", "1\n")
+        .expect("the verifier fixture compiles");
     let role = lm_bytecode::corepin::role_index("TtySize").expect("the role exists");
     let class = module.core_roles[role];
     module.classes[class as usize].fields.pop();

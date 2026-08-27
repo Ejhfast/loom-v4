@@ -262,7 +262,7 @@ pub enum AbiCore {
 }
 
 impl AbiCore {
-    fn text(self) -> &'static str {
+    pub fn text(self) -> &'static str {
         match self {
             AbiCore::Text => "Text",
             AbiCore::Substring => "Substring",
@@ -333,7 +333,7 @@ pub enum AbiNative {
 }
 
 impl AbiNative {
-    fn text(self) -> &'static str {
+    pub fn text(self) -> &'static str {
         match self {
             AbiNative::FileHandle => "FileHandle",
             AbiNative::TcpResource => "TcpResource",

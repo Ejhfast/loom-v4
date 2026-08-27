@@ -166,8 +166,8 @@ pub fn compile_module_with_options_and_bundle(
         );
         return Err(diagnostic.render(source));
     }
-    let core = crate::core_link_unit_with_bundle(bundle)?;
-    let mut hir = lm_hir::check_module_with(
+    let (core, core_intrinsics) = crate::core::core_provider_with_bundle(bundle)?;
+    let hir = lm_hir::check_module_with(
         &ast,
         lm_hir::CheckOptions {
             prelude: true,
@@ -175,22 +175,29 @@ pub fn compile_module_with_options_and_bundle(
             bundle: bundle.clone(),
             module_path: path.to_string(),
             imports: env.imports().clone(),
+            core: Some(core.clone()),
+            core_intrinsics,
+            core_roots: options
+                .dynamic_result
+                .then(|| "DynValue".to_string())
+                .into_iter()
+                .collect(),
         },
     )
     .map_err(|d| d.render(source))?;
     let (linkage, _interface_slots) = select_linkage(path, &hir, env, options)?;
-    lm_hir::externalize_core(&mut hir, core.interface())
-        .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
     if options.dynamic_result {
         package_dynamic_entry(&mut module, path)?;
     }
+    attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
+    let module = lm_link::collect_compiled_unit(&module)
+        .map_err(|error| format!("error: `{path}` does not collect: {error}\n"))?;
     lm_verify::verify_module_with_bundle(&module, bundle)
         .map_err(|e| format!("error: the verifier rejected `{path}`: {e}\n"))?;
     let identity = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
         .map_err(|e| format!("error: `{path}`: {e}\n"))?;
-    attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     let interface =
         lm_bytecode::interface::derive_interface_with_bundle(&module, &identity, path, bundle)
             .map_err(|e| format!("error: `{path}`: {e}\n"))?;
@@ -1434,30 +1441,19 @@ mod tests {
     #[test]
     fn a_source_module_imports_core_without_core_bodies() {
         let compiled = compile("1\n", &CompileOptions::new());
-        let extern_classes = compiled.module.extern_classes();
-        let extern_funcs = compiled.module.extern_funcs();
-        let mut core_class_imports = 0usize;
-        let mut core_function_imports = 0usize;
-        for import in &compiled.module.imports {
-            if import.module != lm_bytecode::CORE_MODULE {
-                continue;
-            }
-            if import.kind == lm_bytecode::ImportKind::Class {
-                core_class_imports += 1;
-                assert!(extern_classes[import.def as usize]);
-            } else {
-                core_function_imports += 1;
-                assert!(extern_funcs[import.def as usize]);
-                assert!(compiled.module.funcs[import.def as usize].blocks.is_empty());
-            }
-        }
-        assert!(core_class_imports > 0);
-        assert!(core_function_imports > 0);
-        assert!(compiled
-            .module
-            .conformances
-            .iter()
-            .any(|item| extern_classes[item.class as usize]));
+        assert!(compiled.module.classes.is_empty());
+        assert_eq!(compiled.module.funcs.len(), 1);
+        assert!(compiled.module.imports.is_empty());
+        let env = crate::core_link_env().expect("the core link environment builds");
+        let unit = compiled
+            .clone()
+            .into_link_unit(&env)
+            .expect("the compiled unit builds");
+        assert_eq!(unit.dependencies().len(), 1);
+        assert_eq!(
+            unit.dependencies()[0].module_path(),
+            lm_bytecode::CORE_MODULE
+        );
         let linked = link_compiled(&compiled);
         assert_eq!(
             linked
@@ -1473,32 +1469,11 @@ mod tests {
 
     #[test]
     fn the_linker_uses_the_provider_conformance_set() {
-        let mut compiled = compile("1\n", &CompileOptions::new());
-        compiled
-            .module
-            .conformances
-            .pop()
-            .expect("the imported core carries conformances");
-        let mut env = crate::core_link_env().expect("the core link environment builds");
-        let path = compiled.path.clone();
-        let unit = compiled
-            .into_link_unit(&env)
-            .expect("the forged unit builds");
-        env.bind_unit(unit).expect("the forged unit binds");
-        let artifact = env.freeze().artifact(&path).expect("the artifact builds");
-        let mut arena = lm_link::CodeArena::new();
-        let namespace = arena
-            .publish(
-                artifact,
-                Some(crate::core_link_unit().expect("the core unit builds")),
-            )
-            .expect("the exact provider supplies its conformances");
-        let linked = arena.namespace(namespace).expect("the namespace exists");
+        let compiled = compile("1\n", &CompileOptions::new());
+        assert!(compiled.module.conformances.is_empty());
+        let linked = link_compiled(&compiled);
         let core = crate::core_link_unit().expect("the core link unit builds");
-        assert_eq!(
-            linked.tables().conformances.len(),
-            core.module().conformances.len()
-        );
+        assert_eq!(linked.conformances.len(), core.module().conformances.len());
     }
 
     #[test]

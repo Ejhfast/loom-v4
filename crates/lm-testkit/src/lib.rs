@@ -26,6 +26,46 @@ pub fn compile_module_text(name: &str, text: &str) -> Result<lm_bytecode::Module
     lm_compiler::compile_source("", &source, true).map(|compiled| compiled.root.module)
 }
 
+/// Compile source text and assemble one verifier mutation fixture.
+///
+/// This helper joins the published tables with their namespace data.
+/// A VM never executes the returned `Module`.
+pub fn compile_verifier_fixture_text(
+    name: &str,
+    text: &str,
+) -> Result<lm_bytecode::Module, String> {
+    let artifact = compile_text(name, text)?;
+    let (arena, namespace) = publish_artifact(&artifact)?;
+    let namespace = arena
+        .namespace(namespace)
+        .ok_or_else(|| "the published namespace is missing".to_string())?;
+    let tables = namespace.tables();
+    let mut slots = tables.slots.clone();
+    for (slot, initial) in slots.iter_mut().zip(namespace.slot_initials()) {
+        slot.initial = *initial;
+    }
+    Ok(lm_bytecode::Module {
+        strings: tables.strings.clone(),
+        bytes: tables.bytes.clone(),
+        types: tables.types.clone(),
+        selectors: tables.selectors.clone(),
+        apps: tables.apps.clone(),
+        interfaces: tables.interfaces.clone(),
+        conformances: tables.conformances.clone(),
+        class_bounds: tables.class_bounds.clone(),
+        func_bounds: tables.func_bounds.clone(),
+        imports: Vec::new(),
+        slots,
+        core_roles: *namespace.core_roles(),
+        classes: tables.classes.clone(),
+        funcs: tables.funcs.clone(),
+        entry: namespace.entry(),
+        exports: namespace.exports().to_vec(),
+        bindings: namespace.bindings().to_vec(),
+        debug: tables.debug.clone(),
+    })
+}
+
 /// Compile source text to serialized artifact bytes.
 pub fn compile_to_bytes(name: &str, text: &str) -> Result<Vec<u8>, String> {
     lm_bytecode::artifact::encode(&compile_text(name, text)?)

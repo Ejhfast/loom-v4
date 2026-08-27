@@ -21,10 +21,11 @@
 //! an imported signature may name a core type.
 
 use crate::check::{
-    index_methods, AssociatedInfo, ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig,
-    InterfaceInfo, InterfaceMethodSig, InterfaceUse, MethodSig,
+    class_self_type, core_native_repr, index_methods, register_core_native_class, AssociatedInfo,
+    ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig, InterfaceInfo, InterfaceMethodSig,
+    InterfaceUse, MethodSig,
 };
-use crate::hir::{HirFunc, HirImport, HirImportDef};
+use crate::hir::{HExpr, HExprKind, HStmt, HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
     ExportEntry, IfaceClass, IfaceClassKind, IfaceFn, IfaceInterface, IfaceInterfaceUse, IfaceItem,
     IfaceRow, IfaceType, Interface, QualName,
@@ -33,7 +34,7 @@ use lm_bytecode::ImportKind;
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{ClassId, ClassKind, Row, RowElem, Type, TypeId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 /// The interfaces one module may import, and the root names its `use`
@@ -73,6 +74,223 @@ impl ImportEnv {
             .filter(|p| p.as_str() == prefix || p.starts_with(&format!("{prefix}.")))
             .map(|p| p.as_str())
             .collect()
+    }
+}
+
+/// Add core names used by the selected dependency surfaces.
+pub(crate) fn add_used_core_names(
+    env: &ImportEnv,
+    uses: &[lm_source::ast::UseDecl],
+    names: &mut HashSet<String>,
+) {
+    let mut work = Vec::new();
+    for declaration in uses {
+        let Some(root) = declaration.path.first() else {
+            continue;
+        };
+        if root == "sys" {
+            continue;
+        }
+        let Some(prefix) = env.roots.get(root) else {
+            continue;
+        };
+        let mut segments: Vec<String> = prefix.split('.').map(str::to_string).collect();
+        segments.extend(declaration.path.iter().skip(1).cloned());
+        let full = segments.join(".");
+        if let Some(interface) = env.module(&full) {
+            work.extend(
+                interface
+                    .exports
+                    .iter()
+                    .map(|export| (full.clone(), export.name.clone())),
+            );
+            continue;
+        }
+        if segments.len() < 2 {
+            continue;
+        }
+        let module = segments[..segments.len() - 1].join(".");
+        let name = segments.last().expect("the path has a definition");
+        if env
+            .module(&module)
+            .and_then(|item| item.find(name))
+            .is_some()
+        {
+            work.push((module, name.clone()));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    while let Some((module, name)) = work.pop() {
+        if !seen.insert((module.clone(), name.clone())) {
+            continue;
+        }
+        let Some(entry) = env.module(&module).and_then(|item| item.find(&name)) else {
+            continue;
+        };
+        add_item_core_names(&module, &name, &entry.item, names, &mut work);
+    }
+}
+
+fn add_qual_core_name(
+    qual: &QualName,
+    names: &mut HashSet<String>,
+    work: &mut Vec<(String, String)>,
+) {
+    if qual.is_core() {
+        names.insert(qual.name.clone());
+    } else {
+        work.push((qual.module.clone(), qual.name.clone()));
+    }
+}
+
+fn add_interface_core_names(
+    interface: &IfaceInterfaceUse,
+    names: &mut HashSet<String>,
+    work: &mut Vec<(String, String)>,
+) {
+    add_qual_core_name(&interface.interface, names, work);
+    for ty in &interface.types {
+        add_type_core_names(ty, names, work);
+    }
+}
+
+fn add_type_core_names(
+    ty: &IfaceType,
+    names: &mut HashSet<String>,
+    work: &mut Vec<(String, String)>,
+) {
+    match ty {
+        IfaceType::Named { class, args } => {
+            add_qual_core_name(class, names, work);
+            for argument in args {
+                add_type_core_names(argument, names, work);
+            }
+        }
+        IfaceType::Projection {
+            base, interface, ..
+        } => {
+            add_type_core_names(base, names, work);
+            add_qual_core_name(interface, names, work);
+        }
+        IfaceType::List(element)
+        | IfaceType::Run(element)
+        | IfaceType::RunSnapshot(element)
+        | IfaceType::Op(_, element) => add_type_core_names(element, names, work),
+        IfaceType::Map(key, value)
+        | IfaceType::PendingCall(key, value)
+        | IfaceType::Handle(key, value) => {
+            add_type_core_names(key, names, work);
+            add_type_core_names(value, names, work);
+        }
+        IfaceType::Tuple(elements) => {
+            for element in elements {
+                add_type_core_names(element, names, work);
+            }
+        }
+        IfaceType::Fn { params, ret, .. } => {
+            for param in params {
+                add_type_core_names(param, names, work);
+            }
+            add_type_core_names(ret, names, work);
+        }
+        _ => {}
+    }
+}
+
+fn add_fn_core_names(
+    function: &IfaceFn,
+    names: &mut HashSet<String>,
+    work: &mut Vec<(String, String)>,
+) {
+    for bounds in &function.type_bounds {
+        for bound in bounds {
+            add_interface_core_names(bound, names, work);
+        }
+    }
+    for param in &function.params {
+        add_type_core_names(param, names, work);
+    }
+    add_type_core_names(&function.ret, names, work);
+}
+
+fn add_item_core_names(
+    module: &str,
+    name: &str,
+    item: &IfaceItem,
+    names: &mut HashSet<String>,
+    work: &mut Vec<(String, String)>,
+) {
+    match item {
+        IfaceItem::Func(function) => add_fn_core_names(function, names, work),
+        IfaceItem::Interface(interface) => {
+            for parent in &interface.parents {
+                add_interface_core_names(parent, names, work);
+            }
+            for bounds in &interface.type_bounds {
+                for bound in bounds {
+                    add_interface_core_names(bound, names, work);
+                }
+            }
+            for associated in &interface.associated {
+                for bound in &associated.bounds {
+                    add_interface_core_names(bound, names, work);
+                }
+            }
+            for method in &interface.methods {
+                for bounds in &method.type_bounds {
+                    for bound in bounds {
+                        add_interface_core_names(bound, names, work);
+                    }
+                }
+                for premise in &method.premises {
+                    add_type_core_names(&premise.subject, names, work);
+                    for bound in &premise.bounds {
+                        add_interface_core_names(bound, names, work);
+                    }
+                }
+                for param in &method.params {
+                    add_type_core_names(param, names, work);
+                }
+                add_type_core_names(&method.ret, names, work);
+            }
+        }
+        IfaceItem::Class(class) => {
+            if let Some(parent) = &class.parent {
+                add_qual_core_name(parent, names, work);
+            }
+            if let Some(family) = &class.family {
+                add_qual_core_name(family, names, work);
+            }
+            for arm in &class.arms {
+                work.push((module.to_string(), format!("{name}.{arm}")));
+            }
+            for field in &class.fields {
+                add_type_core_names(&field.ty, names, work);
+            }
+            for bounds in &class.type_bounds {
+                for bound in bounds {
+                    add_interface_core_names(bound, names, work);
+                }
+            }
+            for conformance in &class.conformances {
+                add_interface_core_names(&conformance.application, names, work);
+                for premise in &conformance.premises {
+                    for bound in &premise.bounds {
+                        add_interface_core_names(bound, names, work);
+                    }
+                }
+                for ty in &conformance.associated {
+                    add_type_core_names(ty, names, work);
+                }
+            }
+            for method in &class.methods {
+                add_fn_core_names(&method.sig, names, work);
+            }
+            if let Some(init) = &class.init {
+                add_fn_core_names(init, names, work);
+            }
+        }
     }
 }
 
@@ -116,13 +334,20 @@ struct PendingDefault {
 /// The import materializer of one module.
 pub(crate) struct Materializer<'a> {
     env: &'a ImportEnv,
+    /// True when this materializer provides the implicit core module.
+    core: bool,
     /// Resolved classes, by (module path, export name).
     classes: HashMap<(String, String), u32>,
     interfaces: HashMap<(String, String), u32>,
+    reserving_classes: HashSet<(String, String)>,
+    reserving_interfaces: HashSet<(String, String)>,
+    expanded_classes: HashSet<(String, String)>,
+    expanded_interfaces: HashSet<(String, String)>,
     pending: Vec<PendingClass>,
     pending_interfaces: Vec<PendingInterface>,
     pending_defaults: Vec<PendingDefault>,
     pending_funcs: Vec<PendingFunc>,
+    inline_intrinsics: HashMap<(String, String), lm_abi::IntrinsicSlot>,
 }
 
 fn error(span: Span, message: impl Into<String>) -> Diagnostic {
@@ -133,12 +358,26 @@ impl<'a> Materializer<'a> {
     pub(crate) fn new(env: &'a ImportEnv) -> Materializer<'a> {
         Materializer {
             env,
+            core: false,
             classes: HashMap::new(),
             interfaces: HashMap::new(),
+            reserving_classes: HashSet::new(),
+            reserving_interfaces: HashSet::new(),
+            expanded_classes: HashSet::new(),
+            expanded_interfaces: HashSet::new(),
             pending: Vec::new(),
             pending_interfaces: Vec::new(),
             pending_defaults: Vec::new(),
             pending_funcs: Vec::new(),
+            inline_intrinsics: HashMap::new(),
+        }
+    }
+
+    /// Create the materializer for the implicit core dependency.
+    pub(crate) fn new_core(env: &'a ImportEnv) -> Materializer<'a> {
+        Materializer {
+            core: true,
+            ..Materializer::new(env)
         }
     }
 
@@ -177,59 +416,14 @@ impl<'a> Materializer<'a> {
         span: Span,
     ) -> Result<u32, Diagnostic> {
         let key = (module.to_string(), name.to_string());
-        if let Some(id) = self.interfaces.get(&key) {
-            return Ok(*id);
+        let id = self.reserve_interface_header(ctx, module, name, span)?;
+        if !self.expanded_interfaces.insert(key) {
+            return Ok(id);
         }
         let entry = self.export(module, name, span)?;
         let IfaceItem::Interface(interface) = &entry.item else {
-            return Err(error(
-                span,
-                format!("`{module}.{name}` is not an interface"),
-            ));
+            unreachable!("the interface header checked the export kind")
         };
-        if ctx.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize {
-            return Err(error(
-                span,
-                "the module has too many interfaces for compact calls",
-            ));
-        }
-        if interface.methods.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
-            return Err(error(
-                span,
-                "the imported interface has too many methods for compact calls",
-            ));
-        }
-        let id = ctx.interfaces.len() as u32;
-        self.interfaces.insert(key, id);
-        ctx.interfaces.push(InterfaceInfo {
-            origin: Some((module.to_string(), name.to_string())),
-            name: name.to_string(),
-            type_params: (0..interface.type_params)
-                .map(|index| format!("${index}"))
-                .collect(),
-            effect_params: (0..interface.effect_params)
-                .map(|index| format!("e{index}"))
-                .collect(),
-            generic_is_effect: interface.generic_is_effect.clone(),
-            parents: Vec::new(),
-            type_bounds: vec![Vec::new(); interface.type_params as usize],
-            associated: interface
-                .associated
-                .iter()
-                .map(|item| AssociatedInfo {
-                    name: item.name.clone(),
-                    bounds: Vec::new(),
-                })
-                .collect(),
-            methods: Vec::new(),
-            method_index: Vec::new(),
-        });
-        self.pending_interfaces.push(PendingInterface {
-            id,
-            module: module.to_string(),
-            name: name.to_string(),
-            interface: interface.clone(),
-        });
         let interface = interface.clone();
         for parent in &interface.parents {
             self.reserve_interface_use(ctx, parent, span)?;
@@ -263,6 +457,113 @@ impl<'a> Materializer<'a> {
         Ok(id)
     }
 
+    /// Reserve one interface after its explicit parents.
+    fn reserve_interface_header(
+        &mut self,
+        ctx: &mut Ctx,
+        module: &str,
+        name: &str,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        let key = (module.to_string(), name.to_string());
+        if let Some(id) = self.interfaces.get(&key) {
+            return Ok(*id);
+        }
+        if !self.reserving_interfaces.insert(key.clone()) {
+            return Err(error(
+                span,
+                format!("the interface `{module}.{name}` has an inheritance cycle"),
+            ));
+        }
+        let entry = self.export(module, name, span)?;
+        let IfaceItem::Interface(interface) = &entry.item else {
+            return Err(error(
+                span,
+                format!("`{module}.{name}` is not an interface"),
+            ));
+        };
+        if ctx.interfaces.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize {
+            return Err(error(
+                span,
+                "the module has too many interfaces for compact calls",
+            ));
+        }
+        if interface.methods.len() > lm_bytecode::MAX_INTERFACE_CALL_INDEX as usize + 1 {
+            return Err(error(
+                span,
+                "the imported interface has too many methods for compact calls",
+            ));
+        }
+        let interface = interface.clone();
+        for parent in &interface.parents {
+            self.reserve_interface_header_qual(ctx, &parent.interface, span)?;
+        }
+        let id = ctx.interfaces.len() as u32;
+        self.interfaces.insert(key.clone(), id);
+        if self.core && ctx.core_interfaces.insert(name.to_string(), id).is_some() {
+            return Err(error(
+                span,
+                format!("the core interface `{name}` has more than one definition"),
+            ));
+        }
+        ctx.interfaces.push(InterfaceInfo {
+            origin: Some((module.to_string(), name.to_string())),
+            name: name.to_string(),
+            type_params: (0..interface.type_params)
+                .map(|index| format!("${index}"))
+                .collect(),
+            effect_params: (0..interface.effect_params)
+                .map(|index| format!("e{index}"))
+                .collect(),
+            generic_is_effect: interface.generic_is_effect.clone(),
+            parents: Vec::new(),
+            type_bounds: vec![Vec::new(); interface.type_params as usize],
+            associated: interface
+                .associated
+                .iter()
+                .map(|item| AssociatedInfo {
+                    name: item.name.clone(),
+                    bounds: Vec::new(),
+                })
+                .collect(),
+            methods: Vec::new(),
+            method_index: Vec::new(),
+        });
+        self.pending_interfaces.push(PendingInterface {
+            id,
+            module: module.to_string(),
+            name: name.to_string(),
+            interface: interface.clone(),
+        });
+        self.reserving_interfaces.remove(&key);
+        Ok(id)
+    }
+
+    fn reserve_interface_header_qual(
+        &mut self,
+        ctx: &mut Ctx,
+        qual: &QualName,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        if qual.is_core() {
+            if self.core {
+                return self.reserve_interface_header(
+                    ctx,
+                    lm_bytecode::CORE_MODULE,
+                    &qual.name,
+                    span,
+                );
+            }
+            return ctx.core_interfaces.get(&qual.name).copied().ok_or_else(|| {
+                error(
+                    span,
+                    format!("the core interface `{}` does not exist", qual.name),
+                )
+            });
+        }
+        self.reserve_interface_header(ctx, &qual.module, &qual.name, span)
+    }
+
     fn reserve_interface_qual(
         &mut self,
         ctx: &mut Ctx,
@@ -270,6 +571,9 @@ impl<'a> Materializer<'a> {
         span: Span,
     ) -> Result<u32, Diagnostic> {
         if qual.is_core() {
+            if self.core {
+                return self.reserve_interface(ctx, lm_bytecode::CORE_MODULE, &qual.name, span);
+            }
             return ctx.core_interfaces.get(&qual.name).copied().ok_or_else(|| {
                 error(
                     span,
@@ -304,47 +608,29 @@ impl<'a> Materializer<'a> {
         span: Span,
     ) -> Result<u32, Diagnostic> {
         let key = (module.to_string(), name.to_string());
-        if let Some(id) = self.classes.get(&key) {
-            return Ok(*id);
+        let id = self.reserve_class_header(ctx, module, name, span)?;
+        if !self.expanded_classes.insert(key) {
+            return Ok(id);
         }
         let entry = self.export(module, name, span)?;
         let IfaceItem::Class(class) = &entry.item else {
-            return Err(error(
-                span,
-                format!("`{module}.{name}` is a function, not a type"),
-            ));
+            unreachable!("the class header checked the export kind")
         };
-        let kind = match class.kind {
-            IfaceClassKind::Normal => ClassKind::Normal,
-            IfaceClassKind::EnumParent => ClassKind::EnumParent,
-            IfaceClassKind::EnumCase => ClassKind::EnumCase,
-        };
-        let id = ctx
-            .store
-            .register_class(name.to_string(), class.type_params, kind)
-            .0;
-        if class.is_final {
-            ctx.store.set_class_final(ClassId(id));
-        }
-        self.classes.insert(key, id);
-        self.pending.push(PendingClass {
-            id,
-            module: module.to_string(),
-            name: name.to_string(),
-            class: class.clone(),
-            iface_hash: entry.iface_hash,
-        });
-        // Reserve every class the declaration names.
         let class = class.clone();
-        if let Some(parent) = &class.parent {
-            let parent = self.reserve_qual(ctx, parent, span)?;
+        let parent = class
+            .parent
+            .as_ref()
+            .map(|parent| self.reserve_qual(ctx, parent, span))
+            .transpose()?;
+        if let Some(family) = &class.family {
+            self.reserve_qual(ctx, family, span)?;
+        }
+        // Reserve every class the declaration names.
+        if let Some(parent) = parent {
             // The store answers the subtype questions, so an imported
             // child must carry its parent there too. The link happens
             // in phase A, before any signature resolves.
             ctx.store.set_class_parent(ClassId(id), ClassId(parent));
-        }
-        if let Some(family) = &class.family {
-            self.reserve_qual(ctx, family, span)?;
         }
         for arm in &class.arms {
             let full = format!("{name}.{arm}");
@@ -378,6 +664,87 @@ impl<'a> Materializer<'a> {
         Ok(id)
     }
 
+    /// Reserve one class after its explicit parent and enum family.
+    fn reserve_class_header(
+        &mut self,
+        ctx: &mut Ctx,
+        module: &str,
+        name: &str,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        let key = (module.to_string(), name.to_string());
+        if let Some(id) = self.classes.get(&key) {
+            return Ok(*id);
+        }
+        if !self.reserving_classes.insert(key.clone()) {
+            return Err(error(
+                span,
+                format!("the class `{module}.{name}` has an inheritance cycle"),
+            ));
+        }
+        let entry = self.export(module, name, span)?;
+        let IfaceItem::Class(class) = &entry.item else {
+            return Err(error(
+                span,
+                format!("`{module}.{name}` is a function, not a type"),
+            ));
+        };
+        let class = class.clone();
+        let iface_hash = entry.iface_hash;
+        if let Some(parent) = &class.parent {
+            self.reserve_class_header_qual(ctx, parent, span)?;
+        }
+        if let Some(family) = &class.family {
+            self.reserve_class_header_qual(ctx, family, span)?;
+        }
+        let kind = match class.kind {
+            IfaceClassKind::Normal => ClassKind::Normal,
+            IfaceClassKind::EnumParent => ClassKind::EnumParent,
+            IfaceClassKind::EnumCase => ClassKind::EnumCase,
+        };
+        let id = ctx
+            .store
+            .register_class(name.to_string(), class.type_params, kind)
+            .0;
+        if class.is_final {
+            ctx.store.set_class_final(ClassId(id));
+        }
+        self.classes.insert(key.clone(), id);
+        if self.core && kind != ClassKind::EnumCase {
+            if ctx.core_types.insert(name.to_string(), id).is_some() {
+                return Err(error(
+                    span,
+                    format!("the core type `{name}` has more than one definition"),
+                ));
+            }
+            register_core_native_class(&mut ctx.store, name, ClassId(id));
+        }
+        self.pending.push(PendingClass {
+            id,
+            module: module.to_string(),
+            name: name.to_string(),
+            class,
+            iface_hash,
+        });
+        self.reserving_classes.remove(&key);
+        Ok(id)
+    }
+
+    fn reserve_class_header_qual(
+        &mut self,
+        ctx: &mut Ctx,
+        qual: &QualName,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        if qual.is_core() {
+            if self.core {
+                return self.reserve_class_header(ctx, lm_bytecode::CORE_MODULE, &qual.name, span);
+            }
+            return core_class(ctx, &qual.name, span);
+        }
+        self.reserve_class_header(ctx, &qual.module, &qual.name, span)
+    }
+
     fn reserve_qual(
         &mut self,
         ctx: &mut Ctx,
@@ -385,6 +752,9 @@ impl<'a> Materializer<'a> {
         span: Span,
     ) -> Result<u32, Diagnostic> {
         if qual.is_core() {
+            if self.core {
+                return self.reserve_class(ctx, lm_bytecode::CORE_MODULE, &qual.name, span);
+            }
             return core_class(ctx, &qual.name, span);
         }
         self.reserve_class(ctx, &qual.module, &qual.name, span)
@@ -396,6 +766,26 @@ impl<'a> Materializer<'a> {
         ty: &IfaceType,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        if self.core {
+            let native = match ty {
+                IfaceType::Unit => Some("Unit".to_string()),
+                IfaceType::Bool => Some("Bool".to_string()),
+                IfaceType::Int => Some("Int".to_string()),
+                IfaceType::Float => Some("Float".to_string()),
+                IfaceType::Str => Some("String".to_string()),
+                IfaceType::Bytes => Some("Bytes".to_string()),
+                IfaceType::FileHandle => Some("FileHandle".to_string()),
+                IfaceType::List(_) => Some("List".to_string()),
+                IfaceType::Map(_, _) => Some("Map".to_string()),
+                IfaceType::Tuple(elements) if (2..=16).contains(&elements.len()) => {
+                    Some(format!("Tuple{}", elements.len()))
+                }
+                _ => None,
+            };
+            if let Some(name) = native {
+                self.reserve_class(ctx, lm_bytecode::CORE_MODULE, &name, span)?;
+            }
+        }
         match ty {
             IfaceType::Named { class, args } => {
                 self.reserve_qual(ctx, class, span)?;
@@ -472,6 +862,242 @@ impl<'a> Materializer<'a> {
             iface_hash,
         });
         Ok(())
+    }
+
+    /// Reserve the selected surface of one implicit dependency.
+    pub(crate) fn reserve_unit(
+        &mut self,
+        ctx: &mut Ctx,
+        unit: &lm_bytecode::artifact::LinkUnit,
+        intrinsics: &[Option<lm_abi::IntrinsicSlot>],
+        names: &HashSet<String>,
+        methods: &HashSet<String>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let module = unit.module_path();
+        self.index_inline_intrinsics(unit, intrinsics);
+        let mut selected = names.clone();
+        loop {
+            let mut changed = false;
+            for export in &unit.interface().exports {
+                let IfaceItem::Class(class) = &export.item else {
+                    continue;
+                };
+                let class_selected = selected.contains(&export.name)
+                    || selected.contains(&class.arm_short)
+                    || class
+                        .methods
+                        .iter()
+                        .any(|method| methods.contains(&method.name));
+                if class_selected {
+                    changed |= selected.insert(export.name.clone());
+                    if let Some(parent) = &class.parent {
+                        if parent.is_core() {
+                            changed |= selected.insert(parent.name.clone());
+                        }
+                    }
+                    if let Some(family) = &class.family {
+                        if family.is_core() {
+                            changed |= selected.insert(family.name.clone());
+                        }
+                    }
+                }
+                let parent_selected = class
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.is_core() && selected.contains(&parent.name));
+                let family_selected = class
+                    .family
+                    .as_ref()
+                    .is_some_and(|family| family.is_core() && selected.contains(&family.name));
+                if parent_selected || family_selected {
+                    changed |= selected.insert(export.name.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for export in &unit.interface().exports {
+            match &export.item {
+                IfaceItem::Class(class)
+                    if selected.contains(&export.name)
+                        || selected.contains(&class.arm_short)
+                        || class
+                            .methods
+                            .iter()
+                            .any(|method| methods.contains(&method.name)) =>
+                {
+                    self.reserve_class(ctx, module, &export.name, span)?;
+                }
+                IfaceItem::Interface(interface)
+                    if selected.contains(&export.name)
+                        || interface
+                            .methods
+                            .iter()
+                            .any(|method| methods.contains(&method.name)) =>
+                {
+                    self.reserve_interface(ctx, module, &export.name, span)?;
+                }
+                _ => {}
+            }
+        }
+        // A reserved signature can add an abstract parent after the
+        // selection pass. Keep its complete local class family.
+        loop {
+            let mut candidates: Vec<String> = unit
+                .interface()
+                .exports
+                .iter()
+                .filter_map(|export| {
+                    let IfaceItem::Class(class) = &export.item else {
+                        return None;
+                    };
+                    let parent = class.parent.as_ref().filter(|item| item.is_core());
+                    let family = class.family.as_ref().filter(|item| item.is_core());
+                    let needed = parent.into_iter().chain(family).any(|item| {
+                        self.classes
+                            .contains_key(&(module.to_string(), item.name.clone()))
+                    });
+                    needed.then(|| export.name.clone())
+                })
+                .collect();
+            for roles in lm_bytecode::corepin::ROLE_FAMILIES {
+                let members: Vec<String> = roles
+                    .iter()
+                    .filter_map(|role| {
+                        let class = *unit.module().core_roles.get(*role)?;
+                        unit.module()
+                            .classes
+                            .get(class as usize)
+                            .map(|item| item.name.clone())
+                    })
+                    .collect();
+                let active = members.iter().any(|name| {
+                    self.classes
+                        .contains_key(&(module.to_string(), name.clone()))
+                });
+                if active {
+                    candidates.extend(members);
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            let before = self.expanded_classes.len();
+            for name in candidates {
+                self.reserve_class(ctx, module, &name, span)?;
+            }
+            if self.expanded_classes.len() == before {
+                break;
+            }
+        }
+        for export in &unit.interface().exports {
+            if !matches!(export.item, IfaceItem::Func(_)) {
+                continue;
+            }
+            let provider = unit
+                .module()
+                .exports
+                .iter()
+                .find(|item| item.name == export.name)
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        format!(
+                            "the module `{module}` has no function export `{}`",
+                            export.name
+                        ),
+                    )
+                })?;
+            let function = unit
+                .module()
+                .funcs
+                .get(provider.def as usize)
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        format!("the function export `{}` has no definition", export.name),
+                    )
+                })?;
+            if !selected.contains(&export.name) && !selected.contains(&function.name) {
+                continue;
+            }
+            self.reserve_func(ctx, &function.name, module, &export.name, span)?;
+        }
+        Ok(())
+    }
+
+    fn index_inline_intrinsics(
+        &mut self,
+        unit: &lm_bytecode::artifact::LinkUnit,
+        intrinsics: &[Option<lm_abi::IntrinsicSlot>],
+    ) {
+        let path = unit.module_path();
+        for export in &unit.module().exports {
+            if export.kind == lm_bytecode::ExportKind::Function {
+                if let Some(Some(intrinsic)) = intrinsics.get(export.def as usize) {
+                    self.inline_intrinsics
+                        .insert((path.to_string(), export.name.clone()), *intrinsic);
+                }
+                continue;
+            }
+            if !export.kind.is_class() {
+                continue;
+            }
+            let Some(class) = unit.module().classes.get(export.def as usize) else {
+                continue;
+            };
+            for (selector, function) in &class.methods {
+                let Some(name) = unit.module().selectors.get(*selector as usize) else {
+                    continue;
+                };
+                let Some(Some(intrinsic)) = intrinsics.get(*function as usize) else {
+                    continue;
+                };
+                self.inline_intrinsics.insert(
+                    (path.to_string(), format!("{}.{}", export.name, name)),
+                    *intrinsic,
+                );
+            }
+            let init_key = format!("{}.init", class.key);
+            let init = unit
+                .module()
+                .bindings
+                .iter()
+                .find(|binding| binding.key == init_key)
+                .map(|binding| binding.func);
+            if let Some(Some(intrinsic)) = init.and_then(|func| intrinsics.get(func as usize)) {
+                self.inline_intrinsics.insert(
+                    (path.to_string(), format!("{}.init", export.name)),
+                    *intrinsic,
+                );
+            }
+        }
+    }
+
+    fn imported_body(&self, module: &str, name: &str, sig: &FnSig) -> Vec<HStmt> {
+        let Some(intrinsic) = self
+            .inline_intrinsics
+            .get(&(module.to_string(), name.to_string()))
+            .copied()
+        else {
+            return Vec::new();
+        };
+        let args = sig
+            .params
+            .iter()
+            .enumerate()
+            .map(|(slot, ty)| HExpr {
+                ty: *ty,
+                mutable: sig.param_muts[slot],
+                kind: HExprKind::Local(slot as u32),
+            })
+            .collect();
+        vec![HStmt::Expr(HExpr {
+            ty: sig.ret,
+            mutable: true,
+            kind: HExprKind::Intrinsic { intrinsic, args },
+        })]
     }
 
     /// Fill every reserved interface contract.
@@ -589,16 +1215,22 @@ impl<'a> Materializer<'a> {
 
     /// Fill every reserved declaration, create the imported
     /// functions, and record the import slots. The result is the own
-    /// field count of each imported class, in class-index order, so
-    /// the caller can keep the default table aligned.
-    pub(crate) fn finish(&mut self, ctx: &mut Ctx, span: Span) -> Result<Vec<usize>, Diagnostic> {
+    /// field count of each imported class and its class index.
+    pub(crate) fn finish(
+        &mut self,
+        ctx: &mut Ctx,
+        span: Span,
+    ) -> Result<Vec<(u32, usize)>, Diagnostic> {
         let pending = std::mem::take(&mut self.pending);
         let mut own_fields = Vec::with_capacity(pending.len());
         for item in &pending {
-            debug_assert_eq!(item.id as usize, ctx.classes.len());
             let info = self.class_info(ctx, item, span)?;
-            own_fields.push(info.field_names.len() - info.own_start);
-            ctx.classes.push(info);
+            own_fields.push((item.id, info.field_names.len() - info.own_start));
+            let target = ctx
+                .classes
+                .get_mut(item.id as usize)
+                .ok_or_else(|| error(span, "an imported class has no reserved table entry"))?;
+            *target = info;
             ctx.imports.push(HirImport {
                 module: item.module.clone(),
                 name: item.name.clone(),
@@ -617,14 +1249,16 @@ impl<'a> Materializer<'a> {
         // The method functions follow the class table, so every class
         // index exists before a method signature resolves.
         for item in &pending {
-            for method in &item.class.methods.clone() {
+            if let Some(init) = &item.class.init {
                 let self_ty = ctx.classes[item.id as usize].self_ty;
-                let sig = self.fn_sig(ctx, &method.sig, Some((self_ty, method.mut_self)), span)?;
+                let sig = self.fn_sig(ctx, init, Some((self_ty, true)), span)?;
+                let name = format!("{}.init", item.name);
+                let body = self.imported_body(&item.module, &name, &sig);
                 let func = ctx.push_func(
                     HirFunc {
-                        core: false,
+                        core: self.core,
                         source_span: None,
-                        name: format!("{}.{}", item.name, method.name),
+                        name: name.clone(),
                         type_params: sig.type_params.len() as u32,
                         type_bounds: crate::check::hir_bounds(&sig.type_bounds),
                         effect_params: sig.effect_params.len() as u32,
@@ -635,14 +1269,55 @@ impl<'a> Materializer<'a> {
                         row: sig.row.clone(),
                         captures: vec![],
                         locals: sig.params.clone(),
-                        body: vec![],
+                        body,
                         imported: true,
                     },
                     sig,
                 );
                 ctx.imports.push(HirImport {
                     module: item.module.clone(),
-                    name: format!("{}.{}", item.name, method.name),
+                    name,
+                    kind: ImportKind::Method,
+                    def: HirImportDef::Func(func),
+                    hash: item.iface_hash,
+                });
+                Rc::get_mut(
+                    ctx.classes[item.id as usize]
+                        .init
+                        .as_mut()
+                        .expect("the imported class has an initializer"),
+                )
+                .expect("an imported initializer is not shared yet")
+                .func = func;
+            }
+            for method in &item.class.methods.clone() {
+                let self_ty = ctx.classes[item.id as usize].self_ty;
+                let sig = self.fn_sig(ctx, &method.sig, Some((self_ty, method.mut_self)), span)?;
+                let name = format!("{}.{}", item.name, method.name);
+                let body = self.imported_body(&item.module, &name, &sig);
+                let func = ctx.push_func(
+                    HirFunc {
+                        core: self.core,
+                        source_span: None,
+                        name: name.clone(),
+                        type_params: sig.type_params.len() as u32,
+                        type_bounds: crate::check::hir_bounds(&sig.type_bounds),
+                        effect_params: sig.effect_params.len() as u32,
+                        params: sig.params.clone(),
+                        param_muts: sig.param_muts.clone(),
+                        param_names: sig.param_names.clone(),
+                        ret: sig.ret,
+                        row: sig.row.clone(),
+                        captures: vec![],
+                        locals: sig.params.clone(),
+                        body,
+                        imported: true,
+                    },
+                    sig,
+                );
+                ctx.imports.push(HirImport {
+                    module: item.module.clone(),
+                    name,
                     kind: ImportKind::Method,
                     def: HirImportDef::Func(func),
                     hash: item.iface_hash,
@@ -699,9 +1374,10 @@ impl<'a> Materializer<'a> {
                 ret: requirement.ret,
                 row: requirement.row.clone(),
             };
+            let body = self.imported_body(&item.module, &item.binding, &sig);
             let func = ctx.push_func(
                 HirFunc {
-                    core: false,
+                    core: self.core,
                     source_span: None,
                     name: item.binding.clone(),
                     type_params: sig.type_params.len() as u32,
@@ -714,7 +1390,7 @@ impl<'a> Materializer<'a> {
                     row: sig.row.clone(),
                     captures: vec![],
                     locals: sig.params.clone(),
-                    body: vec![],
+                    body,
                     imported: true,
                 },
                 sig,
@@ -734,11 +1410,12 @@ impl<'a> Materializer<'a> {
         let funcs = std::mem::take(&mut self.pending_funcs);
         for item in &funcs {
             let sig = self.fn_sig(ctx, &item.sig, None, span)?;
+            let body = self.imported_body(&item.module, &item.name, &sig);
             let func = ctx.push_func(
                 HirFunc {
-                    core: false,
+                    core: self.core,
                     source_span: None,
-                    name: item.name.clone(),
+                    name: item.bound.clone(),
                     type_params: sig.type_params.len() as u32,
                     type_bounds: crate::check::hir_bounds(&sig.type_bounds),
                     effect_params: sig.effect_params.len() as u32,
@@ -749,17 +1426,21 @@ impl<'a> Materializer<'a> {
                     row: sig.row.clone(),
                     captures: vec![],
                     locals: sig.params.clone(),
-                    body: vec![],
+                    body,
                     imported: true,
                 },
                 sig,
             );
-            if ctx.func_index.insert(item.bound.clone(), func).is_some() {
+            let functions = if self.core {
+                &mut ctx.core_func_index
+            } else {
+                &mut ctx.func_index
+            };
+            if functions.insert(item.bound.clone(), func).is_some() {
                 return Err(error(
                     span,
                     format!(
-                        "the name `{}` already has a definition in this module; \
-                         rename it or bind the module instead",
+                        "the function name `{}` has more than one definition",
                         item.bound
                     ),
                 ));
@@ -789,14 +1470,13 @@ impl<'a> Materializer<'a> {
             IfaceClassKind::EnumCase => ClassKind::EnumCase,
         };
         let type_params: Vec<String> = (0..class.type_params).map(|i| format!("${i}")).collect();
-        let self_ty = if class.type_params == 0 {
-            ctx.store.intern(Type::Class(ClassId(item.id)))
-        } else {
-            let vars: Vec<TypeId> = (0..class.type_params)
-                .map(|i| ctx.store.intern(Type::Var(i)))
-                .collect();
-            ctx.store.intern(Type::Inst(ClassId(item.id), vars))
-        };
+        let native_repr = self.core.then(|| core_native_repr(&item.name)).flatten();
+        let self_ty = class_self_type(
+            &mut ctx.store,
+            ClassId(item.id),
+            class.type_params,
+            native_repr,
+        );
         let parent = match &class.parent {
             None => None,
             Some(p) => Some(self.resolve_qual(ctx, p, span)?),
@@ -894,7 +1574,7 @@ impl<'a> Materializer<'a> {
             source_span: None,
             is_final: class.is_final,
             is_frozen: class.is_frozen,
-            native_repr: None,
+            native_repr,
             name: item.name.clone(),
             parent,
             type_params,

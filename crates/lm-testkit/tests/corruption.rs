@@ -556,7 +556,7 @@ fn class_arity_flip_is_rejected() {
 
 #[test]
 fn an_overflowing_interface_arity_is_rejected() {
-    let mut module = lm_bytecode::decode(&valid_bytes()).unwrap();
+    let mut module = lm_hir::core_image();
     let interface = module
         .interfaces
         .first_mut()

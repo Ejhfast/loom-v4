@@ -2,7 +2,7 @@ use lm_bytecode::{
     corepin::{ROLE_BOOL, ROLE_INT},
     Instr,
 };
-use lm_testkit::{compile_module_text, run_text};
+use lm_testkit::{compile_verifier_fixture_text, run_text};
 use lm_vm::{Vm, VmConfig};
 
 fn int_method(module: &lm_bytecode::Module) -> (u32, u32, u32) {
@@ -31,7 +31,8 @@ fn primitive_method(module: &lm_bytecode::Module, role: usize, name: &str) -> (u
 #[test]
 fn int_abs_uses_the_final_core_method_table() {
     let source = "(-42).abs()\n";
-    let module = compile_module_text("int_abs.lm", source).expect("the program compiles");
+    let module =
+        compile_verifier_fixture_text("int_abs.lm", source).expect("the verifier fixture compiles");
     let (class, _, func) = int_method(&module);
     assert!(module.classes[class as usize].is_final);
     let entry = &module.funcs[module.entry as usize];
@@ -52,8 +53,8 @@ fn int_abs_uses_the_final_core_method_table() {
 
 #[test]
 fn an_int_tag_supports_verified_virtual_dispatch() {
-    let mut module =
-        compile_module_text("int_virtual.lm", "1.abs()\n").expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("int_virtual.lm", "1.abs()\n")
+        .expect("the verifier fixture compiles");
     let (_, selector, _) = int_method(&module);
     module.funcs[module.entry as usize].blocks = vec![vec![
         Instr::ConstInt(-7),
@@ -61,9 +62,8 @@ fn an_int_tag_supports_verified_virtual_dispatch() {
         Instr::Return,
     ]];
     lm_verify::verify_module(&module).expect("the virtual call verifies");
-    let artifact = lm_testkit::artifact_with_core_from_module("int_virtual", module)
-        .expect("the artifact builds");
-    let (arena, namespace) = lm_testkit::publish_artifact(&artifact).expect("the artifact loads");
+    let (arena, namespace) =
+        lm_testkit::unit_from_module(module).expect("the verifier fixture loads");
     let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(7)");
@@ -71,7 +71,8 @@ fn an_int_tag_supports_verified_virtual_dispatch() {
 
 #[test]
 fn the_verifier_rejects_a_nonfinal_int_role() {
-    let mut module = compile_module_text("int_role.lm", "1\n").expect("the program compiles");
+    let mut module =
+        compile_verifier_fixture_text("int_role.lm", "1\n").expect("the verifier fixture compiles");
     let class = module.core_roles[ROLE_INT];
     module.conformances.retain(|item| item.class != class);
     module.classes[class as usize].is_final = false;
@@ -89,7 +90,8 @@ fn operators_inline_to_existing_instructions() {
     let source = "(-5, 8 + 3, 8 - 3, 8 * 3, 8 / 3, 8 % 3, \
                   1 == 1, 1 != 2, 1 < 2, 1 <= 1, 2 > 1, 2 >= 2, \
                   not false, true == false, true != false)\n";
-    let module = compile_module_text("operators.lm", source).expect("the program compiles");
+    let module = compile_verifier_fixture_text("operators.lm", source)
+        .expect("the verifier fixture compiles");
     let primitive_funcs: Vec<u32> = [ROLE_INT, ROLE_BOOL]
         .iter()
         .flat_map(|role| {
@@ -137,8 +139,8 @@ fn operators_inline_to_existing_instructions() {
 
 #[test]
 fn a_bool_tag_supports_verified_virtual_dispatch() {
-    let mut module =
-        compile_module_text("bool_virtual.lm", "not false\n").expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("bool_virtual.lm", "not false\n")
+        .expect("the verifier fixture compiles");
     let (selector, _) = primitive_method(&module, ROLE_BOOL, "__not__");
     module.funcs[module.entry as usize].blocks = vec![vec![
         Instr::ConstBool(false),
@@ -146,9 +148,8 @@ fn a_bool_tag_supports_verified_virtual_dispatch() {
         Instr::Return,
     ]];
     lm_verify::verify_module(&module).expect("the virtual call verifies");
-    let artifact = lm_testkit::artifact_with_core_from_module("bool_virtual", module)
-        .expect("the artifact builds");
-    let (arena, namespace) = lm_testkit::publish_artifact(&artifact).expect("the artifact loads");
+    let (arena, namespace) =
+        lm_testkit::unit_from_module(module).expect("the verifier fixture loads");
     let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(true)");
@@ -156,7 +157,8 @@ fn a_bool_tag_supports_verified_virtual_dispatch() {
 
 #[test]
 fn the_verifier_rejects_a_stateful_bool_role() {
-    let mut module = compile_module_text("bool_role.lm", "true\n").expect("the program compiles");
+    let mut module = compile_verifier_fixture_text("bool_role.lm", "true\n")
+        .expect("the verifier fixture compiles");
     let class = module.core_roles[ROLE_BOOL];
     let int_ty = module
         .types
