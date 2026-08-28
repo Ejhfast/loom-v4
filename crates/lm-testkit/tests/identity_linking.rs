@@ -443,6 +443,93 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
 }
 
 #[test]
+fn one_arena_runs_fat_artifacts_with_two_compatible_cores() {
+    use lm_bytecode::artifact::{Artifact, ArtifactDependency, LinkUnit, CORE_MODULE_PATH};
+
+    let standard_core = lm_compiler::core_link_unit().expect("the standard core builds");
+    let standard = compile_text("standard.lm", "40 + 2\n").expect("the program compiles");
+
+    let mut module = standard_core.module().clone();
+    let unit_type = module
+        .types
+        .iter()
+        .position(|ty| *ty == BcType::Unit)
+        .expect("the core unit type exists") as u32;
+    module.funcs.push(Func {
+        name: "alternate_core_marker".to_string(),
+        type_params: 0,
+        effect_params: 0,
+        params: Vec::new(),
+        param_muts: Vec::new(),
+        ret: unit_type,
+        row: Vec::new(),
+        captures: Vec::new(),
+        local_types: Vec::new(),
+        blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
+        param_names: Vec::new(),
+    });
+    module.func_bounds.push(Vec::new());
+    lm_verify::verify_module(&module).expect("the alternate core verifies");
+    let alternate_core = LinkUnit::from_module(CORE_MODULE_PATH, module, Vec::new())
+        .expect("the alternate core unit builds");
+    assert_ne!(alternate_core.id(), standard_core.id());
+
+    let alternate_dependencies = standard
+        .root()
+        .dependencies()
+        .iter()
+        .map(|dependency| {
+            let artifact = if dependency.module_path() == CORE_MODULE_PATH {
+                alternate_core.id()
+            } else {
+                dependency.artifact()
+            };
+            ArtifactDependency::new(dependency.module_path(), artifact)
+                .expect("the dependency is valid")
+        })
+        .collect();
+    let alternate_root = LinkUnit::new(
+        standard.root().module_path(),
+        standard.root().module().clone(),
+        standard.root().interface().clone(),
+        alternate_dependencies,
+    )
+    .expect("the alternate root unit builds");
+    let alternate = Artifact::new(alternate_root, vec![alternate_core])
+        .expect("the fat alternate artifact builds");
+    let alternate_bytes =
+        lm_bytecode::artifact::encode(&alternate).expect("the fat alternate artifact encodes");
+    let alternate = lm_bytecode::artifact::decode(&alternate_bytes)
+        .expect("the fat alternate artifact decodes");
+
+    let mut arena = lm_link::CodeArena::new();
+    let standard_id = arena
+        .publish_verified(standard, Some(standard_core.clone()))
+        .expect("the standard artifact publishes");
+    let alternate_id = arena
+        .publish(alternate, None)
+        .expect("the fat alternate artifact publishes");
+    assert_eq!(arena.namespace_count(), 2);
+    assert_ne!(
+        arena
+            .namespace(standard_id)
+            .expect("the standard namespace exists")
+            .core_artifact(),
+        arena
+            .namespace(alternate_id)
+            .expect("the alternate namespace exists")
+            .core_artifact()
+    );
+
+    let mut standard_vm = lm_vm::Vm::new(arena.clone(), standard_id, lm_vm::VmConfig::default());
+    let standard_outcome = standard_vm.run();
+    assert_eq!(standard_vm.show_outcome(&standard_outcome), "Done(42)");
+    let mut alternate_vm = lm_vm::Vm::new(arena, alternate_id, lm_vm::VmConfig::default());
+    let alternate_outcome = alternate_vm.run();
+    assert_eq!(alternate_vm.show_outcome(&alternate_outcome), "Done(42)");
+}
+
+#[test]
 fn canonical_layout_marks_only_clean_extension_chains() {
     let root = compile_text("root.lm", "0\n").expect("the root compiles");
     let first = compile_text("first.lm", "def first(): Int\n  1\nend\nfirst()\n")

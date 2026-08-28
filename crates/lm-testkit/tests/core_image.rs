@@ -56,9 +56,8 @@ fn core_image_matches_the_pinned_hash() {
     );
 }
 
-/// Compute the pinned core definition lines from a fresh core image.
-fn core_def_lines() -> String {
-    let image = lm_hir::core_image();
+/// Compute the pinned core definition lines from one core image.
+fn core_def_lines(image: &lm_bytecode::Module) -> String {
     let identity = lm_bytecode::identity::module_identity(&image).expect("the core image hashes");
     let mut out = String::new();
     for label in lm_bytecode::corepin::PINNED_LABELS {
@@ -88,7 +87,8 @@ fn core_definition_hashes_match_the_pin() {
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .collect();
-    let fresh = core_def_lines();
+    let image = lm_hir::core_image();
+    let fresh = core_def_lines(&image);
     let fresh_lines: Vec<&str> = fresh.lines().collect();
     assert_eq!(
         pinned_lines, fresh_lines,
@@ -96,6 +96,28 @@ fn core_definition_hashes_match_the_pin() {
          run `cargo test -p lm-testkit --test core_image regenerate_core_pins -- --ignored` \
          and commit the new pins"
     );
+}
+
+fn encode_intrinsics(intrinsics: &[Option<lm_abi::IntrinsicSlot>]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(intrinsics.len() * 4);
+    for intrinsic in intrinsics {
+        bytes.extend_from_slice(&intrinsic.unwrap_or(u32::MAX).to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn pinned_core_files_match_one_fresh_build() {
+    let bundle = lm_abi::standard_bundle();
+    let (image, intrinsics) = lm_hir::core_image_with_intrinsics(bundle);
+    let compiled = std::fs::read(repo_root().join("core/pinned-core.lmbc"))
+        .expect("the pinned core bytes exist");
+    let summaries = std::fs::read(repo_root().join("core/pinned-core-intrinsics.bin"))
+        .expect("the pinned core intrinsic table exists");
+    assert_eq!(compiled, lm_bytecode::encode(&image));
+    assert_eq!(summaries, encode_intrinsics(&intrinsics));
+    let decoded = lm_bytecode::decode(&compiled).expect("the pinned core decodes");
+    lm_verify::verify_module(&decoded).expect("the pinned core verifies");
 }
 
 /// The resolved layout in a user module comes from the hashes: every
@@ -145,7 +167,10 @@ fn a_renamed_shape_cannot_spoof_the_core_layout() {
 #[test]
 #[ignore]
 fn regenerate_core_pins() {
-    let bytes = lm_bytecode::encode(&lm_hir::core_image());
+    let bundle = lm_abi::standard_bundle();
+    let (image, intrinsics) = lm_hir::core_image_with_intrinsics(bundle);
+    lm_verify::verify_module(&image).expect("the generated core verifies");
+    let bytes = lm_bytecode::encode(&image);
     let hash = lm_bytecode::hash::hash256_hex(&bytes);
     std::fs::write(
         repo_root().join("core/pinned-hash.txt"),
@@ -157,9 +182,16 @@ fn regenerate_core_pins() {
                   # in crates/lm-testkit/tests/core_image.rs.\n";
     std::fs::write(
         repo_root().join("core/pinned-core-defs.txt"),
-        format!("{header}{}", core_def_lines()),
+        format!("{header}{}", core_def_lines(&image)),
     )
     .expect("pinned-core-defs.txt writes");
+    std::fs::write(repo_root().join("core/pinned-core.lmbc"), bytes)
+        .expect("pinned-core.lmbc writes");
+    std::fs::write(
+        repo_root().join("core/pinned-core-intrinsics.bin"),
+        encode_intrinsics(&intrinsics),
+    )
+    .expect("pinned-core-intrinsics.bin writes");
 }
 
 /// The prelude is a name-import layer only. The core image compiles

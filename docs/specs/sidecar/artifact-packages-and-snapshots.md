@@ -317,6 +317,14 @@ A future store can resolve more exact `ArtifactId` values.
 
 That extension does not change the artifact format.
 
+The standard build stores one pinned compiled core beside its source pins.
+
+The pin generator verifies the compiled core before it writes the file.
+
+Each process decodes this compiled core once.
+
+A custom ABI bundle compiles and verifies its own core.
+
 `LinkEnv` remains the only module-path resolver.
 
 Decoded artifact units populate one `LinkEnv` for each resolved graph.
