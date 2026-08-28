@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured tree is the `artifact-packages` worktree after revision `56cc675`.
+The measured tree is the `artifact-packages` worktree after revision `bef119a`.
 
 The tree compiles source modules against sparse dependencies.
 
@@ -37,6 +37,7 @@ The snapshot format version is 35.
 | Bytecode instructions | 18,899 |
 | Decoded instruction width | 16 bytes |
 | Core LMBC | 304,763 bytes |
+| Pinned intrinsic summaries | 2,388 bytes |
 | Core LMAR | 304,885 bytes |
 | LMAR wrapper | 122 bytes |
 | LMAR encoding | 0.128 ms |
@@ -61,6 +62,12 @@ LMAR adds 122 bytes of package structure.
 LMAR does not store an `.lmi` type tree.
 
 No compression or verification cache supplies these results.
+
+The standard core provider decodes the pinned LMBC once in each process.
+
+The generator verifies the core before it writes both pinned files.
+
+The core-image gate compares both files with one fresh build.
 
 ### Core comparison
 
@@ -119,16 +126,16 @@ The benchmark alternates the two revisions within each batch.
 
 | Source | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| `1` | 10.073 / 10.039 ms | 15.991 / 15.939 ms | +58.8% |
-| Thin `1.lma` | 2.634 / 2.639 ms | 14.017 / 14.001 ms | +431.6% |
-| `use std.json.Json` | 35.617 / 35.537 ms | 22.035 / 22.067 ms | -38.0% |
-| `use std.http.Http` | 52.618 / 52.608 ms | 30.410 / 30.401 ms | -42.2% |
+| `1` | 10.036 / 9.961 ms | 8.223 / 8.158 ms | -18.1% |
+| Thin `1.lma` | 2.611 / 2.582 ms | 6.036 / 6.007 ms | +131.9% |
+| `use std.json.Json` | 35.413 / 35.370 ms | 14.088 / 14.253 ms | -60.0% |
+| `use std.http.Http` | 53.894 / 55.195 ms | 22.810 / 23.115 ms | -57.9% |
 
-Tiny command startup still constructs, identifies, and publishes the runtime core.
+Tiny command startup decodes, identifies, and publishes the pinned runtime core.
 
-The thin artifact path also constructs that core from bundled source.
+The thin artifact path uses the same pinned provider.
 
-It verifies the artifact unit and trusts the exact compiler-built core.
+The pin generator verifies the core before it writes the pinned files.
 
 Sparse dependency compilation removes repeated core work from standard modules.
 
@@ -164,12 +171,12 @@ The warm debug suite uses Cargo's default concurrency and full coverage.
 
 | Revision | Tests | Time |
 | --- | ---: | ---: |
-| `main` | 1,637 | 49.418 s |
-| Current | 1,692 | 31.769 s |
+| `main` | 1,637 | 49.55 s |
+| Current | 1,693 | 29.05 s |
 
-The current tree adds 55 tests.
+The current tree adds 56 tests.
 
-The current suite is 35.7 percent faster.
+The current suite is 41.4 percent faster.
 
 | Test binary | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
@@ -178,7 +185,7 @@ The current suite is 35.7 percent faster.
 | Snapshot image rules | 0.17 s | 0.20 s | +0.03 s |
 | Snapshot restore rules | 0.40 s | 0.31 s | -0.09 s |
 
-Each test executable builds one process-local core `LinkUnit` when required.
+Each test executable decodes one process-local core `LinkUnit` when required.
 
 This cost appears in compile-heavy test executables.
 
