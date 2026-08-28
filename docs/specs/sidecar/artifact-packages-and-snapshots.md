@@ -403,6 +403,16 @@ It must satisfy this exact runtime ABI.
 
 Cross-version admission remains deferred.
 
+Bytecode effect rows store ABI operation and group slots.
+
+Closed effect rows expand groups into exact operation slots.
+
+Effect rows never store module string slots.
+
+Linking and snapshot restore never relocate effect rows.
+
+Snapshot admission validates each closed row against the exact ABI bundle.
+
 ## 8. Linking and verification
 
 The compiler verifies each emitted `LinkUnit` once.
@@ -476,6 +486,10 @@ It records module bindings, slots, exports, relocation maps, and core roles.
 
 Each machine stores one `NamespaceId`.
 
+The coordinator resolves that identifier before execution.
+
+The interpreter receives direct table and dispatch views.
+
 Each machine, including a host root, owns one VM image record.
 
 A root snapshot therefore restores through the same path as a run snapshot.
@@ -536,11 +550,13 @@ Tuples and immutable collections are exact when their element types are exact.
 
 `DynValue` carries one value and its closed runtime type.
 
-It crosses a VM boundary as one value.
+A dynamic result stays in the machine that produced it.
 
-The holder resolves the payload through the widest code view of the world.
+The holder receives a reference to that machine, like a run handle.
 
-The holder cannot call the payload. It can render it.
+A snapshot of the holder closes over that machine.
+
+The holder cannot call the value. It renders the value through the owning machine's code.
 
 ## 11. `codeof` and runtime compilation
 
@@ -589,11 +605,15 @@ A snapshot never relies on the loader's ambient program.
 
 An in-memory snapshot shares immutable arena units and namespace views.
 
+Its trusted state can retain live arena indices.
+
 Snapshot capture does not encode shared code until the caller requests bytes.
 
 Trusted capture retains shared `Artifact` values.
 
 The `bytes()` operation performs the first artifact encoding.
+
+It also converts live arena indices into the snapshot-local code layout.
 
 A serialized thin snapshot stores program and installed-code units.
 
@@ -603,6 +623,40 @@ A serialized fat snapshot embeds the complete unit graph.
 
 ## 13. Snapshot relocation
 
+A serialized snapshot never stores a process-global arena index.
+
+The artifact graph defines one deterministic snapshot-local code layout.
+
+Each layout entry derives from one `ArtifactId` and one unit-local position.
+
+Namespace manifests define publication order inside this local layout.
+
+The encoder maps live arena indices into the local layout.
+
+The external loader rebuilds the same layout from verified artifacts.
+
+Admission never uses a world execution namespace as the source layout.
+
+World publication history cannot change an admission result.
+
+A world can reuse a canonical layout for the same complete code manifest.
+
+The reuse key includes the bundle, runtime core, artifacts, and namespace manifests.
+
+The loader compares complete artifact bytes before it trusts a reused layout.
+
+A clean extension chain already has this local layout.
+
+The writer proves this property from the immutable arena prefix.
+
+It then writes the local indices without replaying the artifact graph.
+
+An interleaved publication uses the full relocation path.
+
+Restore maps local indices into the destination arena.
+
+`NamespaceId` values never enter the container.
+
 Admission validates every stored index before restore.
 
 Restore builds checked maps for every indexed table.
@@ -610,11 +664,13 @@ Restore builds checked maps for every indexed table.
 The maps cover these items.
 
 - Strings and byte literals.
-- Types and effect rows.
+- Types and class positions.
 - Type environments and applications.
 - Functions, callbacks, and closures.
 - Classes, instances, and conformances.
 - Slots, bindings, and native code handles.
+- Slot-table positions and replacement versions.
+- String and byte-literal cache positions.
 - Core roles and namespace records.
 - Debug data and fault traces.
 - Every type-bearing heap payload.
@@ -624,6 +680,8 @@ The maps cover these items.
 No restore path indexes a map before admission proves the source index.
 
 Mutation tests must reach each map with a non-identity relocation.
+
+Trusted in-memory restore uses its live layout without this conversion.
 
 ## 14. Debugger capability
 
@@ -926,19 +984,26 @@ Gate: a function and a class install into an empty VM.
 - Store namespace manifests.
 - Share code views in in-memory snapshots.
 - Preserve runtime-compiled code and slots.
+- Encode code references through a deterministic snapshot-local layout.
 
 Gate: an unrelated Loom program restores and drives the snapshot.
 
 Gate: thin capture and restore do not encode or decode the runtime core.
 
+Gate: no container field stores a process-global arena index.
+
 ### Stage 8: admission and relocation closure
 
 - Validate every stored index before restore.
 - Relocate every indexed value kind.
+- Relocate positional slot and literal tables.
+- Validate every closed effect operation slot against the ABI bundle.
 - Extend mutation tests for every map.
 - Run each mutation against a non-identity destination.
 
 Gate: admitted bytes never panic during restore or execution.
+
+Gate result: a debugger capture admits in a fresh core-only world.
 
 ### Stage 9: debugger proof
 
@@ -952,6 +1017,8 @@ Gate: the debugger loads a fat snapshot with another compatible core.
 Gate result: `examples/15-compiler-and-hot-code-reloading/12-debug-another-program.lm` loads a thin snapshot of an unrelated program.
 
 The debugger reads the top frame source, answers `Clock.Now`, and renders the result.
+
+Gate result: the debugger retains a foreign result across capture and external restore.
 
 The fat snapshot gate remains open. No writer embeds a core.
 

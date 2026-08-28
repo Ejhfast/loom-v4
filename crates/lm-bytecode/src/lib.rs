@@ -86,11 +86,13 @@ pub fn ad_hoc_slot_key(binding: &str) -> [u8; 32] {
 
 /// One element of an effect row in the serialized module.
 ///
-/// `Op` names an operation or group through the module string table.
+/// `Op` names one operation in the exact ABI bundle.
+/// `Group` names one group in the exact ABI bundle.
 /// `Var` names one effect parameter of the enclosing function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BcRow {
     Op(u32),
+    Group(u32),
     Var(u32),
 }
 
@@ -1814,7 +1816,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 55 adds stream roles and child environment overlays.
 /// Version 56 adds interface defaults and compact interface calls.
 /// Version 57 stores source contracts in the module export section.
-pub const VERSION: u16 = 57;
+/// Version 58 stores effect rows with ABI operation and group slots.
+pub const VERSION: u16 = 58;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2084,6 +2087,7 @@ const TY_NEVER: u8 = 32;
 // Row element tags.
 const ROW_OP: u8 = 0;
 const ROW_VAR: u8 = 1;
+const ROW_GROUP: u8 = 2;
 
 // Class kind tags.
 const KIND_NORMAL: u8 = 0;
@@ -2452,6 +2456,10 @@ fn encode_row(out: &mut Vec<u8>, row: &[BcRow]) {
         match elem {
             BcRow::Op(idx) => {
                 out.push(ROW_OP);
+                write_u32(out, *idx);
+            }
+            BcRow::Group(idx) => {
+                out.push(ROW_GROUP);
                 write_u32(out, *idx);
             }
             BcRow::Var(idx) => {
@@ -3223,6 +3231,7 @@ fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
         let tag = cur.u8()?;
         let elem = match tag {
             ROW_OP => BcRow::Op(cur.u32()?),
+            ROW_GROUP => BcRow::Group(cur.u32()?),
             ROW_VAR => BcRow::Var(cur.u32()?),
             other => return Err(DecodeError::BadRowTag(other)),
         };
@@ -4522,6 +4531,17 @@ mod tests {
         let module = sample_module();
         let bytes = encode(&module);
         assert_eq!(decode(&bytes).unwrap(), module);
+    }
+
+    #[test]
+    fn an_abi_group_row_round_trips() {
+        let mut module = sample_module();
+        let io = lm_abi::standard_bundle()
+            .group_by_name("Io")
+            .expect("the standard ABI has the Io group");
+        module.funcs[0].row = vec![BcRow::Group(io)];
+        let bytes = encode(&module);
+        assert_eq!(decode(&bytes).expect("the module decodes"), module);
     }
 
     #[test]

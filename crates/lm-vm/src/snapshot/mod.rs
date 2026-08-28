@@ -32,6 +32,7 @@ pub mod restore;
 pub mod write;
 
 pub use admit::{admit, AdmissionBudget};
+pub(crate) use code::SnapshotCodeCache;
 pub use codec::{load_external, DecodeBudget};
 pub use write::{CutError, CutReport};
 
@@ -86,7 +87,9 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 31 stores homogeneous dynamic wait sets.
 /// Version 32 stores artifact tables and namespace manifests.
 /// Version 33 stores the dynamic result flag of a machine.
-pub const FORMAT_VERSION: u32 = 33;
+/// Version 34 stores dynamic result references.
+/// Version 35 stores closed effect rows as ABI operation slots.
+pub const FORMAT_VERSION: u32 = 35;
 
 /// The section kinds, in canonical order.
 ///
@@ -680,7 +683,13 @@ impl SnapshotImage {
                 "the snapshot has no code namespace".to_string(),
             )
         })?;
-        let written = codec::encode_with_bundle(&self.world, self.byte_limit, bundle)?;
+        let portable = self
+            .code
+            .needs_portable_layout()
+            .then(|| write::portable_image(&self.world, &self.code))
+            .transpose()?;
+        let image = portable.as_ref().unwrap_or(self.world.as_ref());
+        let written = codec::encode_with_bundle(image, self.byte_limit, bundle)?;
         let hash = codec::stored_container_hash(&written);
         let _ = self.bytes.set(std::sync::Arc::new(written));
         let _ = self.hash.set(hash);
@@ -712,7 +721,11 @@ impl SnapshotImage {
                 "the snapshot has no code namespace".to_string(),
             )
         })?;
-        let mut image = (*self.world).clone();
+        let mut image = if self.code.needs_portable_layout() {
+            write::portable_image(&self.world, &self.code)?
+        } else {
+            (*self.world).clone()
+        };
         image.materialize_artifacts(bundle)?;
         Ok(image)
     }

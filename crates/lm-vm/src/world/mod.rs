@@ -376,8 +376,7 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
                 .intern(ClosedType::Inst(option, vec![args[0]]))
                 .map_err(|_| FaultCode::BoundaryLimit)?
         };
-        self.envs
-            .digest(self.module, &self.identity.class_hashes, family);
+        self.envs.digest(&self.identity.class_hashes, family);
         Ok(Some(lm_graph::DigestOption {
             case,
             family,
@@ -496,8 +495,7 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
                 if self.envs.ty(*ty).is_none() {
                     return Err(FaultCode::BoundaryViolation);
                 }
-                self.envs
-                    .digest(self.module, &self.identity.class_hashes, *ty);
+                self.envs.digest(&self.identity.class_hashes, *ty);
                 Ok(vec![Some(*ty)])
             }
             _ => Ok(Vec::new()),
@@ -796,6 +794,8 @@ pub struct World {
     trusted_index: std::collections::HashMap<[u8; 32], crate::snapshot::SnapshotImage>,
     /// The canonical byte size charged by the trusted image cache.
     trusted_bytes: usize,
+    /// Weak canonical code layouts for admitted external images.
+    snapshot_code: crate::snapshot::SnapshotCodeCache,
     /// The admitted images this world holds, by slot.
     ///
     /// A guest snapshot value names a slot. A capture stores its

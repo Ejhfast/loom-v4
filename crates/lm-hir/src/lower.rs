@@ -34,6 +34,7 @@ fn interface_call(interface: u32, method: u32, recv_ty: u32, app: u32) -> Instr 
 /// Module-wide interning state during lowering.
 struct ModLowerer<'m> {
     store: &'m TypeStore,
+    bundle: &'m lm_abi::AbiBundle,
     funcs: &'m [HirFunc],
     classes: &'m [HirClass],
     /// Small expression bodies that direct calls can inline.
@@ -150,18 +151,29 @@ impl<'m> ModLowerer<'m> {
         self.intern_type(BcType::Callback(params, muts, ret, row))
     }
 
-    /// Convert a checker row into the bytecode row form. Operation
-    /// names intern into the string table.
+    /// Convert a checker row into exact ABI slots.
     fn bc_row(&mut self, row: &Row) -> Vec<BcRow> {
-        row.iter()
+        let mut lowered: Vec<BcRow> = row
+            .iter()
             .map(|elem| match elem {
                 RowElem::Op(name) => {
-                    let text = self.store.row_name(*name).to_string();
-                    BcRow::Op(self.intern_string(&text))
+                    let text = self.store.row_name(*name);
+                    if let Some(operation) = self.bundle.op_by_name(text) {
+                        BcRow::Op(operation)
+                    } else {
+                        BcRow::Group(
+                            self.bundle
+                                .group_by_name(text)
+                                .expect("the checker accepts only ABI row names"),
+                        )
+                    }
                 }
                 RowElem::Var(v) => BcRow::Var(*v),
             })
-            .collect()
+            .collect();
+        lowered.sort_unstable();
+        lowered.dedup();
+        lowered
     }
 
     fn intern_app(&mut self, types: Vec<u32>, rows: Vec<Vec<BcRow>>) -> u32 {
@@ -350,6 +362,7 @@ pub fn lower_module_with_linkage(
     }
     let mut m = ModLowerer {
         store: &hir.store,
+        bundle: &hir.bundle,
         funcs: &hir.funcs,
         classes: &hir.classes,
         inline_bodies,
@@ -4221,15 +4234,19 @@ fn optional_app_text(app: u32) -> String {
     }
 }
 
-fn row_text(module: &Module, row: &[BcRow]) -> String {
+fn row_text(_module: &Module, row: &[BcRow]) -> String {
+    let bundle = lm_abi::standard_bundle();
     let parts: Vec<String> = row
         .iter()
         .map(|elem| match elem {
-            BcRow::Op(idx) => module
-                .strings
-                .get(*idx as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("s{idx}")),
+            BcRow::Op(idx) => bundle
+                .op_name(*idx)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("op{idx}")),
+            BcRow::Group(idx) => bundle
+                .group_name(*idx)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("group{idx}")),
             BcRow::Var(v) => format!("e{v}"),
         })
         .collect();

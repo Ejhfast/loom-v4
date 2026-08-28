@@ -563,10 +563,14 @@ impl World {
         };
         relocate_snapshot_code(
             &layout.relocation,
+            None,
             &layout.code,
-            &mut types,
-            &mut vm_images,
-            &mut machines,
+            &layout.code,
+            SnapshotCodeState {
+                types: &mut types,
+                images: &mut vm_images,
+                machines: &mut machines,
+            },
         )?;
         let image = Image {
             format: super::FORMAT_VERSION,
@@ -783,6 +787,13 @@ impl World {
                     proc: self.require_ordinal(*proc, ordinal_of)?,
                     generation: *generation,
                 },
+                Object::NativeDynRef {
+                    vm: target,
+                    generation,
+                } => Object::NativeDynRef {
+                    vm: self.require_ordinal(*target, ordinal_of)?,
+                    generation: *generation,
+                },
                 other => other
                     .try_clone_remapped(map)
                     .map_err(|_| SnapshotFail::LimitExceeded)?,
@@ -856,9 +867,7 @@ impl World {
         let identity = code.identity().map_err(|error| {
             SnapshotFail::Fault(error, "the code namespace has no identity".to_string())
         })?;
-        Ok(self
-            .envs
-            .digest(code.as_ref(), &identity.class_hashes, closed))
+        Ok(self.envs.digest(&identity.class_hashes, closed))
     }
 
     /// Build the closed type table and the environment table of one
@@ -1171,6 +1180,13 @@ impl World {
                     proc: self.require_ordinal(*proc, ordinal_of)?,
                     generation: *generation,
                 },
+                Object::NativeDynRef {
+                    vm: target,
+                    generation,
+                } => Object::NativeDynRef {
+                    vm: self.require_ordinal(*target, ordinal_of)?,
+                    generation: *generation,
+                },
                 Object::NativeFileHandle { .. } => Object::NativeFileHandle { resource: 0 },
                 Object::NativeTcpStream { .. } => Object::NativeTcpStream { resource: 0 },
                 Object::NativeTcpListener { .. } => Object::NativeTcpListener { resource: 0 },
@@ -1444,6 +1460,34 @@ impl World {
     }
 }
 
+/// Convert one trusted capture to its portable table layout.
+pub(super) fn portable_image(
+    image: &Image,
+    source: &super::code::SnapshotCode,
+) -> Result<Image, SnapshotFail> {
+    let layout = source.portable_layout()?;
+    let mut portable = image.clone();
+    relocate_snapshot_code(
+        &layout.combined,
+        Some(&layout.namespaces),
+        source,
+        &layout.code,
+        SnapshotCodeState {
+            types: &mut portable.types,
+            images: &mut portable.vm_images,
+            machines: &mut portable.machines,
+        },
+    )?;
+    Ok(portable)
+}
+
+/// Mutable snapshot state that contains code indices.
+struct SnapshotCodeState<'a> {
+    types: &'a mut [ClosedType],
+    images: &'a mut [ImageVm],
+    machines: &'a mut [ImageMachine],
+}
+
 fn collect_empty_type(value: Value, out: &mut Vec<u32>) {
     if let Value::EmptyCase { ty, .. } = value {
         out.push(ty);
@@ -1452,15 +1496,15 @@ fn collect_empty_type(value: Value, out: &mut Vec<u32>) {
 
 fn relocate_snapshot_code(
     map: &CodeRelocation,
-    code: &super::code::SnapshotCode,
-    types: &mut [ClosedType],
-    images: &mut [ImageVm],
-    machines: &mut [ImageMachine],
+    namespace_maps: Option<&[CodeRelocation]>,
+    source_code: &super::code::SnapshotCode,
+    target_code: &super::code::SnapshotCode,
+    state: SnapshotCodeState<'_>,
 ) -> Result<(), SnapshotFail> {
     if map.is_identity() {
         return Ok(());
     }
-    for ty in types {
+    for ty in state.types {
         match ty {
             ClosedType::Class(class) | ClosedType::Inst(class, _) => {
                 *class = relocate_index(map.class(*class), "class")?;
@@ -1468,7 +1512,23 @@ fn relocate_snapshot_code(
             _ => {}
         }
     }
-    for image in images {
+    for image in state.images {
+        if let Some(maps) = namespace_maps {
+            let namespace = image.namespace as usize;
+            let namespace_map = maps.get(namespace).ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a VM image has no portable namespace map".to_string(),
+                )
+            })?;
+            let target = target_code.namespace(image.namespace).ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a VM image has no portable code namespace".to_string(),
+                )
+            })?;
+            relocate_image_slots(namespace_map, target.slots.len(), image)?;
+        }
         for target in &mut image.slots {
             relocate_slot_target(map, target)?;
         }
@@ -1476,7 +1536,7 @@ fn relocate_snapshot_code(
             relocate_object_code(map, &mut entry.object)?;
         }
     }
-    for machine in machines {
+    for machine in state.machines {
         machine.body_func = machine
             .body_func
             .map(|function| relocate_index(map.function(function), "body function"))
@@ -1493,30 +1553,123 @@ fn relocate_snapshot_code(
         if let Some(ImageTerminal::Fault(fault)) = &mut machine.terminal {
             relocate_fault_trace(map, &mut fault.trace)?;
         }
-        let target = code.namespace(machine.namespace).ok_or_else(|| {
+        let source_runtime = source_code.namespace(machine.namespace).ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a machine has no source code namespace".to_string(),
+            )
+        })?;
+        let target = target_code.namespace(machine.namespace).ok_or_else(|| {
             SnapshotFail::Fault(
                 FaultCode::MalformedState,
                 "a machine has no prepared code namespace".to_string(),
             )
         })?;
-        let mut literals = vec![None; target.strings.len()];
-        for (source, literal) in machine.literals.iter().copied().enumerate() {
+        let literal_map = namespace_maps
+            .and_then(|maps| maps.get(machine.namespace as usize))
+            .unwrap_or(map);
+        let mut literals = Vec::new();
+        for (source_index, literal) in machine.literals.iter().copied().enumerate() {
             let Some(literal) = literal else {
                 continue;
             };
-            let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
-            let target = relocate_index(map.string(source), "literal string")? as usize;
-            let slot = literals.get_mut(target).ok_or_else(|| {
-                SnapshotFail::Fault(
-                    FaultCode::MalformedState,
-                    "a literal string relocation is outside its namespace".to_string(),
-                )
-            })?;
-            *slot = Some(literal);
+            let target_index = relocate_literal_index(
+                literal_map,
+                source_index,
+                source_runtime.strings.len(),
+                source_runtime.bytes.len(),
+                target.strings.len(),
+            )?;
+            let needed = target_index
+                .checked_add(1)
+                .ok_or(SnapshotFail::LimitExceeded)?;
+            if literals.len() < needed {
+                literals
+                    .try_reserve_exact(needed - literals.len())
+                    .map_err(|_| SnapshotFail::LimitExceeded)?;
+                literals.resize(needed, None);
+            }
+            literals[target_index] = Some(literal);
         }
         machine.literals = literals;
     }
     Ok(())
+}
+
+fn relocate_image_slots(
+    map: &CodeRelocation,
+    target_count: usize,
+    image: &mut ImageVm,
+) -> Result<(), SnapshotFail> {
+    if image.slots.len() != image.slot_versions.len() {
+        return Err(SnapshotFail::Fault(
+            FaultCode::MalformedState,
+            "a VM image has another slot version count".to_string(),
+        ));
+    }
+    let source_slots = std::mem::take(&mut image.slots);
+    let source_versions = std::mem::take(&mut image.slot_versions);
+    let mut slots = vec![ImageSlotTarget::Empty; target_count];
+    let mut versions = vec![0; target_count];
+    let mut occupied = vec![false; target_count];
+    for (source, (slot, version)) in source_slots.into_iter().zip(source_versions).enumerate() {
+        let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
+        let Some(target) = map.slot(source) else {
+            if slot != ImageSlotTarget::Empty || version != 0 {
+                return Err(SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a live VM slot is outside its artifact graph".to_string(),
+                ));
+            }
+            continue;
+        };
+        let target = target as usize;
+        if target >= target_count {
+            return Err(SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a VM slot relocation is outside its namespace".to_string(),
+            ));
+        }
+        if occupied[target] && (slots[target] != slot || versions[target] != version) {
+            return Err(SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "two VM slots have one portable position".to_string(),
+            ));
+        }
+        occupied[target] = true;
+        slots[target] = slot;
+        versions[target] = version;
+    }
+    image.slots = slots;
+    image.slot_versions = versions;
+    Ok(())
+}
+
+fn relocate_literal_index(
+    map: &CodeRelocation,
+    source: usize,
+    source_strings: usize,
+    source_bytes: usize,
+    target_strings: usize,
+) -> Result<usize, SnapshotFail> {
+    if source < source_strings {
+        let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
+        return Ok(relocate_index(map.string(source), "literal string")? as usize);
+    }
+    let source = source
+        .checked_sub(source_strings)
+        .filter(|source| *source < source_bytes)
+        .ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a literal is outside its source pools".to_string(),
+            )
+        })?;
+    let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
+    let target = relocate_index(map.bytes(source), "literal bytes")? as usize;
+    target_strings
+        .checked_add(target)
+        .ok_or(SnapshotFail::LimitExceeded)
 }
 
 fn relocate_slot_target(

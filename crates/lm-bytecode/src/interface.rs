@@ -433,7 +433,7 @@ pub fn import_contract_hash_with_bundle(
     import: &Import,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<(ExportKind, String, [u8; 32]), String> {
-    let view = ModuleSurface { module };
+    let view = ModuleSurface { module, bundle };
     let (kind, name, item) = match import.kind {
         ImportKind::Func => (
             ExportKind::Function,
@@ -497,7 +497,7 @@ pub fn derive_interface_with_bundle(
     module_path: &str,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<Interface, String> {
-    let view = ModuleSurface { module };
+    let view = ModuleSurface { module, bundle };
     let mut exports = Vec::with_capacity(module.exports.len());
     for export in &module.exports {
         let item = if export.kind.is_class() {
@@ -575,6 +575,7 @@ pub fn derive_interface_with_bundle(
 
 struct ModuleSurface<'a> {
     module: &'a Module,
+    bundle: &'a lm_abi::AbiBundle,
 }
 
 impl ModuleSurface<'_> {
@@ -721,12 +722,17 @@ impl ModuleSurface<'_> {
         row.iter()
             .map(|item| match item {
                 crate::BcRow::Op(index) => self
-                    .module
-                    .strings
-                    .get(*index as usize)
-                    .cloned()
+                    .bundle
+                    .op_name(*index)
+                    .map(str::to_string)
                     .map(IfaceRow::Op)
                     .ok_or_else(|| "an interface row names no operation".to_string()),
+                crate::BcRow::Group(index) => self
+                    .bundle
+                    .group_name(*index)
+                    .map(str::to_string)
+                    .map(IfaceRow::Op)
+                    .ok_or_else(|| "an interface row names no group".to_string()),
                 crate::BcRow::Var(index) => Ok(IfaceRow::Var(*index)),
             })
             .collect()

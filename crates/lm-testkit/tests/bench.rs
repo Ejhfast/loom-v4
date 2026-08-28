@@ -2486,8 +2486,8 @@ fn bench_verification() {
         }
     }
     for (name, source) in cases {
-        let bytes = lm_testkit::compile_to_bytes("bench.lm", &source).expect("compiles");
-        let module = lm_bytecode::decode(&bytes).expect("decodes");
+        let module = lm_testkit::compile_module_text("bench.lm", &source).expect("compiles");
+        let bytes = lm_bytecode::encode(&module);
         let mut runs: Vec<Duration> = Vec::new();
         for round in 0..=ROUNDS {
             let start = Instant::now();

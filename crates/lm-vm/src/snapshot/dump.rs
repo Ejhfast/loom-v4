@@ -311,6 +311,7 @@ fn payload(object: &Object) -> String {
         Object::Substring(text) => format!("substring {text:?}"),
         Object::NativeVm { image, generation } => format!("VM image {image}:{generation}"),
         Object::NativeRun { vm } => format!("run {vm}"),
+        Object::NativeDynRef { vm, generation } => format!("dynamic result {vm}:{generation}"),
         Object::NativeCode(code) => {
             format!(
                 "portable {:?} slot {:?} bytes {}",

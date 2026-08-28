@@ -1,6 +1,6 @@
 # Latest benchmark baseline
 
-The measured tree is checkpoint `611d6f7`.
+The measured tree is the `artifact-packages` worktree after revision `fbf8dbd`.
 
 The tree compiles source modules against sparse dependencies.
 
@@ -20,39 +20,39 @@ Core and operation benchmarks pin each process to logical processor zero.
 
 The operating system selects processors for scheduler benchmark processes.
 
-The bytecode version is 57.
+The bytecode version is 58.
 
-The verifier version is 37.
+The verifier version is 38.
 
-The snapshot format version is 31.
+The snapshot format version is 35.
 
 ## Core image
 
 | Measurement | Result |
 | --- | ---: |
-| Classes | 299 |
+| Classes | 300 |
 | HIR functions | 597 |
-| HIR types | 565 |
-| Bytecode functions | 896 |
-| Bytecode instructions | 18,877 |
+| HIR types | 566 |
+| Bytecode functions | 897 |
+| Bytecode instructions | 18,899 |
 | Decoded instruction width | 16 bytes |
-| Core LMBC | 305,056 bytes |
-| Core LMAR | 305,178 bytes |
+| Core LMBC | 304,763 bytes |
+| Core LMAR | 304,885 bytes |
 | LMAR wrapper | 122 bytes |
-| LMAR encoding | 0.132 ms |
-| LMAR decoding and identity | 3.617 ms |
-| Core checking | 2.512 ms |
-| Core lowering | 1.023 ms |
-| Core compilation | 3.957 ms |
-| Core decoding | 0.457 ms |
-| Core verification | 1.488 ms |
-| Structural verification | 0.592 ms |
-| Verification hash | 0.140 ms |
-| Semantic identity | 2.476 ms |
-| Core namespace publication | 4.156 ms |
-| External core artifact load | 7.412 ms |
-| Repeated artifact publication | 0.770 ms |
-| Default interface witnesses | 11 of 3,588 possible entries |
+| LMAR encoding | 0.127 ms |
+| LMAR decoding and identity | 3.599 ms |
+| Core checking | 2.519 ms |
+| Core lowering | 1.018 ms |
+| Core compilation | 3.947 ms |
+| Core decoding | 0.452 ms |
+| Core verification | 1.489 ms |
+| Structural verification | 0.591 ms |
+| Verification hash | 0.136 ms |
+| Semantic identity | 2.468 ms |
+| Core namespace publication | 3.959 ms |
+| External core artifact load | 7.189 ms |
+| Repeated artifact publication | 0.759 ms |
+| Default interface witnesses | 11 of 3,600 possible entries |
 
 LMBC stores compiler surface facts once.
 
@@ -70,15 +70,15 @@ Each process reports one median from nine measured runs.
 
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Core LMBC | 274,657 bytes | 305,056 bytes | +11.1% |
-| Core checking | 2.396 ms | 2.512 ms | +4.8% |
-| Core lowering | 1.000 ms | 1.023 ms | +2.3% |
-| Core compilation | 3.788 ms | 3.957 ms | +4.5% |
-| Core decoding | 0.411 ms | 0.457 ms | +11.2% |
-| Core verification | 1.411 ms | 1.488 ms | +5.5% |
-| Structural verification | 0.516 ms | 0.592 ms | +14.7% |
-| Verification hash | 0.137 ms | 0.140 ms | +2.2% |
-| Semantic identity | 2.538 ms | 2.476 ms | -2.4% |
+| Core LMBC | 274,657 bytes | 304,763 bytes | +11.0% |
+| Core checking | 2.396 ms | 2.519 ms | +5.1% |
+| Core lowering | 1.000 ms | 1.018 ms | +1.8% |
+| Core compilation | 3.788 ms | 3.947 ms | +4.2% |
+| Core decoding | 0.411 ms | 0.452 ms | +10.0% |
+| Core verification | 1.411 ms | 1.489 ms | +5.5% |
+| Structural verification | 0.516 ms | 0.591 ms | +14.5% |
+| Verification hash | 0.137 ms | 0.136 ms | -0.7% |
+| Semantic identity | 2.538 ms | 2.468 ms | -2.8% |
 
 The LMBC growth stores exact source contract facts.
 
@@ -96,18 +96,18 @@ The program contains source `1`.
 
 | Measurement | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Artifact bytes | 274,942 | 1,699 | -99.4% |
-| Source compilation | 8.342 ms | 2.144 ms | -74.3% |
-| Cold artifact load | 2.033 ms | 1.423 ms | -30.0% |
-| Compilation and cold load | 10.375 ms | 3.567 ms | -65.6% |
+| Artifact bytes | 274,942 | 1,703 | -99.4% |
+| Source compilation | 8.342 ms | 2.130 ms | -74.5% |
+| Cold artifact load | 2.033 ms | 1.249 ms | -38.6% |
+| Compilation and cold load | 10.375 ms | 3.379 ms | -67.4% |
 
 The root unit contains one function and no class.
 
 Artifact decoding takes 0.009 milliseconds.
 
-Dependency collection takes 0.456 milliseconds.
+Dependency collection takes 0.454 milliseconds.
 
-Namespace publication takes 1.439 milliseconds.
+Namespace publication takes 1.264 milliseconds.
 
 The cold-load timing measures decoding and publication together.
 
@@ -133,23 +133,29 @@ This comparison uses three pinned processes for each revision.
 
 | Operation | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Direct call | 31.4 ns | 30.4 ns | -3.2% |
-| Virtual call | 64.0 ns | 65.4 ns | +2.2% |
-| List index | 51.6 ns | 45.8 ns | -11.2% |
-| String interpolation | 200.0 ns | 197.3 ns | -1.4% |
-| Interface default | 248.1 ns | 244.7 ns | -1.4% |
-| List hash | 864.5 ns | 814.6 ns | -5.8% |
-| List sort | 19,019.1 ns | 19,027.1 ns | +0.0% |
-| Map hashable lookup | 218.8 ns | 213.9 ns | -2.2% |
-| String builder | 40.9 ns | 40.5 ns | -1.0% |
-| Text iteration | 78.1 ns | 75.6 ns | -3.2% |
-| Large bytes decode | 911.6 ns | 940.2 ns | +3.1% |
-| Byte buffer | 37.6 ns | 38.4 ns | +2.1% |
-| Direct clock | 113.4 ns | 114.7 ns | +1.1% |
+| Direct call | 31.4 ns | 30.8 ns | -1.9% |
+| Virtual call | 64.0 ns | 66.4 ns | +3.8% |
+| List index | 51.6 ns | 44.2 ns | -14.3% |
+| String interpolation | 200.0 ns | 201.0 ns | +0.5% |
+| Interface default | 248.1 ns | 258.7 ns | +4.3% |
+| List hash | 864.5 ns | 842.8 ns | -2.5% |
+| List sort | 19,019.1 ns | 19,250.4 ns | +1.2% |
+| Map hashable lookup | 218.8 ns | 214.8 ns | -1.8% |
+| String builder | 40.9 ns | 42.0 ns | +2.7% |
+| Text iteration | 78.1 ns | 76.7 ns | -1.8% |
+| Large bytes decode | 911.6 ns | 933.0 ns | +2.3% |
+| Byte buffer | 37.6 ns | 38.0 ns | +1.1% |
+| Direct clock | 113.4 ns | 119.3 ns | +5.2% |
 
-The mean operation ratio decreases by 1.6 percent.
+The mean operation ratio decreases by 0.1 percent.
 
-The largest measured increase is 3.1 percent.
+The largest measured increase is 5.2 percent.
+
+An adjacent comparison used revision `fbf8dbd` before this work unit.
+
+The current work increases the mean operation ratio by 0.6 percent.
+
+Admission and effect rows do not run inside these operation loops.
 
 ## Workspace suite
 
@@ -158,16 +164,16 @@ The warm debug suite uses Cargo's default concurrency and full coverage.
 | Revision | Tests | Time |
 | --- | ---: | ---: |
 | `main` | 1,637 | 50.156 s |
-| Current | 1,673 | 33.213 s |
+| Current | 1,690 | 34.780 s |
 
-The current tree adds 36 tests.
+The current tree adds 53 tests.
 
-The current suite is 33.8 percent faster.
+The current suite is 30.7 percent faster.
 
 | Test binary | `main` | Current | Change |
 | --- | ---: | ---: | ---: |
-| Snapshot admission | 11.78 s | 5.05 s | -57.1% |
-| Snapshot mutation fuzzing | 14.06 s | 7.18 s | -48.9% |
+| Snapshot admission | 11.78 s | 5.10 s | -56.7% |
+| Snapshot mutation fuzzing | 14.06 s | 7.49 s | -46.7% |
 | Snapshot image rules | 0.17 s | 0.20 s | +0.03 s |
 | Snapshot restore rules | 0.40 s | 0.31 s | -0.09 s |
 

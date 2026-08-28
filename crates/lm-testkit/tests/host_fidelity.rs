@@ -105,9 +105,12 @@ fn extension_operations_carry_float_values_across_the_host_boundary() {
     let operation = bundle
         .op_by_name("Telemetry.Scale")
         .expect("the operation exists");
+    let group = bundle
+        .group_by_name("Telemetry")
+        .expect("the extension group exists");
     let source = SourceFile::new(
         "float_host.lm",
-        "def go(): Float with Telemetry.Scale\n  sys.telemetry.scale(1.5)\nend\n\ngo()\n",
+        "def go(): Float with Telemetry\n  sys.telemetry.scale(1.5)\nend\n\ngo()\n",
     );
     let compiled = lm_compiler::compile_module_with_bundle(
         "test.entry",
@@ -117,6 +120,18 @@ fn extension_operations_carry_float_values_across_the_host_boundary() {
         &bundle,
     )
     .expect("the program compiles");
+    let go = compiled
+        .module
+        .funcs
+        .iter()
+        .find(|function| function.name == "go")
+        .expect("the program has go");
+    assert_eq!(go.row, vec![lm_bytecode::BcRow::Group(group)]);
+    assert!(!compiled
+        .module
+        .strings
+        .iter()
+        .any(|text| text == "Telemetry"));
     let root = compiled.path.clone();
     let core = lm_compiler::core_link_unit_with_bundle(&bundle).expect("the core unit builds");
     let mut link_env =

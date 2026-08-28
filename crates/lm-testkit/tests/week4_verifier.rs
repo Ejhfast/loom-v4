@@ -69,6 +69,29 @@ fn add_constructor_seal(module: &mut Module, class: usize) {
     block.insert(position, Instr::Extended(ExtendedInstr::SealInstance));
 }
 
+#[test]
+fn lowering_uses_an_abi_operation_slot() {
+    let module = compile(GREET);
+    let greet = func_index(&module, "greet");
+    assert_eq!(
+        module.funcs[greet].row,
+        vec![BcRow::Op(lm_abi::OP_IO_WRITE)]
+    );
+    assert!(!module.strings.iter().any(|text| text == "Io.Write"));
+}
+
+#[test]
+fn lowering_uses_an_abi_group_slot() {
+    let source = GREET.replace("with Io.Write", "with Io");
+    let module = compile(&source);
+    let greet = func_index(&module, "greet");
+    let io = lm_abi::standard_bundle()
+        .group_by_name("Io")
+        .expect("the standard ABI has the Io group");
+    assert_eq!(module.funcs[greet].row, vec![BcRow::Group(io)]);
+    assert!(!module.strings.iter().any(|text| text == "Io"));
+}
+
 const FROZEN_KEY: &str = r#"
 frozen class Key
   value: Int
@@ -156,14 +179,14 @@ fn a_claimed_row_narrower_than_the_performs_is_rejected() {
 }
 
 #[test]
-fn a_row_name_outside_the_manifest_is_rejected() {
+fn a_row_operation_outside_the_abi_is_rejected() {
     let mut module = compile(GREET);
     let greet = func_index(&module, "greet");
-    let BcRow::Op(idx) = module.funcs[greet].row[0] else {
+    let BcRow::Op(_) = module.funcs[greet].row[0] else {
         panic!("greet declares one exact operation");
     };
-    module.strings[idx as usize] = "Zzz.Blast".to_string();
-    assert_rejected(&module, "not in the operation manifest");
+    module.funcs[greet].row[0] = BcRow::Op(u32::MAX);
+    assert_rejected(&module, "operation slot");
 }
 
 #[test]

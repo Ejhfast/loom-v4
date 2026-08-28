@@ -8,7 +8,7 @@ use lm_bytecode::identity::module_identity;
 use lm_bytecode::{BcType, DecodeError, Func, Instr, Module};
 use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
-use lm_testkit::compile_module_text;
+use lm_testkit::{compile_module_text, compile_text};
 
 fn identity_of(source: &str) -> (Module, lm_bytecode::identity::ModuleIdentity) {
     let module = raw_module(source);
@@ -440,6 +440,34 @@ fn the_link_environment_builds_equivalent_thin_and_fat_artifacts() {
     let fat_namespace = fat_arena.namespace(fat_id).expect("the namespace exists");
     assert_eq!(thin_namespace.artifact_id(), fat_namespace.artifact_id());
     assert_eq!(thin_namespace.tables(), fat_namespace.tables());
+}
+
+#[test]
+fn canonical_layout_marks_only_clean_extension_chains() {
+    let root = compile_text("root.lm", "0\n").expect("the root compiles");
+    let first = compile_text("first.lm", "def first(): Int\n  1\nend\nfirst()\n")
+        .expect("the first extension compiles");
+    let second = compile_text("second.lm", "def second(): Int\n  2\nend\nsecond()\n")
+        .expect("the second extension compiles");
+    let (mut arena, root_id) = lm_testkit::publish_artifact(&root).expect("the root publishes");
+    assert!(arena
+        .namespace(root_id)
+        .expect("the root namespace exists")
+        .has_canonical_layout());
+    let first_id = arena
+        .extend(root_id, first)
+        .expect("the first extension publishes");
+    assert!(arena
+        .namespace(first_id)
+        .expect("the first namespace exists")
+        .has_canonical_layout());
+    let second_id = arena
+        .extend(root_id, second)
+        .expect("the interleaved extension publishes");
+    assert!(!arena
+        .namespace(second_id)
+        .expect("the second namespace exists")
+        .has_canonical_layout());
 }
 
 #[test]

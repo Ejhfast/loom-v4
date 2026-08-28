@@ -73,13 +73,15 @@ impl World {
     pub fn show_outcome(&self, outcome: &Outcome) -> String {
         match outcome {
             Outcome::Done(value) => {
-                let code = &self.root_code().funcs[self.root_code().entry as usize];
+                let code = self.root_code().as_ref();
+                let entry = &code.funcs[code.entry as usize];
                 let expected = ShowExpected::Module {
-                    ty: code.ret,
+                    ty: entry.ret,
                     env: TypeEnvId::EMPTY,
                 };
                 let mut visited = Vec::new();
                 let shown = self.show_value_inner(
+                    code,
                     &self.machines[0].vm.heap,
                     *value,
                     Some(expected),
@@ -94,11 +96,11 @@ impl World {
 
     /// Render the retained guest locations of one machine fault.
     pub fn fault_context(&self, fault: &FaultRec) -> Vec<String> {
-        let debug = lm_bytecode::debug::decode(&self.show_code().debug).ok();
+        let debug = lm_bytecode::debug::decode(&self.root_code().debug).ok();
         let identity = self.identity().ok();
         let mut lines = Vec::new();
         for site in &fault.trace {
-            let Some(function) = self.show_code().funcs.get(site.function as usize) else {
+            let Some(function) = self.root_code().funcs.get(site.function as usize) else {
                 continue;
             };
             let mut offset = 0usize;
@@ -173,8 +175,10 @@ impl World {
 
     /// Render one value of one machine.
     pub fn show_value_of(&self, vm: VmId, value: Value) -> String {
+        let code = self.code_of(vm).as_ref();
         let mut visited = Vec::new();
         self.show_value_inner(
+            code,
             &self.machines[vm as usize].vm.heap,
             value,
             None,
@@ -186,19 +190,23 @@ impl World {
     /// Render one terminal result with the machine result type.
     pub fn show_result_of(&self, vm: VmId, value: Value) -> String {
         let machine = &self.machines[vm as usize];
+        let code = self.code_of(vm).as_ref();
         let expected = machine.body_func.map(|func| ShowExpected::Module {
-            ty: self.show_code().funcs[func as usize].ret,
+            ty: code.funcs[func as usize].ret,
             env: machine.witness,
         });
         let mut visited = Vec::new();
-        self.show_value_inner(&machine.vm.heap, value, expected, 0, &mut visited)
+        self.show_value_inner(code, &machine.vm.heap, value, expected, 0, &mut visited)
     }
 
     /// Render one dynamic package payload and resume its machine.
     pub(super) fn handle_dynamic_render(&mut self, vm: VmId, value: Value, ty: u32) {
         let text = {
+            let code = self.code_of(vm).clone();
+            let code = code.as_ref();
             let mut visited = Vec::new();
             self.show_value_inner(
+                code,
                 &self.machines[vm as usize].vm.heap,
                 value,
                 Some(ShowExpected::Closed(ty)),
@@ -214,13 +222,99 @@ impl World {
         }
     }
 
-    pub(super) fn resolve_show_expected(&self, expected: ShowExpected) -> Option<ShowExpected> {
+    /// Render the dynamic result of `target` for `vm` and resume `vm`.
+    pub(super) fn handle_dynamic_render_ref(&mut self, vm: VmId, target: VmId, generation: u32) {
+        let text = match self.dynamic_result_text(target, generation) {
+            Ok(text) => text,
+            Err(code) => {
+                self.machines[vm as usize].set_fault(
+                    code,
+                    "the dynamic result is not available",
+                    None,
+                );
+                return;
+            }
+        };
+        let result = self.machines[vm as usize]
+            .alloc(Object::Str(text.into()))
+            .and_then(|value| self.machines[vm as usize].push(value));
+        if let Err(code) = result {
+            self.machines[vm as usize].set_fault(code, "dynamic rendering failed", None);
+        }
+    }
+
+    /// Render the terminal value of one machine through its own code.
+    ///
+    /// A packed value renders through its stored type. A dynamic run
+    /// renders through its body result type.
+    fn dynamic_result_text(&self, target: VmId, generation: u32) -> Result<String, FaultCode> {
+        self.dynamic_result_text_at(target, generation, 0)
+    }
+
+    fn dynamic_result_text_at(
+        &self,
+        target: VmId,
+        generation: u32,
+        depth: u32,
+    ) -> Result<String, FaultCode> {
+        if depth >= 32 {
+            return Ok("...".to_string());
+        }
+        let machine = self
+            .machines
+            .get(target as usize)
+            .filter(|machine| machine.generation == generation)
+            .ok_or(FaultCode::InvalidVmState)?;
+        let value = match &machine.vm.terminal {
+            Some(Terminal::Done(value)) => *value,
+            _ => return Err(FaultCode::InvalidVmState),
+        };
+        let packed = value
+            .as_obj()
+            .and_then(|reference| match machine.vm.heap.get(reference) {
+                Object::DynValue { value, ty } => Some((*value, *ty)),
+                _ => None,
+            });
+        let code = self.code_of(target).as_ref();
+        let mut visited = Vec::new();
+        if let Some((value, ty)) = packed {
+            return Ok(self.show_value_inner(
+                code,
+                &machine.vm.heap,
+                value,
+                Some(ShowExpected::Closed(ty)),
+                depth + 1,
+                &mut visited,
+            ));
+        }
+        if !machine.dynamic_result {
+            return Err(FaultCode::InvalidVmState);
+        }
+        let expected = machine.body_func.map(|func| ShowExpected::Module {
+            ty: code.funcs[func as usize].ret,
+            env: machine.witness,
+        });
+        Ok(self.show_value_inner(
+            code,
+            &machine.vm.heap,
+            value,
+            expected,
+            depth + 1,
+            &mut visited,
+        ))
+    }
+
+    pub(super) fn resolve_show_expected(
+        &self,
+        code: &NamespaceRuntime,
+        expected: ShowExpected,
+    ) -> Option<ShowExpected> {
         let mut current = expected;
-        for _ in 0..=self.show_code().types.len() {
+        for _ in 0..=code.types.len() {
             let ShowExpected::Module { ty, env } = current else {
                 return Some(current);
             };
-            match self.show_code().types.get(ty as usize)? {
+            match code.types.get(ty as usize)? {
                 BcType::Var(index) => {
                     let closed = *self.envs.env(env)?.types.get(*index as usize)?;
                     current = ShowExpected::Closed(closed);
@@ -233,14 +327,15 @@ impl World {
 
     pub(super) fn show_option_shape(
         &self,
+        code: &NamespaceRuntime,
         expected: ShowExpected,
     ) -> Option<(ShowOption, ShowExpected)> {
-        let expected = self.resolve_show_expected(expected)?;
-        let option = self.root_core().option?;
-        let some = self.root_core().option_some?;
-        let none = self.root_core().option_none?;
+        let expected = self.resolve_show_expected(code, expected)?;
+        let option = code.core_layout().option?;
+        let some = code.core_layout().option_some?;
+        let none = code.core_layout().option_none?;
         let (class, payload) = match expected {
-            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
+            ShowExpected::Module { ty, env } => match code.types.get(ty as usize)? {
                 BcType::Inst(class, args) if args.len() == 1 => {
                     (*class, ShowExpected::Module { ty: args[0], env })
                 }
@@ -265,20 +360,26 @@ impl World {
         Some((case, payload))
     }
 
-    pub(super) fn empty_matches_option(&self, expected: ShowExpected, stored: u32) -> bool {
-        let Some((_, expected_payload)) = self.show_option_shape(expected) else {
+    pub(super) fn empty_matches_option(
+        &self,
+        code: &NamespaceRuntime,
+        expected: ShowExpected,
+        stored: u32,
+    ) -> bool {
+        let Some((_, expected_payload)) = self.show_option_shape(code, expected) else {
             return false;
         };
         let Some(ClosedType::Inst(class, args)) = self.envs.ty(stored) else {
             return false;
         };
-        self.root_core().option == Some(*class)
+        code.core_layout().option == Some(*class)
             && args.len() == 1
-            && self.show_expected_equals_closed(expected_payload, args[0], 0)
+            && self.show_expected_equals_closed(code, expected_payload, args[0], 0)
     }
 
     pub(super) fn show_expected_equals_closed(
         &self,
+        code: &NamespaceRuntime,
         expected: ShowExpected,
         closed: u32,
         depth: u32,
@@ -286,7 +387,7 @@ impl World {
         if depth > 64 {
             return false;
         }
-        let Some(expected) = self.resolve_show_expected(expected) else {
+        let Some(expected) = self.resolve_show_expected(code, expected) else {
             return false;
         };
         if let ShowExpected::Closed(found) = expected {
@@ -295,7 +396,7 @@ impl World {
         let ShowExpected::Module { ty, env } = expected else {
             return false;
         };
-        let Some(source) = self.show_code().types.get(ty as usize) else {
+        let Some(source) = code.types.get(ty as usize) else {
             return false;
         };
         let Some(target) = self.envs.ty(closed) else {
@@ -303,6 +404,7 @@ impl World {
         };
         let child = |this: &Self, source: u32, target: u32| {
             this.show_expected_equals_closed(
+                code,
                 ShowExpected::Module { ty: source, env },
                 target,
                 depth + 1,
@@ -362,7 +464,7 @@ impl World {
                         .zip(other)
                         .all(|(source, target)| child(self, *source, *target))
                     && child(self, *ret, *result)
-                    && self.envs.close_row(self.show_code().as_ref(), row, env) == *closed_row
+                    && self.envs.close_row(code, row, env) == *closed_row
             }
             (BcType::Op(op, source), ClosedType::Op(other, target)) => {
                 op == other && child(self, *source, *target)
@@ -371,9 +473,13 @@ impl World {
         }
     }
 
-    pub(super) fn show_list_element(&self, expected: ShowExpected) -> Option<ShowExpected> {
-        match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
+    pub(super) fn show_list_element(
+        &self,
+        code: &NamespaceRuntime,
+        expected: ShowExpected,
+    ) -> Option<ShowExpected> {
+        match self.resolve_show_expected(code, expected)? {
+            ShowExpected::Module { ty, env } => match code.types.get(ty as usize)? {
                 BcType::List(element) => Some(ShowExpected::Module { ty: *element, env }),
                 _ => None,
             },
@@ -386,10 +492,11 @@ impl World {
 
     pub(super) fn show_map_elements(
         &self,
+        code: &NamespaceRuntime,
         expected: ShowExpected,
     ) -> Option<(ShowExpected, ShowExpected)> {
-        match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
+        match self.resolve_show_expected(code, expected)? {
+            ShowExpected::Module { ty, env } => match code.types.get(ty as usize)? {
                 BcType::Map(key, value) => Some((
                     ShowExpected::Module { ty: *key, env },
                     ShowExpected::Module { ty: *value, env },
@@ -405,9 +512,13 @@ impl World {
         }
     }
 
-    pub(super) fn show_tuple_elements(&self, expected: ShowExpected) -> Option<Vec<ShowExpected>> {
-        match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
+    pub(super) fn show_tuple_elements(
+        &self,
+        code: &NamespaceRuntime,
+        expected: ShowExpected,
+    ) -> Option<Vec<ShowExpected>> {
+        match self.resolve_show_expected(code, expected)? {
+            ShowExpected::Module { ty, env } => match code.types.get(ty as usize)? {
                 BcType::Tuple(elements) => Some(
                     elements
                         .iter()
@@ -430,6 +541,7 @@ impl World {
 
     pub(super) fn show_value_inner(
         &self,
+        code: &NamespaceRuntime,
         heap: &Heap,
         value: Value,
         expected: Option<ShowExpected>,
@@ -438,14 +550,15 @@ impl World {
     ) -> String {
         const MAX_SHOW_DEPTH: u32 = 32;
         if let Some(expected) = expected {
-            if let Some((case, payload)) = self.show_option_shape(expected) {
+            if let Some((case, payload)) = self.show_option_shape(code, expected) {
                 let none = case == ShowOption::None
                     || (case == ShowOption::Family
-                        && matches!(value, Value::EmptyCase { ty, arm: 1 } if self.empty_matches_option(expected, ty)));
+                        && matches!(value, Value::EmptyCase { ty, arm: 1 } if self.empty_matches_option(code, expected, ty)));
                 if none {
                     return "None".to_string();
                 }
-                let inner = self.show_value_inner(heap, value, Some(payload), depth + 1, visited);
+                let inner =
+                    self.show_value_inner(code, heap, value, Some(payload), depth + 1, visited);
                 return format!("Some({inner})");
             }
         }
@@ -457,10 +570,7 @@ impl World {
             Value::Char(value) => format!("{value:?}"),
             Value::Op(op) => format!(
                 "<op {}>",
-                self.show_code()
-                    .bundle()
-                    .op_name(op)
-                    .unwrap_or("<invalid operation>")
+                code.bundle().op_name(op).unwrap_or("<invalid operation>")
             ),
             Value::Callback(reference) => format!("<callback {}>", reference.slot),
             Value::EmptyCase { arm: 1, .. } => "None".to_string(),
@@ -478,17 +588,19 @@ impl World {
                     Object::Substring(text) => render_string(text),
                     Object::List { items, .. } => {
                         visited.push(r);
-                        let element = expected.and_then(|ty| self.show_list_element(ty));
+                        let element = expected.and_then(|ty| self.show_list_element(code, ty));
                         let parts: Vec<String> = items
                             .iter()
-                            .map(|v| self.show_value_inner(heap, *v, element, depth + 1, visited))
+                            .map(|v| {
+                                self.show_value_inner(code, heap, *v, element, depth + 1, visited)
+                            })
                             .collect();
                         visited.pop();
                         format!("[{}]", parts.join(", "))
                     }
                     Object::Map { entries, .. } => {
                         visited.push(r);
-                        let elements = expected.and_then(|ty| self.show_map_elements(ty));
+                        let elements = expected.and_then(|ty| self.show_map_elements(code, ty));
                         let parts: Vec<String> = entries
                             .iter()
                             .filter(|entry| entry.is_live())
@@ -496,6 +608,7 @@ impl World {
                                 format!(
                                     "{}: {}",
                                     self.show_value_inner(
+                                        code,
                                         heap,
                                         entry.key,
                                         elements.map(|pair| pair.0),
@@ -503,6 +616,7 @@ impl World {
                                         visited,
                                     ),
                                     self.show_value_inner(
+                                        code,
                                         heap,
                                         entry.value,
                                         elements.map(|pair| pair.1),
@@ -517,12 +631,13 @@ impl World {
                     }
                     Object::Tuple { items } => {
                         visited.push(r);
-                        let elements = expected.and_then(|ty| self.show_tuple_elements(ty));
+                        let elements = expected.and_then(|ty| self.show_tuple_elements(code, ty));
                         let parts: Vec<String> = items
                             .iter()
                             .enumerate()
                             .map(|(index, v)| {
                                 self.show_value_inner(
+                                    code,
                                     heap,
                                     *v,
                                     elements
@@ -543,7 +658,7 @@ impl World {
                     }
                     Object::Instance { class, fields, env } => {
                         visited.push(r);
-                        let bc = &self.show_code().classes[*class as usize];
+                        let bc = &code.classes[*class as usize];
                         let text = if bc.kind == BcClassKind::Case {
                             // A case instance prints in constructor
                             // form with its short arm name.
@@ -556,6 +671,7 @@ impl World {
                                     .zip(bc.fields.iter())
                                     .map(|(v, (_, ty))| {
                                         self.show_value_inner(
+                                            code,
                                             heap,
                                             *v,
                                             Some(ShowExpected::Module {
@@ -579,6 +695,7 @@ impl World {
                                         "{}: {}",
                                         name,
                                         self.show_value_inner(
+                                            code,
                                             heap,
                                             *v,
                                             Some(ShowExpected::Module {
@@ -597,7 +714,7 @@ impl World {
                         text
                     }
                     Object::Closure { func, .. } => {
-                        format!("<closure {}>", self.show_code().funcs[*func as usize].name)
+                        format!("<closure {}>", code.funcs[*func as usize].name)
                     }
                     Object::StrBuilder(buf) => match buf.byte_len() {
                         Some(len) => format!("<StringBuilder length {len}>"),
@@ -622,6 +739,9 @@ impl World {
                         format!("<vm {image}:{generation}>")
                     }
                     Object::NativeRun { vm } => format!("<run {vm}>"),
+                    Object::NativeDynRef { vm, generation } => self
+                        .dynamic_result_text_at(*vm, *generation, depth + 1)
+                        .unwrap_or_else(|_| format!("<dynamic result {vm}:{generation}>")),
                     Object::NativeCode(code) => {
                         format!(
                             "<{:?} slot {:?} bytes {}>",
@@ -647,10 +767,7 @@ impl World {
                     Object::NativeCall { op, .. } => {
                         format!(
                             "<call {}>",
-                            self.show_code()
-                                .bundle()
-                                .op_name(*op)
-                                .unwrap_or("<invalid operation>")
+                            code.bundle().op_name(*op).unwrap_or("<invalid operation>")
                         )
                     }
                     Object::NativeFault { code, .. } => code.to_string(),
@@ -735,7 +852,7 @@ impl World {
                             .root_code()
                             .bundle()
                             .resource_by_identity(*kind)
-                            .and_then(|slot| self.show_code().bundle().resource(slot))
+                            .and_then(|slot| code.bundle().resource(slot))
                             .map(|resource| resource.name.as_str())
                             .unwrap_or("extension resource");
                         if *resource == 0 {
@@ -747,6 +864,7 @@ impl World {
                     Object::DynValue { value, ty } => {
                         visited.push(r);
                         let text = self.show_value_inner(
+                            code,
                             heap,
                             *value,
                             Some(ShowExpected::Closed(*ty)),
@@ -767,7 +885,7 @@ impl World {
     /// Two modules with equal bodies share one function value, so a
     /// single label would hide one of the two names. A closure body
     /// and the entry take no binding and keep their code label.
-    pub(super) fn func_label(&self, func: u32) -> String {
+    pub(super) fn func_label(&self, code: &NamespaceRuntime, func: u32) -> String {
         let keys: Vec<&str> = self
             .root_code()
             .bindings
@@ -776,7 +894,7 @@ impl World {
             .map(|b| b.key.as_str())
             .collect();
         if keys.is_empty() {
-            self.show_code().funcs[func as usize].name.clone()
+            code.funcs[func as usize].name.clone()
         } else {
             keys.join(", ")
         }
@@ -800,7 +918,7 @@ impl World {
             let _ = writeln!(
                 out,
                 "  frame {} block {} ip {}",
-                self.func_label(frame.func),
+                self.func_label(self.code_for_namespace(m.namespace).as_ref(), frame.func),
                 frame.block,
                 frame.ip
             );
@@ -817,7 +935,14 @@ impl World {
                 r.generation,
                 object.shape().name,
                 state,
-                self.show_value_inner(&m.vm.heap, Value::Obj(r), None, 0, &mut visited)
+                self.show_value_inner(
+                    self.code_for_namespace(m.namespace).as_ref(),
+                    &m.vm.heap,
+                    Value::Obj(r),
+                    None,
+                    0,
+                    &mut visited,
+                )
             );
         });
         out

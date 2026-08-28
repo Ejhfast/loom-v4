@@ -419,12 +419,7 @@ fn widened_callee_row_is_rejected() {
         .iter()
         .position(|f| f.name == "row_target")
         .expect("the sample defines `row_target`");
-    let op = module
-        .strings
-        .iter()
-        .position(|s| s == "Io.Write")
-        .expect("the row name is interned");
-    module.funcs[target].row = vec![BcRow::Op(op as u32)];
+    module.funcs[target].row = vec![BcRow::Op(lm_abi::OP_IO_WRITE)];
     expect_verify_reject(&lm_bytecode::encode(&module), "slot contract");
 }
 

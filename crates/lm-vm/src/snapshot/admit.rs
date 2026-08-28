@@ -128,12 +128,7 @@ pub fn admit(
     let runtime_core = available
         .as_ref()
         .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
-    let known = available
-        .as_ref()
-        .map(|namespace| crate::prepare_namespace(namespace.clone()))
-        .map(std::sync::Arc::new);
-    let known = known.as_ref().map(std::slice::from_ref);
-    let code = super::code::prepare_external(&image, runtime_core, bundle, known)?;
+    let code = super::code::prepare_external(&image, runtime_core, bundle, None)?;
     let identity = prove(&image, &code, budget)?;
     codec::seal_admitted(image, identity, code, budget.byte_limit())
 }
@@ -387,10 +382,9 @@ struct Admit<'m> {
 /// image against the program.
 ///
 /// The call proves every entry before any later rule reads one: a
-/// child index names an earlier entry, a class slot names a class of
-/// the code manifest, an operation slot names the manifest, and an
-/// effect name slot names the module string pool. It rejects a
-/// duplicate entry in either table, so one image states one table.
+/// child index names an earlier entry, and each class slot names a
+/// manifest class. Each operation slot names the ABI bundle. The
+/// function rejects duplicate entries, so one image states one table.
 ///
 /// Every entry charges the aggregate admission budget.
 fn resolve_type_tables(
@@ -399,7 +393,7 @@ fn resolve_type_tables(
     module: &crate::NamespaceRuntime,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<WitnessTables, ImageError> {
-    let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
+    let mut canonical = TypeEnvs::new_with_bundle(u32::MAX, u32::MAX, module.bundle().clone());
     canonical
         .reserve_capacity(image.types.len(), image.envs.len())
         .map_err(|_| {
@@ -472,7 +466,7 @@ fn resolve_type_tables(
                     format!("closed type {at} holds another marker count than parameters"),
                 );
             }
-            check_closed_row(module, row, at)?;
+            check_closed_row(bundle, row, at)?;
         }
         let mapped = node.remap(|child| canonical_of[child as usize]);
         let id = canonical.intern(mapped).map_err(|_| {
@@ -511,7 +505,7 @@ fn resolve_type_tables(
             }
         }
         for row in &env.rows {
-            check_closed_row(module, row, at)?;
+            check_closed_row(bundle, row, at)?;
         }
         let mut types = work_vec(env.types.len())?;
         types.extend(env.types.iter().map(|ty| canonical_of[*ty as usize]));
@@ -542,35 +536,18 @@ fn resolve_type_tables(
     })
 }
 
-/// Prove that one closed effect row names this program and stays
-/// canonical.
-fn check_closed_row(
-    module: &dyn lm_bytecode::CodeTableView,
-    row: &[u32],
-    at: usize,
-) -> Result<(), ImageError> {
+/// Prove that one closed effect row names the ABI and stays canonical.
+fn check_closed_row(bundle: &lm_abi::AbiBundle, row: &[u32], at: usize) -> Result<(), ImageError> {
     for slot in row {
-        if *slot as usize >= module.strings().len() {
+        if *slot >= bundle.op_count() {
             return fail(
                 ImageReason::Code,
-                format!("entry {at} names effect name slot {slot}, which the program has not"),
+                format!("entry {at} names operation slot {slot}, which the ABI has not"),
             );
         }
     }
     for pair in row.windows(2) {
-        let first = module.strings().get(pair[0] as usize).ok_or_else(|| {
-            ImageError::admission(
-                ImageReason::Code,
-                "an effect name slot is outside the program",
-            )
-        })?;
-        let second = module.strings().get(pair[1] as usize).ok_or_else(|| {
-            ImageError::admission(
-                ImageReason::Code,
-                "an effect name slot is outside the program",
-            )
-        })?;
-        if first >= second {
+        if pair[0] >= pair[1] {
             return fail(
                 ImageReason::Layout,
                 format!("entry {at} holds an effect row that is not canonical"),
@@ -1013,6 +990,25 @@ impl Admit<'_> {
                         );
                     }
                 }
+                Object::NativeDynRef {
+                    vm: source,
+                    generation,
+                } => {
+                    let Some(target) = self.image.machines.get(*source as usize) else {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!("object {ordinal} names no result machine")),
+                        );
+                    };
+                    if target.generation != *generation {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!(
+                                "object {ordinal} holds a stale dynamic result reference"
+                            )),
+                        );
+                    }
+                }
                 Object::Instance { class, fields, env } => {
                     if !self.class_named(*class)
                         || self
@@ -1158,7 +1154,7 @@ impl Admit<'_> {
         let Ok(closed) = table.close(self.module, body.ret, env) else {
             return [0u8; 32];
         };
-        table.digest(self.module, &self.identity.class_hashes, closed)
+        table.digest(&self.identity.class_hashes, closed)
     }
 
     /// Prove the canonical first-reference order of VM images.
@@ -1505,6 +1501,7 @@ impl Admit<'_> {
                 Object::NativeRun { vm } | Object::NativeTable { vm } => Some(vm),
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
+                Object::NativeDynRef { vm, .. } => Some(vm),
                 Object::NativeResourceHandle { surface, .. } => Some(surface),
                 Object::NativeWait { owner, .. } => Some(owner),
                 _ => None,

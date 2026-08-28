@@ -118,7 +118,7 @@ fn a_namespace_uses_its_exact_core_layout() {
 fn a_user_enum_cannot_fill_a_core_slot() {
     let core = lm_compiler::core_link_unit().expect("the core unit builds");
     let module = core.module();
-    let layout = lm_bytecode::corepin::declared_layout(&module);
+    let layout = lm_bytecode::corepin::declared_layout(module);
     let io_error = layout.io_error.expect("the core IoError resolves");
     let failed = layout.io_error_failed.expect("the core arm resolves");
     assert_eq!(module.classes[io_error as usize].name, "IoError");

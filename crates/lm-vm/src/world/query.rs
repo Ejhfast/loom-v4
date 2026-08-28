@@ -159,8 +159,12 @@ impl World {
         };
         self.record_snapshot_check();
         let available = self.root_code().clone();
-        let known = self.namespaces.iter().flatten().cloned().collect();
-        let image = crate::snapshot::codec::load_external_known(bytes, available, known, limits)?;
+        let image = crate::snapshot::codec::load_external_known(
+            bytes,
+            available,
+            &mut self.snapshot_code,
+            limits,
+        )?;
         self.trust_image(&image);
         Ok(image)
     }
@@ -220,6 +224,7 @@ impl World {
             }
             let target = match object {
                 Object::NativeRun { vm }
+                | Object::NativeDynRef { vm, .. }
                 | Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(*vm),

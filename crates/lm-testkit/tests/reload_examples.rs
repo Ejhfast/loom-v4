@@ -364,3 +364,122 @@ fn a_debugger_renders_a_result_of_a_class_it_does_not_know() {
         "Done(Ok((\"box.lm\", \"Clock.Now -> Box{value: 41}\")))"
     );
 }
+
+#[test]
+fn a_debugger_that_holds_a_foreign_result_snapshots_and_restores() {
+    fn finish_restored(world: &mut World, root: lm_vm::VmId) {
+        loop {
+            match world.run_machine(root) {
+                lm_vm::RootEvent::Done(value) => {
+                    assert_eq!(world.show_result_of(root, value), "Ok(Box{value: 41})");
+                    break;
+                }
+                lm_vm::RootEvent::Fault(rec) => {
+                    panic!("the restored debugger faulted: {rec:?}")
+                }
+                lm_vm::RootEvent::Blocked if world.poll_blocked() > 0 => {}
+                other => panic!("the restored debugger stopped: {other:?}"),
+            }
+        }
+    }
+
+    // The debugger keeps the result of a class it never saw, then
+    // captures itself. The capture closes over the debuggee machine,
+    // like a run handle. A fresh world with only the runtime core
+    // restores the capture and renders the value through the
+    // debuggee's own code.
+    let debuggee = "class Box\n  value: Int = 41\nend\n\
+      def calculate(): Box with Clock.Now\n  sys.clock.now()\n  Box()\nend\ncalculate()\n";
+    let debugger = "def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close\n\
+      file = sys.fs.open(\"program.lms\", ReadOnly).map_error() {\n\
+        |problem: FsError| display(problem)\n\
+      }?\n\
+      bytes = file.read(1048576).map_error() {\n\
+        |problem: FsError| display(problem)\n\
+      }\n\
+      file.close()\n\
+      bytes\n\
+    end\n\
+    \n\
+    def finish(run: Run[DynValue]): Result[DynValue, String] with Vm\n\
+      loop do\n\
+        case run.drive()\n\
+        in Asked(request)\n\
+          case request\n\
+          in Call(Clock.Now, call, ()) then run.answer(call, 100)\n\
+          in _ then run.reject(request, Fault.denied(\"rejected\"))\n\
+          end\n\
+        in Done(value) then return Ok(value)\n\
+        in Fault(problem) then return Err(problem.code())\n\
+        end\n\
+      end\n\
+    end\n\
+    \n\
+    def go(): Result[DynValue, String] with Fs.Open, Fs.Read, Fs.Close, Vm\n\
+      bytes = read_snapshot()?\n\
+      snapshot = sys.vm.load_snapshot(bytes).map_error() {\n\
+        |problem: SnapshotError| display(problem)\n\
+      }?\n\
+      run = sys.vm.Vm().restore_dynamic(snapshot).map_error() {\n\
+        |problem: RestoreError| display(problem)\n\
+      }?\n\
+      Ok(finish(run)?)\n\
+    end\n\
+    go()\n";
+    let bytes = compile_to_bytes("holder.lm", debugger).expect("the debugger compiles");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the debugger loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut()
+        .set_file("program.lms", program_snapshot("box.lm", debuggee));
+    let mut world = World::new(arena, namespace, VmConfig::default(), Box::new(host));
+    for grant in ["Fs.Open", "Fs.Read", "Fs.Close", "Vm"] {
+        world.allow(grant).expect("the grant names a target");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok(Box{value: 41}))");
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the debugger captures with its foreign result");
+    let bytes = image.bytes().expect("the capture encodes").to_vec();
+
+    // A world with the runtime core alone.
+    let core = lm_compiler::core_link_unit().expect("the core builds");
+    let mut fresh_arena = lm_link::CodeArena::new();
+    let core_namespace = fresh_arena
+        .publish(
+            lm_bytecode::artifact::Artifact::new(core.as_ref().clone(), Vec::new())
+                .expect("the core artifact is valid"),
+            None,
+        )
+        .expect("the core publishes");
+    let mut fresh = World::new(
+        fresh_arena,
+        core_namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let admitted = fresh
+        .load_snapshot_bytes(&bytes)
+        .expect("the capture admits in a core-only world");
+    let target = fresh.new_child(0).expect("the restore target exists");
+    let root = fresh
+        .restore_image(0, target, &admitted)
+        .expect("the capture restores");
+    finish_restored(&mut fresh, root);
+
+    // The first restore published both foreign chains after the core.
+    // Repeated admission must still use the container's table layout.
+    let repeated = fresh
+        .load_snapshot_bytes(&bytes)
+        .expect("world history does not change admission");
+    assert_eq!(
+        repeated.bytes().expect("the repeated image has bytes"),
+        admitted.bytes().expect("the first image has bytes")
+    );
+    let target = fresh.new_child(0).expect("the second target exists");
+    let root = fresh
+        .restore_image(0, target, &repeated)
+        .expect("the repeated image restores");
+    finish_restored(&mut fresh, root);
+}

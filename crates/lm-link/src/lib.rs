@@ -617,6 +617,8 @@ pub struct CodeNamespace {
     closure_bodies: Arc<std::sync::OnceLock<Vec<bool>>>,
     slot_initials: Arc<[Option<SlotTarget>]>,
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
+    /// True when these indices match a clean replay of this chain.
+    canonical_layout: bool,
 }
 
 impl CodeNamespace {
@@ -752,6 +754,11 @@ impl CodeNamespace {
         &self.bundle
     }
 
+    /// True when this namespace already uses its portable table layout.
+    pub fn has_canonical_layout(&self) -> bool {
+        self.canonical_layout
+    }
+
     /// Build one portable artifact for an arena function.
     pub fn function_artifact(&self, function: u32) -> Result<Artifact, LinkError> {
         let (unit, local) = self.local_function(function)?;
@@ -830,7 +837,8 @@ impl CodeNamespace {
             .row
             .iter()
             .map(|element| match element {
-                BcRow::Op(index) => self.tables.strings[*index as usize].as_str(),
+                BcRow::Op(index) => self.bundle.op_name(*index).unwrap_or("?"),
+                BcRow::Group(index) => self.bundle.group_name(*index).unwrap_or("?"),
                 BcRow::Var(_) => "?",
             })
             .collect();
@@ -1052,6 +1060,7 @@ impl CodeArena {
         if let Some(namespace) = self.by_artifact.get(&id) {
             return Ok(*namespace);
         }
+        let canonical_layout = self.namespaces.is_empty();
         let retained = std::sync::Arc::new(artifact.clone());
         let root_path = artifact.root().module_path().to_string();
         let untrusted: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
@@ -1130,6 +1139,7 @@ impl CodeArena {
             closure_bodies: Arc::new(std::sync::OnceLock::new()),
             slot_initials: view.slot_initials.into(),
             bundle: self.bundle.clone(),
+            canonical_layout,
         };
         let index = u32::try_from(self.namespaces.len())
             .map_err(|_| fail("the world has too many code namespaces"))?;
@@ -1236,6 +1246,8 @@ impl CodeArena {
 
         let order = link_order(&root_path, &env)?;
         let slot_scope = graph_core.ok_or_else(|| fail("the artifact has no core dependency"))?;
+        let canonical_layout =
+            base.canonical_layout && merged_matches_namespace(self.merged.as_ref(), base.as_ref());
         let mut merged = self.merged.as_ref().clone();
         let mut addition = NamespaceBuild::default();
         let mut root_exports = Vec::new();
@@ -1315,6 +1327,7 @@ impl CodeArena {
             closure_bodies: Arc::new(std::sync::OnceLock::new()),
             slot_initials: slot_initials.into(),
             bundle: self.bundle.clone(),
+            canonical_layout,
         };
         let index = u32::try_from(self.namespaces.len())
             .map_err(|_| fail("the world has too many code namespaces"))?;
@@ -1338,6 +1351,24 @@ impl CodeArena {
 
 fn id_of(namespace: &CodeNamespace) -> ArtifactId {
     namespace.artifact_id()
+}
+
+/// Test whether an extension starts at the exact namespace prefix.
+fn merged_matches_namespace(merged: &Merged, namespace: &CodeNamespace) -> bool {
+    let tables = namespace.tables();
+    merged.strings.len() == tables.strings.len()
+        && merged.bytes.len() == tables.bytes.len()
+        && merged.types.len() == tables.types.len()
+        && merged.selectors.len() == tables.selectors.len()
+        && merged.apps.len() == tables.apps.len()
+        && merged.classes.len() == tables.classes.len()
+        && merged.class_bounds.len() == tables.class_bounds.len()
+        && merged.interfaces.len() == tables.interfaces.len()
+        && merged.conformances.len() == tables.conformances.len()
+        && merged.funcs.len() == tables.funcs.len()
+        && merged.func_bounds.len() == tables.func_bounds.len()
+        && merged.slots.len() == tables.slots.len()
+        && merged.dispatch.len() == namespace.dispatch.len()
 }
 
 fn namespace_identity(merged: &Merged, artifact: ArtifactId) -> ModuleIdentity {
@@ -2210,17 +2241,13 @@ fn relocate(
         created_interfaces.push(idx as u32);
     }
     for (idx, ty) in module.types.iter().enumerate() {
-        let relocated = reloc_type(ty, &types, &classes, &interfaces, &strings);
+        let relocated = reloc_type(ty, &types, &classes, &interfaces);
         types[idx] = merged.ty(relocated, identity.type_hashes[idx])?;
     }
     for (idx, app) in module.apps.iter().enumerate() {
         let relocated = TypeApp {
             types: app.types.iter().map(|t| types[*t as usize]).collect(),
-            rows: app
-                .rows
-                .iter()
-                .map(|row| reloc_row(row, &strings))
-                .collect(),
+            rows: app.rows.iter().map(|row| reloc_row(row)).collect(),
         };
         apps[idx] = merged.app(relocated);
     }
@@ -2677,7 +2704,7 @@ fn check_function_import_contract(
         && source.param_muts == found.param_muts
         && source.param_names == found.param_names
         && reloc.types[source.ret as usize] == found.ret
-        && reloc_row(&source.row, &reloc.strings) == found.row
+        && reloc_row(&source.row) == found.row
         && captures == found.captures;
     if !matches {
         return Err(fail(format!(
@@ -2838,22 +2865,11 @@ fn register_exports(
     Ok(())
 }
 
-fn reloc_row(row: &[BcRow], strings: &[u32]) -> Vec<BcRow> {
-    row.iter()
-        .map(|elem| match elem {
-            BcRow::Op(idx) => BcRow::Op(strings[*idx as usize]),
-            BcRow::Var(v) => BcRow::Var(*v),
-        })
-        .collect()
+fn reloc_row(row: &[BcRow]) -> Vec<BcRow> {
+    row.to_vec()
 }
 
-fn reloc_type(
-    ty: &BcType,
-    types: &[u32],
-    classes: &[u32],
-    interfaces: &[u32],
-    strings: &[u32],
-) -> BcType {
+fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], interfaces: &[u32]) -> BcType {
     match ty {
         BcType::Class(c) => BcType::Class(classes[*c as usize]),
         BcType::Inst(c, args) => BcType::Inst(
@@ -2867,13 +2883,13 @@ fn reloc_type(
             params.iter().map(|p| types[*p as usize]).collect(),
             muts.clone(),
             types[*ret as usize],
-            reloc_row(row, strings),
+            reloc_row(row),
         ),
         BcType::Callback(params, muts, ret, row) => BcType::Callback(
             params.iter().map(|p| types[*p as usize]).collect(),
             muts.clone(),
             types[*ret as usize],
-            reloc_row(row, strings),
+            reloc_row(row),
         ),
         BcType::Projection {
             base,
@@ -2902,11 +2918,7 @@ fn reloc_interface_use(application: &BcInterfaceUse, reloc: &Reloc) -> BcInterfa
             .iter()
             .map(|item| reloc.types[*item as usize])
             .collect(),
-        rows: application
-            .rows
-            .iter()
-            .map(|row| reloc_row(row, &reloc.strings))
-            .collect(),
+        rows: application.rows.iter().map(|row| reloc_row(row)).collect(),
     }
 }
 
@@ -2934,7 +2946,7 @@ fn reloc_callable_contract(source: &BcCallableContract, reloc: &Reloc) -> BcCall
             .collect(),
         param_muts: source.param_muts.clone(),
         ret: reloc.types[source.ret as usize],
-        row: reloc_row(&source.row, &reloc.strings),
+        row: reloc_row(&source.row),
     }
 }
 
@@ -3031,7 +3043,7 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
                 param_muts: method.param_muts.clone(),
                 param_names: method.param_names.clone(),
                 ret: reloc.types[method.ret as usize],
-                row: reloc_row(&method.row, &reloc.strings),
+                row: reloc_row(&method.row),
                 default: if method.default == lm_bytecode::NO_FUNC {
                     lm_bytecode::NO_FUNC
                 } else {
@@ -3080,7 +3092,7 @@ fn reloc_func(func: &Func, reloc: &Reloc) -> Func {
         param_muts: func.param_muts.clone(),
         param_names: func.param_names.clone(),
         ret: reloc.types[func.ret as usize],
-        row: reloc_row(&func.row, &reloc.strings),
+        row: reloc_row(&func.row),
         captures: func
             .captures
             .iter()

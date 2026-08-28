@@ -157,19 +157,18 @@ pub(crate) fn verify_tables(
                 }
                 check_ref(*ret)?;
                 for elem in row {
-                    if let BcRow::Op(s) = elem {
-                        if *s as usize >= module.strings.len() {
+                    match elem {
+                        BcRow::Op(slot) if *slot >= bundle.op_count() => {
                             return Err(terr(format!(
-                                "type {idx} has a row with an invalid string index"
+                                "type {idx} has an invalid effect operation slot"
                             )));
                         }
-                        if !bundle.row_name_valid(&module.strings[*s as usize]) {
+                        BcRow::Group(slot) if *slot >= bundle.group_count() => {
                             return Err(terr(format!(
-                                "type {idx} has a row that names `{}`, which is \
-                                 not in the operation manifest",
-                                module.strings[*s as usize]
+                                "type {idx} has an invalid effect group slot"
                             )));
                         }
+                        _ => {}
                     }
                 }
             }
@@ -432,19 +431,18 @@ fn verify_applications(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
         for row in &app.rows {
             for elem in row {
-                if let BcRow::Op(s) = elem {
-                    if *s as usize >= module.strings.len() {
+                match elem {
+                    BcRow::Op(slot) if *slot >= ctx.bundle.op_count() => {
                         return Err(terr(format!(
-                            "application {aidx} has a row with an invalid string index"
+                            "application {aidx} has an invalid effect operation slot"
                         )));
                     }
-                    if !ctx.bundle.row_name_valid(&module.strings[*s as usize]) {
+                    BcRow::Group(slot) if *slot >= ctx.bundle.group_count() => {
                         return Err(terr(format!(
-                            "application {aidx} has a row that names `{}`, which \
-                             is not in the operation manifest",
-                            module.strings[*s as usize]
+                            "application {aidx} has an invalid effect group slot"
                         )));
                     }
+                    _ => {}
                 }
             }
             if !ctx.row_canonical(row) {
@@ -693,13 +691,16 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<Vec<bool>, VerifyError> {
                 return Err(ierr("a method row uses an unbound variable".to_string()));
             }
             for element in &method.row {
-                if let BcRow::Op(string) = element {
-                    let Some(name) = module.strings.get(*string as usize) else {
-                        return Err(ierr("a method row string is out of range".to_string()));
-                    };
-                    if !ctx.bundle.row_name_valid(name) {
-                        return Err(ierr("a method row names an unknown effect".to_string()));
+                match element {
+                    BcRow::Op(slot) if *slot >= ctx.bundle.op_count() => {
+                        return Err(ierr(
+                            "a method row has an invalid operation slot".to_string(),
+                        ));
                     }
+                    BcRow::Group(slot) if *slot >= ctx.bundle.group_count() => {
+                        return Err(ierr("a method row has an invalid group slot".to_string()));
+                    }
+                    _ => {}
                 }
             }
             if !ctx.row_canonical(&method.row) {
@@ -1943,24 +1944,19 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
         for elem in &func.row {
             match elem {
-                BcRow::Op(s) => {
-                    if *s as usize >= module.strings.len() {
-                        return Err(err(
-                            fidx as u32,
-                            "the declared row references an invalid string index",
-                        ));
-                    }
-                    if !ctx.bundle.row_name_valid(&module.strings[*s as usize]) {
-                        return Err(err(
-                            fidx as u32,
-                            format!(
-                                "the declared row names `{}`, which is not in the \
-                                 operation manifest",
-                                module.strings[*s as usize]
-                            ),
-                        ));
-                    }
+                BcRow::Op(slot) if *slot >= ctx.bundle.op_count() => {
+                    return Err(err(
+                        fidx as u32,
+                        "the declared row has an invalid operation slot",
+                    ));
                 }
+                BcRow::Group(slot) if *slot >= ctx.bundle.group_count() => {
+                    return Err(err(
+                        fidx as u32,
+                        "the declared row has an invalid group slot",
+                    ));
+                }
+                BcRow::Op(_) | BcRow::Group(_) => {}
                 BcRow::Var(v) => {
                     if *v >= func.effect_params {
                         return Err(err(
@@ -2153,16 +2149,15 @@ fn verify_callable_contract(
     )?;
     for elem in &contract.row {
         match elem {
-            BcRow::Op(name) => {
-                let Some(name) = ctx.module.strings.get(*name as usize) else {
-                    return Err(serr("the effect row has an invalid name".to_string()));
-                };
-                if !ctx.bundle.row_name_valid(name) {
-                    return Err(serr(
-                        "the effect row names an operation outside the manifest".to_string(),
-                    ));
-                }
+            BcRow::Op(slot) if *slot >= ctx.bundle.op_count() => {
+                return Err(serr(
+                    "the effect row has an invalid operation slot".to_string(),
+                ));
             }
+            BcRow::Group(slot) if *slot >= ctx.bundle.group_count() => {
+                return Err(serr("the effect row has an invalid group slot".to_string()));
+            }
+            BcRow::Op(_) | BcRow::Group(_) => {}
             BcRow::Var(variable) if *variable >= contract.effect_params => {
                 return Err(serr(
                     "the effect row uses a variable outside the declared arity".to_string(),

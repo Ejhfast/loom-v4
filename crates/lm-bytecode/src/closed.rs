@@ -28,8 +28,9 @@ use std::sync::{Arc, Mutex};
 /// One entry of the closed type table, by index.
 pub type ClosedTypeId = u32;
 
-/// One closed effect row: the module string slots of its operations
-/// and groups, in canonical order without a duplicate.
+/// One closed effect row of exact ABI operation slots.
+///
+/// The slots use numeric order and contain no duplicate.
 ///
 /// A closed row holds no effect variable, because an environment
 /// substitutes every one of them.
@@ -296,6 +297,7 @@ const DIGEST_DOMAIN: &[u8] = b"lm-closed-type-v1\0";
 /// application, so a repeated generic call reuses one index.
 #[derive(Debug)]
 pub struct TypeEnvs {
+    bundle: Arc<lm_abi::AbiBundle>,
     types: Vec<ClosedType>,
     type_index: HashMap<ClosedType, ClosedTypeId>,
     envs: Vec<TypeEnv>,
@@ -344,6 +346,15 @@ impl TypeEnvs {
     /// Environment zero is the empty environment, so a monomorphic
     /// state stores zero and the table allocates nothing for it.
     pub fn new(max_types: u32, max_envs: u32) -> TypeEnvs {
+        TypeEnvs::new_with_bundle(max_types, max_envs, lm_abi::standard_bundle())
+    }
+
+    /// One empty table under an exact ABI bundle.
+    pub fn new_with_bundle(
+        max_types: u32,
+        max_envs: u32,
+        bundle: Arc<lm_abi::AbiBundle>,
+    ) -> TypeEnvs {
         let max_envs = max_envs.max(1);
         let empty = TypeEnv::default();
         let mut canonical_env_index = HashMap::new();
@@ -358,6 +369,7 @@ impl TypeEnvs {
             max_envs,
         };
         let mut table = TypeEnvs {
+            bundle,
             types: Vec::new(),
             type_index: HashMap::new(),
             envs: Vec::new(),
@@ -490,6 +502,7 @@ impl TypeEnvs {
     pub fn fork_shared(&mut self) -> TypeEnvs {
         self.sync_shared();
         TypeEnvs {
+            bundle: self.bundle.clone(),
             types: self.types.clone(),
             type_index: self.type_index.clone(),
             envs: self.envs.clone(),
@@ -1144,11 +1157,10 @@ impl TypeEnvs {
 
     /// Close one module effect row under one environment.
     ///
-    /// The answer is canonical: the operation names sort by their text
-    /// and hold no duplicate, so one closed row has one identity.
+    /// The answer contains sorted exact operation slots.
     pub fn close_row(
         &self,
-        module: &impl CodeTableView,
+        _module: &impl CodeTableView,
         row: &[BcRow],
         env: TypeEnvId,
     ) -> ClosedRow {
@@ -1156,6 +1168,9 @@ impl TypeEnvs {
         for elem in row {
             match elem {
                 BcRow::Op(slot) => out.push(*slot),
+                BcRow::Group(slot) => {
+                    self.bundle.extend_group_operations(*slot, &mut out);
+                }
                 BcRow::Var(i) => {
                     if let Some(bound) = self.env(env).and_then(|e| e.rows.get(*i as usize)) {
                         out.extend_from_slice(bound);
@@ -1163,7 +1178,7 @@ impl TypeEnvs {
                 }
             }
         }
-        canonical_row(module, out)
+        canonical_row(out)
     }
 
     /// Derive one environment from a parent environment and one type
@@ -1617,20 +1632,13 @@ impl TypeEnvs {
 
     /// The canonical content digest of one closed type node.
     ///
-    /// The digest names a class by its verified definition hash, an
-    /// operation by its manifest identity, and an effect name by its
-    /// text, so one closed type has one identity in every process. A
-    /// child enters through its own digest, so the answer is a content
-    /// address of the whole expression.
+    /// The digest names a class by its verified definition hash.
+    /// It names an operation by its ABI identity. A child enters
+    /// through its own digest.
     /// The walk is iterative. A closed type table can nest a type as
     /// deeply as it holds entries, and polymorphic recursion is legal,
     /// so a walk on the Rust stack would abort the host.
-    pub fn digest(
-        &mut self,
-        module: &impl CodeTableView,
-        class_hashes: &[[u8; 32]],
-        id: ClosedTypeId,
-    ) -> [u8; 32] {
+    pub fn digest(&mut self, class_hashes: &[[u8; 32]], id: ClosedTypeId) -> [u8; 32] {
         if let Some(Some(hit)) = self.digests.get(id as usize) {
             return *hit;
         }
@@ -1652,7 +1660,7 @@ impl TypeEnvs {
                 }
                 continue;
             }
-            let digest = self.digest_flat(module, class_hashes, &node);
+            let digest = self.digest_flat(class_hashes, &node);
             if let Some(slot) = self.digests.get_mut(cur as usize) {
                 *slot = Some(digest);
             }
@@ -1665,12 +1673,7 @@ impl TypeEnvs {
     }
 
     /// The digest of one node whose children already answered.
-    fn digest_flat(
-        &self,
-        module: &impl CodeTableView,
-        class_hashes: &[[u8; 32]],
-        node: &ClosedType,
-    ) -> [u8; 32] {
+    fn digest_flat(&self, class_hashes: &[[u8; 32]], node: &ClosedType) -> [u8; 32] {
         let mut out: Vec<u8> = Vec::with_capacity(64);
         out.extend_from_slice(DIGEST_DOMAIN);
         out.push(tag_of(node));
@@ -1716,13 +1719,7 @@ impl TypeEnvs {
                 child(self, &mut out, *ret);
                 out.extend_from_slice(&(row.len() as u32).to_le_bytes());
                 for slot in row {
-                    let name = module
-                        .strings()
-                        .get(*slot as usize)
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-                    out.extend_from_slice(name.as_bytes());
+                    out.extend_from_slice(&self.bundle.op_identity(*slot).unwrap_or([0; 32]));
                 }
             }
             ClosedType::Callback(params, muts, ret, row) => {
@@ -1734,17 +1731,11 @@ impl TypeEnvs {
                 child(self, &mut out, *ret);
                 out.extend_from_slice(&(row.len() as u32).to_le_bytes());
                 for slot in row {
-                    let name = module
-                        .strings()
-                        .get(*slot as usize)
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-                    out.extend_from_slice(name.as_bytes());
+                    out.extend_from_slice(&self.bundle.op_identity(*slot).unwrap_or([0; 32]));
                 }
             }
             ClosedType::Op(op, f) => {
-                out.extend_from_slice(&lm_abi::op_identity(*op));
+                out.extend_from_slice(&self.bundle.op_identity(*op).unwrap_or([0; 32]));
                 child(self, &mut out, *f);
             }
             _ => {}
@@ -1821,16 +1812,9 @@ pub fn tag_of(node: &ClosedType) -> u8 {
 ///
 /// The order follows the operation text, so it never depends on the
 /// string-pool order of one linked program.
-pub fn canonical_row(module: &impl CodeTableView, mut row: ClosedRow) -> ClosedRow {
-    let name = |slot: &u32| -> &str {
-        module
-            .strings()
-            .get(*slot as usize)
-            .map(String::as_str)
-            .unwrap_or("")
-    };
-    row.sort_by(|a, b| name(a).cmp(name(b)).then(a.cmp(b)));
-    row.dedup_by(|a, b| name(a) == name(b));
+pub fn canonical_row(mut row: ClosedRow) -> ClosedRow {
+    row.sort_unstable();
+    row.dedup();
     row
 }
 
@@ -1992,15 +1976,15 @@ mod tests {
         let m = module();
         let mut table = TypeEnvs::default();
         let class = table.close(&m, 4, TypeEnvId::EMPTY).expect("closed");
-        let one = table.digest(&m, &[[7u8; 32]], class);
+        let one = table.digest(&[[7u8; 32]], class);
         let mut other = TypeEnvs::default();
         // The same class under another slot number with the same
         // definition hash answers the same digest.
         let same = other.intern(ClosedType::Class(0)).expect("interned");
-        assert_eq!(other.digest(&m, &[[7u8; 32]], same), one);
+        assert_eq!(other.digest(&[[7u8; 32]], same), one);
         let mut third = TypeEnvs::default();
         let differs = third.intern(ClosedType::Class(0)).expect("interned");
-        assert_ne!(third.digest(&m, &[[9u8; 32]], differs), one);
+        assert_ne!(third.digest(&[[9u8; 32]], differs), one);
     }
 
     /// A deeply nested type never grows the Rust stack.
@@ -2050,18 +2034,39 @@ mod tests {
         }
         let mut table = TypeEnvs::new(u32::MAX, u32::MAX);
         let closed = table.close(&m, deep, TypeEnvId::EMPTY).expect("closed");
-        let digest = table.digest(&m, &[], closed);
+        let digest = table.digest(&[], closed);
         assert_ne!(digest, [0u8; 32]);
         // The cached answer is the same answer.
-        assert_eq!(table.digest(&m, &[], closed), digest);
+        assert_eq!(table.digest(&[], closed), digest);
     }
 
     #[test]
-    fn a_canonical_row_sorts_by_text_and_dedups() {
-        let m = module();
-        // Slot 1 is `Fs` and slot 0 is `Io`, so the text order swaps
-        // the slot order.
-        assert_eq!(canonical_row(&m, vec![0, 1, 0]), vec![1, 0]);
+    fn a_canonical_row_sorts_by_slot_and_deduplicates() {
+        assert_eq!(canonical_row(vec![1, 0, 1]), vec![0, 1]);
+    }
+
+    #[test]
+    fn closing_a_group_produces_exact_operation_slots() {
+        let module = module();
+        let bundle = lm_abi::standard_bundle();
+        let io = bundle
+            .group_by_name("Io")
+            .expect("the standard ABI has the Io group");
+        let mut expected = bundle
+            .group_operations(io)
+            .expect("the Io group has operations");
+        expected.push(lm_abi::OP_IO_WRITE);
+        expected.sort_unstable();
+        expected.dedup();
+        let table = TypeEnvs::new_with_bundle(64, 64, bundle);
+        assert_eq!(
+            table.close_row(
+                &module,
+                &[BcRow::Group(io), BcRow::Op(lm_abi::OP_IO_WRITE)],
+                TypeEnvId::EMPTY,
+            ),
+            expected
+        );
     }
 
     #[test]

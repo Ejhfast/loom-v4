@@ -440,6 +440,11 @@ pub enum Object {
     NativeVm { image: u32, generation: u32 },
     /// A holder-local handle to one active or stopped invocation.
     NativeRun { vm: u32 },
+    /// A holder-local reference to the dynamic result of one machine.
+    ///
+    /// The value stays in the machine that produced it. The reference
+    /// names that machine and its generation.
+    NativeDynRef { vm: u32, generation: u32 },
     /// Portable code bytes and an optional source table index.
     NativeCode(Box<PortableCode>),
     /// A holder-local handle into one installed VM image.
@@ -642,6 +647,15 @@ const SHAPE_VM: ShapeDesc = ShapeDesc {
 };
 const SHAPE_RUN: ShapeDesc = ShapeDesc {
     name: "Run",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+const SHAPE_DYN_REF: ShapeDesc = ShapeDesc {
+    name: "DynRef",
     has_refs: false,
     born_frozen: true,
     child_order: "none",
@@ -930,7 +944,7 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 37] = [
+pub const SHAPES: [&ShapeDesc; 38] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -968,6 +982,7 @@ pub const SHAPES: [&ShapeDesc; 37] = [
     &SHAPE_PIPE_WRITER,
     &SHAPE_CHILD,
     &SHAPE_UDP_SOCKET,
+    &SHAPE_DYN_REF,
 ];
 
 impl Object {
@@ -1061,6 +1076,10 @@ impl Object {
                 generation: *generation,
             },
             Object::NativeRun { vm } => Object::NativeRun { vm: *vm },
+            Object::NativeDynRef { vm, generation } => Object::NativeDynRef {
+                vm: *vm,
+                generation: *generation,
+            },
             Object::NativeCode(code) => Object::NativeCode(Box::new((**code).clone())),
             Object::NativeCodeHandle {
                 image,
@@ -1216,6 +1235,7 @@ impl Object {
             Object::NativePipeWriter { .. } => 34,
             Object::NativeChild { .. } => 35,
             Object::NativeUdpSocket { .. } => 36,
+            Object::NativeDynRef { .. } => 37,
         }
     }
 
@@ -1247,6 +1267,7 @@ impl Object {
                 Object::ByteBuf(b) => b.retained_capacity(),
                 Object::NativeVm { .. }
                 | Object::NativeRun { .. }
+                | Object::NativeDynRef { .. }
                 | Object::NativeCodeHandle { .. }
                 | Object::NativeSlotChange { .. }
                 | Object::NativeTable { .. }
@@ -1320,6 +1341,7 @@ impl Object {
             | Object::ByteBuf(_)
             | Object::NativeVm { .. }
             | Object::NativeRun { .. }
+            | Object::NativeDynRef { .. }
             | Object::NativeCode(_)
             | Object::NativeCodeHandle { .. }
             | Object::NativeTable { .. }
@@ -1737,6 +1759,10 @@ mod tests {
             Object::NativePipeWriter { resource: 13 },
             Object::NativeChild { resource: 14 },
             Object::NativeUdpSocket { resource: 15 },
+            Object::NativeDynRef {
+                vm: 2,
+                generation: 1,
+            },
         ]
     }
 
@@ -1942,6 +1968,10 @@ mod tests {
             Object::NativePipeWriter { resource: 0 },
             Object::NativeChild { resource: 0 },
             Object::NativeUdpSocket { resource: 0 },
+            Object::NativeDynRef {
+                vm: 0,
+                generation: 0,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -2100,6 +2130,7 @@ mod tests {
                 "CodeHandle",
                 "SlotChange",
                 "HostResource",
+                "DynRef",
             ]
         );
     }

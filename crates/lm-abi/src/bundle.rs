@@ -295,6 +295,19 @@ impl AbiBundle {
         )
     }
 
+    /// Append the exact operation closure of one group.
+    pub fn extend_group_operations(&self, group: u32, out: &mut Vec<u32>) -> bool {
+        let Some(row) = self.group_bits.get(group as usize) else {
+            return false;
+        };
+        out.extend(
+            row.iter()
+                .enumerate()
+                .filter_map(|(operation, included)| included.then_some(operation as u32)),
+        );
+        true
+    }
+
     /// Return every group that contains one exact operation.
     pub fn groups_containing_op(&self, operation: u32) -> Option<&[u32]> {
         self.groups_by_operation

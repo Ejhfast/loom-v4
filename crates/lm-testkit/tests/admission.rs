@@ -174,6 +174,40 @@ fn repeated_portable_code_admission_rechecks_changed_bytes() {
     assert_eq!(error.reason, ImageReason::Code);
 }
 
+#[test]
+fn canonical_code_reuse_compares_complete_artifact_bytes() {
+    let loaded = program("def go(): Int\n  42\nend\ngo()\n");
+    let image = boundaries(&loaded, &[], 10)
+        .into_iter()
+        .next()
+        .expect("the program has one boundary");
+    let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
+    let (arena, namespace) = publish_artifact(&loaded).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world
+        .load_snapshot_bytes(&bytes)
+        .expect("the original container admits");
+
+    let mut changed = codec::decode(&bytes, lm_vm::snapshot::LoadLimits::default())
+        .expect("the container decodes");
+    let artifact = changed
+        .artifacts
+        .first_mut()
+        .expect("the container carries an artifact");
+    let last = artifact.len() - 1;
+    artifact[last] ^= 1;
+    let changed = codec::encode(&changed, usize::MAX).expect("the changed image encodes");
+    let error = world
+        .load_snapshot_bytes(&changed)
+        .expect_err("changed artifact bytes must miss the canonical code cache");
+    assert_eq!(error.reason, ImageReason::Code);
+}
+
 /// Restore one container into a fresh world and drive the restored
 /// root to a stop.
 ///
@@ -2036,6 +2070,47 @@ fn a_restore_of_another_program_uses_the_image_artifacts() {
     let target = own.new_child(0).expect("a child budget");
     own.restore_image(0, target, &admitted)
         .expect("the image restores into its own program");
+}
+
+/// Foreign restore relocates byte caches and preserves ABI effect rows.
+#[test]
+fn a_foreign_restore_relocates_bytes_and_preserves_effect_rows() {
+    let captured = program(
+        "def hold[effect e](task: () -> Int with e, bytes: Bytes): String\n\
+           i = 0\n\
+           while i < 20\n\
+             i = i + 1\n\
+           end\n\
+           bytes.hex()\n\
+         end\n\
+         hold({ ||: Int with Clock.Now 1 }, b\"\\x00\\xff\")\n",
+    );
+    let images = boundaries(&captured, &[], 100);
+    let image = pick(&images, "a byte literal and effect row", |image| {
+        image.envs.iter().any(|env| !env.rows.is_empty())
+            && image
+                .machines
+                .iter()
+                .any(|machine| machine.literals.iter().any(Option::is_some))
+    });
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let admitted = admit_image(&captured, image, &mut budget).expect("the capture admits");
+    let running = program(SHARED_SOURCE);
+    let (arena, namespace) = publish_artifact(&running).expect("the other artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = world.new_child(0).expect("the restore target exists");
+    let root = world
+        .restore_image(0, target, &admitted)
+        .expect("the foreign image restores");
+    match world.run_machine(root) {
+        RootEvent::Done(value) => assert_eq!(world.show_result_of(root, value), "\"00ff\""),
+        other => panic!("the foreign image stopped: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------

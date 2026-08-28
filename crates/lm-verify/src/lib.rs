@@ -272,7 +272,8 @@ use tables::verify_tables;
 /// Version 35 verifies text padding and Float text conversions.
 /// Version 36 verifies stream roles and child environment overlays.
 /// Version 37 permits capture contracts on imported closure bodies.
-pub const VERIFIER_VERSION: u32 = 37;
+/// Version 38 verifies ABI operation and group slots in effect rows.
+pub const VERIFIER_VERSION: u32 = 38;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -716,9 +717,7 @@ mod tests {
         let wait_ty = module.types.len() as u32;
         module.types.push(BcType::Wait(TY_UNIT));
         module.funcs[0].ret = wait_ty;
-        let sleep_name = module.strings.len() as u32;
-        module.strings.push("Clock.Sleep".to_string());
-        module.funcs[0].row = vec![lm_bytecode::BcRow::Op(sleep_name)];
+        module.funcs[0].row = vec![lm_bytecode::BcRow::Op(lm_abi::OP_CLOCK_SLEEP)];
         verify_module(&module).expect("the prepared wait verifies");
 
         let mut nonwaitable = module.clone();
@@ -755,10 +754,8 @@ mod tests {
         module.types.push(BcType::List(TY_INT));
         let result = module.types.len() as u32;
         module.types.push(BcType::Tuple(vec![TY_INT, TY_INT]));
-        let effect = module.strings.len() as u32;
-        module.strings.push("Wait.Any".to_string());
         module.funcs[0].ret = result;
-        module.funcs[0].row = vec![BcRow::Op(effect)];
+        module.funcs[0].row = vec![BcRow::Op(lm_abi::OP_WAIT_ANY)];
         module.funcs[0].blocks = vec![vec![
             ListNew {
                 ty: waits,
@@ -787,8 +784,6 @@ mod tests {
         let mut module = module_with(vec![vec![ConstInt(0), Return]]);
         let run = module.types.len() as u32;
         module.types.push(BcType::Run(TY_INT));
-        let effect = module.strings.len() as u32;
-        module.strings.push("Vm.BranchAnswer".to_string());
         let mut forged = plain_func(
             "forged_branch",
             vec![run, TY_INT, TY_INT],
@@ -806,7 +801,7 @@ mod tests {
             ]],
         );
         forged.local_types = vec![run, TY_INT, TY_INT];
-        forged.row = vec![BcRow::Op(effect)];
+        forged.row = vec![BcRow::Op(lm_abi::OP_VM_BRANCH_ANSWER)];
         module.funcs.push(forged);
 
         let error = verify_module(&module).expect_err("the forged call token rejects");
@@ -1082,7 +1077,6 @@ mod tests {
     fn rejects_row_not_inside_caller() {
         // Callee claims Io.Write; caller declares the empty row.
         let mut m = module_with(vec![vec![Call(1), Return]]);
-        m.strings = vec!["Io.Write".to_string()];
         m.funcs.push(Func {
             name: "printer".to_string(),
             param_names: vec![],
@@ -1091,7 +1085,7 @@ mod tests {
             params: vec![],
             param_muts: vec![],
             ret: TY_INT,
-            row: vec![BcRow::Op(0)],
+            row: vec![BcRow::Op(lm_abi::OP_IO_WRITE)],
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],
@@ -1104,8 +1098,10 @@ mod tests {
     fn accepts_row_inside_caller_with_group() {
         // Caller declares Io; callee claims Io.Write.
         let mut m = module_with(vec![vec![Call(1), Return]]);
-        m.strings = vec!["Io.Write".to_string(), "Io".to_string()];
-        m.funcs[0].row = vec![BcRow::Op(1)];
+        let io = lm_abi::standard_bundle()
+            .group_by_name("Io")
+            .expect("the standard ABI has the Io group");
+        m.funcs[0].row = vec![BcRow::Group(io)];
         m.funcs.push(Func {
             name: "printer".to_string(),
             param_names: vec![],
@@ -1114,7 +1110,7 @@ mod tests {
             params: vec![],
             param_muts: vec![],
             ret: TY_INT,
-            row: vec![BcRow::Op(0)],
+            row: vec![BcRow::Op(lm_abi::OP_IO_WRITE)],
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],
@@ -1125,8 +1121,18 @@ mod tests {
     #[test]
     fn rejects_non_canonical_declared_row() {
         let mut m = module_with(vec![vec![ConstInt(1), Return]]);
-        m.strings = vec!["Io".to_string(), "Fs".to_string()];
-        m.funcs[0].row = vec![BcRow::Op(0), BcRow::Op(1)]; // Io before Fs
+        let bundle = lm_abi::standard_bundle();
+        let io = bundle
+            .group_by_name("Io")
+            .expect("the standard ABI has the Io group");
+        let fs = bundle
+            .group_by_name("Fs")
+            .expect("the standard ABI has the Fs group");
+        m.funcs[0].row = if io < fs {
+            vec![BcRow::Group(fs), BcRow::Group(io)]
+        } else {
+            vec![BcRow::Group(io), BcRow::Group(fs)]
+        };
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("canonical"), "{e}");
     }
@@ -1408,9 +1414,12 @@ mod tests {
             CallValue { argc: 0 },
             Return,
         ]]);
-        m.strings = vec!["Io.Write".to_string()];
-        m.types
-            .push(BcType::Fn(vec![], vec![], TY_INT, vec![BcRow::Op(0)]));
+        m.types.push(BcType::Fn(
+            vec![],
+            vec![],
+            TY_INT,
+            vec![BcRow::Op(lm_abi::OP_IO_WRITE)],
+        ));
         m.funcs.push(Func {
             name: "printer".to_string(),
             param_names: vec![],
@@ -1419,7 +1428,7 @@ mod tests {
             params: vec![],
             param_muts: vec![],
             ret: TY_INT,
-            row: vec![BcRow::Op(0)],
+            row: vec![BcRow::Op(lm_abi::OP_IO_WRITE)],
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],

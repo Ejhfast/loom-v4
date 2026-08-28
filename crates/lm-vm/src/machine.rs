@@ -568,6 +568,8 @@ pub enum ExecOutcome {
     },
     /// Render one value through its stored closed static type.
     DynamicRender { value: Value, ty: u32 },
+    /// Render the dynamic result of another machine.
+    DynamicRenderRef { vm: u32, generation: u32 },
     /// Reify one named function as portable verified code.
     FunctionCode {
         function: u32,
@@ -1027,7 +1029,7 @@ impl Machine {
                         Ok(class)
                     }
                 }
-                Object::DynValue { .. } => {
+                Object::DynValue { .. } | Object::NativeDynRef { .. } => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
@@ -4589,11 +4591,17 @@ impl Machine {
             }
             ExtendedInstr::DynRender => {
                 let package = self.pop_obj()?;
-                let (value, ty) = match self.vm.heap.get(package) {
-                    Object::DynValue { value, ty } => (*value, *ty),
-                    _ => return Err(BAD_TYPE),
+                return match self.vm.heap.get(package) {
+                    Object::DynValue { value, ty } => Ok(ExecOutcome::DynamicRender {
+                        value: *value,
+                        ty: *ty,
+                    }),
+                    Object::NativeDynRef { vm, generation } => Ok(ExecOutcome::DynamicRenderRef {
+                        vm: *vm,
+                        generation: *generation,
+                    }),
+                    _ => Err(BAD_TYPE),
                 };
-                return Ok(ExecOutcome::DynamicRender { value, ty });
             }
             ExtendedInstr::FunctionCode { func } => {
                 return Ok(ExecOutcome::FunctionCode {

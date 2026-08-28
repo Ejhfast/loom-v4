@@ -1001,6 +1001,7 @@ impl World {
             };
             let target = match object {
                 Object::NativeHandle { proc, generation } => Some((*proc, Some(*generation))),
+                Object::NativeDynRef { vm, generation } => Some((*vm, Some(*generation))),
                 Object::NativeRun { vm }
                 | Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }

@@ -109,7 +109,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 44 lowers tombstone-aware map traversal.
 /// Version 45 uses BLAKE3-256 for bytecode identities.
 /// Version 46 lowers text padding and Float text conversions.
-pub const COMPILER_ABI_VERSION: u32 = 47;
+/// Version 48 encodes effect rows with ABI operation and group slots.
+pub const COMPILER_ABI_VERSION: u32 = 48;
 
 /// The refinement work budget of one component.
 ///
@@ -427,15 +428,18 @@ impl Space {
 /// Validate every index the identity encoding follows. The rules are
 /// a subset of the verifier rules, so a rejection here is always a
 /// rejection there.
-fn preflight(module: &Module) -> Result<(), IdentityError> {
+fn preflight(module: &Module, bundle: &lm_abi::AbiBundle) -> Result<(), IdentityError> {
     let s = Space::of(module);
-    let strings = module.strings.len();
     let check_row = |what: &str, row: &[BcRow]| -> Result<(), IdentityError> {
         for elem in row {
-            if let BcRow::Op(idx) = elem {
-                if *idx as usize >= strings {
-                    return Err(fail(format!("{what}: row string index out of range")));
+            match elem {
+                BcRow::Op(idx) if *idx >= bundle.op_count() => {
+                    return Err(fail(format!("{what}: row operation slot out of range")));
                 }
+                BcRow::Group(idx) if *idx >= bundle.group_count() => {
+                    return Err(fail(format!("{what}: row group slot out of range")));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1734,37 +1738,33 @@ impl<'a> Resolver<'a> {
 
     /// The canonical row bytes use exact operations and variables.
     fn row_bytes(&self, out: &mut Vec<u8>, row: &[BcRow]) {
-        let mut operations = BTreeSet::new();
+        let mut operations = Vec::with_capacity(row.len());
         let mut variables = BTreeSet::new();
         for elem in row {
             match elem {
                 BcRow::Op(idx) => {
-                    let name = &self.module.strings[*idx as usize];
-                    match self.bundle.row_name_operations(name) {
-                        Some(expanded) if !expanded.is_empty() => {
-                            for operation in expanded {
-                                operations.insert(
-                                    self.bundle
-                                        .op_name(operation)
-                                        .expect("a bundle operation has a name")
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        _ => {
-                            operations.insert(name.clone());
-                        }
-                    }
+                    operations.push(*idx);
+                }
+                BcRow::Group(idx) => {
+                    let valid = self.bundle.extend_group_operations(*idx, &mut operations);
+                    debug_assert!(valid, "a verified group slot has operations");
                 }
                 BcRow::Var(v) => {
                     variables.insert(*v);
                 }
             }
         }
+        operations.sort_unstable();
+        operations.dedup();
         out.extend_from_slice(&((operations.len() + variables.len()) as u32).to_le_bytes());
         for operation in operations {
             out.push(0x00);
-            write_str(out, &operation);
+            write_str(
+                out,
+                self.bundle
+                    .op_name(operation)
+                    .expect("a verified operation slot has a name"),
+            );
         }
         for variable in variables {
             out.push(0x01);
@@ -3065,7 +3065,7 @@ pub fn module_identity_with_bundle(
     module: &Module,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<ModuleIdentity, IdentityError> {
-    preflight(module)?;
+    preflight(module, bundle)?;
     let graph = Graph::build(module);
     let s = graph.space;
     let (comps, comp_of) = tarjan(&graph);
@@ -3700,8 +3700,8 @@ mod tag_tests {
 mod slot_tests {
     use super::*;
     use crate::{
-        BcCallableContract, BcType, ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec,
-        SlotTarget, NO_APP, NO_ROLE,
+        BcCallableContract, BcRow, BcType, ExtendedInstr, Func, Instr, Module, SlotContract,
+        SlotSpec, SlotTarget, NO_APP, NO_ROLE,
     };
 
     fn function(name: &str, value: i64) -> Func {
@@ -3799,5 +3799,26 @@ mod slot_tests {
         let first_id = module_identity(&first).expect("the first module hashes");
         let second_id = module_identity(&second).expect("the second module hashes");
         assert_ne!(first_id.func_hashes[0], second_id.func_hashes[0]);
+    }
+
+    #[test]
+    fn a_group_and_its_operations_have_one_identity() {
+        let bundle = lm_abi::standard_bundle();
+        let io = bundle
+            .group_by_name("Io")
+            .expect("the standard ABI has the Io group");
+        let mut grouped = module();
+        grouped.funcs[0].row = vec![BcRow::Group(io)];
+        let mut expanded = grouped.clone();
+        expanded.funcs[0].row = bundle
+            .group_operations(io)
+            .expect("the Io group has operations")
+            .into_iter()
+            .map(BcRow::Op)
+            .collect();
+        let grouped = module_identity(&grouped).expect("the grouped module hashes");
+        let expanded = module_identity(&expanded).expect("the expanded module hashes");
+        assert_eq!(grouped.func_hashes[0], expanded.func_hashes[0]);
+        assert_eq!(grouped.semantic_hash, expanded.semantic_hash);
     }
 }

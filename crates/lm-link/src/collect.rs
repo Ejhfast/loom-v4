@@ -677,13 +677,7 @@ fn type_list_edges(offsets: Offsets, types: &[u32], edges: &mut Vec<u32>) {
     edges.extend(types.iter().map(|ty| offsets.ty(*ty)));
 }
 
-fn row_edges(offsets: Offsets, row: &[BcRow], edges: &mut Vec<u32>) {
-    for item in row {
-        if let BcRow::Op(string) = item {
-            edges.push(offsets.string(*string));
-        }
-    }
-}
+fn row_edges(_offsets: Offsets, _row: &[BcRow], _edges: &mut Vec<u32>) {}
 
 fn rows_edges(offsets: Offsets, rows: &[Vec<BcRow>], edges: &mut Vec<u32>) {
     for row in rows {
@@ -1359,11 +1353,7 @@ fn relocate_module(
             .iter()
             .map(|ty| reloc.types[*ty as usize])
             .collect(),
-        rows: app
-            .rows
-            .iter()
-            .map(|row| reloc_row(row, &reloc.strings))
-            .collect(),
+        rows: app.rows.iter().map(|row| reloc_row(row)).collect(),
     });
     let interfaces = retain_table(&module.interfaces, &reloc.interfaces, |interface| {
         reloc_interface(interface, reloc)
@@ -1609,13 +1599,8 @@ fn relocate_debug(module: &Module, reloc: &Reloc, collected: &Module) -> Result<
     Ok(lm_bytecode::debug::encode(&relocated))
 }
 
-fn reloc_row(row: &[BcRow], strings: &[u32]) -> Vec<BcRow> {
-    row.iter()
-        .map(|item| match item {
-            BcRow::Op(index) => BcRow::Op(strings[*index as usize]),
-            BcRow::Var(index) => BcRow::Var(*index),
-        })
-        .collect()
+fn reloc_row(row: &[BcRow]) -> Vec<BcRow> {
+    row.to_vec()
 }
 
 fn reloc_type(ty: &BcType, reloc: &Reloc) -> BcType {
@@ -1642,7 +1627,7 @@ fn reloc_type(ty: &BcType, reloc: &Reloc) -> BcType {
                 .collect(),
             muts.clone(),
             reloc.types[*ret as usize],
-            reloc_row(row, &reloc.strings),
+            reloc_row(row),
         ),
         BcType::Callback(params, muts, ret, row) => BcType::Callback(
             params
@@ -1651,7 +1636,7 @@ fn reloc_type(ty: &BcType, reloc: &Reloc) -> BcType {
                 .collect(),
             muts.clone(),
             reloc.types[*ret as usize],
-            reloc_row(row, &reloc.strings),
+            reloc_row(row),
         ),
         BcType::Projection {
             base,
@@ -1685,11 +1670,7 @@ fn reloc_interface_use(source: &BcInterfaceUse, reloc: &Reloc) -> BcInterfaceUse
             .iter()
             .map(|ty| reloc.types[*ty as usize])
             .collect(),
-        rows: source
-            .rows
-            .iter()
-            .map(|row| reloc_row(row, &reloc.strings))
-            .collect(),
+        rows: source.rows.iter().map(|row| reloc_row(row)).collect(),
     }
 }
 
@@ -1717,7 +1698,7 @@ fn reloc_callable(source: &BcCallableContract, reloc: &Reloc) -> BcCallableContr
             .collect(),
         param_muts: source.param_muts.clone(),
         ret: reloc.types[source.ret as usize],
-        row: reloc_row(&source.row, &reloc.strings),
+        row: reloc_row(&source.row),
     }
 }
 
@@ -1860,7 +1841,7 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
                 param_muts: method.param_muts.clone(),
                 param_names: method.param_names.clone(),
                 ret: reloc.types[method.ret as usize],
-                row: reloc_row(&method.row, &reloc.strings),
+                row: reloc_row(&method.row),
                 default: if method.default == NO_FUNC {
                     NO_FUNC
                 } else {
@@ -1909,7 +1890,7 @@ fn reloc_func(source: &Func, reloc: &Reloc) -> Func {
         param_muts: source.param_muts.clone(),
         param_names: source.param_names.clone(),
         ret: reloc.types[source.ret as usize],
-        row: reloc_row(&source.row, &reloc.strings),
+        row: reloc_row(&source.row),
         captures: source
             .captures
             .iter()

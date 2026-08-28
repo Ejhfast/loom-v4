@@ -142,16 +142,8 @@ fn source_origin(
         .map(|definition| definition.origin)
 }
 
-fn closed_rows_match(
-    left_module: &dyn lm_bytecode::CodeTableView,
-    left: &[u32],
-    right_module: &dyn lm_bytecode::CodeTableView,
-    right: &[u32],
-) -> bool {
-    left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| {
-            left_module.strings().get(*left as usize) == right_module.strings().get(*right as usize)
-        })
+fn closed_rows_match(left: &[u32], right: &[u32]) -> bool {
+    left == right
 }
 
 #[derive(Clone, Copy)]
@@ -285,12 +277,7 @@ fn closed_types_match(
             ) => {
                 if left_params.len() != right_params.len()
                     || left_muts != right_muts
-                    || !closed_rows_match(
-                        left_space.module,
-                        left_row,
-                        right_space.module,
-                        right_row,
-                    )
+                    || !closed_rows_match(left_row, right_row)
                 {
                     return false;
                 }
@@ -2498,7 +2485,13 @@ impl World {
         {
             return Ok(false);
         }
-        let mut source_types = lm_bytecode::closed::TypeEnvs::default();
+        let target = self.code_of(vm).clone();
+        let bundle = target.bundle().clone();
+        let mut source_types = lm_bytecode::closed::TypeEnvs::new_with_bundle(
+            lm_bytecode::closed::DEFAULT_MAX_CLOSED_TYPES,
+            lm_bytecode::closed::DEFAULT_MAX_TYPE_ENVS,
+            bundle.clone(),
+        );
         let mut parameters = Vec::with_capacity(code.params.len());
         for parameter in &code.params {
             parameters.push(
@@ -2519,8 +2512,6 @@ impl World {
         let source_output = source_types
             .close(module, code.ret, TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
-        let target = self.code_of(vm).clone();
-        let bundle = target.bundle().clone();
         let source_identity = lm_bytecode::identity::module_identity_with_bundle(module, &bundle)
             .map_err(|_| FaultCode::MalformedState)?;
         let target_identity = target.identity()?.clone();

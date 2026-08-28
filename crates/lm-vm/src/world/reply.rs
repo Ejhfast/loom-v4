@@ -432,39 +432,28 @@ impl World {
 
     /// Move one terminal value from `child` into `parent`.
     ///
-    /// A dynamic run packs its value first. The packed value is the
-    /// same `DynValue` that a `dynamic_result` compilation builds, so
-    /// it crosses under the same boundary rule.
+    /// A dynamic result stays in the machine that produced it. The
+    /// holder receives a reference to that machine, so the value keeps
+    /// its own code view, and a snapshot of the holder closes over the
+    /// machine like a run handle.
     fn cross_terminal_value(
         &mut self,
         child: VmId,
         parent: VmId,
         value: Value,
     ) -> Result<Value, FaultCode> {
-        let value = if self.machines[child as usize].dynamic_result {
-            self.pack_dynamic_result(child, value)?
-        } else {
-            value
-        };
-        self.transfer(child, parent, value)
-    }
-
-    /// Pack the terminal value of `child` with its closed result type.
-    fn pack_dynamic_result(&mut self, child: VmId, value: Value) -> Result<Value, FaultCode> {
         let machine = &self.machines[child as usize];
-        let func = machine.body_func.ok_or(FaultCode::MalformedState)?;
-        let witness = machine.witness;
-        let code = self.code_of(child).clone();
-        let ret = code
-            .funcs
-            .get(func as usize)
-            .ok_or(FaultCode::MalformedState)?
-            .ret;
-        let ty = self
-            .envs
-            .close(code.as_ref(), ret, witness)
-            .map_err(|_| FaultCode::BoundaryLimit)?;
-        self.machines[child as usize].alloc(Object::DynValue { value, ty })
+        let packed = value.as_obj().is_some_and(|reference| {
+            matches!(machine.vm.heap.get(reference), Object::DynValue { .. })
+        });
+        if machine.dynamic_result || packed {
+            let generation = machine.generation;
+            return self.machines[parent as usize].alloc(Object::NativeDynRef {
+                vm: child,
+                generation,
+            });
+        }
+        self.transfer(child, parent, value)
     }
 
     /// Wrap one drive event for a bounded turn.
@@ -643,15 +632,9 @@ impl World {
         }
         let (reply_ty, env) = self.reply_type(vm)?;
         let module = self.code_of(vm).clone();
-        let world = self.show_code().clone();
         let machine = &self.machines[vm as usize];
         crate::typecheck::check_boundary_value(
-            crate::typecheck::BoundaryContext::new(
-                module.as_ref(),
-                world.as_ref(),
-                module.bundle(),
-                &machine.vm.heap,
-            ),
+            crate::typecheck::BoundaryContext::new(module.as_ref(), &machine.vm.heap),
             &mut self.envs,
             &mut self.check,
             value,
@@ -687,16 +670,10 @@ impl World {
         if code.params.len() != args.len() {
             return Err(FaultCode::MalformedState);
         }
-        let world = self.show_code().clone();
         let machine = &self.machines[vm as usize];
         for (value, ty) in args.iter().zip(code.params.iter()) {
             crate::typecheck::check_boundary_value(
-                crate::typecheck::BoundaryContext::new(
-                    module.as_ref(),
-                    world.as_ref(),
-                    module.bundle(),
-                    &machine.vm.heap,
-                ),
+                crate::typecheck::BoundaryContext::new(module.as_ref(), &machine.vm.heap),
                 &mut self.envs,
                 &mut self.check,
                 *value,

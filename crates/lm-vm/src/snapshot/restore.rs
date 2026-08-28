@@ -45,6 +45,13 @@ struct PreparedImages {
     config_update: Option<(u32, VmConfig)>,
 }
 
+/// Snapshot code prepared for one destination arena.
+struct PreparedSnapshotCode {
+    namespace_ids: Arc<[NamespaceId]>,
+    combined: CodeRelocation,
+    namespaces: Vec<CodeRelocation>,
+}
+
 /// One prepared full VM restore and its reserved registry entries.
 pub(crate) struct VmRestorePlan {
     restore: RestorePlan,
@@ -238,7 +245,11 @@ impl World {
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
         let image = admitted.world();
-        let (namespace_ids, code_map) = self.prepare_snapshot_code(admitted)?;
+        let PreparedSnapshotCode {
+            namespace_ids,
+            combined: code_map,
+            namespaces: namespace_maps,
+        } = self.prepare_snapshot_code(admitted)?;
         let mut relocated_types;
         let source_types = if code_map.is_identity() {
             image.types.as_slice()
@@ -298,6 +309,7 @@ impl World {
             type_map,
             &namespace_ids,
             &code_map,
+            &namespace_maps,
             admitted,
         )?;
 
@@ -368,6 +380,9 @@ impl World {
                     target_code.strings.len(),
                 ))
             };
+            let literal_map = namespace_maps
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             restore_state(
                 &mut machine,
                 source,
@@ -376,6 +391,7 @@ impl World {
                 env_map,
                 type_map,
                 &code_map,
+                literal_map,
                 &refs,
                 literal_layout,
                 restorer,
@@ -410,7 +426,7 @@ impl World {
     fn prepare_snapshot_code(
         &mut self,
         admitted: &SnapshotImage,
-    ) -> Result<(Arc<[NamespaceId]>, CodeRelocation), RestoreFail> {
+    ) -> Result<PreparedSnapshotCode, RestoreFail> {
         if let Some(ids) = admitted.code().namespace_id_store() {
             let exact = ids.len() == admitted.code().namespaces().len()
                 && ids.iter().copied().enumerate().all(|(ordinal, id)| {
@@ -420,10 +436,16 @@ impl World {
                         .is_some_and(|target| Arc::ptr_eq(source, target))
                 });
             if exact {
-                return Ok((ids, CodeRelocation::identity()));
+                let maps = (0..ids.len()).map(|_| CodeRelocation::identity()).collect();
+                return Ok(PreparedSnapshotCode {
+                    namespace_ids: ids,
+                    combined: CodeRelocation::identity(),
+                    namespaces: maps,
+                });
             }
         }
         let mut ids = try_vec(admitted.code().namespaces().len())?;
+        let mut maps = try_vec(admitted.code().namespaces().len())?;
         let mut combined: Option<CodeRelocation> = None;
         for (ordinal, source) in admitted.code().namespaces().iter().enumerate() {
             let source = source.code_namespace();
@@ -447,13 +469,10 @@ impl World {
                 .arena
                 .namespace(target_id)
                 .ok_or(RestoreFail::IncompatibleImage)?;
-            let map = if Arc::ptr_eq(source, target) {
-                CodeRelocation::identity()
-            } else {
-                source
-                    .relocation_to(target)
-                    .map_err(|_| RestoreFail::IncompatibleImage)?
-            };
+            let map = source
+                .relocation_to(target)
+                .map_err(|_| RestoreFail::IncompatibleImage)?;
+            maps.push(map.clone());
             match &mut combined {
                 Some(combined) => combined
                     .merge(&map)
@@ -463,7 +482,11 @@ impl World {
             ids.push(target_id);
         }
         let combined = combined.ok_or(RestoreFail::IncompatibleImage)?;
-        Ok((ids.into(), combined))
+        Ok(PreparedSnapshotCode {
+            namespace_ids: ids.into(),
+            combined,
+            namespaces: maps,
+        })
     }
 
     /// Plan portable VM image records without changing the registry.
@@ -479,6 +502,7 @@ impl World {
         type_map: &[u32],
         namespace_ids: &[NamespaceId],
         code_map: &CodeRelocation,
+        namespace_maps: &[CodeRelocation],
         admitted: &SnapshotImage,
     ) -> Result<PreparedImages, RestoreFail> {
         if reused_source.is_some() != target_key.is_some() {
@@ -494,6 +518,9 @@ impl World {
             let namespace = *namespace_ids
                 .get(source.namespace as usize)
                 .ok_or(RestoreFail::IncompatibleImage)?;
+            let namespace_map = namespace_maps
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let target = self
                 .vm_images
                 .get(key.image as usize)
@@ -501,6 +528,7 @@ impl World {
             let reuses_pristine_image = target.live
                 && target.generation == key.generation
                 && target.namespace == namespace
+                && namespace_map.is_identity()
                 && same_image_slots(&target.slots, &source.slots, code_map)
                 && target.slot_versions == source.slot_versions
                 && target.heap.live_count() == 0
@@ -569,6 +597,9 @@ impl World {
             let namespace = *namespace_ids
                 .get(source.namespace as usize)
                 .ok_or(RestoreFail::IncompatibleImage)?;
+            let namespace_map = namespace_maps
+                .get(source.namespace as usize)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let mut heap = self.empty_image_heap(config);
             let refs = restore_objects(
                 &mut heap,
@@ -579,9 +610,32 @@ impl World {
                 type_map,
                 code_map,
             )?;
-            let mut slots = try_vec(source.slots.len())?;
-            for target in &source.slots {
-                slots.push(match target {
+            let target_slot_count = self.code_for_namespace(namespace).slots.len();
+            let mut slots = try_vec(target_slot_count)?;
+            slots.resize(target_slot_count, RuntimeSlotTarget::Empty);
+            let mut slot_versions = try_vec(target_slot_count)?;
+            slot_versions.resize(target_slot_count, 0);
+            let mut occupied = try_vec(target_slot_count)?;
+            occupied.resize(target_slot_count, false);
+            for (source_slot, (target, version)) in source
+                .slots
+                .iter()
+                .zip(source.slot_versions.iter().copied())
+                .enumerate()
+            {
+                let source_slot =
+                    u32::try_from(source_slot).map_err(|_| RestoreFail::LimitExceeded)?;
+                let Some(target_slot) = namespace_map.slot(source_slot) else {
+                    if *target != super::ImageSlotTarget::Empty || version != 0 {
+                        return Err(RestoreFail::IncompatibleImage);
+                    }
+                    continue;
+                };
+                let target_slot = target_slot as usize;
+                if target_slot >= target_slot_count || occupied[target_slot] {
+                    return Err(RestoreFail::IncompatibleImage);
+                }
+                let restored = match target {
                     super::ImageSlotTarget::Empty => RuntimeSlotTarget::Empty,
                     super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(
                         code_map
@@ -607,7 +661,10 @@ impl World {
                             generation: *generation,
                         }
                     }
-                });
+                };
+                occupied[target_slot] = true;
+                slots[target_slot] = restored;
+                slot_versions[target_slot] = version;
             }
             let mut instances = try_vec(source.instances.len())?;
             for instance in &source.instances {
@@ -679,7 +736,7 @@ impl World {
                 live: true,
                 config,
                 slots: Arc::new(slots),
-                slot_versions: source.slot_versions.clone(),
+                slot_versions,
                 heap,
                 instances,
             };
@@ -889,6 +946,7 @@ fn restore_state(
     env_map: &[TypeEnvId],
     type_map: &[u32],
     code_map: &CodeRelocation,
+    literal_map: &CodeRelocation,
     refs: &[ObjRef],
     literal_layout: Option<(usize, usize, usize)>,
     restorer: VmId,
@@ -971,7 +1029,7 @@ fn restore_state(
             let target_index = if source_index < source_string_count {
                 let source_string =
                     u32::try_from(source_index).map_err(|_| RestoreFail::IncompatibleImage)?;
-                code_map
+                literal_map
                     .string(source_string)
                     .ok_or(RestoreFail::IncompatibleImage)? as usize
             } else {
@@ -981,7 +1039,7 @@ fn restore_state(
                     .ok_or(RestoreFail::IncompatibleImage)?;
                 let source_byte =
                     u32::try_from(source_byte).map_err(|_| RestoreFail::IncompatibleImage)?;
-                let target_byte = code_map
+                let target_byte = literal_map
                     .bytes(source_byte)
                     .ok_or(RestoreFail::IncompatibleImage)?
                     as usize;
@@ -1360,6 +1418,9 @@ fn relocate_metadata(
         }
         Object::NativeHandle { proc, .. } => {
             *proc = ids[*proc as usize];
+        }
+        Object::NativeDynRef { vm, .. } => {
+            *vm = ids[*vm as usize];
         }
         Object::NativeResourceHandle { surface, .. } => {
             *surface = ids[*surface as usize];

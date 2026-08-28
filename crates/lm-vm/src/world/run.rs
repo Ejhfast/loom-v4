@@ -89,7 +89,11 @@ impl World {
             schedule_events: ScheduleEvents::default(),
             host_completions: std::collections::BTreeMap::new(),
             gate_groups: Vec::new(),
-            envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
+            envs: lm_bytecode::closed::TypeEnvs::new_with_bundle(
+                config.max_closed_types,
+                config.max_type_envs,
+                loaded.bundle().clone(),
+            ),
             host,
             bound_resources: std::collections::BTreeMap::new(),
             next_resource: 1,
@@ -103,6 +107,7 @@ impl World {
             trusted: std::collections::VecDeque::new(),
             trusted_index: std::collections::HashMap::new(),
             trusted_bytes: 0,
+            snapshot_code: crate::snapshot::SnapshotCodeCache::default(),
             images: Vec::new(),
             image_free: Vec::new(),
             last_image: None,
@@ -175,19 +180,6 @@ impl World {
 
     pub(crate) fn root_code(&self) -> &std::sync::Arc<NamespaceRuntime> {
         self.code_of(0)
-    }
-
-    /// The widest registered code view of this world.
-    ///
-    /// Every namespace is a prefix view of one arena, so the newest
-    /// registered namespace resolves every index of every machine.
-    pub(crate) fn show_code(&self) -> &std::sync::Arc<NamespaceRuntime> {
-        self.namespaces
-            .iter()
-            .rev()
-            .flatten()
-            .next()
-            .expect("a world registers its root namespace")
     }
 
     pub(crate) fn root_core(&self) -> CoreLayout {
@@ -584,10 +576,9 @@ impl World {
 
     /// The table grants that the declared row of one function names.
     ///
-    /// A row entry is text: either one exact operation name or one
-    /// group name. The launch paths pass exactly this row to a new
-    /// machine, and each caller charges the same row, so a launch
-    /// creates no authority.
+    /// A row entry carries one exact ABI operation or group slot.
+    /// The launch paths pass exactly this row to a new machine.
+    /// Each caller charges the same row, so a launch creates no authority.
     pub(super) fn declared_grants(&self, vm: VmId, func: u32) -> (Vec<u32>, Vec<u32>) {
         let mut ops: Vec<u32> = Vec::new();
         let mut groups: Vec<u32> = Vec::new();
@@ -595,16 +586,10 @@ impl World {
             return (ops, groups);
         };
         for elem in &entry.row {
-            let lm_bytecode::BcRow::Op(idx) = elem else {
-                continue;
-            };
-            let Some(text) = self.code_of(vm).strings.get(*idx as usize) else {
-                continue;
-            };
-            if let Some(op) = self.code_of(vm).bundle().op_by_name(text) {
-                ops.push(op);
-            } else if let Some(group) = self.code_of(vm).bundle().group_by_name(text) {
-                groups.push(group);
+            match elem {
+                lm_bytecode::BcRow::Op(operation) => ops.push(*operation),
+                lm_bytecode::BcRow::Group(group) => groups.push(*group),
+                lm_bytecode::BcRow::Var(_) => {}
             }
         }
         (ops, groups)
@@ -886,6 +871,10 @@ impl World {
             ExecutionStop::Boundary(ExecOutcome::DynamicRender { value, ty }) => {
                 self.handle_dynamic_render(vm, value, ty)
             }
+            ExecutionStop::Boundary(ExecOutcome::DynamicRenderRef {
+                vm: target,
+                generation,
+            }) => self.handle_dynamic_render_ref(vm, target, generation),
             ExecutionStop::Boundary(ExecOutcome::FunctionCode { function, origin }) => {
                 self.handle_function_code(vm, function, origin)
             }

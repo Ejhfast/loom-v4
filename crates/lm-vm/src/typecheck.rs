@@ -31,9 +31,7 @@ const SEEN_LINEAR: usize = 32;
 /// Reusable state for one boundary check.
 #[derive(Debug, Default)]
 pub(crate) struct BoundaryScratch {
-    work: Vec<(Value, ClosedTypeId, bool)>,
-    /// True while the walk is inside a `DynValue` payload.
-    dynamic: bool,
+    work: Vec<(Value, ClosedTypeId)>,
     seen: Vec<(u32, ClosedTypeId)>,
     seen_set: HashSet<(u32, ClosedTypeId)>,
     subtype_work: Vec<(ClosedTypeId, ClosedTypeId)>,
@@ -44,30 +42,13 @@ pub(crate) struct BoundaryScratch {
 #[derive(Clone, Copy)]
 pub(crate) struct BoundaryContext<'a> {
     module: &'a NamespaceRuntime,
-    /// The widest code view of the world.
-    ///
-    /// A `DynValue` payload carries its own runtime type. The check
-    /// resolves the payload through this view, so a class the holder
-    /// never saw still checks.
-    world: &'a NamespaceRuntime,
-    bundle: &'a lm_abi::AbiBundle,
     heap: &'a Heap,
 }
 
 impl<'a> BoundaryContext<'a> {
     /// Create one boundary-check context.
-    pub(crate) fn new(
-        module: &'a NamespaceRuntime,
-        world: &'a NamespaceRuntime,
-        bundle: &'a lm_abi::AbiBundle,
-        heap: &'a Heap,
-    ) -> BoundaryContext<'a> {
-        BoundaryContext {
-            module,
-            world,
-            bundle,
-            heap,
-        }
+    pub(crate) fn new(module: &'a NamespaceRuntime, heap: &'a Heap) -> BoundaryContext<'a> {
+        BoundaryContext { module, heap }
     }
 }
 
@@ -109,7 +90,7 @@ pub(crate) fn check_boundary_value(
     reply_ty: u32,
     env: TypeEnvId,
 ) -> Result<(), FaultCode> {
-    let module = context.module;
+    let BoundaryContext { module, heap } = context;
     if module.types.get(reply_ty as usize).is_none() || envs.env(env).is_none() {
         return Err(FaultCode::MalformedState);
     }
@@ -125,15 +106,14 @@ pub(crate) fn check_boundary_value(
 
     let root = envs.close(module, reply_ty, env).map_err(env_fault)?;
     scratch.reset();
-    scratch.work.push((value, root, false));
+    scratch.work.push((value, root));
     let mut steps = 0u32;
-    while let Some((value, expect, dynamic)) = scratch.work.pop() {
+    while let Some((value, expect)) = scratch.work.pop() {
         steps += 1;
         if steps > MAX_STEPS {
             return Err(FaultCode::BoundaryLimit);
         }
-        scratch.dynamic = dynamic;
-        check_one(&context, envs, scratch, value, expect)?;
+        check_one(module, heap, envs, scratch, value, expect)?;
     }
     Ok(())
 }
@@ -214,20 +194,13 @@ enum Node {
 
 /// Check one value and expected type pair.
 fn check_one(
-    context: &BoundaryContext<'_>,
+    module: &NamespaceRuntime,
+    heap: &Heap,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     value: Value,
     expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
-    let (module, bundle, heap) = (context.module, context.bundle, context.heap);
-    // The expected type comes from the holder. The object side of a
-    // `DynValue` payload resolves through the widest view.
-    let view = if scratch.dynamic {
-        context.world
-    } else {
-        module
-    };
     match resolve(module, envs, expect)? {
         Node::Scalar(tag) => {
             let matches = match (value, tag) {
@@ -266,7 +239,7 @@ fn check_one(
             if children > 0 && !scratch.mark((reference.slot, expect)) {
                 return Ok(());
             }
-            check_object(view, bundle, envs, scratch, object, kind, expect)
+            check_object(module, envs, scratch, object, kind, expect)
         }
         Node::Callback => Err(FaultCode::BoundaryViolation),
         Node::Option { payload, case } => {
@@ -277,7 +250,7 @@ fn check_one(
                     let some = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME];
                     let none = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE];
                     if *class == some || *class == none {
-                        return check_instance(view, envs, scratch, *class, fields, expect);
+                        return check_instance(module, envs, scratch, *class, fields, expect);
                     }
                 }
             }
@@ -298,7 +271,7 @@ fn check_one(
                 Some(true) if is_none => Err(FaultCode::TypeMismatch),
                 None | Some(false) if is_none => Ok(()),
                 None | Some(true) => {
-                    scratch.work.push((value, payload, scratch.dynamic));
+                    scratch.work.push((value, payload));
                     Ok(())
                 }
                 Some(false) => unreachable!(),
@@ -462,6 +435,7 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativeTable { .. } => Kind::PolicyTable,
         Object::NativeVm { .. } => Kind::Vm,
         Object::NativeRun { .. } => Kind::Run,
+        Object::NativeDynRef { .. } => Kind::DynValue,
         Object::NativeDigest(_) => Kind::Digest,
         Object::NativeSnapshot(_) | Object::NativeSnapshotRef { .. } => Kind::Snapshot,
         Object::NativeCall { .. } => Kind::PendingCall,
@@ -503,7 +477,6 @@ fn kind_of(object: &Object) -> Kind {
 /// Check one object and add its typed children.
 fn check_object(
     module: &NamespaceRuntime,
-    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     object: &Object,
@@ -514,7 +487,7 @@ fn check_object(
         (Object::List { items, .. }, Kind::List) => {
             let elem = child(module, envs, expect, 0)?;
             for item in items {
-                scratch.work.push((*item, elem, scratch.dynamic));
+                scratch.work.push((*item, elem));
             }
             Ok(())
         }
@@ -525,8 +498,8 @@ fn check_object(
                 if !entry.is_live() {
                     continue;
                 }
-                scratch.work.push((entry.key, key, scratch.dynamic));
-                scratch.work.push((entry.value, value, scratch.dynamic));
+                scratch.work.push((entry.key, key));
+                scratch.work.push((entry.value, value));
             }
             Ok(())
         }
@@ -539,7 +512,7 @@ fn check_object(
                 return Err(FaultCode::TypeMismatch);
             }
             for (item, elem) in items.iter().zip(elems) {
-                scratch.work.push((*item, elem, scratch.dynamic));
+                scratch.work.push((*item, elem));
             }
             Ok(())
         }
@@ -547,13 +520,16 @@ fn check_object(
             check_instance(module, envs, scratch, *class, fields, expect)
         }
         (Object::Closure { func, env, .. }, Kind::Closure) => {
-            check_closure(module, bundle, envs, scratch, *func, env.env(), expect)
+            check_closure(module, envs, scratch, *func, env.env(), expect)
         }
+        // A dynamic result reference names a value in another machine.
+        // That machine's own code checked the value.
+        (Object::NativeDynRef { .. }, Kind::DynValue) => Ok(()),
         (Object::DynValue { value, ty }, Kind::DynValue) => {
             if envs.ty(*ty).is_none() {
                 return Err(FaultCode::MalformedState);
             }
-            scratch.work.push((*value, *ty, true));
+            scratch.work.push((*value, *ty));
             Ok(())
         }
         _ => Ok(()),
@@ -586,7 +562,6 @@ fn child(
 /// Check a closure's callable type before it can execute.
 fn check_closure(
     module: &NamespaceRuntime,
-    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     func: u32,
@@ -613,7 +588,7 @@ fn check_closure(
     let actual = envs
         .intern(ClosedType::Fn(params, code.param_muts.clone(), result, row))
         .map_err(env_fault)?;
-    if closed_is_subtype(module, bundle, envs, scratch, actual, expect)? {
+    if closed_is_subtype(module, envs, scratch, actual, expect)? {
         Ok(())
     } else {
         Err(FaultCode::TypeMismatch)
@@ -623,7 +598,6 @@ fn check_closure(
 /// Check the closed subtype relation used by callable values.
 fn closed_is_subtype(
     module: &NamespaceRuntime,
-    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     found: ClosedTypeId,
@@ -677,7 +651,7 @@ fn closed_is_subtype(
                         .iter()
                         .zip(expected_muts.iter())
                         .all(|(found, expected)| !*found || *expected)
-                    || !row_included(module, bundle, &found_row, &expected_row)
+                    || !row_included(&found_row, &expected_row)
                 {
                     return Ok(false);
                 }
@@ -695,7 +669,7 @@ fn closed_is_subtype(
                         .iter()
                         .zip(expected_muts.iter())
                         .all(|(found, expected)| !*found || *expected)
-                    || !row_included(module, bundle, &found_row, &expected_row)
+                    || !row_included(&found_row, &expected_row)
                 {
                     return Ok(false);
                 }
@@ -710,23 +684,8 @@ fn closed_is_subtype(
     Ok(true)
 }
 
-fn row_included(
-    module: &NamespaceRuntime,
-    bundle: &lm_abi::AbiBundle,
-    sub: &ClosedRow,
-    sup: &ClosedRow,
-) -> bool {
-    sub.iter().all(|slot| {
-        let Some(name) = module.strings.get(*slot as usize) else {
-            return false;
-        };
-        sup.iter().any(|candidate| {
-            let Some(candidate_name) = module.strings.get(*candidate as usize) else {
-                return false;
-            };
-            bundle.row_name_included(name, candidate_name)
-        })
-    })
+fn row_included(sub: &ClosedRow, sup: &ClosedRow) -> bool {
+    sub.iter().all(|slot| sup.binary_search(slot).is_ok())
 }
 
 /// Check one instance against one closed class position.
@@ -772,7 +731,7 @@ fn check_instance(
         let field = envs
             .close(module, *field_ty, field_env)
             .map_err(env_fault)?;
-        scratch.work.push((*value, field, scratch.dynamic));
+        scratch.work.push((*value, field));
     }
     Ok(())
 }
@@ -906,7 +865,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                BoundaryContext::new(&module, &module, &lm_abi::standard_bundle(), &heap),
+                BoundaryContext::new(&module, &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Int(41),
@@ -933,7 +892,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                BoundaryContext::new(&module, &module, &lm_abi::standard_bundle(), &heap),
+                BoundaryContext::new(&module, &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(closure),
@@ -960,7 +919,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                BoundaryContext::new(&module, &module, &lm_abi::standard_bundle(), &heap),
+                BoundaryContext::new(&module, &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(closure),
@@ -1006,7 +965,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                BoundaryContext::new(&module, &module, &lm_abi::standard_bundle(), &heap),
+                BoundaryContext::new(&module, &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(instance),

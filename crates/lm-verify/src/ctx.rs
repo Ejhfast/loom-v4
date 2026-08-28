@@ -281,18 +281,11 @@ impl<'m> Ctx<'m> {
     }
 
     /// The sort key of one row element, for canonical order checks.
-    pub(crate) fn row_key(&self, elem: &BcRow) -> (u8, String, u32) {
+    pub(crate) fn row_key(&self, elem: &BcRow) -> (u8, u32) {
         match elem {
-            BcRow::Op(idx) => (
-                0,
-                self.module
-                    .strings
-                    .get(*idx as usize)
-                    .cloned()
-                    .unwrap_or_default(),
-                0,
-            ),
-            BcRow::Var(v) => (1, String::new(), *v),
+            BcRow::Op(slot) => (0, *slot),
+            BcRow::Group(slot) => (1, *slot),
+            BcRow::Var(variable) => (2, *variable),
         }
     }
 
@@ -306,15 +299,23 @@ impl<'m> Ctx<'m> {
     pub(crate) fn row_included(&self, sub: &[BcRow], sup: &[BcRow]) -> bool {
         sub.iter().all(|elem| match elem {
             BcRow::Var(v) => sup.contains(&BcRow::Var(*v)),
-            BcRow::Op(n) => {
-                let Some(name) = self.module.strings.get(*n as usize) else {
+            BcRow::Op(n) | BcRow::Group(n) => {
+                let name = match elem {
+                    BcRow::Op(_) => self.bundle.op_name(*n),
+                    BcRow::Group(_) => self.bundle.group_name(*n),
+                    BcRow::Var(_) => None,
+                };
+                let Some(name) = name else {
                     return false;
                 };
                 sup.iter().any(|s| match s {
                     BcRow::Op(m) => self
-                        .module
-                        .strings
-                        .get(*m as usize)
+                        .bundle
+                        .op_name(*m)
+                        .is_some_and(|sup_name| self.bundle.row_name_included(name, sup_name)),
+                    BcRow::Group(m) => self
+                        .bundle
+                        .group_name(*m)
                         .is_some_and(|sup_name| self.bundle.row_name_included(name, sup_name)),
                     BcRow::Var(_) => false,
                 })
@@ -331,10 +332,10 @@ impl<'m> Ctx<'m> {
                     Some(replacement) => out.extend_from_slice(replacement),
                     None => out.push(*elem),
                 },
-                BcRow::Op(_) => out.push(*elem),
+                BcRow::Op(_) | BcRow::Group(_) => out.push(*elem),
             }
         }
-        out.sort_by_key(|e| self.row_key(e));
+        out.sort_unstable();
         out.dedup();
         out
     }
@@ -724,13 +725,14 @@ impl<'m> Ctx<'m> {
                 return Err("an interface row uses an unbound variable".to_string());
             }
             for element in row {
-                if let BcRow::Op(string) = element {
-                    let Some(name) = self.module.strings.get(*string as usize) else {
-                        return Err("an interface row string is out of range".to_string());
-                    };
-                    if !self.bundle.row_name_valid(name) {
-                        return Err("an interface row names an unknown effect".to_string());
+                match element {
+                    BcRow::Op(slot) if *slot >= self.bundle.op_count() => {
+                        return Err("an interface row has an invalid operation slot".to_string());
                     }
+                    BcRow::Group(slot) if *slot >= self.bundle.group_count() => {
+                        return Err("an interface row has an invalid group slot".to_string());
+                    }
+                    _ => {}
                 }
             }
             if !self.row_canonical(row) {
@@ -1193,7 +1195,7 @@ impl<'m> Ctx<'m> {
     pub(crate) fn row_vars_bounded(&self, row: &[BcRow], elimit: u32) -> bool {
         row.iter().all(|e| match e {
             BcRow::Var(v) => *v < elimit,
-            BcRow::Op(_) => true,
+            BcRow::Op(_) | BcRow::Group(_) => true,
         })
     }
 
@@ -1202,9 +1204,12 @@ impl<'m> Ctx<'m> {
     pub(crate) fn row_has_name(&self, row: &[BcRow], name: &str) -> bool {
         row.iter().any(|elem| match elem {
             BcRow::Op(idx) => self
-                .module
-                .strings
-                .get(*idx as usize)
+                .bundle
+                .op_name(*idx)
+                .is_some_and(|text| self.bundle.row_name_included(name, text)),
+            BcRow::Group(idx) => self
+                .bundle
+                .group_name(*idx)
                 .is_some_and(|text| self.bundle.row_name_included(name, text)),
             BcRow::Var(_) => false,
         })

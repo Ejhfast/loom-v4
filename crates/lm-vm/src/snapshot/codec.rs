@@ -432,10 +432,8 @@ fn section_code(
 
 /// The closed type table and the type environment table.
 ///
-/// A node names a class by its numeric slot and an effect name by its
-/// module string slot, exactly as a heap object names a class. The
-/// code manifest carries the definition hash of every class the image
-/// names, and admission proves every slot.
+/// A node names a class by its numeric slot. A closed row names each
+/// operation by its ABI slot. Admission proves every slot.
 fn section_types(
     image: &Image,
     limit: usize,
@@ -613,6 +611,10 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.u32(*generation);
         }
         Object::NativeRun { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
+        Object::NativeDynRef { vm, generation } => {
+            out.leb(*vm as u64);
+            out.u32(*generation);
+        }
         Object::NativeCode(code) => {
             out.u8(match code.kind {
                 PortableCodeKind::Artifact => 0,
@@ -1198,17 +1200,17 @@ pub fn load_external(
 pub(crate) fn load_external_known(
     bytes: &[u8],
     available: std::sync::Arc<crate::NamespaceRuntime>,
-    known: Vec<std::sync::Arc<crate::NamespaceRuntime>>,
+    cache: &mut super::code::SnapshotCodeCache,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
     let namespace = available.code_namespace().clone();
-    load_external_inner(bytes, Some(namespace), Some(known), limits)
+    load_external_inner(bytes, Some(namespace), Some(cache), limits)
 }
 
 fn load_external_inner(
     bytes: &[u8],
     available: Option<std::sync::Arc<lm_link::CodeNamespace>>,
-    known: Option<Vec<std::sync::Arc<crate::NamespaceRuntime>>>,
+    cache: Option<&mut super::code::SnapshotCodeCache>,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
     if bytes.len() > limits.max_bytes {
@@ -1228,17 +1230,10 @@ fn load_external_inner(
     let runtime_core = available
         .as_ref()
         .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
-    let prepared_known = match (&known, &available) {
-        (None, Some(namespace)) => Some(vec![std::sync::Arc::new(crate::prepare_namespace(
-            namespace.clone(),
-        ))]),
-        _ => None,
-    };
-    let known = known.as_deref().or(prepared_known.as_deref());
     let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
     let (image, hash) = decode_inner(bytes, limits, &decode_budget, &bundle)?;
     decode_budget.charge(bytes.len(), "container copy")?;
-    let code = super::code::prepare_external(&image, runtime_core, bundle, known)?;
+    let code = super::code::prepare_external(&image, runtime_core, bundle, cache)?;
     let mut admission_budget = AdmissionBudget::default();
     let identity = super::admit::prove(&image, &code, &mut admission_budget)?;
     // The decoder accepts one byte string for one image, so the bytes
@@ -1820,8 +1815,9 @@ fn decode_row(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<ClosedRow> 
     let len = cur.count(limits.max_code_slots as u64, "effect row element")?;
     let mut row: ClosedRow = cur.vector(len, "effect row")?;
     for _ in 0..len {
-        let slot = u32::try_from(cur.leb()?)
-            .map_err(|_| ImageError::new(ImageReason::Code, "an effect name slot is too large"))?;
+        let slot = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(ImageReason::Code, "an effect operation slot is too large")
+        })?;
         row.push(slot);
     }
     Ok(row)
@@ -2303,6 +2299,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         },
         25 => Object::NativeRun {
             vm: machine_ref(cur, ctx)?,
+        },
+        37 => Object::NativeDynRef {
+            vm: machine_ref(cur, ctx)?,
+            generation: cur.u32()?,
         },
         26 => {
             let kind = match cur.u8()? {
