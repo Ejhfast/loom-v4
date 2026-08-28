@@ -138,8 +138,13 @@ impl World {
             .cloned()
             .ok_or_else(|| "the published code namespace is missing".to_string())?;
         let code = Arc::new(crate::prepare_namespace(linked));
-        self.namespaces.resize(namespace.index() + 1, None);
-        self.namespace_execution.resize(namespace.index() + 1, None);
+        let namespace_count = namespace.index() + 1;
+        if self.namespaces.len() < namespace_count {
+            self.namespaces.resize(namespace_count, None);
+        }
+        if self.namespace_execution.len() < namespace_count {
+            self.namespace_execution.resize(namespace_count, None);
+        }
         self.namespaces[namespace.index()] = Some(code.clone());
         if tables_extend(code.as_ref(), self.execution_tables.as_ref()) {
             self.execution_tables = code.clone();

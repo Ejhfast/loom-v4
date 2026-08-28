@@ -3,8 +3,8 @@
 use lm_compiler::{compile_module_with_options, core_link_env, CompileEnv, CompileOptions};
 use lm_host::CliHost;
 use lm_source::SourceFile;
-use lm_testkit::compile_to_bytes;
-use lm_testkit::publish_artifact_bytes;
+use lm_testkit::{compile_text, compile_to_bytes};
+use lm_testkit::{publish_artifact, publish_artifact_bytes};
 use lm_vm::snapshot::{LoadLimits, SnapshotFail};
 use lm_vm::{RecordingHost, RootEvent, VmConfig, World};
 use std::cell::RefCell;
@@ -3647,6 +3647,148 @@ execute()
             RootEvent::Ran => {}
             event => panic!("the restored run stopped: {event:?}"),
         }
+    }
+}
+
+const INSTALLED_CHILD_APP: &str = r#"
+def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile(
+    "plugin.lm",
+    "plugin.lm",
+    "def slow(value: Int): Int\n  i = 0\n  while i < value\n    i = i + 1\n  end\n  i\nend\n0\n",
+    env,
+    options
+  ).map_error() { |error: CompileErrors| error.message }?
+  module = artifact.verify().map_error() { |error: CodeError| error.message }?
+  code = module.function_code[(Int,), Int]("slow").map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  definition = image.install(code).map_error() { |error: CodeError| error.message }?
+  run = image.activate(definition, args: (300,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Ok(value) then Ok(value)
+  in Err(_) then Err("the installed function faulted")
+  end
+end
+
+execute()
+"#;
+
+fn capture_installed_child_snapshot() -> Vec<u8> {
+    let artifact = compile_text("installed-child.lm", INSTALLED_CHILD_APP)
+        .expect("the installed-child program compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the program publishes");
+    let base_funcs = arena
+        .namespace(namespace)
+        .expect("the program namespace exists")
+        .table_store()
+        .funcs
+        .len();
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(CliHost::new(1)),
+    );
+    for grant in ["Compiler", "Vm"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    for _ in 0..200_000 {
+        for child in world.machine_ids().into_iter().filter(|id| *id != 0) {
+            let gate = world.next_gate();
+            if let Ok(image) = world.capture_snapshot(gate, child, false) {
+                let stored = image.world();
+                let top = stored.machines[0].frames.last().map(|frame| frame.func);
+                if stored.namespaces.len() == 1
+                    && stored.namespaces[0].artifacts.len() == 2
+                    && top.is_some_and(|func| (func as usize) >= base_funcs)
+                {
+                    return image.bytes().expect("the child snapshot encodes").to_vec();
+                }
+            }
+        }
+        match world.step_root() {
+            RootEvent::Ran => {}
+            RootEvent::Blocked | RootEvent::Waiting => {
+                if world.poll_blocked() == 0 && world.wait_host_completion(|_| true).is_none() {
+                    panic!("the root stalled before the child capture");
+                }
+            }
+            event => panic!("the root stopped before the child capture: {event:?}"),
+        }
+    }
+    panic!("no installed child reached a snapshot boundary");
+}
+
+fn capture_initial_program_snapshot() -> Vec<u8> {
+    let artifact = compile_text("installed-child.lm", INSTALLED_CHILD_APP)
+        .expect("the installed-child program compiles");
+    let (arena, namespace) = publish_artifact(&artifact).expect("the program publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the initial program captures");
+    assert_eq!(image.world().namespaces.len(), 1);
+    assert_eq!(image.world().namespaces[0].artifacts.len(), 1);
+    image
+        .bytes()
+        .expect("the initial snapshot encodes")
+        .to_vec()
+}
+
+#[test]
+fn a_prefix_restore_keeps_a_registered_child_namespace() {
+    let child = capture_installed_child_snapshot();
+    let initial = capture_initial_program_snapshot();
+    let debugger =
+        compile_text("namespace-debugger.lm", "0\n").expect("the debugger program compiles");
+    let (arena, namespace) = publish_artifact(&debugger).expect("the debugger publishes");
+    let mut config = VmConfig::default();
+    config.max_children += 4;
+    let mut world = World::new(arena, namespace, config, Box::new(RecordingHost::new(1)));
+
+    let child_image = world
+        .load_snapshot_bytes(&child)
+        .expect("the child snapshot admits");
+    let child_target = world.new_child(0).expect("the child target exists");
+    let child_root = world
+        .restore_image(0, child_target, &child_image)
+        .expect("the child snapshot restores");
+
+    let initial_image = world
+        .load_snapshot_bytes(&initial)
+        .expect("the initial snapshot admits");
+    let initial_target = world.new_child(0).expect("the initial target exists");
+    world
+        .restore_image(0, initial_target, &initial_image)
+        .expect("the initial snapshot restores");
+
+    match world.run_machine(child_root) {
+        RootEvent::Done(value) => {
+            assert_eq!(world.show_result_of(child_root, value), "300");
+        }
+        event => panic!("the restored child stopped: {event:?}"),
     }
 }
 
