@@ -1197,11 +1197,13 @@ end
 
 The compiler always gives `while` a condition-false exit. It does not inspect the condition value during type checking.
 
-An inline `while` or `for` body uses `do` followed by a separator:
+An inline `while` or `for` body can use a semicolon separator:
 
 ```lm
-for item in items() do; use(item) end
+for item in items(); use(item) end
 ```
+
+`do` can precede the separator. It opens a loop body only before a newline or semicolon.
 
 `continue` starts the next iteration of the nearest loop. It has type `Never`.
 

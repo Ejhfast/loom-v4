@@ -36,6 +36,7 @@ struct ModLowerer<'m> {
     store: &'m TypeStore,
     bundle: &'m lm_abi::AbiBundle,
     funcs: &'m [HirFunc],
+    interfaces: &'m [HirInterface],
     classes: &'m [HirClass],
     /// Small expression bodies that direct calls can inline.
     inline_bodies: Vec<Option<HExpr>>,
@@ -61,6 +62,10 @@ struct ModLowerer<'m> {
     class_slots: HashMap<u32, u32>,
     /// Local dispatch function for each late class constructor.
     class_dispatch: HashMap<u32, u32>,
+    /// Operand counts for the published slots, in slot order.
+    slot_param_counts: Vec<usize>,
+    /// Operand counts for direct-call targets, in function order.
+    func_param_counts: Vec<usize>,
 }
 
 /// The callable kind of one late function reference.
@@ -333,17 +338,20 @@ pub fn lower_module_with_linkage(
 ) -> Result<Module, String> {
     let mut function_slots = HashMap::new();
     let mut class_slots = HashMap::new();
+    let mut slot_param_counts = Vec::new();
     let mut next_slot = 0u32;
     for function in linkage.functions.keys() {
         if linkage.dynamic_functions.contains(function) {
             function_slots.insert(*function, next_slot);
         }
+        slot_param_counts.push(hir.funcs[*function as usize].params.len());
         next_slot += 1;
     }
     for class in linkage.classes.keys() {
         if linkage.dynamic_classes.contains(class) {
             class_slots.insert(*class, next_slot);
         }
+        slot_param_counts.push(hir.classes[*class as usize].ctor_params.len());
         next_slot += 1;
     }
     let dispatch_base = hir.funcs.len() as u32 + hir.classes.len() as u32;
@@ -353,6 +361,18 @@ pub fn lower_module_with_linkage(
         .enumerate()
         .map(|(offset, class)| (*class, dispatch_base + offset as u32))
         .collect();
+    let mut func_param_counts: Vec<usize> = hir
+        .funcs
+        .iter()
+        .map(|function| function.params.len())
+        .collect();
+    func_param_counts.extend(hir.classes.iter().map(|class| class.ctor_params.len()));
+    func_param_counts.extend(
+        linkage
+            .dynamic_classes
+            .iter()
+            .map(|class| hir.classes[*class as usize].ctor_params.len()),
+    );
     let mut inline_bodies: Vec<Option<HExpr>> = hir.funcs.iter().map(inline_body).collect();
     for function in &linkage.dynamic_functions {
         let body = inline_bodies
@@ -364,6 +384,7 @@ pub fn lower_module_with_linkage(
         store: &hir.store,
         bundle: &hir.bundle,
         funcs: &hir.funcs,
+        interfaces: &hir.interfaces,
         classes: &hir.classes,
         inline_bodies,
         strings: Vec::new(),
@@ -382,6 +403,8 @@ pub fn lower_module_with_linkage(
         function_slots,
         class_slots,
         class_dispatch,
+        slot_param_counts,
+        func_param_counts,
     };
     // The canonical primitive prefix required by the verifier.
     m.intern_type(BcType::Unit);
@@ -709,13 +732,24 @@ pub fn lower_module_with_linkage(
     Ok(module)
 }
 
+#[derive(Clone, Copy)]
+struct LoopTargets {
+    continue_block: u32,
+    exit_block: u32,
+    result_slot: Option<u32>,
+    entry_depth: usize,
+}
+
 struct Lowerer<'a, 'm> {
     m: &'a mut ModLowerer<'m>,
     blocks: Vec<Vec<Instr>>,
     cur: usize,
-    /// Stack of `(continue_target, break_target)` blocks.
-    /// Continue target, exit target, and optional loop-result slot.
-    loops: Vec<(u32, u32, Option<u32>)>,
+    /// Static operand depth at the current instruction.
+    stack_depth: usize,
+    /// Static operand depth at each block entry.
+    block_depths: Vec<Option<usize>>,
+    /// Targets and entry depth for each active loop.
+    loops: Vec<LoopTargets>,
     /// The declared type of every local slot so far. The checker
     /// types come first; scratch slots append their true types. The
     /// slot count is the vector length.
@@ -738,12 +772,22 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             m,
             blocks: vec![Vec::new()],
             cur: 0,
+            stack_depth: 0,
+            block_depths: vec![Some(0)],
             loops: Vec::new(),
             local_types,
         }
     }
 
     fn emit(&mut self, instr: Instr) {
+        let (pops, pushes) = stack_effect(self.m, &instr);
+        self.stack_depth = self.stack_depth.saturating_sub(pops) + pushes;
+        match &instr {
+            Instr::Jump(target) | Instr::JumpIfFalse(target) | Instr::JumpIfTrue(target) => {
+                self.record_block_depth(*target);
+            }
+            _ => {}
+        }
         if matches!(instr, Instr::Pop) {
             if let Some(Instr::MapPut { discard, .. }) = self.blocks[self.cur].last_mut() {
                 if !*discard {
@@ -757,11 +801,36 @@ impl<'a, 'm> Lowerer<'a, 'm> {
 
     fn new_block(&mut self) -> u32 {
         self.blocks.push(Vec::new());
+        self.block_depths.push(None);
         (self.blocks.len() - 1) as u32
     }
 
     fn switch_to(&mut self, block: u32) {
         self.cur = block as usize;
+        self.stack_depth = self.block_depths[self.cur].unwrap_or(0);
+    }
+
+    fn record_block_depth(&mut self, block: u32) {
+        let depth = &mut self.block_depths[block as usize];
+        if depth.is_none() {
+            *depth = Some(self.stack_depth);
+        }
+    }
+
+    /// Remove operands that the current expression left above one loop.
+    fn unwind_to_loop(&mut self, entry_depth: usize) {
+        while self.stack_depth > entry_depth {
+            self.emit(Instr::Pop);
+        }
+    }
+
+    fn push_loop(&mut self, continue_block: u32, exit_block: u32, result_slot: Option<u32>) {
+        self.loops.push(LoopTargets {
+            continue_block,
+            exit_block,
+            result_slot,
+            entry_depth: self.stack_depth,
+        });
     }
 
     /// Allocate one scratch local slot with its declared type.
@@ -1076,7 +1145,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::JumpIfFalse(exit_b));
                 self.emit(Instr::Jump(body_b));
                 self.switch_to(body_b);
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1098,24 +1167,27 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.switch_to(dead);
             }
             HStmt::Break { value } => {
-                let (_, exit_b, result_slot) = *self.loops.last().expect("checked loop context");
+                let targets = *self.loops.last().expect("checked loop context");
                 if let Some(value) = value {
                     self.lower_expr(value);
-                    if value.flow == Flow::Normal {
-                        if let Some(slot) = result_slot {
-                            self.emit(Instr::StoreLocal(slot));
-                        } else {
-                            self.emit(Instr::Pop);
-                        }
+                    if value.flow == Flow::Never {
+                        return;
+                    }
+                    if let Some(slot) = targets.result_slot {
+                        self.emit(Instr::StoreLocal(slot));
+                    } else {
+                        self.emit(Instr::Pop);
                     }
                 }
-                self.emit(Instr::Jump(exit_b));
+                self.unwind_to_loop(targets.entry_depth);
+                self.emit(Instr::Jump(targets.exit_block));
                 let dead = self.new_block();
                 self.switch_to(dead);
             }
             HStmt::Continue => {
-                let (cond_b, _, _) = *self.loops.last().expect("checked loop context");
-                self.emit(Instr::Jump(cond_b));
+                let targets = *self.loops.last().expect("checked loop context");
+                self.unwind_to_loop(targets.entry_depth);
+                self.emit(Instr::Jump(targets.continue_block));
                 let dead = self.new_block();
                 self.switch_to(dead);
             }
@@ -1173,7 +1245,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::ListAt);
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*index_slot);
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1233,7 +1305,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::StoreLocal(bindings[1]));
                 }
                 self.increment_local(*index_slot);
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1268,7 +1340,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len));
                 self.emit(Instr::Add);
                 self.emit(Instr::StoreLocal(*cursor_slot));
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1301,7 +1373,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::LoadLocal(*cursor_slot));
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*cursor_slot);
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1349,7 +1421,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 } else {
                     self.emit(Instr::StoreLocal(bindings[0]));
                 }
-                self.loops.push((cond_b, exit_b, None));
+                self.push_loop(cond_b, exit_b, None);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1960,7 +2032,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let exit_b = self.new_block();
                 self.emit(Instr::Jump(body_b));
                 self.switch_to(body_b);
-                self.loops.push((body_b, exit_b, *result_slot));
+                self.push_loop(body_b, exit_b, *result_slot);
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(body_b));
@@ -3675,8 +3747,69 @@ fn lower_new_dispatch_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) 
     }
 }
 
+/// Tables needed to calculate one instruction's operand effect.
+trait StackEffectTables {
+    fn function_param_count(&self, function: u32) -> usize;
+    fn interface_param_count(&self, interface: u32, method: u32) -> usize;
+    fn slot_param_count(&self, slot: u32) -> usize;
+}
+
+impl StackEffectTables for ModLowerer<'_> {
+    fn function_param_count(&self, function: u32) -> usize {
+        self.func_param_counts
+            .get(function as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn interface_param_count(&self, interface: u32, method: u32) -> usize {
+        self.interfaces
+            .get(interface as usize)
+            .and_then(|interface| interface.methods.get(method as usize))
+            .map(|method| method.params.len())
+            .unwrap_or(0)
+    }
+
+    fn slot_param_count(&self, slot: u32) -> usize {
+        self.slot_param_counts
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl StackEffectTables for Module {
+    fn function_param_count(&self, function: u32) -> usize {
+        self.funcs
+            .get(function as usize)
+            .map(|function| function.params.len())
+            .unwrap_or(0)
+    }
+
+    fn interface_param_count(&self, interface: u32, method: u32) -> usize {
+        self.interfaces
+            .get(interface as usize)
+            .and_then(|interface| interface.methods.get(method as usize))
+            .map(|method| method.params.len())
+            .unwrap_or(0)
+    }
+
+    fn slot_param_count(&self, slot: u32) -> usize {
+        self.slots
+            .get(slot as usize)
+            .map(|slot| match &slot.contract {
+                lm_bytecode::SlotContract::Function(contract)
+                | lm_bytecode::SlotContract::Method(contract) => contract.params.len(),
+                lm_bytecode::SlotContract::Class { constructor, .. } => constructor.params.len(),
+                lm_bytecode::SlotContract::Value { .. }
+                | lm_bytecode::SlotContract::Process { .. } => 0,
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// Count the values an instruction pops and pushes.
-fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
+fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize) {
     match instr {
         Instr::ConstUnit
         | Instr::ConstBool(_)
@@ -3813,14 +3946,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
-        Instr::Call(idx) | Instr::CallG { func: idx, .. } => {
-            let argc = module
-                .funcs
-                .get(*idx as usize)
-                .map(|f| f.params.len())
-                .unwrap_or(0);
-            (argc, 1)
-        }
+        Instr::Call(idx) | Instr::CallG { func: idx, .. } => (tables.function_param_count(*idx), 1),
         Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
             (*argc as usize + 1, 1)
         }
@@ -3848,13 +3974,11 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::Unreachable => (0, 0),
         Instr::CallInterface { site, .. } => {
             let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
-            let argc = module.interfaces[interface as usize].methods[method as usize]
-                .params
-                .len();
+            let argc = tables.interface_param_count(interface, method);
             (argc + 1, 1)
         }
         Instr::Numeric(instr) => numeric_stack_effect(*instr),
-        Instr::Extended(instr) => extended_stack_effect(module, instr),
+        Instr::Extended(instr) => extended_stack_effect(tables, instr),
     }
 }
 
@@ -3902,7 +4026,7 @@ fn numeric_stack_effect(instr: lm_bytecode::NumericInstr) -> (usize, usize) {
     }
 }
 
-fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usize) {
+fn extended_stack_effect(tables: &impl StackEffectTables, instr: &ExtendedInstr) -> (usize, usize) {
     match instr {
         ExtendedInstr::OptionNone { .. } => (0, 1),
         ExtendedInstr::OptionSome { .. }
@@ -3936,20 +4060,8 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::FaultSite { .. }
         | ExtendedInstr::FaultTrace { .. } => (1, 1),
-        ExtendedInstr::CallSlot { slot, .. } => {
-            let count = match &module.slots[*slot as usize].contract {
-                lm_bytecode::SlotContract::Function(contract)
-                | lm_bytecode::SlotContract::Method(contract) => contract.params.len(),
-                _ => 0,
-            };
-            (count, 1)
-        }
-        ExtendedInstr::NewSlot { slot, .. } => {
-            let count = match &module.slots[*slot as usize].contract {
-                lm_bytecode::SlotContract::Class { constructor, .. } => constructor.params.len(),
-                _ => 0,
-            };
-            (count, 1)
+        ExtendedInstr::CallSlot { slot, .. } | ExtendedInstr::NewSlot { slot, .. } => {
+            (tables.slot_param_count(*slot), 1)
         }
         ExtendedInstr::LoadSlot { .. } => (0, 1),
         ExtendedInstr::SendSlot { .. }

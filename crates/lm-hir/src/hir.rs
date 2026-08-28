@@ -745,6 +745,8 @@ impl HExpr {
         self
     }
 
+    /// Follow the runtime evaluation order of each operand.
+    /// A mandatory operand with `Never` flow prevents normal completion.
     fn derived_flow(&self) -> Flow {
         if self.ty == lm_types::NEVER {
             return Flow::Never;

@@ -1,5 +1,6 @@
 //! Tests for expression-only bodies and value-producing loops.
 
+use lm_bytecode::Instr;
 use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
 
@@ -253,4 +254,65 @@ for number in make() do || [2, 3] end\n\
 end\n\
 sum\n";
     assert_eq!(run(source), "Done(5)");
+}
+
+#[test]
+fn break_unwinds_a_pending_receiver() {
+    let source = "items: List[Int] = []\n\
+while true\n\
+  items.push(if items.len() > 2 then break else 1 end)\n\
+end\n\
+items.len()\n";
+    assert_eq!(run(source), "Done(3)");
+}
+
+#[test]
+fn break_unwinds_a_pending_binary_operand() {
+    let source = "total = 0\n\
+index = 0\n\
+while true\n\
+  index = index + 1\n\
+  total = total + (if index > 3 then break else index end)\n\
+end\n\
+total\n";
+    assert_eq!(run(source), "Done(6)");
+}
+
+#[test]
+fn continue_unwinds_a_pending_argument_receiver() {
+    let source = "items: List[Int] = []\n\
+index = 0\n\
+while index < 4\n\
+  index = index + 1\n\
+  items.push(if index % 2 == 0 then continue else index end)\n\
+end\n\
+items.len()\n";
+    assert_eq!(run(source), "Done(2)");
+}
+
+#[test]
+fn a_valued_break_removes_a_pending_receiver_before_its_result() {
+    let source = "items: List[Int] = [1, 2, 3]\n\
+loop do\n\
+  items.push(if true then break items.len() else 1 end)\n\
+end\n";
+    assert_eq!(run(source), "Done(3)");
+
+    let module = compile_module_text("expression-control.lm", source).unwrap();
+    let entry = &module.funcs[module.entry as usize];
+    assert!(entry.blocks.iter().any(|block| {
+        block.windows(3).any(|window| {
+            matches!(window[0], Instr::StoreLocal(_))
+                && matches!(window[1], Instr::Pop)
+                && matches!(window[2], Instr::Jump(_))
+        })
+    }));
+}
+
+#[test]
+fn an_inline_loop_do_needs_a_separator() {
+    expect_error(
+        "for item in [1] do item end\n0\n",
+        "`do` opens a loop body only before a newline or `;`",
+    );
 }

@@ -237,9 +237,14 @@ impl Parser<'_> {
     fn loop_header_body_opener(&mut self) -> Result<(), Diagnostic> {
         if matches!(self.peek(), Tok::KwDo) {
             self.pos += 1;
-            return self
-                .expect(Tok::Newline, "a separator after `do`")
-                .map(|_| ());
+            if matches!(self.peek(), Tok::Newline) {
+                self.pos += 1;
+                return Ok(());
+            }
+            return Err(self.error(
+                "E1003",
+                "`do` opens a loop body only before a newline or `;`",
+            ));
         }
         if matches!(self.peek(), Tok::Newline) {
             self.pos += 1;
