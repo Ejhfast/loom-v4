@@ -898,7 +898,7 @@ Gate: semantic identity returns an error or a value for every decoded payload.
 - Remove the second LMI payload from LMAR.
 - Keep `.lmi` as an optional build-cache projection.
 - Change the LMAR format version to 3.
-- Change the LMBC format version to 57.
+- Change the LMBC format version to 58.
 
 Gate: LMAR stores each module surface once.
 
@@ -1061,6 +1061,7 @@ These items remain outside the initial release.
 - Compatible dependency substitution.
 - Source module import cycles.
 - Cross-runtime snapshot migration.
+- Fat snapshot encoding.
 - Snapshot state diffs.
 - Arena reclamation.
 - Artifact compression.

@@ -4,62 +4,17 @@
 //! It keeps unresolved imports for the artifact linker.
 //! It compacts each table in its original order.
 
+use crate::reloc_tables::{
+    reloc_bounds, reloc_class, reloc_conformance, reloc_func, reloc_interface, reloc_row,
+    reloc_slot, reloc_type, Reloc,
+};
 use lm_bytecode::debug::{DebugCodeOrigin, DebugDefinition, DebugFunction, DebugInfo};
 use lm_bytecode::{
-    BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, Export, ExtendedInstr, Func, Import, ImportKind, Instr, Module,
-    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_PARENT,
-    NO_ROLE,
+    BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceUse, BcRow, BcType, Export,
+    ExtendedInstr, Func, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget,
+    TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_ROLE,
 };
 use std::collections::{HashMap, HashSet};
-
-/// The table changes from one collection pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CollectionStats {
-    pub strings_before: usize,
-    pub strings_after: usize,
-    pub bytes_before: usize,
-    pub bytes_after: usize,
-    pub types_before: usize,
-    pub types_after: usize,
-    pub selectors_before: usize,
-    pub selectors_after: usize,
-    pub apps_before: usize,
-    pub apps_after: usize,
-    pub interfaces_before: usize,
-    pub interfaces_after: usize,
-    pub classes_before: usize,
-    pub classes_after: usize,
-    pub funcs_before: usize,
-    pub funcs_after: usize,
-    pub slots_before: usize,
-    pub slots_after: usize,
-}
-
-impl CollectionStats {
-    fn from_modules(before: &Module, after: &Module) -> CollectionStats {
-        CollectionStats {
-            strings_before: before.strings.len(),
-            strings_after: after.strings.len(),
-            bytes_before: before.bytes.len(),
-            bytes_after: after.bytes.len(),
-            types_before: before.types.len(),
-            types_after: after.types.len(),
-            selectors_before: before.selectors.len(),
-            selectors_after: after.selectors.len(),
-            apps_before: before.apps.len(),
-            apps_after: after.apps.len(),
-            interfaces_before: before.interfaces.len(),
-            interfaces_after: after.interfaces.len(),
-            classes_before: before.classes.len(),
-            classes_after: after.classes.len(),
-            funcs_before: before.funcs.len(),
-            funcs_after: after.funcs.len(),
-            slots_before: before.slots.len(),
-            slots_after: after.slots.len(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct Offsets {
@@ -144,7 +99,7 @@ impl Offsets {
 
 /// Collect one verified program with no unresolved imports.
 #[cfg(test)]
-pub(crate) fn collect_program(module: &Module) -> Result<(Module, CollectionStats), String> {
+pub(crate) fn collect_program(module: &Module) -> Result<Module, String> {
     if !module.imports.is_empty() {
         return Err("dependency collection needs a program with resolved imports".to_string());
     }
@@ -156,11 +111,11 @@ pub(crate) fn collect_program(module: &Module) -> Result<(Module, CollectionStat
         return Err("dependency collection has too many table entries".to_string());
     }
     let roots = [offsets.func(module.entry)];
-    collect_from_roots(module, offsets, &roots, false, &HashSet::new())
+    collect_from_roots(module, offsets, &roots, false, &[])
 }
 
 /// Collect one root module before the linker resolves its imports.
-pub(crate) fn collect_link_root(module: &Module) -> Result<(Module, CollectionStats), String> {
+pub(crate) fn collect_link_root(module: &Module) -> Result<Module, String> {
     if module.entry as usize >= module.funcs.len() {
         return Err("dependency collection received an invalid entry".to_string());
     }
@@ -169,11 +124,11 @@ pub(crate) fn collect_link_root(module: &Module) -> Result<(Module, CollectionSt
         return Err("dependency collection has too many table entries".to_string());
     }
     let roots = [offsets.func(module.entry)];
-    collect_from_roots(module, offsets, &roots, true, &HashSet::new())
+    collect_from_roots(module, offsets, &roots, true, &[])
 }
 
 /// Collect one compiled module and keep its complete local surface.
-pub(crate) fn collect_compiled_unit(module: &Module) -> Result<(Module, CollectionStats), String> {
+pub(crate) fn collect_compiled_unit(module: &Module) -> Result<Module, String> {
     if module.entry as usize >= module.funcs.len() {
         return Err("dependency collection received an invalid entry".to_string());
     }
@@ -184,9 +139,7 @@ pub(crate) fn collect_compiled_unit(module: &Module) -> Result<(Module, Collecti
     let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
     let mut roots = vec![offsets.func(module.entry)];
-    let mut exports = HashSet::with_capacity(module.exports.len());
     for export in &module.exports {
-        exports.insert(export.name.clone());
         if export.kind.is_class() {
             checked_class_export(module, &extern_classes, export)?;
             roots.push(offsets.class(export.def));
@@ -211,7 +164,7 @@ pub(crate) fn collect_compiled_unit(module: &Module) -> Result<(Module, Collecti
     }
     roots.sort_unstable();
     roots.dedup();
-    collect_from_roots(module, offsets, &roots, true, &exports)
+    collect_from_roots(module, offsets, &roots, true, &module.exports)
 }
 
 /// One definition selected as an artifact root.
@@ -225,7 +178,8 @@ pub(crate) enum DefinitionRoot {
 pub(crate) fn collect_link_definition(
     module: &Module,
     root: DefinitionRoot,
-) -> Result<(Module, CollectionStats), String> {
+    export: Export,
+) -> Result<Module, String> {
     if module.entry as usize >= module.funcs.len() {
         return Err("dependency collection received an invalid entry".to_string());
     }
@@ -247,19 +201,14 @@ pub(crate) fn collect_link_definition(
             offsets.class(class)
         }
     };
-    let exports = module
-        .exports
-        .iter()
-        .map(|export| export.name.clone())
-        .collect();
-    collect_from_roots(module, offsets, &[root], true, &exports)
+    collect_from_roots(module, offsets, &[root], true, &[export])
 }
 
 /// Collect the exports requested from one provider module.
 pub(crate) fn collect_link_exports(
     module: &Module,
     requests: &[(String, ImportKind)],
-) -> Result<(Module, CollectionStats), String> {
+) -> Result<Module, String> {
     let offsets = Offsets::new(module);
     if offsets.total > u32::MAX as usize {
         return Err("dependency collection has too many table entries".to_string());
@@ -329,6 +278,12 @@ pub(crate) fn collect_link_exports(
     }
     roots.sort_unstable();
     roots.dedup();
+    let exports: Vec<Export> = module
+        .exports
+        .iter()
+        .filter(|export| exports.contains(&export.name))
+        .cloned()
+        .collect();
     collect_from_roots(module, offsets, &roots, true, &exports)
 }
 
@@ -369,8 +324,8 @@ fn collect_from_roots(
     offsets: Offsets,
     roots: &[u32],
     keep_imports: bool,
-    exports: &HashSet<String>,
-) -> Result<(Module, CollectionStats), String> {
+    exports: &[Export],
+) -> Result<Module, String> {
     if roots.is_empty() {
         return Err("dependency collection received no roots".to_string());
     }
@@ -409,9 +364,7 @@ fn collect_from_roots(
         canonical_roots.dedup();
     };
     let reloc = Reloc::from_live(module, offsets, &live);
-    let collected = relocate_module(module, &reloc, keep_imports, exports)?;
-    let stats = CollectionStats::from_modules(module, &collected);
-    Ok((collected, stats))
+    relocate_module(module, &reloc, keep_imports, exports)
 }
 
 fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
@@ -1293,19 +1246,6 @@ fn slot_edges(offsets: Offsets, slot: &SlotSpec, edges: &mut Vec<u32>) {
 
 const DEAD: u32 = u32::MAX;
 
-#[derive(Debug)]
-struct Reloc {
-    strings: Vec<u32>,
-    bytes: Vec<u32>,
-    types: Vec<u32>,
-    selectors: Vec<u32>,
-    apps: Vec<u32>,
-    interfaces: Vec<u32>,
-    classes: Vec<u32>,
-    funcs: Vec<u32>,
-    slots: Vec<u32>,
-}
-
 impl Reloc {
     fn from_live(module: &Module, offsets: Offsets, live: &[bool]) -> Reloc {
         Reloc {
@@ -1341,11 +1281,13 @@ fn relocate_module(
     module: &Module,
     reloc: &Reloc,
     keep_imports: bool,
-    export_names: &HashSet<String>,
+    exports: &[Export],
 ) -> Result<Module, String> {
     let strings = retain_table(&module.strings, &reloc.strings, Clone::clone);
     let bytes = retain_table(&module.bytes, &reloc.bytes, Clone::clone);
-    let types = retain_table(&module.types, &reloc.types, |ty| reloc_type(ty, reloc));
+    let types = retain_table(&module.types, &reloc.types, |ty| {
+        reloc_type(ty, &reloc.types, &reloc.classes, &reloc.interfaces)
+    });
     let selectors = retain_table(&module.selectors, &reloc.selectors, Clone::clone);
     let apps = retain_table(&module.apps, &reloc.apps, |app| TypeApp {
         types: app
@@ -1392,10 +1334,8 @@ fn relocate_module(
     } else {
         Vec::new()
     };
-    let exports = module
-        .exports
+    let exports = exports
         .iter()
-        .filter(|export| export_names.contains(&export.name))
         .map(|export| reloc_export(export, reloc))
         .collect::<Result<Vec<_>, _>>()?;
     let mut core_roles = [NO_ROLE; lm_bytecode::CORE_ROLE_COUNT];
@@ -1599,572 +1539,6 @@ fn relocate_debug(module: &Module, reloc: &Reloc, collected: &Module) -> Result<
     Ok(lm_bytecode::debug::encode(&relocated))
 }
 
-fn reloc_row(row: &[BcRow]) -> Vec<BcRow> {
-    row.to_vec()
-}
-
-fn reloc_type(ty: &BcType, reloc: &Reloc) -> BcType {
-    match ty {
-        BcType::Class(class) => BcType::Class(reloc.classes[*class as usize]),
-        BcType::Inst(class, args) => BcType::Inst(
-            reloc.classes[*class as usize],
-            args.iter().map(|arg| reloc.types[*arg as usize]).collect(),
-        ),
-        BcType::List(element) => BcType::List(reloc.types[*element as usize]),
-        BcType::Map(key, value) => {
-            BcType::Map(reloc.types[*key as usize], reloc.types[*value as usize])
-        }
-        BcType::Tuple(items) => BcType::Tuple(
-            items
-                .iter()
-                .map(|item| reloc.types[*item as usize])
-                .collect(),
-        ),
-        BcType::Fn(params, muts, ret, row) => BcType::Fn(
-            params
-                .iter()
-                .map(|param| reloc.types[*param as usize])
-                .collect(),
-            muts.clone(),
-            reloc.types[*ret as usize],
-            reloc_row(row),
-        ),
-        BcType::Callback(params, muts, ret, row) => BcType::Callback(
-            params
-                .iter()
-                .map(|param| reloc.types[*param as usize])
-                .collect(),
-            muts.clone(),
-            reloc.types[*ret as usize],
-            reloc_row(row),
-        ),
-        BcType::Projection {
-            base,
-            interface,
-            assoc,
-        } => BcType::Projection {
-            base: reloc.types[*base as usize],
-            interface: reloc.interfaces[*interface as usize],
-            assoc: *assoc,
-        },
-        BcType::Run(result) => BcType::Run(reloc.types[*result as usize]),
-        BcType::Wait(result) => BcType::Wait(reloc.types[*result as usize]),
-        BcType::RunSnapshot(result) => BcType::RunSnapshot(reloc.types[*result as usize]),
-        BcType::PendingCall(args, reply) => {
-            BcType::PendingCall(reloc.types[*args as usize], reloc.types[*reply as usize])
-        }
-        BcType::Handle(message, result) => BcType::Handle(
-            reloc.types[*message as usize],
-            reloc.types[*result as usize],
-        ),
-        BcType::Op(op, function) => BcType::Op(*op, reloc.types[*function as usize]),
-        other => other.clone(),
-    }
-}
-
-fn reloc_interface_use(source: &BcInterfaceUse, reloc: &Reloc) -> BcInterfaceUse {
-    BcInterfaceUse {
-        interface: reloc.interfaces[source.interface as usize],
-        types: source
-            .types
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        rows: source.rows.iter().map(|row| reloc_row(row)).collect(),
-    }
-}
-
-fn reloc_bounds(source: &[Vec<BcInterfaceUse>], reloc: &Reloc) -> Vec<Vec<BcInterfaceUse>> {
-    source
-        .iter()
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| reloc_interface_use(item, reloc))
-                .collect()
-        })
-        .collect()
-}
-
-fn reloc_callable(source: &BcCallableContract, reloc: &Reloc) -> BcCallableContract {
-    BcCallableContract {
-        type_params: source.type_params,
-        effect_params: source.effect_params,
-        type_bounds: reloc_bounds(&source.type_bounds, reloc),
-        params: source
-            .params
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        param_muts: source.param_muts.clone(),
-        ret: reloc.types[source.ret as usize],
-        row: reloc_row(&source.row),
-    }
-}
-
-fn reloc_slot_contract(source: &SlotContract, reloc: &Reloc) -> SlotContract {
-    match source {
-        SlotContract::Function(contract) => SlotContract::Function(reloc_callable(contract, reloc)),
-        SlotContract::Method(contract) => SlotContract::Method(reloc_callable(contract, reloc)),
-        SlotContract::Class {
-            type_params,
-            abi,
-            ty,
-            constructor,
-        } => SlotContract::Class {
-            type_params: *type_params,
-            abi: *abi,
-            ty: reloc.types[*ty as usize],
-            constructor: reloc_callable(constructor, reloc),
-        },
-        SlotContract::Value { ty } => SlotContract::Value {
-            ty: reloc.types[*ty as usize],
-        },
-        SlotContract::Process { message, result } => SlotContract::Process {
-            message: reloc.types[*message as usize],
-            result: reloc.types[*result as usize],
-        },
-    }
-}
-
-fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget {
-    match source {
-        SlotTarget::Function(function) => SlotTarget::Function(reloc.funcs[function as usize]),
-        SlotTarget::Class { class, constructor } => SlotTarget::Class {
-            class: reloc.classes[class as usize],
-            constructor: reloc.funcs[constructor as usize],
-        },
-    }
-}
-
-fn reloc_slot(source: &SlotSpec, reloc: &Reloc) -> SlotSpec {
-    SlotSpec {
-        binding: source.binding.clone(),
-        late: source.late,
-        key: source.key,
-        contract_hash: source.contract_hash,
-        contract: reloc_slot_contract(&source.contract, reloc),
-        initial: source
-            .initial
-            .map(|target| reloc_slot_target(target, reloc)),
-    }
-}
-
-fn reloc_class(source: &BcClass, reloc: &Reloc) -> BcClass {
-    BcClass {
-        name: source.name.clone(),
-        key: source.key.clone(),
-        is_final: source.is_final,
-        is_frozen: source.is_frozen,
-        parent: source
-            .parent()
-            .map(|parent| reloc.classes[parent as usize])
-            .unwrap_or(NO_PARENT),
-        parent_args: source
-            .parent_args
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        type_params: source.type_params,
-        kind: source.kind,
-        fields: source
-            .fields
-            .iter()
-            .map(|(name, ty)| (name.clone(), reloc.types[*ty as usize]))
-            .collect(),
-        field_defaults: source.field_defaults.clone(),
-        own_start: source.own_start,
-        has_init: source.has_init,
-        methods: source
-            .methods
-            .iter()
-            .filter_map(|(selector, function)| {
-                let selector = reloc.selectors[*selector as usize];
-                let function = reloc.funcs[*function as usize];
-                (selector != DEAD && function != DEAD).then_some((selector, function))
-            })
-            .collect(),
-    }
-}
-
-fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
-    BcInterface {
-        name: source.name.clone(),
-        key: source.key.clone(),
-        type_params: source.type_params,
-        effect_params: source.effect_params,
-        generic_is_effect: source.generic_is_effect.clone(),
-        parents: source
-            .parents
-            .iter()
-            .map(|parent| reloc_interface_use(parent, reloc))
-            .collect(),
-        type_bounds: reloc_bounds(&source.type_bounds, reloc),
-        associated: source
-            .associated
-            .iter()
-            .map(|item| BcAssociated {
-                name: item.name.clone(),
-                bounds: item
-                    .bounds
-                    .iter()
-                    .map(|bound| reloc_interface_use(bound, reloc))
-                    .collect(),
-            })
-            .collect(),
-        methods: source
-            .methods
-            .iter()
-            .map(|method| BcInterfaceMethod {
-                selector: reloc.selectors[method.selector as usize],
-                mut_self: method.mut_self,
-                type_params: method.type_params,
-                type_bounds: reloc_bounds(&method.type_bounds, reloc),
-                effect_params: method.effect_params,
-                premises: method
-                    .premises
-                    .iter()
-                    .map(|premise| lm_bytecode::BcTypePremise {
-                        subject: reloc.types[premise.subject as usize],
-                        bounds: premise
-                            .bounds
-                            .iter()
-                            .map(|bound| reloc_interface_use(bound, reloc))
-                            .collect(),
-                    })
-                    .collect(),
-                params: method
-                    .params
-                    .iter()
-                    .map(|ty| reloc.types[*ty as usize])
-                    .collect(),
-                param_muts: method.param_muts.clone(),
-                param_names: method.param_names.clone(),
-                ret: reloc.types[method.ret as usize],
-                row: reloc_row(&method.row),
-                default: if method.default == NO_FUNC {
-                    NO_FUNC
-                } else {
-                    reloc.funcs[method.default as usize]
-                },
-            })
-            .collect(),
-    }
-}
-
-fn reloc_conformance(source: &BcConformance, reloc: &Reloc) -> BcConformance {
-    BcConformance {
-        class: reloc.classes[source.class as usize],
-        application: reloc_interface_use(&source.application, reloc),
-        premises: source
-            .premises
-            .iter()
-            .map(|premise| lm_bytecode::BcConformancePremise {
-                param: premise.param,
-                bounds: premise
-                    .bounds
-                    .iter()
-                    .map(|bound| reloc_interface_use(bound, reloc))
-                    .collect(),
-            })
-            .collect(),
-        associated: source
-            .associated
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        method_overrides: source.method_overrides.clone(),
-    }
-}
-
-fn reloc_func(source: &Func, reloc: &Reloc) -> Func {
-    Func {
-        name: source.name.clone(),
-        type_params: source.type_params,
-        effect_params: source.effect_params,
-        params: source
-            .params
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        param_muts: source.param_muts.clone(),
-        param_names: source.param_names.clone(),
-        ret: reloc.types[source.ret as usize],
-        row: reloc_row(&source.row),
-        captures: source
-            .captures
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        local_types: source
-            .local_types
-            .iter()
-            .map(|ty| reloc.types[*ty as usize])
-            .collect(),
-        blocks: source
-            .blocks
-            .iter()
-            .map(|block| {
-                block
-                    .iter()
-                    .map(|instruction| reloc_instr(instruction, reloc))
-                    .collect()
-            })
-            .collect(),
-    }
-}
-
-fn reloc_instr(instruction: &Instr, reloc: &Reloc) -> Instr {
-    match instruction {
-        Instr::ConstStr(index) => Instr::ConstStr(reloc.strings[*index as usize]),
-        Instr::ConstBytes(index) => Instr::ConstBytes(reloc.bytes[*index as usize]),
-        Instr::Call(function) => Instr::Call(reloc.funcs[*function as usize]),
-        Instr::CallG { func, app } => Instr::CallG {
-            func: reloc.funcs[*func as usize],
-            app: reloc.apps[*app as usize],
-        },
-        Instr::CallVirtual { selector, argc } => Instr::CallVirtual {
-            selector: reloc.selectors[*selector as usize],
-            argc: *argc,
-        },
-        Instr::CallVirtualG {
-            selector,
-            argc,
-            app,
-        } => Instr::CallVirtualG {
-            selector: reloc.selectors[*selector as usize],
-            argc: *argc,
-            app: reloc.apps[*app as usize],
-        },
-        Instr::MakeClosure { func, captures } => Instr::MakeClosure {
-            func: reloc.funcs[*func as usize],
-            captures: *captures,
-        },
-        Instr::Perform { op, argc, reply_ty } => Instr::Perform {
-            op: *op,
-            argc: *argc,
-            reply_ty: reloc.types[*reply_ty as usize],
-        },
-        Instr::PerformValue { argc, reply_ty } => Instr::PerformValue {
-            argc: *argc,
-            reply_ty: reloc.types[*reply_ty as usize],
-        },
-        Instr::New(class) => Instr::New(reloc.classes[*class as usize]),
-        Instr::NewG { class, app } => Instr::NewG {
-            class: reloc.classes[*class as usize],
-            app: reloc.apps[*app as usize],
-        },
-        Instr::TupleNew { ty, count } => Instr::TupleNew {
-            ty: reloc.types[*ty as usize],
-            count: *count,
-        },
-        Instr::ListNew { ty, count } => Instr::ListNew {
-            ty: reloc.types[*ty as usize],
-            count: *count,
-        },
-        Instr::MapNew { ty, count } => Instr::MapNew {
-            ty: reloc.types[*ty as usize],
-            count: *count,
-        },
-        Instr::IsType(ty) => Instr::IsType(reloc.types[*ty as usize]),
-        Instr::CastType(ty) => Instr::CastType(reloc.types[*ty as usize]),
-        Instr::MapPut { ty, discard } => Instr::MapPut {
-            ty: reloc.types[*ty as usize],
-            discard: *discard,
-        },
-        Instr::Digest { ty } => Instr::Digest {
-            ty: reloc.types[*ty as usize],
-        },
-        Instr::AsCall { op, ty } => Instr::AsCall {
-            op: *op,
-            ty: reloc.types[*ty as usize],
-        },
-        Instr::CallInterface { site, recv_ty, app } => {
-            let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
-            let interface = reloc.interfaces[interface as usize];
-            Instr::CallInterface {
-                site: lm_bytecode::pack_interface_call_site(interface, method)
-                    .expect("the collected interface count is valid"),
-                recv_ty: reloc.types[*recv_ty as usize],
-                app: reloc_app(*app, reloc),
-            }
-        }
-        Instr::Extended(instruction) => Instr::Extended(reloc_extended(instruction, reloc)),
-        Instr::ConstUnit
-        | Instr::ConstBool(_)
-        | Instr::ConstInt(_)
-        | Instr::ConstFloat(_)
-        | Instr::LoadLocal(_)
-        | Instr::StoreLocal(_)
-        | Instr::Pop
-        | Instr::Add
-        | Instr::Sub
-        | Instr::Mul
-        | Instr::Div
-        | Instr::Rem
-        | Instr::Neg
-        | Instr::Not
-        | Instr::LtInt
-        | Instr::LeInt
-        | Instr::GtInt
-        | Instr::GeInt
-        | Instr::EqInt
-        | Instr::NeInt
-        | Instr::EqBool
-        | Instr::NeBool
-        | Instr::Native(_)
-        | Instr::Numeric(_)
-        | Instr::EqRef
-        | Instr::NeRef
-        | Instr::CallValue { .. }
-        | Instr::LoadCapture(_)
-        | Instr::LoadField(_)
-        | Instr::StoreField(_)
-        | Instr::TupleGet(_)
-        | Instr::ListLen
-        | Instr::ListAt
-        | Instr::ListPush
-        | Instr::MapLen
-        | Instr::MapHas
-        | Instr::MapAt
-        | Instr::Freeze
-        | Instr::EqDigest
-        | Instr::NeDigest
-        | Instr::Jump(_)
-        | Instr::JumpIfFalse(_)
-        | Instr::JumpIfTrue(_)
-        | Instr::Return
-        | Instr::OpConst(_)
-        | Instr::TableEdit { .. }
-        | Instr::CallArgs
-        | Instr::FaultCode
-        | Instr::RequestOp
-        | Instr::FaultDenied
-        | Instr::RaiseUserPanic
-        | Instr::RaiseAssertionFailed
-        | Instr::RaiseFault
-        | Instr::Unreachable
-        | Instr::EqValue
-        | Instr::NeValue => *instruction,
-    }
-}
-
-fn reloc_extended(instruction: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
-    match instruction {
-        ExtendedInstr::MakeCallback { func, captures } => ExtendedInstr::MakeCallback {
-            func: reloc.funcs[*func as usize],
-            captures: *captures,
-        },
-        ExtendedInstr::FunctionCode { func } => ExtendedInstr::FunctionCode {
-            func: reloc.funcs[*func as usize],
-        },
-        ExtendedInstr::ClassCode { class } => ExtendedInstr::ClassCode {
-            class: reloc.classes[*class as usize],
-        },
-        ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::FaultSite { ty } => ExtendedInstr::FaultSite {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::FaultTrace { ty } => ExtendedInstr::FaultTrace {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::OptionNone { ty } => ExtendedInstr::OptionNone {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::OptionPayload { ty } => ExtendedInstr::OptionPayload {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::ListGet { ty } => ExtendedInstr::ListGet {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::MapGet { ty } => ExtendedInstr::MapGet {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::ListPop { ty } => ExtendedInstr::ListPop {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::DynPack { ty } => ExtendedInstr::DynPack {
-            ty: reloc.types[*ty as usize],
-        },
-        ExtendedInstr::PrepareWait { op_argc, reply_ty } => ExtendedInstr::PrepareWait {
-            op_argc: *op_argc,
-            reply_ty: reloc.types[*reply_ty as usize],
-        },
-        ExtendedInstr::CallSlot { slot, app } => ExtendedInstr::CallSlot {
-            slot: reloc.slots[*slot as usize],
-            app: reloc_app(*app, reloc),
-        },
-        ExtendedInstr::NewSlot { slot, app } => ExtendedInstr::NewSlot {
-            slot: reloc.slots[*slot as usize],
-            app: reloc_app(*app, reloc),
-        },
-        ExtendedInstr::LoadSlot { slot } => ExtendedInstr::LoadSlot {
-            slot: reloc.slots[*slot as usize],
-        },
-        ExtendedInstr::SendSlot { slot } => ExtendedInstr::SendSlot {
-            slot: reloc.slots[*slot as usize],
-        },
-        ExtendedInstr::AsCallback
-        | ExtendedInstr::ListEpoch
-        | ExtendedInstr::ListIterLen
-        | ExtendedInstr::MapEpoch
-        | ExtendedInstr::MapIterLen
-        | ExtendedInstr::MapNextIndex
-        | ExtendedInstr::SealInstance
-        | ExtendedInstr::MapKeyAt
-        | ExtendedInstr::MapValueAt
-        | ExtendedInstr::ListCapacity
-        | ExtendedInstr::ListSet
-        | ExtendedInstr::ListInsert
-        | ExtendedInstr::ListRemove
-        | ExtendedInstr::ListSwapRemove
-        | ExtendedInstr::ListReserve
-        | ExtendedInstr::ListTruncate
-        | ExtendedInstr::ListContains
-        | ExtendedInstr::ListReorder
-        | ExtendedInstr::MapClear
-        | ExtendedInstr::MapReserve
-        | ExtendedInstr::SyntaxTreeRoot
-        | ExtendedInstr::SyntaxKind
-        | ExtendedInstr::SyntaxCategory
-        | ExtendedInstr::SyntaxRangeStart
-        | ExtendedInstr::SyntaxRangeEnd
-        | ExtendedInstr::SyntaxText
-        | ExtendedInstr::SyntaxChildren
-        | ExtendedInstr::SyntaxDetach
-        | ExtendedInstr::DynRender
-        | ExtendedInstr::SyntaxBuildToken
-        | ExtendedInstr::SyntaxBuildTrivia
-        | ExtendedInstr::SyntaxBuildNode
-        | ExtendedInstr::SyntaxToTree
-        | ExtendedInstr::CodeDefinition
-        | ExtendedInstr::MapProbe
-        | ExtendedInstr::MapProbeFound
-        | ExtendedInstr::MapProbeKey
-        | ExtendedInstr::MapProbeValue
-        | ExtendedInstr::MapProbeSetValue
-        | ExtendedInstr::MapProbeRemove
-        | ExtendedInstr::MapInsertHashed
-        | ExtendedInstr::MapWriteGuard => *instruction,
-    }
-}
-
-fn reloc_app(app: u32, reloc: &Reloc) -> u32 {
-    if app == NO_APP {
-        NO_APP
-    } else {
-        reloc.apps[app as usize]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2218,9 +1592,9 @@ mod tests {
             ],
             0,
         );
-        let (collected, stats) = collect_program(&module).expect("the program collects");
-        assert_eq!(stats.funcs_before, 3);
-        assert_eq!(stats.funcs_after, 1);
+        let collected = collect_program(&module).expect("the program collects");
+        assert_eq!(module.funcs.len(), 3);
+        assert_eq!(collected.funcs.len(), 1);
         assert_eq!(collected.funcs[0].name, "entry");
     }
 
@@ -2241,8 +1615,8 @@ mod tests {
             vec![vec![Instr::ConstUnit, Instr::Return]],
         ));
         let module = function_module(funcs, live_count as u32 - 1);
-        let (collected, stats) = collect_program(&module).expect("the deep program collects");
-        assert_eq!(stats.funcs_after, live_count);
+        let collected = collect_program(&module).expect("the deep program collects");
+        assert_eq!(collected.funcs.len(), live_count);
         assert_eq!(collected.funcs.last().unwrap().name, "live_19999");
     }
 }

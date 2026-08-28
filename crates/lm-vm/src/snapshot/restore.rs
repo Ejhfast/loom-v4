@@ -264,7 +264,32 @@ impl World {
                             .class(*class)
                             .ok_or(RestoreFail::IncompatibleImage)?;
                     }
-                    _ => {}
+                    lm_bytecode::closed::ClosedType::Unit
+                    | lm_bytecode::closed::ClosedType::Bool
+                    | lm_bytecode::closed::ClosedType::Int
+                    | lm_bytecode::closed::ClosedType::Float
+                    | lm_bytecode::closed::ClosedType::Str
+                    | lm_bytecode::closed::ClosedType::Fault
+                    | lm_bytecode::closed::ClosedType::Request
+                    | lm_bytecode::closed::ClosedType::PolicyTable
+                    | lm_bytecode::closed::ClosedType::Vm
+                    | lm_bytecode::closed::ClosedType::Digest
+                    | lm_bytecode::closed::ClosedType::VmSnapshot
+                    | lm_bytecode::closed::ClosedType::Bytes
+                    | lm_bytecode::closed::ClosedType::FileHandle
+                    | lm_bytecode::closed::ClosedType::ResourceHandle
+                    | lm_bytecode::closed::ClosedType::HostResource
+                    | lm_bytecode::closed::ClosedType::List(_)
+                    | lm_bytecode::closed::ClosedType::Map(_, _)
+                    | lm_bytecode::closed::ClosedType::Tuple(_)
+                    | lm_bytecode::closed::ClosedType::Fn(..)
+                    | lm_bytecode::closed::ClosedType::Callback(..)
+                    | lm_bytecode::closed::ClosedType::Run(_)
+                    | lm_bytecode::closed::ClosedType::Wait(_)
+                    | lm_bytecode::closed::ClosedType::PendingCall(_, _)
+                    | lm_bytecode::closed::ClosedType::Handle(_, _)
+                    | lm_bytecode::closed::ClosedType::Op(_, _)
+                    | lm_bytecode::closed::ClosedType::RunSnapshot(_) => {}
                 }
                 relocated_types.push(ty);
             }

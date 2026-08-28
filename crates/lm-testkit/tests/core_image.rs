@@ -58,7 +58,7 @@ fn core_image_matches_the_pinned_hash() {
 
 /// Compute the pinned core definition lines from one core image.
 fn core_def_lines(image: &lm_bytecode::Module) -> String {
-    let identity = lm_bytecode::identity::module_identity(&image).expect("the core image hashes");
+    let identity = lm_bytecode::identity::module_identity(image).expect("the core image hashes");
     let mut out = String::new();
     for label in lm_bytecode::corepin::PINNED_LABELS {
         let key = lm_bytecode::corepin::pinned_key(label);

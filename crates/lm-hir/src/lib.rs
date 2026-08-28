@@ -6,6 +6,7 @@
 
 pub mod check;
 mod checkfn;
+mod core_demand;
 pub mod exhaust;
 pub mod hir;
 pub mod import;
@@ -115,93 +116,4 @@ fn forwarded_intrinsic(
         matches!(argument.kind, hir::HExprKind::Local(slot) if slot as usize == index)
     });
     direct.then_some(intrinsic)
-}
-
-/// Replace checked core bodies with exact import declarations.
-pub fn externalize_core(
-    hir: &mut HirModule,
-    interface: &lm_bytecode::interface::Interface,
-) -> Result<(), String> {
-    use lm_bytecode::{ImportKind, CORE_MODULE};
-
-    if interface.module_path != CORE_MODULE {
-        return Err("the core interface has another module path".to_string());
-    }
-    let mut imports = Vec::new();
-    let mut methods = std::collections::BTreeSet::new();
-    for (class_index, class) in hir.classes.iter().enumerate() {
-        if !class.key.starts_with("core.") {
-            continue;
-        }
-        let export = interface
-            .find(&class.name)
-            .ok_or_else(|| format!("the core exports no class `{}`", class.name))?;
-        if !export.kind.is_class() {
-            return Err(format!("the core export `{}` is not a class", class.name));
-        }
-        imports.push(hir::HirImport {
-            module: CORE_MODULE.to_string(),
-            name: class.name.clone(),
-            kind: ImportKind::Class,
-            def: hir::HirImportDef::Class(class_index as u32),
-            hash: export.iface_hash,
-        });
-        imports.push(hir::HirImport {
-            module: CORE_MODULE.to_string(),
-            name: class.name.clone(),
-            kind: ImportKind::Ctor,
-            def: hir::HirImportDef::Ctor(class_index as u32),
-            hash: export.iface_hash,
-        });
-        for (name, function) in &class.methods {
-            methods.insert(*function);
-            imports.push(hir::HirImport {
-                module: CORE_MODULE.to_string(),
-                name: format!("{}.{name}", class.name),
-                kind: ImportKind::Method,
-                def: hir::HirImportDef::Func(*function),
-                hash: export.iface_hash,
-            });
-        }
-    }
-    let mut core_ordinal = 0u32;
-    for (index, function) in hir.funcs.iter().enumerate() {
-        if !function.core {
-            continue;
-        }
-        let ordinal = core_ordinal;
-        core_ordinal += 1;
-        if methods.contains(&(index as u32)) {
-            continue;
-        }
-        let name = interface
-            .find(&function.name)
-            .filter(|export| export.kind == lm_bytecode::ExportKind::Function)
-            .map(|_| function.name.clone())
-            .unwrap_or_else(|| format!("$internal.function.{ordinal}"));
-        let provider = interface
-            .find(&name)
-            .ok_or_else(|| format!("core function {index} has no provider export"))?;
-        imports.push(hir::HirImport {
-            module: CORE_MODULE.to_string(),
-            name,
-            kind: ImportKind::Func,
-            def: hir::HirImportDef::Func(index as u32),
-            hash: provider.iface_hash,
-        });
-    }
-    for class in &mut hir.classes {
-        if class.key.starts_with("core.") {
-            class.imported = true;
-        }
-    }
-    for function in &mut hir.funcs {
-        if function.core {
-            function.imported = true;
-        }
-    }
-    hir.bindings
-        .retain(|binding| !binding.key.starts_with("core."));
-    hir.imports.extend(imports);
-    Ok(())
 }

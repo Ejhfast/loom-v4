@@ -1127,6 +1127,10 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 
 ### Land
 
+- Use `LinkUnit`, `Artifact`, `LinkEnv`, and `CodeNamespace` from source through execution.
+- Publish verified units into one append-only `CodeArena`.
+- Store thin snapshot code as exact artifact manifests.
+- Let one debugger restore and drive an unrelated program snapshot.
 - Full adversarial validation pass over artifact/snapshot decoders, verifier, graph codec, type/class layouts, code availability, machine ordinals, handle relocation, machine references, resource classifications, and size arithmetic.
 - Streaming/preflight checks that reject impossible sizes before large allocations.
 - Fuzz dictionaries/corpora derived from real artifacts and snapshots; structure-aware mutators; coverage reporting.

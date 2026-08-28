@@ -1715,7 +1715,39 @@ fn relocate_object_code(map: &CodeRelocation, object: &mut Object) -> Result<(),
             *slot = relocate_index(map.slot(*slot), "slot change")?;
         }
         Object::NativeFault { trace, .. } => relocate_fault_trace(map, trace)?,
-        _ => {}
+        Object::Str(_)
+        | Object::List { .. }
+        | Object::Map { .. }
+        | Object::Tuple { .. }
+        | Object::StrBuilder(_)
+        | Object::ByteBuf(_)
+        | Object::Bytes(_)
+        | Object::NativeVm { .. }
+        | Object::NativeRun { .. }
+        | Object::NativeDynRef { .. }
+        | Object::NativeCode(_)
+        | Object::NativeTable { .. }
+        | Object::NativeRequest { .. }
+        | Object::NativeCall { .. }
+        | Object::NativeDigest(_)
+        | Object::NativeHandle { .. }
+        | Object::NativeSnapshot(_)
+        | Object::NativeSnapshotRef { .. }
+        | Object::NativeFileHandle { .. }
+        | Object::NativeResourceHandle { .. }
+        | Object::NativeWait { .. }
+        | Object::Substring(_)
+        | Object::NativeTcpStream { .. }
+        | Object::NativeTcpListener { .. }
+        | Object::NativeTlsStream { .. }
+        | Object::NativeRawMode { .. }
+        | Object::NativeSignalStream { .. }
+        | Object::NativePipeReader { .. }
+        | Object::NativePipeWriter { .. }
+        | Object::NativeChild { .. }
+        | Object::NativeUdpSocket { .. }
+        | Object::NativeHostResource { .. }
+        | Object::DynValue { .. } => {}
     }
     Ok(())
 }
