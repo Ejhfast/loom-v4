@@ -252,13 +252,17 @@ impl<'o> FnChecker<'o> {
 
     /// An instance type of a core enum found by name.
     pub(super) fn core_inst(ctx: &mut Ctx, name: &str, args: Vec<TypeId>) -> TypeId {
-        let class = ctx.core_types[name];
+        let Some(class) = ctx.core_types.get(name).copied() else {
+            return ctx.omit_core_type(name);
+        };
         ctx.store.intern(Type::Inst(lm_types::ClassId(class), args))
     }
 
     /// The instance type of a core enum without type parameters.
     pub(super) fn core_class(ctx: &mut Ctx, name: &str) -> TypeId {
-        let class = ctx.core_types[name];
+        let Some(class) = ctx.core_types.get(name).copied() else {
+            return ctx.omit_core_type(name);
+        };
         ctx.store.intern(Type::Class(lm_types::ClassId(class)))
     }
 

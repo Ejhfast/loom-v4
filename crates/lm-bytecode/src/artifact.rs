@@ -17,7 +17,7 @@ pub use codec::{
     ArtifactDecodeError, ArtifactEncodeError, ArtifactLimits, FORMAT_VERSION,
 };
 
-const ARTIFACT_ID_TAG: &[u8] = b"lm-artifact-id-v1\0";
+const ARTIFACT_ID_TAG: &[u8] = b"lm-artifact-id-v2\0";
 
 /// The canonical module path of the standard core.
 pub const CORE_MODULE_PATH: &str = "core";
@@ -122,7 +122,7 @@ impl LinkUnit {
             bundle,
         )
         .map_err(ArtifactError::InvalidModuleSurface)?;
-        let id = compute_artifact_id(&module_path, &identity, &interface, &dependencies)?;
+        let id = compute_artifact_id(&module_path, &module, &identity, &interface, &dependencies)?;
         Ok(LinkUnit {
             id,
             bundle_digest: bundle.digest(),
@@ -163,7 +163,7 @@ impl LinkUnit {
         }
         canonicalize_dependencies(&mut dependencies)?;
         let identity = module_identity_with_bundle(&module, bundle)?;
-        let id = compute_artifact_id(&module_path, &identity, &interface, &dependencies)?;
+        let id = compute_artifact_id(&module_path, &module, &identity, &interface, &dependencies)?;
         Ok(LinkUnit {
             id,
             bundle_digest: bundle.digest(),
@@ -461,6 +461,7 @@ fn write_digest(out: &mut fmt::Formatter<'_>, digest: &[u8; 32]) -> fmt::Result 
 
 fn compute_artifact_id(
     module_path: &str,
+    module: &Module,
     identity: &ModuleIdentity,
     interface: &Interface,
     dependencies: &[ArtifactDependency],
@@ -468,12 +469,14 @@ fn compute_artifact_id(
     let count =
         u32::try_from(dependencies.len()).map_err(|_| ArtifactError::TooManyDependencies)?;
     let mut bytes = Vec::with_capacity(
-        ARTIFACT_ID_TAG.len() + module_path.len() + 72 + dependencies.len() * 40,
+        ARTIFACT_ID_TAG.len() + module_path.len() + 136 + dependencies.len() * 40,
     );
     bytes.extend_from_slice(ARTIFACT_ID_TAG);
     write_identity_string(&mut bytes, module_path)?;
     bytes.extend_from_slice(&identity.semantic_hash);
     bytes.extend_from_slice(&interface_identity(interface));
+    bytes.extend_from_slice(&hash::hash256(&crate::semantic_section(module)));
+    bytes.extend_from_slice(&hash::hash256(&crate::linkage_section(module)));
     bytes.extend_from_slice(&count.to_le_bytes());
     for dependency in dependencies {
         write_identity_string(&mut bytes, &dependency.module_path)?;
@@ -683,6 +686,36 @@ mod tests {
     fn module_semantics_move_artifact_identity() {
         let first = unit(7, &[]);
         let second = unit(8, &[]);
+        assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn exported_target_moves_artifact_identity() {
+        let mut first = module(7, &[]);
+        let mut other = first.funcs[0].clone();
+        other.name = "other".to_string();
+        other.blocks[0][0] = Instr::ConstInt(8);
+        first.funcs.push(other);
+        first.func_bounds.push(Vec::new());
+        first.exports.push(crate::Export {
+            kind: crate::ExportKind::Function,
+            name: "value".to_string(),
+            def: 0,
+            ctor: crate::NO_CTOR,
+        });
+        let mut second = first.clone();
+        second.exports[0].def = 1;
+
+        let first = LinkUnit::from_module("test.main", first, Vec::new()).unwrap();
+        let second = LinkUnit::from_module("test.main", second, Vec::new()).unwrap();
+        assert_eq!(
+            first.identity().semantic_hash,
+            second.identity().semantic_hash
+        );
+        assert_eq!(
+            interface_identity(first.interface()),
+            interface_identity(second.interface())
+        );
         assert_ne!(first.id(), second.id());
     }
 

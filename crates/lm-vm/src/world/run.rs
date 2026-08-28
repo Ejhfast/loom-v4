@@ -62,10 +62,7 @@ impl World {
             None,
             lm_value::TypeEnvId::EMPTY,
         );
-        let execution_code = Arc::new(crate::executor::ExecutionCode::new(
-            module.clone(),
-            loaded.dispatch_store(),
-        ));
+        let execution_code = execution_code(&module, &module);
         let mut namespaces = vec![None; arena.namespace_count()];
         namespaces[namespace.index()] = Some(loaded.clone());
         let mut namespace_execution = vec![None; arena.namespace_count()];
@@ -75,8 +72,8 @@ impl World {
             arena,
             root_namespace: namespace,
             namespaces,
+            execution_tables: module.clone(),
             namespace_execution,
-            arena_execution: execution_code,
             machines: vec![root.into()],
             vm_images: Vec::new(),
             vm_image_free: Vec::new(),
@@ -141,15 +138,22 @@ impl World {
             .cloned()
             .ok_or_else(|| "the published code namespace is missing".to_string())?;
         let code = Arc::new(crate::prepare_namespace(linked));
-        let execution = Arc::new(crate::executor::ExecutionCode::new(
-            code.clone(),
-            code.dispatch_store(),
-        ));
         self.namespaces.resize(namespace.index() + 1, None);
         self.namespace_execution.resize(namespace.index() + 1, None);
         self.namespaces[namespace.index()] = Some(code.clone());
-        self.namespace_execution[namespace.index()] = Some(execution.clone());
-        self.arena_execution = execution;
+        if tables_extend(code.as_ref(), self.execution_tables.as_ref()) {
+            self.execution_tables = code.clone();
+            for (index, namespace) in self.namespaces.iter().enumerate() {
+                if let Some(namespace) = namespace {
+                    self.namespace_execution[index] =
+                        Some(execution_code(namespace, &self.execution_tables));
+                }
+            }
+        } else {
+            debug_assert!(tables_cover(self.execution_tables.as_ref(), code.as_ref()));
+            self.namespace_execution[namespace.index()] =
+                Some(execution_code(&code, &self.execution_tables));
+        }
         Ok(code)
     }
 
@@ -188,9 +192,12 @@ impl World {
 
     pub(crate) fn execution_code_of(
         &self,
-        _vm: VmId,
+        vm: VmId,
     ) -> std::sync::Arc<crate::executor::ExecutionCode> {
-        self.arena_execution.clone()
+        self.namespace_execution[self.namespace_of(vm).index()]
+            .as_ref()
+            .expect("a machine namespace has execution code")
+            .clone()
     }
 
     /// The current scheduler measurement counters.
@@ -757,7 +764,7 @@ impl World {
     }
 
     fn execute_inline(&mut self, vm: VmId, limit: u32) -> crate::executor::InlineExecutionReport {
-        let execution = self.arena_execution.clone();
+        let execution = self.execution_code_of(vm);
         let code = execution.module();
         let dispatch = execution.dispatch();
         let image = self.machines[vm as usize].image;

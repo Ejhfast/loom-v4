@@ -46,6 +46,46 @@ use crate::schedule::{
 /// The first record count that can trigger machine reclamation.
 const RECORD_RECLAMATION_FLOOR: usize = 1_024;
 
+/// Build one execution view with local roles and current arena tables.
+fn execution_code(
+    namespace: &Arc<NamespaceRuntime>,
+    tables: &Arc<NamespaceRuntime>,
+) -> Arc<crate::executor::ExecutionCode> {
+    let view = Arc::new(namespace.with_execution_tables(tables));
+    let dispatch = view.dispatch_store();
+    Arc::new(crate::executor::ExecutionCode::new(view, dispatch))
+}
+
+/// Test whether one runtime contains every table entry of another runtime.
+fn tables_cover(candidate: &NamespaceRuntime, current: &NamespaceRuntime) -> bool {
+    table_lengths(candidate)
+        .iter()
+        .zip(table_lengths(current))
+        .all(|(candidate, current)| *candidate >= current)
+}
+
+/// Test whether one runtime adds at least one arena table entry.
+fn tables_extend(candidate: &NamespaceRuntime, current: &NamespaceRuntime) -> bool {
+    table_lengths(candidate) != table_lengths(current) && tables_cover(candidate, current)
+}
+
+fn table_lengths(runtime: &NamespaceRuntime) -> [usize; 12] {
+    [
+        runtime.strings.len(),
+        runtime.bytes.len(),
+        runtime.types.len(),
+        runtime.selectors.len(),
+        runtime.apps.len(),
+        runtime.interfaces.len(),
+        runtime.conformances.len(),
+        runtime.class_bounds.len(),
+        runtime.func_bounds.len(),
+        runtime.slots.len(),
+        runtime.classes.len(),
+        runtime.funcs.len(),
+    ]
+}
+
 /// Select the next adaptive record reclamation threshold.
 fn record_reclamation_threshold(live: usize, hard_limit: u32) -> usize {
     live.saturating_mul(2)
@@ -683,8 +723,9 @@ pub struct World {
     pub(crate) arena: lm_link::CodeArena,
     pub(crate) root_namespace: lm_link::NamespaceId,
     pub(crate) namespaces: Vec<Option<std::sync::Arc<NamespaceRuntime>>>,
+    /// The newest arena table prefix available for execution.
+    execution_tables: std::sync::Arc<NamespaceRuntime>,
     namespace_execution: Vec<Option<std::sync::Arc<crate::executor::ExecutionCode>>>,
-    arena_execution: std::sync::Arc<crate::executor::ExecutionCode>,
     pub(crate) machines: Vec<MachineSlot>,
     /// Persistent VM images, separate from run machine records.
     pub(crate) vm_images: Vec<VmImageRecord>,
@@ -1043,13 +1084,9 @@ mod tests {
         let mut code = world.code_for_namespace(namespace).as_ref().clone();
         edit(&mut code.core);
         let code = Arc::new(code);
-        let execution = Arc::new(crate::executor::ExecutionCode::new(
-            code.clone(),
-            code.dispatch_store(),
-        ));
+        let execution = execution_code(&code, &world.execution_tables);
         world.namespaces[namespace.index()] = Some(code);
-        world.namespace_execution[namespace.index()] = Some(execution.clone());
-        world.arena_execution = execution;
+        world.namespace_execution[namespace.index()] = Some(execution);
     }
 
     #[test]

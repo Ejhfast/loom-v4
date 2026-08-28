@@ -193,7 +193,7 @@ The definition collector uses the shared SCC implementation.
 
 The artifact magic is `LMAR`.
 
-Artifact format version 2 uses this header.
+Artifact format version 3 uses this header.
 
 ```text
 magic:               4 bytes
@@ -252,6 +252,8 @@ It covers these values.
 - The canonical module path.
 - The module semantic hash.
 - The derived interface identity.
+- The exact bytecode semantic section.
+- The exact linker-visible module surface.
 - Every dependency module path and `ArtifactId`.
 
 The derived interface identity uses facts from the same module payload.
@@ -895,7 +897,7 @@ Gate: semantic identity returns an error or a value for every decoded payload.
 - Derive compiler interfaces from canonical module tables.
 - Remove the second LMI payload from LMAR.
 - Keep `.lmi` as an optional build-cache projection.
-- Change the LMAR format version to 2.
+- Change the LMAR format version to 3.
 - Change the LMBC format version to 57.
 
 Gate: LMAR stores each module surface once.

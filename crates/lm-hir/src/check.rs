@@ -1664,6 +1664,8 @@ pub(crate) struct Ctx {
     pub(crate) classes: Vec<ClassInfo>,
     pub(crate) user_types: HashMap<String, u32>,
     pub(crate) core_types: HashMap<String, u32>,
+    /// The first required core type that sparse selection omitted.
+    missing_core_type: Option<String>,
     pub(crate) interfaces: Vec<InterfaceInfo>,
     pub(crate) user_interfaces: HashMap<String, u32>,
     pub(crate) core_interfaces: HashMap<String, u32>,
@@ -1700,6 +1702,25 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
+    /// Record one missing sparse core dependency and return `Never`.
+    pub(crate) fn omit_core_type(&mut self, name: &str) -> TypeId {
+        if self.missing_core_type.is_none() {
+            self.missing_core_type = Some(name.to_string());
+        }
+        NEVER
+    }
+
+    /// Resolve one required sparse core interface.
+    pub(crate) fn core_interface(&self, name: &str, span: Span) -> Result<u32, Diagnostic> {
+        self.core_interfaces.get(name).copied().ok_or_else(|| {
+            Diagnostic::new(
+                "E1052",
+                format!("the compiler did not select required core interface `{name}`"),
+                span,
+            )
+        })
+    }
+
     /// Test whether every value of one type is deeply frozen.
     pub(crate) fn type_always_frozen(&self, ty: TypeId, allow_var: bool) -> bool {
         self.type_always_frozen_inner(ty, allow_var, 0)
@@ -3019,7 +3040,7 @@ pub(crate) fn check_key_type(
         ctx.deferred_map_keys.push((env.clone(), key, span));
         return Ok(());
     }
-    let hashable = ctx.core_interfaces["Hashable"];
+    let hashable = ctx.core_interface("Hashable", span)?;
     if native || ctx.type_conformance(env, key, hashable).is_some() {
         Ok(())
     } else {
@@ -3208,6 +3229,14 @@ pub fn check_module_with(
     module: &ast::Module,
     options: CheckOptions,
 ) -> Result<HirModule, Diagnostic> {
+    check_module_with_core_adjustment(module, options, |_| {})
+}
+
+fn check_module_with_core_adjustment(
+    module: &ast::Module,
+    options: CheckOptions,
+    adjust_core_types: impl FnOnce(&mut Ctx),
+) -> Result<HirModule, Diagnostic> {
     // The pinned core image owns the module path `core`. A source
     // module with that path would give a user class a core qualified
     // key, and the linker merges on that key.
@@ -3294,6 +3323,7 @@ pub fn check_module_with(
         core_types: HashMap::with_capacity(
             core.classes.len() + core.enums.len() + compiled_core_exports,
         ),
+        missing_core_type: None,
         interfaces: Vec::with_capacity(
             core.interfaces.len() + module.interfaces.len() + compiled_core_exports,
         ),
@@ -3381,12 +3411,13 @@ pub fn check_module_with(
     }
     materializer.finish_interfaces(&mut ctx, import_span)?;
     resolve_all_interfaces(&mut ctx, module, false)?;
+    adjust_core_types(&mut ctx);
     index_interface_defaults(&mut ctx);
     let option_class = ctx.core_types.get("Option").copied().unwrap_or(u32::MAX);
     let some_class = option_class.saturating_add(1);
     let none_class = option_class.saturating_add(2);
-    let partial_eq_interface = ctx.core_interfaces["PartialEq"];
-    let hashable_interface = ctx.core_interfaces["Hashable"];
+    let partial_eq_interface = ctx.core_interface("PartialEq", Span::new(0, 0))?;
+    let hashable_interface = ctx.core_interface("Hashable", Span::new(0, 0))?;
     ctx.core = CoreIds {
         option_class,
         some_class,
@@ -3658,6 +3689,13 @@ pub fn check_module_with(
     let checker = FnChecker::entry_collect(TyEnv::default());
     let (body, entry_ty, _mutable, locals, entry_row) =
         checker.check_entry(&mut ctx, &module.entry, entry_span)?;
+    if let Some(name) = ctx.missing_core_type.take() {
+        return Err(Diagnostic::new(
+            "E1052",
+            format!("the compiler did not select required core type `{name}`"),
+            entry_span,
+        ));
+    }
     let entry_ty = if entry_ty == NEVER { UNIT } else { entry_ty };
     let exports = collect_exports(&ctx, module, &options.module_path, false)?;
     ctx.funcs[entry_idx] = Some(HirFunc {
@@ -3881,6 +3919,59 @@ fn reserve_interface_defaults(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sparse_core_error(adjust: impl FnOnce(&mut Ctx)) -> Diagnostic {
+        let bundle = lm_abi::standard_bundle();
+        let (module, intrinsics) = crate::core_image_with_intrinsics(bundle.clone());
+        let core = std::sync::Arc::new(
+            lm_bytecode::artifact::LinkUnit::from_module_with_bundle(
+                lm_bytecode::CORE_MODULE,
+                module,
+                Vec::new(),
+                &bundle,
+            )
+            .expect("the core unit builds"),
+        );
+        let source =
+            lm_source::parse::parse("value = 1\n\"value #{value}\"\n").expect("the source parses");
+        let result = check_module_with_core_adjustment(
+            &source,
+            CheckOptions {
+                module_path: "test.main".to_string(),
+                core: Some(core),
+                core_intrinsics: intrinsics.into(),
+                ..CheckOptions::default()
+            },
+            adjust,
+        );
+        let Err(error) = result else {
+            panic!("the sparse core miss must reject");
+        };
+        error
+    }
+
+    #[test]
+    fn a_sparse_core_type_miss_returns_a_diagnostic() {
+        let error = sparse_core_error(|ctx| {
+            assert!(ctx.core_types.remove("StringBuilder").is_some());
+        });
+        assert_eq!(error.code, "E1052");
+        assert!(error.message.contains("StringBuilder"));
+    }
+
+    #[test]
+    fn a_sparse_core_interface_miss_returns_a_diagnostic() {
+        let error = sparse_core_error(|ctx| {
+            assert!(ctx.core_interfaces.remove("Hashable").is_some());
+        });
+        assert_eq!(error.code, "E1052");
+        assert!(error.message.contains("Hashable"));
+    }
 }
 
 /// A defect in the pinned core sources is an implementation defect,
@@ -5645,8 +5736,8 @@ fn check_class_conformances(
                 }
             }
         }
-        if conformance.application.interface == ctx.core_interfaces["Iterable"] {
-            let iterator = ctx.core_interfaces["Iterator"];
+        if ctx.core_interfaces.get("Iterable").copied() == Some(conformance.application.interface) {
+            let iterator = ctx.core_interface("Iterator", declaration_span)?;
             let item_index = contract
                 .associated
                 .iter()

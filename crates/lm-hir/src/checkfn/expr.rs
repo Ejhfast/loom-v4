@@ -43,7 +43,7 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Bool(*v),
             }),
-            ExprKind::Interp(parts) => self.synth_interp(ctx, parts),
+            ExprKind::Interp(parts) => self.synth_interp(ctx, parts, expr.span),
             ExprKind::SelfRef => self.synth_self(ctx, expr.span),
             ExprKind::Name(name) => {
                 if let Some(res) = self.resolve_name(name)? {
@@ -588,9 +588,10 @@ impl<'o> FnChecker<'o> {
         &mut self,
         ctx: &mut Ctx,
         parts: &[ast::InterpPart],
+        span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let mut checked = Vec::new();
-        let display = ctx.core_interfaces["Display"];
+        let display = ctx.core_interface("Display", span)?;
         let display_method = ctx.interfaces[display as usize]
             .methods
             .iter()
@@ -598,7 +599,12 @@ impl<'o> FnChecker<'o> {
             .expect("Display declares append_to") as u32;
         let text = Self::core_class(ctx, "Text");
         let char_value = Self::core_class(ctx, "Char");
-        let builder_ty = ctx.classes[ctx.core_types["StringBuilder"] as usize].self_ty;
+        let builder_ty = ctx
+            .core_types
+            .get("StringBuilder")
+            .and_then(|class| ctx.classes.get(*class as usize))
+            .map(|class| class.self_ty)
+            .unwrap_or_else(|| ctx.omit_core_type("StringBuilder"));
         let mut builder_slot = None;
         for part in parts {
             match part {

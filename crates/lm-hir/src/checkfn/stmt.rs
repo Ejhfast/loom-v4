@@ -456,7 +456,12 @@ impl<'o> FnChecker<'o> {
                 });
                 let range = ctx.core_types.get("Range").copied();
                 if is_text {
-                    let item = ctx.classes[ctx.core_types["Char"] as usize].self_ty;
+                    let item = ctx
+                        .core_types
+                        .get("Char")
+                        .and_then(|class| ctx.classes.get(*class as usize))
+                        .map(|class| class.self_ty)
+                        .unwrap_or_else(|| ctx.omit_core_type("Char"));
                     let source_slot = self.hidden_local(source_ty, source_mut);
                     let cursor_slot = self.hidden_local(INT, true);
                     (
@@ -482,7 +487,7 @@ impl<'o> FnChecker<'o> {
                         true,
                     )
                 } else {
-                    let iterable = ctx.core_interfaces["Iterable"];
+                    let iterable = ctx.core_interface("Iterable", span)?;
                     let item_index = ctx.interfaces[iterable as usize]
                         .associated
                         .iter()

@@ -244,6 +244,23 @@ impl lm_bytecode::CodeTableView for NamespaceRuntime {
 }
 
 impl NamespaceRuntime {
+    /// Use newer arena tables with this namespace's local metadata.
+    fn with_execution_tables(&self, tables: &NamespaceRuntime) -> NamespaceRuntime {
+        NamespaceRuntime {
+            code: self.code.clone(),
+            tables: tables.tables.clone(),
+            bundle: self.bundle.clone(),
+            dispatch: tables.dispatch.clone(),
+            closure_bodies: tables.closure_bodies.clone(),
+            core: self.core,
+            core_roles: self.core_roles,
+            entry: self.entry,
+            bindings: self.bindings.clone(),
+            slot_initials: self.slot_initials.clone(),
+            identity: tables.identity.clone(),
+        }
+    }
+
     pub(crate) fn code_namespace(&self) -> &std::sync::Arc<lm_link::CodeNamespace> {
         &self.code
     }

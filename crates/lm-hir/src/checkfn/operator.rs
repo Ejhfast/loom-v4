@@ -100,7 +100,7 @@ impl<'o> FnChecker<'o> {
 
     /// Select one native equality intrinsic and its right operand type.
     fn native_equality(
-        ctx: &Ctx,
+        ctx: &mut Ctx,
         ty: TypeId,
         op: BinOp,
     ) -> Option<(lm_abi::IntrinsicSlot, TypeId)> {
@@ -117,7 +117,11 @@ impl<'o> FnChecker<'o> {
             NativeRepr::Text | NativeRepr::String | NativeRepr::Substring => (
                 lm_abi::INTRINSIC_STRING_EQ,
                 lm_abi::INTRINSIC_STRING_NE,
-                ctx.classes[ctx.core_types["Text"] as usize].self_ty,
+                ctx.core_types
+                    .get("Text")
+                    .and_then(|class| ctx.classes.get(*class as usize))
+                    .map(|class| class.self_ty)
+                    .unwrap_or_else(|| ctx.omit_core_type("Text")),
             ),
             NativeRepr::Char => (
                 lm_abi::INTRINSIC_CHAR_EQ,
@@ -166,7 +170,7 @@ impl<'o> FnChecker<'o> {
             });
         }
 
-        let interface = ctx.core_interfaces["PartialEq"];
+        let interface = ctx.core_interface("PartialEq", span)?;
         let method = ctx.interfaces[interface as usize]
             .methods
             .iter()
@@ -337,7 +341,7 @@ impl<'o> FnChecker<'o> {
             }
             BinOp::Eq | BinOp::Ne => {
                 let l = self.synth_expr(ctx, left)?;
-                let partial_eq = ctx.core_interfaces["PartialEq"];
+                let partial_eq = ctx.core_interface("PartialEq", left.span)?;
                 if let Some(application) = ctx.type_conformance(&self.env, l.ty, partial_eq) {
                     if let Some((intrinsic, operand_ty)) = Self::native_equality(ctx, l.ty, op) {
                         let r = self.check_expr(ctx, right, operand_ty)?;

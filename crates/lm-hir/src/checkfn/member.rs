@@ -245,7 +245,7 @@ impl<'o> FnChecker<'o> {
         let recv_ty = recv_h.ty;
         if name == "value" {
             if let Type::Inst(class, arguments) = ctx.store.get(recv_ty).clone() {
-                if class.0 == ctx.core_types["Result"] && arguments.len() == 2 {
+                if ctx.core_types.get("Result") == Some(&class.0) && arguments.len() == 2 {
                     if !type_args.is_empty() {
                         return Err(Diagnostic::new(
                             "E1024",

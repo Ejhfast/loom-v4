@@ -1276,6 +1276,8 @@ impl CodeArena {
             base.canonical_layout && merged_matches_namespace(self.merged.as_ref(), base.as_ref());
         let mut merged = self.merged.as_ref().clone();
         let mut addition = NamespaceBuild::default();
+        let replaced_paths: BTreeSet<String> = order.iter().cloned().collect();
+        seed_extension_providers(&mut addition, base.as_ref(), &replaced_paths)?;
         let mut relocations = base.relocations.clone();
         let mut units = base.units.clone();
         let mut active_units = base.active_units.clone();
@@ -2116,6 +2118,69 @@ fn bind_unit(
     }
     merge_bindings(view, module, identity, path, reloc)?;
     register_exports(view, module, unit.interface(), path, reloc)
+}
+
+/// Seed type-provider checks from the namespace being extended.
+///
+/// Function bindings keep their separate base-wins policy. This
+/// helper adds no code and performs no verification or relocation.
+fn seed_extension_providers(
+    view: &mut NamespaceBuild,
+    base: &CodeNamespace,
+    replaced_paths: &BTreeSet<String>,
+) -> Result<(), LinkError> {
+    for (path, id) in &base.active_units {
+        if replaced_paths.contains(path) {
+            continue;
+        }
+        let unit = base
+            .units
+            .get(id)
+            .ok_or_else(|| fail(format!("the base module `{path}` has no stored unit")))?;
+        let reloc = base
+            .relocations
+            .get(id)
+            .ok_or_else(|| fail(format!("the base module `{path}` has no relocation")))?;
+        let module = unit.module();
+        let extern_classes = module.extern_classes();
+        for (index, class) in module.classes.iter().enumerate() {
+            if extern_classes[index] {
+                continue;
+            }
+            let hash = unit.identity().class_hashes[index];
+            let target = reloc.0.classes[index];
+            match view.class_version.get(&class.key) {
+                Some((found, _, provider)) if *found != target => {
+                    return Err(fail(format!(
+                        "the class `{}` is provided by `{provider}` and `{path}`",
+                        class.key,
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    view.class_version
+                        .insert(class.key.clone(), (target, hash, path.clone()));
+                }
+            }
+        }
+        for (index, interface) in module.interfaces.iter().enumerate() {
+            let target = reloc.0.interfaces[index];
+            match view.interface_by_key.get(&interface.key) {
+                Some((found, provider)) if *found != target => {
+                    return Err(fail(format!(
+                        "the interface `{}` is provided by `{provider}` and `{path}`",
+                        interface.key
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    view.interface_by_key
+                        .insert(interface.key.clone(), (target, path.clone()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn artifact_from_order(

@@ -2145,6 +2145,14 @@ pub fn semantic_section(module: &Module) -> Vec<u8> {
     encode_semantic(module)
 }
 
+/// The exact linker-visible surface of one module.
+///
+/// The section excludes debug data. It includes every name, key,
+/// binding, and export target that can change linking or execution.
+pub(crate) fn linkage_section(module: &Module) -> Vec<u8> {
+    encode_exports(module)
+}
+
 /// Encode the semantic region: every table except the definition
 /// names.
 fn encode_semantic(module: &Module) -> Vec<u8> {
@@ -3155,6 +3163,23 @@ struct Cursor<'a> {
     pos: usize,
 }
 
+const MAX_DECODE_VECTOR_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reserve one decoded vector without invoking the infallible allocator.
+fn decode_vec<T>(count: usize) -> Result<Vec<T>, DecodeError> {
+    let bytes = count
+        .checked_mul(std::mem::size_of::<T>().max(1))
+        .ok_or(DecodeError::BadLength)?;
+    if bytes > MAX_DECODE_VECTOR_BYTES {
+        return Err(DecodeError::BadLength);
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| DecodeError::BadLength)?;
+    Ok(values)
+}
+
 impl<'a> Cursor<'a> {
     fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         let end = self.pos.checked_add(len).ok_or(DecodeError::Truncated)?;
@@ -3229,7 +3254,7 @@ impl<'a> Cursor<'a> {
 
 fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
     let count = cur.len()?;
-    let mut row = Vec::with_capacity(count);
+    let mut row = decode_vec(count)?;
     for _ in 0..count {
         let tag = cur.u8()?;
         let elem = match tag {
@@ -3251,7 +3276,7 @@ fn decode_callable_contract(cur: &mut Cursor<'_>) -> Result<BcCallableContract, 
     if count > cur.remaining() / 4 {
         return Err(DecodeError::BadLength);
     }
-    let mut params = Vec::with_capacity(count);
+    let mut params = decode_vec(count)?;
     for _ in 0..count {
         params.push(cur.u32()?);
     }
@@ -3259,7 +3284,7 @@ fn decode_callable_contract(cur: &mut Cursor<'_>) -> Result<BcCallableContract, 
     if marker_count != count {
         return Err(DecodeError::MutMarkerCount);
     }
-    let mut param_muts = Vec::with_capacity(marker_count);
+    let mut param_muts = decode_vec(marker_count)?;
     for _ in 0..marker_count {
         param_muts.push(cur.flag()?);
     }
@@ -3306,12 +3331,12 @@ fn decode_interface_use(cur: &mut Cursor<'_>) -> Result<BcInterfaceUse, DecodeEr
     if type_count > cur.remaining() / 4 {
         return Err(DecodeError::BadLength);
     }
-    let mut types = Vec::with_capacity(type_count);
+    let mut types = decode_vec(type_count)?;
     for _ in 0..type_count {
         types.push(cur.u32()?);
     }
     let row_count = cur.len()?;
-    let mut rows = Vec::with_capacity(row_count);
+    let mut rows = decode_vec(row_count)?;
     for _ in 0..row_count {
         rows.push(decode_row(cur)?);
     }
@@ -3324,10 +3349,10 @@ fn decode_interface_use(cur: &mut Cursor<'_>) -> Result<BcInterfaceUse, DecodeEr
 
 fn decode_type_bounds(cur: &mut Cursor<'_>) -> Result<Vec<Vec<BcInterfaceUse>>, DecodeError> {
     let parameter_count = cur.len()?;
-    let mut bounds = Vec::with_capacity(parameter_count);
+    let mut bounds = decode_vec(parameter_count)?;
     for _ in 0..parameter_count {
         let bound_count = cur.len()?;
-        let mut parameter = Vec::with_capacity(bound_count);
+        let mut parameter = decode_vec(bound_count)?;
         for _ in 0..bound_count {
             parameter.push(decode_interface_use(cur)?);
         }
@@ -3422,7 +3447,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
             if name_count != method.params.len() {
                 return Err(DecodeError::ExportCountMismatch);
             }
-            let mut names = Vec::with_capacity(name_count);
+            let mut names = decode_vec(name_count)?;
             for _ in 0..name_count {
                 names.push(cur.string()?);
             }
@@ -3440,7 +3465,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
         if default_count != class.fields.len() {
             return Err(DecodeError::ExportCountMismatch);
         }
-        let mut defaults = Vec::with_capacity(default_count);
+        let mut defaults = decode_vec(default_count)?;
         for _ in 0..default_count {
             defaults.push(cur.flag()?);
         }
@@ -3458,7 +3483,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
         if name_count != 0 && name_count != func.params.len() {
             return Err(DecodeError::ExportCountMismatch);
         }
-        let mut names = Vec::with_capacity(name_count);
+        let mut names = decode_vec(name_count)?;
         for _ in 0..name_count {
             names.push(cur.string()?);
         }
@@ -3480,7 +3505,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     if binding_count > cur.remaining() / 12 {
         return Err(DecodeError::BadLength);
     }
-    let mut bindings = Vec::with_capacity(binding_count);
+    let mut bindings = decode_vec(binding_count)?;
     for _ in 0..binding_count {
         let key = cur.string()?;
         let func = cur.u32()?;
@@ -3495,7 +3520,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     }
     module.bindings = bindings;
     let export_count = cur.len()?;
-    let mut exports = Vec::with_capacity(export_count);
+    let mut exports = decode_vec(export_count)?;
     for _ in 0..export_count {
         let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
         let name = cur.string()?;
@@ -3536,7 +3561,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
 fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
     let string_count = cur.len()?;
-    let mut strings = Vec::with_capacity(string_count);
+    let mut strings = decode_vec(string_count)?;
     for _ in 0..string_count {
         strings.push(cur.string()?);
     }
@@ -3544,31 +3569,31 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     if byte_count > cur.remaining() / 4 {
         return Err(DecodeError::BadLength);
     }
-    let mut literal_bytes = Vec::with_capacity(byte_count);
+    let mut literal_bytes = decode_vec(byte_count)?;
     for _ in 0..byte_count {
         let len = cur.u32()? as usize;
         literal_bytes.push(cur.take(len)?.to_vec());
     }
     let type_count = cur.len()?;
-    let mut types = Vec::with_capacity(type_count);
+    let mut types = decode_vec(type_count)?;
     for _ in 0..type_count {
         types.push(decode_type(&mut cur)?);
     }
     let selector_count = cur.len()?;
-    let mut selectors = Vec::with_capacity(selector_count);
+    let mut selectors = decode_vec(selector_count)?;
     for _ in 0..selector_count {
         selectors.push(cur.string()?);
     }
     let app_count = cur.len()?;
-    let mut apps = Vec::with_capacity(app_count);
+    let mut apps = decode_vec(app_count)?;
     for _ in 0..app_count {
         let ty_count = cur.len()?;
-        let mut app_types = Vec::with_capacity(ty_count);
+        let mut app_types = decode_vec(ty_count)?;
         for _ in 0..ty_count {
             app_types.push(cur.u32()?);
         }
         let row_count = cur.len()?;
-        let mut rows = Vec::with_capacity(row_count);
+        let mut rows = decode_vec(row_count)?;
         for _ in 0..row_count {
             rows.push(decode_row(&mut cur)?);
         }
@@ -3578,37 +3603,37 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         });
     }
     let interface_count = cur.len()?;
-    let mut interfaces = Vec::with_capacity(interface_count);
+    let mut interfaces = decode_vec(interface_count)?;
     for _ in 0..interface_count {
         let type_params = cur.u32()?;
         let effect_params = cur.u32()?;
         let generic_count = cur.len()?;
-        let mut generic_is_effect = Vec::with_capacity(generic_count);
+        let mut generic_is_effect = decode_vec(generic_count)?;
         for _ in 0..generic_count {
             generic_is_effect.push(cur.flag()?);
         }
         let parent_count = cur.len()?;
-        let mut parents = Vec::with_capacity(parent_count);
+        let mut parents = decode_vec(parent_count)?;
         for _ in 0..parent_count {
             parents.push(decode_interface_use(&mut cur)?);
         }
         let type_bounds = decode_type_bounds(&mut cur)?;
         let associated_count = cur.len()?;
-        let mut associated = Vec::with_capacity(associated_count);
+        let mut associated = decode_vec(associated_count)?;
         for _ in 0..associated_count {
             let name = cur.string()?;
             let bound_count = cur.len()?;
             if bound_count > cur.remaining() / 12 {
                 return Err(DecodeError::BadLength);
             }
-            let mut bounds = Vec::with_capacity(bound_count);
+            let mut bounds = decode_vec(bound_count)?;
             for _ in 0..bound_count {
                 bounds.push(decode_interface_use(&mut cur)?);
             }
             associated.push(BcAssociated { name, bounds });
         }
         let method_count = cur.len()?;
-        let mut methods = Vec::with_capacity(method_count);
+        let mut methods = decode_vec(method_count)?;
         for _ in 0..method_count {
             let selector = cur.u32()?;
             let mut_self = cur.flag()?;
@@ -3616,11 +3641,11 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             let type_bounds = decode_type_bounds(&mut cur)?;
             let effect_params = cur.u32()?;
             let premise_count = cur.len()?;
-            let mut premises = Vec::with_capacity(premise_count);
+            let mut premises = decode_vec(premise_count)?;
             for _ in 0..premise_count {
                 let subject = cur.u32()?;
                 let bound_count = cur.len()?;
-                let mut bounds = Vec::with_capacity(bound_count);
+                let mut bounds = decode_vec(bound_count)?;
                 for _ in 0..bound_count {
                     bounds.push(decode_interface_use(&mut cur)?);
                 }
@@ -3630,7 +3655,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             if param_count > cur.remaining() / 4 {
                 return Err(DecodeError::BadLength);
             }
-            let mut params = Vec::with_capacity(param_count);
+            let mut params = decode_vec(param_count)?;
             for _ in 0..param_count {
                 params.push(cur.u32()?);
             }
@@ -3638,7 +3663,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             if marker_count != param_count {
                 return Err(DecodeError::MutMarkerCount);
             }
-            let mut param_muts = Vec::with_capacity(marker_count);
+            let mut param_muts = decode_vec(marker_count)?;
             for _ in 0..marker_count {
                 param_muts.push(cur.flag()?);
             }
@@ -3673,7 +3698,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         });
     }
     let conformance_count = cur.len()?;
-    let mut conformances = Vec::with_capacity(conformance_count);
+    let mut conformances = decode_vec(conformance_count)?;
     for _ in 0..conformance_count {
         let class = cur.u32()?;
         let application = decode_interface_use(&mut cur)?;
@@ -3681,14 +3706,14 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         if premise_count > cur.remaining() / 8 {
             return Err(DecodeError::BadLength);
         }
-        let mut premises = Vec::with_capacity(premise_count);
+        let mut premises = decode_vec(premise_count)?;
         for _ in 0..premise_count {
             let param = cur.u32()?;
             let bound_count = cur.len()?;
             if bound_count > cur.remaining() / 12 {
                 return Err(DecodeError::BadLength);
             }
-            let mut bounds = Vec::with_capacity(bound_count);
+            let mut bounds = decode_vec(bound_count)?;
             for _ in 0..bound_count {
                 bounds.push(decode_interface_use(&mut cur)?);
             }
@@ -3698,7 +3723,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         if associated_count > cur.remaining() / 4 {
             return Err(DecodeError::BadLength);
         }
-        let mut associated = Vec::with_capacity(associated_count);
+        let mut associated = decode_vec(associated_count)?;
         for _ in 0..associated_count {
             associated.push(cur.u32()?);
         }
@@ -3706,7 +3731,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         if method_count > cur.remaining() {
             return Err(DecodeError::BadLength);
         }
-        let mut method_overrides = Vec::with_capacity(method_count);
+        let mut method_overrides = decode_vec(method_count)?;
         for _ in 0..method_count {
             method_overrides.push(cur.flag()?);
         }
@@ -3719,17 +3744,17 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         });
     }
     let class_bound_count = cur.len()?;
-    let mut class_bounds = Vec::with_capacity(class_bound_count);
+    let mut class_bounds = decode_vec(class_bound_count)?;
     for _ in 0..class_bound_count {
         class_bounds.push(decode_type_bounds(&mut cur)?);
     }
     let function_bound_count = cur.len()?;
-    let mut func_bounds = Vec::with_capacity(function_bound_count);
+    let mut func_bounds = decode_vec(function_bound_count)?;
     for _ in 0..function_bound_count {
         func_bounds.push(decode_type_bounds(&mut cur)?);
     }
     let import_count = cur.len()?;
-    let mut imports = Vec::with_capacity(import_count);
+    let mut imports = decode_vec(import_count)?;
     for _ in 0..import_count {
         let module_path = cur.string()?;
         let name = cur.string()?;
@@ -3755,7 +3780,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     if slot_count > cur.remaining() / 66 {
         return Err(DecodeError::BadLength);
     }
-    let mut slots = Vec::with_capacity(slot_count);
+    let mut slots = decode_vec(slot_count)?;
     for _ in 0..slot_count {
         let mut key = [0u8; 32];
         key.copy_from_slice(cur.take(32)?);
@@ -3785,11 +3810,11 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         *slot = cur.u32()?;
     }
     let class_count = cur.len()?;
-    let mut classes = Vec::with_capacity(class_count);
+    let mut classes = decode_vec(class_count)?;
     for _ in 0..class_count {
         let parent = cur.u32()?;
         let parent_arg_count = cur.len()?;
-        let mut parent_args = Vec::with_capacity(parent_arg_count);
+        let mut parent_args = decode_vec(parent_arg_count)?;
         for _ in 0..parent_arg_count {
             parent_args.push(cur.u32()?);
         }
@@ -3803,14 +3828,14 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         let is_final = cur.flag()?;
         let is_frozen = cur.flag()?;
         let field_count = cur.len()?;
-        let mut fields = Vec::with_capacity(field_count);
+        let mut fields = decode_vec(field_count)?;
         for _ in 0..field_count {
             let fname = cur.string()?;
             let fty = cur.u32()?;
             fields.push((fname, fty));
         }
         let method_count = cur.len()?;
-        let mut methods = Vec::with_capacity(method_count);
+        let mut methods = decode_vec(method_count)?;
         for _ in 0..method_count {
             let sel = cur.u32()?;
             let func = cur.u32()?;
@@ -3833,12 +3858,12 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         });
     }
     let func_count = cur.len()?;
-    let mut funcs = Vec::with_capacity(func_count);
+    let mut funcs = decode_vec(func_count)?;
     for _ in 0..func_count {
         let type_params = cur.u32()?;
         let effect_params = cur.u32()?;
         let param_count = cur.len()?;
-        let mut params = Vec::with_capacity(param_count);
+        let mut params = decode_vec(param_count)?;
         for _ in 0..param_count {
             params.push(cur.u32()?);
         }
@@ -3849,14 +3874,14 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         if mut_count != param_count {
             return Err(DecodeError::MutMarkerCount);
         }
-        let mut param_muts = Vec::with_capacity(mut_count);
+        let mut param_muts = decode_vec(mut_count)?;
         for _ in 0..mut_count {
             param_muts.push(cur.flag()?);
         }
         let ret = cur.u32()?;
         let row = decode_row(&mut cur)?;
         let capture_count = cur.len()?;
-        let mut captures = Vec::with_capacity(capture_count);
+        let mut captures = decode_vec(capture_count)?;
         for _ in 0..capture_count {
             captures.push(cur.u32()?);
         }
@@ -3866,15 +3891,15 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         if local_count > cur.remaining() / 4 {
             return Err(DecodeError::BadLength);
         }
-        let mut local_types = Vec::with_capacity(local_count);
+        let mut local_types = decode_vec(local_count)?;
         for _ in 0..local_count {
             local_types.push(cur.u32()?);
         }
         let block_count = cur.len()?;
-        let mut blocks = Vec::with_capacity(block_count);
+        let mut blocks = decode_vec(block_count)?;
         for _ in 0..block_count {
             let instr_count = cur.len()?;
-            let mut block = Vec::with_capacity(instr_count);
+            let mut block = decode_vec(instr_count)?;
             for _ in 0..instr_count {
                 block.push(decode_instr(&mut cur)?);
             }
@@ -3966,7 +3991,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_INST => {
             let class = cur.u32()?;
             let count = cur.len()?;
-            let mut args = Vec::with_capacity(count);
+            let mut args = decode_vec(count)?;
             for _ in 0..count {
                 args.push(cur.u32()?);
             }
@@ -3976,7 +4001,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_MAP => BcType::Map(cur.u32()?, cur.u32()?),
         TY_TUPLE => {
             let count = cur.len()?;
-            let mut elems = Vec::with_capacity(count);
+            let mut elems = decode_vec(count)?;
             for _ in 0..count {
                 elems.push(cur.u32()?);
             }
@@ -3984,7 +4009,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         }
         TY_FN => {
             let count = cur.len()?;
-            let mut params = Vec::with_capacity(count);
+            let mut params = decode_vec(count)?;
             for _ in 0..count {
                 params.push(cur.u32()?);
             }
@@ -3992,7 +4017,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             if mut_count != count {
                 return Err(DecodeError::MutMarkerCount);
             }
-            let mut muts = Vec::with_capacity(mut_count);
+            let mut muts = decode_vec(mut_count)?;
             for _ in 0..mut_count {
                 muts.push(cur.flag()?);
             }
@@ -4002,7 +4027,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         }
         TY_CALLBACK => {
             let count = cur.len()?;
-            let mut params = Vec::with_capacity(count);
+            let mut params = decode_vec(count)?;
             for _ in 0..count {
                 params.push(cur.u32()?);
             }
@@ -4010,7 +4035,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             if mut_count != count {
                 return Err(DecodeError::MutMarkerCount);
             }
-            let mut muts = Vec::with_capacity(mut_count);
+            let mut muts = decode_vec(mut_count)?;
             for _ in 0..mut_count {
                 muts.push(cur.flag()?);
             }
@@ -4503,6 +4528,23 @@ mod tests {
     #[test]
     fn decoded_instruction_form_is_fixed_size() {
         assert_eq!(std::mem::size_of::<Instr>(), 16);
+    }
+
+    #[test]
+    fn decoder_rejects_a_table_that_exceeds_its_allocation_limit() {
+        let mut bytes = Vec::new();
+        for _ in 0..11 {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for _ in 0..CORE_ROLE_COUNT {
+            bytes.extend_from_slice(&NO_ROLE.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let count = MAX_DECODE_VECTOR_BYTES / std::mem::size_of::<Func>() + 1;
+        bytes.extend_from_slice(&(count as u32).to_le_bytes());
+        bytes.resize(bytes.len() + count, 0);
+
+        assert_eq!(decode_semantic(&bytes), Err(DecodeError::BadLength));
     }
 
     #[test]

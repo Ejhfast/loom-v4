@@ -7,7 +7,7 @@ use std::fmt;
 const MAGIC: &[u8; 4] = b"LMAR";
 
 /// The artifact format version.
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 pub(super) const HEADER_LEN: usize = 4 + 2 + 32 + 32 + 4;
 const MIN_UNIT_BYTES: usize = 32 + 4 + 1 + 4 + 4;

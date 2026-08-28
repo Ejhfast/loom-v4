@@ -216,12 +216,19 @@ end
 fn artifact_units(
     units: &[lm_compiler::CompiledModule],
 ) -> Result<lm_bytecode::artifact::Artifact, String> {
+    artifact_units_at("app.main", units)
+}
+
+fn artifact_units_at(
+    root: &str,
+    units: &[lm_compiler::CompiledModule],
+) -> Result<lm_bytecode::artifact::Artifact, String> {
     let mut env = lm_compiler::core_link_env().expect("the core link environment builds");
     for unit in units {
         lm_testkit::bind_compiled_unit(&mut env, unit.clone()).expect("binds");
     }
     env.freeze()
-        .complete_artifact("app.main")
+        .complete_artifact(root)
         .map_err(|error| error.to_string())
 }
 
@@ -590,6 +597,48 @@ fn extension_preserves_existing_slot_initials_and_bindings() {
 }
 
 #[test]
+fn extension_allows_its_provider_to_replace_a_class() {
+    let first = compile_text(
+        "plugin.lm",
+        "final class Box\n  value: Int = 1\nend\nBox().value\n",
+    )
+    .expect("the first artifact compiles");
+    let second = compile_text(
+        "plugin.lm",
+        "final class Box\n  value: String = \"two\"\nend\nBox().value\n",
+    )
+    .expect("the second artifact compiles");
+    let (mut arena, first_id) =
+        lm_testkit::publish_artifact(&first).expect("the first artifact publishes");
+    arena
+        .extend(first_id, second)
+        .expect("the owning module can replace its class");
+}
+
+#[test]
+fn extension_allows_its_provider_to_replace_an_interface() {
+    let first = compile_text(
+        "plugin.lm",
+        "interface Value\n  def value(self): Int\nend\n\
+         final class First implements Value\n  def value(self): Int\n    1\n  end\nend\n\
+         First().value()\n",
+    )
+    .expect("the first artifact compiles");
+    let second = compile_text(
+        "plugin.lm",
+        "interface Value\n  def value(self): String\nend\n\
+         final class Second implements Value\n  def value(self): String\n    \"two\"\n  end\nend\n\
+         Second().value()\n",
+    )
+    .expect("the second artifact compiles");
+    let (mut arena, first_id) =
+        lm_testkit::publish_artifact(&first).expect("the first artifact publishes");
+    arena
+        .extend(first_id, second)
+        .expect("the owning module can replace its interface");
+}
+
+#[test]
 fn collection_keeps_one_import_and_removes_an_unused_cycle() {
     let first = link_selective_provider("0");
     let second = link_selective_provider("1");
@@ -816,6 +865,22 @@ fn rekey_class(unit: &mut lm_compiler::CompiledModule, from: &str, to: &str, nam
     }
 }
 
+/// Give one interface the qualified key of another provider.
+fn rekey_interface(unit: &mut lm_compiler::CompiledModule, from: &str, to: &str, name: &str) {
+    let interface = unit
+        .module
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.key == from)
+        .expect("the interface exists");
+    interface.key = to.to_string();
+    interface.name = name.to_string();
+    let identity = module_identity(&unit.module).expect("the changed module has an identity");
+    unit.semantic_hash = identity.semantic_hash;
+    unit.interface = lm_bytecode::interface::derive_interface(&unit.module, &identity, &unit.path)
+        .expect("the changed module has an interface");
+}
+
 /// Two providers of one class key. The second module declares a class
 /// with the same qualified key and a different constructor.
 fn two_providers_of_one_class_key(first: &str, second: &str) -> Vec<lm_compiler::CompiledModule> {
@@ -828,6 +893,64 @@ fn two_providers_of_one_class_key(first: &str, second: &str) -> Vec<lm_compiler:
     );
     rekey_class(&mut main, "app.main.Spot", "app.shapes.Dot", "Dot");
     vec![shapes, main]
+}
+
+#[test]
+fn extension_rejects_a_class_from_another_provider() {
+    let shapes = compile_one(
+        "app.shapes",
+        "class Dot\n  x: Int = 0\nend\nDot().x\n",
+        &[],
+        true,
+    );
+    let mut main = compile_one(
+        "app.main",
+        "class Spot\n  x: String = \"two\"\nend\nSpot().x.len()\n",
+        &[],
+        true,
+    );
+    rekey_class(&mut main, "app.main.Spot", "app.shapes.Dot", "Dot");
+    let base = artifact_units_at("app.shapes", std::slice::from_ref(&shapes))
+        .expect("the base artifact builds");
+    let extension = artifact_units_at("app.main", std::slice::from_ref(&main))
+        .expect("the extension artifact builds");
+    let (mut arena, base_id) =
+        lm_testkit::publish_artifact(&base).expect("the base artifact publishes");
+    let error = arena
+        .extend(base_id, extension)
+        .expect_err("another class provider must reject");
+    assert!(error.to_string().contains("two implementations"), "{error}");
+}
+
+#[test]
+fn extension_rejects_an_interface_from_another_provider() {
+    let shapes = compile_one(
+        "app.shapes",
+        "interface Value\n  def value(self): Int\nend\n\
+         final class First implements Value\n  def value(self): Int\n    1\n  end\nend\n\
+         def marker(): Int\n  First().value()\nend\n",
+        &[],
+        false,
+    );
+    let mut main = compile_one(
+        "app.main",
+        "interface Other\n  def value(self): String\nend\n\
+         final class Item implements Other\n  def value(self): String\n    \"two\"\n  end\nend\n\
+         Item().value().len()\n",
+        &[],
+        true,
+    );
+    rekey_interface(&mut main, "app.main.Other", "app.shapes.Value", "Value");
+    let base = artifact_units_at("app.shapes", std::slice::from_ref(&shapes))
+        .expect("the base artifact builds");
+    let extension = artifact_units_at("app.main", std::slice::from_ref(&main))
+        .expect("the extension artifact builds");
+    let (mut arena, base_id) =
+        lm_testkit::publish_artifact(&base).expect("the base artifact publishes");
+    let error = arena
+        .extend(base_id, extension)
+        .expect_err("another interface provider must reject");
+    assert!(error.to_string().contains("two contracts"), "{error}");
 }
 
 /// The measured gap: a class structural hash covers no constructor.

@@ -3562,6 +3562,10 @@ execute()
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
+    let initial_gate = world.next_gate();
+    let initial = world
+        .capture_snapshot(initial_gate, 0, false)
+        .expect("the initial program captures");
 
     let mut captured = None;
     for _ in 0..2000 {
@@ -3602,13 +3606,20 @@ execute()
         1
     );
 
+    let debugger = compile_to_bytes("debugger.lm", "0\n").expect("the debugger compiles");
     let admitted = lm_testkit::load_snapshot_for_artifact_bytes(
-        &bytes,
+        &debugger,
         captured.bytes().expect("the snapshot encodes"),
         LoadLimits::default(),
     )
     .expect("the external snapshot admits");
-    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
+    let initial = lm_testkit::load_snapshot_for_artifact_bytes(
+        &debugger,
+        initial.bytes().expect("the initial snapshot encodes"),
+        LoadLimits::default(),
+    )
+    .expect("the initial external snapshot admits");
+    let (arena, namespace) = publish_artifact_bytes(&debugger).expect("the debugger loads");
     let mut restored = World::new(
         arena,
         namespace,
@@ -3620,6 +3631,12 @@ execute()
     let root = restored
         .restore_image(0, target, &admitted)
         .expect("the code image restores");
+    let initial_target = restored
+        .new_child(0)
+        .expect("the initial restore target exists");
+    restored
+        .restore_image(0, initial_target, &initial)
+        .expect("the initial image restores after the wider image");
     restored.allow_on(root, "Vm").expect("the grant exists");
     loop {
         match restored.run_machine(root) {

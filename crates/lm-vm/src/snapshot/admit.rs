@@ -642,14 +642,6 @@ impl Admit<'_> {
     // Structural resolution.
     // ----------------------------------------------------------
 
-    fn func_named(&self, slot: u32) -> bool {
-        self.code.contains_function(slot)
-    }
-
-    fn class_named(&self, slot: u32) -> bool {
-        self.code.contains_class(slot)
-    }
-
     /// Prove each module instance against its installation record.
     fn check_instances(&self) -> Result<(), ImageError> {
         for (image, vm) in self.image.vm_images.iter().enumerate() {
@@ -798,6 +790,7 @@ impl Admit<'_> {
     fn check_slot_state(&self) -> Result<(), ImageError> {
         for (image, vm) in self.image.vm_images.iter().enumerate() {
             let namespace = self.namespace(vm.namespace)?;
+            let code = namespace.code_namespace();
             if vm.slots.len() != namespace.slots.len() || vm.slot_versions.len() != vm.slots.len() {
                 return fail(
                     ImageReason::Code,
@@ -809,10 +802,12 @@ impl Admit<'_> {
                 let valid = match (&spec.contract, target) {
                     (_, ImageSlotTarget::Empty) => true,
                     (SlotContract::Function(contract), ImageSlotTarget::Function(func)) => {
-                        self.func_named(*func) && self.callable_matches(*func, contract, false)
+                        code.contains_function(*func)
+                            && self.callable_matches(*func, contract, false)
                     }
                     (SlotContract::Method(contract), ImageSlotTarget::Function(func)) => {
-                        self.func_named(*func) && self.callable_matches(*func, contract, true)
+                        code.contains_function(*func)
+                            && self.callable_matches(*func, contract, true)
                     }
                     (
                         SlotContract::Class {
@@ -833,10 +828,10 @@ impl Admit<'_> {
                             }
                             _ => None,
                         };
-                        self.class_named(*class)
+                        code.contains_class(*class)
                             && target.is_some_and(|target| target.type_params == *type_params)
                             && contract_class == Some(*class)
-                            && self.func_named(*target_constructor)
+                            && code.contains_function(*target_constructor)
                             && self.callable_matches(*target_constructor, constructor, false)
                     }
                     (SlotContract::Value { .. }, ImageSlotTarget::Value(_)) => true,
@@ -868,6 +863,12 @@ impl Admit<'_> {
         let Some(body_index) = machine.body_func else {
             return false;
         };
+        let Some(namespace) = self.code.namespace(machine.namespace) else {
+            return false;
+        };
+        if !namespace.code_namespace().contains_function(body_index) {
+            return false;
+        }
         let Some(body) = self.module.funcs.get(body_index as usize) else {
             return false;
         };
@@ -907,6 +908,8 @@ impl Admit<'_> {
     /// Prove one frozen value-slot heap and its canonical order.
     fn check_vm_image_heap(&self, image: u32) -> Result<(), ImageError> {
         let record = &self.image.vm_images[image as usize];
+        let namespace = self.namespace(record.namespace)?;
+        let code = namespace.code_namespace();
         let objects = record.objects.len() as u32;
         let machines = self.image.machines.len() as u32;
         let at = |what: &str| format!("VM image {image}: {what}");
@@ -1010,7 +1013,7 @@ impl Admit<'_> {
                     }
                 }
                 Object::Instance { class, fields, env } => {
-                    if !self.class_named(*class)
+                    if !code.contains_class(*class)
                         || self
                             .module
                             .classes
@@ -1029,7 +1032,7 @@ impl Admit<'_> {
                     captures,
                     env,
                 } => {
-                    if !self.func_named(*func)
+                    if !code.contains_function(*func)
                         || self
                             .module
                             .funcs
@@ -1209,6 +1212,8 @@ impl Admit<'_> {
     /// later rule follows a reference.
     fn check_references(&self, vm: u32) -> Result<(), ImageError> {
         let m = self.machine(vm);
+        let namespace = self.namespace(m.namespace)?;
+        let code_namespace = namespace.code_namespace();
         let objects = m.objects.len() as u32;
         let callbacks = m.callbacks.len() as u32;
         let machines = self.image.machines.len() as u32;
@@ -1618,7 +1623,9 @@ impl Admit<'_> {
             }
             match &entry.object {
                 Object::Instance { class, fields, env } => {
-                    if *class as usize >= self.module.classes.len() || !self.class_named(*class) {
+                    if *class as usize >= self.module.classes.len()
+                        || !code_namespace.contains_class(*class)
+                    {
                         return fail(
                             ImageReason::Code,
                             at(&format!(
@@ -1674,7 +1681,9 @@ impl Admit<'_> {
                     captures,
                     env,
                 } => {
-                    if *func as usize >= self.module.funcs.len() || !self.func_named(*func) {
+                    if *func as usize >= self.module.funcs.len()
+                        || !code_namespace.contains_function(*func)
+                    {
                         return fail(
                             ImageReason::Code,
                             at(&format!(
@@ -1711,7 +1720,9 @@ impl Admit<'_> {
             }
         }
         for (idx, frame) in m.frames.iter().enumerate() {
-            if frame.func as usize >= self.module.funcs.len() || !self.func_named(frame.func) {
+            if frame.func as usize >= self.module.funcs.len()
+                || !code_namespace.contains_function(frame.func)
+            {
                 return fail(
                     ImageReason::Code,
                     at(&format!(
@@ -1762,7 +1773,8 @@ impl Admit<'_> {
             }
         }
         for (idx, callback) in m.callbacks.iter().enumerate() {
-            if callback.func as usize >= self.module.funcs.len() || !self.func_named(callback.func)
+            if callback.func as usize >= self.module.funcs.len()
+                || !code_namespace.contains_function(callback.func)
             {
                 return fail(
                     ImageReason::Code,
@@ -1905,7 +1917,7 @@ impl Admit<'_> {
                     format!("{context} location {index} names no function"),
                 );
             };
-            if !self.func_named(site.function) {
+            if !self.code.contains_function(site.function) {
                 return fail(
                     ImageReason::Code,
                     format!("{context} location {index} names an omitted function"),
@@ -2814,8 +2826,11 @@ impl Admit<'_> {
     fn check_machine_witness(&self) -> Result<(), ImageError> {
         for (vm, machine) in self.image.machines.iter().enumerate() {
             let at = |what: &str| format!("machine {vm}: {what}");
+            let namespace = self.namespace(machine.namespace)?;
             if let Some(func) = machine.body_func {
-                if func as usize >= self.module.funcs.len() || !self.func_named(func) {
+                if func as usize >= self.module.funcs.len()
+                    || !namespace.code_namespace().contains_function(func)
+                {
                     return fail(
                         ImageReason::Code,
                         at("the witness names a function the manifest omits"),
