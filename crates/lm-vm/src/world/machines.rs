@@ -759,6 +759,7 @@ impl World {
             }) => *ty,
             _ => return Err(FaultCode::TypeMismatch),
         };
+        let world = self.show_code().clone();
         let source_heap = &self
             .machines
             .get(source as usize)
@@ -766,7 +767,12 @@ impl World {
             .vm
             .heap;
         crate::typecheck::check_boundary_value(
-            crate::typecheck::BoundaryContext::new(code.as_ref(), code.bundle(), source_heap),
+            crate::typecheck::BoundaryContext::new(
+                code.as_ref(),
+                world.as_ref(),
+                code.bundle(),
+                source_heap,
+            ),
             &mut self.envs,
             &mut self.check,
             value,
@@ -900,6 +906,7 @@ impl World {
             _ => return Err(FaultCode::MalformedState),
         };
         let code = self.code_of(vm).clone();
+        let world = self.show_code().clone();
         let ty = match code.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Value { ty },
@@ -910,6 +917,7 @@ impl World {
         crate::typecheck::check_boundary_value(
             crate::typecheck::BoundaryContext::new(
                 code.as_ref(),
+                world.as_ref(),
                 code.bundle(),
                 &self.vm_images[key.image as usize].heap,
             ),

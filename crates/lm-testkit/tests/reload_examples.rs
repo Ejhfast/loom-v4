@@ -247,7 +247,12 @@ fn a_debugger_opens_another_program() {
 /// Capture one unrelated program before it runs.
 fn independent_program_snapshot() -> Vec<u8> {
     let source = "def calculate(): Int with Clock.Now\n  sys.clock.now()\n  42\nend\ncalculate()\n";
-    let bytes = compile_to_bytes("independent-program.lm", source).expect("the program compiles");
+    program_snapshot("independent-program.lm", source)
+}
+
+/// Capture one program before it runs.
+fn program_snapshot(name: &str, source: &str) -> Vec<u8> {
+    let bytes = compile_to_bytes(name, source).expect("the program compiles");
     let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
         arena,
@@ -340,5 +345,22 @@ fn a_dynamic_run_keeps_its_result_view_across_a_snapshot() {
             &[("program.lms", independent_program_snapshot())],
         ),
         "Done(Ok(\"42\"))"
+    );
+}
+
+#[test]
+fn a_debugger_renders_a_result_of_a_class_it_does_not_know() {
+    // The debuggee returns an instance of its own class. The debugger
+    // never saw that class. The `DynValue` carries the runtime type,
+    // and the world resolves it, so the debugger renders the value.
+    let source = "class Box\n  value: Int = 41\nend\n\
+      def calculate(): Box with Clock.Now\n  sys.clock.now()\n  Box()\nend\ncalculate()\n";
+    assert_eq!(
+        run_example_with_files(
+            "examples/15-compiler-and-hot-code-reloading/12-debug-another-program.lm",
+            &["Fs.Open", "Fs.Read", "Fs.Close", "Vm"],
+            &[("program.lms", program_snapshot("box.lm", source))],
+        ),
+        "Done(Ok((\"box.lm\", \"Clock.Now -> Box{value: 41}\")))"
     );
 }

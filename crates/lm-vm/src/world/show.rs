@@ -94,11 +94,11 @@ impl World {
 
     /// Render the retained guest locations of one machine fault.
     pub fn fault_context(&self, fault: &FaultRec) -> Vec<String> {
-        let debug = lm_bytecode::debug::decode(&self.root_code().debug).ok();
+        let debug = lm_bytecode::debug::decode(&self.show_code().debug).ok();
         let identity = self.identity().ok();
         let mut lines = Vec::new();
         for site in &fault.trace {
-            let Some(function) = self.root_code().funcs.get(site.function as usize) else {
+            let Some(function) = self.show_code().funcs.get(site.function as usize) else {
                 continue;
             };
             let mut offset = 0usize;
@@ -187,7 +187,7 @@ impl World {
     pub fn show_result_of(&self, vm: VmId, value: Value) -> String {
         let machine = &self.machines[vm as usize];
         let expected = machine.body_func.map(|func| ShowExpected::Module {
-            ty: self.root_code().funcs[func as usize].ret,
+            ty: self.show_code().funcs[func as usize].ret,
             env: machine.witness,
         });
         let mut visited = Vec::new();
@@ -216,11 +216,11 @@ impl World {
 
     pub(super) fn resolve_show_expected(&self, expected: ShowExpected) -> Option<ShowExpected> {
         let mut current = expected;
-        for _ in 0..=self.root_code().types.len() {
+        for _ in 0..=self.show_code().types.len() {
             let ShowExpected::Module { ty, env } = current else {
                 return Some(current);
             };
-            match self.root_code().types.get(ty as usize)? {
+            match self.show_code().types.get(ty as usize)? {
                 BcType::Var(index) => {
                     let closed = *self.envs.env(env)?.types.get(*index as usize)?;
                     current = ShowExpected::Closed(closed);
@@ -240,7 +240,7 @@ impl World {
         let some = self.root_core().option_some?;
         let none = self.root_core().option_none?;
         let (class, payload) = match expected {
-            ShowExpected::Module { ty, env } => match self.root_code().types.get(ty as usize)? {
+            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
                 BcType::Inst(class, args) if args.len() == 1 => {
                     (*class, ShowExpected::Module { ty: args[0], env })
                 }
@@ -295,7 +295,7 @@ impl World {
         let ShowExpected::Module { ty, env } = expected else {
             return false;
         };
-        let Some(source) = self.root_code().types.get(ty as usize) else {
+        let Some(source) = self.show_code().types.get(ty as usize) else {
             return false;
         };
         let Some(target) = self.envs.ty(closed) else {
@@ -362,7 +362,7 @@ impl World {
                         .zip(other)
                         .all(|(source, target)| child(self, *source, *target))
                     && child(self, *ret, *result)
-                    && self.envs.close_row(self.root_code().as_ref(), row, env) == *closed_row
+                    && self.envs.close_row(self.show_code().as_ref(), row, env) == *closed_row
             }
             (BcType::Op(op, source), ClosedType::Op(other, target)) => {
                 op == other && child(self, *source, *target)
@@ -373,7 +373,7 @@ impl World {
 
     pub(super) fn show_list_element(&self, expected: ShowExpected) -> Option<ShowExpected> {
         match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.root_code().types.get(ty as usize)? {
+            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
                 BcType::List(element) => Some(ShowExpected::Module { ty: *element, env }),
                 _ => None,
             },
@@ -389,7 +389,7 @@ impl World {
         expected: ShowExpected,
     ) -> Option<(ShowExpected, ShowExpected)> {
         match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.root_code().types.get(ty as usize)? {
+            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
                 BcType::Map(key, value) => Some((
                     ShowExpected::Module { ty: *key, env },
                     ShowExpected::Module { ty: *value, env },
@@ -407,7 +407,7 @@ impl World {
 
     pub(super) fn show_tuple_elements(&self, expected: ShowExpected) -> Option<Vec<ShowExpected>> {
         match self.resolve_show_expected(expected)? {
-            ShowExpected::Module { ty, env } => match self.root_code().types.get(ty as usize)? {
+            ShowExpected::Module { ty, env } => match self.show_code().types.get(ty as usize)? {
                 BcType::Tuple(elements) => Some(
                     elements
                         .iter()
@@ -457,7 +457,7 @@ impl World {
             Value::Char(value) => format!("{value:?}"),
             Value::Op(op) => format!(
                 "<op {}>",
-                self.root_code()
+                self.show_code()
                     .bundle()
                     .op_name(op)
                     .unwrap_or("<invalid operation>")
@@ -543,7 +543,7 @@ impl World {
                     }
                     Object::Instance { class, fields, env } => {
                         visited.push(r);
-                        let bc = &self.root_code().classes[*class as usize];
+                        let bc = &self.show_code().classes[*class as usize];
                         let text = if bc.kind == BcClassKind::Case {
                             // A case instance prints in constructor
                             // form with its short arm name.
@@ -597,7 +597,7 @@ impl World {
                         text
                     }
                     Object::Closure { func, .. } => {
-                        format!("<closure {}>", self.root_code().funcs[*func as usize].name)
+                        format!("<closure {}>", self.show_code().funcs[*func as usize].name)
                     }
                     Object::StrBuilder(buf) => match buf.byte_len() {
                         Some(len) => format!("<StringBuilder length {len}>"),
@@ -647,7 +647,7 @@ impl World {
                     Object::NativeCall { op, .. } => {
                         format!(
                             "<call {}>",
-                            self.root_code()
+                            self.show_code()
                                 .bundle()
                                 .op_name(*op)
                                 .unwrap_or("<invalid operation>")
@@ -735,7 +735,7 @@ impl World {
                             .root_code()
                             .bundle()
                             .resource_by_identity(*kind)
-                            .and_then(|slot| self.root_code().bundle().resource(slot))
+                            .and_then(|slot| self.show_code().bundle().resource(slot))
                             .map(|resource| resource.name.as_str())
                             .unwrap_or("extension resource");
                         if *resource == 0 {
@@ -776,7 +776,7 @@ impl World {
             .map(|b| b.key.as_str())
             .collect();
         if keys.is_empty() {
-            self.root_code().funcs[func as usize].name.clone()
+            self.show_code().funcs[func as usize].name.clone()
         } else {
             keys.join(", ")
         }

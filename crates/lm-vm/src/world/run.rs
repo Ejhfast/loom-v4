@@ -177,6 +177,19 @@ impl World {
         self.code_of(0)
     }
 
+    /// The widest registered code view of this world.
+    ///
+    /// Every namespace is a prefix view of one arena, so the newest
+    /// registered namespace resolves every index of every machine.
+    pub(crate) fn show_code(&self) -> &std::sync::Arc<NamespaceRuntime> {
+        self.namespaces
+            .iter()
+            .rev()
+            .flatten()
+            .next()
+            .expect("a world registers its root namespace")
+    }
+
     pub(crate) fn root_core(&self) -> CoreLayout {
         self.core_of(0)
     }

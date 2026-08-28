@@ -643,10 +643,12 @@ impl World {
         }
         let (reply_ty, env) = self.reply_type(vm)?;
         let module = self.code_of(vm).clone();
+        let world = self.show_code().clone();
         let machine = &self.machines[vm as usize];
         crate::typecheck::check_boundary_value(
             crate::typecheck::BoundaryContext::new(
                 module.as_ref(),
+                world.as_ref(),
                 module.bundle(),
                 &machine.vm.heap,
             ),
@@ -685,11 +687,13 @@ impl World {
         if code.params.len() != args.len() {
             return Err(FaultCode::MalformedState);
         }
+        let world = self.show_code().clone();
         let machine = &self.machines[vm as usize];
         for (value, ty) in args.iter().zip(code.params.iter()) {
             crate::typecheck::check_boundary_value(
                 crate::typecheck::BoundaryContext::new(
                     module.as_ref(),
+                    world.as_ref(),
                     module.bundle(),
                     &machine.vm.heap,
                 ),

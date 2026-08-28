@@ -534,11 +534,13 @@ Artifact collection keeps a sealed parent with all case children.
 
 Tuples and immutable collections are exact when their element types are exact.
 
-`DynValue` stays inside the owning VM.
+`DynValue` carries one value and its closed runtime type.
 
-A debugger inspects dynamic values through VM operations.
+It crosses a VM boundary as one value.
 
-It does not move those values into its own namespace.
+The holder resolves the payload through the widest code view of the world.
+
+The holder cannot call the payload. It can render it.
 
 ## 11. `codeof` and runtime compilation
 
