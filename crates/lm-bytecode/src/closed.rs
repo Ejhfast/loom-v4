@@ -1457,7 +1457,7 @@ impl TypeEnvs {
     pub fn interface_default_env(
         &mut self,
         module: &impl CodeTableView,
-        interface: u32,
+        conformance: u32,
         runtime_class: u32,
         receiver: ClosedTypeId,
         own: TypeEnvId,
@@ -1487,57 +1487,31 @@ impl TypeEnvs {
             return Ok(None);
         }
 
-        let mut class = runtime_class;
-        let mut class_args = runtime_args;
-        let mut steps = 0usize;
-        loop {
-            if let Some(conformance) = module.conformances().iter().find(|candidate| {
-                candidate.class == class && candidate.application.interface == interface
-            }) {
-                let owner = self.env_of(class_args, Vec::new())?;
-                let mut types = Vec::with_capacity(1 + conformance.application.types.len());
-                types.push(receiver);
-                for ty in &conformance.application.types {
-                    types.push(self.close(module, *ty, owner)?);
-                }
-                let mut rows: Vec<ClosedRow> = conformance
-                    .application
-                    .rows
-                    .iter()
-                    .map(|row| self.close_row(module, row, owner))
-                    .collect();
-                if let Some(environment) = self.env(own) {
-                    types.extend_from_slice(&environment.types);
-                    rows.extend_from_slice(&environment.rows);
-                }
-                return self.env_of(types, rows).map(Some);
-            }
-            steps += 1;
-            if steps > module.classes().len() {
-                return Ok(None);
-            }
-            let Some(entry) = module.classes().get(class as usize) else {
-                return Ok(None);
-            };
-            let Some(parent) = entry.parent() else {
-                return Ok(None);
-            };
-            if !entry.parent_args.is_empty() {
-                let owner = self.env_of(class_args, Vec::new())?;
-                let mut parent_args = Vec::with_capacity(entry.parent_args.len());
-                for ty in &entry.parent_args {
-                    parent_args.push(self.close(module, *ty, owner)?);
-                }
-                class_args = parent_args;
-            } else if module
-                .classes()
-                .get(parent as usize)
-                .is_some_and(|parent| parent.type_params == 0)
-            {
-                class_args.clear();
-            }
-            class = parent;
+        let Some(conformance) = module.conformances().get(conformance as usize) else {
+            return Ok(None);
+        };
+        let Some(class_args) =
+            self.ancestor_args(module, runtime_class, &runtime_args, conformance.class)
+        else {
+            return Ok(None);
+        };
+        let owner = self.env_of(class_args, Vec::new())?;
+        let mut types = Vec::with_capacity(1 + conformance.application.types.len());
+        types.push(receiver);
+        for ty in &conformance.application.types {
+            types.push(self.close(module, *ty, owner)?);
         }
+        let mut rows: Vec<ClosedRow> = conformance
+            .application
+            .rows
+            .iter()
+            .map(|row| self.close_row(module, row, owner))
+            .collect();
+        if let Some(environment) = self.env(own) {
+            types.extend_from_slice(&environment.types);
+            rows.extend_from_slice(&environment.rows);
+        }
+        self.env_of(types, rows).map(Some)
     }
 
     /// Build one environment from an explicit closed argument list.

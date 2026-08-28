@@ -496,33 +496,18 @@ impl World {
                     return None;
                 }
             },
-            Held::Container(bytes) => {
-                if bytes.len() < 32 {
+            Held::Container(bytes) => match self.load_snapshot_bytes(&bytes) {
+                Ok(image) => image,
+                Err(error) => {
                     self.fault_caller(
                         vm,
                         op,
                         FaultCode::BoundaryViolation,
-                        "the snapshot container is shorter than its frame",
+                        &format!("the snapshot image did not load: {error}"),
                     );
                     return None;
                 }
-                let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
-                match self.trusted_image(&hash) {
-                    Some(image) => image,
-                    None => match self.load_snapshot_bytes(&bytes) {
-                        Ok(image) => image,
-                        Err(error) => {
-                            self.fault_caller(
-                                vm,
-                                op,
-                                FaultCode::BoundaryViolation,
-                                &format!("the snapshot image did not load: {error}"),
-                            );
-                            return None;
-                        }
-                    },
-                }
-            }
+            },
         };
         Some(image)
     }

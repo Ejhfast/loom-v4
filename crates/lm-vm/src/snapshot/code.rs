@@ -261,13 +261,13 @@ impl SnapshotCodeKey {
 /// Decode, verify, and publish the code of one external image.
 pub(crate) fn prepare_external(
     image: &Image,
-    runtime_core: Option<&LinkUnit>,
+    runtime_core: Option<Arc<LinkUnit>>,
     bundle: Arc<lm_abi::AbiBundle>,
     mut cache: Option<&mut SnapshotCodeCache>,
 ) -> Result<SnapshotCode, ImageError> {
     let key = cache
         .as_ref()
-        .and_then(|_| SnapshotCodeKey::from_encoded(image, &bundle, runtime_core));
+        .and_then(|_| SnapshotCodeKey::from_encoded(image, &bundle, runtime_core.as_deref()));
     if let (Some(cache), Some(key)) = (cache.as_deref_mut(), key.as_ref()) {
         if let Some(code) = cache.get(key, &image.artifacts) {
             return Ok(code);
@@ -300,7 +300,6 @@ pub(crate) fn prepare_external(
         }
     };
 
-    let runtime_core = runtime_core.cloned().map(Arc::new);
     let mut arena = CodeArena::with_bundle(bundle);
     let mut namespaces = Vec::new();
     namespaces

@@ -84,7 +84,7 @@ select a weaker restore path.
 
 A held or self image can contain one distinguished-run selector.
 
-`VmSnapshot.cast_result[T](type)` checks that selector and its result type. Success returns `RunSnapshot[T]` without copying the image.
+`Vm.RestoreDynamic` restores that selector as `Run[DynValue]`.
 
 A full snapshot from `Vm.snapshot()` contains one full-VM selector. It contains no distinguished-run selector.
 
@@ -104,8 +104,7 @@ The view selects one distinguished run. Its terminal result has type
 A resolved type contains every generic substitution. It contains no
 unresolved type variable and no missing type-table entry.
 
-Resolved types are internal verifier values. They are not guest
-`TypeView` values and need no serialized proof form.
+Resolved types are internal verifier values. They have no guest form.
 
 ### 2.7 Admission identity
 
@@ -306,9 +305,11 @@ capture list alone. The image therefore carries witnesses.
 
 #### A witness is a runtime carrier
 
-A witness gives a live frame the concrete types of its activation. The
-boundary check of section 5.2 reads it to substitute `reply_ty`, and a
-later `Type[T]` surface will read it for reflection.
+A witness gives a live frame the concrete types of its activation.
+
+The boundary check of section 5.2 reads it to substitute `reply_ty`.
+
+A future reflection surface can also read it.
 
 Admission checks a witness structurally alone. Each ordinal lies in
 range, each entry holds no free type variable, the table is acyclic,
@@ -602,14 +603,13 @@ Build the carrier generously now, and build no solver.
 
 ### 14.1 Type descriptors and reflection
 
-Language specification 17.1 defers the guest forms of
-`VmSnapshot.cast_result` and `VmSnapshot.result_type`, because
-version 0.2 has no `Type[T]` descriptor. Language specification section
-9 already calls `type_descriptor[T]()` a witness.
+Typed snapshot casts and result-type queries remain deferred.
 
-A canonical closed type with a content digest is the value a `Type[T]`
-descriptor holds. The same table therefore answers a dynamic cast and a
-reflection query.
+Version 0.2 exposes no guest type descriptor.
+
+A future descriptor can hold one canonical closed-type digest.
+
+The same table can support a dynamic cast and a reflection query.
 
 A generic instance stores its concrete arguments for this reason.
 Admission needs no instance witness, because the edge supplies the

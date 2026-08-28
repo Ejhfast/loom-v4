@@ -127,7 +127,7 @@ pub fn admit(
         .unwrap_or_else(lm_abi::standard_bundle);
     let runtime_core = available
         .as_ref()
-        .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
+        .and_then(|namespace| namespace.active_unit_store(lm_bytecode::artifact::CORE_MODULE_PATH));
     let code = super::code::prepare_external(&image, runtime_core, bundle, None)?;
     let identity = prove(&image, &code, budget)?;
     codec::seal_admitted(image, identity, code, budget.byte_limit())

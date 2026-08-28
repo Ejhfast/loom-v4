@@ -404,7 +404,9 @@ impl World {
             machines.push(machine);
         }
         if attach_target_image {
-            machines[0].image = target_image;
+            if let Some(target_image) = target_image {
+                machines[0].image = Some(target_image);
+            }
         }
 
         Ok(RestorePlan {

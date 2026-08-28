@@ -151,6 +151,14 @@ impl World {
         &mut self,
         bytes: &[u8],
     ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::ImageError> {
+        if bytes.len() >= 32 {
+            let hash = crate::snapshot::codec::stored_container_hash(bytes);
+            if let Some(image) = self.trusted_image(&hash) {
+                if image.bytes().is_ok_and(|known| known.as_slice() == bytes) {
+                    return Ok(image);
+                }
+            }
+        }
         let limits = crate::snapshot::LoadLimits {
             max_machines: self.budget.limits.max_machines,
             max_vm_images: self.budget.limits.max_vm_images,

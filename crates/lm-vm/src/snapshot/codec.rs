@@ -103,7 +103,7 @@ pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
     lm_graph::digest::hash_parts(&[HASH_DOMAIN, prefix])
 }
 
-pub(super) fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&bytes[bytes.len() - 32..]);
     hash
@@ -1229,7 +1229,7 @@ fn load_external_inner(
         .unwrap_or_else(lm_abi::standard_bundle);
     let runtime_core = available
         .as_ref()
-        .and_then(|namespace| namespace.active_unit(lm_bytecode::artifact::CORE_MODULE_PATH));
+        .and_then(|namespace| namespace.active_unit_store(lm_bytecode::artifact::CORE_MODULE_PATH));
     let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
     let (image, hash) = decode_inner(bytes, limits, &decode_budget, &bundle)?;
     decode_budget.charge(bytes.len(), "container copy")?;

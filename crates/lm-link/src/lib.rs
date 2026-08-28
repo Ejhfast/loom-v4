@@ -314,6 +314,11 @@ impl FrozenLinkEnv {
         self.units.get(path).map(Arc::as_ref)
     }
 
+    /// Return the shared unit at one canonical path.
+    pub fn unit_store(&self, path: &str) -> Option<Arc<LinkUnit>> {
+        self.units.get(path).cloned()
+    }
+
     /// Return all bound module paths in canonical order.
     pub fn paths(&self) -> Vec<&str> {
         self.units.keys().map(String::as_str).collect()
@@ -350,7 +355,6 @@ pub fn resolve_artifact(
     runtime_core: Option<Arc<LinkUnit>>,
 ) -> Result<(ArtifactId, FrozenLinkEnv), LinkEnvError> {
     let (root, mut units) = artifact.into_units();
-    let mut units: Vec<Arc<LinkUnit>> = units.drain(..).map(Arc::new).collect();
     let mut available: BTreeSet<ArtifactId> = units.iter().map(|unit| unit.id()).collect();
     let mut required_core = None;
     for unit in &units {
@@ -605,6 +609,9 @@ pub struct CodeNamespace {
     units: BTreeMap<ArtifactId, std::sync::Arc<LinkUnit>>,
     active_units: BTreeMap<String, ArtifactId>,
     relocations: BTreeMap<ArtifactId, UnitRelocation>,
+    functions: Arc<[u64]>,
+    classes: Arc<[u64]>,
+    slots: Arc<[u64]>,
     core_artifact: Option<ArtifactId>,
     tables: std::sync::Arc<CodeTables>,
     dispatch: Arc<CodeTable<DispatchRow>>,
@@ -643,26 +650,25 @@ impl CodeNamespace {
         self.unit(*id)
     }
 
+    pub fn active_unit_store(&self, path: &str) -> Option<Arc<LinkUnit>> {
+        let id = self.active_units.get(path)?;
+        self.units.get(id).cloned()
+    }
+
     pub fn relocation(&self, id: ArtifactId) -> Option<&UnitRelocation> {
         self.relocations.get(&id)
     }
 
     pub fn contains_function(&self, function: u32) -> bool {
-        self.relocations
-            .values()
-            .any(|relocation| relocation.functions().contains(&function))
+        contains_index(&self.functions, function)
     }
 
     pub fn contains_class(&self, class: u32) -> bool {
-        self.relocations
-            .values()
-            .any(|relocation| relocation.classes().contains(&class))
+        contains_index(&self.classes, class)
     }
 
     pub fn contains_slot(&self, slot: u32) -> bool {
-        self.relocations
-            .values()
-            .any(|relocation| relocation.slots().contains(&slot))
+        contains_index(&self.slots, slot)
     }
 
     pub fn core_artifact(&self) -> Option<ArtifactId> {
@@ -862,6 +868,7 @@ const NO_METHOD: u32 = u32::MAX;
 #[derive(Debug, Clone)]
 struct InterfaceWitness {
     interface: u32,
+    conformance: u32,
     method_overrides: Arc<[bool]>,
 }
 
@@ -884,13 +891,17 @@ impl DispatchRow {
     }
 
     #[inline]
-    pub fn interface_override(&self, interface: u32, method: u32) -> Option<bool> {
+    pub fn interface_witness(&self, interface: u32, method: u32) -> Option<(bool, u32)> {
         let witnesses = self.interface_witnesses.as_deref()?;
         let witness = witnesses
             .binary_search_by_key(&interface, |witness| witness.interface)
             .ok()
             .map(|index| &witnesses[index])?;
-        witness.method_overrides.get(method as usize).copied()
+        witness
+            .method_overrides
+            .get(method as usize)
+            .copied()
+            .map(|overrides| (overrides, witness.conformance))
     }
 
     #[inline]
@@ -1063,7 +1074,8 @@ impl CodeArena {
         let canonical_layout = self.namespaces.is_empty();
         let retained = std::sync::Arc::new(artifact.clone());
         let root_path = artifact.root().module_path().to_string();
-        let untrusted: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let untrusted: BTreeSet<ArtifactId> =
+            artifact.units().iter().map(|unit| unit.id()).collect();
         let (root, env) = resolve_artifact(artifact, runtime_core)
             .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
         let root_unit = env
@@ -1107,7 +1119,11 @@ impl CodeArena {
                 }
             };
             relocations.insert(unit.id(), UnitRelocation(reloc.clone()));
-            units.insert(unit.id(), Arc::new(unit.clone()));
+            units.insert(
+                unit.id(),
+                env.unit_store(path)
+                    .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?,
+            );
             active_units.insert(path.clone(), unit.id());
             if path == &root_path {
                 entry = reloc.funcs.get(unit.module().entry as usize).copied();
@@ -1121,12 +1137,16 @@ impl CodeArena {
         let tables = Arc::new(tables_of(&merged));
         let dispatch = Arc::new(merged.dispatch.clone());
         let identity = Arc::new(namespace_identity(&merged, root));
+        let [functions, classes, slots] = namespace_membership(&relocations);
         let namespace = CodeNamespace {
             artifact_id: root,
             artifacts: vec![retained],
             units,
             active_units,
             relocations,
+            functions,
+            classes,
+            slots,
             core_artifact,
             tables,
             dispatch,
@@ -1173,29 +1193,34 @@ impl CodeArena {
         let core = source
             .core_artifact
             .and_then(|id| source.units.get(&id).cloned());
-        let mut namespace = self.publish_known(root.as_ref().clone(), core)?;
+        let mut namespace = self.publish_verified(root.as_ref().clone(), core)?;
         for artifact in artifacts {
-            namespace = self.extend_known(namespace, artifact.as_ref().clone())?;
+            namespace = self.extend_verified(namespace, artifact.as_ref().clone())?;
         }
         Ok(namespace)
     }
 
-    fn publish_known(
+    /// Publish units that already passed the bytecode verifier.
+    ///
+    /// Use this path only for exact compiler output or a verified
+    /// namespace replay.
+    pub fn publish_verified(
         &mut self,
         artifact: Artifact,
         runtime_core: Option<Arc<LinkUnit>>,
     ) -> Result<NamespaceId, LinkError> {
-        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(|unit| unit.id()).collect();
         Arc::make_mut(&mut self.verified).extend(units);
         self.publish(artifact, runtime_core)
     }
 
-    fn extend_known(
+    /// Extend a namespace with units that already passed verification.
+    pub fn extend_verified(
         &mut self,
         base: NamespaceId,
         artifact: Artifact,
     ) -> Result<NamespaceId, LinkError> {
-        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let units: BTreeSet<ArtifactId> = artifact.units().iter().map(|unit| unit.id()).collect();
         Arc::make_mut(&mut self.verified).extend(units);
         self.extend(base, artifact)
     }
@@ -1224,7 +1249,8 @@ impl CodeArena {
             .core_artifact
             .and_then(|id| base.units.get(&id).cloned());
         let retained = Arc::new(artifact.clone());
-        let untrusted: BTreeSet<ArtifactId> = artifact.units().iter().map(LinkUnit::id).collect();
+        let untrusted: BTreeSet<ArtifactId> =
+            artifact.units().iter().map(|unit| unit.id()).collect();
         let root_path = artifact.root().module_path().to_string();
         let (root, env) = resolve_artifact(artifact, runtime_core)
             .map_err(|error| fail(format!("the artifact does not resolve: {error}")))?;
@@ -1250,7 +1276,6 @@ impl CodeArena {
             base.canonical_layout && merged_matches_namespace(self.merged.as_ref(), base.as_ref());
         let mut merged = self.merged.as_ref().clone();
         let mut addition = NamespaceBuild::default();
-        let mut root_exports = Vec::new();
         let mut relocations = base.relocations.clone();
         let mut units = base.units.clone();
         let mut active_units = base.active_units.clone();
@@ -1277,18 +1302,19 @@ impl CodeArena {
                 }
             };
             relocations.insert(unit.id(), UnitRelocation(reloc.clone()));
-            units.insert(unit.id(), Arc::new(unit.clone()));
+            units.insert(
+                unit.id(),
+                env.unit_store(path)
+                    .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?,
+            );
             active_units.insert(path.clone(), unit.id());
-            if path == &root_path {
-                root_exports = relocated_exports(unit.module(), &reloc)?;
-            }
         }
 
         let mut slot_initials = base.slot_initials.to_vec();
         slot_initials.resize(merged.slots.len(), None);
         addition.slot_initials.resize(merged.slots.len(), None);
         for (index, initial) in addition.slot_initials.into_iter().enumerate() {
-            if initial.is_some() {
+            if slot_initials[index].is_none() {
                 slot_initials[index] = initial;
             }
         }
@@ -1299,7 +1325,7 @@ impl CodeArena {
             .map(|binding| (binding.key.clone(), binding))
             .collect();
         for binding in addition.bindings {
-            binding_by_key.insert(binding.key.clone(), binding);
+            binding_by_key.entry(binding.key.clone()).or_insert(binding);
         }
         let mut artifacts = base.artifacts.clone();
         if !artifacts.iter().any(|item| item.id() == retained.id()) {
@@ -1309,12 +1335,16 @@ impl CodeArena {
         let tables = Arc::new(tables_of(&merged));
         let dispatch = Arc::new(merged.dispatch.clone());
         let identity = Arc::new(namespace_identity(&merged, base.artifact_id));
+        let [functions, classes, slots] = namespace_membership(&relocations);
         let namespace = CodeNamespace {
             artifact_id: base.artifact_id,
             artifacts,
             units,
             active_units,
             relocations,
+            functions,
+            classes,
+            slots,
             core_artifact: base.core_artifact,
             tables,
             dispatch,
@@ -1336,7 +1366,6 @@ impl CodeArena {
         Arc::make_mut(&mut self.by_chain).insert(chain, id);
         self.merged = Arc::new(merged);
         Arc::make_mut(&mut self.verified).extend(unchecked);
-        let _ = root_exports;
         Ok(id)
     }
 
@@ -1351,6 +1380,34 @@ impl CodeArena {
 
 fn id_of(namespace: &CodeNamespace) -> ArtifactId {
     namespace.artifact_id()
+}
+
+fn namespace_membership(relocations: &BTreeMap<ArtifactId, UnitRelocation>) -> [Arc<[u64]>; 3] {
+    let mut functions = Vec::new();
+    let mut classes = Vec::new();
+    let mut slots = Vec::new();
+    for relocation in relocations.values() {
+        mark_indices(&mut functions, relocation.functions());
+        mark_indices(&mut classes, relocation.classes());
+        mark_indices(&mut slots, relocation.slots());
+    }
+    [functions.into(), classes.into(), slots.into()]
+}
+
+fn mark_indices(bits: &mut Vec<u64>, indices: &[u32]) {
+    for &index in indices {
+        let word = index as usize / u64::BITS as usize;
+        if bits.len() <= word {
+            bits.resize(word + 1, 0);
+        }
+        bits[word] |= 1 << (index % u64::BITS);
+    }
+}
+
+fn contains_index(bits: &[u64], index: u32) -> bool {
+    let word = index as usize / u64::BITS as usize;
+    bits.get(word)
+        .is_some_and(|bits| bits & (1 << (index % u64::BITS)) != 0)
 }
 
 /// Test whether an extension starts at the exact namespace prefix.
@@ -1513,10 +1570,10 @@ impl Merged {
 fn extend_dispatch(merged: &mut Merged) {
     let first = merged.dispatch.len();
     let mut conformances_by_class = vec![Vec::new(); merged.classes.len().saturating_sub(first)];
-    for conformance in merged.conformances.iter() {
+    for (conformance_index, conformance) in merged.conformances.iter().enumerate() {
         let class = conformance.class as usize;
         if class >= first {
-            conformances_by_class[class - first].push(conformance);
+            conformances_by_class[class - first].push((conformance_index as u32, conformance));
         }
     }
     for class_index in first..merged.classes.len() {
@@ -1538,7 +1595,7 @@ fn extend_dispatch(merged: &mut Merged) {
         }
         let inherited_witnesses = inherited.and_then(|row| row.interface_witnesses.clone());
         let mut changed_witnesses: Option<Vec<InterfaceWitness>> = None;
-        for conformance in &conformances_by_class[class_index - first] {
+        for (conformance_index, conformance) in &conformances_by_class[class_index - first] {
             let interface = conformance.application.interface;
             let has_default = merged.interfaces[interface as usize]
                 .methods
@@ -1554,6 +1611,7 @@ fn extend_dispatch(merged: &mut Merged) {
             });
             let witness = InterfaceWitness {
                 interface,
+                conformance: *conformance_index,
                 method_overrides: conformance.method_overrides.clone().into(),
             };
             match witnesses.binary_search_by_key(&interface, |item| item.interface) {
@@ -2067,8 +2125,7 @@ fn artifact_from_order(
     embed_core: bool,
 ) -> Result<Artifact, LinkError> {
     let root_unit = env
-        .unit(root)
-        .cloned()
+        .unit_store(root)
         .ok_or_else(|| fail(format!("the module `{root}` is not bound")))?;
     let mut embedded = Vec::new();
     for path in order {
@@ -2076,12 +2133,11 @@ fn artifact_from_order(
             continue;
         }
         embedded.push(
-            env.unit(path)
-                .cloned()
+            env.unit_store(path)
                 .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?,
         );
     }
-    Artifact::new(root_unit, embedded)
+    Artifact::new_shared(root_unit, embedded)
         .map_err(|error| fail(format!("the artifact graph is invalid: {error}")))
 }
 
@@ -3454,5 +3510,22 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         | ExtendedInstr::SyntaxBuildTrivia
         | ExtendedInstr::SyntaxBuildNode
         | ExtendedInstr::SyntaxToTree => *instr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{contains_index, mark_indices};
+
+    #[test]
+    fn sparse_membership_marks_exact_indices() {
+        let mut bits = Vec::new();
+        mark_indices(&mut bits, &[0, 63, 64, 4097]);
+        for index in [0, 63, 64, 4097] {
+            assert!(contains_index(&bits, index));
+        }
+        for index in [1, 62, 65, 4096, 4098, u32::MAX] {
+            assert!(!contains_index(&bits, index));
+        }
     }
 }

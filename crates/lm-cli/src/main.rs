@@ -106,7 +106,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             let options = parse_options(rest)?;
             let source = read_source(&options.file)?;
             let artifact = compile_file(&source)?.artifact;
-            publish_artifact(artifact)?;
+            publish_verified_artifact(artifact)?;
             Ok(ExitCode::SUCCESS)
         }
         "new" => {
@@ -247,11 +247,11 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 /// Publish the exact runtime core as one artifact namespace.
 fn runtime_core() -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
     let unit = lm_compiler::core_link_unit()?;
-    let artifact = lm_bytecode::artifact::Artifact::new(unit.as_ref().clone(), Vec::new())
+    let artifact = lm_bytecode::artifact::Artifact::new_shared(unit, Vec::new())
         .map_err(|error| format!("error: the runtime core artifact is invalid: {error}\n"))?;
     let mut arena = lm_link::CodeArena::new();
     let namespace = arena
-        .publish(artifact, None)
+        .publish_verified(artifact, None)
         .map_err(|error| format!("error: the runtime core did not publish: {error}\n"))?;
     Ok((arena, namespace))
 }
@@ -511,9 +511,26 @@ fn publish_artifact(
     Ok((arena, namespace))
 }
 
+/// Publish exact output from this process's compiler.
+fn publish_verified_artifact(
+    artifact: lm_bytecode::artifact::Artifact,
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let core = lm_compiler::core_link_unit()?;
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish_verified(artifact, Some(core))
+        .map_err(|error| format!("error: {error}\n"))?;
+    Ok((arena, namespace))
+}
+
 /// Load one artifact into a new code arena.
 fn load_artifact(path: &str) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
-    publish_artifact(read_artifact(path)?)
+    if extension(path) == "lma" {
+        publish_artifact(read_artifact(path)?)
+    } else {
+        let source = read_source(path)?;
+        publish_verified_artifact(compile_file(&source)?.artifact)
+    }
 }
 
 /// Build one source file into `build/debug/<name>.lma` plus

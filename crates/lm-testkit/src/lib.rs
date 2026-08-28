@@ -124,6 +124,18 @@ pub fn publish_artifact(
     Ok((arena, namespace))
 }
 
+/// Publish exact output from this process's compiler.
+pub fn publish_compiled_artifact(
+    artifact: lm_bytecode::artifact::Artifact,
+) -> Result<(lm_link::CodeArena, lm_link::NamespaceId), String> {
+    let core = lm_compiler::core_link_unit()?;
+    let mut arena = lm_link::CodeArena::new();
+    let namespace = arena
+        .publish_verified(artifact, Some(core))
+        .map_err(|error| format!("artifact publish error: {error}"))?;
+    Ok((arena, namespace))
+}
+
 /// Verify and publish one crafted module as a test-only core unit.
 pub fn unit_from_module(
     module: lm_bytecode::Module,
@@ -169,7 +181,8 @@ pub fn replace_artifact_root(
         .filter(|unit| unit.id() != old.id())
         .cloned()
         .collect();
-    lm_bytecode::artifact::Artifact::new(root, embedded).map_err(|error| error.to_string())
+    lm_bytecode::artifact::Artifact::new_shared(std::sync::Arc::new(root), embedded)
+        .map_err(|error| error.to_string())
 }
 
 /// Build one artifact from a compiler result.
@@ -228,11 +241,11 @@ pub fn bind_compiled_unit(
     env.bind_unit(unit).map_err(|error| error.to_string())
 }
 
-/// Compile, serialize, decode, verify, and run one program. Return the
-/// stable outcome text, for example `Done(42)` or `Fault(OutOfFuel)`.
+/// Compile, publish, and run one program.
+/// Return stable outcome text such as `Done(42)`.
 pub fn run_text(name: &str, text: &str, config: VmConfig) -> Result<String, String> {
-    let bytes = compile_to_bytes(name, text)?;
-    let (arena, namespace) = publish_artifact_bytes(&bytes)?;
+    let artifact = compile_text(name, text)?;
+    let (arena, namespace) = publish_compiled_artifact(artifact)?;
     let mut vm = Vm::new(arena, namespace, config);
     let outcome = vm.run();
     Ok(vm.show_outcome(&outcome))
@@ -247,8 +260,8 @@ pub fn run_world(
     allow: &[&str],
     config: VmConfig,
 ) -> Result<(String, Rc<RefCell<RecordingHost>>), String> {
-    let bytes = compile_to_bytes(name, text)?;
-    let (arena, namespace) = publish_artifact_bytes(&bytes)?;
+    let artifact = compile_text(name, text)?;
+    let (arena, namespace) = publish_compiled_artifact(artifact)?;
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     let mut world = World::new(arena, namespace, config, Box::new(host.clone()));
     for grant in allow {

@@ -1333,11 +1333,14 @@ impl<T> CodeTable<T> {
 
     #[inline(always)]
     pub fn get(&self, index: usize) -> Option<&T> {
-        if index >= self.len {
-            return None;
+        if self.later.is_empty() {
+            return self.first.get(index);
         }
         if index < self.first.len() {
             return self.first.get(index);
+        }
+        if index >= self.len {
+            return None;
         }
         let chunks = self.later.as_slice();
         if let Some(last) = chunks.last() {

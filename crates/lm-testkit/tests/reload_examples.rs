@@ -447,16 +447,18 @@ fn a_debugger_that_holds_a_foreign_result_snapshots_and_restores() {
     let core = lm_compiler::core_link_unit().expect("the core builds");
     let mut fresh_arena = lm_link::CodeArena::new();
     let core_namespace = fresh_arena
-        .publish(
-            lm_bytecode::artifact::Artifact::new(core.as_ref().clone(), Vec::new())
+        .publish_verified(
+            lm_bytecode::artifact::Artifact::new_shared(core, Vec::new())
                 .expect("the core artifact is valid"),
             None,
         )
         .expect("the core publishes");
+    let mut fresh_config = VmConfig::default();
+    fresh_config.max_children += 1;
     let mut fresh = World::new(
         fresh_arena,
         core_namespace,
-        VmConfig::default(),
+        fresh_config,
         Box::new(RecordingHost::new(1)),
     );
     let admitted = fresh
@@ -466,6 +468,12 @@ fn a_debugger_that_holds_a_foreign_result_snapshots_and_restores() {
     let root = fresh
         .restore_image(0, target, &admitted)
         .expect("the capture restores");
+    let gate = fresh.next_gate();
+    let round_trip = fresh
+        .capture_snapshot(gate, root, false)
+        .expect("the restored debugger captures again");
+    let round_trip_bytes = round_trip.bytes().expect("the round-trip image has bytes");
+    assert_eq!(round_trip_bytes.as_slice(), bytes.as_slice());
     finish_restored(&mut fresh, root);
 
     // The first restore published both foreign chains after the core.

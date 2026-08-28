@@ -720,6 +720,14 @@ fn external_bytes_run_admission_once_and_trusted_capture_skips_it() {
         .expect("the container loads");
     assert_eq!(world.snapshot_checks(), 1);
     assert_eq!(checked.origin(), lm_vm::snapshot::Origin::ExternalContainer);
+    let repeated = world
+        .load_snapshot_bytes(image.bytes().expect("the image encodes"))
+        .expect("the same container reuses its admitted image");
+    assert_eq!(world.snapshot_checks(), 1);
+    assert_eq!(
+        repeated.bytes().expect("the repeated image has bytes"),
+        checked.bytes().expect("the checked image has bytes")
+    );
     // Two restores of the checked image repeat nothing.
     for _ in 0..2 {
         let target = world.new_child(0).expect("the budget holds a child");

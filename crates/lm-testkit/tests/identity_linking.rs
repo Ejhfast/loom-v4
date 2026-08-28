@@ -471,6 +471,38 @@ fn canonical_layout_marks_only_clean_extension_chains() {
 }
 
 #[test]
+fn extension_preserves_existing_slot_initials_and_bindings() {
+    let first = compile_text("plugin.lm", "def value(): Int\n  1\nend\nvalue()\n")
+        .expect("the first artifact compiles");
+    let second = compile_text("plugin.lm", "def value(): Int\n  2\nend\nvalue()\n")
+        .expect("the second artifact compiles");
+    let second_root = second.id();
+    let (mut arena, first_id) =
+        lm_testkit::publish_artifact(&first).expect("the first artifact publishes");
+    let first = arena
+        .namespace(first_id)
+        .expect("the first namespace exists");
+    let first_slots = first.slot_initials().to_vec();
+    let first_bindings = first.bindings().to_vec();
+    let second_id = arena
+        .extend(first_id, second)
+        .expect("the second version installs");
+    let second = arena
+        .namespace(second_id)
+        .expect("the second namespace exists");
+    assert_eq!(&second.slot_initials()[..first_slots.len()], first_slots);
+    for first_binding in first_bindings {
+        let binding = second
+            .bindings()
+            .iter()
+            .find(|binding| binding.key == first_binding.key)
+            .expect("the existing binding remains present");
+        assert_eq!(binding, &first_binding);
+    }
+    assert!(second.relocation(second_root).is_some());
+}
+
+#[test]
 fn collection_keeps_one_import_and_removes_an_unused_cycle() {
     let first = link_selective_provider("0");
     let second = link_selective_provider("1");
@@ -1500,8 +1532,9 @@ fn measure_load_path() {
                   def run(n: Int): Int\n  c = Counter()\n  i = 0\n  \
                   while i < n\n    c.add(i)\n    i = i + 1\n  end\n  c.get()\nend\n\
                   run(10)\n";
-    let bytes = lm_testkit::compile_to_bytes("t.lm", source).expect("compiles");
-    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    let module = lm_testkit::compile_module_text("t.lm", source).expect("compiles");
+    let module_bytes = lm_bytecode::encode(&module);
+    let artifact_bytes = lm_testkit::compile_to_bytes("t.lm", source).expect("compiles");
     const ROUNDS: u32 = 200;
     let start = std::time::Instant::now();
     for _ in 0..ROUNDS {
@@ -1515,12 +1548,13 @@ fn measure_load_path() {
     let verify = start.elapsed() / ROUNDS;
     let start = std::time::Instant::now();
     for _ in 0..ROUNDS {
-        lm_testkit::publish_artifact_bytes(&bytes).expect("loads");
+        lm_testkit::publish_artifact_bytes(&artifact_bytes).expect("loads");
     }
     let load = start.elapsed() / ROUNDS;
     println!(
-        "module {} bytes: identity {identity:?} verify {verify:?} load {load:?}",
-        bytes.len()
+        "module {} bytes, artifact {} bytes: identity {identity:?} verify {verify:?} load {load:?}",
+        module_bytes.len(),
+        artifact_bytes.len()
     );
 }
 

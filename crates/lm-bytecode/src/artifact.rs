@@ -8,6 +8,7 @@ use crate::interface::{interface_identity, Interface};
 use crate::{hash, Module};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 mod codec;
 
@@ -218,24 +219,39 @@ impl LinkUnit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Artifact {
     root: ArtifactId,
-    units: Vec<LinkUnit>,
+    units: Arc<[Arc<LinkUnit>]>,
 }
 
 impl Artifact {
     /// Create one artifact from a root and embedded dependencies.
     pub fn new(root: LinkUnit, embedded: Vec<LinkUnit>) -> Result<Artifact, ArtifactGraphError> {
+        Artifact::new_shared(Arc::new(root), embedded.into_iter().map(Arc::new).collect())
+    }
+
+    /// Create one artifact from shared link units.
+    pub fn new_shared(
+        root: Arc<LinkUnit>,
+        embedded: Vec<Arc<LinkUnit>>,
+    ) -> Result<Artifact, ArtifactGraphError> {
         let root_id = root.id();
         let mut units = Vec::with_capacity(embedded.len().saturating_add(1));
         units.push(root);
         units.extend(embedded);
-        Artifact::from_units(root_id, units)
+        Artifact::from_shared_units(root_id, units)
     }
 
     pub(crate) fn from_units(
         root: ArtifactId,
-        mut units: Vec<LinkUnit>,
+        units: Vec<LinkUnit>,
     ) -> Result<Artifact, ArtifactGraphError> {
-        units.sort_by_key(LinkUnit::id);
+        Artifact::from_shared_units(root, units.into_iter().map(Arc::new).collect())
+    }
+
+    fn from_shared_units(
+        root: ArtifactId,
+        mut units: Vec<Arc<LinkUnit>>,
+    ) -> Result<Artifact, ArtifactGraphError> {
+        units.sort_by_key(|unit| unit.id());
         for pair in units.windows(2) {
             if pair[0].id() == pair[1].id() {
                 return Err(ArtifactGraphError::DuplicateUnit(pair[0].id()));
@@ -252,7 +268,10 @@ impl Artifact {
                 ));
             }
         }
-        let artifact = Artifact { root, units };
+        let artifact = Artifact {
+            root,
+            units: units.into(),
+        };
         artifact.validate_graph()?;
         Ok(artifact)
     }
@@ -269,21 +288,21 @@ impl Artifact {
     }
 
     /// Return all embedded units, including the root.
-    pub fn units(&self) -> &[LinkUnit] {
+    pub fn units(&self) -> &[Arc<LinkUnit>] {
         &self.units
     }
 
     /// Find one embedded unit by semantic identity.
     pub fn unit(&self, id: ArtifactId) -> Option<&LinkUnit> {
         self.units
-            .binary_search_by_key(&id, LinkUnit::id)
+            .binary_search_by_key(&id, |unit| unit.id())
             .ok()
-            .map(|index| &self.units[index])
+            .map(|index| self.units[index].as_ref())
     }
 
-    /// Consume the artifact and return its root and units.
-    pub fn into_units(self) -> (ArtifactId, Vec<LinkUnit>) {
-        (self.root, self.units)
+    /// Consume the artifact and return shared unit stores.
+    pub fn into_units(self) -> (ArtifactId, Vec<Arc<LinkUnit>>) {
+        (self.root, self.units.iter().cloned().collect())
     }
 
     fn validate_graph(&self) -> Result<(), ArtifactGraphError> {
@@ -372,7 +391,10 @@ impl fmt::Display for ArtifactGraphError {
 
 impl std::error::Error for ArtifactGraphError {}
 
-fn reject_cycles(units: &[LinkUnit], successors: &[Vec<u32>]) -> Result<(), ArtifactGraphError> {
+fn reject_cycles(
+    units: &[Arc<LinkUnit>],
+    successors: &[Vec<u32>],
+) -> Result<(), ArtifactGraphError> {
     let (components, _) = lm_scc::components(units.len(), successors);
     for component in components {
         let first = component[0];
@@ -970,7 +992,7 @@ mod tests {
         units.reverse();
         let artifact = Artifact {
             root: units[0].id(),
-            units,
+            units: units.into_iter().map(Arc::new).collect(),
         };
         let bytes = encode(&artifact).unwrap();
         assert_eq!(decode(&bytes), Err(ArtifactDecodeError::NonCanonicalUnits));
@@ -990,7 +1012,7 @@ mod tests {
         root.dependencies.reverse();
         let artifact = Artifact {
             root: root.id(),
-            units: vec![root],
+            units: vec![Arc::new(root)].into(),
         };
         let bytes = encode(&artifact).unwrap();
         assert_eq!(

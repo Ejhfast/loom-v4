@@ -814,7 +814,7 @@ impl World {
         let root = artifact.id();
         let mut units: BTreeMap<
             lm_bytecode::artifact::ArtifactId,
-            lm_bytecode::artifact::LinkUnit,
+            std::sync::Arc<lm_bytecode::artifact::LinkUnit>,
         > = artifact
             .units()
             .iter()
@@ -834,7 +834,7 @@ impl World {
             let provider = provider.artifact.clone();
             for unit in provider.units() {
                 match units.get(&unit.id()) {
-                    Some(existing) if existing != unit => {
+                    Some(existing) if existing.as_ref() != unit.as_ref() => {
                         return Err(format!("link unit {} has conflicting content", unit.id()));
                     }
                     Some(_) => {}
@@ -847,7 +847,7 @@ impl World {
         let root = units
             .remove(&root)
             .ok_or_else(|| "the install artifact has no root unit".to_string())?;
-        lm_bytecode::artifact::Artifact::new(root, units.into_values().collect())
+        lm_bytecode::artifact::Artifact::new_shared(root, units.into_values().collect())
             .map_err(|error| format!("the link environment is invalid: {error}"))
     }
 

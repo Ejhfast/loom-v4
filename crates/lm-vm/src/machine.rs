@@ -1983,13 +1983,13 @@ impl Machine {
         } else {
             envs.derive(module, parent, call.app).map_err(env_fault)?
         };
+        let witness = dispatch
+            .get(class as usize)
+            .and_then(|row| row.interface_witness(call.interface, call.method));
         let selected = if default == lm_bytecode::NO_FUNC {
             true
         } else {
-            dispatch
-                .get(class as usize)
-                .and_then(|row| row.interface_override(call.interface, call.method))
-                .ok_or(BAD_TYPE)?
+            witness.ok_or(BAD_TYPE)?.0
         };
         let (target, env) = if selected {
             let target = dispatch
@@ -2005,8 +2005,9 @@ impl Machine {
             if default == lm_bytecode::NO_FUNC {
                 return Err(BAD_TYPE);
             }
+            let conformance = witness.ok_or(BAD_TYPE)?.1;
             let env = envs
-                .interface_default_env(module, call.interface, class, receiver, own)
+                .interface_default_env(module, conformance, class, receiver, own)
                 .map_err(env_fault)?
                 .ok_or(BAD_TYPE)?;
             (default, env)

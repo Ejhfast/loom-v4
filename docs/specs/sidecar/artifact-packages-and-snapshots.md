@@ -407,6 +407,8 @@ Bytecode effect rows store ABI operation and group slots.
 
 Closed effect rows expand groups into exact operation slots.
 
+A closed row depends on the group membership of its pinned ABI bundle.
+
 Effect rows never store module string slots.
 
 Linking and snapshot restore never relocate effect rows.
@@ -627,9 +629,15 @@ A serialized snapshot never stores a process-global arena index.
 
 The artifact graph defines one deterministic snapshot-local code layout.
 
-Each layout entry derives from one `ArtifactId` and one unit-local position.
+The loader starts with an empty arena.
 
-Namespace manifests define publication order inside this local layout.
+It replays each namespace manifest in stored order.
+
+Each manifest replays its artifact chain in stored order.
+
+Each artifact replays dependency units before its root unit.
+
+This replay assigns every snapshot-local code index.
 
 The encoder maps live arena indices into the local layout.
 
@@ -780,17 +788,17 @@ Later phases share the decoded value.
 
 Normal source compilation must not pay snapshot packaging costs.
 
-Trusted compilation performs collection, relocation, identity calculation, and encoding.
+Trusted source execution performs collection, identity calculation, and relocation.
+
+Artifact build also performs encoding.
 
 Trusted compilation does not repeat unit verification or interface validation.
 
 Normal execution must not pay namespace lookup costs per instruction.
 
-Core verification can be reused by exact `ArtifactId`.
+The process reuses its verified standard core unit.
 
-This reuse is an additional optimization.
-
-It cannot hide a slower cold path.
+The runtime keeps no on-disk verifier verdict cache.
 
 Compression is also an additional optimization.
 
@@ -916,7 +924,7 @@ Gate: decoded artifact units verify before relocation.
 
 Gate: trusted compiler units do not verify twice.
 
-Gate: incompatible relocated calls reject during final VM verification.
+Gate: incompatible relocated calls reject during link contract comparison.
 
 Gate: a source module contains no copied core function body.
 
@@ -1030,7 +1038,7 @@ The fat snapshot gate remains open. No writer embeds a core.
 - Measure compile, link, load, install, restore, and execution.
 - Run the full workspace suite.
 
-Gate: existing execution operations stay within normal benchmark noise.
+Gate: each existing execution benchmark stays within five percent of its same-session parent result.
 
 Gate: collected artifacts improve raw size and cold load time.
 

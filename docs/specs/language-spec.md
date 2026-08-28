@@ -475,13 +475,10 @@ The type universe has four strata.
 | `StringBuilder` | Mutable UTF-8 builder |
 | `ByteBuffer` | Mutable byte builder |
 | `Fault` / `FaultCode` | Frozen machine-fault diagnostic and stable code |
-| `Type[T]` | Typed runtime type descriptor |
-| `TypeView` | Erased frozen type descriptor for diagnostics/dynamic checks |
 | `Class[T]` | Class value constructing `T` |
 | `PolicyTarget` | Sealed non-callable parent used by non-granting table edits |
 | `Operation` / `OperationGroup` | Exact-operation and group policy descriptors; both subtype `PolicyTarget` |
 | `DynValue` | Explicit type/value package for dynamic APIs |
-| `ValueView` | Opaque frozen diagnostic view of a value |
 | `Artifact` | Opaque untrusted bytecode container |
 | `VerifiedModule` | Portable verified module revision |
 | `FunctionCode[A,T]` | Portable verified function code |
@@ -524,6 +521,10 @@ enum Result[T, E]
   Err(error: E)
 end
 ```
+
+`Option.Some` uses its bare payload as its runtime value.
+
+`Option.None` uses the native empty-case value.
 
 An artifact carries a **core role table**: one class slot per stable core role, for example `Option`, `Option.Some`, and `Option.None`. The compiler fills the table, the linker relocates it, and the verifier proves the kind, the generic arity, the parent slot, and the exact field layout of every filled slot. A rule that needs a core family, such as the pending-call type of a `Call` pattern, reads a slot. It reads no name and no hash, so a rename changes nothing the verifier reads, and an artifact with no source resolves its core from its own bytes. A family whose parent slot is filled must fill every arm slot.
 
@@ -716,20 +717,19 @@ end
 
 `is` is pure. `as` returns the same value or faults with `BadCast`.
 
-Truly dynamic APIs use an opaque package:
+Truly dynamic APIs use the opaque `DynValue` package.
 
-```text
-dyn_pack[T](value: T) -> DynValue
-DynValue.type(self) -> TypeView
-dyn_unpack[T](value: DynValue, expected: Type[T]) -> Option[T]
-type_descriptor[T]() -> Type[T]
-```
+The compiler creates this package for a declared dynamic result.
 
-`type_descriptor[T]()` is a pure compiler-known constructor for the canonical typed descriptor of `T`.
+`DynValue.render()` gives a bounded text representation.
 
-It allocates no visible dynamic object on repeated use. Dynamic-unpack and snapshot APIs can use this descriptor.
+`DynValue` preserves its hidden exact type. It does not expose that type to guest code.
 
-`DynValue` is frozen and preserves the hidden exact type. It does not implicitly subtype every `T`, so dynamic data cannot infect a surrounding generic type by accident. Reflection and diagnostics use `ValueView`, which exposes type, bounded formatting, digest when available, and structural children as more views; it cannot be cast back into a live guest value.
+A local `DynValue` is digestible when its packaged graph is digestible.
+
+A cross-machine dynamic reference is holder-local and not digestible.
+
+General type descriptors, dynamic unpacking, and value reflection remain deferred.
 
 ### 5.7 Function, operation, and effect-variable types
 
@@ -1895,7 +1895,9 @@ q.op_name(): String
 
 The token names a machine and an ordinal, and never the operation, so the name comes from the pending record of that machine. The request must still be live. `answer`, `reject`, `dispatch`, and `serve_file` each spend one request, and reading the name after any of them faults the caller with `InvalidRequestToken`.
 
-The wider erased surface stays deferred. `q.op(): Operation` needs an identity-erased operation value, which version 0.2 does not define; `q.args_view()` and `q.reply_type()` need `ValueView` and `TypeView` with them.
+The wider erased surface stays deferred.
+
+It needs identity-erased operation, value, and type views that version 0.2 does not define.
 
 To read arguments or answer, the holder matches the request against an exact typed operation object:
 
@@ -1975,7 +1977,9 @@ An existing policy-table handle permits synchronized live revocation.
 
 A routed request parks its descendant activation chain. Only the holder of the driven surface can consume that route.
 
-`stack()` is valid only while not running or proc-owned and returns deep-frozen `FrameView` values: function identity/name, PC, source location if present, locals as `ValueView`, and a bounded operand summary. No live guest reference escapes. The name of a frame is the set of names that bind its function value (3.7), because two equal bodies share one code object and keep both names.
+`stack()` is valid only while the run is stopped and holder-owned.
+
+It returns deep-frozen `CodeLocation` values with the top frame first.
 
 At most one host thread owns execution. Guest execution remains one logical thread.
 
@@ -2168,17 +2172,16 @@ Each creation path runs admission or copies a stopped verified image.
 
 Editable snapshot data has no guest spelling. It never backs a guest value.
 
-`RunSnapshot[T]` is a typed view over one `VmSnapshot`. It validates the image's distinguished run selection.
+`RunSnapshot[T]` is a typed capture of one run.
 
 ```text
-VmSnapshot.result_type(self) -> TypeView
-VmSnapshot.cast_result[T](self, expected: Type[T])
-  -> Result[RunSnapshot[T], SnapshotTypeError]
 VmSnapshot.to_bytes(self) -> Result[Bytes, SnapshotError]
 RunSnapshot[T].to_bytes(self) -> Result[Bytes, SnapshotError]
 ```
 
-`cast_result` requires a distinguished run marker. A full VM snapshot has no such marker.
+External bytes produce `VmSnapshot` because they have no guest type witness.
+
+`Vm.restore_dynamic` restores its distinguished run as `Run[DynValue]`.
 
 A run image stores an explicit distinguished-run selector. The selector does not give machine ordinal zero special meaning.
 
@@ -3456,7 +3459,9 @@ The metaprogramming sidecar defines the complete slot contracts and replacement 
 
 The held, receiverless, and full VM forms use separate exact operation identities. They share one snapshot implementation family.
 
-`VmSnapshot.cast_result(type_descriptor[T]())` checks a distinguished run. It returns `Result[RunSnapshot[T],SnapshotTypeError]`.
+`Vm.RestoreDynamic` accepts a `VmSnapshot` with a distinguished run.
+
+It returns `Result[Run[DynValue],RestoreError]`.
 
 A full VM snapshot has no distinguished run. `Vm.RestoreVm` restores that image without selecting a run.
 
@@ -4131,7 +4136,11 @@ is_frozen[T](value: T): Bool
 deep_equal[T](a: T, b: T): Bool
 ```
 
-`deep_equal` requires frozen digestible graphs. It uses digests as a fast reject, then cycle-safe structural comparison; digest equality alone is not proof. `std/value` also exposes bounded `inspect(value): ValueView` and canonical encode/decode for data types explicitly marked by the core shape table.
+`deep_equal` requires frozen digestible graphs.
+
+It uses digests as a fast reject, then performs cycle-safe structural comparison.
+
+Digest equality alone is not proof.
 
 ### 24.9 Paths, I/O, and files
 
@@ -4279,7 +4288,13 @@ def answer_write[T](
 end
 ```
 
-A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Call` pattern rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, and bounded request logging through `ValueView`.
+A policy can define one such function for each operation that it owns.
+
+The ordinary `Call` pattern rule type-checks this function.
+
+This rule adds no variadic generics, tuple spreading, or dependent native rule.
+
+`std/vm` provides fuel builders, limit builders, terminal-result mapping, and snapshot file helpers.
 
 ### 24.14 Procs
 
