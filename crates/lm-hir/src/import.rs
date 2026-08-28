@@ -25,7 +25,7 @@ use crate::check::{
     ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig, InterfaceInfo, InterfaceMethodSig,
     InterfaceUse, MethodSig,
 };
-use crate::hir::{HExpr, HExprKind, HStmt, HirFunc, HirImport, HirImportDef};
+use crate::hir::{Flow, HExpr, HExprKind, HStmt, HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
     ExportEntry, IfaceClass, IfaceClassKind, IfaceFn, IfaceInterface, IfaceInterfaceUse, IfaceItem,
     IfaceRow, IfaceType, Interface, QualName,
@@ -1088,16 +1088,21 @@ impl<'a> Materializer<'a> {
             .iter()
             .enumerate()
             .map(|(slot, ty)| HExpr {
+                flow: Flow::Normal,
                 ty: *ty,
                 mutable: sig.param_muts[slot],
                 kind: HExprKind::Local(slot as u32),
             })
             .collect();
-        vec![HStmt::Expr(HExpr {
-            ty: sig.ret,
-            mutable: true,
-            kind: HExprKind::Intrinsic { intrinsic, args },
-        })]
+        vec![HStmt::Expr(
+            HExpr {
+                flow: Flow::Normal,
+                ty: sig.ret,
+                mutable: true,
+                kind: HExprKind::Intrinsic { intrinsic, args },
+            }
+            .finish_flow(),
+        )]
     }
 
     /// Fill every reserved interface contract.

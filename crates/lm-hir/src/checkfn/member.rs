@@ -63,6 +63,7 @@ impl<'o> FnChecker<'o> {
             let ty = ctx.classes[cidx as usize].field_tys[fidx];
             let mutable = self_expr.mutable;
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable,
                 kind: HExprKind::FieldGet {
@@ -89,6 +90,7 @@ impl<'o> FnChecker<'o> {
         let ty = ctx.store.substitute(declared, &class_args, &[]);
         let mutable = recv_h.mutable;
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable,
             kind: HExprKind::FieldGet {
@@ -166,6 +168,7 @@ impl<'o> FnChecker<'o> {
                     let args = arrange_args(args, &["bits"], "Float.from_bits")?;
                     let bits = self.check_expr(ctx, args[0], INT)?;
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: lm_types::FLOAT,
                         mutable: true,
                         kind: HExprKind::Intrinsic {
@@ -199,6 +202,7 @@ impl<'o> FnChecker<'o> {
                     let args = arrange_args(args, &["text"], "Bytes.from_hex")?;
                     let text = self.check_expr(ctx, args[0], sig.params[0])?;
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: sig.ret,
                         mutable: true,
                         kind: HExprKind::Call {
@@ -266,6 +270,7 @@ impl<'o> FnChecker<'o> {
                     }
                     let func = ctx.core_func_index["_result_fault_value"];
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: arguments[0],
                         mutable: true,
                         kind: HExprKind::Call {
@@ -314,6 +319,7 @@ impl<'o> FnChecker<'o> {
             self.charge_op(ctx, op, span)?;
             let ty = ctx.store.intern(Type::Wait(ret));
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::PrepareWait { op, args: checked },
@@ -413,6 +419,7 @@ impl<'o> FnChecker<'o> {
                     if matches!(ctx.store.get(field_ty), Type::Fn(..) | Type::Callback(..)) {
                         let mutable = recv_h.mutable;
                         let callee = HExpr {
+                            flow: Flow::Normal,
                             ty: field_ty,
                             mutable,
                             kind: HExprKind::FieldGet {
@@ -562,6 +569,7 @@ impl<'o> FnChecker<'o> {
         }
         let ret = ctx.normalize_associated(&self.env, out.ret);
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: ret,
             mutable: true,
             kind: HExprKind::InterfaceCall {
@@ -640,6 +648,7 @@ impl<'o> FnChecker<'o> {
                         all_args.push(recv_h);
                         all_args.extend(args);
                         return Ok(HExpr {
+                            flow: Flow::Normal,
                             ty: sig.ret,
                             mutable: true,
                             kind: HExprKind::Call {
@@ -651,6 +660,7 @@ impl<'o> FnChecker<'o> {
                         });
                     }
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: sig.ret,
                         mutable: true,
                         kind: HExprKind::MethodCall {
@@ -709,6 +719,7 @@ impl<'o> FnChecker<'o> {
                     let mut all_args = vec![recv_h];
                     all_args.extend(out.args);
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: out.ret,
                         mutable: true,
                         kind: HExprKind::Call {
@@ -720,6 +731,7 @@ impl<'o> FnChecker<'o> {
                     });
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: out.ret,
                     mutable: true,
                     kind: HExprKind::MethodCall {
@@ -841,6 +853,7 @@ impl<'o> FnChecker<'o> {
             _ => true,
         };
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: ret,
             mutable,
             kind: HExprKind::Native { op, args: all_args },
@@ -891,6 +904,7 @@ impl<'o> FnChecker<'o> {
         let args = arrange_args(args, &["reason"], "denied")?;
         let reason = self.check_expr(ctx, args[0], STRING)?;
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: lm_types::FAULT,
             mutable: true,
             kind: HExprKind::FaultDenied {
@@ -988,6 +1002,7 @@ impl<'o> FnChecker<'o> {
         );
         let ty = ctx.store.intern(Type::Handle(mailbox, body.ret));
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable: true,
             kind: HExprKind::Spawn {
@@ -1079,6 +1094,7 @@ impl<'o> FnChecker<'o> {
             let mut all_args = vec![self.self_value()];
             all_args.extend(checked);
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty: UNIT,
                 mutable: true,
                 kind: HExprKind::Call {
@@ -1144,6 +1160,7 @@ impl<'o> FnChecker<'o> {
         // arguments come before the method's own arguments.
         let targs = out.targs;
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: out.ret,
             mutable: true,
             kind: HExprKind::Call {
@@ -1169,6 +1186,7 @@ impl<'o> FnChecker<'o> {
                 let idx = self.check_expr(ctx, index, INT)?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: elem,
                     mutable,
                     kind: HExprKind::Native {
@@ -1183,6 +1201,7 @@ impl<'o> FnChecker<'o> {
                 let key = self.check_expr(ctx, index, query_key)?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: v,
                     mutable,
                     kind: HExprKind::Native {
@@ -1212,6 +1231,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: elems[pos as usize],
                     mutable,
                     kind: HExprKind::TupleGet {
@@ -1281,6 +1301,7 @@ impl<'o> FnChecker<'o> {
         if is_cast {
             let mutable = v.mutable;
             Ok(HExpr {
+                flow: Flow::Normal,
                 ty: target,
                 mutable,
                 kind: HExprKind::CastType {
@@ -1290,6 +1311,7 @@ impl<'o> FnChecker<'o> {
             })
         } else {
             Ok(HExpr {
+                flow: Flow::Normal,
                 ty: BOOL,
                 mutable: true,
                 kind: HExprKind::IsType {
@@ -1309,7 +1331,7 @@ impl<'o> FnChecker<'o> {
         row: &[ast::RowItem],
         expected_ret: Option<TypeId>,
         infer_row: bool,
-        body: &[ast::Stmt],
+        body: &[ast::Expr],
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let env = self.env.clone();
@@ -1353,7 +1375,7 @@ impl<'o> FnChecker<'o> {
                 .collect()],
             captures: Vec::new(),
             is_closure: true,
-            loop_depth: 0,
+            loops: Vec::new(),
             iterated_places: Vec::new(),
             saw_return: false,
             ret: ret_kind,
@@ -1366,7 +1388,7 @@ impl<'o> FnChecker<'o> {
         let (body_h, body_ty) = match declared_ret {
             Some(t) => {
                 let mode = if t == UNIT {
-                    BlockMode::Stmt
+                    BlockMode::Discard
                 } else {
                     BlockMode::Value(t)
                 };
@@ -1390,6 +1412,7 @@ impl<'o> FnChecker<'o> {
             .captures
             .iter()
             .map(|c| HExpr {
+                flow: Flow::Normal,
                 ty: c.ty,
                 mutable: c.mutable,
                 kind: match c.source {
@@ -1445,6 +1468,7 @@ impl<'o> FnChecker<'o> {
         );
         let fn_ty = ctx.store.intern_fn(ptys, pmuts, body_ty, closure_row);
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: fn_ty,
             mutable: true,
             kind: HExprKind::MakeClosure {

@@ -59,7 +59,7 @@ impl CoreDemand {
                     }
                 }
                 if let Some(body) = &method.body {
-                    demand.add_stmts(bundle, body);
+                    demand.add_exprs(bundle, body);
                 }
             }
         }
@@ -108,9 +108,9 @@ impl CoreDemand {
             demand.add_generics(&function.generics);
             demand.add_params(&function.params);
             demand.add_optional_type(function.ret.as_ref());
-            demand.add_stmts(bundle, &function.body);
+            demand.add_exprs(bundle, &function.body);
         }
-        demand.add_stmts(bundle, &module.entry);
+        demand.add_exprs(bundle, &module.entry);
         demand
     }
 
@@ -206,46 +206,45 @@ impl CoreDemand {
         self.add_params(&method.params);
         self.add_optional_type(method.ret.as_ref());
         self.add_generics(&method.premises);
-        self.add_stmts(bundle, &method.body);
+        self.add_exprs(bundle, &method.body);
     }
 
-    fn add_stmts(&mut self, bundle: &lm_abi::AbiBundle, statements: &[ast::Stmt]) {
-        for statement in statements {
-            match &statement.kind {
-                ast::StmtKind::Assign { ty, value, .. } => {
-                    self.add_optional_type(ty.as_ref());
-                    self.add_expr(bundle, value);
-                }
-                ast::StmtKind::AssignField { recv, value, .. } => {
-                    self.add_expr(bundle, recv);
-                    self.add_expr(bundle, value);
-                }
-                ast::StmtKind::While { cond, body } => {
-                    self.add_expr(bundle, cond);
-                    self.add_stmts(bundle, body);
-                }
-                ast::StmtKind::For { value, body, .. } => {
-                    self.name("Iterable");
-                    self.name("Iterator");
-                    self.name("Option");
-                    self.name("Char");
-                    self.add_expr(bundle, value);
-                    self.add_stmts(bundle, body);
-                }
-                ast::StmtKind::Return { value } => {
-                    if let Some(value) = value {
-                        self.add_expr(bundle, value);
-                    }
-                }
-                ast::StmtKind::Expr(expr) => self.add_expr(bundle, expr),
-                ast::StmtKind::Break | ast::StmtKind::Continue => {}
-            }
+    fn add_exprs(&mut self, bundle: &lm_abi::AbiBundle, expressions: &[ast::Expr]) {
+        for expression in expressions {
+            self.add_expr(bundle, expression);
         }
     }
 
     fn add_expr(&mut self, bundle: &lm_abi::AbiBundle, expression: &ast::Expr) {
         use ast::ExprKind;
         match &expression.kind {
+            ExprKind::Assign { ty, value, .. } => {
+                self.add_optional_type(ty.as_ref());
+                self.add_expr(bundle, value);
+            }
+            ExprKind::AssignField { recv, value, .. } => {
+                self.add_expr(bundle, recv);
+                self.add_expr(bundle, value);
+            }
+            ExprKind::While { cond, body } => {
+                self.add_expr(bundle, cond);
+                self.add_exprs(bundle, body);
+            }
+            ExprKind::For { value, body, .. } => {
+                self.name("Iterable");
+                self.name("Iterator");
+                self.name("Option");
+                self.name("Char");
+                self.add_expr(bundle, value);
+                self.add_exprs(bundle, body);
+            }
+            ExprKind::Loop { body } => self.add_exprs(bundle, body),
+            ExprKind::Return { value } | ExprKind::Break { value } => {
+                if let Some(value) = value {
+                    self.add_expr(bundle, value);
+                }
+            }
+            ExprKind::Continue => {}
             ExprKind::Str(_) => self.name("String"),
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -420,29 +419,29 @@ impl CoreDemand {
             } => {
                 self.add_params(params);
                 self.add_optional_type(ret.as_ref());
-                self.add_stmts(bundle, body);
+                self.add_exprs(bundle, body);
             }
             ExprKind::If { arms, else_body } => {
                 for (condition, body) in arms {
                     self.add_expr(bundle, condition);
-                    self.add_stmts(bundle, body);
+                    self.add_exprs(bundle, body);
                 }
                 if let Some(body) = else_body {
-                    self.add_stmts(bundle, body);
+                    self.add_exprs(bundle, body);
                 }
             }
             ExprKind::Case { scrut, arms } => {
                 self.add_expr(bundle, scrut);
                 for arm in arms {
                     self.add_pattern(bundle, &arm.pattern);
-                    self.add_stmts(bundle, &arm.body);
+                    self.add_exprs(bundle, &arm.body);
                 }
             }
             ExprKind::Select { arms } => {
                 self.name("Choice");
                 for arm in arms {
                     self.add_expr(bundle, &arm.wait);
-                    self.add_stmts(bundle, &arm.body);
+                    self.add_exprs(bundle, &arm.body);
                 }
             }
             ExprKind::Labeled { value, .. } => self.add_expr(bundle, value),

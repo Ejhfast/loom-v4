@@ -77,7 +77,9 @@ Spelling is case-sensitive. Standard style uses initial capitals for classes, en
 
 ### 2.2 Whitespace, separators, and comments
 
-Spaces, tabs, carriage returns, and newlines separate tokens. A newline or semicolon terminates a statement when not inside delimiters, a string, or an unfinished operator expression.
+Spaces, tabs, carriage returns, and newlines separate tokens. A newline or semicolon separates body expressions.
+
+Delimiters, strings, and unfinished operators suppress this separator.
 
 A line comment starts with `#` and extends to the newline. There are no block comments in version 0.2.
 
@@ -85,7 +87,7 @@ A line comment starts with `#` and extends to the newline. There are no block co
 
 ```text
 and as break case class continue def do effect else elsif end enum escaping
-false if in loop mut not or return self super then true use while with
+false for if in loop mut not or return self super then true use while with
 ```
 
 `sys` is a prebound ordinary value, not a keyword.
@@ -874,19 +876,35 @@ Each callable is lowered to a control-flow graph. Definite assignment, return an
 
 The source checker and bytecode verifier are independent implementations over different representations. The verifier reconstructs local/operand type states at block entries, checks joins, calls, fields, intrinsics, performs, scoped-designator escape, and claimed rows, and rejects malformed external code before it enters the verified-code cache. Source types are erased from the execution hot path to dense slots after verification; ordinary instruction dispatch performs no general subtype lookup.
 
-## 6. Expressions and statements
+## 6. Expressions
 
-Every construct is an expression, though many evaluate to `()`.
+Every executable source construct is an expression. Definitions remain module members. Many expressions evaluate to `()`.
 
 ### 6.1 Blocks, assignment, and calls
 
 A body is a sequence of expressions. Its value is the last expression, or `()` if empty. `return` exits the nearest callable.
 
+A newline can open any control body. `then` can open a conditional or pattern body.
+
+`do` can open a loop body. A `while` or `for` body needs a separator after `do`.
+
+`end` closes each body form. The same expression grammar applies inside every body.
+
 A callable with result `()` discards its final expression value and returns `()`.
 
-An expression in statement position discards its value. Each arm of a discarded control-flow expression also uses statement position.
+An expression in discarded position has no result constraint. Each arm of a discarded control-flow expression follows the same rule.
 
-Assignment declares/rebinds a local or writes a permitted field/index. It evaluates to `()`.
+Assignment declares or rebinds a local. It can also write a permitted field. Assignment evaluates to `()`.
+
+An assignment is valid in every expression position. A new local belongs to the innermost containing body.
+
+`return`, `break`, and `continue` have type `Never`.
+
+A `return` operand must match the callable result type. A `break` operand must match the enclosing `loop` result type.
+
+An expression cannot complete normally when a mandatory operand has type `Never`.
+
+An expression after an expression that cannot complete is unreachable. The compiler does not perform termination analysis.
 
 ```lm
 x = 1
@@ -918,7 +936,7 @@ files.with_open(path, options) do |file|
 end
 ```
 
-The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. A trailing closure must start on the call line. A newline after the call ends the statement first (2.2). Only `?` can follow a trailing closure. There is no overload resolution.
+The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. A trailing closure must start on the call line. A newline after the call ends the expression first (2.2). Only `?` can follow a trailing closure. There is no overload resolution.
 
 ### 6.2 Closures
 
@@ -1149,6 +1167,16 @@ end
 
 Conditions must be `Bool`. If used as a value, all normal branches must have a common type. Omitting `else` is allowed only where the resulting type is `()`.
 
+`then` can open an arm on the same line:
+
+```lm
+width = if value > limit then limit else value end
+```
+
+A newline can open the same arm as a block. `then` and a newline do not create different expression categories.
+
+A discarded conditional does not join its arm types. The checker still checks each arm independently.
+
 ### 7.2 Loops
 
 ```lm
@@ -1156,16 +1184,47 @@ while condition
   body()
 end
 
+for item in items
+  use(item)
+end
+
 loop do
   body()
 end
 ```
 
-`break` exits the nearest loop; `continue` begins its next iteration. A loop has the type `()`.
+`while` and `for` have type `()`. Their `break` expressions cannot carry values.
 
-A loop whose condition is the literal `true` and whose body holds no `break` of that loop has the type `Never` instead. `loop do ... end` is the same statement as `while true`, so both take this rule. `Never` is a subtype of every type, so such a loop ends a body of any declared result type. The statement after it is unreachable, and an unreachable statement is a compile error.
+The compiler always gives `while` a condition-false exit. It does not inspect the condition value during type checking.
 
-The body decides nothing here. A body that returns on one path and repeats on another still never reaches the statement after the loop. `break` is the only normal exit.
+An inline `while` or `for` body uses `do` followed by a separator:
+
+```lm
+for item in items() do; use(item) end
+```
+
+`continue` starts the next iteration of the nearest loop. It has type `Never`.
+
+`loop` has the join type of the `break` values that it owns. A bare `break` contributes `()` to this join.
+
+```lm
+result = loop do
+  value = next()
+  if valid(value) then break value end
+end
+```
+
+A `loop` with no `break` that it owns has type `Never`. `Never` is a subtype of every type.
+
+The checker uses sibling break types to resolve constructor inference. It does not search for a result type.
+
+A loop result is mutable only when every value-producing break result is mutable.
+
+A discarded `loop` does not join its break value types. Each break value remains independently type-checked.
+
+An expression after a loop with no normal exit is unreachable. Unreachable expressions are compile errors.
+
+Only a normal `break` exits `loop`. A `return` exits its callable and contributes no loop value.
 
 A callable that never completes and holds no `return` states no value of its declared result type. Its result type must be `Never` or `()`; any other declared type is a compile error, because nothing in the body produces one.
 
@@ -1187,7 +1246,11 @@ in None
 end
 ```
 
-Arms are tested in source order. An arm may use `then` with one expression or a newline body. Cases over enums and `Bool` are checked for exhaustiveness; cases over other types require a wildcard or binding arm. Duplicate unreachable arms are compile errors.
+Arms are tested in source order. An arm can use `then` with an ordinary expression body. It can also use a newline body.
+
+Cases over enums and `Bool` are checked for exhaustiveness. Cases over other types require a wildcard or binding arm.
+
+Duplicate unreachable arms are compile errors.
 
 ### 7.4 Select
 
@@ -4125,7 +4188,7 @@ A negative `digits` value faults with `InvalidPrecision`.
 
 The distributed floating algorithms are version-pinned and bit-reproducible across conforming targets; implementations do not delegate observable semantics to an unconstrained platform `libm`. Correctly rounded basic arithmetic remains as specified in section 2.4, while transcendental accuracy bounds and special cases are published with the module version.
 
-`Range(start, stop, step)` rejects zero step. `Range.each`, `to_list`, `contains`, and `len` use checked arithmetic. There is no special `for` syntax in version 0.2; `range.each` or a `while` loop is explicit.
+`Range(start, stop, step)` rejects zero step. `Range.each`, `to_list`, `contains`, and `len` use checked arithmetic. A `for` expression traverses a range directly.
 
 ### 24.8 Value utilities
 
@@ -4516,11 +4579,11 @@ A conforming implementation passes tests for at least:
 
 # Appendix A: Surface grammar
 
-This EBNF-like grammar is normative with the clarifications below. `NL` denotes one or more valid statement separators.
+This EBNF-like grammar is normative with the clarifications below. `NL` denotes one or more valid expression separators.
 
 ```ebnf
 module          = opt_separators, { definition, separators },
-                  [ expression, opt_separators ], EOF ;
+                  block, EOF ;
 
 definition      = interface_decl | class_decl | enum_decl | function_decl ;
 
@@ -4596,7 +4659,7 @@ type_args       = "[", type, { ",", type }, "]" ;
 type_list       = type, { ",", type } ;
 qualified_name  = IDENT, { ".", IDENT } ;
 
-block           = { expression, separators } ;
+block           = [ expression, { separators, expression }, opt_separators ] ;
 separators      = ( NL | ";" ), { NL | ";" } ;
 opt_separators  = { NL | ";" } ;
 
@@ -4643,10 +4706,11 @@ primary         = literal
                 | closure
                 | if_expr
                 | while_expr
+                | for_expr
                 | loop_expr
                 | case_expr
                 | return_expr
-                | "break"
+                | break_expr
                 | "continue" ;
 
 list_literal    = "[", [ expression, { ",", expression } ], "]" ;
@@ -4661,17 +4725,22 @@ brace_closure   = "{", "|", [ parameters ], "|", [ ":", type ],
                   [ effect_clause ],
                   ( separators, block | expression ), "}" ;
 
-if_expr         = "if", expression, separators, block,
-                  { "elsif", expression, separators, block },
-                  [ "else", separators, block ], "end" ;
+if_expr         = "if", expression, branch_body,
+                  { "elsif", expression, branch_body },
+                  [ "else", else_body ], "end" ;
 
-while_expr      = "while", expression, separators, block, "end" ;
-loop_expr       = "loop", "do", separators, block, "end" ;
+while_expr      = "while", expression, header_loop_body, "end" ;
+for_expr        = "for", IDENT, [ ",", IDENT ], "in", expression,
+                  header_loop_body, "end" ;
+loop_expr       = "loop", loop_body, "end" ;
+header_loop_body = separators, block | "do", separators, block ;
+loop_body       = separators, block | "do", opt_separators, block ;
 
 case_expr       = "case", expression, separators,
-                  case_arm, { separators, case_arm }, separators, "end" ;
-case_arm        = "in", pattern,
-                  ( "then", ( return_expr | expression ) | separators, block ) ;
+                  case_arm, { separators, case_arm }, opt_separators, "end" ;
+case_arm        = "in", pattern, branch_body ;
+branch_body     = ( "then", opt_separators | separators ), block ;
+else_body       = [ separators ], block ;
 
 pattern         = "_"
                 | IDENT
@@ -4681,6 +4750,7 @@ pattern         = "_"
 tuple_pattern   = "(", pattern, ( ",", [ pattern, { ",", pattern } ] | { ",", pattern } ), ")" ;
 
 return_expr     = "return", [ expression ] ;
+break_expr      = "break", [ expression ] ;
 
 literal         = INT | FLOAT | CHAR | STRING | BYTES
                 | "true" | "false" | "()" ;
@@ -4706,9 +4776,9 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.
 - A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument. It must start on the same line as that chain. Only `?` can follow it.
-- A single-line `then` arm can contain one expression or one `return` statement.
+- `then` opens an ordinary expression body. Assignment and control transfers need no special arm rule.
 - A bracket suffix is generic application only where static resolution permits it and normally precedes a call; otherwise it is indexing. Ambiguous source is rejected.
-- A postfix assignment target must be a writable field or index, not an arbitrary call result.
+- A postfix assignment target must be a writable field. An arbitrary call result is not writable.
 - Enum arms must precede associated bindings and methods. Associated bindings must precede methods.
 - Expected context recognizes a zero-field constructor such as `None`. Another bare name is a binding pattern.
 - Class fields and methods may be interleaved. Field layout follows inherited fields then local field source order.

@@ -1,4 +1,4 @@
-//! Bidirectional expression and statement checking.
+//! Bidirectional expression checking.
 //!
 //! The checker synthesizes a type for each expression, or checks the
 //! expression against an expected type. It resolves names to local
@@ -9,6 +9,7 @@
 //! constructors. It stops at the first error and returns one precise
 //! diagnostic.
 
+mod body;
 mod call;
 mod expr;
 mod flow;
@@ -16,7 +17,6 @@ mod member;
 mod operator;
 mod pattern;
 mod scope;
-mod stmt;
 mod sysabi;
 
 use crate::check::{
@@ -25,7 +25,7 @@ use crate::check::{
 };
 use crate::exhaust::{useful, APat, PatMeta};
 use crate::hir::*;
-use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
+use lm_source::ast::{self, BinOp, ExprKind, PatternKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{
@@ -40,11 +40,29 @@ const PATTERN_BUDGET: u64 = 1_000_000;
 #[derive(Clone, Copy, PartialEq)]
 enum BlockMode {
     /// The block value is discarded. The block type is `()`.
-    Stmt,
+    Discard,
     /// The block must produce a value of the expected type.
     Value(TypeId),
     /// Synthesize the block type from its final expression.
     Synth,
+}
+
+#[derive(Clone, Copy)]
+enum LoopMode {
+    /// `while` and `for` accept only bare breaks.
+    UnitOnly,
+    /// The loop result is discarded.
+    Discard,
+    /// Every break value must produce this type.
+    Value(TypeId),
+    /// The checker joins the break types.
+    Synth,
+}
+
+struct LoopContext {
+    mode: LoopMode,
+    breaks: Vec<(TypeId, bool, Span)>,
+    inference_gap: Option<Diagnostic>,
 }
 
 /// The result-type context of the checked callable.
@@ -235,7 +253,7 @@ pub(crate) struct FnChecker<'o> {
     pub(crate) scopes: Vec<Scope>,
     captures: Vec<CaptureRec>,
     is_closure: bool,
-    loop_depth: u32,
+    loops: Vec<LoopContext>,
     iterated_places: Vec<IteratedPlace>,
     /// True when the body holds a `return`. It witnesses the
     /// declared result type.
@@ -761,6 +779,7 @@ fn freeze_expr(recv: HExpr) -> HExpr {
     let ty = recv.ty;
     let mutable = recv.mutable;
     HExpr {
+        flow: Flow::Normal,
         ty,
         mutable,
         kind: HExprKind::Native {
@@ -774,6 +793,7 @@ fn freeze_expr(recv: HExpr) -> HExpr {
 /// `Digest` value, so it is comparable by value and sendable.
 fn digest_expr(recv: HExpr) -> HExpr {
     HExpr {
+        flow: Flow::Normal,
         ty: DIGEST,
         mutable: true,
         kind: HExprKind::Native {

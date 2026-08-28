@@ -929,7 +929,12 @@ fn collect_dependency_stmt(statement: &HStmt, out: &mut DependencyReferences) {
             }
         }
         HStmt::Expr(value) => collect_dependency_expr(value, out),
-        HStmt::Break | HStmt::Continue => {}
+        HStmt::Break { value } => {
+            if let Some(value) = value {
+                collect_dependency_expr(value, out);
+            }
+        }
+        HStmt::Continue => {}
     }
 }
 
@@ -1020,6 +1025,9 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
                     }
                 }
             }
+        }
+        HExprKind::Block(body) | HExprKind::Loop { body, .. } => {
+            collect_dependency_block(body, out)
         }
         HExprKind::If { arms, else_body } => {
             for (condition, body) in arms {

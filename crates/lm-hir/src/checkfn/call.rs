@@ -55,6 +55,7 @@ impl<'o> FnChecker<'o> {
                     )?;
                     self.charge_row(ctx, &sig.row, span)?;
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: sig.ret,
                         mutable: true,
                         kind: HExprKind::Call {
@@ -85,6 +86,7 @@ impl<'o> FnChecker<'o> {
                     expected,
                 )?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: out.ret,
                     mutable: true,
                     kind: HExprKind::Call {
@@ -165,6 +167,7 @@ impl<'o> FnChecker<'o> {
                     }
                     let text = self.check_expr(ctx, &args[0], STRING)?;
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: lm_types::BYTES,
                         mutable: false,
                         kind: HExprKind::Native {
@@ -236,6 +239,7 @@ impl<'o> FnChecker<'o> {
                     }
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: out.ret,
                     mutable: true,
                     kind: HExprKind::Construct {
@@ -256,6 +260,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let ty = ctx.store.intern(Type::List(elem));
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::ListLit(vec![]),
@@ -271,6 +276,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let ty = ctx.store.intern(Type::Map(k, v));
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::MapLit(vec![]),
@@ -354,6 +360,7 @@ impl<'o> FnChecker<'o> {
             ctx.reified_functions.insert(func);
             let ty = Self::core_inst(ctx, "FunctionCode", vec![input, sig.ret]);
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::FunctionCode { func },
@@ -363,6 +370,7 @@ impl<'o> FnChecker<'o> {
             ctx.reified_classes.insert(class);
             let ty = Self::core_class(ctx, "ClassCode");
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::ClassCode { class },
@@ -433,6 +441,7 @@ impl<'o> FnChecker<'o> {
             span,
         )?;
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: Self::abi_type_id_with_vars(ctx, def.reply, &vars),
             mutable: true,
             kind: HExprKind::Intrinsic {
@@ -465,6 +474,7 @@ impl<'o> FnChecker<'o> {
                 NameRes::Capture(idx, ty, _) => (ty, HExprKind::Capture(idx)),
             };
             return Ok(Callee::Value(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind,
@@ -570,6 +580,7 @@ impl<'o> FnChecker<'o> {
             let args =
                 self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, "operation", span)?;
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty: ret,
                 mutable: true,
                 kind: HExprKind::CallValue {
@@ -598,6 +609,7 @@ impl<'o> FnChecker<'o> {
         // through a value needs mutable capability at mut positions.
         let args = self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, "closure", span)?;
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: ret,
             mutable: true,
             kind: HExprKind::CallValue {

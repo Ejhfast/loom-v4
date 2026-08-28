@@ -326,7 +326,9 @@ pub enum HStmt {
     Return {
         value: Option<HExpr>,
     },
-    Break,
+    Break {
+        value: Option<HExpr>,
+    },
     Continue,
     Expr(HExpr),
 }
@@ -372,10 +374,29 @@ pub enum HForKind {
 
 #[derive(Clone)]
 pub struct HExpr {
+    /// The expression's normal-completion state.
+    pub flow: Flow,
     pub ty: TypeId,
     /// True when the expression yields a mutable reference.
     pub mutable: bool,
     pub kind: HExprKind,
+}
+
+/// Whether evaluation can complete normally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    Normal,
+    Never,
+}
+
+impl Flow {
+    fn strict(items: impl IntoIterator<Item = Flow>) -> Flow {
+        if items.into_iter().any(|item| item == Flow::Never) {
+            Flow::Never
+        } else {
+            Flow::Normal
+        }
+    }
 }
 
 /// A native operation on a built-in collection or builder. The
@@ -650,6 +671,13 @@ pub enum HExprKind {
     },
     /// An interpolated string.
     Interp(Vec<HInterpPart>),
+    /// One source expression lowered through internal statements.
+    Block(Vec<HStmt>),
+    /// A value-producing `loop` expression.
+    Loop {
+        body: Vec<HStmt>,
+        result_slot: Option<u32>,
+    },
     If {
         /// Condition and body for `if` and each `elsif`.
         arms: Vec<(HExpr, Vec<HStmt>)>,
@@ -710,76 +738,142 @@ pub enum HExprKind {
     },
 }
 
+impl HExpr {
+    /// Compute flow from the checked child expressions.
+    pub fn finish_flow(mut self) -> HExpr {
+        self.flow = self.derived_flow();
+        self
+    }
+
+    fn derived_flow(&self) -> Flow {
+        if self.ty == lm_types::NEVER {
+            return Flow::Never;
+        }
+        match &self.kind {
+            HExprKind::Unit
+            | HExprKind::Int(_)
+            | HExprKind::Float(_)
+            | HExprKind::Str(_)
+            | HExprKind::Bytes(_)
+            | HExprKind::Bool(_)
+            | HExprKind::Local(_)
+            | HExprKind::Capture(_)
+            | HExprKind::FunctionCode { .. }
+            | HExprKind::ClassCode { .. }
+            | HExprKind::OpConst(_) => Flow::Normal,
+            HExprKind::Not(value)
+            | HExprKind::Neg(value)
+            | HExprKind::AsCallback(value)
+            | HExprKind::CodeSource { code: value, .. }
+            | HExprKind::CodeDefinition { code: value }
+            | HExprKind::TupleGet { tuple: value, .. }
+            | HExprKind::IsType { value, .. }
+            | HExprKind::CastType { value, .. }
+            | HExprKind::CallArgs { call: value }
+            | HExprKind::FaultCodeGet { fault: value }
+            | HExprKind::FaultSiteGet { fault: value }
+            | HExprKind::FaultTraceGet { fault: value }
+            | HExprKind::RequestOpName { request: value }
+            | HExprKind::FaultDenied { reason: value } => value.flow,
+            HExprKind::Binary { left, right, .. } => Flow::strict([left.flow, right.flow]),
+            HExprKind::And(left, _) | HExprKind::Or(left, _) => left.flow,
+            HExprKind::Call { args, .. }
+            | HExprKind::Construct { args, .. }
+            | HExprKind::Spawn { args, .. }
+            | HExprKind::Native { args, .. }
+            | HExprKind::Intrinsic { args, .. }
+            | HExprKind::Perform { args, .. }
+            | HExprKind::PrepareWait { args, .. } => Flow::strict(args.iter().map(|arg| arg.flow)),
+            HExprKind::MethodCall { recv, args, .. }
+            | HExprKind::InterfaceCall { recv, args, .. } => {
+                Flow::strict(std::iter::once(recv.flow).chain(args.iter().map(|arg| arg.flow)))
+            }
+            HExprKind::FieldGet { recv, .. } => recv.flow,
+            HExprKind::MakeClosure { captures, .. } | HExprKind::MakeCallback { captures, .. } => {
+                Flow::strict(captures.iter().map(|capture| capture.flow))
+            }
+            HExprKind::CallValue { callee, args } => {
+                Flow::strict(std::iter::once(callee.flow).chain(args.iter().map(|arg| arg.flow)))
+            }
+            HExprKind::TupleLit(items) | HExprKind::ListLit(items) => {
+                Flow::strict(items.iter().map(|item| item.flow))
+            }
+            HExprKind::MapLit(entries) => Flow::strict(
+                entries
+                    .iter()
+                    .flat_map(|(key, value)| [key.flow, value.flow]),
+            ),
+            HExprKind::Interp(parts) => Flow::strict(parts.iter().filter_map(|part| match part {
+                HInterpPart::Lit(_) => None,
+                HInterpPart::Native { value, .. } | HInterpPart::Display { value, .. } => {
+                    Some(value.flow)
+                }
+            })),
+            HExprKind::Block(body) => block_flow(body),
+            HExprKind::Loop { .. } => Flow::Normal,
+            HExprKind::If { arms, else_body } => if_flow(arms, else_body.as_deref()),
+            HExprKind::Case { scrut, arms, .. } => {
+                if scrut.flow == Flow::Never {
+                    Flow::Never
+                } else if arms.iter().any(|arm| block_flow(&arm.body) == Flow::Normal) {
+                    Flow::Normal
+                } else {
+                    Flow::Never
+                }
+            }
+            HExprKind::TableEdit { table, mock, .. } => {
+                Flow::strict(std::iter::once(table.flow).chain(mock.iter().map(|value| value.flow)))
+            }
+        }
+    }
+}
+
 impl HStmt {
+    /// Return the statement's normal-completion state.
+    pub fn flow(&self) -> Flow {
+        match self {
+            HStmt::Assign { value, .. } => value.flow,
+            HStmt::AssignField { recv, value, .. } => Flow::strict([recv.flow, value.flow]),
+            HStmt::While { cond, .. } => cond.flow,
+            HStmt::For { source, .. } => source.flow,
+            HStmt::Return { .. } | HStmt::Break { .. } | HStmt::Continue => Flow::Never,
+            HStmt::Expr(expr) => expr.flow,
+        }
+    }
+
     /// Return true when control cannot continue after this statement.
     pub fn diverges(&self) -> bool {
-        match self {
-            HStmt::Return { .. } | HStmt::Break | HStmt::Continue => true,
-            HStmt::Expr(e) => e.ty == lm_types::NEVER,
-            HStmt::While { cond, body } => while_diverges(cond, body),
-            HStmt::For { .. } => false,
-            _ => false,
-        }
+        self.flow() == Flow::Never
     }
 }
 
-/// True when one loop never completes.
-///
-/// The condition must be the literal `true`, and no `break` of this
-/// loop may appear in the body. `loop do ... end` parses to
-/// `while true`, so this is the shape a driver writes.
-///
-/// The lowering pass reads the same answer. A loop that never
-/// completes emits no exit edge, so the block after it keeps no
-/// predecessor and the verifier never reconstructs a state for it.
-pub fn while_diverges(cond: &HExpr, body: &[HStmt]) -> bool {
-    matches!(cond.kind, HExprKind::Bool(true)) && !block_breaks(body)
+fn block_flow(body: &[HStmt]) -> Flow {
+    body.iter()
+        .map(HStmt::flow)
+        .find(|flow| *flow == Flow::Never)
+        .unwrap_or(Flow::Normal)
 }
 
-/// True when one statement list holds a `break` of the loop that
-/// encloses it.
-///
-/// The test asks about the exit, and never about the body. A body that
-/// returns on one path and repeats on another still cannot reach the
-/// statement after the loop. `break` is the only exit, so its absence
-/// proves the loop never completes.
-///
-/// The walk stops at a nested `while`, because a `break` inside it
-/// leaves that loop instead. A closure body is out of reach here:
-/// `MakeClosure` names a separate function by index, and `break` is
-/// invalid across that boundary.
-fn block_breaks(body: &[HStmt]) -> bool {
-    body.iter().any(stmt_breaks)
-}
-
-fn stmt_breaks(stmt: &HStmt) -> bool {
-    match stmt {
-        HStmt::Break => true,
-        // A nested loop owns every `break` inside it.
-        HStmt::While { .. } | HStmt::For { .. } => false,
-        HStmt::Expr(e) => expr_breaks(e),
-        HStmt::Assign { value, .. } => expr_breaks(value),
-        HStmt::AssignField { recv, value, .. } => expr_breaks(recv) || expr_breaks(value),
-        HStmt::Return { value } => value.as_ref().is_some_and(expr_breaks),
-        HStmt::Continue => false,
+fn if_flow(arms: &[(HExpr, Vec<HStmt>)], else_body: Option<&[HStmt]>) -> Flow {
+    let mut can_complete = false;
+    let mut can_reach_next = true;
+    for (cond, body) in arms {
+        if !can_reach_next {
+            break;
+        }
+        if cond.flow == Flow::Never {
+            can_reach_next = false;
+            break;
+        }
+        can_complete |= block_flow(body) == Flow::Normal;
     }
-}
-
-/// True when one expression holds a `break` of the enclosing loop.
-///
-/// Only `if` and `case` carry statement lists. `select` becomes a
-/// `case` before this point, so the two forms cover every block.
-fn expr_breaks(expr: &HExpr) -> bool {
-    match &expr.kind {
-        HExprKind::If { arms, else_body } => {
-            arms.iter()
-                .any(|(cond, body)| expr_breaks(cond) || block_breaks(body))
-                || else_body.as_deref().is_some_and(block_breaks)
-        }
-        HExprKind::Case { scrut, arms, .. } => {
-            expr_breaks(scrut) || arms.iter().any(|arm| block_breaks(&arm.body))
-        }
-        _ => false,
+    if can_reach_next {
+        can_complete |= else_body.is_none_or(|body| block_flow(body) == Flow::Normal);
+    }
+    if can_complete {
+        Flow::Normal
+    } else {
+        Flow::Never
     }
 }
 

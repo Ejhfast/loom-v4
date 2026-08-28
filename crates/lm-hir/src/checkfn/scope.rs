@@ -13,7 +13,7 @@ impl<'o> FnChecker<'o> {
             scopes: vec![Scope::default()],
             captures: Vec::new(),
             is_closure: false,
-            loop_depth: 0,
+            loops: Vec::new(),
             iterated_places: Vec::new(),
             saw_return: false,
             ret,
@@ -161,16 +161,16 @@ impl<'o> FnChecker<'o> {
     pub(crate) fn check_callable(
         mut self,
         ctx: &mut Ctx,
-        stmts: &[ast::Stmt],
+        exprs: &[ast::Expr],
         ret: TypeId,
         span: Span,
     ) -> Result<CheckedBody, Diagnostic> {
         let mode = if ret == UNIT {
-            BlockMode::Stmt
+            BlockMode::Discard
         } else {
             BlockMode::Value(ret)
         };
-        let (body, _, _) = self.check_block(ctx, stmts, mode, span)?;
+        let (body, _, _) = self.check_block(ctx, exprs, mode, span)?;
         let diverges = body.last().map(HStmt::diverges).unwrap_or(false);
         // A callable that never completes normally and holds no
         // `return` produces no value of its declared type. Nothing in
@@ -201,10 +201,10 @@ impl<'o> FnChecker<'o> {
     pub(crate) fn check_entry(
         mut self,
         ctx: &mut Ctx,
-        stmts: &[ast::Stmt],
+        exprs: &[ast::Expr],
         span: Span,
     ) -> Result<CheckedEntry, Diagnostic> {
-        let (body, ty, mutable) = self.check_block(ctx, stmts, BlockMode::Synth, span)?;
+        let (body, ty, mutable) = self.check_block(ctx, exprs, BlockMode::Synth, span)?;
         let locals = self.locals.iter().map(|(t, _)| *t).collect();
         Ok((body, ty, mutable, locals, self.declared_row))
     }
@@ -212,6 +212,15 @@ impl<'o> FnChecker<'o> {
     /// Check one expression against an expected type, exposed for
     /// field defaults.
     pub(crate) fn check_expr(
+        &mut self,
+        ctx: &mut Ctx,
+        expr: &ast::Expr,
+        expected: TypeId,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(self.check_expr_inner(ctx, expr, expected)?.finish_flow())
+    }
+
+    fn check_expr_inner(
         &mut self,
         ctx: &mut Ctx,
         expr: &ast::Expr,
@@ -226,6 +235,9 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::Select { arms } => {
                 self.check_select(ctx, arms, BlockMode::Value(expected), expr.span)
+            }
+            ExprKind::Loop { body } => {
+                self.check_loop(ctx, body, BlockMode::Value(expected), expr.span)
             }
             ExprKind::TupleLit(items) => {
                 if let Type::Tuple(elems) = ctx.store.get(expected).clone() {
@@ -242,6 +254,7 @@ impl<'o> FnChecker<'o> {
                             checked.push(self.check_expr(ctx, item, *elem)?);
                         }
                         return Ok(HExpr {
+                            flow: Flow::Normal,
                             ty: expected,
                             mutable: true,
                             kind: HExprKind::TupleLit(checked),
@@ -266,6 +279,7 @@ impl<'o> FnChecker<'o> {
                         checked.push(self.check_expr(ctx, item, elem)?);
                     }
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: expected,
                         mutable: true,
                         kind: HExprKind::ListLit(checked),
@@ -291,6 +305,7 @@ impl<'o> FnChecker<'o> {
                         checked.push((key, value));
                     }
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: expected,
                         mutable: true,
                         kind: HExprKind::MapLit(checked),
@@ -390,6 +405,9 @@ impl<'o> FnChecker<'o> {
         mut found: HExpr,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
+        if found.flow == Flow::Never {
+            return Ok(found);
+        }
         if ctx.store.contains_callback(found.ty)
             && !matches!(ctx.store.get(expected), Type::Callback(..))
         {
@@ -405,6 +423,7 @@ impl<'o> FnChecker<'o> {
                     HExprKind::MakeCallback { func, captures }
                 }
                 other => HExprKind::AsCallback(Box::new(HExpr {
+                    flow: Flow::Normal,
                     ty: found.ty,
                     mutable: found.mutable,
                     kind: other,

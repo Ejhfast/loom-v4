@@ -40,7 +40,7 @@ fn a_program_under_the_default_retires_with_no_cap() {
 /// A stated bound still stops a program that never ends.
 #[test]
 fn a_stated_bound_still_stops_an_endless_program() {
-    let source = "i = 0\nwhile true\n  i = i + 1\nend\n";
+    let source = "i = 0\nloop do\n  i = i + 1\nend\n";
     let config = VmConfig {
         fuel: 10_000,
         ..VmConfig::default()

@@ -1,10 +1,9 @@
-//! Abstract syntax tree for the week-3 language slice.
+//! Abstract syntax tree for Loom source.
 
 use crate::span::Span;
 use std::fmt::Write as _;
 
-/// A parsed module: classes, enums, top-level functions, and entry
-/// statements.
+/// A parsed module with one expression category for every body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     /// The `use` lines. They come before every definition.
@@ -13,9 +12,8 @@ pub struct Module {
     pub classes: Vec<ClassDef>,
     pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
-    /// Top-level statements. The value of the last expression statement
-    /// becomes the program result.
-    pub entry: Vec<Stmt>,
+    /// The last entry expression becomes the program result.
+    pub entry: Vec<Expr>,
 }
 
 /// One `use` line: a dotted path whose last segment becomes the bound
@@ -93,7 +91,7 @@ pub struct InterfaceMethod {
     pub row: Vec<RowItem>,
     pub premises: Vec<TypePremise>,
     /// `None` marks a required method. `Some` marks one default body.
-    pub body: Option<Vec<Stmt>>,
+    pub body: Option<Vec<Expr>>,
     pub span: Span,
 }
 
@@ -191,7 +189,7 @@ pub struct MethodDef {
     pub ret: Option<TypeExpr>,
     pub row: Vec<RowItem>,
     pub premises: Vec<GenericParam>,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Expr>,
     pub span: Span,
 }
 
@@ -205,7 +203,7 @@ pub struct FuncDef {
     /// `None` means the unit result type `()`.
     pub ret: Option<TypeExpr>,
     pub row: Vec<RowItem>,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Expr>,
     pub span: Span,
 }
 
@@ -244,49 +242,6 @@ pub enum TypeExprKind {
     /// A function type `(A, mut B) -> R with row`. The `bool` list
     /// marks the `mut` parameters and aligns with the parameter list.
     Fn(Vec<TypeExpr>, Vec<bool>, Box<TypeExpr>, Vec<RowItem>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Stmt {
-    pub kind: StmtKind,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StmtKind {
-    /// `name = value` or `name: Type = value`.
-    Assign {
-        name: String,
-        name_span: Span,
-        ty: Option<TypeExpr>,
-        value: Expr,
-    },
-    /// `receiver.field = value`.
-    AssignField {
-        recv: Expr,
-        field: String,
-        field_span: Span,
-        value: Expr,
-    },
-    /// `while cond ... end`.
-    While {
-        cond: Expr,
-        body: Vec<Stmt>,
-    },
-    /// `for name in value ... end`.
-    For {
-        bindings: Vec<(String, Span)>,
-        value: Expr,
-        body: Vec<Stmt>,
-    },
-    /// `return` with an optional value.
-    Return {
-        value: Option<Expr>,
-    },
-    Break,
-    Continue,
-    /// An expression in statement position.
-    Expr(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,7 +306,7 @@ pub enum InterpPart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseArm {
     pub pattern: Pattern,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Expr>,
     pub span: Span,
 }
 
@@ -361,7 +316,7 @@ pub struct SelectArm {
     pub wait: Expr,
     pub binding: String,
     pub binding_span: Span,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Expr>,
     pub span: Span,
 }
 
@@ -399,6 +354,44 @@ pub enum PatternKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
+    /// `name = value` or `name: Type = value`.
+    Assign {
+        name: String,
+        name_span: Span,
+        ty: Option<TypeExpr>,
+        value: Box<Expr>,
+    },
+    /// `receiver.field = value`.
+    AssignField {
+        recv: Box<Expr>,
+        field: String,
+        field_span: Span,
+        value: Box<Expr>,
+    },
+    /// `while condition` followed by its body.
+    While {
+        cond: Box<Expr>,
+        body: Vec<Expr>,
+    },
+    /// `for name in value` followed by its body.
+    For {
+        bindings: Vec<(String, Span)>,
+        value: Box<Expr>,
+        body: Vec<Expr>,
+    },
+    /// `loop do body end`.
+    Loop {
+        body: Vec<Expr>,
+    },
+    /// `return` with an optional value.
+    Return {
+        value: Option<Box<Expr>>,
+    },
+    /// `break` with an optional loop result.
+    Break {
+        value: Option<Box<Expr>>,
+    },
+    Continue,
     Int(i64),
     /// IEEE 754 binary64 value, stored as raw bits.
     Float(u64),
@@ -490,13 +483,13 @@ pub enum ExprKind {
         row: Vec<RowItem>,
         /// True when the source contains a `with` clause.
         row_explicit: bool,
-        body: Vec<Stmt>,
+        body: Vec<Expr>,
     },
     /// `if ... elsif ... else ... end` as an expression.
     If {
         /// Condition and body for `if` and each `elsif`.
-        arms: Vec<(Expr, Vec<Stmt>)>,
-        else_body: Option<Vec<Stmt>>,
+        arms: Vec<(Expr, Vec<Expr>)>,
+        else_body: Option<Vec<Expr>>,
     },
     /// `case scrutinee in pattern then|body ... end` as an expression.
     Case {
@@ -577,13 +570,13 @@ pub fn dump_module(module: &Module) -> String {
             dump_ret(&func.ret),
             dump_row(&func.row)
         );
-        for stmt in &func.body {
-            dump_stmt(&mut out, stmt, 2);
+        for expr in &func.body {
+            dump_expr(&mut out, expr, 2);
         }
     }
     out.push_str("  entry\n");
-    for stmt in &module.entry {
-        dump_stmt(&mut out, stmt, 2);
+    for expr in &module.entry {
+        dump_expr(&mut out, expr, 2);
     }
     out
 }
@@ -599,8 +592,8 @@ fn dump_method(out: &mut String, method: &MethodDef) {
         dump_ret(&method.ret),
         dump_row(&method.row)
     );
-    for stmt in &method.body {
-        dump_stmt(out, stmt, 3);
+    for expr in &method.body {
+        dump_expr(out, expr, 3);
     }
 }
 
@@ -734,10 +727,10 @@ fn indent(out: &mut String, depth: usize) {
     }
 }
 
-fn dump_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
+fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
     indent(out, depth);
-    match &stmt.kind {
-        StmtKind::Assign {
+    match &expr.kind {
+        ExprKind::Assign {
             name, ty, value, ..
         } => {
             match ty {
@@ -750,23 +743,23 @@ fn dump_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             }
             dump_expr(out, value, depth + 1);
         }
-        StmtKind::AssignField {
+        ExprKind::AssignField {
             recv, field, value, ..
         } => {
             let _ = writeln!(out, "assign-field {field}");
             dump_expr(out, recv, depth + 1);
             dump_expr(out, value, depth + 1);
         }
-        StmtKind::While { cond, body } => {
+        ExprKind::While { cond, body } => {
             out.push_str("while\n");
             dump_expr(out, cond, depth + 1);
             indent(out, depth);
             out.push_str("do\n");
-            for s in body {
-                dump_stmt(out, s, depth + 1);
+            for item in body {
+                dump_expr(out, item, depth + 1);
             }
         }
-        StmtKind::For {
+        ExprKind::For {
             bindings,
             value,
             body,
@@ -775,27 +768,28 @@ fn dump_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             let _ = writeln!(out, "for {}", names.join(", "));
             dump_expr(out, value, depth + 1);
             for item in body {
-                dump_stmt(out, item, depth + 1);
+                dump_expr(out, item, depth + 1);
             }
         }
-        StmtKind::Return { value } => {
+        ExprKind::Loop { body } => {
+            out.push_str("loop\n");
+            for item in body {
+                dump_expr(out, item, depth + 1);
+            }
+        }
+        ExprKind::Return { value } => {
             out.push_str("return\n");
             if let Some(value) = value {
                 dump_expr(out, value, depth + 1);
             }
         }
-        StmtKind::Break => out.push_str("break\n"),
-        StmtKind::Continue => out.push_str("continue\n"),
-        StmtKind::Expr(expr) => {
-            out.push_str("expr\n");
-            dump_expr(out, expr, depth + 1);
+        ExprKind::Break { value } => {
+            out.push_str("break\n");
+            if let Some(value) = value {
+                dump_expr(out, value, depth + 1);
+            }
         }
-    }
-}
-
-fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
-    indent(out, depth);
-    match &expr.kind {
+        ExprKind::Continue => out.push_str("continue\n"),
         ExprKind::Int(v) => {
             let _ = writeln!(out, "int {v}");
         }
@@ -956,8 +950,8 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 dump_ret(ret),
                 dump_row(row)
             );
-            for stmt in body {
-                dump_stmt(out, stmt, depth + 1);
+            for expr in body {
+                dump_expr(out, expr, depth + 1);
             }
         }
         ExprKind::If { arms, else_body } => {
@@ -966,15 +960,15 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 indent(out, depth + 1);
                 out.push_str("arm\n");
                 dump_expr(out, cond, depth + 2);
-                for s in body {
-                    dump_stmt(out, s, depth + 2);
+                for expr in body {
+                    dump_expr(out, expr, depth + 2);
                 }
             }
             if let Some(body) = else_body {
                 indent(out, depth + 1);
                 out.push_str("else\n");
-                for s in body {
-                    dump_stmt(out, s, depth + 2);
+                for expr in body {
+                    dump_expr(out, expr, depth + 2);
                 }
             }
         }
@@ -984,8 +978,8 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             for arm in arms {
                 indent(out, depth + 1);
                 let _ = writeln!(out, "in {}", dump_pattern(&arm.pattern));
-                for s in &arm.body {
-                    dump_stmt(out, s, depth + 2);
+                for expr in &arm.body {
+                    dump_expr(out, expr, depth + 2);
                 }
             }
         }
@@ -995,8 +989,8 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 indent(out, depth + 1);
                 let _ = writeln!(out, "in -> {}", arm.binding);
                 dump_expr(out, &arm.wait, depth + 2);
-                for stmt in &arm.body {
-                    dump_stmt(out, stmt, depth + 2);
+                for expr in &arm.body {
+                    dump_expr(out, expr, depth + 2);
                 }
             }
         }

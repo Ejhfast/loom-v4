@@ -24,6 +24,7 @@ impl<'o> FnChecker<'o> {
             .expect("the core primitive method exists");
         debug_assert_eq!(args.len(), method.params.len() + 1);
         HExpr {
+            flow: Flow::Normal,
             ty: method.ret,
             mutable: true,
             kind: HExprKind::Call {
@@ -163,6 +164,7 @@ impl<'o> FnChecker<'o> {
                 equal
             } else {
                 HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Not(Box::new(equal)),
@@ -189,6 +191,7 @@ impl<'o> FnChecker<'o> {
         )?;
         self.charge_row(ctx, &requirement.row, span)?;
         let equal = HExpr {
+            flow: Flow::Normal,
             ty: requirement.ret,
             mutable: true,
             kind: HExprKind::InterfaceCall {
@@ -205,6 +208,7 @@ impl<'o> FnChecker<'o> {
             equal
         } else {
             HExpr {
+                flow: Flow::Normal,
                 ty: BOOL,
                 mutable: true,
                 kind: HExprKind::Not(Box::new(equal)),
@@ -346,6 +350,7 @@ impl<'o> FnChecker<'o> {
                     if let Some((intrinsic, operand_ty)) = Self::native_equality(ctx, l.ty, op) {
                         let r = self.check_expr(ctx, right, operand_ty)?;
                         return Ok(HExpr {
+                            flow: Flow::Normal,
                             ty: BOOL,
                             mutable: true,
                             kind: HExprKind::Intrinsic {
@@ -394,6 +399,7 @@ impl<'o> FnChecker<'o> {
                         ));
                     }
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty: BOOL,
                         mutable: true,
                         kind: HExprKind::Binary {
@@ -431,6 +437,7 @@ impl<'o> FnChecker<'o> {
                     return Ok(Self::primitive_operator(ctx, class, name, vec![l, r]));
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Binary {

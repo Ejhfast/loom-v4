@@ -1,6 +1,6 @@
 //! Scanner for the week-2 language slice.
 //!
-//! The scanner produces tokens with byte spans. It ends each statement
+//! The scanner produces tokens with byte spans. It separates body expressions
 //! with a `Newline` token. It does not emit a `Newline` token inside
 //! delimiters or after a token that cannot end an expression.
 //!
@@ -30,13 +30,15 @@ pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Nest {
     /// An open `(`, `[`, or `{`. Newlines inside do not end a
-    /// statement.
+    /// expression.
     Delim,
-    /// An open statement block closed by `end`.
-    /// Newlines inside the block end statements.
+    /// An open expression block closed by `end`.
+    /// Newlines inside the block separate expressions.
     Block,
-    /// An open brace closure `{ |x| ... }`. Its body is a statement
-    /// block, so newlines inside end statements, and a right brace
+    /// A loop header that waits for `do` or a newline.
+    LoopBlock,
+    /// An open brace closure `{ |x| ... }`. Its body is an expression
+    /// block, so newlines separate expressions, and a right brace
     /// closes it.
     BraceBlock,
 }
@@ -117,7 +119,7 @@ impl<'a> Scanner<'a> {
         });
     }
 
-    /// Push a statement terminator unless the position continues an expression.
+    /// Push an expression separator unless the expression continues.
     fn push_newline(&mut self, start: usize) {
         if self.nesting.last() == Some(&Nest::Delim) {
             return;
@@ -157,7 +159,19 @@ impl<'a> Scanner<'a> {
         };
         if !continues {
             self.push(Tok::Newline, start);
+            if self.nesting.last() == Some(&Nest::LoopBlock) {
+                *self.nesting.last_mut().expect("the loop block exists") = Nest::Block;
+            }
         }
+    }
+
+    /// True when `do` is followed by a body separator.
+    fn do_has_body_separator(&self) -> bool {
+        let mut pos = self.pos;
+        while matches!(self.bytes.get(pos), Some(b' ' | b'\t' | b'\r')) {
+            pos += 1;
+        }
+        matches!(self.bytes.get(pos), None | Some(b';' | b'\n' | b'#'))
     }
 
     fn scan_string(&mut self, start: usize) -> Result<(), Diagnostic> {
@@ -531,20 +545,27 @@ impl<'a> Scanner<'a> {
             "for" => Tok::KwFor,
             _ => Tok::Ident(word.to_string()),
         };
-        // Track statement blocks, so a block body inside `(`, `[`, or
-        // `{` still ends its statements at newlines.
+        // Track expression blocks inside delimiters.
         match &tok {
-            Tok::KwIf | Tok::KwCase | Tok::KwSelect | Tok::KwWhile | Tok::KwLoop | Tok::KwFor => {
+            Tok::KwIf | Tok::KwCase | Tok::KwSelect => {
                 self.nesting.push(Nest::Block);
             }
+            Tok::KwWhile | Tok::KwLoop | Tok::KwFor => self.nesting.push(Nest::LoopBlock),
             Tok::KwDo => {
-                // `loop do` opens one block, not two.
-                if !matches!(self.tokens.last().map(|t| &t.tok), Some(Tok::KwLoop)) {
+                let follows_loop = matches!(
+                    self.tokens.last().map(|token| &token.tok),
+                    Some(Tok::KwLoop)
+                );
+                if self.nesting.last() == Some(&Nest::LoopBlock)
+                    && (follows_loop || self.do_has_body_separator())
+                {
+                    *self.nesting.last_mut().expect("the loop block exists") = Nest::Block;
+                } else {
                     self.nesting.push(Nest::Block);
                 }
             }
             Tok::KwEnd => {
-                if self.nesting.last() == Some(&Nest::Block) {
+                if matches!(self.nesting.last(), Some(Nest::Block | Nest::LoopBlock)) {
                     self.nesting.pop();
                 }
             }
@@ -910,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_newline_between_statements() {
+    fn emits_newline_between_expressions() {
         assert_eq!(
             kinds("x = 1\nx"),
             vec![
@@ -930,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn semicolon_ends_statement() {
+    fn semicolon_separates_expressions() {
         assert_eq!(
             kinds("1; 2"),
             vec![Tok::Int(1), Tok::Newline, Tok::Int(2), Tok::Eof]

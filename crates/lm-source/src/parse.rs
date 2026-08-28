@@ -9,7 +9,7 @@ use crate::scan::scan;
 use crate::span::Span;
 use crate::token::{StrPiece, Tok, Token};
 
-/// The maximum nesting depth for expressions, statements, types, and
+/// The maximum nesting depth for expressions, types, and
 /// patterns.
 ///
 /// The parser and the checker recurse on the Rust stack. This limit
@@ -96,6 +96,14 @@ impl Parser<'_> {
         matches!(self.peek(), Tok::KwDo | Tok::LBraceClosure)
     }
 
+    /// True when the next token starts a trailing closure.
+    ///
+    /// `do` followed by a separator opens a `while` or `for` body.
+    fn at_trailing_closure(&self) -> bool {
+        self.at_closure()
+            && !(matches!(self.peek(), Tok::KwDo) && matches!(self.peek_at(1), Tok::Newline))
+    }
+
     fn error(&self, code: &'static str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(code, message, self.peek_span())
     }
@@ -127,7 +135,7 @@ impl Parser<'_> {
         let mut funcs = Vec::new();
         let mut entry = Vec::new();
         // The `use` lines come first, before any definition or entry
-        // statement.
+        // entry expression.
         loop {
             self.skip_newlines();
             if !matches!(self.peek(), Tok::KwUse) {
@@ -146,12 +154,12 @@ impl Parser<'_> {
                 Tok::KwUse => {
                     return Err(self.error(
                         "E1052",
-                        "a `use` line must come before every definition and statement",
+                        "a `use` line must come before every definition and entry expression",
                     ));
                 }
                 _ => {
-                    let stmt = self.stmt()?;
-                    entry.push(stmt);
+                    let expr = self.expr()?;
+                    entry.push(expr);
                     self.expect_terminator()?;
                 }
             }
@@ -189,8 +197,7 @@ impl Parser<'_> {
         })
     }
 
-    /// Require a statement end: a newline, a semicolon, the end of the
-    /// file, or a following block keyword.
+    /// Require an expression separator or a following block keyword.
     fn expect_terminator(&mut self) -> Result<(), Diagnostic> {
         match self.peek() {
             Tok::Newline => {
@@ -202,9 +209,63 @@ impl Parser<'_> {
             Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif | Tok::KwIn | Tok::RBrace => Ok(()),
             other => Err(self.error(
                 "E1001",
-                format!("expected the end of the statement, found {other}"),
+                format!("expected an expression separator, found {other}"),
             )),
         }
+    }
+
+    /// Consume a block opener.
+    fn body_opener(&mut self, inline: Tok, name: &str) -> Result<(), Diagnostic> {
+        if self.peek() == &inline {
+            self.pos += 1;
+            return Ok(());
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.pos += 1;
+            return Ok(());
+        }
+        Err(self.error(
+            "E1003",
+            format!("expected `{name}` or a newline before the body"),
+        ))
+    }
+
+    /// Open a `while` or `for` body.
+    ///
+    /// `do` needs a separator. This rule distinguishes it from a
+    /// trailing closure in the header expression.
+    fn loop_header_body_opener(&mut self) -> Result<(), Diagnostic> {
+        if matches!(self.peek(), Tok::KwDo) {
+            self.pos += 1;
+            return self
+                .expect(Tok::Newline, "a separator after `do`")
+                .map(|_| ());
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.pos += 1;
+            return Ok(());
+        }
+        Err(self.error(
+            "E1003",
+            "expected `do` with a separator, or a newline before the loop body",
+        ))
+    }
+
+    /// True when a control transfer has no operand.
+    fn at_body_end(&self) -> bool {
+        matches!(
+            self.peek(),
+            Tok::Newline
+                | Tok::Eof
+                | Tok::KwEnd
+                | Tok::KwElse
+                | Tok::KwElsif
+                | Tok::KwIn
+                | Tok::RParen
+                | Tok::RBracket
+                | Tok::Comma
+                | Tok::RBrace
+        )
     }
 
     /// Parse an optional `[T, U, effect e]` generic parameter list.
@@ -1182,8 +1243,8 @@ impl Parser<'_> {
         }
     }
 
-    fn block(&mut self, stops: &[Tok]) -> Result<Vec<Stmt>, Diagnostic> {
-        let mut stmts = Vec::new();
+    fn block(&mut self, stops: &[Tok]) -> Result<Vec<Expr>, Diagnostic> {
+        let mut exprs = Vec::new();
         loop {
             self.skip_newlines();
             if stops.contains(self.peek()) {
@@ -1195,197 +1256,85 @@ impl Parser<'_> {
                 let want = stops.first().unwrap_or(&Tok::KwEnd);
                 return Err(self.error("E1003", format!("expected {want}, found end of file")));
             }
-            let stmt = self.stmt()?;
-            stmts.push(stmt);
+            let expr = self.expr()?;
+            exprs.push(expr);
             self.expect_terminator()?;
         }
-        Ok(stmts)
+        Ok(exprs)
     }
 
-    fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
-        self.enter_nesting()?;
-        let result = self.stmt_inner();
-        self.depth -= 1;
-        result
-    }
-
-    fn stmt_inner(&mut self) -> Result<Stmt, Diagnostic> {
+    fn assignment_expr(&mut self) -> Result<Expr, Diagnostic> {
         self.reject_reserved()?;
-        match self.peek() {
-            Tok::KwDef => Err(self.error(
-                "E1002",
-                "a `def` function is only valid at the top level of a module or in a class",
-            )),
-            Tok::KwClass | Tok::KwFinal | Tok::KwFrozen | Tok::KwInterface => Err(self.error(
-                "E1002",
-                "a type declaration is only valid at the top level of a module",
-            )),
-            Tok::KwEnum => Err(self.error(
-                "E1002",
-                "an `enum` is only valid at the top level of a module",
-            )),
-            Tok::KwReturn => {
-                let ret_tok = self.next();
-                let value = match self.peek() {
-                    Tok::Newline
-                    | Tok::Eof
-                    | Tok::KwEnd
-                    | Tok::KwElse
-                    | Tok::KwElsif
-                    | Tok::KwIn => None,
-                    _ => Some(self.expr()?),
-                };
-                let span = match &value {
-                    Some(v) => ret_tok.span.to(v.span),
-                    None => ret_tok.span,
-                };
-                Ok(Stmt {
-                    kind: StmtKind::Return { value },
-                    span,
-                })
-            }
-            Tok::KwBreak => {
-                let token = self.next();
-                Ok(Stmt {
-                    kind: StmtKind::Break,
-                    span: token.span,
-                })
-            }
-            Tok::KwContinue => {
-                let token = self.next();
-                Ok(Stmt {
-                    kind: StmtKind::Continue,
-                    span: token.span,
-                })
-            }
-            Tok::KwWhile => {
-                let while_tok = self.next();
-                let cond = self.expr()?;
-                let body = self.block(&[Tok::KwEnd])?;
-                let end_tok = self.expect(Tok::KwEnd, "`end`")?;
-                Ok(Stmt {
-                    kind: StmtKind::While { cond, body },
-                    span: while_tok.span.to(end_tok.span),
-                })
-            }
-            Tok::KwLoop => {
-                // `loop [do] ... end` is sugar for `while true`.
-                let loop_tok = self.next();
-                if matches!(self.peek(), Tok::KwDo) {
+        if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Colon) {
+            let saved = self.pos;
+            let (name, name_span) = self.ident("a name")?;
+            self.pos += 1;
+            match self.type_expr() {
+                Ok(ty) if matches!(self.peek(), Tok::Assign) => {
                     self.pos += 1;
-                }
-                let body = self.block(&[Tok::KwEnd])?;
-                let end_tok = self.expect(Tok::KwEnd, "`end`")?;
-                let span = loop_tok.span.to(end_tok.span);
-                Ok(Stmt {
-                    kind: StmtKind::While {
-                        cond: Expr {
-                            kind: ExprKind::Bool(true),
-                            span: loop_tok.span,
-                        },
-                        body,
-                    },
-                    span,
-                })
-            }
-            Tok::KwFor => {
-                let start = self.next();
-                let mut bindings = Vec::new();
-                loop {
-                    let binding = self.ident("a loop binding")?;
-                    bindings.push(binding);
-                    if matches!(self.peek(), Tok::Comma) {
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if bindings.len() > 2 {
-                    return Err(Diagnostic::new(
-                        "E1054",
-                        "a loop pattern has at most two bindings",
-                        start.span,
-                    ));
-                }
-                self.expect(Tok::KwIn, "`in`")?;
-                let value = self.expr()?;
-                let body = self.block(&[Tok::KwEnd])?;
-                let end = self.expect(Tok::KwEnd, "`end`")?;
-                Ok(Stmt {
-                    kind: StmtKind::For {
-                        bindings,
-                        value,
-                        body,
-                    },
-                    span: start.span.to(end.span),
-                })
-            }
-            Tok::Ident(_) if matches!(self.peek_at(1), Tok::Colon) => {
-                let (name, name_span) = self.ident("a name")?;
-                self.pos += 1; // consume `:`
-                let ty = self.type_expr()?;
-                self.expect(Tok::Assign, "`=` after the type annotation")?;
-                let value = self.expr()?;
-                let span = name_span.to(value.span);
-                Ok(Stmt {
-                    kind: StmtKind::Assign {
-                        name,
-                        name_span,
-                        ty: Some(ty),
-                        value,
-                    },
-                    span,
-                })
-            }
-            _ => {
-                let expr = self.expr()?;
-                if matches!(self.peek(), Tok::Assign) {
-                    self.pos += 1; // consume `=`
                     let value = self.expr()?;
-                    let span = expr.span.to(value.span);
-                    return match expr.kind {
-                        ExprKind::Name(name) => Ok(Stmt {
-                            kind: StmtKind::Assign {
-                                name,
-                                name_span: expr.span,
-                                ty: None,
-                                value,
-                            },
-                            span,
-                        }),
-                        ExprKind::Field {
-                            recv,
+                    let span = name_span.to(value.span);
+                    return Ok(Expr {
+                        kind: ExprKind::Assign {
                             name,
                             name_span,
-                        } => Ok(Stmt {
-                            kind: StmtKind::AssignField {
-                                recv: *recv,
-                                field: name,
-                                field_span: name_span,
-                                value,
-                            },
-                            span,
-                        }),
-                        ExprKind::Index { .. } => Err(Diagnostic::new(
-                            "E1002",
-                            "index assignment is not supported in this language slice. \
-                             For a map, use the `put` method. A list has no element \
-                             write in this slice.",
-                            expr.span,
-                        )),
-                        _ => Err(Diagnostic::new(
-                            "E1002",
-                            "this expression is not a valid assignment target",
-                            expr.span,
-                        )),
-                    };
+                            ty: Some(ty),
+                            value: Box::new(value),
+                        },
+                        span,
+                    });
                 }
-                let span = expr.span;
-                Ok(Stmt {
-                    kind: StmtKind::Expr(expr),
-                    span,
-                })
+                Err(diagnostic) if matches!(self.peek(), Tok::Assign) => {
+                    return Err(diagnostic);
+                }
+                Err(diagnostic) if diagnostic.code == "E1022" => {
+                    return Err(diagnostic);
+                }
+                _ => {}
             }
+            self.pos = saved;
+        }
+
+        let target = self.or_expr()?;
+        if !matches!(self.peek(), Tok::Assign) {
+            return Ok(target);
+        }
+        self.pos += 1;
+        let value = self.expr()?;
+        let span = target.span.to(value.span);
+        match target.kind {
+            ExprKind::Name(name) => Ok(Expr {
+                kind: ExprKind::Assign {
+                    name,
+                    name_span: target.span,
+                    ty: None,
+                    value: Box::new(value),
+                },
+                span,
+            }),
+            ExprKind::Field {
+                recv,
+                name,
+                name_span,
+            } => Ok(Expr {
+                kind: ExprKind::AssignField {
+                    recv,
+                    field: name,
+                    field_span: name_span,
+                    value: Box::new(value),
+                },
+                span,
+            }),
+            ExprKind::Index { .. } => Err(Diagnostic::new(
+                "E1002",
+                "index assignment is not supported. Use `put` for a map.",
+                target.span,
+            )),
+            _ => Err(Diagnostic::new(
+                "E1002",
+                "this expression is not a valid assignment target",
+                target.span,
+            )),
         }
     }
 
@@ -1403,7 +1352,7 @@ impl Parser<'_> {
 
     fn expr(&mut self) -> Result<Expr, Diagnostic> {
         self.enter_nesting()?;
-        let result = self.or_expr();
+        let result = self.assignment_expr();
         self.depth -= 1;
         result
     }
@@ -1698,12 +1647,12 @@ impl Parser<'_> {
     ) -> Result<(Expr, bool), Diagnostic> {
         let mut trailing = false;
         let mut end = close_span;
-        if self.at_closure() && self.starts_same_line(close_span) {
+        if self.at_trailing_closure() && self.starts_same_line(close_span) {
             let closure = self.closure_expr()?;
             end = closure.span;
             args.push(closure);
             trailing = true;
-            if self.at_closure() && self.starts_same_line(end) {
+            if self.at_trailing_closure() && self.starts_same_line(end) {
                 return Err(self.error("E1054", "a call accepts at most one trailing closure"));
             }
         }
@@ -1817,6 +1766,29 @@ impl Parser<'_> {
     fn primary_expr(&mut self) -> Result<Expr, Diagnostic> {
         self.reject_reserved()?;
         match self.peek() {
+            Tok::KwDef => Err(self.error(
+                "E1002",
+                "a `def` function is only valid at module or class scope",
+            )),
+            Tok::KwClass | Tok::KwFinal | Tok::KwFrozen | Tok::KwInterface => {
+                Err(self.error("E1002", "a type declaration is only valid at module scope"))
+            }
+            Tok::KwEnum => Err(self.error(
+                "E1002",
+                "an `enum` declaration is only valid at module scope",
+            )),
+            Tok::KwReturn => self.return_expr(),
+            Tok::KwBreak => self.break_expr(),
+            Tok::KwContinue => {
+                let token = self.next();
+                Ok(Expr {
+                    kind: ExprKind::Continue,
+                    span: token.span,
+                })
+            }
+            Tok::KwWhile => self.while_expr(),
+            Tok::KwFor => self.for_expr(),
+            Tok::KwLoop => self.loop_expr(),
             Tok::Int(_) => {
                 let token = self.next();
                 match token.tok {
@@ -2038,6 +2010,97 @@ impl Parser<'_> {
         }
     }
 
+    fn return_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let start = self.expect(Tok::KwReturn, "`return`")?;
+        let value = if self.at_body_end() {
+            None
+        } else {
+            Some(Box::new(self.expr()?))
+        };
+        let span = value
+            .as_ref()
+            .map_or(start.span, |value| start.span.to(value.span));
+        Ok(Expr {
+            kind: ExprKind::Return { value },
+            span,
+        })
+    }
+
+    fn break_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let start = self.expect(Tok::KwBreak, "`break`")?;
+        let value = if self.at_body_end() {
+            None
+        } else {
+            Some(Box::new(self.expr()?))
+        };
+        let span = value
+            .as_ref()
+            .map_or(start.span, |value| start.span.to(value.span));
+        Ok(Expr {
+            kind: ExprKind::Break { value },
+            span,
+        })
+    }
+
+    fn while_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let start = self.expect(Tok::KwWhile, "`while`")?;
+        let cond = self.expr()?;
+        self.loop_header_body_opener()?;
+        let body = self.block(&[Tok::KwEnd])?;
+        let end = self.expect(Tok::KwEnd, "`end`")?;
+        Ok(Expr {
+            kind: ExprKind::While {
+                cond: Box::new(cond),
+                body,
+            },
+            span: start.span.to(end.span),
+        })
+    }
+
+    fn for_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let start = self.expect(Tok::KwFor, "`for`")?;
+        let mut bindings = Vec::new();
+        loop {
+            bindings.push(self.ident("a loop binding")?);
+            if matches!(self.peek(), Tok::Comma) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if bindings.len() > 2 {
+            return Err(Diagnostic::new(
+                "E1054",
+                "a loop pattern has at most two bindings",
+                start.span,
+            ));
+        }
+        self.expect(Tok::KwIn, "`in`")?;
+        let value = self.expr()?;
+        self.loop_header_body_opener()?;
+        let body = self.block(&[Tok::KwEnd])?;
+        let end = self.expect(Tok::KwEnd, "`end`")?;
+        Ok(Expr {
+            kind: ExprKind::For {
+                bindings,
+                value: Box::new(value),
+                body,
+            },
+            span: start.span.to(end.span),
+        })
+    }
+
+    fn loop_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let start = self.expect(Tok::KwLoop, "`loop`")?;
+        self.body_opener(Tok::KwDo, "do")?;
+        let body = self.block(&[Tok::KwEnd])?;
+        let end = self.expect(Tok::KwEnd, "`end`")?;
+        Ok(Expr {
+            kind: ExprKind::Loop { body },
+            span: start.span.to(end.span),
+        })
+    }
+
     /// Parse one closure in either spelling.
     ///
     /// `do |x| ... end` and `{ |x| ... }` produce the same node, so
@@ -2090,6 +2153,7 @@ impl Parser<'_> {
         let else_body;
         loop {
             let cond = self.expr()?;
+            self.body_opener(Tok::KwThen, "then")?;
             let body = self.block(&[Tok::KwElsif, Tok::KwElse, Tok::KwEnd])?;
             arms.push((cond, body));
             match self.peek() {
@@ -2098,6 +2162,9 @@ impl Parser<'_> {
                 }
                 Tok::KwElse => {
                     self.pos += 1;
+                    if matches!(self.peek(), Tok::Newline) {
+                        self.pos += 1;
+                    }
                     else_body = Some(self.block(&[Tok::KwEnd])?);
                     break;
                 }
@@ -2124,30 +2191,9 @@ impl Parser<'_> {
                 Tok::KwIn => {
                     let in_tok = self.next();
                     let pattern = self.pattern()?;
-                    let (body, hi) = if matches!(self.peek(), Tok::KwThen) {
-                        self.pos += 1;
-                        if matches!(self.peek(), Tok::KwReturn | Tok::KwBreak | Tok::KwContinue) {
-                            let stmt = self.stmt()?;
-                            let hi = stmt.span;
-                            (vec![stmt], hi)
-                        } else {
-                            let value = self.expr()?;
-                            let hi = value.span;
-                            let span = value.span;
-                            (
-                                vec![Stmt {
-                                    kind: StmtKind::Expr(value),
-                                    span,
-                                }],
-                                hi,
-                            )
-                        }
-                    } else {
-                        self.expect_terminator()?;
-                        let body = self.block(&[Tok::KwIn, Tok::KwEnd])?;
-                        let hi = body.last().map(|s| s.span).unwrap_or(pattern.span);
-                        (body, hi)
-                    };
+                    self.body_opener(Tok::KwThen, "then")?;
+                    let body = self.block(&[Tok::KwIn, Tok::KwEnd])?;
+                    let hi = body.last().map(|expr| expr.span).unwrap_or(pattern.span);
                     arms.push(CaseArm {
                         span: in_tok.span.to(hi),
                         pattern,
@@ -2458,7 +2504,7 @@ mod tests {
     #[test]
     fn parses_field_assignment_targets() {
         let module = parse("class A\n  x: Int = 0\nend\na = A()\na.x = 3\na.x\n").unwrap();
-        assert!(matches!(module.entry[1].kind, StmtKind::AssignField { .. }));
+        assert!(matches!(module.entry[1].kind, ExprKind::AssignField { .. }));
     }
 
     #[test]
@@ -2486,19 +2532,16 @@ mod tests {
         let dump = dump_module(&module);
         assert_eq!(
             dump,
-            "module\n  entry\n    assign x\n      int 1\n    expr\n      binary +\n        \
-             name x\n        int 2\n"
+            "module\n  entry\n    assign x\n      int 1\n    binary +\n      name x\n      int 2\n"
         );
     }
 
     #[test]
-    fn parses_loop_as_while_true() {
+    fn parses_loop_expression() {
         let module = parse("loop do\nbreak\nend\n1\n").unwrap();
         match &module.entry[0].kind {
-            StmtKind::While { cond, .. } => {
-                assert!(matches!(cond.kind, ExprKind::Bool(true)));
-            }
-            other => panic!("expected a while, got {other:?}"),
+            ExprKind::Loop { .. } => {}
+            other => panic!("expected a loop, got {other:?}"),
         }
         // The `do` is optional.
         assert!(parse("loop\nbreak\nend\n1\n").is_ok());
@@ -2509,19 +2552,16 @@ mod tests {
         let module = parse("(1, 2)\n(\"only\",)\n()\n").unwrap();
         assert_eq!(module.entry.len(), 3);
         match &module.entry[0].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::TupleLit(_))),
+            ExprKind::TupleLit(_) => {}
             other => panic!("expected a tuple, got {other:?}"),
         }
         match &module.entry[1].kind {
-            StmtKind::Expr(e) => match &e.kind {
-                ExprKind::TupleLit(items) => assert_eq!(items.len(), 1),
-                other => panic!("expected a one-element tuple, got {other:?}"),
-            },
-            other => panic!("expected an expression, got {other:?}"),
+            ExprKind::TupleLit(items) => assert_eq!(items.len(), 1),
+            other => panic!("expected a one-element tuple, got {other:?}"),
         }
         match &module.entry[2].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Unit)),
-            other => panic!("expected the unit literal, got {other:?}"),
+            ExprKind::Unit => {}
+            other => panic!("expected unit, got {other:?}"),
         }
     }
 
@@ -2557,20 +2597,17 @@ mod tests {
         let source = "case x\nin Pair(Some(a), None)\n  a\nin _\n  0\nend\n";
         let module = parse(source).unwrap();
         match &module.entry[0].kind {
-            StmtKind::Expr(e) => match &e.kind {
-                ExprKind::Case { arms, .. } => {
-                    assert_eq!(arms.len(), 2);
-                    match &arms[0].pattern.kind {
-                        PatternKind::Ctor { name, args, .. } => {
-                            assert_eq!(name, "Pair");
-                            assert_eq!(args.len(), 2);
-                        }
-                        other => panic!("expected a constructor pattern, got {other:?}"),
+            ExprKind::Case { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                match &arms[0].pattern.kind {
+                    PatternKind::Ctor { name, args, .. } => {
+                        assert_eq!(name, "Pair");
+                        assert_eq!(args.len(), 2);
                     }
+                    other => panic!("expected a constructor pattern, got {other:?}"),
                 }
-                other => panic!("expected a case, got {other:?}"),
-            },
-            other => panic!("expected an expression, got {other:?}"),
+            }
+            other => panic!("expected a case, got {other:?}"),
         }
     }
 
@@ -2579,19 +2616,16 @@ mod tests {
         let source = "case x\nin Option.Some(v) then v\nin Option.None then 0\nend\n";
         let module = parse(source).unwrap();
         match &module.entry[0].kind {
-            StmtKind::Expr(e) => match &e.kind {
-                ExprKind::Case { arms, .. } => match &arms[1].pattern.kind {
-                    PatternKind::Ctor {
-                        qualifier, name, ..
-                    } => {
-                        assert_eq!(qualifier.as_deref(), Some("Option"));
-                        assert_eq!(name, "None");
-                    }
-                    other => panic!("expected a qualified pattern, got {other:?}"),
-                },
-                other => panic!("expected a case, got {other:?}"),
+            ExprKind::Case { arms, .. } => match &arms[1].pattern.kind {
+                PatternKind::Ctor {
+                    qualifier, name, ..
+                } => {
+                    assert_eq!(qualifier.as_deref(), Some("Option"));
+                    assert_eq!(name, "None");
+                }
+                other => panic!("expected a qualified pattern, got {other:?}"),
             },
-            other => panic!("expected an expression, got {other:?}"),
+            other => panic!("expected a case, got {other:?}"),
         }
     }
 
@@ -2599,10 +2633,7 @@ mod tests {
     fn parses_select_arms() {
         let source = "select\nin left -> a\n  a\nin right -> b\n  b\nend\n";
         let module = parse(source).expect("the select parses");
-        let StmtKind::Expr(expr) = &module.entry[0].kind else {
-            panic!("the module entry holds an expression");
-        };
-        let ExprKind::Select { arms } = &expr.kind else {
+        let ExprKind::Select { arms } = &module.entry[0].kind else {
             panic!("the expression is a select");
         };
         assert_eq!(arms.len(), 2);
@@ -2732,14 +2763,11 @@ end
     fn parses_explicit_generic_call_arguments() {
         let module = parse("choose[String](a, b)\nxs[0]\n").unwrap();
         match &module.entry[0].kind {
-            StmtKind::Expr(e) => match &e.kind {
-                ExprKind::Call { type_args, .. } => assert_eq!(type_args.len(), 1),
-                other => panic!("expected a generic call, got {other:?}"),
-            },
-            other => panic!("expected an expression, got {other:?}"),
+            ExprKind::Call { type_args, .. } => assert_eq!(type_args.len(), 1),
+            other => panic!("expected a generic call, got {other:?}"),
         }
         match &module.entry[1].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Index { .. })),
+            ExprKind::Index { .. } => {}
             other => panic!("expected an index, got {other:?}"),
         }
     }
@@ -2748,11 +2776,11 @@ end
     fn parses_is_and_as() {
         let module = parse("a is Dog\na as Dog\n").unwrap();
         match &module.entry[0].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Is { .. })),
+            ExprKind::Is { .. } => {}
             other => panic!("expected `is`, got {other:?}"),
         }
         match &module.entry[1].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Cast { .. })),
+            ExprKind::Cast { .. } => {}
             other => panic!("expected `as`, got {other:?}"),
         }
     }
@@ -2770,7 +2798,7 @@ end
     }
 
     #[test]
-    fn rejects_two_statements_on_one_line() {
+    fn rejects_two_expressions_without_a_separator() {
         assert_eq!(parse("x = 1 y = 2\n").unwrap_err().code, "E1001");
     }
 
@@ -2785,7 +2813,7 @@ end
         let module = parse("name = \"Ada\"\n\"Hello #{name}!\"\n").unwrap();
         assert_eq!(module.entry.len(), 2);
         match &module.entry[1].kind {
-            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Interp(_))),
+            ExprKind::Interp(_) => {}
             other => panic!("expected an expression, got {other:?}"),
         }
     }
@@ -2793,14 +2821,11 @@ end
     #[test]
     fn parses_bitwise_precedence() {
         let module = parse("1 | 2 ^ 3 & 4 == 5\n").unwrap();
-        let StmtKind::Expr(expr) = &module.entry[0].kind else {
-            panic!("the entry holds an expression");
-        };
         let ExprKind::Binary {
             op: BinOp::Eq,
             left,
             ..
-        } = &expr.kind
+        } = &module.entry[0].kind
         else {
             panic!("equality has the weakest tested precedence");
         };
@@ -2823,40 +2848,37 @@ end
     #[test]
     fn parses_result_propagation() {
         let module = parse("def f(): Result[Int, String]\n  work()?\nend\n1\n").unwrap();
-        let StmtKind::Expr(value) = &module.funcs[0].body[0].kind else {
-            panic!("the function body holds an expression");
-        };
-        assert!(matches!(value.kind, ExprKind::Propagate(_)));
+        assert!(matches!(
+            module.funcs[0].body[0].kind,
+            ExprKind::Propagate(_)
+        ));
     }
 
     #[test]
     fn parses_return_in_a_then_arm() {
         let source = "def f(): Int\n  case x\n  in _ then return 1\n  end\nend\n1\n";
         let module = parse(source).unwrap();
-        let StmtKind::Expr(value) = &module.funcs[0].body[0].kind else {
-            panic!("the function body holds an expression");
-        };
-        let ExprKind::Case { arms, .. } = &value.kind else {
+        let ExprKind::Case { arms, .. } = &module.funcs[0].body[0].kind else {
             panic!("the expression is a case");
         };
-        assert!(matches!(arms[0].body[0].kind, StmtKind::Return { .. }));
+        assert!(matches!(arms[0].body[0].kind, ExprKind::Return { .. }));
     }
 
     #[test]
     fn parses_loop_control_in_then_arms() {
         let source = "loop\n  case x\n  in 1 then continue\n  in _ then break\n  end\nend\n1\n";
         let module = parse(source).unwrap();
-        let StmtKind::While { body, .. } = &module.entry[0].kind else {
-            panic!("the first statement is a loop");
+        let ExprKind::Loop { body } = &module.entry[0].kind else {
+            panic!("the first expression is a loop");
         };
-        let StmtKind::Expr(value) = &body[0].kind else {
-            panic!("the loop body holds an expression");
-        };
-        let ExprKind::Case { arms, .. } = &value.kind else {
+        let ExprKind::Case { arms, .. } = &body[0].kind else {
             panic!("the expression is a case");
         };
-        assert!(matches!(arms[0].body[0].kind, StmtKind::Continue));
-        assert!(matches!(arms[1].body[0].kind, StmtKind::Break));
+        assert!(matches!(arms[0].body[0].kind, ExprKind::Continue));
+        assert!(matches!(
+            arms[1].body[0].kind,
+            ExprKind::Break { value: None }
+        ));
     }
 
     #[test]

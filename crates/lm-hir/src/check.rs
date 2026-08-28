@@ -2962,7 +2962,7 @@ fn check_module_with_core_adjustment(
     check_all_methods(&mut ctx, core, true).map_err(core_defect)?;
     check_interface_defaults(&mut ctx, module, false)?;
     check_interface_defaults(&mut ctx, core, true).map_err(core_defect)?;
-    // Pass 6: check the entry statements.
+    // Pass 6: check the entry expressions.
     let entry_span = module
         .entry
         .last()

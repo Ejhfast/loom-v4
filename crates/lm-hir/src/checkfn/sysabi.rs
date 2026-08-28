@@ -312,6 +312,7 @@ impl<'o> FnChecker<'o> {
             }
             self.charge_op(ctx, lm_abi::OP_VM_NEW, span)?;
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty: lm_types::VM,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -334,6 +335,7 @@ impl<'o> FnChecker<'o> {
             let bytes = self.check_expr(ctx, &args[0], lm_types::BYTES)?;
             self.charge_op(ctx, lm_abi::OP_VM_ARTIFACT, span)?;
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty: Self::core_class(ctx, "Artifact"),
                 mutable: false,
                 kind: HExprKind::Perform {
@@ -361,6 +363,7 @@ impl<'o> FnChecker<'o> {
             let error = Self::core_class(ctx, "SnapshotError");
             let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -385,6 +388,7 @@ impl<'o> FnChecker<'o> {
             let error = Self::core_class(ctx, "SnapshotError");
             let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -409,6 +413,7 @@ impl<'o> FnChecker<'o> {
             let error = Self::core_class(ctx, "RestoreError");
             let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM, error]);
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -455,6 +460,7 @@ impl<'o> FnChecker<'o> {
             };
             self.charge_op(ctx, op, span)?;
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -494,6 +500,7 @@ impl<'o> FnChecker<'o> {
             self.charge_row(ctx, &row, span)?;
             let ty = ctx.store.intern(Type::Handle(NEVER, result));
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -536,6 +543,7 @@ impl<'o> FnChecker<'o> {
             self.charge_op(ctx, lm_abi::OP_WAIT_ANY, span)?;
             let ty = ctx.store.intern(Type::Tuple(vec![INT, result]));
             return Ok(HExpr {
+                flow: Flow::Normal,
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
@@ -560,6 +568,7 @@ impl<'o> FnChecker<'o> {
         self.charge_op(ctx, op, span)?;
         let ret = Self::abi_type_id(ctx, def.reply);
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: ret,
             mutable: true,
             kind: HExprKind::Perform { op, args: checked },
@@ -628,6 +637,7 @@ impl<'o> FnChecker<'o> {
         let fn_ty = Self::op_fn_type(ctx, op);
         let ty = ctx.store.intern(Type::Op(op, fn_ty));
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable: true,
             kind: HExprKind::OpConst(op),
@@ -756,6 +766,7 @@ impl<'o> FnChecker<'o> {
             self.charge_row(ctx, &row, span)?;
         }
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: UNIT,
             mutable: true,
             kind: HExprKind::TableEdit {
@@ -883,6 +894,7 @@ impl<'o> FnChecker<'o> {
                 let element = Self::core_class(ctx, "DefinitionSource");
                 let ty = Self::core_inst(ctx, "Option", vec![element]);
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::CodeSource {
@@ -894,6 +906,7 @@ impl<'o> FnChecker<'o> {
             ("FunctionCode", "definition") | ("ClassCode", "definition") => {
                 Self::expect_no_args(name, args, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: Self::core_class(ctx, "DefinitionSpec"),
                     mutable: true,
                     kind: HExprKind::CodeDefinition {
@@ -906,6 +919,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_COMPILER_VERIFY, span)?;
                 let verified = Self::core_class(ctx, "VerifiedModule");
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, verified),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -949,6 +963,7 @@ impl<'o> FnChecker<'o> {
                 };
                 self.charge_op(ctx, op, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, function),
                     mutable: true,
                     kind: HExprKind::Perform { op, args: values },
@@ -966,6 +981,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_VM_MODULE_CLASS_CODE, span)?;
                 let class_code = Self::core_class(ctx, "ClassCode");
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, class_code),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -980,6 +996,7 @@ impl<'o> FnChecker<'o> {
                 let function = Self::core_inst(ctx, "FunctionDef", vec![UNIT, dynamic]);
                 self.charge_op(ctx, lm_abi::OP_VM_INSTANCE_ENTRY, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, function),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1047,6 +1064,7 @@ impl<'o> FnChecker<'o> {
                 };
                 self.charge_op(ctx, op, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, function),
                     mutable: true,
                     kind: HExprKind::Perform { op, args: values },
@@ -1077,6 +1095,7 @@ impl<'o> FnChecker<'o> {
                     },
                 );
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, class_def),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1109,6 +1128,7 @@ impl<'o> FnChecker<'o> {
                 };
                 self.charge_op(ctx, op, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, value),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1137,6 +1157,7 @@ impl<'o> FnChecker<'o> {
                 };
                 self.charge_op(ctx, op, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, value),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1153,6 +1174,7 @@ impl<'o> FnChecker<'o> {
                 let target = Self::core_inst(ctx, "FunctionDef", values);
                 self.charge_op(ctx, lm_abi::OP_VM_BINDING_FUNCTION_TARGET, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, target),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1166,6 +1188,7 @@ impl<'o> FnChecker<'o> {
                 let target = Self::core_class(ctx, "ClassDef");
                 self.charge_op(ctx, lm_abi::OP_VM_BINDING_CLASS_TARGET, span)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: result(ctx, target),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1223,6 +1246,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, op, span)?;
                 let error = Self::core_class(ctx, "SnapshotError");
                 HExpr {
+                    flow: Flow::Normal,
                     ty: Self::core_inst(ctx, "Result", vec![lm_types::BYTES, error]),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1298,6 +1322,7 @@ impl<'o> FnChecker<'o> {
                     Self::core_inst(ctx, "Result", vec![run_ty, error])
                 };
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1372,6 +1397,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "CodeError");
                 let ty = Self::core_inst(ctx, "Result", vec![installed, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform { op, args: values },
@@ -1492,6 +1518,7 @@ impl<'o> FnChecker<'o> {
                 };
                 let ty = Self::core_inst(ctx, "Result", vec![success, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1514,6 +1541,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_VM_REPLACE_ALL, span)?;
                 let error = Self::core_class(ctx, "CodeError");
                 HExpr {
+                    flow: Flow::Normal,
                     ty: Self::core_inst(ctx, "Result", vec![UNIT, error]),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1528,6 +1556,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1553,6 +1582,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1576,6 +1606,7 @@ impl<'o> FnChecker<'o> {
                 let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
                 let ty = Self::core_inst(ctx, "Option", vec![event]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1609,6 +1640,7 @@ impl<'o> FnChecker<'o> {
                     Self::core_inst(ctx, event, vec![t])
                 };
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1623,6 +1655,7 @@ impl<'o> FnChecker<'o> {
                 let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
                 let ty = ctx.store.intern(Type::Wait(event));
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1638,6 +1671,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1653,6 +1687,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "BranchError");
                 let ty = Self::core_inst(ctx, "Result", vec![run, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1690,6 +1725,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "BranchError");
                 let ty = Self::core_inst(ctx, "Result", vec![run, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1722,6 +1758,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "RestoreError");
                 let ty = Self::core_inst(ctx, "Result", vec![run, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1748,6 +1785,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "RestoreError");
                 let ty = Self::core_inst(ctx, "Result", vec![run, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1766,6 +1804,7 @@ impl<'o> FnChecker<'o> {
                 }
                 self.charge_op(ctx, lm_abi::OP_VM_TABLE, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::POLICY_TABLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1779,6 +1818,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_VM_STACK, span)?;
                 let location = Self::core_class(ctx, "CodeLocation");
                 HExpr {
+                    flow: Flow::Normal,
                     ty: ctx.store.intern(Type::List(location)),
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1792,6 +1832,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_VM_HANDLES, span)?;
                 let ty = ctx.store.intern(Type::List(lm_types::RESOURCE_HANDLE));
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1826,6 +1867,7 @@ impl<'o> FnChecker<'o> {
                 }
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1859,6 +1901,7 @@ impl<'o> FnChecker<'o> {
                 }
                 self.charge_op(ctx, lm_abi::OP_VM_SERVE_FILE, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1907,6 +1950,7 @@ impl<'o> FnChecker<'o> {
                 let peer = self.check_expr(ctx, &args[1], address)?;
                 self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_STREAM, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1943,6 +1987,7 @@ impl<'o> FnChecker<'o> {
                 }
                 self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_LISTENER, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -1989,6 +2034,7 @@ impl<'o> FnChecker<'o> {
                 }
                 self.charge_op(ctx, lm_abi::OP_VM_SERVE_TLS_STREAM, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2022,6 +2068,7 @@ impl<'o> FnChecker<'o> {
                 let value = self.check_expr(ctx, args[1], reply)?;
                 self.charge_op(ctx, lm_abi::OP_VM_ANSWER, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: UNIT,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2043,6 +2090,7 @@ impl<'o> FnChecker<'o> {
                 let fault = self.check_expr(ctx, args[1], lm_types::FAULT)?;
                 self.charge_op(ctx, lm_abi::OP_VM_REJECT, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: UNIT,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2062,6 +2110,7 @@ impl<'o> FnChecker<'o> {
                 let request = self.check_expr(ctx, &args[0], lm_types::REQUEST)?;
                 self.charge_op(ctx, lm_abi::OP_VM_DISPATCH, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: UNIT,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2091,6 +2140,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_WAIT_WAIT, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: t,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2122,6 +2172,7 @@ impl<'o> FnChecker<'o> {
                 let choice = Self::core_inst(ctx, "Choice", vec![left, right_result]);
                 let ty = ctx.store.intern(Type::Wait(choice));
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2134,6 +2185,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_WAIT_CANCEL, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2178,6 +2230,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_PROC_SEND, span)?;
                 let ty = Self::core_class(ctx, "SendResult");
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2191,6 +2244,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_PROC_CLOSE, span)?;
                 let ty = Self::core_class(ctx, "SendResult");
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2204,6 +2258,7 @@ impl<'o> FnChecker<'o> {
                 self.charge_op(ctx, lm_abi::OP_PROC_DONE, span)?;
                 let ty = Self::core_inst(ctx, "Result", vec![r, lm_types::FAULT]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2226,6 +2281,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2245,6 +2301,7 @@ impl<'o> FnChecker<'o> {
                 let error = Self::core_class(ctx, "ProcError");
                 let ty = Self::core_inst(ctx, "Result", vec![ok, error]);
                 HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2274,6 +2331,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_IS_OPEN, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2286,6 +2344,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_CLOSE, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2298,6 +2357,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_KIND, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: STRING,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2320,6 +2380,7 @@ impl<'o> FnChecker<'o> {
                 let other = self.check_expr(ctx, &args[0], lm_types::RESOURCE_HANDLE)?;
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_SAME, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Perform {
@@ -2361,6 +2422,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 HExpr {
+                    flow: Flow::Normal,
                     ty: a,
                     mutable: true,
                     kind: HExprKind::CallArgs {
@@ -2371,6 +2433,7 @@ impl<'o> FnChecker<'o> {
             (Type::Request, "op_name") => {
                 Self::expect_no_args(name, args, span)?;
                 HExpr {
+                    flow: Flow::Normal,
                     ty: STRING,
                     mutable: true,
                     kind: HExprKind::RequestOpName {
@@ -2387,6 +2450,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 HExpr {
+                    flow: Flow::Normal,
                     ty: STRING,
                     mutable: true,
                     kind: HExprKind::FaultCodeGet {
@@ -2398,6 +2462,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 let location = Self::core_class(ctx, "CodeLocation");
                 HExpr {
+                    flow: Flow::Normal,
                     ty: Self::core_inst(ctx, "Option", vec![location]),
                     mutable: true,
                     kind: HExprKind::FaultSiteGet {
@@ -2409,6 +2474,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 let location = Self::core_class(ctx, "CodeLocation");
                 HExpr {
+                    flow: Flow::Normal,
                     ty: ctx.store.intern(Type::List(location)),
                     mutable: true,
                     kind: HExprKind::FaultTraceGet {

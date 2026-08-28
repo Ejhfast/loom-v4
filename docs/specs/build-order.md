@@ -114,11 +114,7 @@ Unsupported syntax or semantics reject explicitly. No success path silently fall
 ```lm
 # examples/01-basics/factorial.lm
 def factorial(n: Int): Int
-  if n <= 1
-    1
-  else
-    n * factorial(n - 1)
-  end
+  if n <= 1 then 1 else n * factorial(n - 1) end
 end
 
 factorial(10)

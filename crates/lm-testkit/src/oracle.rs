@@ -52,7 +52,7 @@ enum Stop {
     /// An internal oracle limit, reported as a harness error.
     Limit(&'static str),
     Return(OV),
-    Break,
+    Break(Option<OV>),
     Continue,
 }
 
@@ -169,7 +169,7 @@ impl<'m> Oracle<'m> {
                     }
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(Stop::Continue) => continue,
                         Err(other) => return Err(other),
                     }
@@ -189,7 +189,13 @@ impl<'m> Oracle<'m> {
                 };
                 Err(Stop::Return(value))
             }
-            HStmt::Break => Err(Stop::Break),
+            HStmt::Break { value } => {
+                let value = value
+                    .as_ref()
+                    .map(|value| self.eval(value, frame, depth))
+                    .transpose()?;
+                Err(Stop::Break(value))
+            }
             HStmt::Continue => Err(Stop::Continue),
             HStmt::Expr(e) => {
                 self.eval(e, frame, depth)?;
@@ -239,7 +245,7 @@ impl<'m> Oracle<'m> {
                     frame.set(bindings[0], value);
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) | Err(Stop::Continue) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(other) => return Err(other),
                     }
                 }
@@ -270,7 +276,7 @@ impl<'m> Oracle<'m> {
                     }
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) | Err(Stop::Continue) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(other) => return Err(other),
                     }
                 }
@@ -284,7 +290,7 @@ impl<'m> Oracle<'m> {
                     cursor += value.len_utf8() as i64;
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) | Err(Stop::Continue) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(other) => return Err(other),
                     }
                 }
@@ -313,7 +319,7 @@ impl<'m> Oracle<'m> {
                     frame.set(bindings[0], OV::Int(value));
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) | Err(Stop::Continue) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(other) => return Err(other),
                     }
                 }
@@ -356,7 +362,7 @@ impl<'m> Oracle<'m> {
                     }
                     match self.run_block(body, frame, depth, false) {
                         Ok(_) | Err(Stop::Continue) => {}
-                        Err(Stop::Break) => break,
+                        Err(Stop::Break(_)) => break,
                         Err(other) => return Err(other),
                     }
                 }
@@ -742,6 +748,14 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Str(Rc::new(out)))
             }
+            HExprKind::Block(body) => self.run_block(body, frame, depth, false),
+            HExprKind::Loop { body, .. } => loop {
+                match self.run_block(body, frame, depth, false) {
+                    Ok(_) | Err(Stop::Continue) => {}
+                    Err(Stop::Break(value)) => return Ok(value.unwrap_or(OV::Unit)),
+                    Err(other) => return Err(other),
+                }
+            },
             HExprKind::If { arms, else_body } => {
                 let valued = expr.ty != lm_types::UNIT;
                 for (cond, body) in arms {

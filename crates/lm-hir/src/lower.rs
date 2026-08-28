@@ -714,7 +714,8 @@ struct Lowerer<'a, 'm> {
     blocks: Vec<Vec<Instr>>,
     cur: usize,
     /// Stack of `(continue_target, break_target)` blocks.
-    loops: Vec<(u32, u32)>,
+    /// Continue target, exit target, and optional loop-result slot.
+    loops: Vec<(u32, u32, Option<u32>)>,
     /// The declared type of every local slot so far. The checker
     /// types come first; scratch slots append their true types. The
     /// slot count is the vector length.
@@ -1071,19 +1072,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.switch_to(cond_b);
                 let body_b = self.new_block();
                 let exit_b = self.new_block();
-                if crate::hir::while_diverges(cond, body) {
-                    // The literal condition needs no test, and no
-                    // `break` leaves the loop. The exit block keeps no
-                    // predecessor, so the verifier skips it and the
-                    // declared result type stays unclaimed there.
-                    self.emit(Instr::Jump(body_b));
-                } else {
-                    self.lower_expr(cond);
-                    self.emit(Instr::JumpIfFalse(exit_b));
-                    self.emit(Instr::Jump(body_b));
-                }
+                self.lower_expr(cond);
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
                 self.switch_to(body_b);
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1104,21 +1097,31 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let dead = self.new_block();
                 self.switch_to(dead);
             }
-            HStmt::Break => {
-                let (_, exit_b) = *self.loops.last().expect("checked loop context");
+            HStmt::Break { value } => {
+                let (_, exit_b, result_slot) = *self.loops.last().expect("checked loop context");
+                if let Some(value) = value {
+                    self.lower_expr(value);
+                    if value.flow == Flow::Normal {
+                        if let Some(slot) = result_slot {
+                            self.emit(Instr::StoreLocal(slot));
+                        } else {
+                            self.emit(Instr::Pop);
+                        }
+                    }
+                }
                 self.emit(Instr::Jump(exit_b));
                 let dead = self.new_block();
                 self.switch_to(dead);
             }
             HStmt::Continue => {
-                let (cond_b, _) = *self.loops.last().expect("checked loop context");
+                let (cond_b, _, _) = *self.loops.last().expect("checked loop context");
                 self.emit(Instr::Jump(cond_b));
                 let dead = self.new_block();
                 self.switch_to(dead);
             }
             HStmt::Expr(expr) => {
                 self.lower_expr(expr);
-                if expr.ty != NEVER {
+                if expr.flow == Flow::Normal {
                     self.emit(Instr::Pop);
                 }
             }
@@ -1170,7 +1173,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::ListAt);
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*index_slot);
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1230,7 +1233,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::StoreLocal(bindings[1]));
                 }
                 self.increment_local(*index_slot);
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1265,7 +1268,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len));
                 self.emit(Instr::Add);
                 self.emit(Instr::StoreLocal(*cursor_slot));
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1298,7 +1301,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::LoadLocal(*cursor_slot));
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*cursor_slot);
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1346,7 +1349,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 } else {
                     self.emit(Instr::StoreLocal(bindings[0]));
                 }
-                self.loops.push((cond_b, exit_b));
+                self.loops.push((cond_b, exit_b, None));
                 self.lower_block_stmt(body);
                 self.loops.pop();
                 self.emit(Instr::Jump(cond_b));
@@ -1384,7 +1387,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         match last {
             HStmt::Expr(expr) => {
                 self.lower_expr(expr);
-                expr.ty != NEVER
+                expr.flow == Flow::Normal
             }
             stmt if stmt.diverges() => {
                 self.lower_stmt(stmt);
@@ -1811,6 +1814,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     for (key, value) in entries {
                         let args = vec![
                             HExpr {
+                                flow: Flow::Normal,
                                 ty: expr.ty,
                                 mutable: true,
                                 kind: HExprKind::Local(map),
@@ -1944,6 +1948,28 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::LoadLocal(builder));
                 }
                 self.emit(Instr::Native(lm_bytecode::NativeInstr::SbFinish));
+            }
+            HExprKind::Block(body) => {
+                self.lower_block_stmt(body);
+                if expr.flow == Flow::Normal && expr.ty == UNIT {
+                    self.emit(Instr::ConstUnit);
+                }
+            }
+            HExprKind::Loop { body, result_slot } => {
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(body_b));
+                self.switch_to(body_b);
+                self.loops.push((body_b, exit_b, *result_slot));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(body_b));
+                self.switch_to(exit_b);
+                if expr.ty == UNIT {
+                    self.emit(Instr::ConstUnit);
+                } else if let Some(slot) = result_slot {
+                    self.emit(Instr::LoadLocal(*slot));
+                }
             }
             HExprKind::If { arms, else_body } => {
                 let join_b = self.new_block();
@@ -2792,6 +2818,19 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 }
             }
         }
+        HExprKind::Block(body) => {
+            for statement in body {
+                shift_stmt_in_place(statement, base, max);
+            }
+        }
+        HExprKind::Loop { body, result_slot } => {
+            if let Some(slot) = result_slot {
+                shift_slot(slot, base, max);
+            }
+            for statement in body {
+                shift_stmt_in_place(statement, base, max);
+            }
+        }
         HExprKind::If { arms, else_body } => {
             for (cond, body) in arms {
                 shift_expr_in_place(cond, base, max);
@@ -2951,7 +2990,12 @@ fn shift_stmt_in_place(stmt: &mut HStmt, base: u32, max: &mut u32) {
                 shift_expr_in_place(v, base, max);
             }
         }
-        HStmt::Break | HStmt::Continue => {}
+        HStmt::Break { value } => {
+            if let Some(value) = value {
+                shift_expr_in_place(value, base, max);
+            }
+        }
+        HStmt::Continue => {}
         HStmt::Expr(e) => shift_expr_in_place(e, base, max),
     }
 }

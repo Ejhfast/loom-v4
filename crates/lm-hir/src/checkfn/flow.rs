@@ -70,7 +70,7 @@ impl<'o> FnChecker<'o> {
 
     /// Bind a refined shadow local inside the freshly pushed branch
     /// scope. The shadow holds the same value behind a checked cast,
-    /// so the verifier sees the narrowed type. Return the statement
+    /// so the verifier sees the narrowed type. Return the lowering step
     /// that initializes the shadow.
     pub(super) fn bind_refinement(&mut self, slot: u32, name: String, target: TypeId) -> HStmt {
         let (original, mutable) = self.locals[slot as usize];
@@ -83,10 +83,12 @@ impl<'o> FnChecker<'o> {
         HStmt::Assign {
             slot: shadow,
             value: HExpr {
+                flow: Flow::Normal,
                 ty: target,
                 mutable,
                 kind: HExprKind::CastType {
                     value: Box::new(HExpr {
+                        flow: Flow::Normal,
                         ty: original,
                         mutable,
                         kind: HExprKind::Local(slot),
@@ -103,7 +105,7 @@ impl<'o> FnChecker<'o> {
     pub(super) fn check_branch_body(
         &mut self,
         ctx: &mut Ctx,
-        body: &[ast::Stmt],
+        body: &[ast::Expr],
         mode: BlockMode,
         refinement: Option<(u32, String, TypeId)>,
         entry_state: &Option<CtorState>,
@@ -153,8 +155,8 @@ impl<'o> FnChecker<'o> {
     pub(super) fn check_if(
         &mut self,
         ctx: &mut Ctx,
-        arms: &[(ast::Expr, Vec<ast::Stmt>)],
-        else_body: &Option<Vec<ast::Stmt>>,
+        arms: &[(ast::Expr, Vec<ast::Expr>)],
+        else_body: &Option<Vec<ast::Expr>>,
         mode: BlockMode,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
@@ -164,7 +166,7 @@ impl<'o> FnChecker<'o> {
             }
         }
         let branch_mode = match (mode, else_body) {
-            (BlockMode::Stmt, _) => BlockMode::Stmt,
+            (BlockMode::Discard, _) => BlockMode::Discard,
             (BlockMode::Value(t), _) => BlockMode::Value(t),
             (BlockMode::Synth, Some(_)) => BlockMode::Synth,
             // A value-position `if` without `else` gives unit. Each
@@ -188,7 +190,7 @@ impl<'o> FnChecker<'o> {
         }
         // The branch bodies in order; the `else` body is the last
         // entry when present.
-        type BranchBody<'b> = (&'b Vec<ast::Stmt>, Option<(u32, String, TypeId)>);
+        type BranchBody<'b> = (&'b Vec<ast::Expr>, Option<(u32, String, TypeId)>);
         let mut bodies: Vec<BranchBody<'_>> = Vec::new();
         for ((_, body), refinement) in arms.iter().zip(refinements.into_iter()) {
             bodies.push((body, refinement));
@@ -283,7 +285,7 @@ impl<'o> FnChecker<'o> {
         // Merge constructor states across the non-diverging branches.
         self.merge_ctor_states(ctor_entry, branch_states, span)?;
         let (ty, mutable) = match mode {
-            BlockMode::Stmt => (UNIT, true),
+            BlockMode::Discard => (UNIT, true),
             BlockMode::Value(t) => {
                 let mutable = branch_types.iter().all(|(_, m, _)| *m);
                 (t, mutable)
@@ -302,6 +304,7 @@ impl<'o> FnChecker<'o> {
             }
         };
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable,
             kind: HExprKind::If {
@@ -403,7 +406,7 @@ impl<'o> FnChecker<'o> {
         self.analyze_arms(ctx, scrut_ty, arms, &checked_arms, span)?;
         self.merge_ctor_states(ctor_entry, branch_states, span)?;
         let (ty, mutable) = match mode {
-            BlockMode::Stmt => (UNIT, true),
+            BlockMode::Discard => (UNIT, true),
             BlockMode::Value(t) => {
                 let mutable = branch_types.iter().all(|(_, m, _)| *m);
                 (t, mutable)
@@ -418,6 +421,7 @@ impl<'o> FnChecker<'o> {
             }
         };
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable,
             kind: HExprKind::Case {

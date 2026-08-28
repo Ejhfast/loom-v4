@@ -58,7 +58,7 @@ fn deep_recursion_faults_with_stack_limit_under_a_low_frame_cap() {
 
 #[test]
 fn infinite_loop_faults_with_out_of_fuel() {
-    let source = "i = 0\nwhile true\n  i = i + 1\n  i = i - 1\nend\n";
+    let source = "i = 0\nloop do\n  i = i + 1\n  i = i - 1\nend\n";
     let config = VmConfig {
         fuel: 10_000,
         ..VmConfig::default()

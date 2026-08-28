@@ -1,4 +1,4 @@
-//! Blocks, statements, assignment, and the for loop.
+//! Expression bodies, assignment, and loops.
 //!
 //! One part of the `FnChecker` surface. `checkfn/mod.rs` holds the
 //! state and the free helpers these methods use.
@@ -6,51 +6,54 @@
 use super::*;
 
 impl<'o> FnChecker<'o> {
-    /// Check a statement list. Return the statements, the block type,
+    /// Check an expression list. Return the lowering steps, the block type,
     /// and the block-value capability.
     pub(super) fn check_block(
         &mut self,
         ctx: &mut Ctx,
-        stmts: &[ast::Stmt],
+        exprs: &[ast::Expr],
         mode: BlockMode,
         block_span: Span,
     ) -> Result<(Vec<HStmt>, TypeId, bool), Diagnostic> {
-        let mut out = Vec::with_capacity(stmts.len());
-        for (idx, stmt) in stmts.iter().enumerate() {
+        let mut out = Vec::with_capacity(exprs.len());
+        for (idx, expr) in exprs.iter().enumerate() {
             if let Some(prev) = out.last() {
                 let prev: &HStmt = prev;
                 if prev.diverges() {
                     return Err(Diagnostic::new(
                         "E1021",
-                        "this statement is unreachable",
-                        stmt.span,
+                        "this expression is unreachable",
+                        expr.span,
                     ));
                 }
             }
-            let is_last = idx + 1 == stmts.len();
+            let is_last = idx + 1 == exprs.len();
             if is_last {
                 match mode {
                     BlockMode::Value(expected) => {
-                        let (checked, mutable) = self.check_tail(ctx, stmt, expected)?;
-                        out.push(checked);
+                        let value = self.check_expr(ctx, expr, expected)?;
+                        let mutable = value.flow == Flow::Never || value.mutable;
+                        out.push(HStmt::Expr(value));
                         return Ok((out, expected, mutable));
                     }
                     BlockMode::Synth => {
-                        if let StmtKind::Expr(expr) = &stmt.kind {
-                            let value = self.synth_expr(ctx, expr)?;
-                            let ty = value.ty;
-                            let mutable = value.mutable;
-                            out.push(HStmt::Expr(value));
-                            return Ok((out, ty, mutable));
-                        }
+                        let value = self.synth_expr(ctx, expr)?;
+                        let ty = if value.flow == Flow::Never {
+                            NEVER
+                        } else {
+                            value.ty
+                        };
+                        let mutable = value.flow == Flow::Never || value.mutable;
+                        out.push(HStmt::Expr(value));
+                        return Ok((out, ty, mutable));
                     }
-                    BlockMode::Stmt => {}
+                    BlockMode::Discard => {}
                 }
             }
-            out.push(self.check_stmt(ctx, stmt)?);
+            out.push(self.check_discarded(ctx, expr)?);
         }
         let (block_ty, mutable) = match mode {
-            BlockMode::Stmt => (UNIT, true),
+            BlockMode::Discard => (UNIT, true),
             BlockMode::Value(expected) => {
                 // The list is empty, so the block value is `()`.
                 if expected != UNIT {
@@ -59,6 +62,7 @@ impl<'o> FnChecker<'o> {
                 (UNIT, true)
             }
             BlockMode::Synth => match out.last() {
+                Some(HStmt::Expr(e)) if e.flow == Flow::Never => (NEVER, true),
                 Some(HStmt::Expr(e)) => (e.ty, e.mutable),
                 Some(stmt) if stmt.diverges() => (NEVER, true),
                 _ => (UNIT, true),
@@ -67,162 +71,294 @@ impl<'o> FnChecker<'o> {
         Ok((out, block_ty, mutable))
     }
 
-    /// Check the final statement of a value block against an expected type.
-    pub(super) fn check_tail(
+    /// Check one expression whose value is discarded.
+    pub(super) fn check_discarded(
         &mut self,
         ctx: &mut Ctx,
-        stmt: &ast::Stmt,
-        expected: TypeId,
-    ) -> Result<(HStmt, bool), Diagnostic> {
-        match &stmt.kind {
-            StmtKind::Expr(expr) => {
-                let value = self.check_expr(ctx, expr, expected)?;
-                let mutable = value.mutable;
-                Ok((HStmt::Expr(value), mutable))
-            }
-            // A diverging tail satisfies any expected type.
-            StmtKind::Return { .. } | StmtKind::Break | StmtKind::Continue => {
-                Ok((self.check_stmt(ctx, stmt)?, true))
-            }
-            // A loop with no `break` is a diverging tail too. The
-            // body decides, so this checks the loop first.
-            StmtKind::While { .. } => {
-                let checked = self.check_stmt(ctx, stmt)?;
-                if checked.diverges() || expected == UNIT {
-                    Ok((checked, true))
-                } else {
-                    Err(self.mismatch(ctx, expected, UNIT, stmt.span))
-                }
-            }
-            // A statement tail has the value `()`, so it satisfies an
-            // expected unit type.
-            _ if expected == UNIT => Ok((self.check_stmt(ctx, stmt)?, true)),
-            _ => Err(self.mismatch(ctx, expected, UNIT, stmt.span)),
-        }
-    }
-
-    pub(super) fn check_stmt(
-        &mut self,
-        ctx: &mut Ctx,
-        stmt: &ast::Stmt,
+        expr: &ast::Expr,
     ) -> Result<HStmt, Diagnostic> {
-        match &stmt.kind {
-            StmtKind::Assign {
+        match &expr.kind {
+            ExprKind::Assign {
                 name,
                 name_span,
                 ty,
                 value,
             } => self.check_assign(ctx, name, *name_span, ty, value),
-            StmtKind::AssignField {
+            ExprKind::AssignField {
                 recv,
                 field,
                 field_span,
                 value,
             } => self.check_assign_field(ctx, recv, field, *field_span, value),
-            StmtKind::While { cond, body } => {
-                let before = self.ctor.as_ref().map(|c| c.state.clone());
-                let cond = self.check_expr(ctx, cond, BOOL)?;
-                self.ctor_guard_loop(&before, stmt.span)?;
-                let snapshot = self.ctor.as_ref().map(|c| c.state.clone());
-                self.scopes.push(Scope::default());
-                self.loop_depth += 1;
-                let result = self.check_block(ctx, body, BlockMode::Stmt, stmt.span);
-                self.loop_depth -= 1;
-                self.scopes.pop();
-                let (body, _, _) = result?;
-                self.ctor_guard_loop(&snapshot, stmt.span)?;
-                // The loop body may run zero times, so the state after
-                // the loop is the state before it.
-                if let (Some(c), Some(snap)) = (self.ctor.as_mut(), snapshot) {
-                    c.state = snap;
-                }
-                Ok(HStmt::While { cond, body })
-            }
-            StmtKind::For {
+            ExprKind::While { cond, body } => self.check_while(ctx, cond, body, expr.span),
+            ExprKind::For {
                 bindings,
                 value,
                 body,
-            } => self.check_for(ctx, bindings, value, body, stmt.span),
-            StmtKind::Return { value } => {
-                let ret = match self.ret {
-                    RetKind::Known(t) => t,
-                    RetKind::Entry => {
-                        return Err(Diagnostic::new(
-                            "E1016",
-                            "`return` is not valid at the top level of a module",
-                            stmt.span,
-                        ));
-                    }
-                    RetKind::ClosureInfer => {
-                        return Err(Diagnostic::new(
-                            "E1016",
-                            "`return` needs a declared result type on the closure",
-                            stmt.span,
-                        ));
-                    }
-                };
-                let value = match value {
-                    Some(expr) => Some(self.check_expr(ctx, expr, ret)?),
-                    None => {
-                        if ret != UNIT {
-                            return Err(self.mismatch(ctx, ret, UNIT, stmt.span));
-                        }
-                        None
-                    }
-                };
-                if value
-                    .as_ref()
-                    .is_some_and(|value| ctx.store.contains_callback(value.ty))
-                {
-                    return Err(Diagnostic::new(
-                        "E1064",
-                        "a function cannot return a nonescaping callback",
-                        stmt.span,
-                    ));
-                }
-                // A constructor must be complete at every return.
-                if let Some(c) = &self.ctor {
-                    require_complete(ctx, c.class, c, stmt.span)?;
-                }
-                self.saw_return = true;
-                Ok(HStmt::Return { value })
-            }
-            StmtKind::Break => {
-                if self.loop_depth == 0 {
-                    return Err(Diagnostic::new(
-                        "E1008",
-                        "`break` is only valid inside a loop",
-                        stmt.span,
-                    ));
-                }
-                Ok(HStmt::Break)
-            }
-            StmtKind::Continue => {
-                if self.loop_depth == 0 {
+            } => self.check_for(ctx, bindings, value, body, expr.span),
+            ExprKind::Loop { body } => Ok(HStmt::Expr(
+                self.check_loop(ctx, body, BlockMode::Discard, expr.span)?
+                    .finish_flow(),
+            )),
+            ExprKind::Return { value } => self.check_return(ctx, value.as_deref(), expr.span),
+            ExprKind::Break { value } => self.check_break(ctx, value.as_deref(), expr.span),
+            ExprKind::Continue => {
+                if self.loops.is_empty() {
                     return Err(Diagnostic::new(
                         "E1008",
                         "`continue` is only valid inside a loop",
-                        stmt.span,
+                        expr.span,
                     ));
                 }
                 Ok(HStmt::Continue)
             }
-            StmtKind::Expr(expr) => {
-                let expr = match &expr.kind {
-                    ExprKind::If { arms, else_body } => {
-                        self.check_if(ctx, arms, else_body, BlockMode::Stmt, expr.span)?
-                    }
-                    ExprKind::Case { scrut, arms } => {
-                        self.check_case(ctx, scrut, arms, BlockMode::Stmt, expr.span)?
-                    }
-                    ExprKind::Select { arms } => {
-                        self.check_select(ctx, arms, BlockMode::Stmt, expr.span)?
-                    }
-                    _ => self.synth_expr(ctx, expr)?,
-                };
-                Ok(HStmt::Expr(expr))
-            }
+            ExprKind::If { arms, else_body } => Ok(HStmt::Expr(
+                self.check_if(ctx, arms, else_body, BlockMode::Discard, expr.span)?
+                    .finish_flow(),
+            )),
+            ExprKind::Case { scrut, arms } => Ok(HStmt::Expr(
+                self.check_case(ctx, scrut, arms, BlockMode::Discard, expr.span)?
+                    .finish_flow(),
+            )),
+            ExprKind::Select { arms } => Ok(HStmt::Expr(
+                self.check_select(ctx, arms, BlockMode::Discard, expr.span)?
+                    .finish_flow(),
+            )),
+            _ => Ok(HStmt::Expr(self.synth_expr(ctx, expr)?)),
         }
+    }
+
+    pub(super) fn check_while(
+        &mut self,
+        ctx: &mut Ctx,
+        cond: &ast::Expr,
+        body: &[ast::Expr],
+        span: Span,
+    ) -> Result<HStmt, Diagnostic> {
+        let before = self.ctor.as_ref().map(|item| item.state.clone());
+        let cond = self.check_expr(ctx, cond, BOOL)?;
+        self.ctor_guard_loop(&before, span)?;
+        let snapshot = self.ctor.as_ref().map(|item| item.state.clone());
+        self.scopes.push(Scope::default());
+        self.loops.push(LoopContext {
+            mode: LoopMode::UnitOnly,
+            breaks: Vec::new(),
+            inference_gap: None,
+        });
+        let result = self.check_block(ctx, body, BlockMode::Discard, span);
+        self.loops.pop();
+        self.scopes.pop();
+        let (body, _, _) = result?;
+        self.ctor_guard_loop(&snapshot, span)?;
+        if let (Some(ctor), Some(snapshot)) = (self.ctor.as_mut(), snapshot) {
+            ctor.state = snapshot;
+        }
+        Ok(HStmt::While { cond, body })
+    }
+
+    pub(super) fn check_return(
+        &mut self,
+        ctx: &mut Ctx,
+        source: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<HStmt, Diagnostic> {
+        let ret = match self.ret {
+            RetKind::Known(ty) => ty,
+            RetKind::Entry => {
+                return Err(Diagnostic::new(
+                    "E1016",
+                    "`return` is not valid at the top level of a module",
+                    span,
+                ));
+            }
+            RetKind::ClosureInfer => {
+                return Err(Diagnostic::new(
+                    "E1016",
+                    "`return` needs a declared closure result type",
+                    span,
+                ));
+            }
+        };
+        let value = match source {
+            Some(source) => Some(self.check_expr(ctx, source, ret)?),
+            None if ret == UNIT => None,
+            None => return Err(self.mismatch(ctx, ret, UNIT, span)),
+        };
+        if value
+            .as_ref()
+            .is_some_and(|value| ctx.store.contains_callback(value.ty))
+        {
+            return Err(Diagnostic::new(
+                "E1064",
+                "a function cannot return a nonescaping callback",
+                span,
+            ));
+        }
+        if let Some(ctor) = &self.ctor {
+            require_complete(ctx, ctor.class, ctor, span)?;
+        }
+        self.saw_return = true;
+        Ok(HStmt::Return { value })
+    }
+
+    pub(super) fn check_break(
+        &mut self,
+        ctx: &mut Ctx,
+        source: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<HStmt, Diagnostic> {
+        let Some(mode) = self.loops.last().map(|context| context.mode) else {
+            return Err(Diagnostic::new(
+                "E1008",
+                "`break` is only valid inside a loop",
+                span,
+            ));
+        };
+        if source.is_some() && matches!(mode, LoopMode::UnitOnly) {
+            return Err(Diagnostic::new(
+                "E1008",
+                "a `break` in `while` or `for` cannot carry a value",
+                span,
+            ));
+        }
+        let value = match (mode, source) {
+            (LoopMode::Value(expected), Some(source)) => {
+                Some(self.check_expr(ctx, source, expected)?)
+            }
+            (LoopMode::Synth, Some(source)) => match self.synth_expr(ctx, source) {
+                Ok(value) => Some(value),
+                Err(diagnostic) if is_inference_gap(&diagnostic) => {
+                    let context = self.loops.last_mut().expect("the loop context exists");
+                    if context.inference_gap.is_none() {
+                        context.inference_gap = Some(diagnostic);
+                    }
+                    None
+                }
+                Err(diagnostic) => return Err(diagnostic),
+            },
+            (_, Some(source)) => Some(self.synth_expr(ctx, source)?),
+            (LoopMode::Value(expected), None) if expected != UNIT => {
+                return Err(self.mismatch(ctx, expected, UNIT, span));
+            }
+            _ => None,
+        };
+        if source.is_some() && value.is_none() {
+            return Ok(HStmt::Break { value });
+        }
+        let break_ty = value.as_ref().map_or(UNIT, |value| value.ty);
+        let break_flow = value.as_ref().map_or(Flow::Normal, |value| value.flow);
+        let break_mutable = value.as_ref().is_none_or(|value| value.mutable);
+        if break_flow == Flow::Normal && !matches!(mode, LoopMode::UnitOnly) {
+            self.loops
+                .last_mut()
+                .expect("the loop context exists")
+                .breaks
+                .push((break_ty, break_mutable, span));
+        }
+        Ok(HStmt::Break { value })
+    }
+
+    pub(super) fn check_loop(
+        &mut self,
+        ctx: &mut Ctx,
+        body: &[ast::Expr],
+        mode: BlockMode,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let loop_mode = match mode {
+            BlockMode::Discard => LoopMode::Discard,
+            BlockMode::Value(expected) => LoopMode::Value(expected),
+            BlockMode::Synth => LoopMode::Synth,
+        };
+        let before = self.ctor.as_ref().map(|item| item.state.clone());
+        let local_count = self.locals.len();
+        let func_count = ctx.funcs.len();
+        let sig_count = ctx.sigs.len();
+        let (mut checked_body, mut context) = self.check_loop_body(ctx, body, loop_mode, span)?;
+        let mut inferred_hint = None;
+        if let Some(gap) = context.inference_gap.take() {
+            let resolved: Vec<(TypeId, Span)> = context
+                .breaks
+                .iter()
+                .map(|(ty, _, span)| (*ty, *span))
+                .collect();
+            let Some(hint) = self.branch_hint(ctx, &resolved)? else {
+                return Err(gap);
+            };
+
+            // Discard the incomplete pass before checking every break
+            // against the shared sibling hint.
+            self.locals.truncate(local_count);
+            ctx.funcs.truncate(func_count);
+            ctx.sigs.truncate(sig_count);
+            if let (Some(ctor), Some(before)) = (self.ctor.as_mut(), before.as_ref()) {
+                ctor.state = before.clone();
+            }
+            (checked_body, context) =
+                self.check_loop_body(ctx, body, LoopMode::Value(hint), span)?;
+            inferred_hint = Some(hint);
+        }
+        self.ctor_guard_loop(&before, span)?;
+        if let (Some(ctor), Some(before)) = (self.ctor.as_mut(), before) {
+            ctor.state = before;
+        }
+
+        let ty = if context.breaks.is_empty() {
+            NEVER
+        } else {
+            match loop_mode {
+                LoopMode::Discard => UNIT,
+                LoopMode::Value(expected) => expected,
+                LoopMode::Synth => match inferred_hint {
+                    Some(hint) => hint,
+                    None => {
+                        let resolved: Vec<(TypeId, Span)> = context
+                            .breaks
+                            .iter()
+                            .map(|(ty, _, span)| (*ty, *span))
+                            .collect();
+                        self.branch_hint(ctx, &resolved)?
+                            .expect("a break supplies a type")
+                    }
+                },
+                LoopMode::UnitOnly => unreachable!("a value loop has a value mode"),
+            }
+        };
+        let mutable = if ty == UNIT || ty == NEVER {
+            true
+        } else {
+            context.breaks.iter().all(|(_, mutable, _)| *mutable)
+        };
+        let result_slot = (ty != UNIT && ty != NEVER).then(|| self.hidden_local(ty, mutable));
+        Ok(HExpr {
+            flow: Flow::Normal,
+            ty,
+            mutable,
+            kind: HExprKind::Loop {
+                body: checked_body,
+                result_slot,
+            },
+        })
+    }
+
+    fn check_loop_body(
+        &mut self,
+        ctx: &mut Ctx,
+        body: &[ast::Expr],
+        mode: LoopMode,
+        span: Span,
+    ) -> Result<(Vec<HStmt>, LoopContext), Diagnostic> {
+        self.scopes.push(Scope::default());
+        self.loops.push(LoopContext {
+            mode,
+            breaks: Vec::new(),
+            inference_gap: None,
+        });
+        let result = self.check_block(ctx, body, BlockMode::Discard, span);
+        let context = self.loops.pop().expect("the loop context exists");
+        self.scopes.pop();
+        let (body, _, _) = result?;
+        Ok((body, context))
     }
 
     pub(super) fn hidden_local(&mut self, ty: TypeId, mutable: bool) -> u32 {
@@ -234,6 +370,7 @@ impl<'o> FnChecker<'o> {
     pub(super) fn local_expr(&self, slot: u32) -> HExpr {
         let (ty, mutable) = self.locals[slot as usize];
         HExpr {
+            flow: Flow::Normal,
             ty,
             mutable,
             kind: HExprKind::Local(slot),
@@ -344,6 +481,7 @@ impl<'o> FnChecker<'o> {
         self.charge_row(ctx, &requirement.row, span)?;
         let ret = ctx.normalize_associated(&self.env, requirement.ret);
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: ret,
             mutable: true,
             kind: HExprKind::InterfaceCall {
@@ -400,7 +538,7 @@ impl<'o> FnChecker<'o> {
         ctx: &mut Ctx,
         bindings: &[(String, Span)],
         value: &ast::Expr,
-        body: &[ast::Stmt],
+        body: &[ast::Expr],
         span: Span,
     ) -> Result<HStmt, Diagnostic> {
         let before = self.ctor.as_ref().map(|item| item.state.clone());
@@ -584,16 +722,20 @@ impl<'o> FnChecker<'o> {
         let snapshot = self.ctor.as_ref().map(|item| item.state.clone());
         let (bindings, scope) = self.for_bindings(bindings, &binding_types, binding_mut)?;
         self.scopes.push(scope);
-        self.loop_depth += 1;
+        self.loops.push(LoopContext {
+            mode: LoopMode::UnitOnly,
+            breaks: Vec::new(),
+            inference_gap: None,
+        });
         let tracks_iterated = iterated.is_some();
         if let Some(place) = iterated {
             self.iterated_places.push(place);
         }
-        let result = self.check_block(ctx, body, BlockMode::Stmt, span);
+        let result = self.check_block(ctx, body, BlockMode::Discard, span);
         if tracks_iterated {
             self.iterated_places.pop();
         }
-        self.loop_depth -= 1;
+        self.loops.pop();
         self.scopes.pop();
         let (body, _, _) = result?;
         self.ctor_guard_loop(&snapshot, span)?;
@@ -794,6 +936,7 @@ impl<'o> FnChecker<'o> {
         let (ty, mutable) = self.locals[0];
         debug_assert_eq!(self.lookup_slot("self"), Some(0));
         HExpr {
+            flow: Flow::Normal,
             ty,
             mutable,
             kind: HExprKind::Local(0),

@@ -12,33 +12,121 @@ impl<'o> FnChecker<'o> {
         ctx: &mut Ctx,
         expr: &ast::Expr,
     ) -> Result<HExpr, Diagnostic> {
+        Ok(self.synth_expr_inner(ctx, expr)?.finish_flow())
+    }
+
+    fn synth_expr_inner(&mut self, ctx: &mut Ctx, expr: &ast::Expr) -> Result<HExpr, Diagnostic> {
         match &expr.kind {
+            ExprKind::Assign {
+                name,
+                name_span,
+                ty,
+                value,
+            } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: UNIT,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_assign(ctx, name, *name_span, ty, value)?]),
+            }),
+            ExprKind::AssignField {
+                recv,
+                field,
+                field_span,
+                value,
+            } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: UNIT,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_assign_field(
+                    ctx,
+                    recv,
+                    field,
+                    *field_span,
+                    value,
+                )?]),
+            }),
+            ExprKind::While { cond, body } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: UNIT,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_while(ctx, cond, body, expr.span)?]),
+            }),
+            ExprKind::For {
+                bindings,
+                value,
+                body,
+            } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: UNIT,
+                mutable: true,
+                kind: HExprKind::Block(
+                    vec![self.check_for(ctx, bindings, value, body, expr.span)?],
+                ),
+            }),
+            ExprKind::Loop { body } => self.check_loop(ctx, body, BlockMode::Synth, expr.span),
+            ExprKind::Return { value } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: NEVER,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_return(
+                    ctx,
+                    value.as_deref(),
+                    expr.span,
+                )?]),
+            }),
+            ExprKind::Break { value } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: NEVER,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_break(ctx, value.as_deref(), expr.span)?]),
+            }),
+            ExprKind::Continue => {
+                if self.loops.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1008",
+                        "`continue` is only valid inside a loop",
+                        expr.span,
+                    ));
+                }
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: NEVER,
+                    mutable: true,
+                    kind: HExprKind::Block(vec![HStmt::Continue]),
+                })
+            }
             ExprKind::Unit => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: UNIT,
                 mutable: true,
                 kind: HExprKind::Unit,
             }),
             ExprKind::Int(v) => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: INT,
                 mutable: true,
                 kind: HExprKind::Int(*v),
             }),
             ExprKind::Float(v) => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: lm_types::FLOAT,
                 mutable: true,
                 kind: HExprKind::Float(*v),
             }),
             ExprKind::Str(v) => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: STRING,
                 mutable: true,
                 kind: HExprKind::Str(v.clone()),
             }),
             ExprKind::Bytes(v) => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: lm_types::BYTES,
                 mutable: true,
                 kind: HExprKind::Bytes(v.clone()),
             }),
             ExprKind::Bool(v) => Ok(HExpr {
+                flow: Flow::Normal,
                 ty: BOOL,
                 mutable: true,
                 kind: HExprKind::Bool(*v),
@@ -57,11 +145,13 @@ impl<'o> FnChecker<'o> {
                     }
                     return Ok(match res {
                         NameRes::Local(slot, ty, mutable) => HExpr {
+                            flow: Flow::Normal,
                             ty,
                             mutable,
                             kind: HExprKind::Local(slot),
                         },
                         NameRes::Capture(idx, ty, mutable) => HExpr {
+                            flow: Flow::Normal,
                             ty,
                             mutable,
                             kind: HExprKind::Capture(idx),
@@ -118,6 +208,7 @@ impl<'o> FnChecker<'o> {
                         .store
                         .intern_fn(sig.params, sig.param_muts, sig.ret, sig.row);
                     return Ok(HExpr {
+                        flow: Flow::Normal,
                         ty,
                         mutable: true,
                         kind: HExprKind::MakeClosure {
@@ -201,6 +292,7 @@ impl<'o> FnChecker<'o> {
                 let left = self.check_expr(ctx, left, BOOL)?;
                 let right = self.check_expr(ctx, right, BOOL)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::And(Box::new(left), Box::new(right)),
@@ -210,6 +302,7 @@ impl<'o> FnChecker<'o> {
                 let left = self.check_expr(ctx, left, BOOL)?;
                 let right = self.check_expr(ctx, right, BOOL)?;
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty: BOOL,
                     mutable: true,
                     kind: HExprKind::Or(Box::new(left), Box::new(right)),
@@ -265,6 +358,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::TupleLit(checked),
@@ -289,6 +383,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::ListLit(checked),
@@ -330,6 +425,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 Ok(HExpr {
+                    flow: Flow::Normal,
                     ty,
                     mutable: true,
                     kind: HExprKind::MapLit(checked),
@@ -460,11 +556,8 @@ impl<'o> FnChecker<'o> {
         };
         let ok_arm = ast::CaseArm {
             pattern: constructor("Ok", binding(value_name.clone())),
-            body: vec![ast::Stmt {
-                kind: StmtKind::Expr(ast::Expr {
-                    kind: ExprKind::Name(value_name),
-                    span,
-                }),
+            body: vec![ast::Expr {
+                kind: ExprKind::Name(value_name),
                 span,
             }],
             span,
@@ -475,9 +568,9 @@ impl<'o> FnChecker<'o> {
         };
         let err_arm = ast::CaseArm {
             pattern: constructor("Err", binding(error_name)),
-            body: vec![ast::Stmt {
-                kind: StmtKind::Return {
-                    value: Some(ast::Expr {
+            body: vec![ast::Expr {
+                kind: ExprKind::Return {
+                    value: Some(Box::new(ast::Expr {
                         kind: ExprKind::Call {
                             name: "Err".to_string(),
                             name_span: span,
@@ -485,7 +578,7 @@ impl<'o> FnChecker<'o> {
                             args: vec![error_value],
                         },
                         span,
-                    }),
+                    })),
                 },
                 span,
             }],
@@ -565,11 +658,13 @@ impl<'o> FnChecker<'o> {
                 }
                 Ok(match res {
                     NameRes::Local(slot, ty, mutable) => HExpr {
+                        flow: Flow::Normal,
                         ty,
                         mutable,
                         kind: HExprKind::Local(slot),
                     },
                     NameRes::Capture(idx, ty, mutable) => HExpr {
+                        flow: Flow::Normal,
                         ty,
                         mutable,
                         kind: HExprKind::Capture(idx),
@@ -656,6 +751,7 @@ impl<'o> FnChecker<'o> {
             }
         }
         Ok(HExpr {
+            flow: Flow::Normal,
             ty: STRING,
             mutable: true,
             kind: HExprKind::Interp(checked),
@@ -810,6 +906,7 @@ impl<'o> FnChecker<'o> {
             _ => out.ret,
         };
         Ok(HExpr {
+            flow: Flow::Normal,
             ty,
             mutable: true,
             kind: HExprKind::Construct {
