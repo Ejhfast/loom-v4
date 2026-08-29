@@ -65,14 +65,17 @@ signal guardian in the host.
 | Module | Content |
 | --- | --- |
 | `src/text.lm` | Scalar indexes, tab expansion, and screen columns |
-| `src/keys.lm` | One byte prefix becomes one key |
 | `src/document.lm` | The lines and their edit operations |
 | `src/editor.lm` | The state, the modes, and the key dispatch |
 | `src/screen.lm` | One frame becomes one byte string |
 | `src/main.lm` | Arguments, the file, and the event loop |
 
-`src/keys.lm` and `src/document.lm` hold no effects. Every effect stays
+`src/text.lm` and `src/document.lm` hold no effects. Every effect stays
 in `src/editor.lm` and `src/main.lm`, and each row names its operations.
+
+The editor decodes keys with `std.term.decode_key`. That function reads
+one byte prefix and returns one `TermKey`, so the editor needs no
+terminal parser of its own.
 
 ## Design notes
 

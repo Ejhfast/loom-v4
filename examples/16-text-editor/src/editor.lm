@@ -4,17 +4,18 @@
 # the current mode. `handle` applies one key. It never draws.
 
 use document.Document
-use keys.Key
-use keys.control_of
 use std.fs.write_file_all
+use std.term.TermKey
 use text.clamp
 use text.drop_last
 use text.larger
 use text.screen_column
 use text.smaller
+use text.tab_spaces
 use text.tail_of
-use text.tab_stop
 use text.wrap_index
+
+const HELP: String = "Ctrl-S save   Ctrl-F find   Ctrl-Q quit   Ctrl-A start   Ctrl-E end"
 
 enum Mode
   Edit
@@ -32,10 +33,6 @@ final class SearchState
   found: Bool = false
 end
 
-def help_text(): String
-  "Ctrl-S save   Ctrl-F find   Ctrl-Q quit   Ctrl-A start   Ctrl-E end"
-end
-
 final class Editor
   doc: Document = Document(List[String](), None)
   row: Int = 0
@@ -46,7 +43,7 @@ final class Editor
   col_offset: Int = 0
   view_rows: Int = 22
   view_columns: Int = 80
-  message: String = ""
+  message: String = HELP
   mode: Mode = Mode.Edit
   prompt: String = ""
   search: SearchState = SearchState()
@@ -55,7 +52,6 @@ final class Editor
 
   def init(mut self, doc: Document)
     self.doc = doc
-    self.message = help_text()
   end
 
   # Record the terminal size. Two rows hold the status and the message.
@@ -127,14 +123,9 @@ final class Editor
 
   # Insert one printable scalar group at the cursor.
   def insert(mut self, value: String)
-    if value.is_empty()
-      return
-    end
     case value.at(0)
     in Some(scalar)
-      if scalar.codepoint() < 32
-        return
-      end
+      if scalar.codepoint() < 32 then return end
     in None
       return
     end
@@ -147,7 +138,7 @@ final class Editor
   # Insert spaces up to the next tab stop.
   def insert_tab(mut self)
     width = screen_column(self.doc.line(self.row), self.column)
-    spaces = tab_stop() - (width % tab_stop())
+    spaces = tab_spaces(width)
     builder = StringBuilder()
     count = 0
     while count < spaces
@@ -219,6 +210,21 @@ final class Editor
     self.done = true
   end
 
+  def finish_save_as(mut self) with Fs
+    if self.prompt.is_empty()
+      self.cancel_save_as()
+      return
+    end
+    self.doc.path = Some(self.prompt)
+    self.mode = Mode.Edit
+    self.save()
+  end
+
+  def cancel_save_as(mut self)
+    self.mode = Mode.Edit
+    self.message = "save cancelled"
+  end
+
   # ---- search ---------------------------------------------------
 
   def begin_search(mut self)
@@ -237,7 +243,13 @@ final class Editor
     self.row_offset = self.search.row_offset
     self.col_offset = self.search.col_offset
     self.mode = Mode.Edit
-    self.message = help_text()
+    self.message = HELP
+  end
+
+  def retype_search(mut self, query: String)
+    self.search.query = query
+    self.search.found = false
+    self.find_match(1)
   end
 
   # Move to the next match. `direction` is -1 or 1.
@@ -249,11 +261,7 @@ final class Editor
       self.message = ""
       return
     end
-    column = if self.search.found
-      self.column + direction
-    else
-      self.column
-    end
+    column = if self.search.found then self.column + direction else self.column end
     found = if direction < 0
       match_before(self.doc, query, self.row, column)
     else
@@ -274,7 +282,7 @@ final class Editor
 
   # ---- dispatch -------------------------------------------------
 
-  def handle(mut self, key: Key) with Fs
+  def handle(mut self, key: TermKey) with Fs
     case self.mode
     in Edit   then self.handle_edit(key)
     in Search then self.handle_search(key)
@@ -283,97 +291,59 @@ final class Editor
     self.follow_cursor()
   end
 
-  def handle_edit(mut self, key: Key) with Fs
+  def handle_edit(mut self, key: TermKey) with Fs
     case key
-    in Text(value)     then self.insert(value)
-    in Control(letter) then self.handle_control(letter)
-    in Enter           then self.insert_newline()
-    in Tab             then self.insert_tab()
-    in Backspace       then self.backspace()
-    in Delete          then self.delete()
-    in Up              then self.move_up()
-    in Down            then self.move_down()
-    in Left            then self.move_left()
-    in Right           then self.move_right()
-    in Home            then self.move_home()
-    in End             then self.move_end()
-    in PageUp          then self.move_page(-1)
-    in PageDown        then self.move_page(1)
-    in Escape
-      self.message = help_text()
-    in Unsupported     then ()
+    in Text(value) then self.insert(value)
+    in Enter       then self.insert_newline()
+    in Tab         then self.insert_tab()
+    in Backspace   then self.backspace()
+    in Delete      then self.delete()
+    in Up          then self.move_up()
+    in Down        then self.move_down()
+    in Left        then self.move_left()
+    in Right       then self.move_right()
+    in Home        then self.move_home()
+    in End         then self.move_end()
+    in PageUp      then self.move_page(-1)
+    in PageDown    then self.move_page(1)
+    in Escape      then self.message = HELP
+    in Ctrl('q')   then self.request_quit()
+    in Ctrl('s')   then self.save()
+    in Ctrl('f')   then self.begin_search()
+    in Ctrl('a')   then self.move_home()
+    in Ctrl('e')   then self.move_end()
+    in Ctrl('l')   then self.message = HELP
+    in Ctrl(_)     then ()
+    in Alt(_)      then ()
+    in Unknown(_)  then ()
     end
   end
 
-  def handle_control(mut self, letter: Int) with Fs
-    if letter == control_of("q")
-      self.request_quit()
-    elsif letter == control_of("s")
-      self.save()
-    elsif letter == control_of("f")
-      self.begin_search()
-    elsif letter == control_of("a")
-      self.move_home()
-    elsif letter == control_of("e")
-      self.move_end()
-    elsif letter == control_of("l")
-      self.message = help_text()
-    else
-      ()
-    end
-  end
-
-  def handle_search(mut self, key: Key)
+  def handle_search(mut self, key: TermKey)
     case key
     in Enter
       self.mode = Mode.Edit
-      self.message = help_text()
-    in Escape
-      self.cancel_search()
-    in Backspace
-      self.search.query = drop_last(self.search.query)
-      self.search.found = false
-      self.find_match(1)
-    in Text(value)
-      self.search.query = self.search.query + value
-      self.search.found = false
-      self.find_match(1)
-    in Up       then self.find_match(-1)
-    in Left     then self.find_match(-1)
-    in Down     then self.find_match(1)
-    in Right    then self.find_match(1)
-    in Control(letter)
-      if letter == control_of("g")
-        self.cancel_search()
-      end
-    in _ then ()
+      self.message = HELP
+    in Escape      then self.cancel_search()
+    in Ctrl('g')   then self.cancel_search()
+    in Backspace   then self.retype_search(drop_last(self.search.query))
+    in Text(value) then self.retype_search(self.search.query + value)
+    in Up          then self.find_match(-1)
+    in Left        then self.find_match(-1)
+    in Down        then self.find_match(1)
+    in Right       then self.find_match(1)
+    in _           then ()
     end
   end
 
-  def handle_save_as(mut self, key: Key) with Fs
+  def handle_save_as(mut self, key: TermKey) with Fs
     case key
-    in Enter
-      if self.prompt.is_empty()
-        self.mode = Mode.Edit
-        self.message = "save cancelled"
-      else
-        self.doc.path = Some(self.prompt)
-        self.mode = Mode.Edit
-        self.save()
-      end
-    in Escape
-      self.mode = Mode.Edit
-      self.message = "save cancelled"
-    in Backspace
-      self.prompt = drop_last(self.prompt)
-    in Text(value)
-      self.prompt = self.prompt + value
-    in Control(letter)
-      if letter == control_of("g")
-        self.mode = Mode.Edit
-        self.message = "save cancelled"
-      end
-    in _ then ()
+    in Enter       then self.finish_save_as()
+    in Escape      then self.cancel_save_as()
+    in Ctrl('g')   then self.cancel_save_as()
+    in Backspace   then self.prompt = drop_last(self.prompt)
+    in Text(value) then self.prompt = self.prompt + value
+    in _           then ()
     end
   end
 
@@ -397,6 +367,7 @@ final class Editor
     end
   end
 end
+
 
 # Write the document text to `path`.
 def write_document(path: String, data: Bytes): Result[Int, FsError] with Fs
@@ -426,9 +397,8 @@ def match_after(doc: Document, query: Text, row: Int, column: Int): Option[(Int,
     line = doc.line(at_row)
     start = clamp(at_column, 0, line.len())
     case tail_of(line, start).find(query)
-    in Some(offset)
-      return Some((at_row, start + offset))
-    in None then ()
+    in Some(offset) then return Some((at_row, start + offset))
+    in None         then ()
     end
     at_row = wrap_index(at_row + 1, total)
     at_column = 0
@@ -445,9 +415,7 @@ def match_before(doc: Document, query: Text, row: Int, column: Int): Option[(Int
   step = 0
   while step <= total
     best = last_match_upto(doc.line(at_row), query, limit)
-    if best >= 0
-      return Some((at_row, best))
-    end
+    if best >= 0 then return Some((at_row, best)) end
     at_row = wrap_index(at_row - 1, total)
     limit = doc.line(at_row).len()
     step = step + 1
@@ -457,18 +425,14 @@ end
 
 # Return the last start of `query` at or before `limit`, or -1.
 def last_match_upto(line: Text, query: Text, limit: Int): Int
-  if limit < 0
-    return -1
-  end
+  if limit < 0 then return -1 end
   best = -1
   at = 0
   while at <= line.len()
     case tail_of(line, at).find(query)
     in Some(offset)
       found = at + offset
-      if found > limit
-        return best
-      end
+      if found > limit then return best end
       best = found
       at = found + 1
     in None

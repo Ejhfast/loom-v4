@@ -5,24 +5,16 @@
 # safe result instead of an error.
 
 # The number of columns that one tab advances.
-def tab_stop(): Int
-  4
-end
+const TAB_STOP: Int = 4
+
+const TAB: Char = '\t'
 
 def smaller(left: Int, right: Int): Int
-  if left < right
-    left
-  else
-    right
-  end
+  if left < right then left else right end
 end
 
 def larger(left: Int, right: Int): Int
-  if left > right
-    left
-  else
-    right
-  end
+  if left > right then left else right end
 end
 
 def clamp(value: Int, low: Int, high: Int): Int
@@ -54,27 +46,29 @@ def drop_last(line: Text): String
   head_of(line, larger(line.len() - 1, 0))
 end
 
+# Return the columns that `scalar` adds at screen column `column`.
+def scalar_width(scalar: Char, column: Int): Int
+  if scalar == TAB then TAB_STOP - (column % TAB_STOP) else 1 end
+end
+
 # Replace each tab with spaces up to the next tab stop.
 # A line without a tab needs no copy.
 def expand_tabs(line: Text): Text
-  if not line.contains("\t")
-    return line
-  end
+  if not line.contains("\t") then return line end
   builder = StringBuilder()
   width = 0
   for scalar in line
-    if scalar.codepoint() == 9
-      spaces = tab_stop() - (width % tab_stop())
+    step = scalar_width(scalar, width)
+    if scalar == TAB
       count = 0
-      while count < spaces
+      while count < step
         builder.append(" ")
         count = count + 1
       end
-      width = width + spaces
     else
       builder.push_char(scalar)
-      width = width + 1
     end
+    width = width + step
   end
   builder.finish()
 end
@@ -84,14 +78,8 @@ def screen_column(line: Text, column: Int): Int
   width = 0
   index = 0
   for scalar in line
-    if index >= column
-      return width
-    end
-    if scalar.codepoint() == 9
-      width = width + tab_stop() - (width % tab_stop())
-    else
-      width = width + 1
-    end
+    if index >= column then return width end
+    width = width + scalar_width(scalar, width)
     index = index + 1
   end
   width
@@ -99,8 +87,11 @@ end
 
 # Return `value` inside `0` to `total - 1`, with wrap-around.
 def wrap_index(value: Int, total: Int): Int
-  if total <= 0
-    return 0
-  end
+  if total <= 0 then return 0 end
   ((value % total) + total) % total
+end
+
+# Return the spaces that reach the next tab stop from `column`.
+def tab_spaces(column: Int): Int
+  scalar_width(TAB, column)
 end

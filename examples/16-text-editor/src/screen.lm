@@ -9,58 +9,47 @@ use std.term.cursor_to
 use std.term.hide_cursor
 use std.term.reset_style
 use std.term.show_cursor
+use text.clamp
 use text.clip
 use text.expand_tabs
-use text.clamp
 use text.larger
 use text.screen_column
 use text.smaller
 
-def home(): Bytes
-  b"\x1b[H"
-end
+const HOME: Bytes = b"\x1b[H"
+const ERASE_LINE: Bytes = b"\x1b[2K"
+const INVERT: Bytes = b"\x1b[7m"
+const NEXT_ROW: Bytes = b"\r\n"
+const EMPTY_ROW: Bytes = b"~"
 
-def erase_line(): Bytes
-  b"\x1b[2K"
-end
-
-def invert_style(): Bytes
-  b"\x1b[7m"
-end
-
-def search_prefix(): String
-  "Find: "
-end
-
-def save_prefix(): String
-  "Save as: "
-end
+const SEARCH_PROMPT: String = "Find: "
+const SAVE_PROMPT: String = "Save as: "
 
 def draw(state: Editor): Bytes
   buffer = ByteBuffer()
   buffer.extend(hide_cursor())
-  buffer.extend(home())
+  buffer.extend(HOME)
 
   screen = 0
   while screen < state.view_rows
-    buffer.extend(erase_line())
+    buffer.extend(ERASE_LINE)
     row = state.row_offset + screen
     if row < state.doc.line_count()
       buffer.extend(text_row(state, row))
     else
-      buffer.extend(b"~")
+      buffer.extend(EMPTY_ROW)
     end
-    buffer.extend(b"\r\n")
+    buffer.extend(NEXT_ROW)
     screen = screen + 1
   end
 
-  buffer.extend(erase_line())
-  buffer.extend(invert_style())
+  buffer.extend(ERASE_LINE)
+  buffer.extend(INVERT)
   buffer.extend(status_line(state).bytes())
   buffer.extend(reset_style())
-  buffer.extend(b"\r\n")
+  buffer.extend(NEXT_ROW)
 
-  buffer.extend(erase_line())
+  buffer.extend(ERASE_LINE)
   buffer.extend(clip(message_line(state), 0, state.view_columns).bytes())
 
   buffer.extend(cursor_position(state))
@@ -73,15 +62,13 @@ end
 def text_row(state: Editor, row: Int): Bytes
   source = state.doc.line(row)
   visible = clip(expand_tabs(source), state.col_offset, state.view_columns)
-  if not matched_row(state, row)
-    return visible.bytes()
-  end
+  if not matched_row(state, row) then return visible.bytes() end
   ends = state.column + state.search.query.len()
   start = clamp(state.render_column - state.col_offset, 0, visible.len())
   stop = clamp(screen_column(source, ends) - state.col_offset, start, visible.len())
   buffer = ByteBuffer()
   buffer.extend(clip(visible, 0, start).bytes())
-  buffer.extend(invert_style())
+  buffer.extend(INVERT)
   buffer.extend(clip(visible, start, stop - start).bytes())
   buffer.extend(reset_style())
   buffer.extend(clip(visible, stop, visible.len() - stop).bytes())
@@ -98,11 +85,7 @@ end
 
 # The status bar names the file and the cursor position.
 def status_line(state: Editor): String
-  marker = if state.doc.dirty
-    " (modified)"
-  else
-    ""
-  end
+  marker = if state.doc.dirty then " (modified)" else "" end
   left = "#{state.doc.name()}#{marker}"
   right = "#{state.row + 1}:#{state.column + 1}  #{state.doc.line_count()} lines"
   width = state.view_columns
@@ -113,12 +96,9 @@ end
 # The bottom line shows a message or one prompt.
 def message_line(state: Editor): String
   case state.mode
-  in Edit
-    state.message
-  in Search
-    "#{search_prefix()}#{state.search.query}   arrows: step   Enter: keep   Esc: cancel"
-  in SaveAs
-    "#{save_prefix()}#{state.prompt}   Enter: save   Esc: cancel"
+  in Edit   then state.message
+  in Search then "#{SEARCH_PROMPT}#{state.search.query}   arrows: step   Enter: keep   Esc: cancel"
+  in SaveAs then "#{SAVE_PROMPT}#{state.prompt}   Enter: save   Esc: cancel"
   end
 end
 
@@ -130,9 +110,9 @@ def cursor_position(state: Editor): Bytes
     row = state.row - state.row_offset + 1
     cursor_to(column, row).expect("the text cursor position is valid")
   in Search
-    prompt_cursor(state, search_prefix().len() + state.search.query.len())
+    prompt_cursor(state, SEARCH_PROMPT.len() + state.search.query.len())
   in SaveAs
-    prompt_cursor(state, save_prefix().len() + state.prompt.len())
+    prompt_cursor(state, SAVE_PROMPT.len() + state.prompt.len())
   end
 end
 

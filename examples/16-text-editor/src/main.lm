@@ -5,56 +5,57 @@
 #   lm run --allow Args,Clock,Fs,Io,Tty,Wait examples/16-text-editor -- notes.txt
 #
 # The editor reads keys, changes the document, and draws one frame for
-# each key. It restores the terminal before it returns.
+# each pause in the input. It restores the terminal before it returns.
 
 use document.Document
 use document.empty
 use document.parse
 use editor.Editor
-use keys.Key
-use keys.decode
-use screen.draw
+use std.fs.with_file
 use std.io.write_all
+use std.term.TermKey
 use std.term.clear_screen
 use std.term.cursor_to
+use std.term.decode_key
 use std.term.show_cursor
+use screen.draw
 use text.larger
+
+# The time that a partial escape sequence waits for its remainder.
+# The wait separates a single Escape key from an arrow key.
+const ESCAPE_WAIT_NS: Int = 30_000_000
+
+const READ_SIZE: Int = 1024
 
 # Read one key at a time from standard input.
 final class KeyReader
   pending: ByteBuffer = ByteBuffer()
 
   # Return the next key, or `None` after the input ends.
-  def next(mut self): Option[Key] with Io.ReadBytes, Clock.Sleep, Wait
+  def next(mut self): Option[TermKey] with Io.ReadBytes, Clock.Sleep, Wait
     finish = false
     loop do
       data = self.pending.build()
       if not data.is_empty()
-        case decode(data, finish)
-        in Ready(key, consumed)
+        case decode_key(data, finish)
+        in Decoded(key, consumed)
           self.drop(consumed)
-          return Some(key)
+          break Some(key)
         in NeedMore
-          if finish
-            self.drop(1)
-          end
+          # A finished escape always consumes input. This drop only
+          # guarantees progress if that ever stops holding.
+          if finish then self.drop(1) end
         end
       end
 
       if data.is_empty()
         chunk = read_input()
-        if chunk.is_empty()
-          return None
-        end
+        if chunk.is_empty() then break None end
         self.pending.extend(chunk)
       else
         chunk = read_input_soon()
-        if chunk.is_empty()
-          finish = true
-        else
-          self.pending.extend(chunk)
-          finish = false
-        end
+        finish = chunk.is_empty()
+        self.pending.extend(chunk)
       end
     end
   end
@@ -62,9 +63,9 @@ final class KeyReader
   # Report whether one complete key already waits in the buffer.
   # The event loop skips a frame while more keys wait.
   def has_ready_key(self): Bool
-    case decode(self.pending.build(), false)
-    in Ready(_, _) then true
-    in NeedMore    then false
+    case decode_key(self.pending.build(), false)
+    in Decoded(_, _) then true
+    in NeedMore      then false
     end
   end
 
@@ -80,47 +81,34 @@ final class KeyReader
 end
 
 def read_input(): Bytes with Io.ReadBytes
-  case sys.io.read_bytes(1024)
+  case sys.io.read_bytes(READ_SIZE)
   in Ok(value) then value
   in Err(_)    then Bytes("")
   end
 end
 
 # Wait a short time for the rest of one escape sequence.
-# The timer arm tells a single Escape key from an arrow key.
 def read_input_soon(): Bytes with Io.ReadBytes, Clock.Sleep, Wait
   select
-  in sys.io.read_bytes.wait(1024) -> input
+  in sys.io.read_bytes.wait(READ_SIZE) -> input
     case input
     in Ok(value) then value
     in Err(_)    then Bytes("")
     end
-  in sys.clock.sleep.wait(30_000_000) -> _
+  in sys.clock.sleep.wait(ESCAPE_WAIT_NS) -> _
     Bytes("")
   end
 end
 
 def read_file(path: String): Result[Bytes, FsError] with Fs
-  file = sys.fs.open(path, OpenOptions.ReadOnly)?
-  buffer = ByteBuffer()
-  failure: Option[FsError] = None
-  loop do
-    case file.read(65536)
-    in Err(error)
-      failure = Some(error)
-      break
-    in Ok(chunk)
-      if chunk.is_empty()
-        break
-      end
+  with_file(path, OpenOptions.ReadOnly) { |file: FileHandle|
+    buffer = ByteBuffer()
+    loop do
+      chunk = file.read(65536)?
+      if chunk.is_empty() then break Ok(buffer.finish()) end
       buffer.extend(chunk)
     end
-  end
-  file.close()?
-  case failure
-  in Some(error) then Err(error)
-  in None        then Ok(buffer.finish())
-  end
+  }
 end
 
 # Load the named file. A missing file starts one empty document.
@@ -155,23 +143,16 @@ def edit_loop(mut state: Editor, tty: Tty) with Clock.Sleep, Fs, Io, Tty, Wait
       write_all(draw(state)).expect("the frame writes")
     end
     case reader.next()
-    in None then break
-    in Some(key)
-      state.handle(key)
+    in None      then break ()
+    in Some(key) then state.handle(key)
     end
-    if state.done
-      break
-    end
+    if state.done then break () end
   end
 end
 
 def run() with Args, Clock.Sleep, Fs, Io, Tty, Wait
   arguments = sys.args()
-  path: Option[String] = if arguments.is_empty()
-    None
-  else
-    Some(arguments.at(0))
-  end
+  path: Option[String] = if arguments.is_empty() then None else Some(arguments.at(0)) end
 
   tty = Tty()
   if not tty.is_terminal(StdStream.Input) or not tty.is_terminal(StdStream.Output)

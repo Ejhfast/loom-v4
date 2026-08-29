@@ -22,10 +22,7 @@ final class Document
 
   # Return one line, or an empty line outside the document.
   def line(self, row: Int): String
-    case self.lines.get(row)
-    in Some(value) then value
-    in None        then ""
-    end
+    self.lines.get(row).value_or("")
   end
 
   def line_length(self, row: Int): Int
@@ -33,10 +30,7 @@ final class Document
   end
 
   def name(self): String
-    case self.path
-    in Some(value) then value
-    in None        then "[no name]"
-    end
+    self.path.value_or("[no name]")
   end
 
   # Insert `value` before the scalar at `column`.
@@ -96,10 +90,7 @@ def parse(data: Bytes, path: Option[String]): Result[Document, String]
   in Err(_)
     Err("the file is not valid UTF-8 text")
   in Ok(content)
-    lines = List[String]()
-    for line in content.lines()
-      lines.push(line.to_string())
-    end
+    lines = content.lines().map() { |line: Substring|: String line.to_string() }
     Ok(Document(lines, path))
   end
 end
