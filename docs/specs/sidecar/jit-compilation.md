@@ -553,6 +553,8 @@ This stage is the first review point.
 - add exact zero and overflow exits;
 - sweep fuel around every faulting instruction.
 
+Stop gate: division state, faults, and fuel match interpreter execution exactly.
+
 ### Stage 6: Calls
 
 - compile direct monomorphic calls;
@@ -705,3 +707,24 @@ An initial extraction resolved the source unit before every cache lookup.
 That error made scheduled execution more than two times slower.
 
 The lazy lookup removed that cost without weakening the crate boundary.
+
+## 25. Stage 5 review measurements
+
+The permanent rows vary the divisor during each loop.
+
+This form prevents constant-divisor strength reduction.
+
+| Workload | Interpreter | Native cold | Native warm | Warm gain |
+| --- | ---: | ---: | ---: | ---: |
+| Integer division | 78.691 ms | 2.251 ms | 1.561 ms | 50.40 times |
+| Integer remainder | 78.629 ms | 2.500 ms | 1.822 ms | 43.15 times |
+
+The retained integer loop used 0.912 milliseconds.
+
+The retained scheduled loop used 4.696 milliseconds.
+
+Both retained rows match the crate-extraction checkpoint.
+
+Fuel sweeps cover zero and signed-overflow faults for both operations.
+
+Every tested outcome and complete live-state dump matches interpreter execution.

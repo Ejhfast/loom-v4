@@ -78,6 +78,71 @@ fn integer_overflow_matches_the_interpreter() {
 }
 
 #[test]
+fn integer_division_and_remainder_match_the_interpreter() {
+    let source = concat!(
+        "left = 0 - 20\n",
+        "right = 3\n",
+        "quotient = left / right\n",
+        "remainder = left % right\n",
+        "scaled = quotient * 10\n",
+        "scaled + remainder\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(-62)));
+    assert!(metrics.native_retired_instructions > 0);
+    assert_eq!(metrics.native_fault_exits, 0);
+}
+
+#[test]
+fn integer_division_faults_match_at_each_fuel_boundary() {
+    let cases = [
+        (
+            "value = 7\nzero = 0\nvalue / zero\n",
+            lm_vm::FaultCode::DivideByZero,
+        ),
+        (
+            "value = 7\nzero = 0\nvalue % zero\n",
+            lm_vm::FaultCode::DivideByZero,
+        ),
+        (
+            concat!(
+                "minimum = 0 - 9223372036854775807\n",
+                "minimum = minimum - 1\n",
+                "negative_one = 0 - 1\n",
+                "minimum / negative_one\n",
+            ),
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            concat!(
+                "minimum = 0 - 9223372036854775807\n",
+                "minimum = minimum - 1\n",
+                "negative_one = 0 - 1\n",
+                "minimum % negative_one\n",
+            ),
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+    ];
+    for (source, expected) in cases {
+        let artifact =
+            lm_testkit::compile_text("jit-division-fault.lm", source).expect("the case compiles");
+        for fuel in 0..=16 {
+            let (interpreted, _, interpreted_dump) =
+                run_artifact(&artifact, EngineMode::Interpreter, fuel);
+            let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+            assert_eq!(native, interpreted, "fuel {fuel}");
+            assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+        }
+        let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+        assert_eq!(native, Outcome::Fault(expected));
+        assert_eq!(metrics.native_fault_exits, 1);
+    }
+}
+
+#[test]
 fn float_operations_match_the_interpreter() {
     let source = concat!(
         "value = -(3.5 - 1.25) * 2.0 / 0.5\n",

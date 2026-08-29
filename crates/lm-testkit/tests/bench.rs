@@ -913,6 +913,26 @@ fn bench_jit_scalar_regions() {
         "jit_int_eq",
         "i = 0\nsame = false\nwhile i < 1000000\n  same = i == i\n  i = i + 1\nend\nsame\n",
     );
+    report_jit(
+        "jit_int_div",
+        concat!(
+            "i = 1\nd = 3\ns = 0\n",
+            "while i < 1000000\n",
+            "  q = i / d\n  s = s + q\n  d = d + 2\n",
+            "  if d > 1009\n    d = 3\n  end\n",
+            "  i = i + 1\nend\ns\n",
+        ),
+    );
+    report_jit(
+        "jit_int_rem",
+        concat!(
+            "i = 1\nd = 3\ns = 0\n",
+            "while i < 1000000\n",
+            "  r = i % d\n  s = s + r\n  d = d + 2\n",
+            "  if d > 1009\n    d = 3\n  end\n",
+            "  i = i + 1\nend\ns\n",
+        ),
+    );
     report_jit_sliced(
         "jit_int_loop_sliced",
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",

@@ -258,7 +258,7 @@ impl JitEngine {
                     retired,
                 }
             }
-            ExitKind::IntegerOverflow => {
+            ExitKind::IntegerOverflow | ExitKind::DivideByZero => {
                 if exit.stack_len() != 0 {
                     return malformed_native_exit(retired);
                 }
@@ -268,8 +268,13 @@ impl JitEngine {
                 }
                 machine.vm.operands.truncate(operand_base);
                 engine.note_native_fault_exit();
+                let fault = match exit.kind() {
+                    ExitKind::IntegerOverflow => crate::FaultCode::IntegerOverflow,
+                    ExitKind::DivideByZero => crate::FaultCode::DivideByZero,
+                    _ => unreachable!(),
+                };
                 NativeAttempt::Complete {
-                    outcome: Err(ExecError::Fault(crate::FaultCode::IntegerOverflow)),
+                    outcome: Err(ExecError::Fault(fault)),
                     retired,
                 }
             }

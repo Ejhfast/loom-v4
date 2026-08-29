@@ -24,7 +24,8 @@ const MAX_REGION_STACK: usize = 1_024;
 const EXIT_FUEL: u32 = 1;
 const EXIT_RETURN: u32 = 2;
 const EXIT_INTEGER_OVERFLOW: u32 = 3;
-const EXIT_INVALID_ENTRY: u32 = 4;
+const EXIT_DIVIDE_BY_ZERO: u32 = 4;
+const EXIT_INVALID_ENTRY: u32 = 5;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -171,6 +172,7 @@ impl CompiledRegion {
             EXIT_FUEL => ExitKind::Fuel,
             EXIT_RETURN => ExitKind::Return,
             EXIT_INTEGER_OVERFLOW => ExitKind::IntegerOverflow,
+            EXIT_DIVIDE_BY_ZERO => ExitKind::DivideByZero,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -266,6 +268,7 @@ pub enum ExitKind {
     Fuel,
     Return,
     IntegerOverflow,
+    DivideByZero,
 }
 
 /// One validated native exit record.
@@ -620,7 +623,7 @@ fn analyze_segment(
             Instr::Pop => {
                 stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
             }
-            Instr::Add | Instr::Sub | Instr::Mul => {
+            Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem => {
                 if stack.len() != 2 {
                     return Err(UnsupportedReason::InvalidStack);
                 }
@@ -1128,6 +1131,35 @@ fn emit_segment(
                 )?;
                 stack.push(result);
             }
+            Instr::Div | Instr::Rem => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: segment.start + prefix,
+                    prefix,
+                };
+                let zero = builder.ins().icmp_imm(IntCC::Equal, right, 0);
+                emit_fault_check(builder, values, zero, EXIT_DIVIDE_BY_ZERO, point, &stack)?;
+                let minimum = builder.ins().iconst(types::I64, i64::MIN);
+                let minimum_left = builder.ins().icmp(IntCC::Equal, left, minimum);
+                let negative_one = builder.ins().icmp_imm(IntCC::Equal, right, -1);
+                let overflow = builder.ins().band(minimum_left, negative_one);
+                emit_fault_check(
+                    builder,
+                    values,
+                    overflow,
+                    EXIT_INTEGER_OVERFLOW,
+                    point,
+                    &stack,
+                )?;
+                let result = if matches!(instruction, Instr::Div) {
+                    builder.ins().sdiv(left, right)
+                } else {
+                    builder.ins().srem(left, right)
+                };
+                stack.push(result);
+            }
             Instr::Neg => {
                 let value = pop_native(&mut stack)?;
                 let zero = builder.ins().iconst(types::I64, 0);
@@ -1253,9 +1285,28 @@ fn emit_overflow_check(
     point: FaultPoint,
     stack: &[ir::Value],
 ) -> Result<ir::Value, CompileError> {
+    emit_fault_check(
+        builder,
+        values,
+        overflow,
+        EXIT_INTEGER_OVERFLOW,
+        point,
+        stack,
+    )?;
+    Ok(result)
+}
+
+fn emit_fault_check(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    faulted: ir::Value,
+    kind: u32,
+    point: FaultPoint,
+    stack: &[ir::Value],
+) -> Result<(), CompileError> {
     let fault = builder.create_block();
     let success = builder.create_block();
-    builder.ins().brif(overflow, fault, &[], success, &[]);
+    builder.ins().brif(faulted, fault, &[], success, &[]);
     builder.switch_to_block(fault);
     let retired = builder.use_var(values.retired);
     let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
@@ -1265,7 +1316,7 @@ fn emit_overflow_check(
         values,
         ExitEmission {
             retired,
-            kind: EXIT_INTEGER_OVERFLOW,
+            kind,
             block: point.block,
             instruction: point.instruction,
             result: zero,
@@ -1273,7 +1324,7 @@ fn emit_overflow_check(
         stack,
     )?;
     builder.switch_to_block(success);
-    Ok(result)
+    Ok(())
 }
 
 fn emit_float_instruction(
