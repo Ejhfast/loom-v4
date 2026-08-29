@@ -1,6 +1,6 @@
 # Guarded JIT compilation
 
-Status: Stages 0 through 6 are implemented for the native execution experiment.
+Status: Stages 0 through 7 are implemented for the native execution experiment.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -32,9 +32,9 @@ The first implementation does not compile these operations:
 - indirect, virtual, generic, and recursive native calls;
 - closures or captures;
 - generic environments;
-- heap references;
 - allocation;
-- fields or collections;
+- heap mutation;
+- collection operations;
 - effects;
 - native LMBC instructions;
 - extended LMBC instructions.
@@ -258,6 +258,32 @@ The caller function identity includes each direct callee identity.
 
 The native cache therefore pins the complete compiled call version.
 
+### 10.2 Guarded instance field reads
+
+Stage 7 adds non-generic class references and `LoadField`.
+
+The native ABI stores `ObjRef` as two packed `u32` values.
+
+The low half stores the object slot.
+
+The high half stores the object generation.
+
+Generated code calls one checked runtime service for each field read.
+
+The service copies the field value into the native result slot.
+
+The service never returns a heap pointer.
+
+A stale reference or invalid field produces an exact `TypeMismatch` exit.
+
+An uninitialized field produces an exact `UninitializedField` exit.
+
+A wrong field representation requests interpreter replay before the read.
+
+This replay preserves malformed external-state behavior.
+
+Generic instances remain unsupported in this stage.
+
 ## 11. Native ABI
 
 Generated code does not depend on Rust's `Value` layout.
@@ -283,6 +309,9 @@ type NativeFunction = unsafe extern "C" fn(
     operands: *mut u64,
     fuel: u64,
     entry: u32,
+    runtime_context: *mut (),
+    runtime_call: RuntimeCall,
+    runtime_result: *mut u64,
     exit: *mut NativeExit,
 );
 ```
@@ -298,6 +327,12 @@ Rust converts `Value` instances before native entry.
 Rust reconstructs canonical `Value` instances after native exit.
 
 Native registers and stack slots are execution caches only.
+
+`lm-jit` owns the unsafe callback adapter.
+
+`lm-vm` implements the safe runtime service trait.
+
+The callback context stays valid only during one native activation.
 
 ## 12. Canonical state
 
@@ -396,6 +431,7 @@ The runtime records clock-free counters:
 - compiled regions;
 - compiled segments;
 - compiled direct-call sites;
+- compiled heap-read sites;
 - native entry attempts;
 - guarded values;
 - guard failures;
@@ -403,6 +439,7 @@ The runtime records clock-free counters:
 - native-retired LMBC instructions;
 - materializations;
 - native fault exits;
+- native heap reads;
 - fallbacks by reason.
 
 The benchmark harness measures wall time outside pure runtime crates.
@@ -587,14 +624,31 @@ Stop gate: division state, faults, and fuel match interpreter execution exactly.
 
 Stop gate: calls preserve fuel, limits, faults, versions, and complete machine state.
 
-### Stage 7: Heap access
+### Stage 7: Guarded heap reads
 
 - define stable object guards;
+- pack generation-checked object handles in the native ABI;
+- add checked instance field reads;
+- preserve exact malformed-state behavior;
+- add field-read counters and measurements.
+
+Stop gate: field reads preserve full state and show a clear warm gain.
+
+### Stage 8: Bounded allocation
+
 - define safepoint root maps;
 - add allocation exits;
 - preserve collection and snapshot rules.
 
-No heap instruction enters native execution before this stage.
+Stop gate: allocation preserves heap limits, collection roots, fuel, and snapshots.
+
+### Stage 9: Effects
+
+- add explicit effect exits;
+- resume native execution after each completion;
+- preserve requests, replies, traces, and fuel.
+
+Stop gate: effectful regions match interpreter state at every completion boundary.
 
 ## 22. Acceptance statement
 
@@ -775,3 +829,23 @@ All retained rows stay within 2.7 percent of the prior checkpoint.
 Fuel sweeps cover every limit from zero through 32 instructions.
 
 Tests also cover frame limits, callee faults, recursive exits, and two callee versions.
+
+## 27. Stage 7 review measurements
+
+The field benchmark creates one object before the timed region.
+
+The timed loop reads one integer field one million times.
+
+| Workload | Interpreter | Native cold | Native warm | Warm gain |
+| --- | ---: | ---: | ---: | ---: |
+| Instance field read | 47.753 ms | 6.074 ms | 5.380 ms | 8.88 times |
+
+The callback performs one checked heap lookup for each field read.
+
+Native code retains only generation-checked object handles.
+
+Unit tests cover successful reads and exact uninitialized-field exits.
+
+An integration test resumes native execution from interpreter-created heap state.
+
+The retained scalar, division, call, sliced, and scheduled rows remain within prior variation.

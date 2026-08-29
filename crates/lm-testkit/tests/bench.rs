@@ -123,6 +123,90 @@ fn time_program_native_cold(source: &str) -> Duration {
     median(runs)
 }
 
+/// Time one program after an interpreted setup prefix.
+fn time_program_engine_after_setup(
+    source: &str,
+    mode: EngineMode,
+    setup: u32,
+) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let engine = Arc::new(Engine::new(EngineMode::Interpreter));
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    let mut compiler_metrics = EngineMetrics::default();
+    let mut runs = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        engine.set_mode(EngineMode::Interpreter);
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::NullHost),
+            Arc::clone(&engine),
+        );
+        assert!(matches!(
+            world.drive_slice(root, setup),
+            Some(lm_vm::SliceExit::Yielded)
+        ));
+        engine.set_mode(mode);
+        let start = Instant::now();
+        let outcome = world.run_root();
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round == 0 {
+            compiler_metrics = engine.metrics();
+            engine.reset_metrics();
+        } else {
+            runs.push(elapsed);
+        }
+    }
+    (
+        median(runs),
+        with_compiler_metrics(engine.metrics(), compiler_metrics),
+    )
+}
+
+/// Time cold native execution after an interpreted setup prefix.
+fn time_program_native_cold_after_setup(source: &str, setup: u32) -> Duration {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    let mut runs = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        let engine = Arc::new(Engine::new(EngineMode::Interpreter));
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::NullHost),
+            Arc::clone(&engine),
+        );
+        assert!(matches!(
+            world.drive_slice(root, setup),
+            Some(lm_vm::SliceExit::Yielded)
+        ));
+        engine.set_mode(EngineMode::Native);
+        let start = Instant::now();
+        let outcome = world.run_root();
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    median(runs)
+}
+
 /// Time one program through fixed scheduler slices.
 fn time_program_engine_sliced(
     source: &str,
@@ -213,6 +297,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_regions = compiler.compiled_regions;
     runtime.compiled_segments = compiler.compiled_segments;
     runtime.compiled_call_sites = compiler.compiled_call_sites;
+    runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
     runtime
 }
 
@@ -225,6 +310,26 @@ fn report_jit(name: &str, source: &str, required_call_sites: u64) {
     let (native, metrics) = time_program_engine(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0);
     assert!(metrics.compiled_call_sites >= required_call_sites);
+    println!(
+        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        cold.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        metrics.native_entries,
+        metrics.guarded_values,
+        metrics.compiled_call_sites,
+    );
+}
+
+fn report_jit_after_setup(name: &str, source: &str, setup: u32) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_program_engine_after_setup(source, EngineMode::Interpreter, setup);
+    let cold = time_program_native_cold_after_setup(source, setup);
+    let (native, metrics) = time_program_engine_after_setup(source, EngineMode::Native, setup);
+    assert!(metrics.native_retired_instructions > 0);
     println!(
         "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
@@ -972,6 +1077,20 @@ fn bench_jit_scalar_regions() {
             "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
         ),
         1,
+    );
+    report_jit_after_setup(
+        "jit_field_read",
+        concat!(
+            "class Pair\n",
+            "  left: Int\n",
+            "  def init(mut self, left: Int)\n    self.left = left\n  end\n",
+            "end\n",
+            "pair = Pair(7)\ni = 0\ns = 0\n",
+            "while i < 1000000\n",
+            "  value = pair.left\n  s = s + value\n  i = i + 1\n",
+            "end\ns\n",
+        ),
+        32,
     );
     report_jit_sliced(
         "jit_int_loop_sliced",

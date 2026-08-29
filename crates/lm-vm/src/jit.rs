@@ -3,8 +3,8 @@
 use crate::engine::Engine;
 use crate::machine::{ExecError, ExecOutcome, Machine};
 use crate::NamespaceRuntime;
-use lm_jit::{ExitKind, Failure, FunctionInput, ScalarKind};
-use lm_value::{canonical_float_bits, TypeEnvId, Value};
+use lm_jit::{ExitKind, Failure, FunctionInput, Runtime, RuntimeResult, ScalarKind, ValueRepr};
+use lm_value::{canonical_float_bits, ObjRef, TypeEnvId, Value};
 
 pub(crate) enum NativeAttempt {
     Fallback,
@@ -216,13 +216,23 @@ impl JitEngine {
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
         engine.note_native_entry();
-        let exit = match region.execute(
-            entry.index(),
-            &mut bits,
-            &mut dirty,
-            &mut stack_bits,
-            batch_fuel,
-        ) {
+        let (exit, heap_reads) = {
+            let mut runtime = MachineRuntime {
+                heap: &machine.vm.heap,
+                heap_reads: 0,
+            };
+            let exit = region.execute(
+                &mut runtime,
+                entry.index(),
+                &mut bits,
+                &mut dirty,
+                &mut stack_bits,
+                batch_fuel,
+            );
+            (exit, runtime.heap_reads)
+        };
+        engine.note_native_heap_reads(heap_reads);
+        let exit = match exit {
             Ok(exit) => exit,
             Err(_) => {
                 engine.note_backend_unavailable();
@@ -298,8 +308,14 @@ impl JitEngine {
                     retired,
                 }
             }
-            ExitKind::IntegerOverflow | ExitKind::DivideByZero => {
-                if exit.stack_len() != 0 {
+            ExitKind::IntegerOverflow
+            | ExitKind::DivideByZero
+            | ExitKind::TypeMismatch
+            | ExitKind::UninitializedField => {
+                let fault_kinds = region
+                    .fault_operand_kinds(exit.block(), exit.instruction())
+                    .unwrap_or(&[]);
+                if exit.stack_len() as usize != fault_kinds.len() {
                     return malformed_native_exit(retired);
                 }
                 if let Some(frame) = machine.vm.frames.last_mut() {
@@ -307,10 +323,19 @@ impl JitEngine {
                     frame.ip = exit.instruction();
                 }
                 machine.vm.operands.truncate(operand_base);
+                machine.vm.operands.extend(
+                    fault_kinds
+                        .iter()
+                        .copied()
+                        .zip(stack_bits.iter().copied())
+                        .map(|(kind, bits)| bits_value(kind, bits)),
+                );
                 engine.note_native_fault_exit();
                 let fault = match exit.kind() {
                     ExitKind::IntegerOverflow => crate::FaultCode::IntegerOverflow,
                     ExitKind::DivideByZero => crate::FaultCode::DivideByZero,
+                    ExitKind::TypeMismatch => crate::FaultCode::TypeMismatch,
+                    ExitKind::UninitializedField => crate::FaultCode::UninitializedField,
                     _ => unreachable!(),
                 };
                 NativeAttempt::Complete {
@@ -335,6 +360,7 @@ fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {
         (ScalarKind::Bool, Value::Bool(value)) => Some(u64::from(value)),
         (ScalarKind::Int, Value::Int(value)) => Some(value as u64),
         (ScalarKind::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
+        (ScalarKind::Object(_), Value::Obj(reference)) => Some(object_bits(reference)),
         _ => None,
     }
 }
@@ -345,5 +371,52 @@ fn bits_value(kind: ScalarKind, bits: u64) -> Value {
         ScalarKind::Bool => Value::Bool(bits != 0),
         ScalarKind::Int => Value::Int(bits as i64),
         ScalarKind::Float => Value::Float(canonical_float_bits(bits)),
+        ScalarKind::Object(_) => Value::Obj(object_reference(bits)),
+    }
+}
+
+fn object_bits(reference: ObjRef) -> u64 {
+    u64::from(reference.slot) | (u64::from(reference.generation) << 32)
+}
+
+fn object_reference(bits: u64) -> ObjRef {
+    ObjRef {
+        slot: bits as u32,
+        generation: (bits >> 32) as u32,
+    }
+}
+
+struct MachineRuntime<'a> {
+    heap: &'a crate::Heap,
+    heap_reads: u64,
+}
+
+impl Runtime for MachineRuntime<'_> {
+    fn load_field(&mut self, reference: ObjRef, field: u32, expected: ValueRepr) -> RuntimeResult {
+        self.heap_reads = self.heap_reads.saturating_add(1);
+        let Some(crate::Object::Instance { fields, .. }) = self.heap.try_get(reference) else {
+            return RuntimeResult::TypeMismatch;
+        };
+        let Some(value) = fields.get(field as usize).copied() else {
+            return RuntimeResult::TypeMismatch;
+        };
+        if value == Value::Uninit {
+            return RuntimeResult::UninitializedField;
+        }
+        match representation_bits(expected, value) {
+            Some(bits) => RuntimeResult::Value(bits),
+            None => RuntimeResult::Interpreter,
+        }
+    }
+}
+
+fn representation_bits(expected: ValueRepr, value: Value) -> Option<u64> {
+    match (expected, value) {
+        (ValueRepr::Unit, Value::Unit) => Some(0),
+        (ValueRepr::Bool, Value::Bool(value)) => Some(u64::from(value)),
+        (ValueRepr::Int, Value::Int(value)) => Some(value as u64),
+        (ValueRepr::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
+        (ValueRepr::Object, Value::Obj(reference)) => Some(object_bits(reference)),
+        _ => None,
     }
 }

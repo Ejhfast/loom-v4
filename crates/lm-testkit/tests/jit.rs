@@ -281,6 +281,50 @@ fn direct_call_cache_entries_pin_the_callee_version() {
 }
 
 #[test]
+fn native_field_reads_resume_from_interpreter_created_state() {
+    let source = concat!(
+        "class Pair\n",
+        "  left: Int\n",
+        "  def init(mut self, left: Int)\n    self.left = left\n  end\n",
+        "end\n",
+        "pair = Pair(7)\ni = 0\nsum = 0\n",
+        "while i < 10000\n",
+        "  value = pair.left\n  sum = sum + value\n  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-field.lm", source).expect("the field case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the field case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Interpreter));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice(root, 32),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    engine.set_mode(EngineMode::Native);
+    assert_eq!(
+        world.run_root(),
+        Outcome::Done(lm_value::Value::Int(70_000))
+    );
+    let metrics = engine.metrics();
+    assert!(metrics.native_retired_instructions > 50_000);
+    assert_eq!(metrics.compiled_heap_read_sites, 1);
+    assert!(metrics.native_heap_reads > 9_000);
+    assert_eq!(metrics.guard_failures, 0);
+}
+
+#[test]
 fn float_operations_match_the_interpreter() {
     let source = concat!(
         "value = -(3.5 - 1.25) * 2.0 / 0.5\n",
