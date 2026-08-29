@@ -694,7 +694,7 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::TextLe)
         | Instr::Native(lm_bytecode::NativeInstr::TextGt)
         | Instr::Native(lm_bytecode::NativeInstr::TextGe)
-        | Instr::Native(lm_bytecode::NativeInstr::SubstringToString)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToString)
         | Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
         | Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len)
         | Instr::Native(lm_bytecode::NativeInstr::EqChar)

@@ -5,7 +5,7 @@ use std::fmt;
 pub const MAGIC: [u8; 8] = *b"LMSYNT\0\x01";
 pub const FORMAT_VERSION: u16 = 1;
 pub const GRAMMAR_MAJOR: u16 = 1;
-pub const GRAMMAR_MINOR: u16 = 2;
+pub const GRAMMAR_MINOR: u16 = 3;
 const HEADER_SIZE: usize = 28;
 const RECORD_SIZE: usize = 20;
 
@@ -467,6 +467,7 @@ pub const KIND_ENUM: u16 = 5;
 pub const KIND_FUNCTION: u16 = 6;
 pub const KIND_STATEMENT: u16 = 7;
 pub const KIND_INVALID: u16 = 8;
+pub const KIND_CONST: u16 = 9;
 pub const KIND_INT: u16 = 100;
 pub const KIND_STRING: u16 = 101;
 pub const KIND_IDENTIFIER: u16 = 102;
@@ -511,7 +512,7 @@ pub const KIND_BOM: u16 = 502;
 pub fn syntax_kind_class(kind: u16) -> Option<SyntaxClass> {
     Some(match kind {
         KIND_MODULE | KIND_USE | KIND_INTERFACE | KIND_CLASS | KIND_ENUM | KIND_FUNCTION
-        | KIND_STATEMENT => SyntaxClass::Node,
+        | KIND_STATEMENT | KIND_CONST => SyntaxClass::Node,
         KIND_INVALID => SyntaxClass::Invalid,
         KIND_INT..=KIND_TILDE => SyntaxClass::Token,
         KIND_WHITESPACE | KIND_COMMENT | KIND_BOM => SyntaxClass::Trivia,
@@ -529,6 +530,7 @@ pub fn syntax_kind_name(kind: u16) -> Option<&'static str> {
         KIND_FUNCTION => "FunctionDeclaration",
         KIND_STATEMENT => "Statement",
         KIND_INVALID => "InvalidFragment",
+        KIND_CONST => "ConstantDeclaration",
         KIND_INT => "IntegerToken",
         KIND_STRING => "StringToken",
         KIND_IDENTIFIER => "IdentifierToken",

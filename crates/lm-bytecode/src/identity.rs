@@ -110,7 +110,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 45 uses BLAKE3-256 for bytecode identities.
 /// Version 46 lowers text padding and Float text conversions.
 /// Version 48 encodes effect rows with ABI operation and group slots.
-pub const COMPILER_ABI_VERSION: u32 = 48;
+/// Version 49 adds compile-time constants to module surfaces.
+pub const COMPILER_ABI_VERSION: u32 = 49;
 
 /// The refinement work budget of one component.
 ///
@@ -922,7 +923,7 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::TextLe)
         | Instr::Native(NativeInstr::TextGt)
         | Instr::Native(NativeInstr::TextGe)
-        | Instr::Native(NativeInstr::SubstringToString)
+        | Instr::Native(NativeInstr::TextToString)
         | Instr::Native(NativeInstr::CharCodepoint)
         | Instr::Native(NativeInstr::CharUtf8Len)
         | Instr::Native(NativeInstr::EqChar)
@@ -2217,7 +2218,7 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::TextLe) => 0x90,
             Instr::Native(NativeInstr::TextGt) => 0x91,
             Instr::Native(NativeInstr::TextGe) => 0x92,
-            Instr::Native(NativeInstr::SubstringToString) => 0x93,
+            Instr::Native(NativeInstr::TextToString) => 0x93,
             Instr::Native(NativeInstr::CharCodepoint) => 0x94,
             Instr::Native(NativeInstr::CharUtf8Len) => 0x95,
             Instr::Native(NativeInstr::EqChar) => 0x96,
@@ -2599,7 +2600,7 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::TextLe)
             | Instr::Native(NativeInstr::TextGt)
             | Instr::Native(NativeInstr::TextGe)
-            | Instr::Native(NativeInstr::SubstringToString)
+            | Instr::Native(NativeInstr::TextToString)
             | Instr::Native(NativeInstr::CharCodepoint)
             | Instr::Native(NativeInstr::CharUtf8Len)
             | Instr::Native(NativeInstr::EqChar)

@@ -160,6 +160,18 @@ pub(crate) fn collect_compiled_unit(module: &Module) -> Result<Module, String> {
                 ));
             }
             roots.push(offsets.func(export.def));
+        } else if export.kind.is_constant() {
+            let constant = export
+                .constant
+                .as_ref()
+                .ok_or_else(|| format!("the constant export `{}` has no value", export.name))?;
+            if constant.ty as usize >= module.types.len() {
+                return Err(format!(
+                    "the constant export `{}` names a type outside the module",
+                    export.name
+                ));
+            }
+            roots.push(offsets.ty(constant.ty));
         }
     }
     roots.sort_unstable();
@@ -959,9 +971,8 @@ fn native_edges(
         NativeInstr::TextAt | NativeInstr::TextAtByte => {
             role_edges(module, offsets, &["Text", "Char"], edges)
         }
-        NativeInstr::SubstringToString | NativeInstr::BytesTextView => {
-            role_edges(module, offsets, &["Substring"], edges)
-        }
+        NativeInstr::TextToString => role_edges(module, offsets, &["Text"], edges),
+        NativeInstr::BytesTextView => role_edges(module, offsets, &["Substring"], edges),
         NativeInstr::CharCodepoint
         | NativeInstr::CharUtf8Len
         | NativeInstr::EqChar
@@ -1419,6 +1430,44 @@ fn reloc_import(source: &Import, reloc: &Reloc) -> Option<Import> {
 }
 
 fn reloc_export(source: &Export, reloc: &Reloc) -> Result<Export, String> {
+    if source.kind.is_constant() {
+        let constant = source
+            .constant
+            .as_ref()
+            .ok_or_else(|| format!("the constant export `{}` has no value", source.name))?;
+        if source.def != NO_CTOR || source.ctor != NO_CTOR {
+            return Err(format!(
+                "the constant export `{}` has invalid runtime fields",
+                source.name
+            ));
+        }
+        let ty = reloc
+            .types
+            .get(constant.ty as usize)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "the constant export `{}` names a type outside the module",
+                    source.name
+                )
+            })?;
+        if ty == DEAD {
+            return Err(format!(
+                "dependency collection removed the type of `{}`",
+                source.name
+            ));
+        }
+        return Ok(Export {
+            kind: source.kind,
+            name: source.name.clone(),
+            def: source.def,
+            ctor: source.ctor,
+            constant: Some(lm_bytecode::Constant {
+                ty,
+                value: constant.value.clone(),
+            }),
+        });
+    }
     let def = if source.kind.is_class() {
         reloc.classes[source.def as usize]
     } else if source.kind.is_interface() {
@@ -1450,6 +1499,7 @@ fn reloc_export(source: &Export, reloc: &Reloc) -> Result<Export, String> {
         name: source.name.clone(),
         def,
         ctor,
+        constant: source.constant.clone(),
     })
 }
 

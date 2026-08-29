@@ -702,6 +702,7 @@ mod tests {
             name: "value".to_string(),
             def: 0,
             ctor: crate::NO_CTOR,
+            constant: None,
         });
         let mut second = first.clone();
         second.exports[0].def = 1;
@@ -824,6 +825,7 @@ mod tests {
             name: "entry".to_string(),
             def: 0,
             ctor: crate::NO_CTOR,
+            constant: None,
         });
         let unit = LinkUnit::from_module("test.main", module, Vec::new()).unwrap();
         let module_bytes = crate::encode(unit.module());

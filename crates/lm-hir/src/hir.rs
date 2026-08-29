@@ -45,6 +45,14 @@ pub struct HirExport {
     pub def: u32,
 }
 
+/// One checked module constant.
+#[derive(Clone)]
+pub struct HirConst {
+    pub name: String,
+    pub ty: TypeId,
+    pub value: HExpr,
+}
+
 /// The definition one import slot declares. The lowering pass turns
 /// it into a bytecode index; a constructor index follows the function
 /// table, so only the lowering knows it.
@@ -76,6 +84,8 @@ pub struct HirModule {
     pub conformances: Vec<HirConformance>,
     pub classes: Vec<HirClass>,
     pub funcs: Vec<HirFunc>,
+    /// Literal constants that the compiler adds to the interface.
+    pub constants: Vec<HirConst>,
     /// Index of the entry function inside `funcs`.
     pub entry: usize,
     /// Pinned core definition indices.

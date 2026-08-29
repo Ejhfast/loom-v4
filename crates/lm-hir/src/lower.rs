@@ -605,7 +605,7 @@ pub fn lower_module_with_linkage(
             hash: i.hash,
         })
         .collect();
-    let exports = hir
+    let mut exports: Vec<lm_bytecode::Export> = hir
         .exports
         .iter()
         .map(|e| lm_bytecode::Export {
@@ -617,8 +617,21 @@ pub fn lower_module_with_linkage(
             } else {
                 lm_bytecode::NO_CTOR
             },
+            constant: None,
         })
         .collect();
+    for constant in &hir.constants {
+        exports.push(lm_bytecode::Export {
+            kind: lm_bytecode::ExportKind::Constant,
+            name: constant.name.clone(),
+            def: lm_bytecode::NO_CTOR,
+            ctor: lm_bytecode::NO_CTOR,
+            constant: Some(lm_bytecode::Constant {
+                ty: m.bc_ty(constant.ty),
+                value: lower_const_value(&constant.value)?,
+            }),
+        });
+    }
     // The generated constructor of a class takes a binding derived
     // from the qualified key of that class. The class structural hash
     // covers no constructor, because the constructor is a function
@@ -732,6 +745,25 @@ pub fn lower_module_with_linkage(
     Ok(module)
 }
 
+/// Lower one checked constant without creating runtime code.
+fn lower_const_value(expr: &HExpr) -> Result<lm_bytecode::ConstValue, String> {
+    Ok(match &expr.kind {
+        HExprKind::Unit => lm_bytecode::ConstValue::Unit,
+        HExprKind::Bool(value) => lm_bytecode::ConstValue::Bool(*value),
+        HExprKind::Int(value) => lm_bytecode::ConstValue::Int(*value),
+        HExprKind::Float(bits) => lm_bytecode::ConstValue::Float(*bits),
+        HExprKind::Str(value) => lm_bytecode::ConstValue::String(value.clone()),
+        HExprKind::Bytes(value) => lm_bytecode::ConstValue::Bytes(value.clone()),
+        HExprKind::TupleLit(items) => lm_bytecode::ConstValue::Tuple(
+            items
+                .iter()
+                .map(lower_const_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        _ => return Err("a checked constant contains a runtime expression".to_string()),
+    })
+}
+
 #[derive(Clone, Copy)]
 struct LoopTargets {
     continue_block: u32,
@@ -781,6 +813,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
 
     fn emit(&mut self, instr: Instr) {
         let (pops, pushes) = stack_effect(self.m, &instr);
+        debug_assert!(
+            self.stack_depth >= pops,
+            "instruction {instr:?} pops {pops} values from a stack of depth {}",
+            self.stack_depth
+        );
         self.stack_depth = self.stack_depth.saturating_sub(pops) + pushes;
         match &instr {
             Instr::Jump(target) | Instr::JumpIfFalse(target) | Instr::JumpIfTrue(target) => {
@@ -831,6 +868,22 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             result_slot,
             entry_depth: self.stack_depth,
         });
+    }
+
+    /// Lower one operand and report whether evaluation can continue.
+    fn lower_operand(&mut self, expr: &HExpr) -> bool {
+        self.lower_expr(expr);
+        expr.flow == Flow::Normal
+    }
+
+    /// Lower strict operands until one transfers control.
+    fn lower_operands<'e>(&mut self, exprs: impl IntoIterator<Item = &'e HExpr>) -> bool {
+        for expr in exprs {
+            if !self.lower_operand(expr) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Allocate one scratch local slot with its declared type.
@@ -913,7 +966,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         action: MapAction,
         args: &[HExpr],
         reply: Option<TypeId>,
-    ) {
+    ) -> bool {
         let (key_ty, value_ty) = match self.m.store.get(args[0].ty) {
             Type::Map(key, value) => (*key, *value),
             _ => unreachable!("a map intrinsic receives a map"),
@@ -926,12 +979,18 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         let token = self.scratch_of(INT);
         let reply_ty = reply.map(|ty| self.m.bc_ty(ty));
 
-        self.lower_expr(&args[0]);
+        if !self.lower_operand(&args[0]) {
+            return false;
+        }
         self.emit(Instr::StoreLocal(map));
-        self.lower_expr(&args[1]);
+        if !self.lower_operand(&args[1]) {
+            return false;
+        }
         self.emit(Instr::StoreLocal(key));
         if let Some(slot) = value {
-            self.lower_expr(&args[2]);
+            if !self.lower_operand(&args[2]) {
+                return false;
+            }
             self.emit(Instr::StoreLocal(slot));
         }
         if matches!(
@@ -1053,6 +1112,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         }
         self.emit(Instr::Jump(join));
         self.switch_to(join);
+        true
     }
 
     /// Emit a structural comparison of the tuples in the locals `a`
@@ -1127,12 +1187,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     fn lower_stmt(&mut self, stmt: &HStmt) {
         match stmt {
             HStmt::Assign { slot, value } => {
-                self.lower_expr(value);
+                if !self.lower_operand(value) {
+                    return;
+                }
                 self.emit(Instr::StoreLocal(*slot));
             }
             HStmt::AssignField { recv, field, value } => {
-                self.lower_expr(recv);
-                self.lower_expr(value);
+                if !self.lower_operand(recv) || !self.lower_operand(value) {
+                    return;
+                }
                 self.emit(Instr::StoreField(*field));
             }
             HStmt::While { cond, body } => {
@@ -1141,14 +1204,18 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.switch_to(cond_b);
                 let body_b = self.new_block();
                 let exit_b = self.new_block();
-                self.lower_expr(cond);
+                if !self.lower_operand(cond) {
+                    return;
+                }
                 self.emit(Instr::JumpIfFalse(exit_b));
                 self.emit(Instr::Jump(body_b));
                 self.switch_to(body_b);
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
             HStmt::For {
@@ -1159,7 +1226,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             } => self.lower_for(source, bindings, kind, body),
             HStmt::Return { value } => {
                 match value {
-                    Some(value) => self.lower_expr(value),
+                    Some(value) if !self.lower_operand(value) => return,
+                    Some(_) => {}
                     None => self.emit(Instr::ConstUnit),
                 }
                 self.emit(Instr::Return);
@@ -1209,7 +1277,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             | HForKind::Range { source_slot, .. }
             | HForKind::Generic { source_slot, .. } => *source_slot,
         };
-        self.lower_expr(source);
+        if !self.lower_operand(source) {
+            return;
+        }
         self.emit(Instr::StoreLocal(source_slot));
 
         match kind {
@@ -1246,9 +1316,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*index_slot);
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
             HForKind::Map {
@@ -1306,9 +1378,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 self.increment_local(*index_slot);
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
             HForKind::Text {
@@ -1341,9 +1415,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Add);
                 self.emit(Instr::StoreLocal(*cursor_slot));
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
             HForKind::Range {
@@ -1374,9 +1450,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::StoreLocal(bindings[0]));
                 self.increment_local(*cursor_slot);
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
             HForKind::Generic {
@@ -1422,9 +1500,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::StoreLocal(bindings[0]));
                 }
                 self.push_loop(cond_b, exit_b, None);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(cond_b));
+                if !diverged {
+                    self.emit(Instr::Jump(cond_b));
+                }
                 self.switch_to(exit_b);
             }
         }
@@ -1442,8 +1522,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     fn lower_block_stmt(&mut self, stmts: &[HStmt]) -> bool {
         for stmt in stmts {
             self.lower_stmt(stmt);
+            if stmt.diverges() {
+                return true;
+            }
         }
-        stmts.last().map(HStmt::diverges).unwrap_or(false)
+        false
     }
 
     /// Lower a statement list that produces one value. Return false
@@ -1511,11 +1594,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::Local(slot) => self.emit(Instr::LoadLocal(*slot)),
             HExprKind::Capture(idx) => self.emit(Instr::LoadCapture(*idx)),
             HExprKind::Not(inner) => {
-                self.lower_expr(inner);
+                if !self.lower_operand(inner) {
+                    return;
+                }
                 self.emit(Instr::Not);
             }
             HExprKind::Neg(inner) => {
-                self.lower_expr(inner);
+                if !self.lower_operand(inner) {
+                    return;
+                }
                 self.emit(Instr::Neg);
             }
             HExprKind::Binary {
@@ -1527,10 +1614,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 if matches!(op, BinOp::Eq | BinOp::Ne)
                     && matches!(self.m.store.get(*operand_ty), Type::Tuple(_))
                 {
-                    self.lower_expr(left);
+                    if !self.lower_operand(left) {
+                        return;
+                    }
                     let a = self.scratch_of(*operand_ty);
                     self.emit(Instr::StoreLocal(a));
-                    self.lower_expr(right);
+                    if !self.lower_operand(right) {
+                        return;
+                    }
                     let b = self.scratch_of(*operand_ty);
                     self.emit(Instr::StoreLocal(b));
                     self.lower_tuple_eq(a, b, *operand_ty);
@@ -1542,38 +1633,46 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     // the arm plus the fields. The comparison runs in
                     // the machine, which keeps its own stack, so a
                     // deep value costs no host frame.
-                    self.lower_expr(left);
-                    self.lower_expr(right);
+                    if !self.lower_operand(left) || !self.lower_operand(right) {
+                        return;
+                    }
                     self.emit(if matches!(op, BinOp::Eq) {
                         Instr::EqValue
                     } else {
                         Instr::NeValue
                     });
                 } else {
-                    self.lower_expr(left);
-                    self.lower_expr(right);
+                    if !self.lower_operand(left) || !self.lower_operand(right) {
+                        return;
+                    }
                     self.emit(binary_instr(*op, *operand_ty));
                 }
             }
             HExprKind::And(left, right) => {
-                self.lower_expr(left);
+                if !self.lower_operand(left) {
+                    return;
+                }
                 let false_b = self.new_block();
                 let join_b = self.new_block();
                 self.emit(Instr::JumpIfFalse(false_b));
-                self.lower_expr(right);
-                self.emit(Instr::Jump(join_b));
+                if self.lower_operand(right) {
+                    self.emit(Instr::Jump(join_b));
+                }
                 self.switch_to(false_b);
                 self.emit(Instr::ConstBool(false));
                 self.emit(Instr::Jump(join_b));
                 self.switch_to(join_b);
             }
             HExprKind::Or(left, right) => {
-                self.lower_expr(left);
+                if !self.lower_operand(left) {
+                    return;
+                }
                 let true_b = self.new_block();
                 let join_b = self.new_block();
                 self.emit(Instr::JumpIfTrue(true_b));
-                self.lower_expr(right);
-                self.emit(Instr::Jump(join_b));
+                if self.lower_operand(right) {
+                    self.emit(Instr::Jump(join_b));
+                }
                 self.switch_to(true_b);
                 self.emit(Instr::ConstBool(true));
                 self.emit(Instr::Jump(join_b));
@@ -1590,7 +1689,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     .inline_bodies
                     .get(*func as usize)
                     .and_then(Clone::clone);
-                if rowargs.is_empty() {
+                if rowargs.is_empty() && args.iter().all(|arg| arg.flow == Flow::Normal) {
                     if let Some(template) = inline {
                         if let Some(mut expanded) =
                             instantiate_inline(&template, args, &self.m.inline_bodies)
@@ -1603,8 +1702,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         }
                     }
                 }
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operands(args) {
+                    return;
                 }
                 self.emit_call(*func, targs, rowargs);
                 if self.m.funcs[*func as usize].ret == NEVER {
@@ -1613,8 +1712,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             HExprKind::Construct { class, targs, args } => {
                 if *class == self.m.core.some_class {
-                    for arg in args {
-                        self.lower_expr(arg);
+                    if !self.lower_operands(args) {
+                        return;
                     }
                     let ty = self.m.bc_ty(expr.ty);
                     self.emit(extended(ExtendedInstr::OptionSome { ty }));
@@ -1626,8 +1725,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(extended(ExtendedInstr::OptionNone { ty }));
                     return;
                 }
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operands(args) {
+                    return;
                 }
                 if let Some(slot) = self.m.class_slots.get(class).copied() {
                     let app = if targs.is_empty() {
@@ -1649,9 +1748,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 own_rowargs,
                 args,
             } => {
-                self.lower_expr(recv);
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operand(recv) || !self.lower_operands(args) {
+                    return;
                 }
                 let sel = self.m.selector(selector);
                 let generic_recv = matches!(self.m.store.get(recv.ty), Type::Inst(_, _));
@@ -1683,9 +1781,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 args,
                 ..
             } => {
-                self.lower_expr(recv);
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operand(recv) || !self.lower_operands(args) {
+                    return;
                 }
                 let recv_ty = self.m.bc_ty(recv.ty);
                 let app = if own_targs.is_empty() && own_rowargs.is_empty() {
@@ -1696,7 +1793,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(interface_call(*interface, *method, recv_ty, app));
             }
             HExprKind::FieldGet { recv, field } => {
-                self.lower_expr(recv);
+                if !self.lower_operand(recv) {
+                    return;
+                }
                 let native_option_payload = *field == 0
                     && matches!(
                         self.m.store.get(recv.ty),
@@ -1710,8 +1809,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::MakeClosure { func, captures } => {
-                for capture in captures {
-                    self.lower_expr(capture);
+                if !self.lower_operands(captures) {
+                    return;
                 }
                 // The verifier resolves the closure type through the
                 // type table, so the entry must exist.
@@ -1730,18 +1829,22 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(extended(ExtendedInstr::ClassCode { class: *class }));
             }
             HExprKind::CodeSource { code, .. } => {
-                self.lower_expr(code);
+                if !self.lower_operand(code) {
+                    return;
+                }
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::CodeSource { ty }));
             }
             HExprKind::CodeDefinition { code } => {
-                self.lower_expr(code);
+                if !self.lower_operand(code) {
+                    return;
+                }
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::CodeDefinition));
             }
             HExprKind::MakeCallback { func, captures } => {
-                for capture in captures {
-                    self.lower_expr(capture);
+                if !self.lower_operands(captures) {
+                    return;
                 }
                 self.m.callback_type(*func);
                 self.m.bc_ty(expr.ty);
@@ -1751,15 +1854,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }));
             }
             HExprKind::AsCallback(value) => {
-                self.lower_expr(value);
+                if !self.lower_operand(value) {
+                    return;
+                }
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::AsCallback));
             }
             HExprKind::CallValue { callee, args } => {
                 let is_op = matches!(self.m.store.get(callee.ty), Type::Op(_, _));
-                self.lower_expr(callee);
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operand(callee) || !self.lower_operands(args) {
+                    return;
                 }
                 if is_op {
                     // The instruction carries the reply type, so the
@@ -1806,8 +1910,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 if args.is_empty() {
                     self.emit(Instr::ConstUnit);
                 } else {
-                    for arg in args {
-                        self.lower_expr(arg);
+                    if !self.lower_operands(args) {
+                        return;
                     }
                     let tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
                     let tuple = self.m.store.find(&Type::Tuple(tys));
@@ -1830,8 +1934,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::TupleLit(items) => {
-                for item in items {
-                    self.lower_expr(item);
+                if !self.lower_operands(items) {
+                    return;
                 }
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(Instr::TupleNew {
@@ -1840,22 +1944,28 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::TupleGet { tuple, index } => {
-                self.lower_expr(tuple);
+                if !self.lower_operand(tuple) {
+                    return;
+                }
                 self.emit(Instr::TupleGet(*index));
             }
             HExprKind::IsType { value, ty } => {
-                self.lower_expr(value);
+                if !self.lower_operand(value) {
+                    return;
+                }
                 let ty = self.m.bc_ty(*ty);
                 self.emit(Instr::IsType(ty));
             }
             HExprKind::CastType { value, ty } => {
-                self.lower_expr(value);
+                if !self.lower_operand(value) {
+                    return;
+                }
                 let ty = self.m.bc_ty(*ty);
                 self.emit(Instr::CastType(ty));
             }
             HExprKind::ListLit(items) => {
-                for item in items {
-                    self.lower_expr(item);
+                if !self.lower_operands(items) {
+                    return;
                 }
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(Instr::ListNew {
@@ -1870,8 +1980,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 };
                 if self.native_map_key(key_ty) {
                     for (key, value) in entries {
-                        self.lower_expr(key);
-                        self.lower_expr(value);
+                        if !self.lower_operand(key) || !self.lower_operand(value) {
+                            return;
+                        }
                     }
                     let ty = self.m.bc_ty(expr.ty);
                     self.emit(Instr::MapNew {
@@ -1894,11 +2005,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                             key.clone(),
                             value.clone(),
                         ];
-                        self.lower_hashable_map_action(MapAction::PutDiscard, &args, None);
+                        if !self.lower_hashable_map_action(MapAction::PutDiscard, &args, None) {
+                            return;
+                        }
                         self.emit(Instr::Pop);
                     }
                     self.emit(Instr::LoadLocal(map));
                 }
+            }
+            HExprKind::Native { args, .. } if args.iter().any(|arg| arg.flow == Flow::Never) => {
+                let _ = self.lower_operands(args);
             }
             HExprKind::Native {
                 op: NativeOp::ListGet,
@@ -1921,13 +2037,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         _ => unreachable!("a map operation receives a map"),
                     };
                     if !self.native_map_key(key_ty) {
-                        self.lower_hashable_map_action(action, args, Some(expr.ty));
+                        let _ = self.lower_hashable_map_action(action, args, Some(expr.ty));
                         return;
                     }
                 }
                 let operand_ty = args.first().map(|arg| arg.ty);
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operands(args) {
+                    return;
                 }
                 let instr = match op {
                     NativeOp::ListLen => Instr::ListLen,
@@ -1960,6 +2076,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(instr);
             }
             HExprKind::Intrinsic { intrinsic, args } => {
+                if args.iter().any(|arg| arg.flow == Flow::Never) {
+                    let _ = self.lower_operands(args);
+                    return;
+                }
                 self.lower_intrinsic(*intrinsic, args, expr.ty)
             }
             HExprKind::Interp(parts) => {
@@ -1990,7 +2110,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                             if let Some(builder) = builder_slot {
                                 self.emit(Instr::LoadLocal(builder));
                             }
-                            self.lower_expr(value);
+                            if !self.lower_operand(value) {
+                                return;
+                            }
                             self.emit(interp_native_instr(*kind));
                             if builder_slot.is_some() {
                                 self.emit(Instr::Pop);
@@ -2003,7 +2125,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                             builder,
                             selector: _,
                         } => {
-                            self.lower_expr(value);
+                            if !self.lower_operand(value) {
+                                return;
+                            }
                             self.emit(Instr::LoadLocal(*builder));
                             let recv_ty = self.m.bc_ty(value.ty);
                             self.emit(interface_call(
@@ -2033,9 +2157,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Jump(body_b));
                 self.switch_to(body_b);
                 self.push_loop(body_b, exit_b, *result_slot);
-                self.lower_block_stmt(body);
+                let diverged = self.lower_block_stmt(body);
                 self.loops.pop();
-                self.emit(Instr::Jump(body_b));
+                if !diverged {
+                    self.emit(Instr::Jump(body_b));
+                }
                 self.switch_to(exit_b);
                 if expr.ty == UNIT {
                     self.emit(Instr::ConstUnit);
@@ -2046,18 +2172,24 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::If { arms, else_body } => {
                 let join_b = self.new_block();
                 let unit_valued = expr.ty == UNIT;
+                let mut condition_diverged = false;
                 for (cond, body) in arms {
-                    self.lower_expr(cond);
+                    if !self.lower_operand(cond) {
+                        condition_diverged = true;
+                        break;
+                    }
                     let next_b = self.new_block();
                     self.emit(Instr::JumpIfFalse(next_b));
                     self.lower_branch(body, unit_valued, join_b);
                     self.switch_to(next_b);
                 }
-                match else_body {
-                    Some(body) => self.lower_branch(body, unit_valued, join_b),
-                    None => {
-                        self.emit(Instr::ConstUnit);
-                        self.emit(Instr::Jump(join_b));
+                if !condition_diverged {
+                    match else_body {
+                        Some(body) => self.lower_branch(body, unit_valued, join_b),
+                        None => {
+                            self.emit(Instr::ConstUnit);
+                            self.emit(Instr::Jump(join_b));
+                        }
                     }
                 }
                 self.switch_to(join_b);
@@ -2068,8 +2200,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 arms,
             } => self.lower_case(scrut, *scrut_slot, arms, expr.ty == UNIT),
             HExprKind::Perform { op, args } => {
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operands(args) {
+                    return;
                 }
                 // The verifier reconstructs the perform result type
                 // through the module type table, so the entry exists.
@@ -2083,8 +2215,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::PrepareWait { op, args } => {
-                for arg in args {
-                    self.lower_expr(arg);
+                if !self.lower_operands(args) {
+                    return;
                 }
                 let Type::Wait(reply) = self.m.store.get(expr.ty) else {
                     unreachable!("a prepared wait has a Wait result type")
@@ -2105,9 +2237,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 table,
                 mock,
             } => {
-                self.lower_expr(table);
+                if !self.lower_operand(table) {
+                    return;
+                }
                 if let Some(mock) = mock {
-                    self.lower_expr(mock);
+                    if !self.lower_operand(mock) {
+                        return;
+                    }
                 }
                 let action = match action {
                     TableAction::Pass => 0,
@@ -2126,30 +2262,42 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::CallArgs { call } => {
-                self.lower_expr(call);
+                if !self.lower_operand(call) {
+                    return;
+                }
                 self.m.bc_ty(expr.ty);
                 self.emit(Instr::CallArgs);
             }
             HExprKind::FaultCodeGet { fault } => {
-                self.lower_expr(fault);
+                if !self.lower_operand(fault) {
+                    return;
+                }
                 self.emit(Instr::FaultCode);
             }
             HExprKind::FaultSiteGet { fault } => {
-                self.lower_expr(fault);
+                if !self.lower_operand(fault) {
+                    return;
+                }
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::FaultSite { ty }));
             }
             HExprKind::FaultTraceGet { fault } => {
-                self.lower_expr(fault);
+                if !self.lower_operand(fault) {
+                    return;
+                }
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::FaultTrace { ty }));
             }
             HExprKind::RequestOpName { request } => {
-                self.lower_expr(request);
+                if !self.lower_operand(request) {
+                    return;
+                }
                 self.emit(Instr::RequestOp);
             }
             HExprKind::FaultDenied { reason } => {
-                self.lower_expr(reason);
+                if !self.lower_operand(reason) {
+                    return;
+                }
                 self.emit(Instr::FaultDenied);
             }
         }
@@ -2170,7 +2318,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             _ => unreachable!("a map operation receives a map"),
         };
         if !self.native_map_key(key_ty) {
-            self.lower_hashable_map_action(MapAction::Get, args, Some(expr.ty));
+            let _ = self.lower_hashable_map_action(MapAction::Get, args, Some(expr.ty));
             return;
         }
         self.lower_expr(&args[0]);
@@ -2219,7 +2367,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 _ => unreachable!("a map intrinsic receives a map"),
             };
             if !self.native_map_key(key_ty) {
-                self.lower_hashable_map_action(action, args, Some(reply));
+                let _ = self.lower_hashable_map_action(action, args, Some(reply));
                 return;
             }
         }
@@ -2380,8 +2528,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_TEXT_LE => Instr::Native(lm_bytecode::NativeInstr::TextLe),
             lm_abi::INTRINSIC_TEXT_GT => Instr::Native(lm_bytecode::NativeInstr::TextGt),
             lm_abi::INTRINSIC_TEXT_GE => Instr::Native(lm_bytecode::NativeInstr::TextGe),
-            lm_abi::INTRINSIC_SUBSTRING_TO_STRING => {
-                Instr::Native(lm_bytecode::NativeInstr::SubstringToString)
+            lm_abi::INTRINSIC_TEXT_TO_STRING => {
+                Instr::Native(lm_bytecode::NativeInstr::TextToString)
             }
             lm_abi::INTRINSIC_CHAR_CODEPOINT => {
                 Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
@@ -2531,7 +2679,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     /// the join with one value. The checker proved exhaustiveness, so
     /// the last arm destructures without tests.
     fn lower_case(&mut self, scrut: &HExpr, scrut_slot: u32, arms: &[HArm], unit_valued: bool) {
-        self.lower_expr(scrut);
+        if !self.lower_operand(scrut) {
+            return;
+        }
         self.emit(Instr::StoreLocal(scrut_slot));
         let join_b = self.new_block();
         // The runtime backstop behind the static exhaustiveness
@@ -3850,12 +4000,6 @@ fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize
         | Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
         | Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
         | Instr::Native(lm_bytecode::NativeInstr::TextAtByte)
-        | Instr::Native(lm_bytecode::NativeInstr::TextTrim)
-        | Instr::Native(lm_bytecode::NativeInstr::TextTrimStart)
-        | Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd)
-        | Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii)
-        | Instr::Native(lm_bytecode::NativeInstr::TextToUpperAscii)
-        | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
         | Instr::Native(lm_bytecode::NativeInstr::TextPadStart)
@@ -3863,7 +4007,6 @@ fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
         | Instr::Native(lm_bytecode::NativeInstr::TextSplit)
-        | Instr::Native(lm_bytecode::NativeInstr::TextLines)
         | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
         | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
         | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
@@ -3915,7 +4058,13 @@ fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize
         | Instr::Native(lm_bytecode::NativeInstr::BytesHex)
         | Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8)
         | Instr::Native(lm_bytecode::NativeInstr::TextBytes)
-        | Instr::Native(lm_bytecode::NativeInstr::SubstringToString)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrim)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrimStart)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToUpperAscii)
+        | Instr::Native(lm_bytecode::NativeInstr::TextLines)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToString)
         | Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
         | Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len)
         | Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
@@ -3941,6 +4090,7 @@ fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize
         | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
         | Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => (3, 1),
         Instr::MapPut { discard: true, .. } => (3, 0),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
@@ -4169,9 +4319,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::TextLe) => "TextLe".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextGt) => "TextGt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextGe) => "TextGe".to_string(),
-        Instr::Native(lm_bytecode::NativeInstr::SubstringToString) => {
-            "SubstringToString".to_string()
-        }
+        Instr::Native(lm_bytecode::NativeInstr::TextToString) => "TextToString".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::CharCodepoint) => "CharCodepoint".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len) => "CharUtf8Len".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::EqChar) => "EqChar".to_string(),

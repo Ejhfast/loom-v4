@@ -911,8 +911,8 @@ pub enum NativeInstr {
     TextLe,
     TextGt,
     TextGe,
-    /// Pop a Substring and push a bounded String.
-    SubstringToString,
+    /// Pop Text and push a bounded String.
+    TextToString,
     /// Pop a Char and push its scalar code point.
     CharCodepoint,
     /// Pop a Char and push its UTF-8 byte length.
@@ -1118,6 +1118,8 @@ pub enum ExportKind {
     Enum,
     EnumCase,
     Interface,
+    /// A compile-time value stored only in a module interface.
+    Constant,
 }
 
 impl ExportKind {
@@ -1128,6 +1130,7 @@ impl ExportKind {
             ExportKind::Enum => 2,
             ExportKind::EnumCase => 3,
             ExportKind::Interface => 4,
+            ExportKind::Constant => 5,
         }
     }
 
@@ -1138,6 +1141,7 @@ impl ExportKind {
             2 => Some(ExportKind::Enum),
             3 => Some(ExportKind::EnumCase),
             4 => Some(ExportKind::Interface),
+            5 => Some(ExportKind::Constant),
             _ => None,
         }
     }
@@ -1149,6 +1153,7 @@ impl ExportKind {
             ExportKind::Enum => "enum",
             ExportKind::EnumCase => "case",
             ExportKind::Interface => "interface",
+            ExportKind::Constant => "const",
         }
     }
 
@@ -1163,6 +1168,11 @@ impl ExportKind {
     /// True when the export names an interface contract.
     pub fn is_interface(self) -> bool {
         matches!(self, ExportKind::Interface)
+    }
+
+    /// True when the export is a compile-time constant.
+    pub fn is_constant(self) -> bool {
+        matches!(self, ExportKind::Constant)
     }
 }
 
@@ -1211,12 +1221,29 @@ pub fn ctor_binding_key(class_key: &str) -> String {
 /// The sentinel for an export without a construction function.
 pub const NO_CTOR: u32 = u32::MAX;
 
+/// One recursively literal compile-time value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstValue {
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    String(String),
+    Bytes(Vec<u8>),
+    Tuple(Vec<ConstValue>),
+}
+
+/// One typed compile-time constant in a module export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constant {
+    /// The declared module type index.
+    pub ty: u32,
+    pub value: ConstValue,
+}
+
 /// One exported top-level definition of the source module.
 ///
-/// The table names the definitions another module may import. It
-/// excludes the embedded core copy and every imported declaration, so
-/// the linker never resolves an import to a definition the module did
-/// not define.
+/// The table names definitions and constants that another module can import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
     pub kind: ExportKind,
@@ -1226,6 +1253,8 @@ pub struct Export {
     /// The construction function index of a class export, or
     /// `NO_CTOR`.
     pub ctor: u32,
+    /// The compile-time value of a constant export.
+    pub constant: Option<Constant>,
 }
 
 /// One decoded module.
@@ -1820,7 +1849,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 56 adds interface defaults and compact interface calls.
 /// Version 57 stores source contracts in the module export section.
 /// Version 58 stores effect rows with ABI operation and group slots.
-pub const VERSION: u16 = 58;
+/// Version 59 stores typed constants in the module export section.
+pub const VERSION: u16 = 59;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1943,7 +1973,7 @@ const OP_TEXT_LT: u8 = 0x8f;
 const OP_TEXT_LE: u8 = 0x90;
 const OP_TEXT_GT: u8 = 0x91;
 const OP_TEXT_GE: u8 = 0x92;
-const OP_SUBSTRING_TO_STRING: u8 = 0x93;
+const OP_TEXT_TO_STRING: u8 = 0x93;
 const OP_CHAR_CODEPOINT: u8 = 0x94;
 const OP_CHAR_UTF8_LEN: u8 = 0x95;
 const OP_EQ_CHAR: u8 = 0x96;
@@ -2457,6 +2487,14 @@ fn encode_exports(module: &Module) -> Vec<u8> {
         write_bytes(&mut out, export.name.as_bytes());
         write_u32(&mut out, export.def);
         write_u32(&mut out, export.ctor);
+        match &export.constant {
+            None => out.push(0),
+            Some(constant) => {
+                out.push(1);
+                write_u32(&mut out, constant.ty);
+                interface::encode_const_value(&mut out, &constant.value);
+            }
+        }
     }
     out
 }
@@ -2721,7 +2759,7 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::TextLe) => out.push(OP_TEXT_LE),
         Instr::Native(NativeInstr::TextGt) => out.push(OP_TEXT_GT),
         Instr::Native(NativeInstr::TextGe) => out.push(OP_TEXT_GE),
-        Instr::Native(NativeInstr::SubstringToString) => out.push(OP_SUBSTRING_TO_STRING),
+        Instr::Native(NativeInstr::TextToString) => out.push(OP_TEXT_TO_STRING),
         Instr::Native(NativeInstr::CharCodepoint) => out.push(OP_CHAR_CODEPOINT),
         Instr::Native(NativeInstr::CharUtf8Len) => out.push(OP_CHAR_UTF8_LEN),
         Instr::Native(NativeInstr::EqChar) => out.push(OP_EQ_CHAR),
@@ -3526,6 +3564,36 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
         let name = cur.string()?;
         let def = cur.u32()?;
         let ctor = cur.u32()?;
+        let constant = match cur.u8()? {
+            0 => None,
+            1 => {
+                let ty = cur.u32()?;
+                if ty as usize >= module.types.len() {
+                    return Err(DecodeError::BadExport);
+                }
+                Some(Constant {
+                    ty,
+                    value: interface::decode_const_value(&mut cur, 0)?,
+                })
+            }
+            _ => return Err(DecodeError::BadExport),
+        };
+        if kind.is_constant() != constant.is_some() {
+            return Err(DecodeError::BadExport);
+        }
+        if kind.is_constant() {
+            if def != NO_CTOR || ctor != NO_CTOR {
+                return Err(DecodeError::BadExport);
+            }
+            exports.push(Export {
+                kind,
+                name,
+                def,
+                ctor,
+                constant,
+            });
+            continue;
+        }
         let limit = if kind.is_class() {
             module.classes.len()
         } else if kind.is_interface() {
@@ -3547,6 +3615,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
             name,
             def,
             ctor,
+            constant,
         });
     }
     module.exports = exports;
@@ -4137,7 +4206,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_TEXT_LE => Instr::Native(NativeInstr::TextLe),
         OP_TEXT_GT => Instr::Native(NativeInstr::TextGt),
         OP_TEXT_GE => Instr::Native(NativeInstr::TextGe),
-        OP_SUBSTRING_TO_STRING => Instr::Native(NativeInstr::SubstringToString),
+        OP_TEXT_TO_STRING => Instr::Native(NativeInstr::TextToString),
         OP_CHAR_CODEPOINT => Instr::Native(NativeInstr::CharCodepoint),
         OP_CHAR_UTF8_LEN => Instr::Native(NativeInstr::CharUtf8Len),
         OP_EQ_CHAR => Instr::Native(NativeInstr::EqChar),

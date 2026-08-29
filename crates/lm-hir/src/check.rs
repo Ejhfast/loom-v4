@@ -730,6 +730,8 @@ fn resolve_module_use(
             } else if export.kind.is_interface() {
                 let id = mat.reserve_interface(ctx, &full, &export.name, decl.span)?;
                 bind_interface(ctx, &bound_name, id, decl.name_span)?;
+            } else if export.kind.is_constant() {
+                mat.reserve_const(ctx, &bound_name, &full, &export.name, decl.span)?;
             } else {
                 mat.reserve_func(ctx, &bound_name, &full, &export.name, decl.span)?;
             }
@@ -759,6 +761,8 @@ fn resolve_module_use(
             } else if export.kind.is_interface() {
                 let id = mat.reserve_interface(ctx, &module, &bound, decl.span)?;
                 bind_interface(ctx, &bound, id, decl.name_span)?;
+            } else if export.kind.is_constant() {
+                mat.reserve_const(ctx, &bound, &module, &bound, decl.span)?;
             } else {
                 mat.reserve_func(ctx, &bound, &module, &bound, decl.span)?;
             }
@@ -958,6 +962,10 @@ pub(crate) struct Ctx {
     pub(crate) core_func_index: HashMap<String, u32>,
     pub(crate) sigs: Vec<FnSig>,
     pub(crate) funcs: Vec<Option<HirFunc>>,
+    /// Literal constants visible in checked expressions.
+    pub(crate) constants: HashMap<String, HExpr>,
+    /// Names of local and imported constants in module scope.
+    pub(crate) constant_names: HashSet<String>,
     /// Local functions that one expression installs or reifies.
     pub(crate) reified_functions: BTreeSet<u32>,
     /// Local classes that one expression reifies.
@@ -2500,6 +2508,109 @@ fn index_interface_defaults(ctx: &mut Ctx) {
         .collect();
 }
 
+/// Check local constants and add their literal expressions to scope.
+fn check_constants(
+    ctx: &mut Ctx,
+    module: &ast::Module,
+) -> Result<Vec<crate::hir::HirConst>, Diagnostic> {
+    let mut constants = Vec::with_capacity(module.constants.len());
+    for constant in &module.constants {
+        if !const_literal_syntax(&constant.value) {
+            return Err(Diagnostic::new(
+                "E1053",
+                "a `const` value must be a literal or a tuple of literals",
+                constant.value.span,
+            ));
+        }
+        let ty = resolve_type(ctx, &TyEnv::default(), &constant.ty)?;
+        let mut checker = FnChecker::top_level(RetKind::Known(ty), TyEnv::default(), Vec::new());
+        checker.check_expr(ctx, &constant.value, ty)?;
+        let mut value = const_literal_expr(ctx, &constant.value).ok_or_else(|| {
+            Diagnostic::new(
+                "E1053",
+                "a `const` value must be a literal or a tuple of literals",
+                constant.value.span,
+            )
+        })?;
+        value.ty = ty;
+        value.mutable = false;
+        if ctx
+            .constants
+            .insert(constant.name.clone(), value.clone())
+            .is_some()
+        {
+            return Err(Diagnostic::new(
+                "E1010",
+                format!("the name `{}` has more than one definition", constant.name),
+                constant.name_span,
+            ));
+        }
+        constants.push(crate::hir::HirConst {
+            name: constant.name.clone(),
+            ty,
+            value,
+        });
+    }
+    Ok(constants)
+}
+
+/// Build one local literal expression without runtime evaluation.
+fn const_literal_expr(ctx: &mut Ctx, expr: &ast::Expr) -> Option<HExpr> {
+    let (ty, kind) = match &expr.kind {
+        ast::ExprKind::Unit => (lm_types::UNIT, HExprKind::Unit),
+        ast::ExprKind::Bool(value) => (lm_types::BOOL, HExprKind::Bool(*value)),
+        ast::ExprKind::Int(value) => (lm_types::INT, HExprKind::Int(*value)),
+        ast::ExprKind::Float(bits) => (lm_types::FLOAT, HExprKind::Float(*bits)),
+        ast::ExprKind::Str(value) => (lm_types::STRING, HExprKind::Str(value.clone())),
+        ast::ExprKind::Bytes(value) => (lm_types::BYTES, HExprKind::Bytes(value.clone())),
+        ast::ExprKind::Neg(value) => match const_literal_expr(ctx, value)? {
+            HExpr {
+                kind: HExprKind::Int(value),
+                ..
+            } => (lm_types::INT, HExprKind::Int(value.checked_neg()?)),
+            HExpr {
+                kind: HExprKind::Float(bits),
+                ..
+            } => (lm_types::FLOAT, HExprKind::Float(bits ^ (1_u64 << 63))),
+            _ => return None,
+        },
+        ast::ExprKind::TupleLit(items) => {
+            let values: Vec<HExpr> = items
+                .iter()
+                .map(|item| const_literal_expr(ctx, item))
+                .collect::<Option<_>>()?;
+            let ty = ctx
+                .store
+                .intern(Type::Tuple(values.iter().map(|item| item.ty).collect()));
+            (ty, HExprKind::TupleLit(values))
+        }
+        _ => return None,
+    };
+    Some(HExpr {
+        flow: crate::hir::Flow::Normal,
+        ty,
+        mutable: false,
+        kind,
+    })
+}
+
+/// True when one expression is valid constant source.
+fn const_literal_syntax(expr: &ast::Expr) -> bool {
+    match &expr.kind {
+        ast::ExprKind::Unit
+        | ast::ExprKind::Bool(_)
+        | ast::ExprKind::Int(_)
+        | ast::ExprKind::Float(_)
+        | ast::ExprKind::Str(_)
+        | ast::ExprKind::Bytes(_) => true,
+        ast::ExprKind::Neg(value) => {
+            matches!(&value.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
+        }
+        ast::ExprKind::TupleLit(items) => items.iter().all(const_literal_syntax),
+        _ => false,
+    }
+}
+
 /// Check a parsed module and produce typed HIR with the default
 /// options.
 pub fn check_module(module: &ast::Module) -> Result<HirModule, Diagnostic> {
@@ -2617,6 +2728,8 @@ fn check_module_with_core_adjustment(
         core_func_index: HashMap::with_capacity(core.funcs.len() + compiled_core_exports),
         sigs: Vec::with_capacity(total_funcs),
         funcs: Vec::with_capacity(total_funcs),
+        constants: HashMap::new(),
+        constant_names: HashSet::with_capacity(module.constants.len()),
         reified_functions: BTreeSet::new(),
         reified_classes: BTreeSet::new(),
         core: CoreIds {
@@ -2672,6 +2785,18 @@ fn check_module_with_core_adjustment(
     ctx.user_start = ctx.store.class_count() as u32;
     register_type_names(&mut ctx, module, false)?;
     ctx.import_start = ctx.store.class_count() as u32;
+    for constant in &module.constants {
+        if ctx.user_types.contains_key(&constant.name)
+            || ctx.user_interfaces.contains_key(&constant.name)
+            || !ctx.constant_names.insert(constant.name.clone())
+        {
+            return Err(Diagnostic::new(
+                "E1010",
+                format!("the name `{}` has more than one definition", constant.name),
+                constant.name_span,
+            ));
+        }
+    }
     // Import phase A: reserve the imported class indices before any
     // signature resolves, so a user signature may name an imported
     // type. Phase B fills the declarations after the core lands.
@@ -2719,7 +2844,10 @@ fn check_module_with_core_adjustment(
     };
     // Pass 2a: predeclare top-level function signatures.
     for (idx, func) in module.funcs.iter().enumerate() {
-        if ctx.func_index.contains_key(&func.name) || ctx.user_types.contains_key(&func.name) {
+        if ctx.func_index.contains_key(&func.name)
+            || ctx.user_types.contains_key(&func.name)
+            || ctx.constant_names.contains(&func.name)
+        {
             return Err(Diagnostic::new(
                 "E1010",
                 format!("the name `{}` has more than one definition", func.name),
@@ -2819,6 +2947,7 @@ fn check_module_with_core_adjustment(
             .map_err(core_defect)?;
     }
     check_all_conformances(&mut ctx, module, false, &self_dependent_interfaces)?;
+    let constants = check_constants(&mut ctx, module)?;
     // Pass 2d: check every mailbox message type. The walk reads the
     // declared fields, so it runs after every class resolves.
     check_mailbox_types(&ctx, module)?;
@@ -3013,6 +3142,7 @@ fn check_module_with_core_adjustment(
         ExportSets {
             module: exports,
             core: core_exports,
+            constants,
         },
         &options.module_path,
         module.funcs.len(),
@@ -3023,6 +3153,7 @@ fn check_module_with_core_adjustment(
 struct ExportSets {
     module: Vec<HirExport>,
     core: Vec<HirExport>,
+    constants: Vec<crate::hir::HirConst>,
 }
 
 /// Collect the exported top-level definitions of the source module,
@@ -3541,6 +3672,7 @@ fn assemble(
         conformances,
         classes: hir_classes,
         funcs,
+        constants: exports.constants,
         entry: entry_idx,
         core: ctx.core,
         core_roles,

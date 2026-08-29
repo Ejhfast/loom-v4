@@ -16,6 +16,10 @@ class Text implements Counted, Iterable, Display, Hashable, Comparable
     intrinsic("text.byte_len", self)
   end
 
+  def to_string(self): String
+    intrinsic("text.to_string", self)
+  end
+
   def is_empty(self): Bool
     self.len() == 0
   end
@@ -276,12 +280,8 @@ final class String < Text
 end
 
 final class Substring < Text
-  def to_string(self): String
-    intrinsic("substring.to_string", self)
-  end
-
   def compact(self): String
-    intrinsic("substring.to_string", self)
+    self.to_string()
   end
 end
 

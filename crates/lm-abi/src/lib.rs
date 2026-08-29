@@ -695,7 +695,9 @@ impl AbiType {
 /// Version 19 uses BLAKE3-256 for intrinsic identities.
 /// Version 20 adds Float and bitwise numeric operations.
 /// Version 21 adds text padding and Float text conversions.
-pub const INTRINSIC_ABI_VERSION: u32 = 22;
+/// Version 22 adds exact fault re-raising.
+/// Version 23 makes text-to-string conversion accept all Text values.
+pub const INTRINSIC_ABI_VERSION: u32 = 23;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -766,7 +768,7 @@ pub const INTRINSIC_TEXT_LT: IntrinsicSlot = 52;
 pub const INTRINSIC_TEXT_LE: IntrinsicSlot = 53;
 pub const INTRINSIC_TEXT_GT: IntrinsicSlot = 54;
 pub const INTRINSIC_TEXT_GE: IntrinsicSlot = 55;
-pub const INTRINSIC_SUBSTRING_TO_STRING: IntrinsicSlot = 56;
+pub const INTRINSIC_TEXT_TO_STRING: IntrinsicSlot = 56;
 pub const INTRINSIC_CHAR_CODEPOINT: IntrinsicSlot = 57;
 pub const INTRINSIC_CHAR_UTF8_LEN: IntrinsicSlot = 58;
 pub const INTRINSIC_CHAR_EQ: IntrinsicSlot = 59;
@@ -1232,10 +1234,10 @@ pub const INTRINSICS: [IntrinsicDef; 182] = [
         semantic_revision: 1,
     },
     IntrinsicDef {
-        name: "substring.to_string",
-        params: &[AbiType::SUBSTRING],
+        name: "text.to_string",
+        params: &[AbiType::TEXT],
         reply: AbiType::STR,
-        semantic_revision: 1,
+        semantic_revision: 2,
     },
     IntrinsicDef {
         name: "char.codepoint",

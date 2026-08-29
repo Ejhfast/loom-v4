@@ -67,6 +67,7 @@ pub enum Tok {
     KwWhen,
     KwType,
     KwFor,
+    KwConst,
 
     /// A reserved keyword outside the current language slice.
     KwReserved(&'static str),
@@ -161,6 +162,7 @@ impl fmt::Display for Tok {
             Tok::KwWhen => "`when`",
             Tok::KwType => "`type`",
             Tok::KwFor => "`for`",
+            Tok::KwConst => "`const`",
             Tok::KwReserved(name) => return write!(f, "`{name}`"),
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",

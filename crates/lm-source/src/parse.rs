@@ -33,6 +33,7 @@ pub(crate) fn parse_tokens(text: &str, tokens: &[Token]) -> Result<Module, Diagn
         tokens,
         pos: 0,
         depth: 0,
+        in_loop_header: false,
     };
     parser.module()
 }
@@ -44,6 +45,8 @@ struct Parser<'t> {
     tokens: &'t [Token],
     pos: usize,
     depth: usize,
+    /// True while the parser reads a `while` condition or a `for` source.
+    in_loop_header: bool,
 }
 
 impl Parser<'_> {
@@ -127,11 +130,30 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// Reject one hard keyword when source uses it as a name.
+    fn reject_hard_keyword_name(&self) -> Result<(), Diagnostic> {
+        let name = match self.peek() {
+            Tok::KwClass => "class",
+            Tok::KwEnum => "enum",
+            Tok::KwInterface => "interface",
+            Tok::KwDef => "def",
+            _ => return Ok(()),
+        };
+        if matches!(self.peek_at(1), Tok::Assign | Tok::Colon) {
+            return Err(self.error(
+                "E1002",
+                format!("`{name}` is a reserved word; choose another name"),
+            ));
+        }
+        Ok(())
+    }
+
     fn module(&mut self) -> Result<Module, Diagnostic> {
         let mut uses = Vec::new();
         let mut interfaces = Vec::new();
         let mut classes = Vec::new();
         let mut enums = Vec::new();
+        let mut constants = Vec::new();
         let mut funcs = Vec::new();
         let mut entry = Vec::new();
         // The `use` lines come first, before any definition or entry
@@ -145,11 +167,13 @@ impl Parser<'_> {
         }
         loop {
             self.skip_newlines();
+            self.reject_hard_keyword_name()?;
             match self.peek() {
                 Tok::Eof => break,
                 Tok::KwInterface => interfaces.push(self.interface_def()?),
                 Tok::KwClass | Tok::KwFinal | Tok::KwFrozen => classes.push(self.class_def()?),
                 Tok::KwEnum => enums.push(self.enum_def()?),
+                Tok::KwConst => constants.push(self.const_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
                 Tok::KwUse => {
                     return Err(self.error(
@@ -169,8 +193,28 @@ impl Parser<'_> {
             interfaces,
             classes,
             enums,
+            constants,
             funcs,
             entry,
+        })
+    }
+
+    /// Parse `const NAME: Type = literal`.
+    fn const_def(&mut self) -> Result<ConstDef, Diagnostic> {
+        let start = self.expect(Tok::KwConst, "`const`")?;
+        let (name, name_span) = self.ident("a constant name")?;
+        self.expect(Tok::Colon, "`:` after the constant name")?;
+        let ty = self.type_expr()?;
+        self.expect(Tok::Assign, "`=` after the constant type")?;
+        let value = self.expr()?;
+        let span = start.span.to(value.span);
+        self.expect_terminator()?;
+        Ok(ConstDef {
+            name,
+            name_span,
+            ty,
+            value,
+            span,
         })
     }
 
@@ -1076,6 +1120,7 @@ impl Parser<'_> {
 
     fn ident(&mut self, what: &str) -> Result<(String, Span), Diagnostic> {
         self.reject_reserved()?;
+        self.reject_hard_keyword_name()?;
         match self.peek() {
             Tok::Ident(_) => {
                 let token = self.next();
@@ -1652,6 +1697,17 @@ impl Parser<'_> {
     ) -> Result<(Expr, bool), Diagnostic> {
         let mut trailing = false;
         let mut end = close_span;
+        if self.in_loop_header
+            && matches!(self.peek(), Tok::KwDo)
+            && !matches!(self.peek_at(1), Tok::Pipe)
+            && !matches!(self.peek_at(1), Tok::Newline)
+            && self.starts_same_line(close_span)
+        {
+            return Err(self.error(
+                "E1003",
+                "`do` opens a loop body only before a newline or `;`",
+            ));
+        }
         if self.at_trailing_closure() && self.starts_same_line(close_span) {
             let closure = self.closure_expr()?;
             end = closure.span;
@@ -1770,6 +1826,7 @@ impl Parser<'_> {
 
     fn primary_expr(&mut self) -> Result<Expr, Diagnostic> {
         self.reject_reserved()?;
+        self.reject_hard_keyword_name()?;
         match self.peek() {
             Tok::KwDef => Err(self.error(
                 "E1002",
@@ -1781,6 +1838,10 @@ impl Parser<'_> {
             Tok::KwEnum => Err(self.error(
                 "E1002",
                 "an `enum` declaration is only valid at module scope",
+            )),
+            Tok::KwConst => Err(self.error(
+                "E1002",
+                "a `const` declaration is only valid at module scope",
             )),
             Tok::KwReturn => self.return_expr(),
             Tok::KwBreak => self.break_expr(),
@@ -1840,6 +1901,7 @@ impl Parser<'_> {
                                 tokens: &tokens,
                                 pos: 0,
                                 depth: 0,
+                                in_loop_header: false,
                             };
                             let inner = sub.expr()?;
                             if !matches!(sub.peek(), Tok::Eof) {
@@ -2049,7 +2111,7 @@ impl Parser<'_> {
 
     fn while_expr(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.expect(Tok::KwWhile, "`while`")?;
-        let cond = self.expr()?;
+        let cond = self.loop_header_expr()?;
         self.loop_header_body_opener()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end = self.expect(Tok::KwEnd, "`end`")?;
@@ -2081,7 +2143,7 @@ impl Parser<'_> {
             ));
         }
         self.expect(Tok::KwIn, "`in`")?;
-        let value = self.expr()?;
+        let value = self.loop_header_expr()?;
         self.loop_header_body_opener()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end = self.expect(Tok::KwEnd, "`end`")?;
@@ -2093,6 +2155,15 @@ impl Parser<'_> {
             },
             span: start.span.to(end.span),
         })
+    }
+
+    /// Parse one loop header and mark `do` for the loop diagnostic.
+    fn loop_header_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let old = self.in_loop_header;
+        self.in_loop_header = true;
+        let result = self.expr();
+        self.in_loop_header = old;
+        result
     }
 
     fn loop_expr(&mut self) -> Result<Expr, Diagnostic> {

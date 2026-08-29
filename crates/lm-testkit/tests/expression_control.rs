@@ -232,6 +232,15 @@ end\n\
 }
 
 #[test]
+fn a_later_if_condition_can_transfer_control() {
+    let source = "def choose(first: Bool): Int\n\
+  if first then 3 elsif return 7 then 4 else 5 end\n\
+end\n\
+(choose(true), choose(false))\n";
+    assert_eq!(run(source), "Done((3, 7))");
+}
+
+#[test]
 fn do_with_a_separator_opens_inline_loop_bodies() {
     let source = "def numbers(): List[Int]\n\
   [1, 2, 3]\n\
@@ -313,6 +322,11 @@ end\n";
 fn an_inline_loop_do_needs_a_separator() {
     expect_error(
         "for item in [1] do item end\n0\n",
+        "`do` opens a loop body only before a newline or `;`",
+    );
+
+    expect_error(
+        "def items(): List[Int]\n  [1]\nend\nfor item in items() do item end\n0\n",
         "`do` opens a loop body only before a newline or `;`",
     );
 }

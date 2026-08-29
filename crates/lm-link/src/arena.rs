@@ -360,6 +360,7 @@ pub(crate) fn prepare_definition_export(
                             .map_or(binding.key.clone(), |(_, name)| name.to_string()),
                         def: function,
                         ctor: lm_bytecode::NO_CTOR,
+                        constant: None,
                     })
                 })
                 .ok_or_else(|| fail("the function has no portable export"))?;
@@ -399,6 +400,7 @@ pub(crate) fn prepare_definition_export(
                     name: class_def.name.clone(),
                     def: class,
                     ctor: constructor,
+                    constant: None,
                 });
             (export, collect::DefinitionRoot::Class(class))
         }

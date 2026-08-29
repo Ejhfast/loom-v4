@@ -984,6 +984,33 @@ fn verify_bindings(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     }
 
     for export in &module.exports {
+        if export.kind.is_constant() {
+            let Some(constant) = &export.constant else {
+                return Err(terr(format!(
+                    "constant export `{}` has no value",
+                    export.name
+                )));
+            };
+            if export.def != lm_bytecode::NO_CTOR || export.ctor != lm_bytecode::NO_CTOR {
+                return Err(terr(format!(
+                    "constant export `{}` has invalid runtime fields",
+                    export.name
+                )));
+            }
+            if constant.ty as usize >= module.types.len() {
+                return Err(terr(format!(
+                    "constant export `{}` names a type outside the module",
+                    export.name
+                )));
+            }
+            continue;
+        }
+        if export.constant.is_some() {
+            return Err(terr(format!(
+                "non-constant export `{}` carries a constant value",
+                export.name
+            )));
+        }
         if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
             continue;
         }

@@ -4,6 +4,7 @@
 use lm_bytecode::interface::{
     decode_interface, dump_interface, encode_interface, ExportKind, IfaceItem, IfaceType, Interface,
 };
+use lm_bytecode::ConstValue;
 use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
 
@@ -89,6 +90,31 @@ fn float_types_round_trip_through_an_interface() {
     assert_eq!(
         decode_interface(&encode_interface(&interface)),
         Ok(interface)
+    );
+}
+
+#[test]
+fn constants_round_trip_and_move_the_interface_identity() {
+    let before = compile(
+        "values",
+        "const ANSWER: Int = 42\nconst PAIR: (String, Int) = (\"ready\", -1)\n",
+    )
+    .interface;
+    let answer = before.find("ANSWER").expect("ANSWER is exported");
+    let IfaceItem::Const(constant) = &answer.item else {
+        panic!("ANSWER must be a constant");
+    };
+    assert_eq!(constant.ty, IfaceType::Int);
+    assert_eq!(constant.value, ConstValue::Int(42));
+    assert_eq!(
+        decode_interface(&encode_interface(&before)),
+        Ok(before.clone())
+    );
+
+    let after = compile("values", "const ANSWER: Int = 43\n").interface;
+    assert_ne!(
+        before.find("ANSWER").unwrap().iface_hash,
+        after.find("ANSWER").unwrap().iface_hash
     );
 }
 

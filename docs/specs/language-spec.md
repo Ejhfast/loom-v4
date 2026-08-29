@@ -87,10 +87,14 @@ A line comment starts with `#` and extends to the newline. There are no block co
 
 ```text
 and as break case class continue def do effect else elsif end enum escaping
-false for if in loop mut not or return self super then true use while with
+false for if in loop mut not or return self super then true use while with const
 ```
 
 `sys` is a prebound ordinary value, not a keyword.
+
+`final` and `frozen` are contextual modifiers only before `class`.
+
+They are ordinary identifiers in all other positions.
 
 ### 2.4 Numeric literals
 
@@ -140,6 +144,8 @@ A string is immutable UTF-8 text:
 Plain braces do not start interpolation.
 
 The marker `#{ expression }` starts one interpolation.
+
+The body uses the normal expression scanner. It permits strings and balanced nested braces.
 
 The expression must produce a value that implements `Display`.
 
@@ -216,7 +222,24 @@ do |name: String|: String
 end
 ```
 
-Top-level definitions are `class`, `enum`, and `def`. There are no mutable module variables, top-level assignment slots, effectful initializers, or runtime namespace installation. All definitions are exported by source name. The optional trailing expression becomes the module entry value.
+Top-level definitions are `class`, `enum`, `def`, and `const`.
+
+There are no mutable module variables, effectful initializers, or runtime namespace installation.
+
+A constant has this form:
+
+```lm
+const RETRY_LIMIT: Int = 3
+const STATUS: (Int, String) = (200, "ready")
+```
+
+Its value contains one literal or one tuple of constant values. A leading minus is valid only on a numeric literal.
+
+The declared type must accept the value. Each use copies the typed literal into the consuming expression.
+
+A constant has no function body, runtime slot, or module state. Its typed value forms part of the exported module surface.
+
+All definitions are exported by source name. The optional trailing expression becomes the module entry value.
 
 Inside a package, one module holds the program entry: `src/main.lm`. Every other module must end without a trailing expression. The file tree under `src/` is the module tree, and the module path across packages carries the package name of the manifest (`docs/specs/sidecar/packages.md`).
 
@@ -241,6 +264,8 @@ The standard library is not ambient. A package or explicit compile environment s
 The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A `use` of another module compiles to a named import slot, and the build tool fulfills it. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/sidecar/packages.md`.
 
 A `use` path starts at a root name. The root set is fixed per module: the dependency keys of the manifest, this package's own top-level modules, `std`, and `sys`. A collision inside the root set is a compile error, and the fix is a manifest rename; resolution never picks silently. A path that names a module binds that module, and every export of it resolves under the bound name. A path that names one export of a module binds that export.
+
+A module alias can qualify an enum case. For example, `keys.Key.Enter` names `Enter` from the `Key` family.
 
 One import slot names the providing module, the exported name, the kind, and the pinned interface hash. A compiler checks the importing module against the interface alone, and never against the implementation of the provider. The linker resolves each slot and rejects a provider whose interface hash differs from the pin.
 
@@ -3072,7 +3097,9 @@ A String can retain at most `max(4096, 2 * byte_len)` bytes of backing capacity.
 
 A Substring is an explicit view. It can retain an allocation of any size until the view dies.
 
-`Substring.to_string` and `Substring.compact` return a String with bounded retention. They copy only when the bound requires a copy.
+`Text.to_string` returns its String receiver unchanged. It copies a Substring into bounded String storage.
+
+`Substring.compact` has the same bounded result as `to_string`.
 
 A Bytes slice is also an explicit view. `Bytes.compact` copies the visible bytes into a new allocation.
 
@@ -3911,6 +3938,7 @@ The common Text surface follows.
 ```text
 len() -> Int
 byte_len() -> Int
+to_string() -> String
 is_empty() -> Bool
 at(index: Int) -> Option[Char]
 slice(start: Int, length: Int) -> Result[Substring,IndexError]
@@ -4007,7 +4035,6 @@ __add__(other: Text) -> String
 Substring adds these methods.
 
 ```text
-to_string() -> String
 compact() -> String
 ```
 
@@ -4587,7 +4614,10 @@ This EBNF-like grammar is normative with the clarifications below. `NL` denotes 
 module          = opt_separators, { definition, separators },
                   block, EOF ;
 
-definition      = interface_decl | class_decl | enum_decl | function_decl ;
+definition      = interface_decl | class_decl | enum_decl | function_decl
+                | const_decl ;
+
+const_decl      = "const", IDENT, ":", type, "=", expression ;
 
 interface_decl  = "interface", IDENT, [ generic_params ],
                   [ interface_parents ], separators,
@@ -4773,6 +4803,9 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - A conformance or method premise starts after `when`.
 - A premise subject must name one containing type parameter.
 - `frozen class` implies `final class`.
+- `final` and `frozen` are identifiers unless `class` follows them.
+- A constant value contains literals and tuples only. A numeric literal can have a leading minus.
+- An interpolation body uses the normal scanner and permits balanced nested braces.
 - A comma separates parent interfaces.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.

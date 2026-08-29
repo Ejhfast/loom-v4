@@ -1516,10 +1516,9 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_TEXT_BYTES => {
                 Ok(self.alloc(OKind::Bytes(self.as_text(&values[0])?.as_bytes().to_vec())))
             }
-            lm_abi::INTRINSIC_SUBSTRING_TO_STRING => match &values[0] {
-                OV::Substring(text) => Ok(OV::Str(text.clone())),
-                _ => Err(Stop::Limit("String conversion needs a Substring")),
-            },
+            lm_abi::INTRINSIC_TEXT_TO_STRING => {
+                Ok(OV::Str(Rc::new(self.as_text(&values[0])?.to_string())))
+            }
             lm_abi::INTRINSIC_CHAR_CODEPOINT => {
                 Ok(OV::Int(i64::from(u32::from(self.as_char(&values[0])?))))
             }

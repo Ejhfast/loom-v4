@@ -20,6 +20,7 @@ pub(crate) fn relocated_exports(module: &Module, reloc: &Reloc) -> Result<Vec<Ex
     module
         .exports
         .iter()
+        .filter(|export| !export.kind.is_constant())
         .map(|export| {
             let def = if export.kind.is_class() {
                 reloc.classes.get(export.def as usize)
@@ -44,6 +45,7 @@ pub(crate) fn relocated_exports(module: &Module, reloc: &Reloc) -> Result<Vec<Ex
                 name: export.name.clone(),
                 def,
                 ctor,
+                constant: export.constant.clone(),
             })
         })
         .collect()
@@ -844,6 +846,9 @@ fn register_exports(
     let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
     for export in &module.exports {
+        if export.kind.is_constant() {
+            continue;
+        }
         let key = (path.to_string(), export.name.clone());
         if view.export_hash.contains_key(&key) {
             return Err(fail(format!(

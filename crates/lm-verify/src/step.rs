@@ -455,10 +455,8 @@ pub(crate) fn step(
             pop_expect(state, bytes)?;
             push(state, TY_BOOL)?;
         }
-        Instr::Native(lm_bytecode::NativeInstr::SubstringToString) => {
-            let value = ctx
-                .plain_inst(ctx.core.substring, "Substring")
-                .map_err(&fail)?;
+        Instr::Native(lm_bytecode::NativeInstr::TextToString) => {
+            let value = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
             pop_expect(state, value)?;
             push(state, TY_STR)?;
         }

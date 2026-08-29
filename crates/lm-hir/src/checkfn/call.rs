@@ -977,14 +977,14 @@ impl<'o> FnChecker<'o> {
 
     /// Try to read a receiver expression as an enum qualifier, for
     /// example the `Option` in `Option.Some`.
-    pub(super) fn enum_qualifier(&self, ctx: &Ctx, recv: &ast::Expr) -> Option<u32> {
-        if let ExprKind::Name(name) = &recv.kind {
-            if self.lookup_slot(name).is_none() && self.module_func(ctx, name).is_none() {
-                if let Some(class) = ctx.lookup_type(name, &self.env) {
-                    if ctx.classes[class as usize].kind == ClassKind::EnumParent {
-                        return Some(class);
-                    }
-                }
+    pub(super) fn enum_qualifier(&self, ctx: &Ctx, recv: &ast::Expr) -> Option<(u32, String)> {
+        let (name, root) = qualified_expr_name(recv)?;
+        if self.lookup_slot(root).is_some() || self.module_func(ctx, &name).is_some() {
+            return None;
+        }
+        if let Some(class) = ctx.lookup_type(&name, &self.env) {
+            if ctx.classes[class as usize].kind == ClassKind::EnumParent {
+                return Some((class, name));
             }
         }
         None

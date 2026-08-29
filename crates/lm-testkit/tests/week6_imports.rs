@@ -102,6 +102,7 @@ fn the_container_round_trips_imports_and_exports() {
         name: "<entry>".to_string(),
         def: 1,
         ctor: lm_bytecode::NO_CTOR,
+        constant: None,
     });
     let bytes = lm_bytecode::encode(&module);
     let back = lm_bytecode::decode(&bytes).expect("decodes");

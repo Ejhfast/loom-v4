@@ -158,6 +158,9 @@ impl<'o> FnChecker<'o> {
                         },
                     });
                 }
+                if let Some(value) = ctx.constants.get(name) {
+                    return Ok(value.clone());
+                }
                 if let Some(found) = self.try_ctor_name(ctx, name, expr.span, None)? {
                     return Ok(found);
                 }

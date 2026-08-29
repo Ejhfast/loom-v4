@@ -11,9 +11,20 @@ pub struct Module {
     pub interfaces: Vec<InterfaceDef>,
     pub classes: Vec<ClassDef>,
     pub enums: Vec<EnumDef>,
+    pub constants: Vec<ConstDef>,
     pub funcs: Vec<FuncDef>,
     /// The last entry expression becomes the program result.
     pub entry: Vec<Expr>,
+}
+
+/// One module constant with an explicit type and a literal value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDef {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
+    pub value: Expr,
+    pub span: Span,
 }
 
 /// One `use` line: a dotted path whose last segment becomes the bound
@@ -559,6 +570,15 @@ pub fn dump_module(module: &Module) -> String {
         for method in &enum_def.methods {
             dump_method(&mut out, method);
         }
+    }
+    for constant in &module.constants {
+        let _ = writeln!(
+            out,
+            "  const {}: {}",
+            constant.name,
+            dump_type(&constant.ty)
+        );
+        dump_expr(&mut out, &constant.value, 2);
     }
     for func in &module.funcs {
         let _ = writeln!(

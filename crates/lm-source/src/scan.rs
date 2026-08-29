@@ -6,8 +6,8 @@
 //!
 //! A string literal can hold `#{ expression }` interpolation. The
 //! scanner scans the inner expression with one nested pass and stores
-//! its tokens inside the string token. The inner expression cannot
-//! hold a string literal or a brace in this slice.
+//! its tokens inside the string token. The nested scanner handles
+//! strings and balanced braces in the expression.
 
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -59,43 +59,47 @@ impl<'a> Scanner<'a> {
             self.pos = 3;
         }
         while self.pos < self.bytes.len() {
-            let start = self.pos;
-            let ch = self.cur_char();
-            match ch {
-                ' ' | '\t' | '\r' => {
-                    self.pos += 1;
-                }
-                '#' => {
-                    while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
-                        self.pos += 1;
-                    }
-                }
-                '\n' => {
-                    self.pos += 1;
-                    self.push_newline(start);
-                }
-                ';' => {
-                    self.pos += 1;
-                    self.push_newline(start);
-                }
-                '"' => self.scan_string(start)?,
-                '\'' => {
-                    return Err(self.error(
-                        "E0008",
-                        "character literals are not supported in this language slice",
-                        start,
-                    ));
-                }
-                '0'..='9' => self.scan_number(start)?,
-                'a'..='z' | 'A'..='Z' | '_' => self.scan_word(start)?,
-                _ => self.scan_punct(start)?,
-            }
+            self.scan_one()?;
         }
         let end = self.text.len() as u32;
         self.tokens.push(Token {
             tok: Tok::Eof,
             span: Span::new(end, end),
         });
+        Ok(())
+    }
+
+    /// Scan one token or one item of ignored space.
+    fn scan_one(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        let ch = self.cur_char();
+        match ch {
+            ' ' | '\t' | '\r' => self.pos += 1,
+            '#' => {
+                while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+            }
+            '\n' => {
+                self.pos += 1;
+                self.push_newline(start);
+            }
+            ';' => {
+                self.pos += 1;
+                self.push_newline(start);
+            }
+            '"' => self.scan_string(start)?,
+            '\'' => {
+                return Err(self.error(
+                    "E0008",
+                    "character literals are not supported in this language slice",
+                    start,
+                ));
+            }
+            '0'..='9' => self.scan_number(start)?,
+            'a'..='z' | 'A'..='Z' | '_' => self.scan_word(start)?,
+            _ => self.scan_punct(start)?,
+        }
         Ok(())
     }
 
@@ -346,44 +350,53 @@ impl<'a> Scanner<'a> {
         let brace = self.pos;
         self.pos += 1;
         let expr_start = self.pos;
+        let mut nested = Scanner {
+            text: self.text,
+            bytes: self.bytes,
+            pos: self.pos,
+            tokens: Vec::new(),
+            nesting: Vec::new(),
+        };
+        let mut brace_depth = 0usize;
         loop {
-            if self.pos >= self.bytes.len() || self.bytes[self.pos] == b'\n' {
+            if nested.pos >= nested.bytes.len() || nested.bytes[nested.pos] == b'\n' {
                 return Err(self.error(
                     "E0006",
                     "the interpolation expression has no closing `}`",
                     brace,
                 ));
             }
-            match self.bytes[self.pos] {
-                b'}' => break,
-                b'{' | b'"' => {
+            let byte = nested.bytes[nested.pos];
+            if byte == b'}' && brace_depth == 0 {
+                break;
+            }
+            if let Err(diagnostic) = nested.scan_one() {
+                if diagnostic.code == "E0002" {
                     return Err(self.error(
                         "E0006",
-                        "a brace or a string literal is not valid inside an \
-                         interpolation expression in this language slice",
-                        self.pos,
+                        "the interpolation expression has no closing `}`",
+                        brace,
                     ));
                 }
-                _ => self.pos += 1,
+                return Err(diagnostic);
+            }
+            match byte {
+                b'{' => brace_depth += 1,
+                b'}' => brace_depth -= 1,
+                _ => {}
             }
         }
-        let inner = &self.text[expr_start..self.pos];
-        self.pos += 1; // consume `}`
+        self.pos = nested.pos + 1;
+        let inner = &self.text[expr_start..nested.pos];
         if inner.trim().is_empty() {
             return Err(self.error("E0006", "the interpolation expression is empty", brace));
         }
-        let offset = expr_start as u32;
-        let mut tokens = scan(inner).map_err(|d| {
-            Diagnostic::new(
-                d.code,
-                d.message,
-                Span::new(d.span.lo + offset, d.span.hi + offset),
-            )
-        })?;
-        for token in &mut tokens {
-            token.span = Span::new(token.span.lo + offset, token.span.hi + offset);
-        }
-        Ok(StrPiece::Expr(tokens))
+        let end = nested.pos as u32;
+        nested.tokens.push(Token {
+            tok: Tok::Eof,
+            span: Span::new(end, end),
+        });
+        Ok(StrPiece::Expr(nested.tokens))
     }
 
     /// Scan the `{HEX}` part of a `\u{HEX}` escape. `pos` is at `{`.
@@ -519,8 +532,8 @@ impl<'a> Scanner<'a> {
             "return" => Tok::KwReturn,
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
-            "final" => Tok::KwFinal,
-            "frozen" => Tok::KwFrozen,
+            "final" if self.followed_by_class() => Tok::KwFinal,
+            "frozen" if self.followed_by_class() => Tok::KwFrozen,
             "class" => Tok::KwClass,
             "do" => Tok::KwDo,
             "self" => Tok::KwSelf,
@@ -543,6 +556,7 @@ impl<'a> Scanner<'a> {
             "when" => Tok::KwWhen,
             "type" => Tok::KwType,
             "for" => Tok::KwFor,
+            "const" => Tok::KwConst,
             _ => Tok::Ident(word.to_string()),
         };
         // Track expression blocks inside delimiters.
@@ -573,6 +587,19 @@ impl<'a> Scanner<'a> {
         }
         self.push(tok, start);
         Ok(())
+    }
+
+    /// True when horizontal space and `class` follow the current word.
+    fn followed_by_class(&self) -> bool {
+        let mut pos = self.pos;
+        while matches!(self.bytes.get(pos), Some(b' ' | b'\t' | b'\r')) {
+            pos += 1;
+        }
+        self.text[pos..].starts_with("class")
+            && !self
+                .bytes
+                .get(pos + "class".len())
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
     }
 
     /// Close one open delimiter. An unbalanced closer keeps the block
@@ -789,7 +816,23 @@ mod tests {
         assert_eq!(scan("\"x #{\"").unwrap_err().code, "E0006");
         assert_eq!(scan("\"x #{ }\"").unwrap_err().code, "E0006");
         assert_eq!(scan("\"x #{a{b}\"").unwrap_err().code, "E0006");
-        assert_eq!(scan("\"x #{\"y\"}\"").unwrap_err().code, "E0006");
+    }
+
+    #[test]
+    fn interpolation_scans_strings_and_balanced_braces() {
+        let tokens = kinds("\"#{\"text\"} #{{\"key\": 1}.at(\"key\")}\"");
+        let Tok::StrInterp(pieces) = &tokens[0] else {
+            panic!("the string must contain interpolation pieces");
+        };
+        assert_eq!(pieces.len(), 3);
+        let StrPiece::Expr(first) = &pieces[0] else {
+            panic!("the first piece must be an expression");
+        };
+        assert!(matches!(&first[0].tok, Tok::Str(text) if text == "text"));
+        let StrPiece::Expr(second) = &pieces[2] else {
+            panic!("the last piece must be an expression");
+        };
+        assert!(second.iter().any(|token| matches!(token.tok, Tok::LBrace)));
     }
 
     #[test]
@@ -808,11 +851,40 @@ mod tests {
                 Tok::KwEscaping,
                 Tok::KwSelf,
                 Tok::KwSuper,
-                Tok::KwFinal,
+                Tok::Ident("final".to_string()),
                 Tok::KwFrozen,
                 Tok::KwClass,
                 Tok::KwEnd,
                 Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn class_modifiers_are_contextual_keywords() {
+        assert_eq!(
+            kinds("final = 1; frozen: Int = 2; final class A end; frozen class B end"),
+            vec![
+                Tok::Ident("final".to_string()),
+                Tok::Assign,
+                Tok::Int(1),
+                Tok::Newline,
+                Tok::Ident("frozen".to_string()),
+                Tok::Colon,
+                Tok::Ident("Int".to_string()),
+                Tok::Assign,
+                Tok::Int(2),
+                Tok::Newline,
+                Tok::KwFinal,
+                Tok::KwClass,
+                Tok::Ident("A".to_string()),
+                Tok::KwEnd,
+                Tok::Newline,
+                Tok::KwFrozen,
+                Tok::KwClass,
+                Tok::Ident("B".to_string()),
+                Tok::KwEnd,
+                Tok::Eof,
             ]
         );
     }

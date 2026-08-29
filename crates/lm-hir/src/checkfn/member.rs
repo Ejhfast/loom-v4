@@ -14,9 +14,15 @@ impl<'o> FnChecker<'o> {
         name_span: Span,
         expected: Option<TypeId>,
     ) -> Result<HExpr, Diagnostic> {
+        if let Some((qualified, root)) = qualified_expr_name_with_member(recv, name) {
+            if self.lookup_slot(root).is_none() {
+                if let Some(value) = ctx.constants.get(&qualified) {
+                    return Ok(value.clone());
+                }
+            }
+        }
         // A canonical qualified constructor such as `Option.None`.
-        if let Some(family) = self.enum_qualifier(ctx, recv) {
-            let qualifier = ctx.classes[family as usize].name.clone();
+        if let Some((_family, qualifier)) = self.enum_qualifier(ctx, recv) {
             let arm = self
                 .resolve_ctor(ctx, Some(&qualifier), name, expected, name_span, true)?
                 .expect("qualified constructors resolve or fail");
@@ -114,8 +120,7 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HExpr, Diagnostic> {
         // A canonical qualified constructor call such as
         // `Option.Some(1)`.
-        if let Some(family) = self.enum_qualifier(ctx, recv) {
-            let qualifier = ctx.classes[family as usize].name.clone();
+        if let Some((_family, qualifier)) = self.enum_qualifier(ctx, recv) {
             let arm = self
                 .resolve_ctor(ctx, Some(&qualifier), name, expected, name_span, true)?
                 .expect("qualified constructors resolve or fail");

@@ -311,7 +311,7 @@ pub(crate) fn attach_source_debug(
                 })?;
                 (DefinitionKind::Class, *span, lm_abi::syntax::KIND_ENUM)
             }
-            lm_bytecode::ExportKind::Interface => continue,
+            lm_bytecode::ExportKind::Interface | lm_bytecode::ExportKind::Constant => continue,
         };
         let origin_key = (kind, span.lo, span.hi);
         let origin = match origins.get(&origin_key) {

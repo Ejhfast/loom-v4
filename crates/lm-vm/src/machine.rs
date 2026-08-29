@@ -2079,7 +2079,7 @@ impl Machine {
                 | lm_bytecode::NativeInstr::TextParseIntValue
                 | lm_bytecode::NativeInstr::TextPadStart
                 | lm_bytecode::NativeInstr::TextPadEnd
-                | lm_bytecode::NativeInstr::SubstringToString,
+                | lm_bytecode::NativeInstr::TextToString,
             ) => self.exec_string_instr(instr),
             Instr::Native(
                 lm_bytecode::NativeInstr::CharCodepoint
@@ -2439,14 +2439,18 @@ impl Machine {
                 };
                 self.push(Value::Bool(result))?;
             }
-            Instr::Native(lm_bytecode::NativeInstr::SubstringToString) => {
-                let substring = self.pop_obj()?;
-                let text = match self.vm.heap.get(substring) {
+            Instr::Native(lm_bytecode::NativeInstr::TextToString) => {
+                let source = self.pop_obj()?;
+                let text = match self.vm.heap.get(source) {
+                    Object::Str(_) => {
+                        self.push(Value::Obj(source))?;
+                        return Ok(());
+                    }
                     Object::Substring(text) => text.clone(),
                     _ => return Err(BAD_TYPE),
                 };
                 if !text.has_bounded_retention() {
-                    self.reserve(text.len(), &[Value::Obj(substring)])?;
+                    self.reserve(text.len(), &[Value::Obj(source)])?;
                 }
                 let text = text.try_bounded().map_err(|_| FaultCode::HeapLimit)?;
                 let value = self.alloc(Object::Str(text))?;

@@ -142,6 +142,37 @@ fn iterated_place(expr: &HExpr) -> Option<IteratedPlace> {
     }
 }
 
+/// Read one dotted expression as its qualified name and root name.
+fn qualified_expr_name(expr: &ast::Expr) -> Option<(String, &str)> {
+    fn collect<'a>(expr: &'a ast::Expr, parts: &mut Vec<&'a str>) -> Option<()> {
+        match &expr.kind {
+            ExprKind::Name(name) => parts.push(name),
+            ExprKind::Field { recv, name, .. } => {
+                collect(recv, parts)?;
+                parts.push(name);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    let mut parts = Vec::new();
+    collect(expr, &mut parts)?;
+    let root = *parts.first()?;
+    Some((parts.join("."), root))
+}
+
+/// Add one final member to a dotted expression name.
+fn qualified_expr_name_with_member<'a>(
+    expr: &'a ast::Expr,
+    member: &str,
+) -> Option<(String, &'a str)> {
+    let (mut name, root) = qualified_expr_name(expr)?;
+    name.push('.');
+    name.push_str(member);
+    Some((name, root))
+}
+
 struct CaptureRec {
     name: String,
     ty: TypeId,

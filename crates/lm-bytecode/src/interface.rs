@@ -31,7 +31,8 @@ const MAGIC: &[u8; 4] = b"LMIF";
 // Version 18 adds interface inheritance and bare `Self` contracts.
 // Version 21 adds the binary64 Float type.
 // Version 22 adds generic methods and interface default bindings.
-const VERSION: u16 = 22;
+// Version 23 adds compile-time constants.
+const VERSION: u16 = 23;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -205,6 +206,16 @@ pub struct IfaceInterface {
     pub methods: Vec<IfaceInterfaceMethod>,
 }
 
+/// One constant value in a module interface.
+pub type IfaceConstValue = crate::ConstValue;
+
+/// One typed compile-time constant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceConst {
+    pub ty: IfaceType,
+    pub value: IfaceConstValue,
+}
+
 /// One class-owned conformance in a module interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceConformancePremise {
@@ -297,6 +308,7 @@ pub enum IfaceItem {
     Func(IfaceFn),
     Class(IfaceClass),
     Interface(IfaceInterface),
+    Const(IfaceConst),
 }
 
 /// One export: the name, the kind, the signature, and the two hashes.
@@ -500,14 +512,31 @@ pub fn derive_interface_with_bundle(
     let view = ModuleSurface { module, bundle };
     let mut exports = Vec::with_capacity(module.exports.len());
     for export in &module.exports {
-        let item = if export.kind.is_class() {
+        if export.kind.is_constant() != export.constant.is_some() {
+            return Err(format!(
+                "the export `{}` has inconsistent constant metadata",
+                export.name
+            ));
+        }
+        let item = if export.kind.is_constant() {
+            let constant = export
+                .constant
+                .as_ref()
+                .ok_or_else(|| "a constant export has no value".to_string())?;
+            IfaceItem::Const(IfaceConst {
+                ty: view.ty(constant.ty, 0)?,
+                value: constant.value.clone(),
+            })
+        } else if export.kind.is_class() {
             IfaceItem::Class(view.class(export.def, export.ctor)?)
         } else if export.kind.is_interface() {
             IfaceItem::Interface(view.interface(export.def)?)
         } else {
             IfaceItem::Func(view.function(export.def, false, None)?)
         };
-        let def_hash = if export.kind.is_class() {
+        let def_hash = if export.kind.is_constant() {
+            interface_hash_with_bundle(bundle, export.kind, &export.name, &item)
+        } else if export.kind.is_class() {
             *identity
                 .class_hashes
                 .get(export.def as usize)
@@ -1381,6 +1410,49 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
                 }
             }
         }
+        IfaceItem::Const(constant) => {
+            out.push(3);
+            encode_constant(out, constant);
+        }
+    }
+}
+
+pub(crate) fn encode_constant(out: &mut Vec<u8>, constant: &IfaceConst) {
+    encode_type(out, &constant.ty);
+    encode_const_value(out, &constant.value);
+}
+
+pub(crate) fn encode_const_value(out: &mut Vec<u8>, value: &IfaceConstValue) {
+    match value {
+        IfaceConstValue::Unit => out.push(0),
+        IfaceConstValue::Bool(value) => {
+            out.push(1);
+            out.push(u8::from(*value));
+        }
+        IfaceConstValue::Int(value) => {
+            out.push(2);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        IfaceConstValue::Float(value) => {
+            out.push(3);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        IfaceConstValue::String(value) => {
+            out.push(4);
+            write_str(out, value);
+        }
+        IfaceConstValue::Bytes(value) => {
+            out.push(5);
+            write_u32(out, value.len() as u32);
+            out.extend_from_slice(value);
+        }
+        IfaceConstValue::Tuple(items) => {
+            out.push(6);
+            write_u32(out, items.len() as u32);
+            for item in items {
+                encode_const_value(out, item);
+            }
+        }
     }
 }
 
@@ -1843,8 +1915,48 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 methods,
             }))
         }
+        3 => Ok(IfaceItem::Const(decode_constant(cur)?)),
         other => Err(DecodeError::BadTypeTag(other)),
     }
+}
+
+pub(crate) fn decode_constant(cur: &mut crate::Cursor<'_>) -> Result<IfaceConst, DecodeError> {
+    Ok(IfaceConst {
+        ty: decode_type(cur, 0)?,
+        value: decode_const_value(cur, 0)?,
+    })
+}
+
+pub(crate) fn decode_const_value(
+    cur: &mut crate::Cursor<'_>,
+    depth: u32,
+) -> Result<IfaceConstValue, DecodeError> {
+    if depth >= MAX_TYPE_DEPTH {
+        return Err(DecodeError::BadLength);
+    }
+    Ok(match cur.u8()? {
+        0 => IfaceConstValue::Unit,
+        1 => IfaceConstValue::Bool(cur.flag()?),
+        2 => IfaceConstValue::Int(cur.i64()?),
+        3 => IfaceConstValue::Float(cur.u64()?),
+        4 => IfaceConstValue::String(cur.string()?),
+        5 => {
+            let length = cur.len()?;
+            IfaceConstValue::Bytes(cur.take(length)?.to_vec())
+        }
+        6 => {
+            let count = cur.len()?;
+            if count > cur.remaining() {
+                return Err(DecodeError::BadLength);
+            }
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(decode_const_value(cur, depth + 1)?);
+            }
+            IfaceConstValue::Tuple(items)
+        }
+        other => return Err(DecodeError::BadTypeTag(other)),
+    })
 }
 
 /// Decode one interface. Structure only; every length field is
@@ -1881,6 +1993,7 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
             (IfaceItem::Class(_), kind) => kind.is_class(),
             (IfaceItem::Interface(_), kind) => kind.is_interface(),
             (IfaceItem::Func(_), ExportKind::Function) => true,
+            (IfaceItem::Const(_), ExportKind::Constant) => true,
             _ => false,
         };
         if !agrees {
@@ -2136,6 +2249,30 @@ pub fn item_text(item: &IfaceItem) -> String {
             interface.associated.len(),
             interface.methods.len()
         ),
+        IfaceItem::Const(constant) => format!(
+            "{} = {}",
+            type_text(&constant.ty),
+            const_value_text(&constant.value)
+        ),
+    }
+}
+
+fn const_value_text(value: &IfaceConstValue) -> String {
+    match value {
+        IfaceConstValue::Unit => "()".to_string(),
+        IfaceConstValue::Bool(value) => value.to_string(),
+        IfaceConstValue::Int(value) => value.to_string(),
+        IfaceConstValue::Float(bits) => f64::from_bits(*bits).to_string(),
+        IfaceConstValue::String(value) => format!("{value:?}"),
+        IfaceConstValue::Bytes(value) => format!("{} byte(s)", value.len()),
+        IfaceConstValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(const_value_text).collect();
+            if parts.len() == 1 {
+                format!("({},)", parts[0])
+            } else {
+                format!("({})", parts.join(", "))
+            }
+        }
     }
 }
 

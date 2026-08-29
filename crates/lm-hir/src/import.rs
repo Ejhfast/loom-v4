@@ -27,8 +27,8 @@ use crate::check::{
 };
 use crate::hir::{Flow, HExpr, HExprKind, HStmt, HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
-    ExportEntry, IfaceClass, IfaceClassKind, IfaceFn, IfaceInterface, IfaceInterfaceUse, IfaceItem,
-    IfaceRow, IfaceType, Interface, QualName,
+    ExportEntry, IfaceClass, IfaceClassKind, IfaceConst, IfaceConstValue, IfaceFn, IfaceInterface,
+    IfaceInterfaceUse, IfaceItem, IfaceRow, IfaceType, Interface, QualName,
 };
 use lm_bytecode::ImportKind;
 use lm_source::diag::Diagnostic;
@@ -223,6 +223,7 @@ fn add_item_core_names(
 ) {
     match item {
         IfaceItem::Func(function) => add_fn_core_names(function, names, work),
+        IfaceItem::Const(constant) => add_type_core_names(&constant.ty, names, work),
         IfaceItem::Interface(interface) => {
             for parent in &interface.parents {
                 add_interface_core_names(parent, names, work);
@@ -314,6 +315,12 @@ struct PendingFunc {
     iface_hash: [u8; 32],
 }
 
+/// One imported constant waiting for its declared type.
+struct PendingConst {
+    bound: String,
+    constant: IfaceConst,
+}
+
 /// One imported interface waiting for its contract types.
 struct PendingInterface {
     id: u32,
@@ -347,6 +354,7 @@ pub(crate) struct Materializer<'a> {
     pending_interfaces: Vec<PendingInterface>,
     pending_defaults: Vec<PendingDefault>,
     pending_funcs: Vec<PendingFunc>,
+    pending_consts: Vec<PendingConst>,
     inline_intrinsics: HashMap<(String, String), lm_abi::IntrinsicSlot>,
 }
 
@@ -369,6 +377,7 @@ impl<'a> Materializer<'a> {
             pending_interfaces: Vec::new(),
             pending_defaults: Vec::new(),
             pending_funcs: Vec::new(),
+            pending_consts: Vec::new(),
             inline_intrinsics: HashMap::new(),
         }
     }
@@ -864,6 +873,36 @@ impl<'a> Materializer<'a> {
         Ok(())
     }
 
+    /// Reserve one imported constant under the given bound name.
+    pub(crate) fn reserve_const(
+        &mut self,
+        ctx: &mut Ctx,
+        bound: &str,
+        module: &str,
+        name: &str,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let entry = self.export(module, name, span)?;
+        let IfaceItem::Const(constant) = &entry.item else {
+            return Err(error(span, format!("`{module}.{name}` is not a constant")));
+        };
+        if ctx.user_types.contains_key(bound)
+            || ctx.user_interfaces.contains_key(bound)
+            || !ctx.constant_names.insert(bound.to_string())
+        {
+            return Err(error(
+                span,
+                format!("the name `{bound}` has more than one definition"),
+            ));
+        }
+        self.reserve_type(ctx, &constant.ty, span)?;
+        self.pending_consts.push(PendingConst {
+            bound: bound.to_string(),
+            constant: constant.clone(),
+        });
+        Ok(())
+    }
+
     /// Reserve the selected surface of one implicit dependency.
     pub(crate) fn reserve_unit(
         &mut self,
@@ -938,6 +977,9 @@ impl<'a> Materializer<'a> {
                             .any(|method| methods.contains(&method.name)) =>
                 {
                     self.reserve_interface(ctx, module, &export.name, span)?;
+                }
+                IfaceItem::Const(_) if selected.contains(&export.name) => {
+                    self.reserve_const(ctx, &export.name, module, &export.name, span)?;
                 }
                 _ => {}
             }
@@ -1414,6 +1456,12 @@ impl<'a> Materializer<'a> {
         }
         let funcs = std::mem::take(&mut self.pending_funcs);
         for item in &funcs {
+            if ctx.constant_names.contains(&item.bound) {
+                return Err(error(
+                    span,
+                    format!("the name `{}` has more than one definition", item.bound),
+                ));
+            }
             let sig = self.fn_sig(ctx, &item.sig, None, span)?;
             let body = self.imported_body(&item.module, &item.name, &sig);
             let func = ctx.push_func(
@@ -1457,6 +1505,34 @@ impl<'a> Materializer<'a> {
                 def: HirImportDef::Func(func),
                 hash: item.iface_hash,
             });
+        }
+        let constants = std::mem::take(&mut self.pending_consts);
+        for item in constants {
+            if ctx.func_index.contains_key(&item.bound) {
+                return Err(error(
+                    span,
+                    format!("the name `{}` has more than one definition", item.bound),
+                ));
+            }
+            let ty = self.resolve_type(ctx, &item.constant.ty, span)?;
+            let mut value = const_value_expr(ctx, &item.constant.value);
+            if !ctx.store.compatible(ty, value.ty) {
+                return Err(error(
+                    span,
+                    format!(
+                        "the imported constant `{}` has a value outside its declared type",
+                        item.bound
+                    ),
+                ));
+            }
+            value.ty = ty;
+            value.mutable = false;
+            if ctx.constants.insert(item.bound.clone(), value).is_some() {
+                return Err(error(
+                    span,
+                    format!("the name `{}` has more than one definition", item.bound),
+                ));
+            }
         }
         Ok(own_fields)
     }
@@ -1902,6 +1978,34 @@ impl<'a> Materializer<'a> {
             }
         };
         Ok(id)
+    }
+}
+
+/// Build one imported literal expression without runtime storage.
+fn const_value_expr(ctx: &mut Ctx, value: &IfaceConstValue) -> HExpr {
+    let (ty, kind) = match value {
+        IfaceConstValue::Unit => (lm_types::UNIT, HExprKind::Unit),
+        IfaceConstValue::Bool(value) => (lm_types::BOOL, HExprKind::Bool(*value)),
+        IfaceConstValue::Int(value) => (lm_types::INT, HExprKind::Int(*value)),
+        IfaceConstValue::Float(bits) => (lm_types::FLOAT, HExprKind::Float(*bits)),
+        IfaceConstValue::String(value) => (lm_types::STRING, HExprKind::Str(value.clone())),
+        IfaceConstValue::Bytes(value) => (lm_types::BYTES, HExprKind::Bytes(value.clone())),
+        IfaceConstValue::Tuple(items) => {
+            let values: Vec<HExpr> = items
+                .iter()
+                .map(|item| const_value_expr(ctx, item))
+                .collect();
+            let ty = ctx
+                .store
+                .intern(Type::Tuple(values.iter().map(|item| item.ty).collect()));
+            (ty, HExprKind::TupleLit(values))
+        }
+    };
+    HExpr {
+        flow: Flow::Normal,
+        ty,
+        mutable: false,
+        kind,
     }
 }
 

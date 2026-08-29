@@ -83,6 +83,10 @@ fn build_valid(text: &str, tokens: &[Token], module: &Module) -> PublicSyntax {
         span: item.span,
         kind: KIND_ENUM,
     }));
+    top.extend(module.constants.iter().map(|item| TopItem {
+        span: item.span,
+        kind: KIND_CONST,
+    }));
     top.extend(module.funcs.iter().map(|item| TopItem {
         span: item.span,
         kind: KIND_FUNCTION,
@@ -333,6 +337,7 @@ fn token_kind(token: &Tok) -> u16 {
         | Tok::KwWhen
         | Tok::KwType
         | Tok::KwFor
+        | Tok::KwConst
         | Tok::KwReserved(_) => KIND_KEYWORD,
         Tok::LParen => KIND_LPAREN,
         Tok::RParen => KIND_RPAREN,
