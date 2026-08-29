@@ -319,6 +319,52 @@ end
 }
 
 #[test]
+fn terminal_key_decoder_consumes_complete_escape_sequences() {
+    let source = r##"
+use std.term.decode_key
+use std.term.KeyDecode
+use std.term.TermKey
+
+def describe(input: Bytes, finish_escape: Bool): String
+  case decode_key(input, finish_escape)
+  in Decoded(TermKey.PageUp, count) then "page-up:#{count}"
+  in Decoded(TermKey.PageDown, count) then "page-down:#{count}"
+  in Decoded(TermKey.Home, count) then "home:#{count}"
+  in Decoded(TermKey.Backspace, count) then "backspace:#{count}"
+  in Decoded(TermKey.Ctrl(value), count) then "ctrl:#{value.codepoint()}:#{count}"
+  in Decoded(TermKey.Alt(value), count) then "alt:#{value.codepoint()}:#{count}"
+  in Decoded(TermKey.Unknown(value), count) then "unknown:#{value.hex()}:#{count}"
+  in Decoded(_, count) then "other:#{count}"
+  in NeedMore then "more"
+  end
+end
+
+(
+  describe(b"\x1b[5~x", false),
+  describe(b"\x1b[6~", false),
+  describe(b"\x1b[99~x", false),
+  describe(b"\x1b[1;5", false),
+  describe(b"\x1b[1;5", true),
+  describe(b"\x1bOH", false),
+  describe(b"\x01", false),
+  describe(b"\x08", false),
+  describe(b"\x1bx", false),
+  describe(b"\x1b\xc3\xa9", false)
+)
+"##;
+    let (mut world, _) = world(source);
+
+    let outcome = lm_proc::run_world(&mut world);
+
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done((\"page-up:4\", \"page-down:4\", \"unknown:1b5b39397e:5\", \
+         \"more\", \"unknown:1b5b313b35:5\", \"home:3\", \"ctrl:97:1\", \
+         \"backspace:1\", \"alt:120:2\", \"alt:233:3\"))"
+    );
+}
+
+#[test]
 fn the_checker_rejects_wrong_terminal_and_signal_arguments() {
     let terminal =
         compile_to_bytes("bad-tty.lm", "Tty().size(1)\n").expect_err("an integer stream rejects");

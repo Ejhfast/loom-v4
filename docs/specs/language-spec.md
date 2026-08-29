@@ -4303,6 +4303,20 @@ Core network code defines DNS, TCP, and native TLS stream operations.
 
 `std.term` contains pure terminal control bytes and bounded key decoding.
 
+`decode_key` consumes one complete terminal input sequence.
+
+It scans CSI parameter, intermediate, and final bytes according to ECMA-48.
+
+An unsupported complete sequence becomes `Unknown` and consumes the complete sequence.
+
+An incomplete CSI, SS3, or alternate scalar becomes `NeedMore` until the caller finishes the escape.
+
+`Ctrl` stores a lowercase character for a control letter.
+
+`Alt` stores one printable Unicode scalar.
+
+Byte `0x08` and byte `0x7f` remain `Backspace`.
+
 Terminal input, output, timers, and size queries retain their exact operation rows.
 
 A live TCP or TLS handle is a host attachment and blocks snapshot creation.
