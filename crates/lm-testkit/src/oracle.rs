@@ -499,6 +499,7 @@ impl<'m> Oracle<'m> {
             HExprKind::Int(v) => Ok(OV::Int(*v)),
             HExprKind::Float(bits) => Ok(OV::Float(*bits)),
             HExprKind::Bool(v) => Ok(OV::Bool(*v)),
+            HExprKind::Char(value) => Ok(OV::Char(*value)),
             HExprKind::Str(v) => Ok(OV::Str(Rc::new(v.clone()))),
             HExprKind::Bytes(v) => Ok(self.alloc(OKind::Bytes(v.clone()))),
             HExprKind::Local(slot) => frame.get(*slot),
@@ -919,6 +920,7 @@ impl<'m> Oracle<'m> {
             }
             HPattern::Int(want) => Ok(matches!(value, OV::Int(v) if v == want)),
             HPattern::Bool(want) => Ok(matches!(value, OV::Bool(v) if v == want)),
+            HPattern::Char(want) => Ok(matches!(value, OV::Char(v) if v == want)),
             HPattern::Str(want) => Ok(matches!(value, OV::Str(v) if v.as_str() == want)),
             HPattern::Project { .. } | HPattern::And(_) => {
                 Err(Stop::Limit("request patterns run in the VM only"))

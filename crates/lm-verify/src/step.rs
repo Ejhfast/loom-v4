@@ -136,6 +136,15 @@ pub(crate) fn step(
             }
             push(state, ctx.intern(BcType::Float))?;
         }
+        Instr::ConstChar(value) => {
+            if char::from_u32(*value).is_none() {
+                return Err(fail(
+                    "a character constant is not one Unicode scalar".to_string(),
+                ));
+            }
+            let ty = ctx.plain_inst(ctx.core.char_value, "Char").map_err(&fail)?;
+            push(state, ty)?;
+        }
         Instr::ConstStr(_) => push(state, TY_STR)?,
         Instr::ConstBytes(index) => {
             if *index as usize >= module.bytes.len() {

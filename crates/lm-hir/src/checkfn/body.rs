@@ -814,6 +814,7 @@ impl<'o> FnChecker<'o> {
             None => {
                 if self.module_func(ctx, name).is_some()
                     || ctx.lookup_type(name, &self.env).is_some()
+                    || ctx.constant_names.contains(name)
                 {
                     return Err(Diagnostic::new(
                         "E1019",

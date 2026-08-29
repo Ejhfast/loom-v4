@@ -109,6 +109,23 @@ fn the_container_round_trips_imports_and_exports() {
     assert_eq!(back, module);
 }
 
+/// A constant pin round-trips without one runtime definition.
+#[test]
+fn a_constant_pin_round_trips_without_a_definition() {
+    let mut module = importing_module(PIN);
+    module.imports.push(Import {
+        module: "dep.values".to_string(),
+        name: "LIMIT".to_string(),
+        kind: ImportKind::Constant,
+        def: lm_bytecode::NO_IMPORT_DEF,
+        hash: [8; 32],
+    });
+    let bytes = lm_bytecode::encode(&module);
+    let decoded = lm_bytecode::decode(&bytes).expect("the module decodes");
+    assert_eq!(decoded.imports, module.imports);
+    lm_verify::verify_module(&decoded).expect("the pin verifies");
+}
+
 /// An import slot outside the definition tables rejects at the
 /// decoder, before any later pass reads it.
 #[test]

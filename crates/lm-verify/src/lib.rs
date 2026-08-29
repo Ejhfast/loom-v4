@@ -273,7 +273,8 @@ use tables::verify_tables;
 /// Version 36 verifies stream roles and child environment overlays.
 /// Version 37 permits capture contracts on imported closure bodies.
 /// Version 38 verifies ABI operation and group slots in effect rows.
-pub const VERIFIER_VERSION: u32 = 38;
+/// Version 39 verifies typed constant exports and constant pins.
+pub const VERIFIER_VERSION: u32 = 39;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -430,6 +431,45 @@ mod tests {
             bindings: vec![],
             debug: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejects_a_constant_value_outside_its_declared_type() {
+        let mut module = module_with(vec![vec![ConstInt(1), Return]]);
+        module.exports.push(lm_bytecode::Export {
+            kind: lm_bytecode::ExportKind::Constant,
+            name: "LIMIT".to_string(),
+            def: lm_bytecode::NO_CTOR,
+            ctor: lm_bytecode::NO_CTOR,
+            constant: Some(lm_bytecode::Constant {
+                ty: TY_INT,
+                value: lm_bytecode::ConstValue::String("wrong".to_string()),
+            }),
+        });
+        let error = verify_module(&module).expect_err("the wrong constant value must reject");
+        assert!(
+            error.message.contains("outside its declared type"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_deep_unnamed_constant_names_its_export_table_entry() {
+        let mut value = lm_bytecode::ConstValue::Int(1);
+        for _ in 0..32 {
+            value = lm_bytecode::ConstValue::Tuple(vec![value]);
+        }
+        let mut module = module_with(vec![vec![ConstInt(1), Return]]);
+        module.exports.push(lm_bytecode::Export {
+            kind: lm_bytecode::ExportKind::Constant,
+            name: String::new(),
+            def: lm_bytecode::NO_CTOR,
+            ctor: lm_bytecode::NO_CTOR,
+            constant: Some(lm_bytecode::Constant { ty: TY_INT, value }),
+        });
+        let error = verify_module(&module).expect_err("the deep value must reject");
+        assert!(error.message.contains("export table 0"), "{error}");
+        assert!(error.message.contains("deeper than 32 levels"), "{error}");
     }
 
     #[test]
@@ -593,6 +633,13 @@ mod tests {
         ]]);
         let error = verify_module(&module).expect_err("the NaN must reject");
         assert!(error.message.contains("noncanonical NaN"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_character_constant_outside_unicode() {
+        let module = module_with(vec![vec![ConstChar(0x00d8_0000), Return]]);
+        let error = verify_module(&module).expect_err("the invalid character must reject");
+        assert!(error.message.contains("Unicode scalar"), "{error}");
     }
 
     #[test]

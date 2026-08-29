@@ -1875,6 +1875,16 @@ impl Parser<'_> {
                     _ => unreachable!(),
                 }
             }
+            Tok::Char(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Char(value) => Ok(Expr {
+                        kind: ExprKind::Char(value),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
             Tok::Str(_) => {
                 let token = self.next();
                 match token.tok {
@@ -1900,7 +1910,7 @@ impl Parser<'_> {
                                 text: self.text,
                                 tokens: &tokens,
                                 pos: 0,
-                                depth: 0,
+                                depth: self.depth,
                                 in_loop_header: false,
                             };
                             let inner = sub.expr()?;
@@ -2447,6 +2457,16 @@ impl Parser<'_> {
             Tok::StrInterp(_) => {
                 Err(self.error("E1041", "an interpolated string is not a valid pattern"))
             }
+            Tok::Char(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Char(value) => Ok(Pattern {
+                        kind: PatternKind::Char(value),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
             Tok::Ident(_) => {
                 let (name, span) = self.ident("a pattern")?;
                 if name == "_" {
@@ -2455,13 +2475,16 @@ impl Parser<'_> {
                         span,
                     });
                 }
-                let (qualifier, ctor_name, mut hi) = if matches!(self.peek(), Tok::Dot) {
+                let mut parts = vec![name];
+                let mut hi = span;
+                while matches!(self.peek(), Tok::Dot) {
                     self.pos += 1;
                     let (arm, arm_span) = self.ident("an arm name after `.`")?;
-                    (Some(name), arm, arm_span)
-                } else {
-                    (None, name, span)
-                };
+                    parts.push(arm);
+                    hi = arm_span;
+                }
+                let ctor_name = parts.pop().expect("a pattern has one name");
+                let qualifier = (!parts.is_empty()).then(|| parts.join("."));
                 if matches!(self.peek(), Tok::LParen) {
                     self.pos += 1;
                     let mut args = Vec::new();

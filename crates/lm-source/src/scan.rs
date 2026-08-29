@@ -13,6 +13,9 @@ use crate::diag::Diagnostic;
 use crate::span::Span;
 use crate::token::{StrPiece, Tok, Token};
 
+/// The largest nested interpolation depth.
+const MAX_INTERPOLATION_DEPTH: usize = 64;
+
 /// Scan the full source text into tokens.
 pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
     let mut scanner = Scanner {
@@ -21,6 +24,7 @@ pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
         pos: 0,
         tokens: Vec::new(),
         nesting: Vec::new(),
+        interpolation_depth: 0,
     };
     scanner.run()?;
     Ok(scanner.tokens)
@@ -50,6 +54,8 @@ struct Scanner<'a> {
     tokens: Vec<Token>,
     /// The open nesting contexts, innermost last.
     nesting: Vec<Nest>,
+    /// The number of interpolation scanners above this scanner.
+    interpolation_depth: usize,
 }
 
 impl<'a> Scanner<'a> {
@@ -89,13 +95,7 @@ impl<'a> Scanner<'a> {
                 self.push_newline(start);
             }
             '"' => self.scan_string(start)?,
-            '\'' => {
-                return Err(self.error(
-                    "E0008",
-                    "character literals are not supported in this language slice",
-                    start,
-                ));
-            }
+            '\'' => self.scan_char(start)?,
             '0'..='9' => self.scan_number(start)?,
             'a'..='z' | 'A'..='Z' | '_' => self.scan_word(start)?,
             _ => self.scan_punct(start)?,
@@ -265,6 +265,89 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
+    /// Scan one Unicode scalar character literal.
+    fn scan_char(&mut self, start: usize) -> Result<(), Diagnostic> {
+        self.pos += 1;
+        if self.pos >= self.bytes.len() || matches!(self.cur_char(), '\n' | '\r') {
+            return Err(self.error("E0008", "unterminated character literal", start));
+        }
+        if self.cur_char() == '\'' {
+            return Err(self.error("E0008", "a character literal cannot be empty", start));
+        }
+        let value = if self.cur_char() == '\\' {
+            let esc_start = self.pos;
+            self.pos += 1;
+            let escape = self.cur_char();
+            match escape {
+                '\\' => {
+                    self.pos += 1;
+                    '\\'
+                }
+                '"' => {
+                    self.pos += 1;
+                    '"'
+                }
+                '\'' => {
+                    self.pos += 1;
+                    '\''
+                }
+                'n' => {
+                    self.pos += 1;
+                    '\n'
+                }
+                'r' => {
+                    self.pos += 1;
+                    '\r'
+                }
+                't' => {
+                    self.pos += 1;
+                    '\t'
+                }
+                '0' => {
+                    self.pos += 1;
+                    '\0'
+                }
+                'x' => {
+                    self.pos += 1;
+                    let byte = self
+                        .scan_hex_byte(esc_start)
+                        .map_err(|_| self.error("E0008", "invalid character escape", esc_start))?;
+                    if byte > 0x7f {
+                        return Err(self.error(
+                            "E0008",
+                            "a character byte escape must be in the ASCII range",
+                            esc_start,
+                        ));
+                    }
+                    char::from(byte)
+                }
+                'u' => {
+                    self.pos += 1;
+                    self.scan_unicode_escape(esc_start)
+                        .map_err(|_| self.error("E0008", "invalid character escape", esc_start))?
+                }
+                _ => {
+                    self.pos += escape.len_utf8();
+                    return Err(self.error("E0008", "invalid character escape", esc_start));
+                }
+            }
+        } else {
+            let value = self.cur_char();
+            self.pos += value.len_utf8();
+            value
+        };
+        if self.cur_char() != '\'' {
+            return Err(self.error(
+                "E0008",
+                "a character literal must contain one Unicode scalar value",
+                start,
+            ));
+        }
+        self.pos += 1;
+        self.push(Tok::Char(value), start);
+        Ok(())
+    }
+
     /// Scan one immutable byte string. `pos` is at the opening quote.
     fn scan_bytes(&mut self, start: usize) -> Result<(), Diagnostic> {
         self.pos += 1;
@@ -348,6 +431,17 @@ impl<'a> Scanner<'a> {
     /// Scan one `#{ expression }` interpolation. `pos` is at `{`.
     fn scan_interpolation(&mut self) -> Result<StrPiece, Diagnostic> {
         let brace = self.pos;
+        let interpolation_depth = self.interpolation_depth + 1;
+        if interpolation_depth > MAX_INTERPOLATION_DEPTH {
+            return Err(self.error(
+                "E1022",
+                format!(
+                    "the interpolation nesting is deeper than the limit of \
+                     {MAX_INTERPOLATION_DEPTH} levels"
+                ),
+                brace,
+            ));
+        }
         self.pos += 1;
         let expr_start = self.pos;
         let mut nested = Scanner {
@@ -356,6 +450,7 @@ impl<'a> Scanner<'a> {
             pos: self.pos,
             tokens: Vec::new(),
             nesting: Vec::new(),
+            interpolation_depth,
         };
         let mut brace_depth = 0usize;
         loop {
@@ -370,16 +465,14 @@ impl<'a> Scanner<'a> {
             if byte == b'}' && brace_depth == 0 {
                 break;
             }
-            if let Err(diagnostic) = nested.scan_one() {
-                if diagnostic.code == "E0002" {
-                    return Err(self.error(
-                        "E0006",
-                        "the interpolation expression has no closing `}`",
-                        brace,
-                    ));
-                }
-                return Err(diagnostic);
+            if byte == b'#' {
+                return Err(self.error(
+                    "E0006",
+                    "a comment cannot occur inside an interpolation expression",
+                    nested.pos,
+                ));
             }
+            nested.scan_one()?;
             match byte {
                 b'{' => brace_depth += 1,
                 b'}' => brace_depth -= 1,
@@ -589,16 +682,30 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
-    /// True when horizontal space and `class` follow the current word.
+    /// True when class modifiers and `class` follow the current word.
     fn followed_by_class(&self) -> bool {
         let mut pos = self.pos;
         while matches!(self.bytes.get(pos), Some(b' ' | b'\t' | b'\r')) {
             pos += 1;
         }
-        self.text[pos..].starts_with("class")
+        for modifier in ["final", "frozen"] {
+            if self.word_at(pos, modifier) {
+                pos += modifier.len();
+                while matches!(self.bytes.get(pos), Some(b' ' | b'\t' | b'\r')) {
+                    pos += 1;
+                }
+                break;
+            }
+        }
+        self.word_at(pos, "class")
+    }
+
+    /// Test one complete source word at a byte position.
+    fn word_at(&self, pos: usize, word: &str) -> bool {
+        self.text[pos..].starts_with(word)
             && !self
                 .bytes
-                .get(pos + "class".len())
+                .get(pos + word.len())
                 .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
     }
 
@@ -813,9 +920,16 @@ mod tests {
 
     #[test]
     fn rejects_bad_interpolation() {
-        assert_eq!(scan("\"x #{\"").unwrap_err().code, "E0006");
+        let string_error = scan("\"x #{\"").expect_err("the inner string must reject");
+        assert_eq!(string_error.code, "E0002");
+        assert!(string_error.message.contains("string"));
         assert_eq!(scan("\"x #{ }\"").unwrap_err().code, "E0006");
-        assert_eq!(scan("\"x #{a{b}\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x #{a").unwrap_err().code, "E0006");
+
+        let comment_error =
+            scan("\"x #{1 # comment}\"").expect_err("the interpolation comment must reject");
+        assert_eq!(comment_error.code, "E0006");
+        assert!(comment_error.message.contains("comment"));
     }
 
     #[test]
@@ -836,6 +950,17 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_nesting_stops_at_a_fixed_depth() {
+        let mut source = "0".to_string();
+        for _ in 0..=MAX_INTERPOLATION_DEPTH {
+            source = format!("\"#{{{source}}}\"");
+        }
+        let error = scan(&source).expect_err("deep interpolation must reject");
+        assert_eq!(error.code, "E1022");
+        assert!(error.message.contains("interpolation nesting"));
+    }
+
+    #[test]
     fn scans_arrow_and_new_keywords() {
         assert_eq!(
             kinds("do |x: Int| -> mut escaping self super final frozen class end"),
@@ -851,7 +976,7 @@ mod tests {
                 Tok::KwEscaping,
                 Tok::KwSelf,
                 Tok::KwSuper,
-                Tok::Ident("final".to_string()),
+                Tok::KwFinal,
                 Tok::KwFrozen,
                 Tok::KwClass,
                 Tok::KwEnd,
@@ -863,7 +988,10 @@ mod tests {
     #[test]
     fn class_modifiers_are_contextual_keywords() {
         assert_eq!(
-            kinds("final = 1; frozen: Int = 2; final class A end; frozen class B end"),
+            kinds(
+                "final = 1; frozen: Int = 2; final class A end; \
+                 frozen class B end; frozen final class C end",
+            ),
             vec![
                 Tok::Ident("final".to_string()),
                 Tok::Assign,
@@ -883,6 +1011,12 @@ mod tests {
                 Tok::KwFrozen,
                 Tok::KwClass,
                 Tok::Ident("B".to_string()),
+                Tok::KwEnd,
+                Tok::Newline,
+                Tok::KwFrozen,
+                Tok::KwFinal,
+                Tok::KwClass,
+                Tok::Ident("C".to_string()),
                 Tok::KwEnd,
                 Tok::Eof,
             ]
@@ -943,8 +1077,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_char_and_triple_literals() {
-        assert_eq!(scan("'a'").unwrap_err().code, "E0008");
+    fn scans_character_literals() {
+        assert_eq!(
+            kinds(r"'a' '猫' '\n' '\'' '\x41' '\u{1f642}'"),
+            vec![
+                Tok::Char('a'),
+                Tok::Char('猫'),
+                Tok::Char('\n'),
+                Tok::Char('\''),
+                Tok::Char('A'),
+                Tok::Char('🙂'),
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_character_literals() {
+        for source in ["''", "'ab'", "'\\x80'", "'\\xGG'", "'\\u{}'", "'\\q'", "'a"] {
+            assert_eq!(scan(source).unwrap_err().code, "E0008", "{source}");
+        }
+    }
+
+    #[test]
+    fn rejects_triple_literals() {
         assert_eq!(scan("\"\"\"x\"\"\"").unwrap_err().code, "E0010");
     }
 

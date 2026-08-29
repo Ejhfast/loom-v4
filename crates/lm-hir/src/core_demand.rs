@@ -246,6 +246,7 @@ impl CoreDemand {
             }
             ExprKind::Continue => {}
             ExprKind::Str(_) => self.name("String"),
+            ExprKind::Char(_) => self.name("Char"),
             ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Bytes(_)
@@ -484,6 +485,7 @@ impl CoreDemand {
             | ast::PatternKind::Int(_)
             | ast::PatternKind::Bool(_)
             | ast::PatternKind::Str(_) => {}
+            ast::PatternKind::Char(_) => self.name("Char"),
         }
     }
 

@@ -32,7 +32,8 @@ const MAGIC: &[u8; 4] = b"LMIF";
 // Version 21 adds the binary64 Float type.
 // Version 22 adds generic methods and interface default bindings.
 // Version 23 adds compile-time constants.
-const VERSION: u16 = 23;
+// Version 24 adds character constants.
+const VERSION: u16 = 24;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -447,6 +448,9 @@ pub fn import_contract_hash_with_bundle(
 ) -> Result<(ExportKind, String, [u8; 32]), String> {
     let view = ModuleSurface { module, bundle };
     let (kind, name, item) = match import.kind {
+        ImportKind::Constant => {
+            return Ok((ExportKind::Constant, import.name.clone(), import.hash));
+        }
         ImportKind::Func => (
             ExportKind::Function,
             import.name.clone(),
@@ -1437,6 +1441,10 @@ pub(crate) fn encode_const_value(out: &mut Vec<u8>, value: &IfaceConstValue) {
             out.push(3);
             out.extend_from_slice(&value.to_le_bytes());
         }
+        IfaceConstValue::Char(value) => {
+            out.push(7);
+            write_u32(out, u32::from(*value));
+        }
         IfaceConstValue::String(value) => {
             out.push(4);
             write_str(out, value);
@@ -1696,7 +1704,10 @@ fn decode_fn(cur: &mut crate::Cursor<'_>) -> Result<IfaceFn, DecodeError> {
     })
 }
 
-fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
+fn decode_item(
+    cur: &mut crate::Cursor<'_>,
+    const_allocation: &mut usize,
+) -> Result<IfaceItem, DecodeError> {
     match cur.u8()? {
         0 => Ok(IfaceItem::Func(decode_fn(cur)?)),
         1 => {
@@ -1915,21 +1926,25 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 methods,
             }))
         }
-        3 => Ok(IfaceItem::Const(decode_constant(cur)?)),
+        3 => Ok(IfaceItem::Const(decode_constant(cur, const_allocation)?)),
         other => Err(DecodeError::BadTypeTag(other)),
     }
 }
 
-pub(crate) fn decode_constant(cur: &mut crate::Cursor<'_>) -> Result<IfaceConst, DecodeError> {
+fn decode_constant(
+    cur: &mut crate::Cursor<'_>,
+    const_allocation: &mut usize,
+) -> Result<IfaceConst, DecodeError> {
     Ok(IfaceConst {
         ty: decode_type(cur, 0)?,
-        value: decode_const_value(cur, 0)?,
+        value: decode_const_value(cur, 0, const_allocation)?,
     })
 }
 
 pub(crate) fn decode_const_value(
     cur: &mut crate::Cursor<'_>,
     depth: u32,
+    allocation: &mut usize,
 ) -> Result<IfaceConstValue, DecodeError> {
     if depth >= MAX_TYPE_DEPTH {
         return Err(DecodeError::BadLength);
@@ -1939,6 +1954,7 @@ pub(crate) fn decode_const_value(
         1 => IfaceConstValue::Bool(cur.flag()?),
         2 => IfaceConstValue::Int(cur.i64()?),
         3 => IfaceConstValue::Float(cur.u64()?),
+        7 => IfaceConstValue::Char(char::from_u32(cur.u32()?).ok_or(DecodeError::BadCharacter)?),
         4 => IfaceConstValue::String(cur.string()?),
         5 => {
             let length = cur.len()?;
@@ -1949,9 +1965,18 @@ pub(crate) fn decode_const_value(
             if count > cur.remaining() {
                 return Err(DecodeError::BadLength);
             }
-            let mut items = Vec::with_capacity(count);
+            let bytes = count
+                .checked_mul(std::mem::size_of::<IfaceConstValue>().max(1))
+                .ok_or(DecodeError::BadLength)?;
+            *allocation = allocation
+                .checked_add(bytes)
+                .ok_or(DecodeError::BadLength)?;
+            if *allocation > crate::MAX_DECODE_VECTOR_BYTES {
+                return Err(DecodeError::BadLength);
+            }
+            let mut items = crate::decode_vec(count)?;
             for _ in 0..count {
-                items.push(decode_const_value(cur, depth + 1)?);
+                items.push(decode_const_value(cur, depth + 1, allocation)?);
             }
             IfaceConstValue::Tuple(items)
         }
@@ -1978,7 +2003,8 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
     let mut semantic_hash = [0u8; 32];
     semantic_hash.copy_from_slice(cur.take(32)?);
     let count = cur.len()?;
-    let mut exports = Vec::with_capacity(count);
+    let mut exports = crate::decode_vec(count)?;
+    let mut const_allocation = 0usize;
     for _ in 0..count {
         let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
         let name = cur.string()?;
@@ -1986,7 +2012,7 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
         iface_hash.copy_from_slice(cur.take(32)?);
         let mut def_hash = [0u8; 32];
         def_hash.copy_from_slice(cur.take(32)?);
-        let item = decode_item(&mut cur)?;
+        let item = decode_item(&mut cur, &mut const_allocation)?;
         // The kind and the item must agree, so a later pass never
         // reads a class item as a function.
         let agrees = match (&item, kind) {
@@ -2263,6 +2289,7 @@ fn const_value_text(value: &IfaceConstValue) -> String {
         IfaceConstValue::Bool(value) => value.to_string(),
         IfaceConstValue::Int(value) => value.to_string(),
         IfaceConstValue::Float(bits) => f64::from_bits(*bits).to_string(),
+        IfaceConstValue::Char(value) => format!("{value:?}"),
         IfaceConstValue::String(value) => format!("{value:?}"),
         IfaceConstValue::Bytes(value) => format!("{} byte(s)", value.len()),
         IfaceConstValue::Tuple(items) => {
@@ -2311,4 +2338,29 @@ pub fn dump_interface(interface: &Interface) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_constant_counts_share_one_allocation_budget() {
+        const COUNT: u32 = 100_000;
+        let mut bytes = Vec::new();
+        for _ in 0..MAX_TYPE_DEPTH {
+            bytes.push(6);
+            bytes.extend_from_slice(&COUNT.to_le_bytes());
+        }
+        bytes.resize(bytes.len() + COUNT as usize, 0);
+
+        let mut cursor = crate::Cursor {
+            bytes: &bytes,
+            pos: 0,
+        };
+        let mut allocation = 0usize;
+        let error = decode_const_value(&mut cursor, 0, &mut allocation)
+            .expect_err("nested reservations must reject");
+        assert_eq!(error, DecodeError::BadLength);
+    }
 }

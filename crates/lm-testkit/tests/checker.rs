@@ -51,10 +51,10 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("\"open\n"), "E0002");
     assert_eq!(code_of("\"\\q\"\n"), "E0003");
     assert_eq!(code_of("99999999999999999999\n"), "E0004");
-    assert_eq!(code_of("\"hi #{\"\n"), "E0006");
+    assert_eq!(code_of("\"hi #{\"\n"), "E0002");
     assert_eq!(code_of("\"hi #{ }\"\n"), "E0006");
     assert_eq!(code_of("0x\n"), "E0007");
-    assert_eq!(code_of("'c'\n"), "E0008");
+    assert_eq!(code_of("'cc'\n"), "E0008");
     assert_eq!(code_of("b\"é\"\n"), "E0009");
     assert_eq!(code_of("\"\"\"x\"\"\"\n"), "E0010");
     // Parser rules.

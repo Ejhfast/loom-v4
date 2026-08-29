@@ -72,9 +72,13 @@ importing module must agree with:
   name;
 - the field defaults, the arm names, and the initializer signature
   that the checker reads.
+- the declared type and literal value of a constant.
 
-An import slot pins the InterfaceHash of the export it names. The
-build store uses InterfaceHash to decide which dependents rebuild.
+An import slot pins the InterfaceHash of the export it names.
+
+A constant pin has no runtime definition.
+
+The build store uses InterfaceHash to decide which dependents rebuild.
 
 InterfaceHash contains names by design. A rename moves it.
 

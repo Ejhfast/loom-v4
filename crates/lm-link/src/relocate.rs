@@ -20,8 +20,20 @@ pub(crate) fn relocated_exports(module: &Module, reloc: &Reloc) -> Result<Vec<Ex
     module
         .exports
         .iter()
-        .filter(|export| !export.kind.is_constant())
         .map(|export| {
+            if export.kind.is_constant() {
+                let mut relocated = export.clone();
+                let constant = relocated
+                    .constant
+                    .as_mut()
+                    .ok_or_else(|| fail("a constant export has no value"))?;
+                constant.ty = reloc
+                    .types
+                    .get(constant.ty as usize)
+                    .copied()
+                    .ok_or_else(|| fail("a constant export names a missing relocated type"))?;
+                return Ok(relocated);
+            }
             let def = if export.kind.is_class() {
                 reloc.classes.get(export.def as usize)
             } else if export.kind.is_interface() {
@@ -226,6 +238,11 @@ fn relocate(
     slot_scope: ArtifactId,
 ) -> Result<Reloc, LinkError> {
     let extern_classes = module.extern_classes();
+    for (slot, import) in module.imports.iter().enumerate() {
+        if import.kind == ImportKind::Constant {
+            check_pin(view, import, path, slot)?;
+        }
+    }
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
     let bytes: Vec<u32> = module
         .bytes
@@ -352,7 +369,7 @@ fn relocate(
     // The function map resolves each imported declaration to one
     // provider definition. Each local function gets one arena entry.
     for (idx, import) in module.imports.iter().enumerate() {
-        if import.kind == ImportKind::Class {
+        if matches!(import.kind, ImportKind::Class | ImportKind::Constant) {
             continue;
         }
         let target = resolve_func_import(view, merged, module, import, path, idx, &reloc)?;
@@ -709,6 +726,7 @@ fn resolve_func_import(
                 })
         }
         ImportKind::Class => unreachable!("a class slot never reaches the function map"),
+        ImportKind::Constant => unreachable!("a constant pin has no function target"),
     }?;
     check_function_import_contract(tables, module, import, path, slot, target, reloc)?;
     Ok(target)
@@ -846,15 +864,22 @@ fn register_exports(
     let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
     for export in &module.exports {
-        if export.kind.is_constant() {
-            continue;
-        }
         let key = (path.to_string(), export.name.clone());
         if view.export_hash.contains_key(&key) {
             return Err(fail(format!(
                 "the module `{path}` exports the name `{}` twice",
                 export.name
             )));
+        }
+        let entry = interface.find(&export.name).ok_or_else(|| {
+            fail(format!(
+                "the interface of `{path}` does not describe the export `{}`",
+                export.name
+            ))
+        })?;
+        view.export_hash.insert(key.clone(), entry.iface_hash);
+        if export.kind.is_constant() {
+            continue;
         }
         // The decoder bounds these indices, and a hand-built module
         // reaches the linker without a decoder, so the bound is
@@ -892,13 +917,6 @@ fn register_exports(
                 export.name
             )));
         }
-        let entry = interface.find(&export.name).ok_or_else(|| {
-            fail(format!(
-                "the interface of `{path}` does not describe the export `{}`",
-                export.name
-            ))
-        })?;
-        view.export_hash.insert(key.clone(), entry.iface_hash);
         if export.kind.is_class() {
             view.class_exports
                 .insert(key.clone(), reloc.classes[export.def as usize]);

@@ -601,6 +601,7 @@ pub fn lower_module_with_linkage(
                 crate::hir::HirImportDef::Class(c) => c,
                 crate::hir::HirImportDef::Func(f) => f,
                 crate::hir::HirImportDef::Ctor(c) => new_base + c,
+                crate::hir::HirImportDef::Constant => lm_bytecode::NO_IMPORT_DEF,
             },
             hash: i.hash,
         })
@@ -752,6 +753,7 @@ fn lower_const_value(expr: &HExpr) -> Result<lm_bytecode::ConstValue, String> {
         HExprKind::Bool(value) => lm_bytecode::ConstValue::Bool(*value),
         HExprKind::Int(value) => lm_bytecode::ConstValue::Int(*value),
         HExprKind::Float(bits) => lm_bytecode::ConstValue::Float(*bits),
+        HExprKind::Char(value) => lm_bytecode::ConstValue::Char(*value),
         HExprKind::Str(value) => lm_bytecode::ConstValue::String(value.clone()),
         HExprKind::Bytes(value) => lm_bytecode::ConstValue::Bytes(value.clone()),
         HExprKind::TupleLit(items) => lm_bytecode::ConstValue::Tuple(
@@ -1582,6 +1584,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::Unit => self.emit(Instr::ConstUnit),
             HExprKind::Int(v) => self.emit(Instr::ConstInt(*v)),
             HExprKind::Float(bits) => self.emit(Instr::ConstFloat(*bits)),
+            HExprKind::Char(value) => self.emit(Instr::ConstChar(u32::from(*value))),
             HExprKind::Bool(v) => self.emit(Instr::ConstBool(*v)),
             HExprKind::Str(v) => {
                 let idx = self.m.intern_string(v);
@@ -2734,6 +2737,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     }
                 }
             }
+            HPattern::Char(value) => {
+                if let Some(fail) = fail {
+                    self.emit(Instr::LoadLocal(src));
+                    self.emit(Instr::ConstChar(*value as u32));
+                    self.emit(Instr::Native(lm_bytecode::NativeInstr::EqChar));
+                    self.emit(Instr::JumpIfFalse(fail));
+                }
+            }
             HPattern::Str(v) => {
                 if let Some(fail) = fail {
                     self.emit(Instr::LoadLocal(src));
@@ -2892,6 +2903,7 @@ fn instantiate_inline_expr(
         HExprKind::Unit
         | HExprKind::Int(_)
         | HExprKind::Float(_)
+        | HExprKind::Char(_)
         | HExprKind::Str(_)
         | HExprKind::Bytes(_)
         | HExprKind::Bool(_) => {}
@@ -2963,6 +2975,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         HExprKind::Unit
         | HExprKind::Int(_)
         | HExprKind::Float(_)
+        | HExprKind::Char(_)
         | HExprKind::Str(_)
         | HExprKind::Bytes(_)
         | HExprKind::Bool(_)
@@ -3965,6 +3978,7 @@ fn stack_effect(tables: &impl StackEffectTables, instr: &Instr) -> (usize, usize
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
         | Instr::ConstFloat(_)
+        | Instr::ConstChar(_)
         | Instr::ConstStr(_)
         | Instr::ConstBytes(_)
         | Instr::LoadLocal(_)
@@ -4258,6 +4272,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::ConstBool(v) => format!("ConstBool {v}"),
         Instr::ConstInt(v) => format!("ConstInt {v}"),
         Instr::ConstFloat(bits) => format!("ConstFloat {bits:#018x}"),
+        Instr::ConstChar(value) => format!("ConstChar U+{value:04X}"),
         Instr::ConstStr(idx) => format!("ConstStr s{idx}"),
         Instr::ConstBytes(idx) => format!("ConstBytes b{idx}"),
         Instr::Numeric(instr) => format!("Numeric {instr:?}"),

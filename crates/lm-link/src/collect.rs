@@ -286,6 +286,21 @@ pub(crate) fn collect_link_exports(
                 }
                 roots.push(offsets.func(export.def));
             }
+            ImportKind::Constant => {
+                if !export.kind.is_constant() {
+                    return Err(format!("the export `{export_name}` is not a constant"));
+                }
+                let constant = export
+                    .constant
+                    .as_ref()
+                    .ok_or_else(|| format!("the constant export `{export_name}` has no value"))?;
+                if constant.ty as usize >= module.types.len() {
+                    return Err(format!(
+                        "the constant export `{export_name}` names a type outside the module"
+                    ));
+                }
+                roots.push(offsets.ty(constant.ty));
+            }
         }
     }
     roots.sort_unstable();
@@ -423,6 +438,9 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
         }
     }
     for import in &module.imports {
+        if import.kind == ImportKind::Constant {
+            continue;
+        }
         if matches!(import.kind, ImportKind::Ctor | ImportKind::Method) {
             let class_name = if import.kind == ImportKind::Method {
                 import
@@ -778,6 +796,7 @@ fn instruction_edges(
     match instruction {
         Instr::ConstStr(index) => edges.push(offsets.string(*index)),
         Instr::ConstBytes(index) => edges.push(offsets.bytes(*index)),
+        Instr::ConstChar(_) => role_edges(module, offsets, &["Char"], edges),
         Instr::Call(function) => edges.push(offsets.func(*function)),
         Instr::CallG { func, app } => {
             edges.push(offsets.func(*func));
@@ -1415,6 +1434,15 @@ fn relocate_module(
 }
 
 fn reloc_import(source: &Import, reloc: &Reloc) -> Option<Import> {
+    if source.kind == ImportKind::Constant {
+        return Some(Import {
+            module: source.module.clone(),
+            name: source.name.clone(),
+            kind: source.kind,
+            def: lm_bytecode::NO_IMPORT_DEF,
+            hash: source.hash,
+        });
+    }
     let def = if source.kind == ImportKind::Class {
         reloc.classes[source.def as usize]
     } else {

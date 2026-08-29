@@ -318,6 +318,9 @@ struct PendingFunc {
 /// One imported constant waiting for its declared type.
 struct PendingConst {
     bound: String,
+    module: String,
+    name: String,
+    iface_hash: [u8; 32],
     constant: IfaceConst,
 }
 
@@ -898,6 +901,9 @@ impl<'a> Materializer<'a> {
         self.reserve_type(ctx, &constant.ty, span)?;
         self.pending_consts.push(PendingConst {
             bound: bound.to_string(),
+            module: module.to_string(),
+            name: name.to_string(),
+            iface_hash: entry.iface_hash,
             constant: constant.clone(),
         });
         Ok(())
@@ -1515,24 +1521,32 @@ impl<'a> Materializer<'a> {
                 ));
             }
             let ty = self.resolve_type(ctx, &item.constant.ty, span)?;
-            let mut value = const_value_expr(ctx, &item.constant.value);
-            if !ctx.store.compatible(ty, value.ty) {
-                return Err(error(
-                    span,
+            let value = const_value_expr(ctx, &item.constant.value, ty).ok_or_else(|| {
+                Diagnostic::new(
+                    "E1053",
                     format!(
                         "the imported constant `{}` has a value outside its declared type",
                         item.bound
                     ),
-                ));
-            }
-            value.ty = ty;
-            value.mutable = false;
+                    span,
+                )
+            })?;
             if ctx.constants.insert(item.bound.clone(), value).is_some() {
                 return Err(error(
                     span,
                     format!("the name `{}` has more than one definition", item.bound),
                 ));
             }
+            ctx.constant_pins.insert(
+                item.bound,
+                HirImport {
+                    module: item.module,
+                    name: item.name,
+                    kind: ImportKind::Constant,
+                    def: HirImportDef::Constant,
+                    hash: item.iface_hash,
+                },
+            );
         }
         Ok(own_fields)
     }
@@ -1982,31 +1996,54 @@ impl<'a> Materializer<'a> {
 }
 
 /// Build one imported literal expression without runtime storage.
-fn const_value_expr(ctx: &mut Ctx, value: &IfaceConstValue) -> HExpr {
-    let (ty, kind) = match value {
-        IfaceConstValue::Unit => (lm_types::UNIT, HExprKind::Unit),
-        IfaceConstValue::Bool(value) => (lm_types::BOOL, HExprKind::Bool(*value)),
-        IfaceConstValue::Int(value) => (lm_types::INT, HExprKind::Int(*value)),
-        IfaceConstValue::Float(bits) => (lm_types::FLOAT, HExprKind::Float(*bits)),
-        IfaceConstValue::String(value) => (lm_types::STRING, HExprKind::Str(value.clone())),
-        IfaceConstValue::Bytes(value) => (lm_types::BYTES, HExprKind::Bytes(value.clone())),
+fn const_value_expr(ctx: &mut Ctx, value: &IfaceConstValue, expected: TypeId) -> Option<HExpr> {
+    let kind = match value {
+        IfaceConstValue::Unit if ctx.store.compatible(expected, lm_types::UNIT) => HExprKind::Unit,
+        IfaceConstValue::Bool(value) if ctx.store.compatible(expected, lm_types::BOOL) => {
+            HExprKind::Bool(*value)
+        }
+        IfaceConstValue::Int(value) if ctx.store.compatible(expected, lm_types::INT) => {
+            HExprKind::Int(*value)
+        }
+        IfaceConstValue::Float(bits) if ctx.store.compatible(expected, lm_types::FLOAT) => {
+            HExprKind::Float(*bits)
+        }
+        IfaceConstValue::Char(value) => {
+            let class = ctx.core_types.get("Char").copied()?;
+            let char_ty = ctx.store.intern(Type::Class(ClassId(class)));
+            if !ctx.store.compatible(expected, char_ty) {
+                return None;
+            }
+            HExprKind::Char(*value)
+        }
+        IfaceConstValue::String(value) if ctx.store.compatible(expected, lm_types::STRING) => {
+            HExprKind::Str(value.clone())
+        }
+        IfaceConstValue::Bytes(value) if ctx.store.compatible(expected, lm_types::BYTES) => {
+            HExprKind::Bytes(value.clone())
+        }
         IfaceConstValue::Tuple(items) => {
+            let Type::Tuple(expected_items) = ctx.store.get(expected).clone() else {
+                return None;
+            };
+            if items.len() != expected_items.len() {
+                return None;
+            }
             let values: Vec<HExpr> = items
                 .iter()
-                .map(|item| const_value_expr(ctx, item))
-                .collect();
-            let ty = ctx
-                .store
-                .intern(Type::Tuple(values.iter().map(|item| item.ty).collect()));
-            (ty, HExprKind::TupleLit(values))
+                .zip(expected_items)
+                .map(|(item, expected)| const_value_expr(ctx, item, expected))
+                .collect::<Option<_>>()?;
+            HExprKind::TupleLit(values)
         }
+        _ => return None,
     };
-    HExpr {
+    Some(HExpr {
         flow: Flow::Normal,
-        ty,
+        ty: expected,
         mutable: false,
         kind,
-    }
+    })
 }
 
 /// One core class by its canonical name. An arm carries the family

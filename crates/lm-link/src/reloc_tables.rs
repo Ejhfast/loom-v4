@@ -640,6 +640,7 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::ConstBool(_)
         | Instr::ConstInt(_)
         | Instr::ConstFloat(_)
+        | Instr::ConstChar(_)
         | Instr::Numeric(_)
         | Instr::LoadLocal(_)
         | Instr::StoreLocal(_)

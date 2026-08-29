@@ -113,6 +113,12 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Float(*v),
             }),
+            ExprKind::Char(value) => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: Self::core_class(ctx, "Char"),
+                mutable: true,
+                kind: HExprKind::Char(*value),
+            }),
             ExprKind::Str(v) => Ok(HExpr {
                 flow: Flow::Normal,
                 ty: STRING,
@@ -158,8 +164,8 @@ impl<'o> FnChecker<'o> {
                         },
                     });
                 }
-                if let Some(value) = ctx.constants.get(name) {
-                    return Ok(value.clone());
+                if let Some(value) = ctx.use_constant(name) {
+                    return Ok(value);
                 }
                 if let Some(found) = self.try_ctor_name(ctx, name, expr.span, None)? {
                     return Ok(found);

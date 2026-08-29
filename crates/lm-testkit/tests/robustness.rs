@@ -113,6 +113,27 @@ fn deep_nesting_in_a_method_body_is_rejected_with_a_diagnostic() {
 }
 
 #[test]
+fn deep_interpolation_is_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let mut text = "0".to_string();
+        for _ in 0..200 {
+            text = format!("\"#{{{text}}}\"");
+        }
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
+fn interpolation_keeps_the_parent_parser_depth() {
+    on_small_stack(|| {
+        let inner = nested("(", "1", ")", 40);
+        let string = format!("\"#{{{inner}}}\"");
+        let text = nested("(", &string, ")", 280);
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
 fn moderate_nesting_compiles_and_runs() {
     // The full supported nesting depth needs a standard 8 MiB main
     // stack. Test threads have a smaller default stack, so this case

@@ -16,8 +16,8 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HExpr, Diagnostic> {
         if let Some((qualified, root)) = qualified_expr_name_with_member(recv, name) {
             if self.lookup_slot(root).is_none() {
-                if let Some(value) = ctx.constants.get(&qualified) {
-                    return Ok(value.clone());
+                if let Some(value) = ctx.use_constant(&qualified) {
+                    return Ok(value);
                 }
             }
         }

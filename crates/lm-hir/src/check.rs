@@ -966,6 +966,10 @@ pub(crate) struct Ctx {
     pub(crate) constants: HashMap<String, HExpr>,
     /// Names of local and imported constants in module scope.
     pub(crate) constant_names: HashSet<String>,
+    /// Provider pins for imported constants, keyed by bound name.
+    pub(crate) constant_pins: HashMap<String, HirImport>,
+    /// Exact constant pins already emitted by this module.
+    pub(crate) used_constant_pins: HashSet<(String, String, [u8; 32])>,
     /// Local functions that one expression installs or reifies.
     pub(crate) reified_functions: BTreeSet<u32>,
     /// Local classes that one expression reifies.
@@ -1084,6 +1088,18 @@ impl Ctx {
             }
         }
         lm_bytecode::qualified_key(module_path, &info.name)
+    }
+
+    /// Read one constant and record its exact provider pin.
+    pub(crate) fn use_constant(&mut self, name: &str) -> Option<HExpr> {
+        let value = self.constants.get(name)?.clone();
+        if let Some(pin) = self.constant_pins.get(name).cloned() {
+            let key = (pin.module.clone(), pin.name.clone(), pin.hash);
+            if self.used_constant_pins.insert(key) {
+                self.imports.push(pin);
+            }
+        }
+        Some(value)
     }
 
     /// Render one type with names from its lexical scope.
@@ -2561,6 +2577,11 @@ fn const_literal_expr(ctx: &mut Ctx, expr: &ast::Expr) -> Option<HExpr> {
         ast::ExprKind::Bool(value) => (lm_types::BOOL, HExprKind::Bool(*value)),
         ast::ExprKind::Int(value) => (lm_types::INT, HExprKind::Int(*value)),
         ast::ExprKind::Float(bits) => (lm_types::FLOAT, HExprKind::Float(*bits)),
+        ast::ExprKind::Char(value) => {
+            let class = ctx.core_types.get("Char").copied()?;
+            let ty = ctx.store.intern(Type::Class(ClassId(class)));
+            (ty, HExprKind::Char(*value))
+        }
         ast::ExprKind::Str(value) => (lm_types::STRING, HExprKind::Str(value.clone())),
         ast::ExprKind::Bytes(value) => (lm_types::BYTES, HExprKind::Bytes(value.clone())),
         ast::ExprKind::Neg(value) => match const_literal_expr(ctx, value)? {
@@ -2601,6 +2622,7 @@ fn const_literal_syntax(expr: &ast::Expr) -> bool {
         | ast::ExprKind::Bool(_)
         | ast::ExprKind::Int(_)
         | ast::ExprKind::Float(_)
+        | ast::ExprKind::Char(_)
         | ast::ExprKind::Str(_)
         | ast::ExprKind::Bytes(_) => true,
         ast::ExprKind::Neg(value) => {
@@ -2730,6 +2752,8 @@ fn check_module_with_core_adjustment(
         funcs: Vec::with_capacity(total_funcs),
         constants: HashMap::new(),
         constant_names: HashSet::with_capacity(module.constants.len()),
+        constant_pins: HashMap::new(),
+        used_constant_pins: HashSet::new(),
         reified_functions: BTreeSet::new(),
         reified_classes: BTreeSet::new(),
         core: CoreIds {
@@ -2786,8 +2810,16 @@ fn check_module_with_core_adjustment(
     register_type_names(&mut ctx, module, false)?;
     ctx.import_start = ctx.store.class_count() as u32;
     for constant in &module.constants {
+        let shadows_local_arm = module
+            .enums
+            .iter()
+            .flat_map(|family| &family.arms)
+            .any(|arm| arm.name == constant.name);
+        let shadows_prelude_arm = ctx.prelude && PRELUDE_CTORS.contains(&constant.name.as_str());
         if ctx.user_types.contains_key(&constant.name)
             || ctx.user_interfaces.contains_key(&constant.name)
+            || shadows_local_arm
+            || shadows_prelude_arm
             || !ctx.constant_names.insert(constant.name.clone())
         {
             return Err(Diagnostic::new(

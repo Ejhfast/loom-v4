@@ -111,7 +111,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 46 lowers text padding and Float text conversions.
 /// Version 48 encodes effect rows with ABI operation and group slots.
 /// Version 49 adds compile-time constants to module surfaces.
-pub const COMPILER_ABI_VERSION: u32 = 49;
+/// Version 50 adds pin-only imports and character literals.
+pub const COMPILER_ABI_VERSION: u32 = 50;
 
 /// The refinement work budget of one component.
 ///
@@ -820,6 +821,14 @@ fn preflight(module: &Module, bundle: &lm_abi::AbiBundle) -> Result<(), Identity
     let mut claimed_classes = vec![false; s.classes];
     let mut claimed_funcs = vec![false; s.funcs];
     for (idx, import) in module.imports.iter().enumerate() {
+        if import.kind == crate::ImportKind::Constant {
+            if import.def != crate::NO_IMPORT_DEF {
+                return Err(fail(format!(
+                    "import {idx}: a constant pin has a runtime definition"
+                )));
+            }
+            continue;
+        }
         let claimed = if import.kind.is_func() {
             &mut claimed_funcs
         } else {
@@ -997,6 +1006,14 @@ fn preflight_instr(
         | Instr::RaiseFault
         | Instr::RequestOp
         | Instr::Unreachable => Ok(()),
+        Instr::ConstChar(value) => {
+            if char::from_u32(*value).is_none() {
+                return Err(fail(format!(
+                    "function {fidx}: a character constant is not one Unicode scalar"
+                )));
+            }
+            Ok(())
+        }
         Instr::ConstStr(idx) => {
             if *idx as usize >= strings {
                 return Err(bad("string index"));
@@ -2165,6 +2182,7 @@ impl<'a> Resolver<'a> {
             Instr::ConstStr(..) => 0x03,
             Instr::Numeric(..) => 0xfb,
             Instr::ConstFloat(..) => 0xfc,
+            Instr::ConstChar(..) => 0x08,
             Instr::ConstBytes(..) => 0xfd,
             Instr::LoadLocal(..) => 0x04,
             Instr::StoreLocal(..) => 0x05,
@@ -2418,6 +2436,9 @@ impl<'a> Resolver<'a> {
             }
             Instr::ConstFloat(bits) => {
                 out.extend_from_slice(&bits.to_le_bytes());
+            }
+            Instr::ConstChar(value) => {
+                out.extend_from_slice(&value.to_le_bytes());
             }
             Instr::ConstStr(idx) => {
                 write_str(out, &self.module.strings[*idx as usize]);
@@ -3159,6 +3180,9 @@ pub fn module_identity_with_bundle(
     // identity. It references nothing, so it is a singleton component
     // and every hash schedule reaches it before any user of it.
     for import in &module.imports {
+        if import.kind == crate::ImportKind::Constant {
+            continue;
+        }
         let node = if import.kind.is_func() {
             state.func_hash[import.def as usize] = Some(import.hash);
             s.func_node(import.def)

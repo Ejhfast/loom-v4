@@ -130,6 +130,18 @@ impl<'o> FnChecker<'o> {
                 }
                 Ok(HPattern::Bool(*v))
             }
+            PatternKind::Char(value) => {
+                let char_ty = Self::core_class(ctx, "Char");
+                if scrut_ty != char_ty {
+                    return Err(self.pattern_mismatch(
+                        ctx,
+                        "a character literal",
+                        scrut_ty,
+                        pat.span,
+                    ));
+                }
+                Ok(HPattern::Char(*value))
+            }
             PatternKind::Str(v) => {
                 if scrut_ty != STRING {
                     return Err(self.pattern_mismatch(ctx, "a string literal", scrut_ty, pat.span));
@@ -137,6 +149,16 @@ impl<'o> FnChecker<'o> {
                 Ok(HPattern::Str(v.clone()))
             }
             PatternKind::Name(name) => {
+                if ctx.constant_names.contains(name) {
+                    return Err(Diagnostic::new(
+                        "E1041",
+                        format!(
+                            "`{name}` is a constant and cannot bind a pattern. \
+                             Write its literal value."
+                        ),
+                        pat.span,
+                    ));
+                }
                 // An arm name of the scrutinee enum is a constructor.
                 if let Some((class, class_args)) = class_of(ctx, scrut_ty) {
                     if let Some(family) = ctx.family_of(class) {

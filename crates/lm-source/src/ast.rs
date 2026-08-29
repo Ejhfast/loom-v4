@@ -360,6 +360,7 @@ pub enum PatternKind {
     /// Supported literal patterns.
     Int(i64),
     Bool(bool),
+    Char(char),
     Str(String),
 }
 
@@ -406,6 +407,8 @@ pub enum ExprKind {
     Int(i64),
     /// IEEE 754 binary64 value, stored as raw bits.
     Float(u64),
+    /// One Unicode scalar value.
+    Char(char),
     Str(String),
     Bytes(Vec<u8>),
     /// An interpolated string literal.
@@ -737,6 +740,7 @@ fn dump_pattern(pattern: &Pattern) -> String {
         }
         PatternKind::Int(v) => v.to_string(),
         PatternKind::Bool(v) => v.to_string(),
+        PatternKind::Char(v) => format!("{v:?}"),
         PatternKind::Str(v) => format!("{v:?}"),
     }
 }
@@ -815,6 +819,9 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
         }
         ExprKind::Float(bits) => {
             let _ = writeln!(out, "float {:?}", f64::from_bits(*bits));
+        }
+        ExprKind::Char(value) => {
+            let _ = writeln!(out, "char {value:?}");
         }
         ExprKind::Str(v) => {
             let _ = writeln!(out, "str {v:?}");

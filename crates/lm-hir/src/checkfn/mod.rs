@@ -788,6 +788,7 @@ fn hpat_to_apat(pat: &HPattern) -> APat {
             .unwrap_or(APat::Wild),
         HPattern::Int(v) => APat::Int(*v),
         HPattern::Bool(v) => APat::Bool(*v),
+        HPattern::Char(v) => APat::Char(*v),
         HPattern::Str(v) => APat::Str(v.clone()),
         HPattern::Ctor { class, args, .. } => {
             APat::Ctor(*class, args.iter().map(hpat_to_apat).collect())

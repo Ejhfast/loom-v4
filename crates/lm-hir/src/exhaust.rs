@@ -13,6 +13,7 @@ pub enum APat {
     Wild,
     Int(i64),
     Bool(bool),
+    Char(char),
     Str(String),
     /// A final case class with sub-patterns for its fields.
     Ctor(u32, Vec<APat>),
@@ -81,6 +82,10 @@ pub fn useful(
             let spec = specialize_matrix(matrix, &Head::Bool(*value), 0);
             useful(meta, &spec, &v[1..], budget)
         }
+        APat::Char(value) => {
+            let spec = specialize_matrix(matrix, &Head::Char(*value), 0);
+            useful(meta, &spec, &v[1..], budget)
+        }
         APat::Str(value) => {
             let spec = specialize_matrix(matrix, &Head::Str(value.clone()), 0);
             useful(meta, &spec, &v[1..], budget)
@@ -121,6 +126,7 @@ enum Head {
     Call(u32),
     Int(i64),
     Bool(bool),
+    Char(char),
     Str(String),
 }
 
@@ -129,6 +135,7 @@ fn pattern_head(pat: &APat) -> Option<Head> {
         APat::Wild => None,
         APat::Int(v) => Some(Head::Int(*v)),
         APat::Bool(v) => Some(Head::Bool(*v)),
+        APat::Char(v) => Some(Head::Char(*v)),
         APat::Str(v) => Some(Head::Str(v.clone())),
         APat::Ctor(c, _) => Some(Head::Class(*c)),
         APat::Tuple(args) => Some(Head::Tuple(args.len())),
@@ -164,7 +171,7 @@ fn complete_signature(meta: &impl PatMeta, heads: &[Head]) -> bool {
         // A tuple type has one constructor, so one tuple head
         // covers it.
         Head::Tuple(_) => true,
-        Head::Int(_) | Head::Str(_) | Head::Call(_) => false,
+        Head::Int(_) | Head::Char(_) | Head::Str(_) | Head::Call(_) => false,
     }
 }
 
@@ -177,6 +184,7 @@ fn specialize_row(row: &[APat], head: &Head, arity: usize) -> Option<Vec<APat>> 
         (APat::Call(op), Head::Call(h)) if op == h => Some(Vec::new()),
         (APat::Int(v), Head::Int(h)) if v == h => Some(Vec::new()),
         (APat::Bool(v), Head::Bool(h)) if v == h => Some(Vec::new()),
+        (APat::Char(v), Head::Char(h)) if v == h => Some(Vec::new()),
         (APat::Str(v), Head::Str(h)) if v == h => Some(Vec::new()),
         _ => None,
     };

@@ -4691,6 +4691,9 @@ impl Machine {
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
             Instr::ConstInt(v) => self.push(Value::Int(v))?,
             Instr::ConstFloat(bits) => self.push(Value::Float(canonical_float_bits(bits)))?,
+            Instr::ConstChar(value) => {
+                self.push(Value::Char(char::from_u32(value).ok_or(BAD_STATE)?))?;
+            }
             Instr::ConstStr(idx) => {
                 // Literal strings intern per machine: the first load
                 // allocates one frozen object, and every later load

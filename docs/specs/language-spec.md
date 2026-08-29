@@ -132,6 +132,8 @@ A character literal contains one Unicode scalar value:
 '\u{1f642}'
 ```
 
+Character literals use string escapes. A `\xNN` character escape must stay in the ASCII range.
+
 A string is immutable UTF-8 text:
 
 ```lm
@@ -146,6 +148,10 @@ Plain braces do not start interpolation.
 The marker `#{ expression }` starts one interpolation.
 
 The body uses the normal expression scanner. It permits strings and balanced nested braces.
+
+An interpolation body cannot contain a source comment. The comment would consume the closing brace.
+
+The compiler rejects nested interpolation before scanner recursion exceeds its fixed limit.
 
 The expression must produce a value that implements `Display`.
 
@@ -236,6 +242,8 @@ const STATUS: (Int, String) = (200, "ready")
 Its value contains one literal or one tuple of constant values. A leading minus is valid only on a numeric literal.
 
 The declared type must accept the value. Each use copies the typed literal into the consuming expression.
+
+An imported constant use adds a pin-only import slot. The slot carries no runtime definition.
 
 A constant has no function body, runtime slot, or module state. Its typed value forms part of the exported module surface.
 
@@ -415,6 +423,8 @@ Refinement runs on untrusted input before the verifier, so its work is bounded t
 A **method** takes part in its class identity as the pair of the selector name and the implementing function identity. Selector identity is therefore name-based and independent of any method body. An override with a different body keeps the selector name.
 
 An **InterfaceHash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes. An edit to an exported body therefore moves the StructuralHash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition, and it rejects a slot whose provider interface hash differs from the pin.
+
+For a constant, InterfaceHash covers the declared type and literal value.
 
 A **VerificationHash** is the exact resolved input of the verifier. It covers the semantic region, the operation manifest digest, and every resolved input the verifier reads. It answers one question: did the verifier approve this exact representation? A host that caches a verified admission keys on this value and on no other. The verifier reads resolved slots and structures, never a source name, so a rename moves no VerificationHash.
 

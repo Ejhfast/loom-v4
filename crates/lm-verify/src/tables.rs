@@ -890,6 +890,14 @@ fn verify_imports(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             if import.module.is_empty() || import.name.is_empty() {
                 return Err(ierr("the slot needs a module path and a name".to_string()));
             }
+            if import.kind == lm_bytecode::ImportKind::Constant {
+                if import.def != lm_bytecode::NO_IMPORT_DEF {
+                    return Err(ierr(
+                        "a constant pin must not name a runtime definition".to_string(),
+                    ));
+                }
+                continue;
+            }
             let claimed = if import.kind.is_func() {
                 &mut claimed_funcs
             } else {
@@ -983,51 +991,81 @@ fn verify_bindings(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
     }
 
-    for export in &module.exports {
+    for (index, export) in module.exports.iter().enumerate() {
+        let subject = named_table_subject("export", &export.name, index);
         if export.kind.is_constant() {
             let Some(constant) = &export.constant else {
-                return Err(terr(format!(
-                    "constant export `{}` has no value",
-                    export.name
-                )));
+                return Err(terr(format!("{subject} has no constant value")));
             };
             if export.def != lm_bytecode::NO_CTOR || export.ctor != lm_bytecode::NO_CTOR {
                 return Err(terr(format!(
-                    "constant export `{}` has invalid runtime fields",
-                    export.name
+                    "{subject} has invalid constant runtime fields"
                 )));
             }
             if constant.ty as usize >= module.types.len() {
+                return Err(terr(format!("{subject} names a type outside the module")));
+            }
+            let actual = constant_value_type(ctx, &constant.value, 0)
+                .map_err(|message| terr(format!("{subject} {message}")))?;
+            if !ctx.is_subtype(actual, constant.ty) {
                 return Err(terr(format!(
-                    "constant export `{}` names a type outside the module",
-                    export.name
+                    "{subject} has a constant value outside its declared type"
                 )));
             }
             continue;
         }
         if export.constant.is_some() {
-            return Err(terr(format!(
-                "non-constant export `{}` carries a constant value",
-                export.name
-            )));
+            return Err(terr(format!("{subject} carries a constant value")));
         }
         if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
             continue;
         }
         let Some(class) = module.classes.get(export.def as usize) else {
-            return Err(terr(format!(
-                "export `{}` names a class outside the module",
-                export.name
-            )));
+            return Err(terr(format!("{subject} names a class outside the module")));
         };
         if !constructors[export.def as usize].contains(&export.ctor) {
             return Err(terr(format!(
-                "export `{}` does not use the constructor of `{}`",
-                export.name, class.key
+                "{subject} does not use the constructor of `{}`",
+                class.key
             )));
         }
     }
     Ok(())
+}
+
+/// Derive the verifier type of one literal constant value.
+fn constant_value_type(
+    ctx: &Ctx<'_>,
+    value: &lm_bytecode::ConstValue,
+    depth: usize,
+) -> Result<u32, String> {
+    if depth >= 32 {
+        return Err("has a value deeper than 32 levels".to_string());
+    }
+    Ok(match value {
+        lm_bytecode::ConstValue::Unit => TY_UNIT,
+        lm_bytecode::ConstValue::Bool(_) => TY_BOOL,
+        lm_bytecode::ConstValue::Int(_) => TY_INT,
+        lm_bytecode::ConstValue::Float(bits) => {
+            if f64::from_bits(*bits).is_nan() && *bits != 0x7ff8_0000_0000_0000 {
+                return Err("has a noncanonical NaN".to_string());
+            }
+            ctx.intern(BcType::Float)
+        }
+        lm_bytecode::ConstValue::Char(_) => ctx.plain_inst(ctx.core.char_value, "Char")?,
+        lm_bytecode::ConstValue::String(_) => TY_STR,
+        lm_bytecode::ConstValue::Bytes(_) => ctx.intern(BcType::Bytes),
+        lm_bytecode::ConstValue::Tuple(items) => {
+            if items.is_empty() || items.len() > MAX_TUPLE_ARITY {
+                return Err("has an invalid tuple arity".to_string());
+            }
+            let mut types = Vec::with_capacity(items.len());
+            for item in items {
+                types.push(constant_value_type(ctx, item, depth + 1)?);
+            }
+            ctx.intern(BcType::Tuple(types))
+        }
+    })
 }
 
 /// The class table.

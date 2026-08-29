@@ -62,6 +62,8 @@ pub enum HirImportDef {
     Func(u32),
     /// The construction function of the given class.
     Ctor(u32),
+    /// A compile-time constant has no runtime definition.
+    Constant,
 }
 
 /// One import slot the module needs.
@@ -494,6 +496,7 @@ pub enum HPattern {
     Bind(u32),
     Int(i64),
     Bool(bool),
+    Char(char),
     Str(String),
     /// Reads one native projection of the scrutinee, then matches
     /// `inner` against the result. `ty` types the scratch slot.
@@ -535,6 +538,7 @@ pub enum HExprKind {
     Unit,
     Int(i64),
     Float(u64),
+    Char(char),
     Str(String),
     Bytes(Vec<u8>),
     Bool(bool),
@@ -765,6 +769,7 @@ impl HExpr {
             HExprKind::Unit
             | HExprKind::Int(_)
             | HExprKind::Float(_)
+            | HExprKind::Char(_)
             | HExprKind::Str(_)
             | HExprKind::Bytes(_)
             | HExprKind::Bool(_)

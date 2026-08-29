@@ -296,6 +296,7 @@ fn token_kind(token: &Tok) -> u16 {
     match token {
         Tok::Int(_) => KIND_INT,
         Tok::Float(_) => KIND_FLOAT,
+        Tok::Char(_) => KIND_CHAR,
         Tok::Str(_) | Tok::StrInterp(_) => KIND_STRING,
         Tok::Bytes(_) => KIND_BYTES,
         Tok::Ident(_) => KIND_IDENTIFIER,

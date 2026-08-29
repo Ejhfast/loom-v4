@@ -383,6 +383,8 @@ pub enum Instr {
     ConstInt(i64),
     /// Push one canonical IEEE 754 binary64 constant.
     ConstFloat(u64),
+    /// Push one Unicode scalar value.
+    ConstChar(u32),
     /// Allocate the module string with this pool index and push it.
     ConstStr(u32),
     /// Allocate the module byte literal with this pool index.
@@ -1071,6 +1073,8 @@ pub enum ImportKind {
     Method,
     /// A top-level function. `def` is a function index.
     Func,
+    /// A compile-time constant pin. `def` is `NO_IMPORT_DEF`.
+    Constant,
 }
 
 impl ImportKind {
@@ -1080,23 +1084,26 @@ impl ImportKind {
             ImportKind::Ctor => 1,
             ImportKind::Method => 2,
             ImportKind::Func => 3,
+            ImportKind::Constant => 4,
         }
     }
 
     /// True when the slot declares a function, not a class.
     pub fn is_func(self) -> bool {
-        !matches!(self, ImportKind::Class)
+        matches!(
+            self,
+            ImportKind::Ctor | ImportKind::Method | ImportKind::Func
+        )
     }
 }
 
 /// One named import slot.
 ///
-/// A slot declares a definition that another module provides. The
-/// local definition it names carries the signature only: an imported
-/// function has no blocks, and an imported class has no method
-/// bodies. The pinned hash is the interface hash of the provider
-/// export. The linker resolves the slot by module path and name, and
-/// rejects a provider whose interface hash differs from the pin.
+/// A slot pins an export that another module provides. A definition
+/// slot names one sparse local declaration. A constant slot has no
+/// runtime declaration because the compiler inlines its value. The
+/// linker rejects a provider whose interface hash differs from the
+/// pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
     /// The providing module path, for example `mathlib.matrix`.
@@ -1104,7 +1111,7 @@ pub struct Import {
     /// The exported name, for example `Matrix` or `Matrix.scale`.
     pub name: String,
     pub kind: ImportKind,
-    /// The local class or function index this slot declares.
+    /// The local definition index, or `NO_IMPORT_DEF` for a constant.
     pub def: u32,
     /// The pinned interface hash of the provider export.
     pub hash: [u8; 32],
@@ -1221,6 +1228,9 @@ pub fn ctor_binding_key(class_key: &str) -> String {
 /// The sentinel for an export without a construction function.
 pub const NO_CTOR: u32 = u32::MAX;
 
+/// The sentinel for an import without a runtime definition.
+pub const NO_IMPORT_DEF: u32 = u32::MAX;
+
 /// One recursively literal compile-time value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstValue {
@@ -1228,6 +1238,7 @@ pub enum ConstValue {
     Bool(bool),
     Int(i64),
     Float(u64),
+    Char(char),
     String(String),
     Bytes(Vec<u8>),
     Tuple(Vec<ConstValue>),
@@ -1850,7 +1861,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 57 stores source contracts in the module export section.
 /// Version 58 stores effect rows with ABI operation and group slots.
 /// Version 59 stores typed constants in the module export section.
-pub const VERSION: u16 = 59;
+/// Version 60 adds pin-only imports and character literals.
+pub const VERSION: u16 = 60;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1867,6 +1879,7 @@ const OP_LOAD_LOCAL: u8 = 0x04;
 const OP_STORE_LOCAL: u8 = 0x05;
 const OP_POP: u8 = 0x06;
 const OP_RAISE_FAULT: u8 = 0x07;
+const OP_CONST_CHAR: u8 = 0x08;
 const OP_ADD: u8 = 0x10;
 const OP_SUB: u8 = 0x11;
 const OP_MUL: u8 = 0x12;
@@ -2683,6 +2696,10 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             out.push(OP_CONST_FLOAT);
             out.extend_from_slice(&bits.to_le_bytes());
         }
+        Instr::ConstChar(value) => {
+            out.push(OP_CONST_CHAR);
+            write_u32(out, *value);
+        }
         Instr::ConstStr(idx) => {
             out.push(OP_CONST_STR);
             write_u32(out, *idx);
@@ -3129,6 +3146,8 @@ pub enum DecodeError {
     /// A `mut` flag byte is not 0 or 1.
     BadFlag(u8),
     BadUtf8,
+    /// A character value is not one Unicode scalar value.
+    BadCharacter,
     /// A table length field is larger than the remaining input allows.
     BadLength,
     /// Extra bytes follow the encoded module.
@@ -3174,6 +3193,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadSlot => write!(f, "a slot declaration is invalid"),
             DecodeError::BadFlag(v) => write!(f, "invalid flag byte {v}"),
             DecodeError::BadUtf8 => write!(f, "a string is not valid UTF-8"),
+            DecodeError::BadCharacter => write!(f, "a character is not a Unicode scalar value"),
             DecodeError::BadLength => write!(f, "a length field exceeds the input size"),
             DecodeError::TrailingBytes => write!(f, "extra bytes follow the module"),
             DecodeError::BadSectionTable => {
@@ -3559,6 +3579,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     module.bindings = bindings;
     let export_count = cur.len()?;
     let mut exports = decode_vec(export_count)?;
+    let mut const_allocation = 0usize;
     for _ in 0..export_count {
         let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
         let name = cur.string()?;
@@ -3573,7 +3594,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
                 }
                 Some(Constant {
                     ty,
-                    value: interface::decode_const_value(&mut cur, 0)?,
+                    value: interface::decode_const_value(&mut cur, 0, &mut const_allocation)?,
                 })
             }
             _ => return Err(DecodeError::BadExport),
@@ -3832,6 +3853,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             1 => ImportKind::Ctor,
             2 => ImportKind::Method,
             3 => ImportKind::Func,
+            4 => ImportKind::Constant,
             _ => return Err(DecodeError::BadImport),
         };
         let def = cur.u32()?;
@@ -4001,6 +4023,12 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut claimed_classes = vec![false; classes.len()];
     let mut claimed_funcs = vec![false; funcs.len()];
     for import in &imports {
+        if import.kind == ImportKind::Constant {
+            if import.def != NO_IMPORT_DEF {
+                return Err(DecodeError::BadImport);
+            }
+            continue;
+        }
         let claimed = if import.kind.is_func() {
             &mut claimed_funcs
         } else {
@@ -4146,6 +4174,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_CONST_BOOL => Instr::ConstBool(cur.u8()? != 0),
         OP_CONST_INT => Instr::ConstInt(cur.i64()?),
         OP_CONST_FLOAT => Instr::ConstFloat(cur.u64()?),
+        OP_CONST_CHAR => Instr::ConstChar(cur.u32()?),
         OP_CONST_STR => Instr::ConstStr(cur.u32()?),
         OP_CONST_BYTES => Instr::ConstBytes(cur.u32()?),
         OP_NUMERIC => Instr::Numeric(
@@ -4814,6 +4843,7 @@ mod tests {
             Instr::ConstBool(true),
             Instr::ConstInt(-5),
             Instr::ConstFloat(1.5f64.to_bits()),
+            Instr::ConstChar('猫' as u32),
             Instr::ConstStr(0),
             Instr::ConstBytes(0),
             Instr::LoadLocal(1),

@@ -19,6 +19,8 @@ pub enum Tok {
     Int(i64),
     /// IEEE 754 binary64 literal, stored as raw bits.
     Float(u64),
+    /// One Unicode scalar value.
+    Char(char),
     /// String literal after escape processing, without interpolation.
     Str(String),
     /// String literal with interpolated expressions.
@@ -121,6 +123,7 @@ impl fmt::Display for Tok {
         let text = match self {
             Tok::Int(v) => return write!(f, "integer literal `{v}`"),
             Tok::Float(v) => return write!(f, "float literal `{}`", f64::from_bits(*v)),
+            Tok::Char(v) => return write!(f, "character literal `{v:?}`"),
             Tok::Str(_) | Tok::StrInterp(_) => return write!(f, "string literal"),
             Tok::Bytes(_) => return write!(f, "byte string literal"),
             Tok::Ident(name) => return write!(f, "`{name}`"),
