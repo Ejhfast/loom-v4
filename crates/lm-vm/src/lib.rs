@@ -268,6 +268,10 @@ impl NamespaceRuntime {
         &self.code
     }
 
+    pub(crate) fn table_store(&self) -> std::sync::Arc<CodeTables> {
+        self.tables.clone()
+    }
+
     /// Return the immutable ABI bundle used to verify this module.
     pub fn bundle(&self) -> &std::sync::Arc<lm_abi::AbiBundle> {
         &self.bundle

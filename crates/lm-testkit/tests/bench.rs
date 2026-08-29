@@ -74,14 +74,14 @@ fn time_program(source: &str) -> Duration {
 fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let start = Instant::now();
-        let mut vm = Vm::new_with_engine(arena, namespace, config(), Arc::clone(&engine));
+        let mut vm = Vm::new_with_engine(arena.clone(), namespace, config(), Arc::clone(&engine));
         let outcome = vm.run();
         let elapsed = start.elapsed();
         assert!(
@@ -106,13 +106,13 @@ fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetri
 fn time_program_native_cold(source: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let engine = Arc::new(Engine::new(EngineMode::Native));
         let start = Instant::now();
-        let mut vm = Vm::new_with_engine(arena, namespace, config(), engine);
+        let mut vm = Vm::new_with_engine(arena.clone(), namespace, config(), engine);
         let outcome = vm.run();
         let elapsed = start.elapsed();
         assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
@@ -131,6 +131,8 @@ fn time_program_engine_after_setup(
 ) -> (Duration, EngineMetrics) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let engine = Arc::new(Engine::new(EngineMode::Interpreter));
     let root = lm_vm::TaskKey {
         vm: 0,
@@ -139,11 +141,9 @@ fn time_program_engine_after_setup(
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         engine.set_mode(EngineMode::Interpreter);
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::NullHost),
@@ -175,17 +175,17 @@ fn time_program_engine_after_setup(
 fn time_program_native_cold_after_setup(source: &str, setup: u32) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let root = lm_vm::TaskKey {
         vm: 0,
         generation: 0,
     };
     let mut runs = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let engine = Arc::new(Engine::new(EngineMode::Interpreter));
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::NullHost),
@@ -215,6 +215,8 @@ fn time_program_engine_sliced(
 ) -> (Duration, EngineMetrics) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let root = lm_vm::TaskKey {
@@ -223,11 +225,9 @@ fn time_program_engine_sliced(
     };
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let start = Instant::now();
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::NullHost),
@@ -259,14 +259,14 @@ fn time_program_engine_sliced(
 fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::NullHost),
@@ -306,14 +306,14 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
 fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|error| panic!("the effect benchmark must compile:\n{error}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::RecordingHost::new(1)),
@@ -342,13 +342,13 @@ fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, Engi
 fn time_effect_program_native_cold(source: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|error| panic!("the effect benchmark must compile:\n{error}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
     let mut runs = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
-        let (arena, namespace) =
-            lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
         let engine = Arc::new(Engine::new(EngineMode::Native));
         let mut world = lm_vm::World::new_with_engine(
-            arena,
+            arena.clone(),
             namespace,
             config(),
             Box::new(lm_vm::RecordingHost::new(1)),

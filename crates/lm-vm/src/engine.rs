@@ -165,9 +165,18 @@ impl Engine {
         &self,
         machine: &mut crate::machine::Machine,
         module: &crate::NamespaceRuntime,
+        native: &crate::jit::NativeCodeState,
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
-        self.jit.execute(self, machine, module, instruction_limit)
+        self.jit
+            .execute(self, machine, module, native, instruction_limit)
+    }
+
+    pub(crate) fn native_code(
+        &self,
+        module: &crate::NamespaceRuntime,
+    ) -> crate::jit::NativeCodeState {
+        self.jit.native_code(module)
     }
 
     pub(crate) fn note_native_entry_attempt(&self) {

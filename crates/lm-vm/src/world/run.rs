@@ -99,7 +99,8 @@ impl World {
             None,
             lm_value::TypeEnvId::EMPTY,
         );
-        let execution_code = execution_code(&module, &module);
+        let native_code = engine.native_code(&module);
+        let execution_code = execution_code(&module, &module, &native_code);
         let mut namespaces = vec![None; arena.namespace_count()];
         namespaces[namespace.index()] = Some(loaded.clone());
         let mut namespace_execution = vec![None; arena.namespace_count()];
@@ -110,6 +111,7 @@ impl World {
             root_namespace: namespace,
             namespaces,
             execution_tables: module.clone(),
+            native_code,
             namespace_execution,
             engine,
             machines: vec![root.into()],
@@ -186,16 +188,23 @@ impl World {
         self.namespaces[namespace.index()] = Some(code.clone());
         if tables_extend(code.as_ref(), self.execution_tables.as_ref()) {
             self.execution_tables = code.clone();
+            self.native_code.extend(self.execution_tables.funcs.len());
             for (index, namespace) in self.namespaces.iter().enumerate() {
                 if let Some(namespace) = namespace {
-                    self.namespace_execution[index] =
-                        Some(execution_code(namespace, &self.execution_tables));
+                    self.namespace_execution[index] = Some(execution_code(
+                        namespace,
+                        &self.execution_tables,
+                        &self.native_code,
+                    ));
                 }
             }
         } else {
             debug_assert!(tables_cover(self.execution_tables.as_ref(), code.as_ref()));
-            self.namespace_execution[namespace.index()] =
-                Some(execution_code(&code, &self.execution_tables));
+            self.namespace_execution[namespace.index()] = Some(execution_code(
+                &code,
+                &self.execution_tables,
+                &self.native_code,
+            ));
         }
         Ok(code)
     }
@@ -824,8 +833,6 @@ impl World {
 
     fn execute_inline(&mut self, vm: VmId, limit: u32) -> crate::executor::InlineExecutionReport {
         let execution = self.execution_code_of(vm);
-        let code = execution.module();
-        let dispatch = execution.dispatch();
         let image = self.machines[vm as usize].image;
         let slots = image.and_then(|key| {
             self.vm_images.get(key.image as usize).and_then(|record| {
@@ -835,8 +842,7 @@ impl World {
         });
         crate::executor::execute_inline(
             &mut self.machines[vm as usize],
-            code.as_ref(),
-            dispatch.as_ref(),
+            execution.as_ref(),
             &mut self.envs,
             slots,
             limit,

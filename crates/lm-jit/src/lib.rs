@@ -15,9 +15,8 @@ use std::ffi::c_void;
 use std::fmt;
 use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
-const MAX_COMPILED_REGIONS: usize = 256;
 const MAX_REGION_INSTRUCTIONS: usize = 65_536;
 const MAX_REGION_LOCALS: usize = 1_024;
 const MAX_REGION_STACK: usize = 1_024;
@@ -206,15 +205,9 @@ pub enum Failure {
     BackendUnavailable,
 }
 
-enum CacheEntry {
-    Ready(Arc<CompiledRegion>),
-    Failed(Failure),
-}
-
-/// One host-owned cache of immutable native regions.
+/// One host-owned native compiler.
 #[derive(Default)]
 pub struct JitEngine {
-    regions: RwLock<HashMap<[u8; 32], CacheEntry>>,
     compilation_attempts: AtomicU64,
     compiled_regions: AtomicU64,
     compiled_segments: AtomicU64,
@@ -226,15 +219,7 @@ pub struct JitEngine {
 
 impl fmt::Debug for JitEngine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let regions = self
-            .regions
-            .read()
-            .map(|regions| regions.len())
-            .unwrap_or(0);
-        formatter
-            .debug_struct("JitEngine")
-            .field("regions", &regions)
-            .finish()
+        formatter.debug_struct("JitEngine").finish()
     }
 }
 
@@ -243,7 +228,7 @@ pub struct CompiledRegion {
     plan: RegionPlan,
     entry: NativeFunction,
     // The module owns the executable memory behind `entry`.
-    _module: Mutex<JITModule>,
+    module: Mutex<Option<JITModule>>,
 }
 
 impl fmt::Debug for CompiledRegion {
@@ -252,6 +237,20 @@ impl fmt::Debug for CompiledRegion {
             .debug_struct("CompiledRegion")
             .field("segments", &self.plan.segments.len())
             .finish()
+    }
+}
+
+impl Drop for CompiledRegion {
+    fn drop(&mut self) {
+        let module = self
+            .module
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(module) = module {
+            // SAFETY: The final region owner has released every native call.
+            unsafe { module.free_memory() };
+        }
     }
 }
 
@@ -464,7 +463,6 @@ struct FunctionDefinition<'a> {
 
 /// Immutable verified input for one native compilation.
 pub struct FunctionInput<'a> {
-    hash: [u8; 32],
     root: FunctionDefinition<'a>,
     direct_callees: Vec<FunctionDefinition<'a>>,
 }
@@ -473,7 +471,6 @@ impl<'a> FunctionInput<'a> {
     /// Create one function input from a published function and its source unit.
     #[inline]
     pub fn new(
-        hash: [u8; 32],
         function: u32,
         runtime: &'a Func,
         source: &'a Module,
@@ -481,7 +478,6 @@ impl<'a> FunctionInput<'a> {
         source_function: u32,
     ) -> FunctionInput<'a> {
         FunctionInput {
-            hash,
             root: FunctionDefinition {
                 function,
                 runtime,
@@ -1504,50 +1500,12 @@ fn compute_liveness(segments: &mut [Segment], locals: usize) {
 }
 
 impl JitEngine {
-    /// Return one cached or newly compiled function region.
-    #[inline(always)]
-    pub fn region<'a, F>(&self, hash: [u8; 32], input: F) -> Result<Arc<CompiledRegion>, Failure>
-    where
-        F: FnOnce() -> Result<FunctionInput<'a>, Failure>,
-    {
-        {
-            let regions = self
-                .regions
-                .read()
-                .map_err(|_| Failure::BackendUnavailable)?;
-            if let Some(entry) = regions.get(&hash) {
-                return cached_result(entry);
-            }
-        }
-        self.compile_missing(hash, input)
-    }
-
+    /// Compile one verified function for its current arena layout.
     #[cold]
     #[inline(never)]
-    fn compile_missing<'a, F>(
-        &self,
-        hash: [u8; 32],
-        input: F,
-    ) -> Result<Arc<CompiledRegion>, Failure>
-    where
-        F: FnOnce() -> Result<FunctionInput<'a>, Failure>,
-    {
-        let mut regions = self
-            .regions
-            .write()
-            .map_err(|_| Failure::BackendUnavailable)?;
-        if let Some(entry) = regions.get(&hash) {
-            return cached_result(entry);
-        }
-        if regions.len() >= MAX_COMPILED_REGIONS {
-            return Err(Failure::BackendUnavailable);
-        }
-        let input = input()?;
-        if input.hash != hash {
-            return Err(Failure::BackendUnavailable);
-        }
+    pub fn compile(&self, input: FunctionInput<'_>) -> Result<Arc<CompiledRegion>, Failure> {
         self.compilation_attempts.fetch_add(1, Ordering::Relaxed);
-        let compiled = match compile_region(input) {
+        match compile_region(input) {
             Ok(region) => {
                 self.compiled_regions.fetch_add(1, Ordering::Relaxed);
                 self.compiled_segments
@@ -1560,14 +1518,11 @@ impl JitEngine {
                     .fetch_add(region.plan.allocation_sites as u64, Ordering::Relaxed);
                 self.compiled_effect_sites
                     .fetch_add(region.plan.effect_sites as u64, Ordering::Relaxed);
-                CacheEntry::Ready(Arc::new(region))
+                Ok(Arc::new(region))
             }
-            Err(CompileError::Unsupported(_reason)) => CacheEntry::Failed(Failure::Unsupported),
-            Err(CompileError::Backend) => CacheEntry::Failed(Failure::BackendUnavailable),
-        };
-        let result = cached_result(&compiled);
-        regions.insert(hash, compiled);
-        result
+            Err(CompileError::Unsupported(_reason)) => Err(Failure::Unsupported),
+            Err(CompileError::Backend) => Err(Failure::BackendUnavailable),
+        }
     }
 
     /// Return the current clock-free compilation counters.
@@ -1592,14 +1547,6 @@ impl JitEngine {
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);
         self.compiled_allocation_sites.store(0, Ordering::Relaxed);
         self.compiled_effect_sites.store(0, Ordering::Relaxed);
-    }
-}
-
-#[inline(always)]
-fn cached_result(entry: &CacheEntry) -> Result<Arc<CompiledRegion>, Failure> {
-    match entry {
-        CacheEntry::Ready(region) => Ok(Arc::clone(region)),
-        CacheEntry::Failed(reason) => Err(*reason),
     }
 }
 
@@ -1674,7 +1621,7 @@ fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileErr
     Ok(CompiledRegion {
         plan,
         entry,
-        _module: Mutex::new(module),
+        module: Mutex::new(Some(module)),
     })
 }
 
@@ -3105,18 +3052,8 @@ mod tests {
         let bundle = lm_abi::standard_bundle();
         lm_verify::verify_module_with_bundle(&module, &bundle).expect("the field load verifies");
         let engine = JitEngine::default();
-        let hash = [9; 32];
         let region = engine
-            .region(hash, || {
-                Ok(FunctionInput::new(
-                    hash,
-                    0,
-                    &module.funcs[0],
-                    &module,
-                    &bundle,
-                    0,
-                ))
-            })
+            .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
             .expect("the field load compiles");
         let reference = u64::from(3u32) | (u64::from(7u32) << 32);
         let mut locals = [reference];
@@ -3138,18 +3075,8 @@ mod tests {
         let module = field_module();
         let bundle = lm_abi::standard_bundle();
         let engine = JitEngine::default();
-        let hash = [10; 32];
         let region = engine
-            .region(hash, || {
-                Ok(FunctionInput::new(
-                    hash,
-                    0,
-                    &module.funcs[0],
-                    &module,
-                    &bundle,
-                    0,
-                ))
-            })
+            .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
             .expect("the field load compiles");
         let reference = u64::from(3u32) | (u64::from(7u32) << 32);
         let mut locals = [reference];

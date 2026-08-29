@@ -8,6 +8,79 @@ use lm_jit::{
     LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, ObjRef, TypeEnvId, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+const MAX_COMPILED_REGIONS: usize = 256;
+
+#[derive(Clone)]
+pub(crate) struct NativeCodeState(Arc<NativeCodeRevision>);
+
+#[derive(Clone)]
+struct NativeCodeRevision {
+    slots: lm_bytecode::CodeTable<Arc<NativeSlot>>,
+    compiled: Arc<AtomicUsize>,
+}
+
+impl NativeCodeState {
+    pub(crate) fn new(functions: usize) -> NativeCodeState {
+        let mut revision = NativeCodeRevision {
+            slots: lm_bytecode::CodeTable::default(),
+            compiled: Arc::new(AtomicUsize::new(0)),
+        };
+        while revision.slots.len() < functions {
+            revision.slots.push(Arc::new(NativeSlot::default()));
+        }
+        NativeCodeState(Arc::new(revision))
+    }
+
+    pub(crate) fn extend(&mut self, functions: usize) {
+        if self.0.slots.len() >= functions {
+            return;
+        }
+        let mut revision = self.0.as_ref().clone();
+        while revision.slots.len() < functions {
+            revision.slots.push(Arc::new(NativeSlot::default()));
+        }
+        self.0 = Arc::new(revision);
+    }
+
+    fn slot(&self, function: u32) -> Option<&Arc<NativeSlot>> {
+        self.0.slots.get(function as usize)
+    }
+}
+
+#[derive(Default)]
+struct NativeSlot {
+    verdict: OnceLock<Result<Arc<lm_jit::CompiledRegion>, Failure>>,
+}
+
+impl NativeSlot {
+    fn region<'a, F>(
+        &self,
+        compiler: &lm_jit::JitEngine,
+        compiled: &AtomicUsize,
+        input: F,
+    ) -> Result<Arc<lm_jit::CompiledRegion>, Failure>
+    where
+        F: FnOnce() -> Result<FunctionInput<'a>, Failure>,
+    {
+        self.verdict
+            .get_or_init(|| {
+                compiled
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        (count < MAX_COMPILED_REGIONS).then_some(count + 1)
+                    })
+                    .map_err(|_| Failure::BackendUnavailable)?;
+                let result = input().and_then(|input| compiler.compile(input));
+                if result.is_err() {
+                    compiled.fetch_sub(1, Ordering::Relaxed);
+                }
+                result
+            })
+            .clone()
+    }
+}
 
 pub(crate) enum NativeAttempt {
     Fallback,
@@ -30,12 +103,47 @@ pub(crate) enum NativeAttempt {
 }
 
 /// One host-owned native compiler and immutable region cache.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct JitEngine {
     compiler: lm_jit::JitEngine,
+    layouts:
+        Mutex<std::collections::HashMap<usize, (Weak<lm_bytecode::CodeTables>, NativeCodeState)>>,
+}
+
+impl std::fmt::Debug for JitEngine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let layouts = self.layouts.lock().map(|items| items.len()).unwrap_or(0);
+        formatter
+            .debug_struct("JitEngine")
+            .field("layouts", &layouts)
+            .finish()
+    }
 }
 
 impl JitEngine {
+    pub(crate) fn native_code(&self, module: &NamespaceRuntime) -> NativeCodeState {
+        let tables = module.table_store();
+        let key = Arc::as_ptr(&tables) as usize;
+        let mut layouts = self
+            .layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((known_tables, known_state)) = layouts.get(&key) {
+            if known_tables
+                .upgrade()
+                .is_some_and(|known| Arc::ptr_eq(&known, &tables))
+            {
+                return known_state.clone();
+            }
+        }
+        if layouts.len() >= 256 {
+            layouts.retain(|_, (tables, _)| tables.strong_count() != 0);
+        }
+        let state = NativeCodeState::new(module.funcs.len());
+        layouts.insert(key, (Arc::downgrade(&tables), state.clone()));
+        state
+    }
+
     pub(crate) fn metrics(&self) -> lm_jit::CompilerMetrics {
         self.compiler.metrics()
     }
@@ -49,6 +157,7 @@ impl JitEngine {
         engine: &Engine,
         machine: &mut Machine,
         module: &NamespaceRuntime,
+        native: &NativeCodeState,
         instruction_limit: u32,
     ) -> NativeAttempt {
         engine.note_native_entry_attempt();
@@ -57,16 +166,11 @@ impl JitEngine {
             return NativeAttempt::Fallback;
         };
         let function = frame.func;
-        let Some(hash) = module
-            .code_namespace()
-            .func_hashes()
-            .get(function as usize)
-            .copied()
-        else {
+        let Some(slot) = native.slot(function) else {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
-        let region = match self.compiler.region(hash, || {
+        let region = match slot.region(&self.compiler, &native.0.compiled, || {
             let runtime = module
                 .funcs
                 .get(function as usize)
@@ -75,14 +179,8 @@ impl JitEngine {
                 .code_namespace()
                 .function_unit(function)
                 .map_err(|_| Failure::Unsupported)?;
-            let mut input = FunctionInput::new(
-                hash,
-                function,
-                runtime,
-                unit.module(),
-                module.bundle(),
-                local,
-            );
+            let mut input =
+                FunctionInput::new(function, runtime, unit.module(), module.bundle(), local);
             let mut callees = Vec::new();
             for instruction in runtime.blocks.iter().flatten() {
                 if let lm_bytecode::Instr::Call(callee) = instruction {
@@ -262,16 +360,29 @@ impl JitEngine {
             Ok(exit) => exit,
             Err(_) => {
                 engine.note_backend_unavailable();
-                return NativeAttempt::Fallback;
+                engine.note_native_fault_exit();
+                return malformed_native_execution(machine, original_fuel, 0, instruction_limit);
             }
         };
         let Ok(retired) = u32::try_from(exit.retired()) else {
             engine.note_backend_unavailable();
-            return NativeAttempt::Fallback;
+            engine.note_native_fault_exit();
+            return malformed_native_execution(
+                machine,
+                original_fuel,
+                exit.retired(),
+                instruction_limit,
+            );
         };
         if retired > instruction_limit || exit.retired() > original_fuel {
             engine.note_backend_unavailable();
-            return NativeAttempt::Fallback;
+            engine.note_native_fault_exit();
+            return malformed_native_execution(
+                machine,
+                original_fuel,
+                exit.retired(),
+                instruction_limit,
+            );
         }
         machine.vm.fuel -= exit.retired();
         for (slot, state) in local_states.iter().copied().enumerate() {
@@ -399,6 +510,19 @@ fn malformed_native_exit(retired: u32) -> NativeAttempt {
         outcome: Err(ExecError::Fault(crate::FaultCode::MalformedState)),
         retired,
     }
+}
+
+fn malformed_native_execution(
+    machine: &mut Machine,
+    original_fuel: u64,
+    reported: u64,
+    instruction_limit: u32,
+) -> NativeAttempt {
+    let retired = reported
+        .min(original_fuel)
+        .min(u64::from(instruction_limit)) as u32;
+    machine.vm.fuel = original_fuel - u64::from(retired);
+    malformed_native_exit(retired)
 }
 
 fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {

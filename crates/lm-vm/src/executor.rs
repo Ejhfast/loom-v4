@@ -106,22 +106,33 @@ impl Drop for ExecutionFuelClaim {
 pub(crate) struct ExecutionCode {
     module: Arc<NamespaceRuntime>,
     dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
+    native: crate::jit::NativeCodeState,
 }
 
 impl ExecutionCode {
+    #[cfg(test)]
     pub(crate) fn new(
         module: Arc<NamespaceRuntime>,
         dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
     ) -> ExecutionCode {
-        ExecutionCode { module, dispatch }
+        let native = crate::jit::NativeCodeState::new(module.funcs.len());
+        ExecutionCode {
+            module,
+            dispatch,
+            native,
+        }
     }
 
-    pub(crate) fn module(&self) -> &Arc<NamespaceRuntime> {
-        &self.module
-    }
-
-    pub(crate) fn dispatch(&self) -> &Arc<lm_bytecode::CodeTable<DispatchRow>> {
-        &self.dispatch
+    pub(crate) fn with_native(
+        module: Arc<NamespaceRuntime>,
+        dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
+        native: crate::jit::NativeCodeState,
+    ) -> ExecutionCode {
+        ExecutionCode {
+            module,
+            dispatch,
+            native,
+        }
     }
 }
 
@@ -432,6 +443,7 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
             EngineTurnContext {
                 module: code.module.as_ref(),
                 dispatch: code.dispatch.as_ref(),
+                native: &code.native,
                 envs,
                 slots,
                 restricted_world: *restricted_world,
@@ -472,8 +484,7 @@ pub fn execute(mut lease: ExecutionLease) -> ExecutionReport {
 /// Execute one deterministic slice through borrowed state.
 pub(crate) fn execute_inline(
     machine: &mut Machine,
-    module: &NamespaceRuntime,
-    dispatch: &lm_bytecode::CodeTable<DispatchRow>,
+    code: &ExecutionCode,
     envs: &mut TypeEnvs,
     slots: Option<&[ImageSlotTarget]>,
     instruction_limit: u32,
@@ -483,8 +494,9 @@ pub(crate) fn execute_inline(
         machine,
         instruction_limit,
         EngineTurnContext {
-            module,
-            dispatch,
+            module: code.module.as_ref(),
+            dispatch: code.dispatch.as_ref(),
+            native: &code.native,
             envs,
             slots,
             restricted_world: false,
@@ -506,6 +518,7 @@ pub(crate) fn execute_inline(
 struct EngineTurnContext<'a> {
     module: &'a NamespaceRuntime,
     dispatch: &'a lm_bytecode::CodeTable<DispatchRow>,
+    native: &'a crate::jit::NativeCodeState,
     envs: &'a mut TypeEnvs,
     slots: Option<&'a [ImageSlotTarget]>,
     restricted_world: bool,
@@ -528,7 +541,7 @@ fn run_engine_turn(
         let remaining = instruction_limit - retired_total;
         match context
             .engine
-            .execute_native(machine, context.module, remaining)
+            .execute_native(machine, context.module, context.native, remaining)
         {
             crate::jit::NativeAttempt::Complete { outcome, retired } => {
                 retired_total += retired;

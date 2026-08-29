@@ -50,10 +50,15 @@ const RECORD_RECLAMATION_FLOOR: usize = 1_024;
 fn execution_code(
     namespace: &Arc<NamespaceRuntime>,
     tables: &Arc<NamespaceRuntime>,
+    native: &crate::jit::NativeCodeState,
 ) -> Arc<crate::executor::ExecutionCode> {
     let view = Arc::new(namespace.with_execution_tables(tables));
     let dispatch = view.dispatch_store();
-    Arc::new(crate::executor::ExecutionCode::new(view, dispatch))
+    Arc::new(crate::executor::ExecutionCode::with_native(
+        view,
+        dispatch,
+        native.clone(),
+    ))
 }
 
 /// Test whether one runtime contains every table entry of another runtime.
@@ -725,6 +730,7 @@ pub struct World {
     pub(crate) namespaces: Vec<Option<std::sync::Arc<NamespaceRuntime>>>,
     /// The newest arena table prefix available for execution.
     execution_tables: std::sync::Arc<NamespaceRuntime>,
+    native_code: crate::jit::NativeCodeState,
     namespace_execution: Vec<Option<std::sync::Arc<crate::executor::ExecutionCode>>>,
     /// The host-selected execution engine and its counters.
     engine: std::sync::Arc<crate::Engine>,
@@ -1086,7 +1092,7 @@ mod tests {
         let mut code = world.code_for_namespace(namespace).as_ref().clone();
         edit(&mut code.core);
         let code = Arc::new(code);
-        let execution = execution_code(&code, &world.execution_tables);
+        let execution = execution_code(&code, &world.execution_tables, &world.native_code);
         world.namespaces[namespace.index()] = Some(code);
         world.namespace_execution[namespace.index()] = Some(execution);
     }

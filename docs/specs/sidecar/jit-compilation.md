@@ -1,6 +1,8 @@
 # Guarded JIT compilation
 
-Status: Stages 0 through 9 are implemented for the native execution experiment.
+Status: Stages 0 through 9 implement the native mechanism.
+
+Stages 10 and later expand performance across complete programs.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -400,13 +402,17 @@ Generated code returns explicit fault records to Rust.
 
 ## 15. Compiled-code ownership
 
-One host engine owns the compiled-region cache.
+One host engine owns native compilers and exact arena-layout caches.
 
 Each compiled region owns one finalized Cranelift `JITModule`.
 
+The final region drop releases its executable memory.
+
 The implementation pins Cranelift 0.129.2 for Rust 1.91 compatibility.
 
-The cache serializes compilation for one missing region.
+Each dense function slot stores one immutable compilation verdict.
+
+Compilation serializes only concurrent requests for the same function slot.
 
 Published native functions are immutable.
 
@@ -414,9 +420,13 @@ Workers can call published functions concurrently.
 
 The engine owner outlives every published function pointer.
 
-The cache key contains the exact function version and backend configuration.
+One cache prefix belongs to one exact arena table prefix.
 
-The cache never keys by source name alone.
+Equal arena clones can share this prefix.
+
+Divergent arena extensions receive separate appended slots.
+
+A semantic function hash never identifies arena-relative operands.
 
 The first cache limits region count, instructions, locals, and operand depth.
 
@@ -923,3 +933,35 @@ Tests cover direct operations, first-class operations, deferred replies, denied 
 Every test compares complete live-state dumps and proc traces where those values apply.
 
 The retained scalar, call, field, allocation, sliced, and scheduled rows remain within prior variation.
+
+## 30. Stage 10 cache correction
+
+The first cache keyed regions only by semantic function hash.
+
+Generated allocation code also embeds arena-relative class indices.
+
+Two arenas could therefore reuse incompatible native code.
+
+The corrected cache uses direct function slots under one exact arena prefix.
+
+The hot lookup performs no semantic hash or hash-table probe.
+
+Failed compilation stores one stable verdict without consuming compiled-region capacity.
+
+Concurrent compilation holds only the requested slot initializer.
+
+The engine retains shared arena prefixes while their source tables remain live.
+
+Each dropped region calls Cranelift's executable-memory release operation.
+
+Invalid retired counts now produce `MalformedState` without replaying native heap changes.
+
+A regression test runs equal function identities under two different class layouts.
+
+Both runs now construct their declared class.
+
+The retained warm integer loop used 0.708 milliseconds.
+
+The scheduled integer loop used 4.614 milliseconds.
+
+Unsupported `Auto` execution used 1.004 times interpreter duration.

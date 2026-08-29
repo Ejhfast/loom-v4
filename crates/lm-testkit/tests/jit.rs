@@ -61,6 +61,16 @@ fn run_artifact_with_config(
     (outcome, engine.metrics(), dump)
 }
 
+fn run_with_shared_engine(source: &str, engine: Arc<Engine>) -> String {
+    let artifact =
+        lm_testkit::compile_text("jit-cache.lm", source).expect("the cache case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the cache case publishes");
+    let mut vm = Vm::new_with_engine(arena, namespace, VmConfig::default(), engine);
+    let outcome = vm.run();
+    vm.show_outcome(&outcome)
+}
+
 fn run_effect(
     artifact: &lm_bytecode::artifact::Artifact,
     mode: EngineMode,
@@ -99,6 +109,27 @@ fn scalar_loop_matches_the_interpreter() {
     assert_eq!(metrics.compiled_regions, 1);
     assert!(metrics.native_retired_instructions > 100_000);
     assert_eq!(metrics.guard_failures, 0);
+}
+
+#[test]
+fn native_cache_is_scoped_to_one_arena_layout() {
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let first = concat!("class P\nend\n", "def make(): P\n  P()\nend\n", "make()\n",);
+    let shifted = concat!(
+        "class Q\nend\n",
+        "class P\nend\n",
+        "def make(): P\n  P()\nend\n",
+        "make()\n",
+    );
+    assert_eq!(
+        run_with_shared_engine(first, Arc::clone(&engine)),
+        "Done(P{})"
+    );
+    assert_eq!(
+        run_with_shared_engine(shifted, Arc::clone(&engine)),
+        "Done(P{})"
+    );
+    assert_eq!(engine.metrics().compiled_regions, 4);
 }
 
 #[test]
