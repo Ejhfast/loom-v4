@@ -33,6 +33,7 @@ const EXIT_UNINITIALIZED_FIELD: u32 = 8;
 const EXIT_CALL: u32 = 9;
 const EXIT_ALLOCATION: u32 = 10;
 const EXIT_HEAP_LIMIT: u32 = 11;
+const EXIT_EFFECT: u32 = 12;
 
 const RUNTIME_LOAD_FIELD: u32 = 1;
 const RUNTIME_ALLOC_INSTANCE: u32 = 2;
@@ -90,6 +91,7 @@ pub enum ValueRepr {
     Int = 2,
     Float = 3,
     Object = 4,
+    Operation = 5,
 }
 
 impl ValueRepr {
@@ -100,6 +102,7 @@ impl ValueRepr {
             2 => Some(ValueRepr::Int),
             3 => Some(ValueRepr::Float),
             4 => Some(ValueRepr::Object),
+            5 => Some(ValueRepr::Operation),
             _ => None,
         }
     }
@@ -218,6 +221,7 @@ pub struct JitEngine {
     compiled_call_sites: AtomicU64,
     compiled_heap_read_sites: AtomicU64,
     compiled_allocation_sites: AtomicU64,
+    compiled_effect_sites: AtomicU64,
 }
 
 impl fmt::Debug for JitEngine {
@@ -324,9 +328,12 @@ impl CompiledRegion {
             .find(|segment| {
                 segment.block == block
                     && segment.end.checked_sub(1) == Some(instruction)
-                    && matches!(segment.exit, SegmentExit::Call { .. })
+                    && matches!(
+                        segment.exit,
+                        SegmentExit::Call { .. } | SegmentExit::Effect { .. }
+                    )
             })
-            .map(|segment| segment.call_stack.as_slice())
+            .map(|segment| segment.boundary_stack.as_slice())
             .or_else(|| {
                 self.plan.segments.iter().find_map(|segment| {
                     segment
@@ -406,6 +413,7 @@ impl CompiledRegion {
             EXIT_CALL => ExitKind::Call,
             EXIT_ALLOCATION => ExitKind::Allocation,
             EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
+            EXIT_EFFECT => ExitKind::Effect,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -429,6 +437,7 @@ pub enum ScalarKind {
     Float,
     /// One heap object with a source-unit type index.
     Object(u32),
+    Operation,
 }
 
 impl ScalarKind {
@@ -439,6 +448,7 @@ impl ScalarKind {
             ScalarKind::Int => ValueRepr::Int,
             ScalarKind::Float => ValueRepr::Float,
             ScalarKind::Object(_) => ValueRepr::Object,
+            ScalarKind::Operation => ValueRepr::Operation,
         }
     }
 }
@@ -530,6 +540,7 @@ pub struct CompilerMetrics {
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,
     pub compiled_allocation_sites: u64,
+    pub compiled_effect_sites: u64,
 }
 
 /// One supported native entry and its required scalar values.
@@ -572,6 +583,7 @@ pub enum ExitKind {
     Call,
     Allocation,
     HeapLimit,
+    Effect,
     Interpreter,
 }
 
@@ -647,6 +659,9 @@ enum SegmentExit {
     Allocation {
         fallthrough_ip: u32,
     },
+    Effect {
+        fallthrough_ip: u32,
+    },
     Return,
 }
 
@@ -663,7 +678,7 @@ struct Segment {
     live_in: Vec<bool>,
     entry_stack: Vec<ScalarKind>,
     exit_stack: Vec<ScalarKind>,
-    call_stack: Vec<ScalarKind>,
+    boundary_stack: Vec<ScalarKind>,
     field_results: Vec<(u32, ScalarKind)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -700,6 +715,7 @@ struct RegionPlan {
     inline_call_sites: usize,
     heap_read_sites: usize,
     allocation_sites: usize,
+    effect_sites: usize,
 }
 
 struct SegmentAnalysis {
@@ -708,7 +724,7 @@ struct SegmentAnalysis {
     exit_stack: Vec<ScalarKind>,
     max_stack: usize,
     max_stack_values: usize,
-    call_stack: Vec<ScalarKind>,
+    boundary_stack: Vec<ScalarKind>,
     field_results: Vec<(u32, ScalarKind)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -794,6 +810,7 @@ impl RegionPlan {
         let mut inline_call_sites = 0;
         let mut heap_read_sites = 0;
         let mut allocation_sites = 0;
+        let mut effect_sites = 0;
         let mut active_block = u32::MAX;
         let mut block_stack = Vec::new();
         let analysis_context = SegmentAnalysisContext {
@@ -834,7 +851,7 @@ impl RegionPlan {
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
             segment.exit_stack = analysis.exit_stack.clone();
-            segment.call_stack = analysis.call_stack;
+            segment.boundary_stack = analysis.boundary_stack;
             segment.field_results = analysis.field_results;
             heap_read_sites += segment.field_results.len();
             segment.replay_stacks = analysis.replay_stacks;
@@ -853,6 +870,10 @@ impl RegionPlan {
                 } else {
                     segment.cost = segment.cost.saturating_sub(1);
                 }
+            }
+            if matches!(segment.exit, SegmentExit::Effect { .. }) {
+                segment.cost = segment.cost.saturating_sub(1);
+                effect_sites += 1;
             }
             block_stack = analysis.exit_stack;
             max_stack = max_stack.max(analysis.max_stack);
@@ -909,6 +930,7 @@ impl RegionPlan {
             inline_call_sites,
             heap_read_sites,
             allocation_sites,
+            effect_sites,
         })
     }
 
@@ -1034,7 +1056,7 @@ fn inline_function_plan(
         live_in: Vec::new(),
         entry_stack: Vec::new(),
         exit_stack: Vec::new(),
-        call_stack: Vec::new(),
+        boundary_stack: Vec::new(),
         field_results: Vec::new(),
         replay_stacks: Vec::new(),
         fault_stacks: Vec::new(),
@@ -1068,6 +1090,7 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
         Some(BcType::Class(_)) => Ok(ScalarKind::Object(ty)),
+        Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
         _ => Err(UnsupportedReason::NonScalarType),
     }
 }
@@ -1098,6 +1121,9 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                 Instr::New(_) => Some(SegmentExit::Allocation {
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
+                Instr::Perform { .. } | Instr::PerformValue { .. } => Some(SegmentExit::Effect {
+                    fallthrough_ip: instruction_index as u32 + 1,
+                }),
                 Instr::Return => Some(SegmentExit::Return),
                 _ => None,
             };
@@ -1114,7 +1140,7 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                 live_in: Vec::new(),
                 entry_stack: Vec::new(),
                 exit_stack: Vec::new(),
-                call_stack: Vec::new(),
+                boundary_stack: Vec::new(),
                 field_results: Vec::new(),
                 replay_stacks: Vec::new(),
                 fault_stacks: Vec::new(),
@@ -1150,6 +1176,9 @@ fn resolve_successors(
             SegmentExit::Allocation { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
+            SegmentExit::Effect { fallthrough_ip } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Return => Vec::new(),
         };
     }
@@ -1176,7 +1205,7 @@ fn analyze_segment(
     let mut stack = entry_stack.to_vec();
     let mut max_stack = stack.len();
     let mut max_stack_values = stack.len();
-    let mut call_stack = Vec::new();
+    let mut boundary_stack = Vec::new();
     let mut field_results = Vec::new();
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
@@ -1200,6 +1229,7 @@ fn analyze_segment(
             Instr::ConstBool(_) => stack.push(ScalarKind::Bool),
             Instr::ConstInt(_) => stack.push(ScalarKind::Int),
             Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
+            Instr::OpConst(_) => stack.push(ScalarKind::Operation),
             Instr::LoadLocal(slot) => {
                 let at = slot as usize;
                 let Some(kind) = context.locals.get(at).copied() else {
@@ -1301,13 +1331,13 @@ fn analyze_segment(
                     .calls
                     .get(&target)
                     .ok_or(UnsupportedReason::MissingSource)?;
-                call_stack = stack.clone();
+                boundary_stack = stack.clone();
                 for parameter in contract.params.iter().rev().copied() {
                     expect(&mut stack, parameter)?;
                 }
                 if let Some(inline) = &contract.inline {
                     let prefix = stack.len();
-                    let push_limit = call_stack
+                    let push_limit = boundary_stack
                         .len()
                         .checked_add(inline.local_kinds.len())
                         .ok_or(UnsupportedReason::RegionLimit)?;
@@ -1318,6 +1348,39 @@ fn analyze_segment(
                     max_stack_values = max_stack_values.max(push_limit).max(body_limit);
                 }
                 stack.push(contract.result);
+            }
+            Instr::Perform { argc, .. } => {
+                let Instr::Perform {
+                    reply_ty: source_reply,
+                    ..
+                } = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                boundary_stack = stack.clone();
+                let arguments = usize::try_from(argc)
+                    .ok()
+                    .and_then(|count| stack.len().checked_sub(count))
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                stack.truncate(arguments);
+                stack.push(scalar_kind(context.module, source_reply)?);
+            }
+            Instr::PerformValue { argc, .. } => {
+                let Instr::PerformValue {
+                    reply_ty: source_reply,
+                    ..
+                } = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                boundary_stack = stack.clone();
+                let operation = usize::try_from(argc)
+                    .ok()
+                    .and_then(|count| stack.len().checked_sub(count))
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                stack.truncate(operation);
+                expect(&mut stack, ScalarKind::Operation)?;
+                stack.push(scalar_kind(context.module, source_reply)?);
             }
             Instr::Numeric(operation) if float_operation(operation, &mut stack)? => {}
             Instr::Jump(_) => {}
@@ -1341,7 +1404,7 @@ fn analyze_segment(
         exit_stack: stack,
         max_stack,
         max_stack_values,
-        call_stack,
+        boundary_stack,
         field_results,
         replay_stacks,
         fault_stacks,
@@ -1495,6 +1558,8 @@ impl JitEngine {
                     .fetch_add(region.plan.heap_read_sites as u64, Ordering::Relaxed);
                 self.compiled_allocation_sites
                     .fetch_add(region.plan.allocation_sites as u64, Ordering::Relaxed);
+                self.compiled_effect_sites
+                    .fetch_add(region.plan.effect_sites as u64, Ordering::Relaxed);
                 CacheEntry::Ready(Arc::new(region))
             }
             Err(CompileError::Unsupported(_reason)) => CacheEntry::Failed(Failure::Unsupported),
@@ -1514,6 +1579,7 @@ impl JitEngine {
             compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
             compiled_heap_read_sites: self.compiled_heap_read_sites.load(Ordering::Relaxed),
             compiled_allocation_sites: self.compiled_allocation_sites.load(Ordering::Relaxed),
+            compiled_effect_sites: self.compiled_effect_sites.load(Ordering::Relaxed),
         }
     }
 
@@ -1525,6 +1591,7 @@ impl JitEngine {
         self.compiled_call_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);
         self.compiled_allocation_sites.store(0, Ordering::Relaxed);
+        self.compiled_effect_sites.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1911,6 +1978,9 @@ fn emit_segment(
                     .iconst(types::I64, canonical_float_bits(bits) as i64);
                 stack.push(value);
             }
+            Instr::OpConst(operation) => {
+                stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
+            }
             Instr::LoadLocal(slot) => {
                 stack.push(builder.use_var(values.locals[slot as usize]));
             }
@@ -2062,6 +2132,8 @@ fn emit_segment(
                 emit_float_instruction(builder, &mut stack, operation)?;
             }
             Instr::Call(_)
+            | Instr::Perform { .. }
+            | Instr::PerformValue { .. }
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
@@ -2083,7 +2155,7 @@ fn emit_segment(
                 .ok_or(CompileError::Unsupported(UnsupportedReason::MissingSource))?;
             let deopt_stack = stack.clone();
             let caller_kind_count = segment
-                .call_stack
+                .boundary_stack
                 .len()
                 .checked_sub(inline.params.len())
                 .ok_or(CompileError::Backend)?;
@@ -2095,7 +2167,7 @@ fn emit_segment(
                     definition,
                     plan: inline,
                     root_local_kinds: &plan.local_kinds,
-                    caller_stack_kinds: &segment.call_stack[..caller_kind_count],
+                    caller_stack_kinds: &segment.boundary_stack[..caller_kind_count],
                     deopt: FaultPoint {
                         block: segment.block,
                         instruction: call_instruction,
@@ -2127,6 +2199,26 @@ fn emit_segment(
         return Ok(());
     }
 
+    if matches!(segment.exit, SegmentExit::Effect { .. }) {
+        let effect_instruction = segment.end - 1;
+        emit_charge(builder, values, segment.cost);
+        let retired = builder.use_var(values.retired);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_EFFECT,
+                block: segment.block,
+                instruction: effect_instruction,
+                result: zero,
+            },
+            &stack,
+        )?;
+        return Ok(());
+    }
+
     emit_charge(builder, values, segment.cost);
     match segment.exit {
         SegmentExit::Jump { .. } => {
@@ -2150,6 +2242,7 @@ fn emit_segment(
             define_stack(builder, values, &stack)?;
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         }
+        SegmentExit::Effect { .. } => unreachable!(),
         SegmentExit::Return => {
             let result = pop_native(&mut stack)?;
             let retired = builder.use_var(values.retired);
@@ -2204,6 +2297,9 @@ fn emit_inline_call(
                     .ins()
                     .iconst(types::I64, canonical_float_bits(bits) as i64),
             ),
+            Instr::OpConst(operation) => {
+                stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
+            }
             Instr::LoadLocal(slot) => {
                 let value = locals
                     .get(slot as usize)
@@ -2919,7 +3015,7 @@ mod tests {
             live_in: vec![],
             entry_stack: vec![],
             exit_stack: vec![],
-            call_stack: vec![],
+            boundary_stack: vec![],
             field_results: vec![],
             replay_stacks: vec![],
             fault_stacks: vec![],

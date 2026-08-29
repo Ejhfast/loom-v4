@@ -283,7 +283,11 @@ impl JitEngine {
         engine.note_materialization();
 
         match exit.kind() {
-            ExitKind::Fuel | ExitKind::Interpreter | ExitKind::Call | ExitKind::Allocation => {
+            ExitKind::Fuel
+            | ExitKind::Interpreter
+            | ExitKind::Call
+            | ExitKind::Allocation
+            | ExitKind::Effect => {
                 let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
                 let Some(stack_kinds) = region.operand_kinds(exit.block(), exit.instruction())
                 else {
@@ -308,9 +312,15 @@ impl JitEngine {
                 };
                 frame.block = exit.block();
                 frame.ip = exit.instruction();
-                if matches!(exit.kind(), ExitKind::Call | ExitKind::Allocation) {
+                if matches!(
+                    exit.kind(),
+                    ExitKind::Call | ExitKind::Allocation | ExitKind::Effect
+                ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         engine.note_native_allocation_exit();
+                    }
+                    if matches!(exit.kind(), ExitKind::Effect) {
+                        engine.note_native_effect_exit();
                     }
                     NativeAttempt::InterpretOne { retired }
                 } else if interpreter {
@@ -398,6 +408,7 @@ fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {
         (ScalarKind::Int, Value::Int(value)) => Some(value as u64),
         (ScalarKind::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
         (ScalarKind::Object(_), Value::Obj(reference)) => Some(object_bits(reference)),
+        (ScalarKind::Operation, Value::Op(operation)) => Some(u64::from(operation)),
         _ => None,
     }
 }
@@ -409,6 +420,7 @@ fn bits_value(kind: ScalarKind, bits: u64) -> Value {
         ScalarKind::Int => Value::Int(bits as i64),
         ScalarKind::Float => Value::Float(canonical_float_bits(bits)),
         ScalarKind::Object(_) => Value::Obj(object_reference(bits)),
+        ScalarKind::Operation => Value::Op(bits as u32),
     }
 }
 
@@ -512,6 +524,7 @@ fn representation_bits(expected: ValueRepr, value: Value) -> Option<u64> {
         (ValueRepr::Int, Value::Int(value)) => Some(value as u64),
         (ValueRepr::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
         (ValueRepr::Object, Value::Obj(reference)) => Some(object_bits(reference)),
+        (ValueRepr::Operation, Value::Op(operation)) => Some(u64::from(operation)),
         _ => None,
     }
 }

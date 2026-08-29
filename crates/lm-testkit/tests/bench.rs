@@ -299,7 +299,95 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_call_sites = compiler.compiled_call_sites;
     runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
     runtime.compiled_allocation_sites = compiler.compiled_allocation_sites;
+    runtime.compiled_effect_sites = compiler.compiled_effect_sites;
     runtime
+}
+
+fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|error| panic!("the effect benchmark must compile:\n{error}"));
+    let engine = Arc::new(Engine::new(mode));
+    let mut compiler_metrics = EngineMetrics::default();
+    let mut runs = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        world
+            .allow("Clock.Now")
+            .expect("the clock grant must exist");
+        let start = Instant::now();
+        let outcome = world.run_root();
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round == 0 {
+            compiler_metrics = engine.metrics();
+            engine.reset_metrics();
+        } else {
+            runs.push(elapsed);
+        }
+    }
+    (
+        median(runs),
+        with_compiler_metrics(engine.metrics(), compiler_metrics),
+    )
+}
+
+fn time_effect_program_native_cold(source: &str) -> Duration {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|error| panic!("the effect benchmark must compile:\n{error}"));
+    let mut runs = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the effect benchmark must load");
+        let engine = Arc::new(Engine::new(EngineMode::Native));
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::RecordingHost::new(1)),
+            engine,
+        );
+        world
+            .allow("Clock.Now")
+            .expect("the clock grant must exist");
+        let start = Instant::now();
+        let outcome = world.run_root();
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    median(runs)
+}
+
+fn report_jit_effect(name: &str, source: &str, required_exits: u64) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_effect_program_engine(source, EngineMode::Interpreter);
+    let cold = time_effect_program_native_cold(source);
+    let (native, metrics) = time_effect_program_engine(source, EngineMode::Native);
+    assert!(metrics.native_retired_instructions > 0);
+    assert!(metrics.compiled_effect_sites > 0);
+    assert!(metrics.native_effect_exits >= required_exits);
+    println!(
+        "LOOM_JIT_EFFECT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        cold.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        metrics.compiled_effect_sites,
+        metrics.native_effect_exits,
+        metrics.native_entries,
+    );
 }
 
 fn report_jit(name: &str, source: &str, required_call_sites: u64) {
@@ -1110,6 +1198,44 @@ fn bench_jit_scalar_regions() {
             "end\ni\n",
         ),
         0,
+    );
+    println!(
+        "LOOM_JIT_EFFECT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\teffect_sites\teffect_exits\tentries"
+    );
+    report_jit_effect(
+        "jit_effect_mixed",
+        concat!(
+            "def go(): Int with Clock.Now\n",
+            "  outer = 0\n  total = 0\n  observed = 0\n",
+            "  while outer < 100\n",
+            "    inner = 0\n",
+            "    while inner < 10000\n",
+            "      total = total + 1\n",
+            "      inner = inner + 1\n",
+            "    end\n",
+            "    observed = sys.clock.now()\n",
+            "    outer = outer + 1\n",
+            "  end\n",
+            "  total\n",
+            "end\n",
+            "go()\n",
+        ),
+        900,
+    );
+    report_jit_effect(
+        "jit_effect_boundary",
+        concat!(
+            "def go(): Int with Clock.Now\n",
+            "  i = 0\n  observed = 0\n",
+            "  while i < 20000\n",
+            "    observed = sys.clock.now()\n",
+            "    i = i + 1\n",
+            "  end\n",
+            "  i\n",
+            "end\n",
+            "go()\n",
+        ),
+        180_000,
     );
     report_jit_sliced(
         "jit_int_loop_sliced",

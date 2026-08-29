@@ -1,6 +1,6 @@
 # Guarded JIT compilation
 
-Status: Stages 0 through 8 are implemented for the native execution experiment.
+Status: Stages 0 through 9 are implemented for the native execution experiment.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -34,7 +34,7 @@ The first implementation does not compile these operations:
 - generic environments;
 - generic and aggregate allocation;
 - heap mutation;
-- effects;
+- selectable wait preparation;
 - native LMBC instructions;
 - extended LMBC instructions.
 
@@ -345,6 +345,8 @@ The callback context stays valid only during one native activation.
 
 Native code materializes all changed state before returning to Rust.
 
+An effect exit materializes before the interpreter retires the effect instruction.
+
 An allocation callback receives complete object roots for every active native frame.
 
 Generated code retains no raw heap pointer across an allocation or collection.
@@ -442,6 +444,7 @@ The runtime records clock-free counters:
 - compiled direct-call sites;
 - compiled heap-read sites;
 - compiled allocation sites;
+- compiled effect sites;
 - native entry attempts;
 - guarded values;
 - guard failures;
@@ -452,6 +455,7 @@ The runtime records clock-free counters:
 - native heap reads;
 - native allocations;
 - native allocation exits;
+- native effect exits;
 - fallbacks by reason.
 
 The benchmark harness measures wall time outside pure runtime crates.
@@ -495,6 +499,8 @@ Tests capture after interpreter execution and resume through native code.
 
 Tests capture native allocation state and resume through both engines.
 
+Tests capture completed effect state and resume through both engines.
+
 ### 17.4 External state
 
 External snapshots can enter a native region after successful guards.
@@ -505,9 +511,9 @@ A malformed dormant value does not block an unrelated native region.
 
 ### 17.5 Parallel execution
 
-A forced native test executes one supported region through `ExecutionLease`.
+A forced native test executes supported regions through `ExecutionLease`.
 
-The test covers worker execution, turn expiry, materialization, and recall.
+The tests cover worker execution, effect exits, turn expiry, materialization, and recall.
 
 Later surface stages repeat the pause, barrier, and replacement tests.
 
@@ -662,6 +668,8 @@ Stop gate: allocation preserves heap limits, collection roots, fuel, and snapsho
 ### Stage 9: Effects
 
 - add explicit effect exits;
+- support direct and first-class operation values;
+- keep selectable wait preparation outside this stage;
 - resume native execution after each completion;
 - preserve requests, replies, traces, and fuel.
 
@@ -892,3 +900,26 @@ The nested constructor then performs one collection and resumes native execution
 Tests cover exact fuel, heap limits, root retention, collection state, and snapshot continuation.
 
 All retained native rows remain faster than their interpreter rows.
+
+## 29. Stage 9 review measurements
+
+The mixed workload performs one million integer-loop iterations and 100 direct effects.
+
+The boundary workload performs 20,000 direct effects with only loop control.
+
+| Workload | Interpreter | Native cold | Native warm | Warm gain |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed compute and effects | 30.692 ms | 1.645 ms | 0.808 ms | 37.99 times |
+| Effect boundaries only | 2.279 ms | 5.794 ms | 5.289 ms | 0.43 times |
+
+Forced native execution adds approximately 151 nanoseconds per effect boundary in the boundary workload.
+
+This cost comes from state materialization, one interpreter instruction, reply handling, guards, and native reentry.
+
+An `Auto` density policy remains future work.
+
+Tests cover direct operations, first-class operations, deferred replies, denied effects, fuel sweeps, snapshots, and worker leases.
+
+Every test compares complete live-state dumps and proc traces where those values apply.
+
+The retained scalar, call, field, allocation, sliced, and scheduled rows remain within prior variation.

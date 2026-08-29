@@ -614,7 +614,7 @@ mod tests {
     use super::*;
     use crate::resource::ResourceBudget;
     use crate::VmConfig;
-    use lm_bytecode::{BcType, Func, Instr, Module};
+    use lm_bytecode::{BcRow, BcType, Func, Instr, Module};
     use lm_heap::Heap;
     use lm_value::{TypeEnvId, Value};
 
@@ -723,6 +723,96 @@ mod tests {
         assert_eq!(engine.metrics().compiled_regions, 1);
         assert_eq!(engine.metrics().native_retired_instructions, 2);
         drop(machine);
+    }
+
+    #[test]
+    fn a_native_worker_returns_one_materialized_effect_boundary() {
+        let module = crate::unit_from_module_for_test(Module {
+            strings: vec![],
+            bytes: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
+            imports: vec![],
+            slots: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            classes: vec![],
+            funcs: vec![Func {
+                name: "main".to_string(),
+                param_names: vec![],
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 2,
+                row: vec![BcRow::Op(lm_abi::OP_CLOCK_NOW)],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![vec![
+                    Instr::Perform {
+                        op: lm_abi::OP_CLOCK_NOW,
+                        argc: 0,
+                        reply_ty: 2,
+                    },
+                    Instr::Return,
+                ]],
+            }],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+            debug: vec![],
+        })
+        .expect("the effect worker unit verifies");
+        let config = VmConfig {
+            heap_bytes: 1024,
+            ..VmConfig::default()
+        };
+        let mut machine = Box::new(Machine::empty_with_resource_budget(
+            config,
+            None,
+            0,
+            ResourceBudget::new(config.max_resources as usize),
+        ));
+        machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
+        let engine = Arc::new(Engine::new(EngineMode::Native));
+        let (lease, reservation) = ExecutionLease::new(
+            ExecutionToken {
+                world: 7,
+                machine: 0,
+                generation: 0,
+                lease: 3,
+            },
+            machine,
+            Arc::new(ExecutionCode::new(module, Arc::new(Vec::new().into()))),
+            Box::default(),
+            None,
+            ExecutionLimits {
+                instructions: 16,
+                exclusive_world: false,
+                fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
+                engine: Arc::clone(&engine),
+            },
+        );
+        let report = std::thread::spawn(move || execute(lease))
+            .join()
+            .expect("the effect worker returns one report");
+        let (_, machine, _, _, stop, retired) = report.into_parts(reservation);
+        assert_eq!(retired, 1);
+        assert!(matches!(
+            stop,
+            ExecutionStop::Boundary(ExecOutcome::Perform { op, args })
+                if op == lm_abi::OP_CLOCK_NOW && args.is_empty()
+        ));
+        let frame = machine.vm.frames.last().expect("the effect frame remains");
+        assert_eq!((frame.block, frame.ip), (0, 1));
+        assert!(machine.vm.operands.is_empty());
+        let metrics = engine.metrics();
+        assert_eq!(metrics.compiled_effect_sites, 1);
+        assert_eq!(metrics.native_effect_exits, 1);
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub struct EngineMetrics {
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,
     pub compiled_allocation_sites: u64,
+    pub compiled_effect_sites: u64,
     pub native_entry_attempts: u64,
     pub guarded_values: u64,
     pub guard_failures: u64,
@@ -44,6 +45,7 @@ pub struct EngineMetrics {
     pub native_heap_reads: u64,
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
+    pub native_effect_exits: u64,
     pub unsupported_region_fallbacks: u64,
     pub missing_entry_fallbacks: u64,
     pub backend_unavailable_fallbacks: u64,
@@ -61,6 +63,7 @@ struct EngineCounters {
     native_heap_reads: AtomicU64,
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
+    native_effect_exits: AtomicU64,
     unsupported_region_fallbacks: AtomicU64,
     missing_entry_fallbacks: AtomicU64,
     backend_unavailable_fallbacks: AtomicU64,
@@ -76,6 +79,7 @@ impl EngineCounters {
             compiled_call_sites: compiler.compiled_call_sites,
             compiled_heap_read_sites: compiler.compiled_heap_read_sites,
             compiled_allocation_sites: compiler.compiled_allocation_sites,
+            compiled_effect_sites: compiler.compiled_effect_sites,
             native_entry_attempts: read(&self.native_entry_attempts),
             guarded_values: read(&self.guarded_values),
             guard_failures: read(&self.guard_failures),
@@ -86,6 +90,7 @@ impl EngineCounters {
             native_heap_reads: read(&self.native_heap_reads),
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
+            native_effect_exits: read(&self.native_effect_exits),
             unsupported_region_fallbacks: read(&self.unsupported_region_fallbacks),
             missing_entry_fallbacks: read(&self.missing_entry_fallbacks),
             backend_unavailable_fallbacks: read(&self.backend_unavailable_fallbacks),
@@ -104,6 +109,7 @@ impl EngineCounters {
         reset(&self.native_heap_reads);
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
+        reset(&self.native_effect_exits);
         reset(&self.unsupported_region_fallbacks);
         reset(&self.missing_entry_fallbacks);
         reset(&self.backend_unavailable_fallbacks);
@@ -219,6 +225,12 @@ impl Engine {
         self.counters
             .native_allocations
             .fetch_add(allocations, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_native_effect_exit(&self) {
+        self.counters
+            .native_effect_exits
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn note_unsupported_region_fallback(&self) {

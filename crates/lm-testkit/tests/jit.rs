@@ -61,6 +61,35 @@ fn run_artifact_with_config(
     (outcome, engine.metrics(), dump)
 }
 
+fn run_effect(
+    artifact: &lm_bytecode::artifact::Artifact,
+    mode: EngineMode,
+    fuel: u64,
+    grants: &[&str],
+) -> (Outcome, lm_vm::EngineMetrics, String, String) {
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact.clone()).expect("the effect case publishes");
+    let engine = Arc::new(Engine::new(mode));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig {
+            fuel,
+            ..VmConfig::default()
+        },
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    world.trace_procs();
+    for grant in grants {
+        world.allow(grant).expect("the effect grant exists");
+    }
+    let outcome = world.run_root();
+    let dump = world.dump_live(&outcome);
+    let trace = world.dump_trace();
+    (outcome, engine.metrics(), dump, trace)
+}
+
 #[test]
 fn scalar_loop_matches_the_interpreter() {
     let (interpreted, _, _) = run(SCALAR_LOOP, EngineMode::Interpreter, u64::MAX);
@@ -422,6 +451,134 @@ fn a_fault_after_allocation_does_not_replay_the_allocation() {
 }
 
 #[test]
+fn exact_effects_resume_native_execution() {
+    let source = concat!(
+        "def go(): Int with Clock.Now\n",
+        "  i = 0\n  total = 0\n  last = 0\n",
+        "  while i < 100\n",
+        "    total = total + i\n",
+        "    last = sys.clock.now()\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-effect.lm", source).expect("the effect case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) =
+        run_effect(&artifact, EngineMode::Interpreter, u64::MAX, &["Clock.Now"]);
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &["Clock.Now"]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(4950)));
+    assert!(metrics.compiled_effect_sites > 0, "{metrics:?}");
+    assert_eq!(metrics.native_effect_exits, 100, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn first_class_effects_resume_native_execution() {
+    let source = concat!(
+        "use sys.clock.now\n\n",
+        "def go(): Int with Clock.Now\n",
+        "  operation = now\n",
+        "  i = 0\n  total = 0\n  last = 0\n",
+        "  while i < 10\n",
+        "    last = operation()\n",
+        "    total = total + i\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-effect-value.lm", source)
+        .expect("the first-class effect case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) =
+        run_effect(&artifact, EngineMode::Interpreter, u64::MAX, &["Clock.Now"]);
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &["Clock.Now"]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(45)));
+    assert_eq!(metrics.native_effect_exits, 10, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn exact_effects_match_each_fuel_boundary() {
+    let source = concat!(
+        "def go(): Int with Clock.Now\n",
+        "  first = sys.clock.now()\n",
+        "  second = sys.clock.now()\n",
+        "  first + second\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-effect-fuel.lm", source)
+        .expect("the effect fuel case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump, interpreted_trace) =
+            run_effect(&artifact, EngineMode::Interpreter, fuel, &["Clock.Now"]);
+        let (native, _, native_dump, native_trace) =
+            run_effect(&artifact, EngineMode::Native, fuel, &["Clock.Now"]);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+        assert_eq!(native_trace, interpreted_trace, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn a_denied_effect_keeps_the_exact_fault_state() {
+    let source = "def go(): Int with Clock.Now\n  sys.clock.now()\nend\ngo()\n";
+    let artifact = lm_testkit::compile_text("jit-effect-denied.lm", source)
+        .expect("the denied effect case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) =
+        run_effect(&artifact, EngineMode::Interpreter, u64::MAX, &[]);
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &[]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::PolicyDenied));
+    assert_eq!(metrics.native_effect_exits, 1, "{metrics:?}");
+}
+
+#[test]
+fn deferred_effect_replies_resume_native_execution() {
+    let source = concat!(
+        "def go(): Int with Clock.Sleep\n",
+        "  i = 0\n",
+        "  while i < 3\n",
+        "    sys.clock.sleep(1)\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  i\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-effect-deferred.lm", source)
+        .expect("the deferred effect case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) = run_effect(
+        &artifact,
+        EngineMode::Interpreter,
+        u64::MAX,
+        &["Clock.Sleep"],
+    );
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &["Clock.Sleep"]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3)));
+    assert_eq!(metrics.native_effect_exits, 3, "{metrics:?}");
+}
+
+#[test]
 fn float_operations_match_the_interpreter() {
     let source = concat!(
         "value = -(3.5 - 1.25) * 2.0 / 0.5\n",
@@ -544,6 +701,59 @@ fn restore_with_native(
     image: &lm_vm::snapshot::Image,
 ) -> (RootEvent, lm_vm::EngineMetrics) {
     restore_with_engine(artifact, image, EngineMode::Native)
+}
+
+#[test]
+fn an_effect_completion_snapshot_resumes_in_both_engines() {
+    let source = concat!(
+        "def go(): Int with Clock.Now\n",
+        "  observed = sys.clock.now()\n",
+        "  i = 0\n  total = 0\n",
+        "  while i < 1000\n",
+        "    total = total + i\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-effect-snapshot.lm", source)
+        .expect("the effect snapshot case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact.clone())
+        .expect("the effect snapshot case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    world.allow("Clock.Now").expect("the clock grant exists");
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice(root, 128),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    assert_eq!(engine.metrics().native_effect_exits, 1);
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the completed effect state captures");
+    let (interpreted, _) = restore_with_engine(&artifact, image.world(), EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, image.world());
+    assert!(matches!(
+        interpreted,
+        RootEvent::Done(lm_value::Value::Int(499_500))
+    ));
+    assert!(matches!(
+        native,
+        RootEvent::Done(lm_value::Value::Int(499_500))
+    ));
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
 }
 
 #[test]
