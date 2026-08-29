@@ -1365,6 +1365,33 @@ impl Machine {
                 roots.push(*r);
             }
         }
+        self.extend_non_arena_gc_roots(&mut roots);
+        roots.extend_from_slice(extra);
+        roots
+    }
+
+    /// Build roots while native code owns the active frame arenas.
+    fn native_gc_roots(
+        &self,
+        base_local: usize,
+        base_operand: usize,
+        active: &[ObjRef],
+    ) -> Vec<ObjRef> {
+        let mut roots = Vec::new();
+        for value in self.vm.locals[..base_local]
+            .iter()
+            .chain(self.vm.operands[..base_operand].iter())
+        {
+            if let Value::Obj(reference) = value {
+                roots.push(*reference);
+            }
+        }
+        roots.extend_from_slice(active);
+        self.extend_non_arena_gc_roots(&mut roots);
+        roots
+    }
+
+    fn extend_non_arena_gc_roots(&self, roots: &mut Vec<ObjRef>) {
         for frame in &self.vm.frames {
             if let Some(FrameCapture::Closure(reference)) = frame.closure {
                 roots.push(reference);
@@ -1416,8 +1443,6 @@ impl Machine {
         }
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.vm.literals.iter().flatten().copied());
-        roots.extend_from_slice(extra);
-        roots
     }
 
     /// The canonical snapshot roots of this machine, in canonical
@@ -1531,6 +1556,29 @@ impl Machine {
             let mut extra = Vec::new();
             object.children(&mut extra);
             self.collect_garbage(&extra);
+            cost = self.vm.heap.allocation_cost(&object);
+            if self.vm.heap.would_exceed(cost) {
+                return Err(FaultCode::HeapLimit);
+            }
+        }
+        Ok(Value::Obj(self.vm.heap.alloc(object)))
+    }
+
+    /// Allocate while native code owns the active frame arenas.
+    pub(crate) fn alloc_native(
+        &mut self,
+        object: Object,
+        base_local: usize,
+        base_operand: usize,
+        active_roots: &[ObjRef],
+    ) -> Result<Value, FaultCode> {
+        let mut cost = self.vm.heap.allocation_cost(&object);
+        if self.vm.heap.collection_due(cost) {
+            let mut roots = self.native_gc_roots(base_local, base_operand, active_roots);
+            object.children(&mut roots);
+            lm_graph::collect(&mut self.vm.heap, roots);
+            self.execution_metrics.collections =
+                self.execution_metrics.collections.saturating_add(1);
             cost = self.vm.heap.allocation_cost(&object);
             if self.vm.heap.would_exceed(cost) {
                 return Err(FaultCode::HeapLimit);

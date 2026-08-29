@@ -30,12 +30,22 @@ const EXIT_INTERPRETER: u32 = 5;
 const EXIT_INVALID_ENTRY: u32 = 6;
 const EXIT_TYPE_MISMATCH: u32 = 7;
 const EXIT_UNINITIALIZED_FIELD: u32 = 8;
+const EXIT_CALL: u32 = 9;
+const EXIT_ALLOCATION: u32 = 10;
+const EXIT_HEAP_LIMIT: u32 = 11;
 
 const RUNTIME_LOAD_FIELD: u32 = 1;
+const RUNTIME_ALLOC_INSTANCE: u32 = 2;
 const RUNTIME_OK: u32 = 0;
 const RUNTIME_TYPE_MISMATCH: u32 = 1;
 const RUNTIME_UNINITIALIZED_FIELD: u32 = 2;
 const RUNTIME_INTERPRETER: u32 = 3;
+const RUNTIME_HEAP_LIMIT: u32 = 4;
+
+/// The native local changed during this activation.
+pub const LOCAL_DIRTY: u8 = 1;
+/// The native local contains an initialized value.
+pub const LOCAL_INITIALIZED: u8 = 2;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -59,8 +69,17 @@ type NativeFunction = unsafe extern "C" fn(
     *mut c_void,
     RawRuntimeCall,
     *mut u64,
+    *mut u64,
+    *mut u8,
     *mut RawExit,
 );
+
+struct RawRuntimeContext<R> {
+    runtime: *mut R,
+    roots: *const u64,
+    root_states: *const u8,
+    root_capacity: usize,
+}
 
 /// One stable value representation at the native runtime boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +111,7 @@ pub enum RuntimeResult {
     Value(u64),
     TypeMismatch,
     UninitializedField,
+    HeapLimit,
     Interpreter,
 }
 
@@ -103,6 +123,15 @@ pub trait Runtime {
         reference: lm_value::ObjRef,
         field: u32,
         expected: ValueRepr,
+    ) -> RuntimeResult;
+
+    /// Allocate one plain instance with the supplied active roots.
+    fn allocate_instance(
+        &mut self,
+        class: u32,
+        root_bits: &[u64],
+        root_states: &[u8],
+        allow_collection: bool,
     ) -> RuntimeResult;
 }
 
@@ -117,18 +146,38 @@ unsafe extern "C" fn runtime_call<R: Runtime>(
     if context.is_null() || result.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    // SAFETY: `CompiledRegion::execute` passes one live `R` for this call.
-    let runtime = unsafe { &mut *context.cast::<R>() };
-    let Some(expected) = ValueRepr::from_raw(representation) else {
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() {
         return RUNTIME_INTERPRETER;
-    };
+    }
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
     let response = match operation {
         RUNTIME_LOAD_FIELD => {
+            let Some(expected) = ValueRepr::from_raw(representation) else {
+                return RUNTIME_INTERPRETER;
+            };
             let reference = lm_value::ObjRef {
                 slot: first as u32,
                 generation: (first >> 32) as u32,
             };
             runtime.load_field(reference, second as u32, expected)
+        }
+        RUNTIME_ALLOC_INSTANCE => {
+            if second > 1 {
+                return RUNTIME_INTERPRETER;
+            }
+            let root_count = representation as usize;
+            if root_count > context.root_capacity {
+                return RUNTIME_INTERPRETER;
+            }
+            // SAFETY: The checked count stays inside the activation root buffer.
+            let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+            // SAFETY: Both root buffers have the same checked capacity.
+            let root_states =
+                unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+            runtime.allocate_instance(first as u32, root_bits, root_states, second != 0)
         }
         _ => RuntimeResult::Interpreter,
     };
@@ -140,6 +189,7 @@ unsafe extern "C" fn runtime_call<R: Runtime>(
         }
         RuntimeResult::TypeMismatch => RUNTIME_TYPE_MISMATCH,
         RuntimeResult::UninitializedField => RUNTIME_UNINITIALIZED_FIELD,
+        RuntimeResult::HeapLimit => RUNTIME_HEAP_LIMIT,
         RuntimeResult::Interpreter => RUNTIME_INTERPRETER,
     }
 }
@@ -167,6 +217,7 @@ pub struct JitEngine {
     compiled_segments: AtomicU64,
     compiled_call_sites: AtomicU64,
     compiled_heap_read_sites: AtomicU64,
+    compiled_allocation_sites: AtomicU64,
 }
 
 impl fmt::Debug for JitEngine {
@@ -217,6 +268,18 @@ impl CompiledRegion {
     #[inline(always)]
     pub fn max_stack(&self) -> usize {
         self.plan.max_stack
+    }
+
+    /// Return the largest native collection-root count.
+    #[inline(always)]
+    pub fn max_roots(&self) -> usize {
+        self.plan.max_roots
+    }
+
+    /// Return true when native execution can collect this machine.
+    #[inline(always)]
+    pub fn requires_complete_roots(&self) -> bool {
+        self.plan.allocation_sites != 0
     }
 
     /// Return the largest complete stack use above the root locals.
@@ -294,31 +357,41 @@ impl CompiledRegion {
         runtime: &mut R,
         entry: u32,
         locals: &mut [u64],
-        dirty: &mut [u8],
+        local_states: &mut [u8],
         operands: &mut [u64],
         fuel: u64,
     ) -> Result<ExecutionExit, Failure> {
         if entry as usize >= self.plan.segments.len()
             || locals.len() != self.plan.local_kinds.len()
-            || dirty.len() != self.plan.local_kinds.len()
+            || local_states.len() != self.plan.local_kinds.len()
             || operands.len() < self.plan.max_stack
         {
             return Err(Failure::BackendUnavailable);
         }
         let mut exit = RawExit::default();
         let mut runtime_result = 0u64;
+        let mut roots = vec![0u64; self.plan.max_roots.max(1)];
+        let mut root_states = vec![0u8; self.plan.max_roots.max(1)];
+        let mut runtime_context = RawRuntimeContext {
+            runtime: std::ptr::from_mut(runtime),
+            roots: roots.as_ptr(),
+            root_states: root_states.as_ptr(),
+            root_capacity: self.plan.max_roots,
+        };
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe {
             (self.entry)(
                 locals.as_mut_ptr(),
-                dirty.as_mut_ptr(),
+                local_states.as_mut_ptr(),
                 operands.as_mut_ptr(),
                 fuel,
                 entry,
-                std::ptr::from_mut(runtime).cast::<c_void>(),
+                std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
                 runtime_call::<R>,
                 std::ptr::from_mut(&mut runtime_result),
+                roots.as_mut_ptr(),
+                root_states.as_mut_ptr(),
                 &mut exit,
             );
         }
@@ -330,6 +403,9 @@ impl CompiledRegion {
             EXIT_INTERPRETER => ExitKind::Interpreter,
             EXIT_TYPE_MISMATCH => ExitKind::TypeMismatch,
             EXIT_UNINITIALIZED_FIELD => ExitKind::UninitializedField,
+            EXIT_CALL => ExitKind::Call,
+            EXIT_ALLOCATION => ExitKind::Allocation,
+            EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -453,6 +529,7 @@ pub struct CompilerMetrics {
     pub compiled_segments: u64,
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,
+    pub compiled_allocation_sites: u64,
 }
 
 /// One supported native entry and its required scalar values.
@@ -492,6 +569,9 @@ pub enum ExitKind {
     DivideByZero,
     TypeMismatch,
     UninitializedField,
+    Call,
+    Allocation,
+    HeapLimit,
     Interpreter,
 }
 
@@ -564,6 +644,9 @@ enum SegmentExit {
         target: u32,
         fallthrough_ip: u32,
     },
+    Allocation {
+        fallthrough_ip: u32,
+    },
     Return,
 }
 
@@ -584,6 +667,7 @@ struct Segment {
     field_results: Vec<(u32, ScalarKind)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
+    allocations: Vec<AllocationSite>,
 }
 
 #[derive(Debug, Clone)]
@@ -592,6 +676,7 @@ struct InlineFunctionPlan {
     local_kinds: Vec<ScalarKind>,
     max_stack: usize,
     cost: u32,
+    allocations: Vec<AllocationSite>,
 }
 
 #[derive(Debug, Clone)]
@@ -607,12 +692,14 @@ struct RegionPlan {
     result_kind: ScalarKind,
     max_stack: usize,
     max_stack_values: usize,
+    max_roots: usize,
     additional_frames: u32,
     segments: Vec<Segment>,
     entries: std::collections::HashMap<(u32, u32), usize>,
     inline_functions: HashMap<u32, InlineFunctionPlan>,
     inline_call_sites: usize,
     heap_read_sites: usize,
+    allocation_sites: usize,
 }
 
 struct SegmentAnalysis {
@@ -625,6 +712,23 @@ struct SegmentAnalysis {
     field_results: Vec<(u32, ScalarKind)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
+    allocations: Vec<AllocationSite>,
+}
+
+struct SegmentAnalysisContext<'a> {
+    func: &'a Func,
+    source_func: &'a Func,
+    module: &'a Module,
+    locals: &'a [ScalarKind],
+    result: ScalarKind,
+    calls: &'a HashMap<u32, CallContract>,
+}
+
+#[derive(Debug, Clone)]
+struct AllocationSite {
+    instruction: u32,
+    initialized: Vec<bool>,
+    stack: Vec<ScalarKind>,
 }
 
 impl RegionPlan {
@@ -689,8 +793,17 @@ impl RegionPlan {
         let mut additional_frames = 0;
         let mut inline_call_sites = 0;
         let mut heap_read_sites = 0;
+        let mut allocation_sites = 0;
         let mut active_block = u32::MAX;
         let mut block_stack = Vec::new();
+        let analysis_context = SegmentAnalysisContext {
+            func: runtime,
+            source_func,
+            module: source,
+            locals: &local_kinds,
+            result: result_kind,
+            calls: &call_contracts,
+        };
         for (index, segment) in segments.iter_mut().enumerate() {
             let state = states
                 .get(segment.block as usize)
@@ -717,16 +830,7 @@ impl RegionPlan {
                     *value = true;
                 }
             }
-            let analysis = analyze_segment(
-                runtime,
-                source,
-                segment,
-                &local_kinds,
-                result_kind,
-                &initialized,
-                &block_stack,
-                &call_contracts,
-            )?;
+            let analysis = analyze_segment(&analysis_context, segment, &initialized, &block_stack)?;
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
             segment.exit_stack = analysis.exit_stack.clone();
@@ -735,6 +839,8 @@ impl RegionPlan {
             heap_read_sites += segment.field_results.len();
             segment.replay_stacks = analysis.replay_stacks;
             segment.fault_stacks = analysis.fault_stacks;
+            segment.allocations = analysis.allocations;
+            allocation_sites += segment.allocations.len();
             segment.cost = segment.end - segment.start;
             if let SegmentExit::Call { target, .. } = segment.exit {
                 if let Some(inline) = inline_functions.get(&target) {
@@ -764,17 +870,45 @@ impl RegionPlan {
             return Err(UnsupportedReason::RegionLimit);
         }
         compute_liveness(&mut segments, local_kinds.len());
+        let root_local_count = local_kinds
+            .iter()
+            .filter(|kind| matches!(kind, ScalarKind::Object(_)))
+            .count();
+        let inline_root_count = inline_functions
+            .values()
+            .map(|inline| {
+                inline
+                    .local_kinds
+                    .iter()
+                    .filter(|kind| matches!(kind, ScalarKind::Object(_)))
+                    .count()
+                    + inline.max_stack
+            })
+            .max()
+            .unwrap_or(0);
+        let max_roots = root_local_count
+            .checked_add(max_stack)
+            .and_then(|count| count.checked_add(inline_root_count))
+            .ok_or(UnsupportedReason::RegionLimit)?;
+        allocation_sites = inline_functions
+            .values()
+            .try_fold(allocation_sites, |total, inline| {
+                total.checked_add(inline.allocations.len())
+            })
+            .ok_or(UnsupportedReason::RegionLimit)?;
         Ok(RegionPlan {
             local_kinds,
             result_kind,
             max_stack,
             max_stack_values,
+            max_roots,
             additional_frames,
             segments,
             entries,
             inline_functions,
             inline_call_sites,
             heap_read_sites,
+            allocation_sites,
         })
     }
 
@@ -856,6 +990,25 @@ fn inline_function_plan(
     {
         return None;
     }
+    let mut allocated = false;
+    for instruction in &code[..code.len() - 1] {
+        if allocated
+            && matches!(
+                instruction,
+                Instr::New(_)
+                    | Instr::LoadField(_)
+                    | Instr::Add
+                    | Instr::Sub
+                    | Instr::Mul
+                    | Instr::Div
+                    | Instr::Rem
+                    | Instr::Neg
+            )
+        {
+            return None;
+        }
+        allocated |= matches!(instruction, Instr::New(_));
+    }
     let source_func = definition
         .source
         .funcs
@@ -866,14 +1019,6 @@ fn inline_function_plan(
         .map(|ty| scalar_kind(definition.source, *ty))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    if params
-        .iter()
-        .chain(local_kinds.iter())
-        .chain(std::iter::once(&result))
-        .any(|kind| matches!(kind, ScalarKind::Object(_)))
-    {
-        return None;
-    }
     if local_kinds.len() > MAX_REGION_LOCALS || local_kinds.get(..params.len()) != Some(params) {
         return None;
     }
@@ -893,25 +1038,26 @@ fn inline_function_plan(
         field_results: Vec::new(),
         replay_stacks: Vec::new(),
         fault_stacks: Vec::new(),
+        allocations: Vec::new(),
     };
     let mut initialized = vec![false; local_kinds.len()];
     initialized[..params.len()].fill(true);
-    let analysis = analyze_segment(
-        runtime,
-        definition.source,
-        &segment,
-        &local_kinds,
+    let calls = HashMap::new();
+    let context = SegmentAnalysisContext {
+        func: runtime,
+        source_func,
+        module: definition.source,
+        locals: &local_kinds,
         result,
-        &initialized,
-        &[],
-        &HashMap::new(),
-    )
-    .ok()?;
+        calls: &calls,
+    };
+    let analysis = analyze_segment(&context, &segment, &initialized, &[]).ok()?;
     Some(InlineFunctionPlan {
         params: params.to_vec(),
         local_kinds,
         max_stack: analysis.max_stack,
         cost: code.len() as u32,
+        allocations: analysis.allocations,
     })
 }
 
@@ -949,6 +1095,9 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                     target: *target,
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
+                Instr::New(_) => Some(SegmentExit::Allocation {
+                    fallthrough_ip: instruction_index as u32 + 1,
+                }),
                 Instr::Return => Some(SegmentExit::Return),
                 _ => None,
             };
@@ -969,6 +1118,7 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                 field_results: Vec::new(),
                 replay_stacks: Vec::new(),
                 fault_stacks: Vec::new(),
+                allocations: Vec::new(),
             });
             start = instruction_index + 1;
         }
@@ -997,6 +1147,9 @@ fn resolve_successors(
             SegmentExit::Call { fallthrough_ip, .. } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
+            SegmentExit::Allocation { fallthrough_ip } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Return => Vec::new(),
         };
     }
@@ -1015,14 +1168,10 @@ fn entry(
 }
 
 fn analyze_segment(
-    func: &Func,
-    module: &Module,
+    context: &SegmentAnalysisContext<'_>,
     segment: &Segment,
-    locals: &[ScalarKind],
-    result: ScalarKind,
     initialized: &[bool],
     entry_stack: &[ScalarKind],
-    calls: &HashMap<u32, CallContract>,
 ) -> Result<SegmentAnalysis, UnsupportedReason> {
     let mut stack = entry_stack.to_vec();
     let mut max_stack = stack.len();
@@ -1031,13 +1180,21 @@ fn analyze_segment(
     let mut field_results = Vec::new();
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
-    let mut uses = vec![false; locals.len()];
-    let mut definitions = vec![false; locals.len()];
-    for (offset, instruction) in func.blocks[segment.block as usize]
+    let mut allocations = Vec::new();
+    let mut uses = vec![false; context.locals.len()];
+    let mut definitions = vec![false; context.locals.len()];
+    for (offset, instruction) in context.func.blocks[segment.block as usize]
         [segment.start as usize..segment.end as usize]
         .iter()
         .enumerate()
     {
+        let source_instruction = context
+            .source_func
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize + offset))
+            .copied()
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
         match *instruction {
             Instr::ConstUnit => stack.push(ScalarKind::Unit),
             Instr::ConstBool(_) => stack.push(ScalarKind::Bool),
@@ -1045,7 +1202,7 @@ fn analyze_segment(
             Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
             Instr::LoadLocal(slot) => {
                 let at = slot as usize;
-                let Some(kind) = locals.get(at).copied() else {
+                let Some(kind) = context.locals.get(at).copied() else {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 if !initialized.get(at).copied().unwrap_or(false)
@@ -1060,7 +1217,8 @@ fn analyze_segment(
             }
             Instr::StoreLocal(slot) => {
                 let at = slot as usize;
-                let kind = locals
+                let kind = context
+                    .locals
                     .get(at)
                     .copied()
                     .ok_or(UnsupportedReason::InvalidControlFlow)?;
@@ -1074,10 +1232,35 @@ fn analyze_segment(
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let kind = field_kind(module, receiver, field)?;
+                let kind = field_kind(context.module, receiver, field)?;
                 field_results.push((instruction, kind));
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(kind);
+            }
+            Instr::New(_) => {
+                let Instr::New(class) = source_instruction else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let ty = context
+                    .module
+                    .types
+                    .iter()
+                    .position(|ty| matches!(ty, BcType::Class(found) if *found == class))
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or(UnsupportedReason::NonScalarType)?;
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let mut initialized_now = initialized.to_vec();
+                for (slot, defined) in definitions.iter().copied().enumerate() {
+                    initialized_now[slot] |= defined;
+                }
+                allocations.push(AllocationSite {
+                    instruction,
+                    initialized: initialized_now,
+                    stack: stack.clone(),
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Object(ty));
             }
             Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem => {
                 if stack.len() != 2 {
@@ -1114,7 +1297,10 @@ fn analyze_segment(
                 stack.push(ScalarKind::Bool);
             }
             Instr::Call(target) => {
-                let contract = calls.get(&target).ok_or(UnsupportedReason::MissingSource)?;
+                let contract = context
+                    .calls
+                    .get(&target)
+                    .ok_or(UnsupportedReason::MissingSource)?;
                 call_stack = stack.clone();
                 for parameter in contract.params.iter().rev().copied() {
                     expect(&mut stack, parameter)?;
@@ -1139,7 +1325,7 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Bool)?;
             }
             Instr::Return => {
-                expect(&mut stack, result)?;
+                expect(&mut stack, context.result)?;
                 if !stack.is_empty() {
                     return Err(UnsupportedReason::InvalidStack);
                 }
@@ -1159,6 +1345,7 @@ fn analyze_segment(
         field_results,
         replay_stacks,
         fault_stacks,
+        allocations,
     })
 }
 
@@ -1306,6 +1493,8 @@ impl JitEngine {
                     .fetch_add(region.plan.inline_call_sites as u64, Ordering::Relaxed);
                 self.compiled_heap_read_sites
                     .fetch_add(region.plan.heap_read_sites as u64, Ordering::Relaxed);
+                self.compiled_allocation_sites
+                    .fetch_add(region.plan.allocation_sites as u64, Ordering::Relaxed);
                 CacheEntry::Ready(Arc::new(region))
             }
             Err(CompileError::Unsupported(_reason)) => CacheEntry::Failed(Failure::Unsupported),
@@ -1324,6 +1513,7 @@ impl JitEngine {
             compiled_segments: self.compiled_segments.load(Ordering::Relaxed),
             compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
             compiled_heap_read_sites: self.compiled_heap_read_sites.load(Ordering::Relaxed),
+            compiled_allocation_sites: self.compiled_allocation_sites.load(Ordering::Relaxed),
         }
     }
 
@@ -1334,6 +1524,7 @@ impl JitEngine {
         self.compiled_segments.store(0, Ordering::Relaxed);
         self.compiled_call_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);
+        self.compiled_allocation_sites.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1386,6 +1577,8 @@ fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileErr
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
     let id = module
         .declare_function("loom_scalar_region", Linkage::Local, &signature)
         .map_err(|_| CompileError::Backend)?;
@@ -1421,18 +1614,26 @@ fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileErr
 #[derive(Clone, Copy)]
 struct NativeValues<'a> {
     locals: &'a [Variable],
-    dirty: &'a [Variable],
+    local_states: &'a [Variable],
     stack: &'a [Variable],
     fuel: Variable,
     retired: Variable,
     local_pointer: ir::Value,
-    dirty_pointer: ir::Value,
+    local_state_pointer: ir::Value,
     stack_pointer: ir::Value,
     runtime_context: ir::Value,
     runtime_call: ir::Value,
     runtime_result_pointer: ir::Value,
+    root_pointer: ir::Value,
+    root_state_pointer: ir::Value,
     runtime_signature: ir::SigRef,
     exit_pointer: ir::Value,
+}
+
+#[derive(Clone, Copy)]
+struct NativeRoot {
+    bits: ir::Value,
+    state: Option<ir::Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -1449,6 +1650,21 @@ struct FaultPoint {
     block: u32,
     instruction: u32,
     prefix: u32,
+}
+
+struct InlineCallEmission<'a> {
+    definition: FunctionDefinition<'a>,
+    plan: &'a InlineFunctionPlan,
+    root_local_kinds: &'a [ScalarKind],
+    caller_stack_kinds: &'a [ScalarKind],
+    deopt: FaultPoint,
+    deopt_stack: &'a [ir::Value],
+}
+
+struct FieldExitEmission<'a> {
+    point: FaultPoint,
+    fault_stack: &'a [ir::Value],
+    deopt_stack: &'a [ir::Value],
 }
 
 fn emit_region(
@@ -1480,30 +1696,38 @@ fn emit_region(
     builder.append_block_params_for_function_params(entry_block);
     let parameters = builder.block_params(entry_block);
     let local_pointer = parameters[0];
-    let dirty_pointer = parameters[1];
+    let local_state_pointer = parameters[1];
     let stack_pointer = parameters[2];
     let initial_fuel = parameters[3];
     let entry = parameters[4];
     let runtime_context = parameters[5];
     let runtime_call = parameters[6];
     let runtime_result_pointer = parameters[7];
-    let exit_pointer = parameters[8];
+    let root_pointer = parameters[8];
+    let root_state_pointer = parameters[9];
+    let exit_pointer = parameters[10];
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
-    let mut dirty = Vec::with_capacity(plan.local_kinds.len());
+    let mut local_states = Vec::with_capacity(plan.local_kinds.len());
     for slot in 0..plan.local_kinds.len() {
         let local = builder.declare_var(types::I64);
-        let changed = builder.declare_var(types::I8);
+        let state = builder.declare_var(types::I8);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), local_pointer, offset);
-        let zero = builder.ins().iconst(types::I8, 0);
+        let local_state = builder.ins().load(
+            types::I8,
+            MemFlags::new(),
+            local_state_pointer,
+            state_offset,
+        );
         builder.def_var(local, value);
-        builder.def_var(changed, zero);
+        builder.def_var(state, local_state);
         locals.push(local);
-        dirty.push(changed);
+        local_states.push(state);
     }
     let mut stack = Vec::with_capacity(plan.max_stack);
     for slot in 0..plan.max_stack {
@@ -1523,16 +1747,18 @@ fn emit_region(
     builder.def_var(retired, zero);
     let values = NativeValues {
         locals: &locals,
-        dirty: &dirty,
+        local_states: &local_states,
         stack: &stack,
         fuel,
         retired,
         local_pointer,
-        dirty_pointer,
+        local_state_pointer,
         stack_pointer,
         runtime_context,
         runtime_call,
         runtime_result_pointer,
+        root_pointer,
+        root_state_pointer,
         runtime_signature,
         exit_pointer,
     };
@@ -1634,6 +1860,43 @@ fn emit_segment(
                 let value = builder.ins().iconst(types::I64, 0);
                 stack.push(value);
             }
+            Instr::New(class) => {
+                let instruction = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == instruction)
+                    .ok_or(CompileError::Backend)?;
+                let mut roots = Vec::new();
+                for (slot, (kind, variable)) in plan
+                    .local_kinds
+                    .iter()
+                    .copied()
+                    .zip(values.locals.iter().copied())
+                    .enumerate()
+                {
+                    if matches!(kind, ScalarKind::Object(_)) {
+                        roots.push(NativeRoot {
+                            bits: builder.use_var(variable),
+                            state: Some(builder.use_var(values.local_states[slot])),
+                        });
+                    }
+                }
+                extend_stack_roots(&mut roots, &site.stack, &stack)?;
+                let value = emit_allocate_instance(
+                    builder,
+                    values,
+                    class,
+                    &roots,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix,
+                    },
+                    &stack,
+                )?;
+                stack.push(value);
+            }
             Instr::ConstBool(value) => {
                 let value = builder.ins().iconst(types::I64, i64::from(value));
                 stack.push(value);
@@ -1654,8 +1917,10 @@ fn emit_segment(
             Instr::StoreLocal(slot) => {
                 let value = pop_native(&mut stack)?;
                 builder.def_var(values.locals[slot as usize], value);
-                let changed = builder.ins().iconst(types::I8, 1);
-                builder.def_var(values.dirty[slot as usize], changed);
+                let state = builder
+                    .ins()
+                    .iconst(types::I8, i64::from(LOCAL_DIRTY | LOCAL_INITIALIZED));
+                builder.def_var(values.local_states[slot as usize], state);
             }
             Instr::Pop => {
                 pop_native(&mut stack)?;
@@ -1676,13 +1941,15 @@ fn emit_segment(
                     reference,
                     field,
                     kind.representation(),
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: instruction + 1,
-                        prefix,
+                    FieldExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
                     },
-                    &stack,
-                    &deopt_stack,
                 )?;
                 stack.push(value);
             }
@@ -1815,18 +2082,27 @@ fn emit_segment(
                 .definition(target)
                 .ok_or(CompileError::Unsupported(UnsupportedReason::MissingSource))?;
             let deopt_stack = stack.clone();
+            let caller_kind_count = segment
+                .call_stack
+                .len()
+                .checked_sub(inline.params.len())
+                .ok_or(CompileError::Backend)?;
             emit_inline_call(
                 builder,
                 values,
                 &mut stack,
-                definition,
-                inline,
-                FaultPoint {
-                    block: segment.block,
-                    instruction: call_instruction,
-                    prefix,
+                InlineCallEmission {
+                    definition,
+                    plan: inline,
+                    root_local_kinds: &plan.local_kinds,
+                    caller_stack_kinds: &segment.call_stack[..caller_kind_count],
+                    deopt: FaultPoint {
+                        block: segment.block,
+                        instruction: call_instruction,
+                        prefix,
+                    },
+                    deopt_stack: &deopt_stack,
                 },
-                &deopt_stack,
             )?;
             emit_charge(builder, values, segment.cost);
             define_stack(builder, values, &stack)?;
@@ -1840,7 +2116,7 @@ fn emit_segment(
                 values,
                 ExitEmission {
                     retired,
-                    kind: EXIT_INTERPRETER,
+                    kind: EXIT_CALL,
                     block: segment.block,
                     instruction: call_instruction,
                     result: zero,
@@ -1870,6 +2146,10 @@ fn emit_segment(
             }
         }
         SegmentExit::Call { .. } => unreachable!(),
+        SegmentExit::Allocation { .. } => {
+            define_stack(builder, values, &stack)?;
+            builder.ins().jump(blocks[segment.successors[0]], &[]);
+        }
         SegmentExit::Return => {
             let result = pop_native(&mut stack)?;
             let retired = builder.use_var(values.retired);
@@ -1894,27 +2174,25 @@ fn emit_inline_call(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     caller_stack: &mut Vec<ir::Value>,
-    definition: FunctionDefinition<'_>,
-    plan: &InlineFunctionPlan,
-    deopt: FaultPoint,
-    deopt_stack: &[ir::Value],
+    call: InlineCallEmission<'_>,
 ) -> Result<(), CompileError> {
     let argument_start = caller_stack
         .len()
-        .checked_sub(plan.params.len())
+        .checked_sub(call.plan.params.len())
         .ok_or(CompileError::Backend)?;
     let arguments = caller_stack.split_off(argument_start);
-    let mut locals = vec![None; plan.local_kinds.len()];
+    let mut locals = vec![None; call.plan.local_kinds.len()];
     for (slot, value) in arguments.into_iter().enumerate() {
         locals[slot] = Some(value);
     }
-    let mut stack = Vec::with_capacity(plan.max_stack);
-    let code = definition
+    let mut stack = Vec::with_capacity(call.plan.max_stack);
+    let code = call
+        .definition
         .runtime
         .blocks
         .first()
         .ok_or(CompileError::Backend)?;
-    for instruction in code.iter().copied() {
+    for (instruction_index, instruction) in code.iter().copied().enumerate() {
         match instruction {
             Instr::ConstUnit => stack.push(builder.ins().iconst(types::I64, 0)),
             Instr::ConstBool(value) => {
@@ -1941,6 +2219,59 @@ fn emit_inline_call(
             Instr::Pop => {
                 pop_native(&mut stack)?;
             }
+            Instr::New(class) => {
+                let site = call
+                    .plan
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction as usize == instruction_index)
+                    .ok_or(CompileError::Backend)?;
+                let mut roots = Vec::new();
+                for (slot, (kind, variable)) in call
+                    .root_local_kinds
+                    .iter()
+                    .copied()
+                    .zip(values.locals.iter().copied())
+                    .enumerate()
+                {
+                    if matches!(kind, ScalarKind::Object(_)) {
+                        roots.push(NativeRoot {
+                            bits: builder.use_var(variable),
+                            state: Some(builder.use_var(values.local_states[slot])),
+                        });
+                    }
+                }
+                extend_stack_roots(&mut roots, call.caller_stack_kinds, caller_stack)?;
+                for ((kind, initialized), value) in call
+                    .plan
+                    .local_kinds
+                    .iter()
+                    .copied()
+                    .zip(site.initialized.iter().copied())
+                    .zip(locals.iter().copied())
+                {
+                    if initialized && matches!(kind, ScalarKind::Object(_)) {
+                        roots.push(NativeRoot {
+                            bits: value.ok_or(CompileError::Backend)?,
+                            state: None,
+                        });
+                    }
+                }
+                extend_stack_roots(&mut roots, &site.stack, &stack)?;
+                let (status, value) = emit_allocation_call(builder, values, class, &roots, false)?;
+                let replay = builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+                emit_fault_check(
+                    builder,
+                    values,
+                    replay,
+                    EXIT_ALLOCATION,
+                    call.deopt,
+                    call.deopt_stack,
+                )?;
+                stack.push(value);
+            }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
                 let left = pop_native(&mut stack)?;
@@ -1955,8 +2286,8 @@ fn emit_inline_call(
                     values,
                     overflow,
                     EXIT_INTERPRETER,
-                    deopt,
-                    deopt_stack,
+                    call.deopt,
+                    call.deopt_stack,
                 )?;
                 stack.push(result);
             }
@@ -1964,7 +2295,14 @@ fn emit_inline_call(
                 let right = pop_native(&mut stack)?;
                 let left = pop_native(&mut stack)?;
                 let zero = builder.ins().icmp_imm(IntCC::Equal, right, 0);
-                emit_fault_check(builder, values, zero, EXIT_INTERPRETER, deopt, deopt_stack)?;
+                emit_fault_check(
+                    builder,
+                    values,
+                    zero,
+                    EXIT_INTERPRETER,
+                    call.deopt,
+                    call.deopt_stack,
+                )?;
                 let minimum = builder.ins().iconst(types::I64, i64::MIN);
                 let minimum_left = builder.ins().icmp(IntCC::Equal, left, minimum);
                 let negative_one = builder.ins().icmp_imm(IntCC::Equal, right, -1);
@@ -1974,8 +2312,8 @@ fn emit_inline_call(
                     values,
                     overflow,
                     EXIT_INTERPRETER,
-                    deopt,
-                    deopt_stack,
+                    call.deopt,
+                    call.deopt_stack,
                 )?;
                 let result = if matches!(instruction, Instr::Div) {
                     builder.ins().sdiv(left, right)
@@ -1993,8 +2331,8 @@ fn emit_inline_call(
                     values,
                     overflow,
                     EXIT_INTERPRETER,
-                    deopt,
-                    deopt_stack,
+                    call.deopt,
+                    call.deopt_stack,
                 )?;
                 stack.push(result);
             }
@@ -2123,9 +2461,7 @@ fn emit_load_field(
     reference: ir::Value,
     field: u32,
     representation: ValueRepr,
-    point: FaultPoint,
-    fault_stack: &[ir::Value],
-    deopt_stack: &[ir::Value],
+    exit: FieldExitEmission<'_>,
 ) -> Result<ir::Value, CompileError> {
     let operation = builder
         .ins()
@@ -2155,8 +2491,8 @@ fn emit_load_field(
         values,
         mismatch,
         EXIT_TYPE_MISMATCH,
-        point,
-        fault_stack,
+        exit.point,
+        exit.fault_stack,
     )?;
     let uninitialized =
         builder
@@ -2167,19 +2503,120 @@ fn emit_load_field(
         values,
         uninitialized,
         EXIT_UNINITIALIZED_FIELD,
-        point,
-        fault_stack,
+        exit.point,
+        exit.fault_stack,
     )?;
     let replay = builder
         .ins()
         .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
-    emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
     Ok(builder.ins().load(
         types::I64,
         MemFlags::new(),
         values.runtime_result_pointer,
         0,
     ))
+}
+
+fn extend_stack_roots(
+    roots: &mut Vec<NativeRoot>,
+    kinds: &[ScalarKind],
+    values: &[ir::Value],
+) -> Result<(), CompileError> {
+    if kinds.len() != values.len() {
+        return Err(CompileError::Backend);
+    }
+    for (kind, value) in kinds.iter().copied().zip(values.iter().copied()) {
+        if matches!(kind, ScalarKind::Object(_)) {
+            roots.push(NativeRoot {
+                bits: value,
+                state: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn emit_allocate_instance(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    class: u32,
+    roots: &[NativeRoot],
+    point: FaultPoint,
+    stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let (status, result) = emit_allocation_call(builder, values, class, roots, true)?;
+    let heap_limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+    emit_fault_check(builder, values, heap_limit, EXIT_HEAP_LIMIT, point, stack)?;
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, point, stack)?;
+    Ok(result)
+}
+
+fn emit_allocation_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    class: u32,
+    roots: &[NativeRoot],
+    allow_collection: bool,
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    for (slot, root) in roots.iter().copied().enumerate() {
+        let value_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        builder.ins().store(
+            MemFlags::new(),
+            root.bits,
+            values.root_pointer,
+            value_offset,
+        );
+        let state = root.state.unwrap_or_else(|| {
+            builder
+                .ins()
+                .iconst(types::I8, i64::from(LOCAL_INITIALIZED))
+        });
+        builder.ins().store(
+            MemFlags::new(),
+            state,
+            values.root_state_pointer,
+            state_offset,
+        );
+    }
+    let operation = builder
+        .ins()
+        .iconst(types::I32, i64::from(RUNTIME_ALLOC_INSTANCE));
+    let class = builder.ins().iconst(types::I64, i64::from(class));
+    let collection = builder
+        .ins()
+        .iconst(types::I64, i64::from(allow_collection));
+    let root_count = builder.ins().iconst(
+        types::I32,
+        i64::try_from(roots.len()).map_err(|_| CompileError::Backend)?,
+    );
+    let call = builder.ins().call_indirect(
+        values.runtime_signature,
+        values.runtime_call,
+        &[
+            values.runtime_context,
+            operation,
+            class,
+            collection,
+            root_count,
+            values.runtime_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let result = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.runtime_result_pointer,
+        0,
+    );
+    Ok((status, result))
 }
 
 fn emit_interpreter_replay(
@@ -2303,16 +2740,19 @@ fn emit_exit(
 ) -> Result<(), CompileError> {
     for (slot, variable) in values.locals.iter().copied().enumerate() {
         let value = builder.use_var(variable);
-        let changed = builder.use_var(values.dirty[slot]);
+        let state = builder.use_var(values.local_states[slot]);
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let dirty_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         builder
             .ins()
             .store(MemFlags::new(), value, values.local_pointer, local_offset);
-        builder
-            .ins()
-            .store(MemFlags::new(), changed, values.dirty_pointer, dirty_offset);
+        builder.ins().store(
+            MemFlags::new(),
+            state,
+            values.local_state_pointer,
+            state_offset,
+        );
     }
     for (slot, value) in stack.iter().copied().enumerate() {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
@@ -2483,6 +2923,7 @@ mod tests {
             field_results: vec![],
             replay_stacks: vec![],
             fault_stacks: vec![],
+            allocations: vec![],
         }];
         compute_liveness(&mut segments, 2);
         assert_eq!(segments[0].live_in, vec![false, true]);
@@ -2549,6 +2990,16 @@ mod tests {
             assert_eq!(field, 0);
             assert_eq!(expected, ValueRepr::Int);
             self.result
+        }
+
+        fn allocate_instance(
+            &mut self,
+            _class: u32,
+            _root_bits: &[u64],
+            _root_states: &[u8],
+            _allow_collection: bool,
+        ) -> RuntimeResult {
+            RuntimeResult::Interpreter
         }
     }
 

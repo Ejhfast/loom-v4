@@ -553,6 +553,29 @@ fn run_engine_turn(
                 retired_total += interpreted;
                 return (outcome, retired_total);
             }
+            crate::jit::NativeAttempt::InterpretOne { retired } => {
+                retired_total += retired;
+                let remaining = instruction_limit - retired_total;
+                if remaining == 0 {
+                    return (Ok(None), retired_total);
+                }
+                let (outcome, interpreted) = run_interpreter_turn(machine, 1, &mut context);
+                retired_total += interpreted;
+                if interpreted == 1
+                    && retired_total < instruction_limit
+                    && matches!(outcome, Ok(None))
+                {
+                    continue;
+                }
+                return (outcome, retired_total);
+            }
+            crate::jit::NativeAttempt::Reenter { retired } => {
+                retired_total += retired;
+                if retired_total < instruction_limit {
+                    continue;
+                }
+                return (Ok(None), retired_total);
+            }
             crate::jit::NativeAttempt::Fallback => {
                 let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
                 retired_total += interpreted;

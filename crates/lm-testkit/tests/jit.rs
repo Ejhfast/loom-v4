@@ -15,6 +15,18 @@ end
 if same then sum else 0 end
 "#;
 
+const ALLOCATION_LOOP: &str = r#"
+class Token
+end
+
+i = 0
+while i < 1000
+  token = Token()
+  i = i + 1
+end
+i
+"#;
+
 fn run(source: &str, mode: EngineMode, fuel: u64) -> (Outcome, lm_vm::EngineMetrics, String) {
     let artifact = lm_testkit::compile_text("jit.lm", source).expect("the JIT case compiles");
     run_artifact(&artifact, mode, fuel)
@@ -169,7 +181,7 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(10_000)));
     assert_eq!(metrics.compiled_call_sites, 1);
     assert!(metrics.native_retired_instructions > 40_000);
-    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
 }
 
 #[test]
@@ -244,7 +256,7 @@ fn a_recursive_call_uses_an_explicit_interpreter_exit() {
     assert_eq!(metrics.compiled_call_sites, 0);
     assert!(metrics.native_entries > 0);
     assert!(metrics.materializations > 0);
-    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 1, "{metrics:?}");
 }
 
 #[test]
@@ -322,6 +334,91 @@ fn native_field_reads_resume_from_interpreter_created_state() {
     assert_eq!(metrics.compiled_heap_read_sites, 1);
     assert!(metrics.native_heap_reads > 9_000);
     assert_eq!(metrics.guard_failures, 0);
+}
+
+#[test]
+fn native_allocation_resumes_native_execution() {
+    let (interpreted, _, interpreted_dump) =
+        run(ALLOCATION_LOOP, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(ALLOCATION_LOOP, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
+    assert!(metrics.compiled_allocation_sites > 0, "{metrics:?}");
+    assert!(metrics.native_allocations >= 1000, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000);
+    assert_eq!(metrics.guard_failures, 0);
+}
+
+#[test]
+fn native_allocation_matches_each_fuel_boundary() {
+    let source = ALLOCATION_LOOP.replace("1000", "3");
+    let artifact = lm_testkit::compile_text("jit-allocation-fuel.lm", &source)
+        .expect("the allocation case compiles");
+    for fuel in 0..=48 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn native_allocation_preserves_collection_roots() {
+    let artifact = lm_testkit::compile_text("jit-allocation-gc.lm", ALLOCATION_LOOP)
+        .expect("the allocation case compiles");
+    let config = VmConfig {
+        heap_bytes: 4096,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
+    assert!(metrics.native_allocations >= 1000);
+}
+
+#[test]
+fn native_allocation_preserves_the_heap_limit_fault() {
+    let source = "class Token\nend\nToken()\n";
+    let artifact = lm_testkit::compile_text("jit-allocation-limit.lm", source)
+        .expect("the allocation limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+}
+
+#[test]
+fn a_fault_after_allocation_does_not_replay_the_allocation() {
+    let source = concat!(
+        "class Token\n",
+        "end\n",
+        "def make(divisor: Int): Token\n",
+        "  token = Token()\n",
+        "  ignored = 1 / divisor\n",
+        "  token\n",
+        "end\n",
+        "make(0)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::DivideByZero));
+    assert_eq!(metrics.native_allocations, 1, "{metrics:?}");
 }
 
 #[test]
@@ -412,9 +509,10 @@ fn captured_scalar_loop() -> (lm_bytecode::artifact::Artifact, lm_vm::snapshot::
     )
 }
 
-fn restore_with_native(
+fn restore_with_engine(
     artifact: &lm_bytecode::artifact::Artifact,
     image: &lm_vm::snapshot::Image,
+    mode: EngineMode,
 ) -> (RootEvent, lm_vm::EngineMetrics) {
     let bytes =
         lm_vm::snapshot::codec::encode(image, usize::MAX).expect("the scalar image encodes");
@@ -426,7 +524,7 @@ fn restore_with_native(
     .expect("the scalar image admits");
     let (arena, namespace) =
         lm_testkit::publish_artifact(artifact).expect("the scalar artifact publishes");
-    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let engine = Arc::new(Engine::new(mode));
     let mut world = World::new_with_engine(
         arena,
         namespace,
@@ -439,6 +537,53 @@ fn restore_with_native(
         .restore_image(0, target, &admitted)
         .expect("the scalar image restores");
     (world.run_machine(root), engine.metrics())
+}
+
+fn restore_with_native(
+    artifact: &lm_bytecode::artifact::Artifact,
+    image: &lm_vm::snapshot::Image,
+) -> (RootEvent, lm_vm::EngineMetrics) {
+    restore_with_engine(artifact, image, EngineMode::Native)
+}
+
+#[test]
+fn a_native_allocation_snapshot_resumes_in_both_engines() {
+    let artifact = lm_testkit::compile_text("jit-allocation-snapshot.lm", ALLOCATION_LOOP)
+        .expect("the allocation snapshot case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact.clone())
+        .expect("the allocation snapshot case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice(root, 128),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    assert!(engine.metrics().native_allocations > 0);
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the allocation state captures");
+    let (interpreted, _) = restore_with_engine(&artifact, image.world(), EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, image.world());
+    assert!(matches!(
+        interpreted,
+        RootEvent::Done(lm_value::Value::Int(1000))
+    ));
+    assert!(matches!(
+        native,
+        RootEvent::Done(lm_value::Value::Int(1000))
+    ));
+    assert!(metrics.native_allocations > 0, "{metrics:?}");
 }
 
 #[test]

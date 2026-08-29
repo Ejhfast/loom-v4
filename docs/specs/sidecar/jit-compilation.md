@@ -1,6 +1,6 @@
 # Guarded JIT compilation
 
-Status: Stages 0 through 7 are implemented for the native execution experiment.
+Status: Stages 0 through 8 are implemented for the native execution experiment.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -32,9 +32,8 @@ The first implementation does not compile these operations:
 - indirect, virtual, generic, and recursive native calls;
 - closures or captures;
 - generic environments;
-- allocation;
+- generic and aggregate allocation;
 - heap mutation;
-- collection operations;
 - effects;
 - native LMBC instructions;
 - extended LMBC instructions.
@@ -82,6 +81,8 @@ An **entry point** is a supported LMBC program position for one region.
 An **entry plan** lists the live scalar values required by one entry point.
 
 A **materialization map** describes canonical machine state at one native exit.
+
+A **root map** lists every initialized object value held by one active native frame.
 
 A **guard** checks one required `Value` representation without changing machine state.
 
@@ -305,13 +306,15 @@ struct NativeExit {
 
 type NativeFunction = unsafe extern "C" fn(
     locals: *mut u64,
-    dirty: *mut u8,
+    local_states: *mut u8,
     operands: *mut u64,
     fuel: u64,
     entry: u32,
     runtime_context: *mut (),
     runtime_call: RuntimeCall,
     runtime_result: *mut u64,
+    roots: *mut u64,
+    root_states: *mut u8,
     exit: *mut NativeExit,
 );
 ```
@@ -328,6 +331,8 @@ Rust reconstructs canonical `Value` instances after native exit.
 
 Native registers and stack slots are execution caches only.
 
+Local state bytes record initialization and changed values.
+
 `lm-jit` owns the unsafe callback adapter.
 
 `lm-vm` implements the safe runtime service trait.
@@ -339,6 +344,10 @@ The callback context stays valid only during one native activation.
 `Frame`, `VmState.locals`, and `VmState.operands` remain canonical state.
 
 Native code materializes all changed state before returning to Rust.
+
+An allocation callback receives complete object roots for every active native frame.
+
+Generated code retains no raw heap pointer across an allocation or collection.
 
 Each exit records the next LMBC program position.
 
@@ -432,6 +441,7 @@ The runtime records clock-free counters:
 - compiled segments;
 - compiled direct-call sites;
 - compiled heap-read sites;
+- compiled allocation sites;
 - native entry attempts;
 - guarded values;
 - guard failures;
@@ -440,6 +450,8 @@ The runtime records clock-free counters:
 - materializations;
 - native fault exits;
 - native heap reads;
+- native allocations;
+- native allocation exits;
 - fallbacks by reason.
 
 The benchmark harness measures wall time outside pure runtime crates.
@@ -480,6 +492,8 @@ Tests alternate interpreter and native turns on one machine.
 Tests capture after native execution and resume through the interpreter.
 
 Tests capture after interpreter execution and resume through native code.
+
+Tests capture native allocation state and resume through both engines.
 
 ### 17.4 External state
 
@@ -637,7 +651,10 @@ Stop gate: field reads preserve full state and show a clear warm gain.
 ### Stage 8: Bounded allocation
 
 - define safepoint root maps;
-- add allocation exits;
+- compile plain non-generic instance allocation;
+- collect through the checked runtime callback;
+- exit before an inline allocation that needs collection;
+- resume native execution after the constructor boundary;
 - preserve collection and snapshot rules.
 
 Stop gate: allocation preserves heap limits, collection roots, fuel, and snapshots.
@@ -849,3 +866,29 @@ Unit tests cover successful reads and exact uninitialized-field exits.
 An integration test resumes native execution from interpreter-created heap state.
 
 The retained scalar, division, call, sliced, and scheduled rows remain within prior variation.
+
+## 28. Stage 8 review measurements
+
+The allocation benchmark creates 100,000 empty instances.
+
+It keeps one prior instance in a local at each allocation.
+
+| Workload | Interpreter | Native cold | Native warm | Warm gain |
+| --- | ---: | ---: | ---: | ---: |
+| Plain instance allocation | 7.697 ms | 3.046 ms | 2.599 ms | 2.96 times |
+
+An initial design returned to the interpreter for every allocation.
+
+That design achieved only 0.19 times interpreter performance.
+
+Native bounded allocation removed that handoff.
+
+Removing one host vector allocation from each callback improved the gain from 2.02 times to 2.96 times.
+
+Collecting inline allocations use one explicit constructor exit.
+
+The nested constructor then performs one collection and resumes native execution.
+
+Tests cover exact fuel, heap limits, root retention, collection state, and snapshot continuation.
+
+All retained native rows remain faster than their interpreter rows.

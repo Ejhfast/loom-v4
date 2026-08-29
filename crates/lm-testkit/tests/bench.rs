@@ -298,6 +298,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_segments = compiler.compiled_segments;
     runtime.compiled_call_sites = compiler.compiled_call_sites;
     runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
+    runtime.compiled_allocation_sites = compiler.compiled_allocation_sites;
     runtime
 }
 
@@ -311,7 +312,7 @@ fn report_jit(name: &str, source: &str, required_call_sites: u64) {
     assert!(metrics.native_retired_instructions > 0);
     assert!(metrics.compiled_call_sites >= required_call_sites);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         cold.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
@@ -319,6 +320,8 @@ fn report_jit(name: &str, source: &str, required_call_sites: u64) {
         metrics.native_entries,
         metrics.guarded_values,
         metrics.compiled_call_sites,
+        metrics.compiled_allocation_sites,
+        metrics.native_allocations,
     );
 }
 
@@ -331,7 +334,7 @@ fn report_jit_after_setup(name: &str, source: &str, setup: u32) {
     let (native, metrics) = time_program_engine_after_setup(source, EngineMode::Native, setup);
     assert!(metrics.native_retired_instructions > 0);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         cold.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
@@ -339,6 +342,8 @@ fn report_jit_after_setup(name: &str, source: &str, setup: u32) {
         metrics.native_entries,
         metrics.guarded_values,
         metrics.compiled_call_sites,
+        metrics.compiled_allocation_sites,
+        metrics.native_allocations,
     );
 }
 
@@ -350,13 +355,15 @@ fn report_jit_sliced(name: &str, source: &str, quantum: u32) {
     let (native, metrics) = time_program_engine_sliced(source, EngineMode::Native, quantum);
     assert!(metrics.native_retired_instructions > 0);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
         metrics.native_entries,
         metrics.guarded_values,
         metrics.compiled_call_sites,
+        metrics.compiled_allocation_sites,
+        metrics.native_allocations,
     );
 }
 
@@ -368,13 +375,15 @@ fn report_jit_scheduled(name: &str, source: &str) {
     let (native, metrics) = time_program_engine_scheduled(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
         metrics.native_entries,
         metrics.guarded_values,
         metrics.compiled_call_sites,
+        metrics.compiled_allocation_sites,
+        metrics.native_allocations,
     );
 }
 
@@ -1031,7 +1040,7 @@ end
 #[ignore]
 fn bench_jit_scalar_regions() {
     println!(
-        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls"
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"
     );
     report_jit(
         "jit_int_loop",
@@ -1091,6 +1100,16 @@ fn bench_jit_scalar_regions() {
             "end\ns\n",
         ),
         32,
+    );
+    report_jit(
+        "jit_allocation",
+        concat!(
+            "class Token\nend\n",
+            "i = 0\nwhile i < 100000\n",
+            "  token = Token()\n  i = i + 1\n",
+            "end\ni\n",
+        ),
+        0,
     );
     report_jit_sliced(
         "jit_int_loop_sliced",

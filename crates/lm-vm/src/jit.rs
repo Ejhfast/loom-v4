@@ -3,7 +3,10 @@
 use crate::engine::Engine;
 use crate::machine::{ExecError, ExecOutcome, Machine};
 use crate::NamespaceRuntime;
-use lm_jit::{ExitKind, Failure, FunctionInput, Runtime, RuntimeResult, ScalarKind, ValueRepr};
+use lm_jit::{
+    ExitKind, Failure, FunctionInput, Runtime, RuntimeResult, ScalarKind, ValueRepr, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
+};
 use lm_value::{canonical_float_bits, ObjRef, TypeEnvId, Value};
 
 pub(crate) enum NativeAttempt {
@@ -12,6 +15,12 @@ pub(crate) enum NativeAttempt {
         instructions: u32,
     },
     Continue {
+        retired: u32,
+    },
+    InterpretOne {
+        retired: u32,
+    },
+    Reenter {
         retired: u32,
     },
     Complete {
@@ -111,13 +120,14 @@ impl JitEngine {
                 return NativeAttempt::Fallback;
             }
         };
-        self.execute_region(engine, machine, &region, instruction_limit)
+        self.execute_region(engine, machine, module, &region, instruction_limit)
     }
 
     fn execute_region(
         &self,
         engine: &Engine,
         machine: &mut Machine,
+        module: &NamespaceRuntime,
         region: &lm_jit::CompiledRegion,
         instruction_limit: u32,
     ) -> NativeAttempt {
@@ -125,8 +135,7 @@ impl JitEngine {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
-        if machine.vm.frames.len() != 1 || frame.closure.is_some() || frame.env != TypeEnvId::EMPTY
-        {
+        if frame.closure.is_some() || frame.env != TypeEnvId::EMPTY {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         }
@@ -183,19 +192,31 @@ impl JitEngine {
             return NativeAttempt::Fallback;
         }
         let mut bits = vec![0; region.local_kinds().len()];
-        let mut dirty = vec![0; region.local_kinds().len()];
+        let mut local_states = vec![0; region.local_kinds().len()];
         let mut stack_bits = vec![0; region.max_stack()];
         let mut guarded = 0u64;
-        for (slot, live) in entry.live_locals().iter().copied().enumerate() {
-            if !live {
+        for (slot, (kind, live)) in region
+            .local_kinds()
+            .iter()
+            .copied()
+            .zip(entry.live_locals().iter().copied())
+            .enumerate()
+        {
+            let complete_root =
+                region.requires_complete_roots() && matches!(kind, ScalarKind::Object(_));
+            if !live && !complete_root {
+                continue;
+            }
+            if !live && locals[slot] == Value::Uninit {
                 continue;
             }
             guarded += 1;
-            let Some(value) = scalar_bits(region.local_kinds()[slot], locals[slot]) else {
+            let Some(value) = scalar_bits(kind, locals[slot]) else {
                 engine.note_guard_failure(guarded);
                 return NativeAttempt::Fallback;
             };
             bits[slot] = value;
+            local_states[slot] = LOCAL_INITIALIZED;
         }
         for (slot, (kind, value)) in entry
             .operand_kinds()
@@ -216,22 +237,27 @@ impl JitEngine {
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
         engine.note_native_entry();
-        let (exit, heap_reads) = {
+        let (exit, heap_reads, allocations) = {
             let mut runtime = MachineRuntime {
-                heap: &machine.vm.heap,
+                machine,
+                module,
+                base_local: base,
+                base_operand: operand_base,
                 heap_reads: 0,
+                allocations: 0,
             };
             let exit = region.execute(
                 &mut runtime,
                 entry.index(),
                 &mut bits,
-                &mut dirty,
+                &mut local_states,
                 &mut stack_bits,
                 batch_fuel,
             );
-            (exit, runtime.heap_reads)
+            (exit, runtime.heap_reads, runtime.allocations)
         };
         engine.note_native_heap_reads(heap_reads);
+        engine.note_native_allocations(allocations);
         let exit = match exit {
             Ok(exit) => exit,
             Err(_) => {
@@ -248,8 +274,8 @@ impl JitEngine {
             return NativeAttempt::Fallback;
         }
         machine.vm.fuel -= exit.retired();
-        for (slot, changed) in dirty.iter().copied().enumerate() {
-            if changed != 0 {
+        for (slot, state) in local_states.iter().copied().enumerate() {
+            if state & LOCAL_DIRTY != 0 {
                 machine.vm.locals[base + slot] = bits_value(region.local_kinds()[slot], bits[slot]);
             }
         }
@@ -257,7 +283,7 @@ impl JitEngine {
         engine.note_materialization();
 
         match exit.kind() {
-            ExitKind::Fuel | ExitKind::Interpreter => {
+            ExitKind::Fuel | ExitKind::Interpreter | ExitKind::Call | ExitKind::Allocation => {
                 let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
                 let Some(stack_kinds) = region.operand_kinds(exit.block(), exit.instruction())
                 else {
@@ -282,7 +308,12 @@ impl JitEngine {
                 };
                 frame.block = exit.block();
                 frame.ip = exit.instruction();
-                if interpreter {
+                if matches!(exit.kind(), ExitKind::Call | ExitKind::Allocation) {
+                    if matches!(exit.kind(), ExitKind::Allocation) {
+                        engine.note_native_allocation_exit();
+                    }
+                    NativeAttempt::InterpretOne { retired }
+                } else if interpreter {
                     NativeAttempt::Continue { retired }
                 } else if exit.retired() == batch_fuel {
                     let outcome = if u64::from(instruction_limit) <= original_fuel {
@@ -300,18 +331,23 @@ impl JitEngine {
                     return malformed_native_exit(retired);
                 }
                 let value = bits_value(region.result_kind(), exit.result());
-                NativeAttempt::Complete {
-                    outcome: machine
-                        .finish_native_return(value)
-                        .map(Some)
-                        .map_err(ExecError::Fault),
-                    retired,
+                match machine.finish_native_return(value) {
+                    Ok(ExecOutcome::Continue) => NativeAttempt::Reenter { retired },
+                    Ok(outcome) => NativeAttempt::Complete {
+                        outcome: Ok(Some(outcome)),
+                        retired,
+                    },
+                    Err(fault) => NativeAttempt::Complete {
+                        outcome: Err(ExecError::Fault(fault)),
+                        retired,
+                    },
                 }
             }
             ExitKind::IntegerOverflow
             | ExitKind::DivideByZero
             | ExitKind::TypeMismatch
-            | ExitKind::UninitializedField => {
+            | ExitKind::UninitializedField
+            | ExitKind::HeapLimit => {
                 let fault_kinds = region
                     .fault_operand_kinds(exit.block(), exit.instruction())
                     .unwrap_or(&[]);
@@ -336,6 +372,7 @@ impl JitEngine {
                     ExitKind::DivideByZero => crate::FaultCode::DivideByZero,
                     ExitKind::TypeMismatch => crate::FaultCode::TypeMismatch,
                     ExitKind::UninitializedField => crate::FaultCode::UninitializedField,
+                    ExitKind::HeapLimit => crate::FaultCode::HeapLimit,
                     _ => unreachable!(),
                 };
                 NativeAttempt::Complete {
@@ -387,14 +424,19 @@ fn object_reference(bits: u64) -> ObjRef {
 }
 
 struct MachineRuntime<'a> {
-    heap: &'a crate::Heap,
+    machine: &'a mut Machine,
+    module: &'a NamespaceRuntime,
+    base_local: usize,
+    base_operand: usize,
     heap_reads: u64,
+    allocations: u64,
 }
 
 impl Runtime for MachineRuntime<'_> {
     fn load_field(&mut self, reference: ObjRef, field: u32, expected: ValueRepr) -> RuntimeResult {
         self.heap_reads = self.heap_reads.saturating_add(1);
-        let Some(crate::Object::Instance { fields, .. }) = self.heap.try_get(reference) else {
+        let Some(crate::Object::Instance { fields, .. }) = self.machine.vm.heap.try_get(reference)
+        else {
             return RuntimeResult::TypeMismatch;
         };
         let Some(value) = fields.get(field as usize).copied() else {
@@ -406,6 +448,59 @@ impl Runtime for MachineRuntime<'_> {
         match representation_bits(expected, value) {
             Some(bits) => RuntimeResult::Value(bits),
             None => RuntimeResult::Interpreter,
+        }
+    }
+
+    fn allocate_instance(
+        &mut self,
+        class: u32,
+        root_bits: &[u64],
+        root_states: &[u8],
+        allow_collection: bool,
+    ) -> RuntimeResult {
+        if root_bits.len() != root_states.len() {
+            return RuntimeResult::Interpreter;
+        }
+        let Some(class_entry) = self.module.classes.get(class as usize) else {
+            return RuntimeResult::Interpreter;
+        };
+        let object = crate::Object::Instance {
+            class,
+            fields: vec![Value::Uninit; class_entry.fields.len()],
+            env: lm_value::Witness::EMPTY,
+        };
+        let cost = self.machine.vm.heap.allocation_cost(&object);
+        if !self.machine.vm.heap.collection_due(cost) {
+            let reference = self.machine.vm.heap.alloc(object);
+            self.allocations = self.allocations.saturating_add(1);
+            return RuntimeResult::Value(object_bits(reference));
+        }
+        if !allow_collection {
+            return RuntimeResult::Interpreter;
+        }
+        let mut roots = Vec::new();
+        if roots.try_reserve_exact(root_bits.len()).is_err() {
+            return RuntimeResult::HeapLimit;
+        }
+        roots.extend(
+            root_bits
+                .iter()
+                .copied()
+                .zip(root_states.iter().copied())
+                .filter(|(_, state)| state & LOCAL_INITIALIZED != 0)
+                .map(|(bits, _)| object_reference(bits)),
+        );
+        match self
+            .machine
+            .alloc_native(object, self.base_local, self.base_operand, &roots)
+        {
+            Ok(Value::Obj(reference)) => {
+                self.allocations = self.allocations.saturating_add(1);
+                RuntimeResult::Value(object_bits(reference))
+            }
+            Ok(_) => RuntimeResult::Interpreter,
+            Err(crate::FaultCode::HeapLimit) => RuntimeResult::HeapLimit,
+            Err(_) => RuntimeResult::Interpreter,
         }
     }
 }
