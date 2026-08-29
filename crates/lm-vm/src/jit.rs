@@ -1,45 +1,10 @@
-//! Guarded native regions over verified scalar LMBC.
+//! Canonical machine-state adapter for native execution.
 
 use crate::engine::Engine;
 use crate::machine::{ExecError, ExecOutcome, Machine};
 use crate::NamespaceRuntime;
-use cranelift_codegen::ir::{
-    self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
-    UserFuncName,
-};
-use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{default_libcall_names, Linkage, Module as _};
-use lm_bytecode::{BcType, Func, Instr, NumericInstr};
-use lm_value::{canonical_float_bits, TypeEnvId, Value, CANONICAL_NAN_BITS};
-use std::collections::HashMap;
-use std::fmt;
-use std::mem;
-use std::sync::{Arc, Mutex, RwLock};
-
-const MAX_COMPILED_REGIONS: usize = 256;
-const MAX_REGION_INSTRUCTIONS: usize = 65_536;
-const MAX_REGION_LOCALS: usize = 1_024;
-const MAX_REGION_STACK: usize = 1_024;
-
-const EXIT_FUEL: u32 = 1;
-const EXIT_RETURN: u32 = 2;
-const EXIT_INTEGER_OVERFLOW: u32 = 3;
-const EXIT_INVALID_ENTRY: u32 = 4;
-
-#[repr(C)]
-#[derive(Debug, Default)]
-struct NativeExit {
-    retired: u64,
-    kind: u32,
-    block: u32,
-    instruction: u32,
-    stack_len: u32,
-    result: u64,
-}
-
-type NativeFunction = unsafe extern "C" fn(*mut u64, *mut u8, *mut u64, u64, u32, *mut NativeExit);
+use lm_jit::{ExitKind, Failure, FunctionInput, ScalarKind};
+use lm_value::{canonical_float_bits, TypeEnvId, Value};
 
 pub(crate) enum NativeAttempt {
     Fallback,
@@ -55,505 +20,21 @@ pub(crate) enum NativeAttempt {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum CachedFailure {
-    Unsupported,
-    Backend,
-}
-
-enum CacheEntry {
-    Ready(Arc<CompiledRegion>),
-    Failed(CachedFailure),
-}
-
-/// One host-owned cache of immutable native regions.
-#[derive(Default)]
+/// One host-owned native compiler and immutable region cache.
+#[derive(Debug, Default)]
 pub(crate) struct JitEngine {
-    regions: RwLock<HashMap<[u8; 32], CacheEntry>>,
-}
-
-impl fmt::Debug for JitEngine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let regions = self
-            .regions
-            .read()
-            .map(|regions| regions.len())
-            .unwrap_or(0);
-        formatter
-            .debug_struct("JitEngine")
-            .field("regions", &regions)
-            .finish()
-    }
-}
-
-struct CompiledRegion {
-    plan: RegionPlan,
-    entry: NativeFunction,
-    // The module owns the executable memory behind `entry`.
-    _module: Mutex<JITModule>,
-}
-
-impl fmt::Debug for CompiledRegion {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CompiledRegion")
-            .field("segments", &self.plan.segments.len())
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScalarKind {
-    Unit,
-    Bool,
-    Int,
-    Float,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum UnsupportedReason {
-    MissingSource,
-    GenericFunction,
-    CapturedFunction,
-    NonScalarType,
-    UnsupportedInstruction,
-    InvalidStack,
-    InvalidControlFlow,
-    RegionLimit,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SegmentExit {
-    Jump {
-        target_block: u32,
-    },
-    Conditional {
-        target_block: u32,
-        jump_on_true: bool,
-        fallthrough_ip: u32,
-    },
-    Return,
-}
-
-#[derive(Debug, Clone)]
-struct Segment {
-    block: u32,
-    start: u32,
-    end: u32,
-    exit: SegmentExit,
-    uses: Vec<bool>,
-    definitions: Vec<bool>,
-    successors: Vec<usize>,
-    live_in: Vec<bool>,
-    entry_stack: Vec<ScalarKind>,
-    exit_stack: Vec<ScalarKind>,
-}
-
-#[derive(Debug, Clone)]
-struct RegionPlan {
-    local_kinds: Vec<ScalarKind>,
-    result_kind: ScalarKind,
-    max_stack: usize,
-    segments: Vec<Segment>,
-    entries: std::collections::HashMap<(u32, u32), usize>,
-}
-
-struct SegmentAnalysis {
-    uses: Vec<bool>,
-    definitions: Vec<bool>,
-    exit_stack: Vec<ScalarKind>,
-    max_stack: usize,
-}
-
-impl RegionPlan {
-    fn for_function(
-        module: &NamespaceRuntime,
-        function: u32,
-    ) -> Result<RegionPlan, UnsupportedReason> {
-        let runtime = module
-            .funcs
-            .get(function as usize)
-            .ok_or(UnsupportedReason::MissingSource)?;
-        if runtime.type_params != 0 || runtime.effect_params != 0 {
-            return Err(UnsupportedReason::GenericFunction);
-        }
-        if !runtime.captures.is_empty() {
-            return Err(UnsupportedReason::CapturedFunction);
-        }
-        let instructions = runtime
-            .blocks
-            .iter()
-            .try_fold(0usize, |total, block| total.checked_add(block.len()));
-        if runtime.local_types.len() > MAX_REGION_LOCALS
-            || instructions.is_none_or(|count| count > MAX_REGION_INSTRUCTIONS)
-        {
-            return Err(UnsupportedReason::RegionLimit);
-        }
-        let (unit, local) = module
-            .code_namespace()
-            .function_unit(function)
-            .map_err(|_| UnsupportedReason::MissingSource)?;
-        let source = unit.module();
-        let source_func = source
-            .funcs
-            .get(local as usize)
-            .ok_or(UnsupportedReason::MissingSource)?;
-        let states = lm_verify::verify_function_states_with_bundle(source, module.bundle(), local)
-            .map_err(|_| UnsupportedReason::MissingSource)?;
-        if source_func.blocks.len() != runtime.blocks.len()
-            || source_func.local_types.len() != runtime.local_types.len()
-        {
-            return Err(UnsupportedReason::InvalidControlFlow);
-        }
-        let local_kinds = source_func
-            .local_types
-            .iter()
-            .map(|ty| scalar_kind(source, *ty))
-            .collect::<Result<Vec<_>, _>>()?;
-        let result_kind = scalar_kind(source, source_func.ret)?;
-        let mut segments = split_segments(runtime)?;
-        let entries: std::collections::HashMap<(u32, u32), usize> = segments
-            .iter()
-            .enumerate()
-            .map(|(index, segment)| ((segment.block, segment.start), index))
-            .collect();
-        resolve_successors(&mut segments, &entries)?;
-        let mut max_stack = 0;
-        let mut active_block = u32::MAX;
-        let mut block_stack = Vec::new();
-        for (index, segment) in segments.iter_mut().enumerate() {
-            let state = states
-                .get(segment.block as usize)
-                .and_then(Option::as_ref)
-                .ok_or(UnsupportedReason::InvalidControlFlow)?;
-            if active_block != segment.block {
-                active_block = segment.block;
-                block_stack = state
-                    .stack()
-                    .iter()
-                    .map(|ty| scalar_kind(source, *ty))
-                    .collect::<Result<Vec<_>, _>>()?;
-            }
-            segment.entry_stack = block_stack.clone();
-            let mut initialized: Vec<bool> = state.locals().iter().map(Option::is_some).collect();
-            for instruction in runtime.blocks[segment.block as usize]
-                .iter()
-                .take(segment.start as usize)
-            {
-                if let Instr::StoreLocal(slot) = instruction {
-                    let Some(value) = initialized.get_mut(*slot as usize) else {
-                        return Err(UnsupportedReason::InvalidControlFlow);
-                    };
-                    *value = true;
-                }
-            }
-            let analysis = analyze_segment(
-                runtime,
-                segment,
-                &local_kinds,
-                result_kind,
-                &initialized,
-                &block_stack,
-            )?;
-            segment.uses = analysis.uses;
-            segment.definitions = analysis.definitions;
-            segment.exit_stack = analysis.exit_stack.clone();
-            block_stack = analysis.exit_stack;
-            max_stack = max_stack.max(analysis.max_stack);
-            debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
-        }
-        for segment in &segments {
-            for successor in &segment.successors {
-                if segment.exit_stack != segments[*successor].entry_stack {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                }
-            }
-        }
-        if max_stack > MAX_REGION_STACK {
-            return Err(UnsupportedReason::RegionLimit);
-        }
-        compute_liveness(&mut segments, local_kinds.len());
-        Ok(RegionPlan {
-            local_kinds,
-            result_kind,
-            max_stack,
-            segments,
-            entries,
-        })
-    }
-
-    fn distance_to_entry(&self, block: u32, instruction: u32) -> Option<u32> {
-        self.segments
-            .iter()
-            .find(|segment| {
-                segment.block == block && segment.start < instruction && instruction < segment.end
-            })
-            .map(|segment| segment.end - instruction)
-    }
-}
-
-fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, UnsupportedReason> {
-    match module.types.get(ty as usize) {
-        Some(BcType::Unit) => Ok(ScalarKind::Unit),
-        Some(BcType::Bool) => Ok(ScalarKind::Bool),
-        Some(BcType::Int) => Ok(ScalarKind::Int),
-        Some(BcType::Float) => Ok(ScalarKind::Float),
-        _ => Err(UnsupportedReason::NonScalarType),
-    }
-}
-
-fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
-    let mut segments = Vec::new();
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        let mut start = 0usize;
-        for (instruction_index, instruction) in block.iter().enumerate() {
-            let exit = match instruction {
-                Instr::Jump(target) => Some(SegmentExit::Jump {
-                    target_block: *target,
-                }),
-                Instr::JumpIfFalse(target) => Some(SegmentExit::Conditional {
-                    target_block: *target,
-                    jump_on_true: false,
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::JumpIfTrue(target) => Some(SegmentExit::Conditional {
-                    target_block: *target,
-                    jump_on_true: true,
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::Return => Some(SegmentExit::Return),
-                _ => None,
-            };
-            let Some(exit) = exit else { continue };
-            segments.push(Segment {
-                block: block_index as u32,
-                start: start as u32,
-                end: instruction_index as u32 + 1,
-                exit,
-                uses: Vec::new(),
-                definitions: Vec::new(),
-                successors: Vec::new(),
-                live_in: Vec::new(),
-                entry_stack: Vec::new(),
-                exit_stack: Vec::new(),
-            });
-            start = instruction_index + 1;
-        }
-        if start != block.len() {
-            return Err(UnsupportedReason::InvalidControlFlow);
-        }
-    }
-    Ok(segments)
-}
-
-fn resolve_successors(
-    segments: &mut [Segment],
-    entries: &std::collections::HashMap<(u32, u32), usize>,
-) -> Result<(), UnsupportedReason> {
-    for segment in segments {
-        segment.successors = match segment.exit {
-            SegmentExit::Jump { target_block } => vec![entry(entries, target_block, 0)?],
-            SegmentExit::Conditional {
-                target_block,
-                fallthrough_ip,
-                ..
-            } => vec![
-                entry(entries, target_block, 0)?,
-                entry(entries, segment.block, fallthrough_ip)?,
-            ],
-            SegmentExit::Return => Vec::new(),
-        };
-    }
-    Ok(())
-}
-
-fn entry(
-    entries: &std::collections::HashMap<(u32, u32), usize>,
-    block: u32,
-    instruction: u32,
-) -> Result<usize, UnsupportedReason> {
-    entries
-        .get(&(block, instruction))
-        .copied()
-        .ok_or(UnsupportedReason::InvalidControlFlow)
-}
-
-fn analyze_segment(
-    func: &Func,
-    segment: &Segment,
-    locals: &[ScalarKind],
-    result: ScalarKind,
-    initialized: &[bool],
-    entry_stack: &[ScalarKind],
-) -> Result<SegmentAnalysis, UnsupportedReason> {
-    let mut stack = entry_stack.to_vec();
-    let mut max_stack = stack.len();
-    let mut uses = vec![false; locals.len()];
-    let mut definitions = vec![false; locals.len()];
-    for instruction in
-        &func.blocks[segment.block as usize][segment.start as usize..segment.end as usize]
-    {
-        match *instruction {
-            Instr::ConstUnit => stack.push(ScalarKind::Unit),
-            Instr::ConstBool(_) => stack.push(ScalarKind::Bool),
-            Instr::ConstInt(_) => stack.push(ScalarKind::Int),
-            Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
-            Instr::LoadLocal(slot) => {
-                let at = slot as usize;
-                let Some(kind) = locals.get(at).copied() else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                if !initialized.get(at).copied().unwrap_or(false)
-                    && !definitions.get(at).copied().unwrap_or(false)
-                {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
-                if !definitions[at] {
-                    uses[at] = true;
-                }
-                stack.push(kind);
-            }
-            Instr::StoreLocal(slot) => {
-                let at = slot as usize;
-                let kind = locals
-                    .get(at)
-                    .copied()
-                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
-                expect(&mut stack, kind)?;
-                definitions[at] = true;
-            }
-            Instr::Pop => {
-                stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-            }
-            Instr::Add | Instr::Sub | Instr::Mul => {
-                if stack.len() != 2 {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
-                expect(&mut stack, ScalarKind::Int)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                stack.push(ScalarKind::Int);
-            }
-            Instr::Neg => {
-                if stack.len() != 1 {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
-                expect(&mut stack, ScalarKind::Int)?;
-                stack.push(ScalarKind::Int);
-            }
-            Instr::Not => {
-                expect(&mut stack, ScalarKind::Bool)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::LtInt
-            | Instr::LeInt
-            | Instr::GtInt
-            | Instr::GeInt
-            | Instr::EqInt
-            | Instr::NeInt => {
-                expect(&mut stack, ScalarKind::Int)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::EqBool | Instr::NeBool => {
-                expect(&mut stack, ScalarKind::Bool)?;
-                expect(&mut stack, ScalarKind::Bool)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::Numeric(operation) if float_operation(operation, &mut stack)? => {}
-            Instr::Jump(_) => {}
-            Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
-                expect(&mut stack, ScalarKind::Bool)?;
-            }
-            Instr::Return => {
-                expect(&mut stack, result)?;
-                if !stack.is_empty() {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
-            }
-            _ => return Err(UnsupportedReason::UnsupportedInstruction),
-        }
-        max_stack = max_stack.max(stack.len());
-    }
-    Ok(SegmentAnalysis {
-        uses,
-        definitions,
-        exit_stack: stack,
-        max_stack,
-    })
-}
-
-fn expect(stack: &mut Vec<ScalarKind>, expected: ScalarKind) -> Result<(), UnsupportedReason> {
-    match stack.pop() {
-        Some(found) if found == expected => Ok(()),
-        _ => Err(UnsupportedReason::InvalidStack),
-    }
-}
-
-fn float_operation(
-    operation: NumericInstr,
-    stack: &mut Vec<ScalarKind>,
-) -> Result<bool, UnsupportedReason> {
-    match operation {
-        NumericInstr::FloatNeg => {
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Float);
-        }
-        NumericInstr::FloatAdd
-        | NumericInstr::FloatSub
-        | NumericInstr::FloatMul
-        | NumericInstr::FloatDiv => {
-            expect(stack, ScalarKind::Float)?;
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Float);
-        }
-        NumericInstr::FloatEq
-        | NumericInstr::FloatNe
-        | NumericInstr::FloatLt
-        | NumericInstr::FloatLe
-        | NumericInstr::FloatGt
-        | NumericInstr::FloatGe => {
-            expect(stack, ScalarKind::Float)?;
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Bool);
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
-fn compute_liveness(segments: &mut [Segment], locals: usize) {
-    for segment in segments.iter_mut() {
-        segment.live_in = vec![false; locals];
-    }
-    loop {
-        let previous: Vec<Vec<bool>> = segments
-            .iter()
-            .map(|segment| segment.live_in.clone())
-            .collect();
-        let mut changed = false;
-        for index in (0..segments.len()).rev() {
-            let mut live_out = vec![false; locals];
-            for successor in segments[index].successors.iter().copied() {
-                for (slot, live) in previous[successor].iter().copied().enumerate() {
-                    live_out[slot] |= live;
-                }
-            }
-            let next: Vec<bool> = (0..locals)
-                .map(|slot| {
-                    segments[index].uses[slot]
-                        || (live_out[slot] && !segments[index].definitions[slot])
-                })
-                .collect();
-            changed |= next != segments[index].live_in;
-            segments[index].live_in = next;
-        }
-        if !changed {
-            break;
-        }
-    }
+    compiler: lm_jit::JitEngine,
 }
 
 impl JitEngine {
+    pub(crate) fn metrics(&self) -> lm_jit::CompilerMetrics {
+        self.compiler.metrics()
+    }
+
+    pub(crate) fn reset_metrics(&self) {
+        self.compiler.reset_metrics();
+    }
+
     pub(crate) fn execute(
         &self,
         engine: &Engine,
@@ -576,13 +57,29 @@ impl JitEngine {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
-        let region = match self.region(engine, module, function, hash) {
+        let region = match self.compiler.region(hash, || {
+            let runtime = module
+                .funcs
+                .get(function as usize)
+                .ok_or(Failure::Unsupported)?;
+            let (unit, local) = module
+                .code_namespace()
+                .function_unit(function)
+                .map_err(|_| Failure::Unsupported)?;
+            Ok(FunctionInput::new(
+                hash,
+                runtime,
+                unit.module(),
+                module.bundle(),
+                local,
+            ))
+        }) {
             Ok(region) => region,
-            Err(CachedFailure::Unsupported) => {
+            Err(Failure::Unsupported) => {
                 engine.note_unsupported_region_fallback();
                 return NativeAttempt::Fallback;
             }
-            Err(CachedFailure::Backend) => {
+            Err(Failure::BackendUnavailable) => {
                 engine.note_backend_unavailable();
                 return NativeAttempt::Fallback;
             }
@@ -590,47 +87,11 @@ impl JitEngine {
         self.execute_region(engine, machine, &region, instruction_limit)
     }
 
-    fn region(
-        &self,
-        engine: &Engine,
-        module: &NamespaceRuntime,
-        function: u32,
-        hash: [u8; 32],
-    ) -> Result<Arc<CompiledRegion>, CachedFailure> {
-        {
-            let regions = self.regions.read().map_err(|_| CachedFailure::Backend)?;
-            if let Some(entry) = regions.get(&hash) {
-                return cached_result(entry);
-            }
-        }
-        let mut regions = self.regions.write().map_err(|_| CachedFailure::Backend)?;
-        if let Some(entry) = regions.get(&hash) {
-            return cached_result(entry);
-        }
-        if regions.len() >= MAX_COMPILED_REGIONS {
-            return Err(CachedFailure::Backend);
-        }
-        engine.note_compilation_attempt();
-        let compiled = match compile_region(module, function) {
-            Ok(region) => {
-                engine.note_compiled_region(region.plan.segments.len() as u64);
-                CacheEntry::Ready(Arc::new(region))
-            }
-            Err(CompileError::Unsupported(_reason)) => {
-                CacheEntry::Failed(CachedFailure::Unsupported)
-            }
-            Err(CompileError::Backend) => CacheEntry::Failed(CachedFailure::Backend),
-        };
-        let result = cached_result(&compiled);
-        regions.insert(hash, compiled);
-        result
-    }
-
     fn execute_region(
         &self,
         engine: &Engine,
         machine: &mut Machine,
-        region: &CompiledRegion,
+        region: &lm_jit::CompiledRegion,
         instruction_limit: u32,
     ) -> NativeAttempt {
         let Some(frame) = machine.vm.frames.last() else {
@@ -642,10 +103,9 @@ impl JitEngine {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         }
-        let Some(entry) = region.plan.entries.get(&(frame.block, frame.ip)).copied() else {
+        let Some(entry) = region.entry_plan(frame.block, frame.ip) else {
             engine.note_missing_entry_fallback();
             return region
-                .plan
                 .distance_to_entry(frame.block, frame.ip)
                 .map_or(NativeAttempt::Fallback, |instructions| {
                     NativeAttempt::AdvanceToEntry { instructions }
@@ -657,7 +117,7 @@ impl JitEngine {
             engine.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
-        let Some(end) = base.checked_add(region.plan.local_kinds.len()) else {
+        let Some(end) = base.checked_add(region.local_kinds().len()) else {
             engine.note_guard_failure(0);
             return NativeAttempt::Fallback;
         };
@@ -670,7 +130,7 @@ impl JitEngine {
             .locals
             .len()
             .checked_add(operand_base)
-            .and_then(|used| used.checked_add(region.plan.max_stack))
+            .and_then(|used| used.checked_add(region.max_stack()))
         else {
             engine.note_guard_failure(0);
             return NativeAttempt::Fallback;
@@ -680,29 +140,28 @@ impl JitEngine {
             return NativeAttempt::Fallback;
         }
 
-        let segment = &region.plan.segments[entry];
         let operands = &machine.vm.operands[operand_base..];
-        if operands.len() != segment.entry_stack.len() {
+        if operands.len() != entry.operand_kinds().len() {
             engine.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
-        let mut bits = vec![0; region.plan.local_kinds.len()];
-        let mut dirty = vec![0; region.plan.local_kinds.len()];
-        let mut stack_bits = vec![0; region.plan.max_stack];
+        let mut bits = vec![0; region.local_kinds().len()];
+        let mut dirty = vec![0; region.local_kinds().len()];
+        let mut stack_bits = vec![0; region.max_stack()];
         let mut guarded = 0u64;
-        for (slot, live) in segment.live_in.iter().copied().enumerate() {
+        for (slot, live) in entry.live_locals().iter().copied().enumerate() {
             if !live {
                 continue;
             }
             guarded += 1;
-            let Some(value) = scalar_bits(region.plan.local_kinds[slot], locals[slot]) else {
+            let Some(value) = scalar_bits(region.local_kinds()[slot], locals[slot]) else {
                 engine.note_guard_failure(guarded);
                 return NativeAttempt::Fallback;
             };
             bits[slot] = value;
         }
-        for (slot, (kind, value)) in segment
-            .entry_stack
+        for (slot, (kind, value)) in entry
+            .operand_kinds()
             .iter()
             .copied()
             .zip(operands.iter().copied())
@@ -719,50 +178,44 @@ impl JitEngine {
 
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
-        let mut exit = NativeExit::default();
         engine.note_native_entry();
-        // SAFETY: The compiler bounds every buffer access by these buffer lengths.
-        // The generated function uses the exact `NativeFunction` C ABI.
-        unsafe {
-            (region.entry)(
-                bits.as_mut_ptr(),
-                dirty.as_mut_ptr(),
-                stack_bits.as_mut_ptr(),
-                batch_fuel,
-                entry as u32,
-                &mut exit,
-            );
-        }
-        let Ok(retired) = u32::try_from(exit.retired) else {
+        let exit = match region.execute(
+            entry.index(),
+            &mut bits,
+            &mut dirty,
+            &mut stack_bits,
+            batch_fuel,
+        ) {
+            Ok(exit) => exit,
+            Err(_) => {
+                engine.note_backend_unavailable();
+                return NativeAttempt::Fallback;
+            }
+        };
+        let Ok(retired) = u32::try_from(exit.retired()) else {
             engine.note_backend_unavailable();
             return NativeAttempt::Fallback;
         };
-        if retired > instruction_limit || exit.retired > original_fuel {
+        if retired > instruction_limit || exit.retired() > original_fuel {
             engine.note_backend_unavailable();
             return NativeAttempt::Fallback;
         }
-        machine.vm.fuel -= exit.retired;
+        machine.vm.fuel -= exit.retired();
         for (slot, changed) in dirty.iter().copied().enumerate() {
             if changed != 0 {
-                machine.vm.locals[base + slot] =
-                    bits_value(region.plan.local_kinds[slot], bits[slot]);
+                machine.vm.locals[base + slot] = bits_value(region.local_kinds()[slot], bits[slot]);
             }
         }
         engine.note_native_retired(retired as u64);
         engine.note_materialization();
 
-        match exit.kind {
-            EXIT_FUEL => {
-                let Some(exit_entry) = region
-                    .plan
-                    .entries
-                    .get(&(exit.block, exit.instruction))
-                    .copied()
+        match exit.kind() {
+            ExitKind::Fuel => {
+                let Some(stack_kinds) = region.operand_kinds(exit.block(), exit.instruction())
                 else {
                     return malformed_native_exit(retired);
                 };
-                let stack_kinds = &region.plan.segments[exit_entry].entry_stack;
-                if exit.stack_len as usize != stack_kinds.len() {
+                if exit.stack_len() as usize != stack_kinds.len() {
                     return malformed_native_exit(retired);
                 }
                 machine.vm.operands.truncate(operand_base);
@@ -779,9 +232,9 @@ impl JitEngine {
                         retired,
                     };
                 };
-                frame.block = exit.block;
-                frame.ip = exit.instruction;
-                if exit.retired == batch_fuel {
+                frame.block = exit.block();
+                frame.ip = exit.instruction();
+                if exit.retired() == batch_fuel {
                     let outcome = if u64::from(instruction_limit) <= original_fuel {
                         Ok(None)
                     } else {
@@ -792,11 +245,11 @@ impl JitEngine {
                     NativeAttempt::Continue { retired }
                 }
             }
-            EXIT_RETURN => {
-                if exit.stack_len != 0 {
+            ExitKind::Return => {
+                if exit.stack_len() != 0 {
                     return malformed_native_exit(retired);
                 }
-                let value = bits_value(region.plan.result_kind, exit.result);
+                let value = bits_value(region.result_kind(), exit.result());
                 NativeAttempt::Complete {
                     outcome: machine
                         .finish_native_return(value)
@@ -805,13 +258,13 @@ impl JitEngine {
                     retired,
                 }
             }
-            EXIT_INTEGER_OVERFLOW => {
-                if exit.stack_len != 0 {
+            ExitKind::IntegerOverflow => {
+                if exit.stack_len() != 0 {
                     return malformed_native_exit(retired);
                 }
                 if let Some(frame) = machine.vm.frames.last_mut() {
-                    frame.block = exit.block;
-                    frame.ip = exit.instruction;
+                    frame.block = exit.block();
+                    frame.ip = exit.instruction();
                 }
                 machine.vm.operands.truncate(operand_base);
                 engine.note_native_fault_exit();
@@ -820,18 +273,7 @@ impl JitEngine {
                     retired,
                 }
             }
-            _ => {
-                engine.note_backend_unavailable();
-                malformed_native_exit(retired)
-            }
         }
-    }
-}
-
-fn cached_result(entry: &CacheEntry) -> Result<Arc<CompiledRegion>, CachedFailure> {
-    match entry {
-        CacheEntry::Ready(region) => Ok(Arc::clone(region)),
-        CacheEntry::Failed(reason) => Err(*reason),
     }
 }
 
@@ -858,725 +300,5 @@ fn bits_value(kind: ScalarKind, bits: u64) -> Value {
         ScalarKind::Bool => Value::Bool(bits != 0),
         ScalarKind::Int => Value::Int(bits as i64),
         ScalarKind::Float => Value::Float(canonical_float_bits(bits)),
-    }
-}
-
-enum CompileError {
-    Unsupported(UnsupportedReason),
-    Backend,
-}
-
-impl From<UnsupportedReason> for CompileError {
-    fn from(reason: UnsupportedReason) -> CompileError {
-        CompileError::Unsupported(reason)
-    }
-}
-
-fn compile_region(
-    namespace: &NamespaceRuntime,
-    function: u32,
-) -> Result<CompiledRegion, CompileError> {
-    let plan = RegionPlan::for_function(namespace, function)?;
-    let func = namespace
-        .funcs
-        .get(function as usize)
-        .ok_or(UnsupportedReason::MissingSource)?;
-
-    let mut flags = settings::builder();
-    flags
-        .set("use_colocated_libcalls", "false")
-        .map_err(|_| CompileError::Backend)?;
-    flags
-        .set("is_pic", "false")
-        .map_err(|_| CompileError::Backend)?;
-    flags
-        .set("opt_level", "speed")
-        .map_err(|_| CompileError::Backend)?;
-    let isa = cranelift_native::builder()
-        .map_err(|_| CompileError::Backend)?
-        .finish(settings::Flags::new(flags))
-        .map_err(|_| CompileError::Backend)?;
-    let pointer_type = isa.pointer_type();
-    let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
-    let mut signature = module.make_signature();
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(types::I64));
-    signature.params.push(AbiParam::new(types::I32));
-    signature.params.push(AbiParam::new(pointer_type));
-    let id = module
-        .declare_function("loom_scalar_region", Linkage::Local, &signature)
-        .map_err(|_| CompileError::Backend)?;
-    let mut context = module.make_context();
-    context.func.signature = signature;
-    context.func.name = UserFuncName::user(0, id.as_u32());
-    let mut frontend = FunctionBuilderContext::new();
-    emit_region(&mut context.func, &mut frontend, pointer_type, func, &plan)?;
-    module
-        .define_function(id, &mut context)
-        .map_err(|_| CompileError::Backend)?;
-    module
-        .finalize_definitions()
-        .map_err(|_| CompileError::Backend)?;
-    let code = module.get_finalized_function(id);
-    // SAFETY: The generated function uses the exact `NativeFunction` C ABI.
-    // `CompiledRegion` retains the module that owns the executable memory.
-    let entry = unsafe { mem::transmute::<*const u8, NativeFunction>(code) };
-    Ok(CompiledRegion {
-        plan,
-        entry,
-        _module: Mutex::new(module),
-    })
-}
-
-#[derive(Clone, Copy)]
-struct NativeValues<'a> {
-    locals: &'a [Variable],
-    dirty: &'a [Variable],
-    stack: &'a [Variable],
-    fuel: Variable,
-    retired: Variable,
-    local_pointer: ir::Value,
-    dirty_pointer: ir::Value,
-    stack_pointer: ir::Value,
-    exit_pointer: ir::Value,
-}
-
-#[derive(Clone, Copy)]
-struct ExitEmission {
-    retired: ir::Value,
-    kind: u32,
-    block: u32,
-    instruction: u32,
-    result: ir::Value,
-}
-
-#[derive(Clone, Copy)]
-struct FaultPoint {
-    block: u32,
-    instruction: u32,
-    prefix: u32,
-}
-
-fn emit_region(
-    function: &mut ir::Function,
-    frontend: &mut FunctionBuilderContext,
-    pointer_type: ir::Type,
-    bytecode: &Func,
-    plan: &RegionPlan,
-) -> Result<(), CompileError> {
-    let mut builder = FunctionBuilder::new(function, frontend);
-    let entry_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let blocks: Vec<ir::Block> = (0..plan.segments.len())
-        .map(|_| builder.create_block())
-        .collect();
-
-    builder.switch_to_block(entry_block);
-    builder.append_block_params_for_function_params(entry_block);
-    let parameters = builder.block_params(entry_block);
-    let local_pointer = parameters[0];
-    let dirty_pointer = parameters[1];
-    let stack_pointer = parameters[2];
-    let initial_fuel = parameters[3];
-    let entry = parameters[4];
-    let exit_pointer = parameters[5];
-
-    let mut locals = Vec::with_capacity(plan.local_kinds.len());
-    let mut dirty = Vec::with_capacity(plan.local_kinds.len());
-    for slot in 0..plan.local_kinds.len() {
-        let local = builder.declare_var(types::I64);
-        let changed = builder.declare_var(types::I8);
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        let value = builder
-            .ins()
-            .load(types::I64, MemFlags::new(), local_pointer, offset);
-        let zero = builder.ins().iconst(types::I8, 0);
-        builder.def_var(local, value);
-        builder.def_var(changed, zero);
-        locals.push(local);
-        dirty.push(changed);
-    }
-    let mut stack = Vec::with_capacity(plan.max_stack);
-    for slot in 0..plan.max_stack {
-        let variable = builder.declare_var(types::I64);
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        let value = builder
-            .ins()
-            .load(types::I64, MemFlags::new(), stack_pointer, offset);
-        builder.def_var(variable, value);
-        stack.push(variable);
-    }
-    let fuel = builder.declare_var(types::I64);
-    let retired = builder.declare_var(types::I64);
-    builder.def_var(fuel, initial_fuel);
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder.def_var(retired, zero);
-    let values = NativeValues {
-        locals: &locals,
-        dirty: &dirty,
-        stack: &stack,
-        fuel,
-        retired,
-        local_pointer,
-        dirty_pointer,
-        stack_pointer,
-        exit_pointer,
-    };
-
-    let mut dispatch = Switch::new();
-    for (index, block) in blocks.iter().copied().enumerate() {
-        dispatch.set_entry(index as u128, block);
-    }
-    dispatch.emit(&mut builder, entry, invalid_block);
-
-    builder.switch_to_block(invalid_block);
-    let retired_value = builder.use_var(retired);
-    emit_exit(
-        &mut builder,
-        values,
-        ExitEmission {
-            retired: retired_value,
-            kind: EXIT_INVALID_ENTRY,
-            block: 0,
-            instruction: 0,
-            result: zero,
-        },
-        &[],
-    )?;
-
-    for (index, segment) in plan.segments.iter().enumerate() {
-        builder.switch_to_block(blocks[index]);
-        let body = builder.create_block();
-        let fuel_exit = builder.create_block();
-        let available = builder.use_var(fuel);
-        let enough = builder.ins().icmp_imm(
-            IntCC::UnsignedGreaterThanOrEqual,
-            available,
-            i64::from(segment.end - segment.start),
-        );
-        builder.ins().brif(enough, body, &[], fuel_exit, &[]);
-
-        builder.switch_to_block(fuel_exit);
-        let retired_value = builder.use_var(retired);
-        let result = builder.ins().iconst(types::I64, 0);
-        let entry_stack: Vec<ir::Value> = values
-            .stack
-            .iter()
-            .take(segment.entry_stack.len())
-            .map(|variable| builder.use_var(*variable))
-            .collect();
-        emit_exit(
-            &mut builder,
-            values,
-            ExitEmission {
-                retired: retired_value,
-                kind: EXIT_FUEL,
-                block: segment.block,
-                instruction: segment.start,
-                result,
-            },
-            &entry_stack,
-        )?;
-
-        builder.switch_to_block(body);
-        emit_segment(&mut builder, bytecode, segment, &blocks, values)?;
-    }
-
-    builder.seal_all_blocks();
-    builder.finalize();
-    let _ = pointer_type;
-    Ok(())
-}
-
-fn emit_segment(
-    builder: &mut FunctionBuilder<'_>,
-    bytecode: &Func,
-    segment: &Segment,
-    blocks: &[ir::Block],
-    values: NativeValues<'_>,
-) -> Result<(), CompileError> {
-    let mut stack: Vec<ir::Value> = values
-        .stack
-        .iter()
-        .take(segment.entry_stack.len())
-        .map(|variable| builder.use_var(*variable))
-        .collect();
-    let code =
-        &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
-    for (within, instruction) in code.iter().copied().enumerate() {
-        let prefix = within as u32 + 1;
-        match instruction {
-            Instr::ConstUnit => {
-                let value = builder.ins().iconst(types::I64, 0);
-                stack.push(value);
-            }
-            Instr::ConstBool(value) => {
-                let value = builder.ins().iconst(types::I64, i64::from(value));
-                stack.push(value);
-            }
-            Instr::ConstInt(value) => {
-                let value = builder.ins().iconst(types::I64, value);
-                stack.push(value);
-            }
-            Instr::ConstFloat(bits) => {
-                let value = builder
-                    .ins()
-                    .iconst(types::I64, canonical_float_bits(bits) as i64);
-                stack.push(value);
-            }
-            Instr::LoadLocal(slot) => {
-                stack.push(builder.use_var(values.locals[slot as usize]));
-            }
-            Instr::StoreLocal(slot) => {
-                let value = pop_native(&mut stack)?;
-                builder.def_var(values.locals[slot as usize], value);
-                let changed = builder.ins().iconst(types::I8, 1);
-                builder.def_var(values.dirty[slot as usize], changed);
-            }
-            Instr::Pop => {
-                pop_native(&mut stack)?;
-            }
-            Instr::Add | Instr::Sub | Instr::Mul => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let (result, overflow) = match instruction {
-                    Instr::Add => builder.ins().sadd_overflow(left, right),
-                    Instr::Sub => builder.ins().ssub_overflow(left, right),
-                    Instr::Mul => builder.ins().smul_overflow(left, right),
-                    _ => unreachable!(),
-                };
-                let result = emit_overflow_check(
-                    builder,
-                    values,
-                    overflow,
-                    result,
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: segment.start + prefix,
-                        prefix,
-                    },
-                    &stack,
-                )?;
-                stack.push(result);
-            }
-            Instr::Neg => {
-                let value = pop_native(&mut stack)?;
-                let zero = builder.ins().iconst(types::I64, 0);
-                let (result, overflow) = builder.ins().ssub_overflow(zero, value);
-                let result = emit_overflow_check(
-                    builder,
-                    values,
-                    overflow,
-                    result,
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: segment.start + prefix,
-                        prefix,
-                    },
-                    &stack,
-                )?;
-                stack.push(result);
-            }
-            Instr::Not => {
-                let value = pop_native(&mut stack)?;
-                stack.push(builder.ins().bxor_imm(value, 1));
-            }
-            Instr::LtInt
-            | Instr::LeInt
-            | Instr::GtInt
-            | Instr::GeInt
-            | Instr::EqInt
-            | Instr::NeInt => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let condition = match instruction {
-                    Instr::LtInt => IntCC::SignedLessThan,
-                    Instr::LeInt => IntCC::SignedLessThanOrEqual,
-                    Instr::GtInt => IntCC::SignedGreaterThan,
-                    Instr::GeInt => IntCC::SignedGreaterThanOrEqual,
-                    Instr::EqInt => IntCC::Equal,
-                    Instr::NeInt => IntCC::NotEqual,
-                    _ => unreachable!(),
-                };
-                let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
-            }
-            Instr::EqBool | Instr::NeBool => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let condition = if matches!(instruction, Instr::EqBool) {
-                    IntCC::Equal
-                } else {
-                    IntCC::NotEqual
-                };
-                let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
-            }
-            Instr::Numeric(operation) => {
-                emit_float_instruction(builder, &mut stack, operation)?;
-            }
-            Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) | Instr::Return => {}
-            _ => {
-                return Err(CompileError::Unsupported(
-                    UnsupportedReason::UnsupportedInstruction,
-                ))
-            }
-        }
-    }
-
-    let cost = segment.end - segment.start;
-    emit_charge(builder, values, cost);
-    match segment.exit {
-        SegmentExit::Jump { .. } => {
-            define_stack(builder, values, &stack)?;
-            builder.ins().jump(blocks[segment.successors[0]], &[]);
-        }
-        SegmentExit::Conditional { jump_on_true, .. } => {
-            let condition = pop_native(&mut stack)?;
-            define_stack(builder, values, &stack)?;
-            let condition = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
-            let target = blocks[segment.successors[0]];
-            let fallthrough = blocks[segment.successors[1]];
-            if jump_on_true {
-                builder.ins().brif(condition, target, &[], fallthrough, &[]);
-            } else {
-                builder.ins().brif(condition, fallthrough, &[], target, &[]);
-            }
-        }
-        SegmentExit::Return => {
-            let result = pop_native(&mut stack)?;
-            let retired = builder.use_var(values.retired);
-            emit_exit(
-                builder,
-                values,
-                ExitEmission {
-                    retired,
-                    kind: EXIT_RETURN,
-                    block: segment.block,
-                    instruction: segment.end,
-                    result,
-                },
-                &stack,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn pop_native(stack: &mut Vec<ir::Value>) -> Result<ir::Value, CompileError> {
-    stack.pop().ok_or(CompileError::Backend)
-}
-
-fn emit_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost: u32) {
-    let fuel = builder.use_var(values.fuel);
-    let retired = builder.use_var(values.retired);
-    let fuel = builder.ins().iadd_imm(fuel, -i64::from(cost));
-    let retired = builder.ins().iadd_imm(retired, i64::from(cost));
-    builder.def_var(values.fuel, fuel);
-    builder.def_var(values.retired, retired);
-}
-
-fn emit_overflow_check(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    overflow: ir::Value,
-    result: ir::Value,
-    point: FaultPoint,
-    stack: &[ir::Value],
-) -> Result<ir::Value, CompileError> {
-    let fault = builder.create_block();
-    let success = builder.create_block();
-    builder.ins().brif(overflow, fault, &[], success, &[]);
-    builder.switch_to_block(fault);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
-    let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_INTEGER_OVERFLOW,
-            block: point.block,
-            instruction: point.instruction,
-            result: zero,
-        },
-        stack,
-    )?;
-    builder.switch_to_block(success);
-    Ok(result)
-}
-
-fn emit_float_instruction(
-    builder: &mut FunctionBuilder<'_>,
-    stack: &mut Vec<ir::Value>,
-    operation: NumericInstr,
-) -> Result<(), CompileError> {
-    match operation {
-        NumericInstr::FloatNeg => {
-            let value = float_value(builder, pop_native(stack)?);
-            let value = builder.ins().fneg(value);
-            stack.push(canonical_float(builder, value));
-        }
-        NumericInstr::FloatAdd
-        | NumericInstr::FloatSub
-        | NumericInstr::FloatMul
-        | NumericInstr::FloatDiv => {
-            let right_bits = pop_native(stack)?;
-            let left_bits = pop_native(stack)?;
-            let right = float_value(builder, right_bits);
-            let left = float_value(builder, left_bits);
-            let value = match operation {
-                NumericInstr::FloatAdd => builder.ins().fadd(left, right),
-                NumericInstr::FloatSub => builder.ins().fsub(left, right),
-                NumericInstr::FloatMul => builder.ins().fmul(left, right),
-                NumericInstr::FloatDiv => builder.ins().fdiv(left, right),
-                _ => unreachable!(),
-            };
-            stack.push(canonical_float(builder, value));
-        }
-        NumericInstr::FloatEq
-        | NumericInstr::FloatNe
-        | NumericInstr::FloatLt
-        | NumericInstr::FloatLe
-        | NumericInstr::FloatGt
-        | NumericInstr::FloatGe => {
-            let right_bits = pop_native(stack)?;
-            let left_bits = pop_native(stack)?;
-            let right = float_value(builder, right_bits);
-            let left = float_value(builder, left_bits);
-            let compared = match operation {
-                NumericInstr::FloatEq | NumericInstr::FloatNe => {
-                    let equal = builder.ins().fcmp(FloatCC::Equal, left, right);
-                    let left_nan = builder.ins().fcmp(FloatCC::Unordered, left, left);
-                    let right_nan = builder.ins().fcmp(FloatCC::Unordered, right, right);
-                    let both_nan = builder.ins().band(left_nan, right_nan);
-                    let equal = builder.ins().bor(equal, both_nan);
-                    if matches!(operation, NumericInstr::FloatNe) {
-                        builder.ins().bxor_imm(equal, 1)
-                    } else {
-                        equal
-                    }
-                }
-                NumericInstr::FloatLt => builder.ins().fcmp(FloatCC::LessThan, left, right),
-                NumericInstr::FloatLe => builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right),
-                NumericInstr::FloatGt => builder.ins().fcmp(FloatCC::GreaterThan, left, right),
-                NumericInstr::FloatGe => {
-                    builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right)
-                }
-                _ => unreachable!(),
-            };
-            stack.push(builder.ins().uextend(types::I64, compared));
-        }
-        _ => {
-            return Err(CompileError::Unsupported(
-                UnsupportedReason::UnsupportedInstruction,
-            ))
-        }
-    }
-    Ok(())
-}
-
-fn float_value(builder: &mut FunctionBuilder<'_>, bits: ir::Value) -> ir::Value {
-    builder.ins().bitcast(types::F64, MemFlags::new(), bits)
-}
-
-fn canonical_float(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::Value {
-    let bits = builder.ins().bitcast(types::I64, MemFlags::new(), value);
-    let is_nan = builder.ins().fcmp(FloatCC::Unordered, value, value);
-    let canonical = builder.ins().iconst(types::I64, CANONICAL_NAN_BITS as i64);
-    builder.ins().select(is_nan, canonical, bits)
-}
-
-fn emit_exit(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    exit: ExitEmission,
-    stack: &[ir::Value],
-) -> Result<(), CompileError> {
-    for (slot, variable) in values.locals.iter().copied().enumerate() {
-        let value = builder.use_var(variable);
-        let changed = builder.use_var(values.dirty[slot]);
-        let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        let dirty_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), value, values.local_pointer, local_offset);
-        builder
-            .ins()
-            .store(MemFlags::new(), changed, values.dirty_pointer, dirty_offset);
-    }
-    for (slot, value) in stack.iter().copied().enumerate() {
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), value, values.stack_pointer, offset);
-    }
-    store_i64(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, retired),
-        exit.retired,
-    )?;
-    store_i32_constant(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, kind),
-        exit.kind,
-    )?;
-    store_i32_constant(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, block),
-        exit.block,
-    )?;
-    store_i32_constant(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, instruction),
-        exit.instruction,
-    )?;
-    store_i32_constant(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, stack_len),
-        u32::try_from(stack.len()).map_err(|_| CompileError::Backend)?,
-    )?;
-    store_i64(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(NativeExit, result),
-        exit.result,
-    )?;
-    builder.ins().return_(&[]);
-    Ok(())
-}
-
-fn define_stack(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    stack: &[ir::Value],
-) -> Result<(), CompileError> {
-    if stack.len() > values.stack.len() {
-        return Err(CompileError::Backend);
-    }
-    for (variable, value) in values.stack.iter().copied().zip(stack.iter().copied()) {
-        builder.def_var(variable, value);
-    }
-    Ok(())
-}
-
-fn store_i32_constant(
-    builder: &mut FunctionBuilder<'_>,
-    pointer: ir::Value,
-    offset: usize,
-    value: u32,
-) -> Result<(), CompileError> {
-    let value = builder.ins().iconst(types::I32, i64::from(value));
-    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
-    builder.ins().store(MemFlags::new(), value, pointer, offset);
-    Ok(())
-}
-
-fn store_i64(
-    builder: &mut FunctionBuilder<'_>,
-    pointer: ir::Value,
-    offset: usize,
-    value: ir::Value,
-) -> Result<(), CompileError> {
-    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
-    builder.ins().store(MemFlags::new(), value, pointer, offset);
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lm_bytecode::{BcType, Module};
-
-    fn module(blocks: Vec<Vec<Instr>>) -> Module {
-        Module {
-            strings: vec![],
-            bytes: vec![],
-            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
-            selectors: vec![],
-            apps: vec![],
-            interfaces: vec![],
-            conformances: vec![],
-            class_bounds: vec![],
-            func_bounds: vec![vec![]],
-            classes: vec![],
-            funcs: vec![Func {
-                name: "main".to_string(),
-                param_names: vec![],
-                type_params: 0,
-                effect_params: 0,
-                params: vec![],
-                param_muts: vec![],
-                ret: 2,
-                row: vec![],
-                captures: vec![],
-                local_types: vec![2, 2],
-                blocks,
-            }],
-            imports: vec![],
-            slots: vec![],
-            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
-            entry: 0,
-            exports: vec![],
-            bindings: vec![],
-            debug: vec![],
-        }
-    }
-
-    #[test]
-    fn segments_split_conditional_fallthrough() {
-        let module = module(vec![
-            vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],
-            vec![
-                Instr::LoadLocal(0),
-                Instr::ConstInt(10),
-                Instr::LtInt,
-                Instr::JumpIfFalse(3),
-                Instr::Jump(2),
-            ],
-            vec![
-                Instr::LoadLocal(0),
-                Instr::ConstInt(1),
-                Instr::Add,
-                Instr::StoreLocal(0),
-                Instr::Jump(1),
-            ],
-            vec![Instr::LoadLocal(0), Instr::Return],
-        ]);
-        lm_verify::verify_module(&module).expect("the loop verifies");
-        let segments = split_segments(&module.funcs[0]).expect("the loop splits");
-        assert_eq!(segments.len(), 5);
-        assert_eq!((segments[1].block, segments[1].start), (1, 0));
-        assert_eq!((segments[2].block, segments[2].start), (1, 4));
-    }
-
-    #[test]
-    fn liveness_ignores_a_local_replaced_before_use() {
-        let mut segments = vec![Segment {
-            block: 0,
-            start: 0,
-            end: 3,
-            exit: SegmentExit::Return,
-            uses: vec![false, true],
-            definitions: vec![true, false],
-            successors: vec![],
-            live_in: vec![],
-            entry_stack: vec![],
-            exit_stack: vec![],
-        }];
-        compute_liveness(&mut segments, 2);
-        assert_eq!(segments[0].live_in, vec![false, true]);
     }
 }

@@ -45,9 +45,6 @@ pub struct EngineMetrics {
 
 #[derive(Debug, Default)]
 struct EngineCounters {
-    compilation_attempts: AtomicU64,
-    compiled_regions: AtomicU64,
-    compiled_segments: AtomicU64,
     native_entry_attempts: AtomicU64,
     guarded_values: AtomicU64,
     guard_failures: AtomicU64,
@@ -61,12 +58,12 @@ struct EngineCounters {
 }
 
 impl EngineCounters {
-    fn read(&self) -> EngineMetrics {
+    fn read(&self, compiler: lm_jit::CompilerMetrics) -> EngineMetrics {
         let read = |value: &AtomicU64| value.load(Ordering::Relaxed);
         EngineMetrics {
-            compilation_attempts: read(&self.compilation_attempts),
-            compiled_regions: read(&self.compiled_regions),
-            compiled_segments: read(&self.compiled_segments),
+            compilation_attempts: compiler.compilation_attempts,
+            compiled_regions: compiler.compiled_regions,
+            compiled_segments: compiler.compiled_segments,
             native_entry_attempts: read(&self.native_entry_attempts),
             guarded_values: read(&self.guarded_values),
             guard_failures: read(&self.guard_failures),
@@ -82,9 +79,6 @@ impl EngineCounters {
 
     fn reset(&self) {
         let reset = |value: &AtomicU64| value.store(0, Ordering::Relaxed);
-        reset(&self.compilation_attempts);
-        reset(&self.compiled_regions);
-        reset(&self.compiled_segments);
         reset(&self.native_entry_attempts);
         reset(&self.guarded_values);
         reset(&self.guard_failures);
@@ -128,12 +122,13 @@ impl Engine {
 
     /// Return the current clock-free counters.
     pub fn metrics(&self) -> EngineMetrics {
-        self.counters.read()
+        self.counters.read(self.jit.metrics())
     }
 
     /// Reset every clock-free counter.
     pub fn reset_metrics(&self) {
         self.counters.reset();
+        self.jit.reset_metrics();
     }
 
     pub(crate) fn note_backend_unavailable(&self) {
@@ -149,21 +144,6 @@ impl Engine {
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
         self.jit.execute(self, machine, module, instruction_limit)
-    }
-
-    pub(crate) fn note_compilation_attempt(&self) {
-        self.counters
-            .compilation_attempts
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_compiled_region(&self, segments: u64) {
-        self.counters
-            .compiled_regions
-            .fetch_add(1, Ordering::Relaxed);
-        self.counters
-            .compiled_segments
-            .fetch_add(segments, Ordering::Relaxed);
     }
 
     pub(crate) fn note_native_entry_attempt(&self) {

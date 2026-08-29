@@ -31,6 +31,7 @@ crates/
   lm-types/        interned types, subtyping, inference, rows
   lm-bytecode/     serialized and decoded instruction formats
   lm-verify/       artifact and bytecode verifier
+  lm-jit/          verified native regions and executable memory
   lm-link/         exact artifact resolution, contract checks, relocation
   lm-value/        Value, TypeId, ObjRef, scalar semantics
   lm-heap/         object table, pages, GC, native shapes
@@ -74,7 +75,7 @@ CLI + host + proc scheduler + bootstrap compiler
 ABI + source/HIR/types + bytecode/verifier + value/heap/graph/VM
 ```
 
-`lm-vm` has no filesystem, clock, network, process, or compiler-frontend dependency. `lm-host` never receives a general writable guest pointer. Unsafe Rust is confined to allocation pages, raw-copy helpers, and the optional C shim.
+`lm-vm` has no filesystem, clock, network, process, or compiler-frontend dependency. `lm-host` never receives a general writable guest pointer. Unsafe Rust is confined to allocation pages, raw-copy helpers, native-code entry, executable-memory backends, and the optional C shim.
 
 ---
 

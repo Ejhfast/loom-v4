@@ -1,15 +1,16 @@
 [package]
-name = "lm-vm"
+name = "lm-jit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cranelift-codegen = "=0.129.2"
+cranelift-frontend = "=0.129.2"
+cranelift-jit = "=0.129.2"
+cranelift-module = "=0.129.2"
+cranelift-native = "=0.129.2"
 lm-abi = { path = "../lm-abi" }
 lm-bytecode = { path = "../lm-bytecode" }
-lm-graph = { path = "../lm-graph" }
-lm-heap = { path = "../lm-heap" }
-lm-jit = { path = "../lm-jit" }
-lm-link = { path = "../lm-link" }
-lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }
+lm-verify = { path = "../lm-verify" }

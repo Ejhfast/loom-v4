@@ -354,6 +354,18 @@ The first cache limits region count, instructions, locals, and operand depth.
 
 An exhausted cache keeps interpreter execution available.
 
+### 15.1 Crate boundary
+
+`lm-jit` owns region analysis, Cranelift, the native ABI, and executable memory.
+
+`lm-vm` owns engine policy, entry guards, canonical state, and exit materialization.
+
+`lm-jit` depends only on lower bytecode, verifier, ABI, and value crates.
+
+`lm-jit` never depends on `lm-vm`.
+
+The native backend never reads `Machine`, `VmState`, or Rust `Value` storage.
+
 ## 16. Metrics
 
 The runtime records clock-free counters:
@@ -668,3 +680,28 @@ This size is 41.7 percent larger than its 13,521,160-byte base.
 That ownership retains Cranelift drop code in the CLI.
 
 The backend build cost and enabled binary size remain review items.
+
+### 24.1 Crate extraction measurements
+
+The extraction moved native compilation from `lm-vm` into `lm-jit`.
+
+The adapter resolves source-unit data only when a function misses the native cache.
+
+All measurements used one pinned processor and the release profile.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Integer warm | 0.910 ms | 0.912 ms |
+| Float warm | 2.410 ms | 2.383 ms |
+| Equality warm | 0.933 ms | 0.948 ms |
+| Sliced warm | 1.780 ms | 1.826 ms |
+| Scheduled warm | 4.890 ms | 4.698 ms |
+| Wide guard | 1.930 ms | 1.945 ms |
+
+The values remain within measurement variance.
+
+An initial extraction resolved the source unit before every cache lookup.
+
+That error made scheduled execution more than two times slower.
+
+The lazy lookup removed that cost without weakening the crate boundary.
