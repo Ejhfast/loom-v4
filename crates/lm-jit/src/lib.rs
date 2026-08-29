@@ -25,7 +25,8 @@ const EXIT_FUEL: u32 = 1;
 const EXIT_RETURN: u32 = 2;
 const EXIT_INTEGER_OVERFLOW: u32 = 3;
 const EXIT_DIVIDE_BY_ZERO: u32 = 4;
-const EXIT_INVALID_ENTRY: u32 = 5;
+const EXIT_INTERPRETER: u32 = 5;
+const EXIT_INVALID_ENTRY: u32 = 6;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -61,6 +62,7 @@ pub struct JitEngine {
     compilation_attempts: AtomicU64,
     compiled_regions: AtomicU64,
     compiled_segments: AtomicU64,
+    compiled_call_sites: AtomicU64,
 }
 
 impl fmt::Debug for JitEngine {
@@ -113,6 +115,18 @@ impl CompiledRegion {
         self.plan.max_stack
     }
 
+    /// Return the largest complete stack use above the root locals.
+    #[inline(always)]
+    pub fn max_stack_values(&self) -> usize {
+        self.plan.max_stack_values
+    }
+
+    /// Return the largest additional native call depth.
+    #[inline(always)]
+    pub fn additional_frames(&self) -> u32 {
+        self.plan.additional_frames
+    }
+
     /// Return the plan for one exact program position.
     #[inline(always)]
     pub fn entry_plan(&self, block: u32, instruction: u32) -> Option<EntryPlan<'_>> {
@@ -134,8 +148,18 @@ impl CompiledRegion {
     /// Return the operand representations at one exact entry.
     #[inline(always)]
     pub fn operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        let index = self.plan.entries.get(&(block, instruction)).copied()?;
-        Some(&self.plan.segments[index].entry_stack)
+        if let Some(index) = self.plan.entries.get(&(block, instruction)).copied() {
+            return Some(&self.plan.segments[index].entry_stack);
+        }
+        self.plan
+            .segments
+            .iter()
+            .find(|segment| {
+                segment.block == block
+                    && segment.end.checked_sub(1) == Some(instruction)
+                    && matches!(segment.exit, SegmentExit::Call { .. })
+            })
+            .map(|segment| segment.call_stack.as_slice())
     }
 
     /// Execute native code over explicit scalar buffers.
@@ -173,6 +197,7 @@ impl CompiledRegion {
             EXIT_RETURN => ExitKind::Return,
             EXIT_INTEGER_OVERFLOW => ExitKind::IntegerOverflow,
             EXIT_DIVIDE_BY_ZERO => ExitKind::DivideByZero,
+            EXIT_INTERPRETER => ExitKind::Interpreter,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -196,14 +221,20 @@ pub enum ScalarKind {
     Float,
 }
 
-/// Immutable verified input for one native compilation.
 #[derive(Clone, Copy)]
-pub struct FunctionInput<'a> {
-    hash: [u8; 32],
+struct FunctionDefinition<'a> {
+    function: u32,
     runtime: &'a Func,
     source: &'a Module,
     bundle: &'a Arc<lm_abi::AbiBundle>,
     source_function: u32,
+}
+
+/// Immutable verified input for one native compilation.
+pub struct FunctionInput<'a> {
+    hash: [u8; 32],
+    root: FunctionDefinition<'a>,
+    direct_callees: Vec<FunctionDefinition<'a>>,
 }
 
 impl<'a> FunctionInput<'a> {
@@ -211,6 +242,7 @@ impl<'a> FunctionInput<'a> {
     #[inline]
     pub fn new(
         hash: [u8; 32],
+        function: u32,
         runtime: &'a Func,
         source: &'a Module,
         bundle: &'a Arc<lm_abi::AbiBundle>,
@@ -218,10 +250,51 @@ impl<'a> FunctionInput<'a> {
     ) -> FunctionInput<'a> {
         FunctionInput {
             hash,
+            root: FunctionDefinition {
+                function,
+                runtime,
+                source,
+                bundle,
+                source_function,
+            },
+            direct_callees: Vec::new(),
+        }
+    }
+
+    /// Add one exact direct callee used by the root function.
+    pub fn add_direct_callee(
+        &mut self,
+        function: u32,
+        runtime: &'a Func,
+        source: &'a Module,
+        bundle: &'a Arc<lm_abi::AbiBundle>,
+        source_function: u32,
+    ) {
+        if function == self.root.function
+            || self
+                .direct_callees
+                .iter()
+                .any(|definition| definition.function == function)
+        {
+            return;
+        }
+        self.direct_callees.push(FunctionDefinition {
+            function,
             runtime,
             source,
             bundle,
             source_function,
+        });
+    }
+
+    fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
+        if function == self.root.function {
+            Some(self.root)
+        } else {
+            self.direct_callees
+                .iter()
+                .find(|definition| definition.function == function)
+                .copied()
         }
     }
 }
@@ -232,6 +305,7 @@ pub struct CompilerMetrics {
     pub compilation_attempts: u64,
     pub compiled_regions: u64,
     pub compiled_segments: u64,
+    pub compiled_call_sites: u64,
 }
 
 /// One supported native entry and its required scalar values.
@@ -269,6 +343,7 @@ pub enum ExitKind {
     Return,
     IntegerOverflow,
     DivideByZero,
+    Interpreter,
 }
 
 /// One validated native exit record.
@@ -336,6 +411,10 @@ enum SegmentExit {
         jump_on_true: bool,
         fallthrough_ip: u32,
     },
+    Call {
+        target: u32,
+        fallthrough_ip: u32,
+    },
     Return,
 }
 
@@ -344,6 +423,7 @@ struct Segment {
     block: u32,
     start: u32,
     end: u32,
+    cost: u32,
     exit: SegmentExit,
     uses: Vec<bool>,
     definitions: Vec<bool>,
@@ -351,6 +431,22 @@ struct Segment {
     live_in: Vec<bool>,
     entry_stack: Vec<ScalarKind>,
     exit_stack: Vec<ScalarKind>,
+    call_stack: Vec<ScalarKind>,
+}
+
+#[derive(Debug, Clone)]
+struct InlineFunctionPlan {
+    params: Vec<ScalarKind>,
+    local_kinds: Vec<ScalarKind>,
+    max_stack: usize,
+    cost: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CallContract {
+    params: Vec<ScalarKind>,
+    result: ScalarKind,
+    inline: Option<InlineFunctionPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -358,8 +454,12 @@ struct RegionPlan {
     local_kinds: Vec<ScalarKind>,
     result_kind: ScalarKind,
     max_stack: usize,
+    max_stack_values: usize,
+    additional_frames: u32,
     segments: Vec<Segment>,
     entries: std::collections::HashMap<(u32, u32), usize>,
+    inline_functions: HashMap<u32, InlineFunctionPlan>,
+    inline_call_sites: usize,
 }
 
 struct SegmentAnalysis {
@@ -367,11 +467,13 @@ struct SegmentAnalysis {
     definitions: Vec<bool>,
     exit_stack: Vec<ScalarKind>,
     max_stack: usize,
+    max_stack_values: usize,
+    call_stack: Vec<ScalarKind>,
 }
 
 impl RegionPlan {
-    fn for_function(input: FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
-        let runtime = input.runtime;
+    fn for_function(input: &FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
+        let runtime = input.root.runtime;
         if runtime.type_params != 0 || runtime.effect_params != 0 {
             return Err(UnsupportedReason::GenericFunction);
         }
@@ -387,15 +489,15 @@ impl RegionPlan {
         {
             return Err(UnsupportedReason::RegionLimit);
         }
-        let source = input.source;
+        let source = input.root.source;
         let source_func = source
             .funcs
-            .get(input.source_function as usize)
+            .get(input.root.source_function as usize)
             .ok_or(UnsupportedReason::MissingSource)?;
         let states = lm_verify::verify_function_states_with_bundle(
             source,
-            input.bundle,
-            input.source_function,
+            input.root.bundle,
+            input.root.source_function,
         )
         .map_err(|_| UnsupportedReason::MissingSource)?;
         if source_func.blocks.len() != runtime.blocks.len()
@@ -409,6 +511,16 @@ impl RegionPlan {
             .map(|ty| scalar_kind(source, *ty))
             .collect::<Result<Vec<_>, _>>()?;
         let result_kind = scalar_kind(source, source_func.ret)?;
+        let call_contracts = call_contracts(input)?;
+        let inline_functions: HashMap<u32, InlineFunctionPlan> = call_contracts
+            .iter()
+            .filter_map(|(function, contract)| {
+                contract
+                    .inline
+                    .as_ref()
+                    .map(|plan| (*function, plan.clone()))
+            })
+            .collect();
         let mut segments = split_segments(runtime)?;
         let entries: std::collections::HashMap<(u32, u32), usize> = segments
             .iter()
@@ -417,6 +529,9 @@ impl RegionPlan {
             .collect();
         resolve_successors(&mut segments, &entries)?;
         let mut max_stack = 0;
+        let mut max_stack_values = 0;
+        let mut additional_frames = 0;
+        let mut inline_call_sites = 0;
         let mut active_block = u32::MAX;
         let mut block_stack = Vec::new();
         for (index, segment) in segments.iter_mut().enumerate() {
@@ -452,12 +567,28 @@ impl RegionPlan {
                 result_kind,
                 &initialized,
                 &block_stack,
+                &call_contracts,
             )?;
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
             segment.exit_stack = analysis.exit_stack.clone();
+            segment.call_stack = analysis.call_stack;
+            segment.cost = segment.end - segment.start;
+            if let SegmentExit::Call { target, .. } = segment.exit {
+                if let Some(inline) = inline_functions.get(&target) {
+                    segment.cost = segment
+                        .cost
+                        .checked_add(inline.cost)
+                        .ok_or(UnsupportedReason::RegionLimit)?;
+                    additional_frames = 1;
+                    inline_call_sites += 1;
+                } else {
+                    segment.cost = segment.cost.saturating_sub(1);
+                }
+            }
             block_stack = analysis.exit_stack;
             max_stack = max_stack.max(analysis.max_stack);
+            max_stack_values = max_stack_values.max(analysis.max_stack_values);
             debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
         }
         for segment in &segments {
@@ -475,8 +606,12 @@ impl RegionPlan {
             local_kinds,
             result_kind,
             max_stack,
+            max_stack_values,
+            additional_frames,
             segments,
             entries,
+            inline_functions,
+            inline_call_sites,
         })
     }
 
@@ -488,6 +623,121 @@ impl RegionPlan {
             })
             .map(|segment| segment.end - instruction)
     }
+}
+
+fn call_contracts(
+    input: &FunctionInput<'_>,
+) -> Result<HashMap<u32, CallContract>, UnsupportedReason> {
+    let mut contracts = HashMap::new();
+    let definitions = std::iter::once(input.root).chain(input.direct_callees.iter().copied());
+    for definition in definitions {
+        let source_func = definition
+            .source
+            .funcs
+            .get(definition.source_function as usize)
+            .ok_or(UnsupportedReason::MissingSource)?;
+        if source_func.params.len() != definition.runtime.params.len()
+            || source_func.local_types.len() != definition.runtime.local_types.len()
+        {
+            return Err(UnsupportedReason::InvalidControlFlow);
+        }
+        let params = source_func
+            .params
+            .iter()
+            .map(|ty| scalar_kind(definition.source, *ty))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = scalar_kind(definition.source, source_func.ret)?;
+        let inline = inline_function_plan(definition, &params, result);
+        contracts.insert(
+            definition.function,
+            CallContract {
+                params,
+                result,
+                inline,
+            },
+        );
+    }
+    Ok(contracts)
+}
+
+fn inline_function_plan(
+    definition: FunctionDefinition<'_>,
+    params: &[ScalarKind],
+    result: ScalarKind,
+) -> Option<InlineFunctionPlan> {
+    const MAX_INLINE_INSTRUCTIONS: usize = 256;
+
+    let runtime = definition.runtime;
+    if runtime.type_params != 0
+        || runtime.effect_params != 0
+        || !runtime.captures.is_empty()
+        || !runtime.row.is_empty()
+        || runtime.blocks.len() != 1
+    {
+        return None;
+    }
+    let code = runtime.blocks.first()?;
+    if code.is_empty()
+        || code.len() > MAX_INLINE_INSTRUCTIONS
+        || !matches!(code.last(), Some(Instr::Return))
+        || code[..code.len() - 1].iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instr::Jump(_)
+                    | Instr::JumpIfFalse(_)
+                    | Instr::JumpIfTrue(_)
+                    | Instr::Call(_)
+                    | Instr::Return
+            )
+        })
+    {
+        return None;
+    }
+    let source_func = definition
+        .source
+        .funcs
+        .get(definition.source_function as usize)?;
+    let local_kinds = source_func
+        .local_types
+        .iter()
+        .map(|ty| scalar_kind(definition.source, *ty))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if local_kinds.len() > MAX_REGION_LOCALS || local_kinds.get(..params.len()) != Some(params) {
+        return None;
+    }
+    let segment = Segment {
+        block: 0,
+        start: 0,
+        end: code.len() as u32,
+        cost: code.len() as u32,
+        exit: SegmentExit::Return,
+        uses: Vec::new(),
+        definitions: Vec::new(),
+        successors: Vec::new(),
+        live_in: Vec::new(),
+        entry_stack: Vec::new(),
+        exit_stack: Vec::new(),
+        call_stack: Vec::new(),
+    };
+    let mut initialized = vec![false; local_kinds.len()];
+    initialized[..params.len()].fill(true);
+    let analysis = analyze_segment(
+        runtime,
+        &segment,
+        &local_kinds,
+        result,
+        &initialized,
+        &[],
+        &HashMap::new(),
+    )
+    .ok()?;
+    Some(InlineFunctionPlan {
+        params: params.to_vec(),
+        local_kinds,
+        max_stack: analysis.max_stack,
+        cost: code.len() as u32,
+    })
 }
 
 fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, UnsupportedReason> {
@@ -519,6 +769,10 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                     jump_on_true: true,
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
+                Instr::Call(target) => Some(SegmentExit::Call {
+                    target: *target,
+                    fallthrough_ip: instruction_index as u32 + 1,
+                }),
                 Instr::Return => Some(SegmentExit::Return),
                 _ => None,
             };
@@ -527,6 +781,7 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                 block: block_index as u32,
                 start: start as u32,
                 end: instruction_index as u32 + 1,
+                cost: instruction_index as u32 + 1 - start as u32,
                 exit,
                 uses: Vec::new(),
                 definitions: Vec::new(),
@@ -534,6 +789,7 @@ fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
                 live_in: Vec::new(),
                 entry_stack: Vec::new(),
                 exit_stack: Vec::new(),
+                call_stack: Vec::new(),
             });
             start = instruction_index + 1;
         }
@@ -559,6 +815,9 @@ fn resolve_successors(
                 entry(entries, target_block, 0)?,
                 entry(entries, segment.block, fallthrough_ip)?,
             ],
+            SegmentExit::Call { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Return => Vec::new(),
         };
     }
@@ -583,9 +842,12 @@ fn analyze_segment(
     result: ScalarKind,
     initialized: &[bool],
     entry_stack: &[ScalarKind],
+    calls: &HashMap<u32, CallContract>,
 ) -> Result<SegmentAnalysis, UnsupportedReason> {
     let mut stack = entry_stack.to_vec();
     let mut max_stack = stack.len();
+    let mut max_stack_values = stack.len();
+    let mut call_stack = Vec::new();
     let mut uses = vec![false; locals.len()];
     let mut definitions = vec![false; locals.len()];
     for instruction in
@@ -657,6 +919,26 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Bool)?;
                 stack.push(ScalarKind::Bool);
             }
+            Instr::Call(target) => {
+                let contract = calls.get(&target).ok_or(UnsupportedReason::MissingSource)?;
+                call_stack = stack.clone();
+                for parameter in contract.params.iter().rev().copied() {
+                    expect(&mut stack, parameter)?;
+                }
+                if let Some(inline) = &contract.inline {
+                    let prefix = stack.len();
+                    let push_limit = call_stack
+                        .len()
+                        .checked_add(inline.local_kinds.len())
+                        .ok_or(UnsupportedReason::RegionLimit)?;
+                    let body_limit = prefix
+                        .checked_add(inline.local_kinds.len())
+                        .and_then(|value| value.checked_add(inline.max_stack))
+                        .ok_or(UnsupportedReason::RegionLimit)?;
+                    max_stack_values = max_stack_values.max(push_limit).max(body_limit);
+                }
+                stack.push(contract.result);
+            }
             Instr::Numeric(operation) if float_operation(operation, &mut stack)? => {}
             Instr::Jump(_) => {}
             Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
@@ -671,12 +953,15 @@ fn analyze_segment(
             _ => return Err(UnsupportedReason::UnsupportedInstruction),
         }
         max_stack = max_stack.max(stack.len());
+        max_stack_values = max_stack_values.max(stack.len());
     }
     Ok(SegmentAnalysis {
         uses,
         definitions,
         exit_stack: stack,
         max_stack,
+        max_stack_values,
+        call_stack,
     })
 }
 
@@ -800,6 +1085,8 @@ impl JitEngine {
                 self.compiled_regions.fetch_add(1, Ordering::Relaxed);
                 self.compiled_segments
                     .fetch_add(region.plan.segments.len() as u64, Ordering::Relaxed);
+                self.compiled_call_sites
+                    .fetch_add(region.plan.inline_call_sites as u64, Ordering::Relaxed);
                 CacheEntry::Ready(Arc::new(region))
             }
             Err(CompileError::Unsupported(_reason)) => CacheEntry::Failed(Failure::Unsupported),
@@ -816,6 +1103,7 @@ impl JitEngine {
             compilation_attempts: self.compilation_attempts.load(Ordering::Relaxed),
             compiled_regions: self.compiled_regions.load(Ordering::Relaxed),
             compiled_segments: self.compiled_segments.load(Ordering::Relaxed),
+            compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
         }
     }
 
@@ -824,6 +1112,7 @@ impl JitEngine {
         self.compilation_attempts.store(0, Ordering::Relaxed);
         self.compiled_regions.store(0, Ordering::Relaxed);
         self.compiled_segments.store(0, Ordering::Relaxed);
+        self.compiled_call_sites.store(0, Ordering::Relaxed);
     }
 }
 
@@ -847,8 +1136,8 @@ impl From<UnsupportedReason> for CompileError {
 }
 
 fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileError> {
-    let plan = RegionPlan::for_function(input)?;
-    let func = input.runtime;
+    let plan = RegionPlan::for_function(&input)?;
+    let func = input.root.runtime;
 
     let mut flags = settings::builder();
     flags
@@ -880,7 +1169,14 @@ fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileErr
     context.func.signature = signature;
     context.func.name = UserFuncName::user(0, id.as_u32());
     let mut frontend = FunctionBuilderContext::new();
-    emit_region(&mut context.func, &mut frontend, pointer_type, func, &plan)?;
+    emit_region(
+        &mut context.func,
+        &mut frontend,
+        pointer_type,
+        func,
+        &plan,
+        &input,
+    )?;
     module
         .define_function(id, &mut context)
         .map_err(|_| CompileError::Backend)?;
@@ -933,6 +1229,7 @@ fn emit_region(
     pointer_type: ir::Type,
     bytecode: &Func,
     plan: &RegionPlan,
+    input: &FunctionInput<'_>,
 ) -> Result<(), CompileError> {
     let mut builder = FunctionBuilder::new(function, frontend);
     let entry_block = builder.create_block();
@@ -1024,7 +1321,7 @@ fn emit_region(
         let enough = builder.ins().icmp_imm(
             IntCC::UnsignedGreaterThanOrEqual,
             available,
-            i64::from(segment.end - segment.start),
+            i64::from(segment.cost),
         );
         builder.ins().brif(enough, body, &[], fuel_exit, &[]);
 
@@ -1051,7 +1348,15 @@ fn emit_region(
         )?;
 
         builder.switch_to_block(body);
-        emit_segment(&mut builder, bytecode, segment, &blocks, values)?;
+        emit_segment(
+            &mut builder,
+            bytecode,
+            segment,
+            &blocks,
+            values,
+            plan,
+            input,
+        )?;
     }
 
     builder.seal_all_blocks();
@@ -1066,6 +1371,8 @@ fn emit_segment(
     segment: &Segment,
     blocks: &[ir::Block],
     values: NativeValues<'_>,
+    plan: &RegionPlan,
+    input: &FunctionInput<'_>,
 ) -> Result<(), CompileError> {
     let mut stack: Vec<ir::Value> = values
         .stack
@@ -1216,7 +1523,11 @@ fn emit_segment(
             Instr::Numeric(operation) => {
                 emit_float_instruction(builder, &mut stack, operation)?;
             }
-            Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) | Instr::Return => {}
+            Instr::Call(_)
+            | Instr::Jump(_)
+            | Instr::JumpIfFalse(_)
+            | Instr::JumpIfTrue(_)
+            | Instr::Return => {}
             _ => {
                 return Err(CompileError::Unsupported(
                     UnsupportedReason::UnsupportedInstruction,
@@ -1225,8 +1536,51 @@ fn emit_segment(
         }
     }
 
-    let cost = segment.end - segment.start;
-    emit_charge(builder, values, cost);
+    if let SegmentExit::Call { target, .. } = segment.exit {
+        let call_instruction = segment.end - 1;
+        let prefix = segment.end - segment.start - 1;
+        if let Some(inline) = plan.inline_functions.get(&target) {
+            let definition = input
+                .definition(target)
+                .ok_or(CompileError::Unsupported(UnsupportedReason::MissingSource))?;
+            let deopt_stack = stack.clone();
+            emit_inline_call(
+                builder,
+                values,
+                &mut stack,
+                definition,
+                inline,
+                FaultPoint {
+                    block: segment.block,
+                    instruction: call_instruction,
+                    prefix,
+                },
+                &deopt_stack,
+            )?;
+            emit_charge(builder, values, segment.cost);
+            define_stack(builder, values, &stack)?;
+            builder.ins().jump(blocks[segment.successors[0]], &[]);
+        } else {
+            emit_charge(builder, values, segment.cost);
+            let retired = builder.use_var(values.retired);
+            let zero = builder.ins().iconst(types::I64, 0);
+            emit_exit(
+                builder,
+                values,
+                ExitEmission {
+                    retired,
+                    kind: EXIT_INTERPRETER,
+                    block: segment.block,
+                    instruction: call_instruction,
+                    result: zero,
+                },
+                &stack,
+            )?;
+        }
+        return Ok(());
+    }
+
+    emit_charge(builder, values, segment.cost);
     match segment.exit {
         SegmentExit::Jump { .. } => {
             define_stack(builder, values, &stack)?;
@@ -1244,6 +1598,7 @@ fn emit_segment(
                 builder.ins().brif(condition, fallthrough, &[], target, &[]);
             }
         }
+        SegmentExit::Call { .. } => unreachable!(),
         SegmentExit::Return => {
             let result = pop_native(&mut stack)?;
             let retired = builder.use_var(values.retired);
@@ -1262,6 +1617,170 @@ fn emit_segment(
         }
     }
     Ok(())
+}
+
+fn emit_inline_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    caller_stack: &mut Vec<ir::Value>,
+    definition: FunctionDefinition<'_>,
+    plan: &InlineFunctionPlan,
+    deopt: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<(), CompileError> {
+    let argument_start = caller_stack
+        .len()
+        .checked_sub(plan.params.len())
+        .ok_or(CompileError::Backend)?;
+    let arguments = caller_stack.split_off(argument_start);
+    let mut locals = vec![None; plan.local_kinds.len()];
+    for (slot, value) in arguments.into_iter().enumerate() {
+        locals[slot] = Some(value);
+    }
+    let mut stack = Vec::with_capacity(plan.max_stack);
+    let code = definition
+        .runtime
+        .blocks
+        .first()
+        .ok_or(CompileError::Backend)?;
+    for instruction in code.iter().copied() {
+        match instruction {
+            Instr::ConstUnit => stack.push(builder.ins().iconst(types::I64, 0)),
+            Instr::ConstBool(value) => {
+                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+            }
+            Instr::ConstInt(value) => stack.push(builder.ins().iconst(types::I64, value)),
+            Instr::ConstFloat(bits) => stack.push(
+                builder
+                    .ins()
+                    .iconst(types::I64, canonical_float_bits(bits) as i64),
+            ),
+            Instr::LoadLocal(slot) => {
+                let value = locals
+                    .get(slot as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or(CompileError::Backend)?;
+                stack.push(value);
+            }
+            Instr::StoreLocal(slot) => {
+                let value = pop_native(&mut stack)?;
+                *locals.get_mut(slot as usize).ok_or(CompileError::Backend)? = Some(value);
+            }
+            Instr::Pop => {
+                pop_native(&mut stack)?;
+            }
+            Instr::Add | Instr::Sub | Instr::Mul => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let (result, overflow) = match instruction {
+                    Instr::Add => builder.ins().sadd_overflow(left, right),
+                    Instr::Sub => builder.ins().ssub_overflow(left, right),
+                    Instr::Mul => builder.ins().smul_overflow(left, right),
+                    _ => unreachable!(),
+                };
+                emit_fault_check(
+                    builder,
+                    values,
+                    overflow,
+                    EXIT_INTERPRETER,
+                    deopt,
+                    deopt_stack,
+                )?;
+                stack.push(result);
+            }
+            Instr::Div | Instr::Rem => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let zero = builder.ins().icmp_imm(IntCC::Equal, right, 0);
+                emit_fault_check(builder, values, zero, EXIT_INTERPRETER, deopt, deopt_stack)?;
+                let minimum = builder.ins().iconst(types::I64, i64::MIN);
+                let minimum_left = builder.ins().icmp(IntCC::Equal, left, minimum);
+                let negative_one = builder.ins().icmp_imm(IntCC::Equal, right, -1);
+                let overflow = builder.ins().band(minimum_left, negative_one);
+                emit_fault_check(
+                    builder,
+                    values,
+                    overflow,
+                    EXIT_INTERPRETER,
+                    deopt,
+                    deopt_stack,
+                )?;
+                let result = if matches!(instruction, Instr::Div) {
+                    builder.ins().sdiv(left, right)
+                } else {
+                    builder.ins().srem(left, right)
+                };
+                stack.push(result);
+            }
+            Instr::Neg => {
+                let value = pop_native(&mut stack)?;
+                let zero = builder.ins().iconst(types::I64, 0);
+                let (result, overflow) = builder.ins().ssub_overflow(zero, value);
+                emit_fault_check(
+                    builder,
+                    values,
+                    overflow,
+                    EXIT_INTERPRETER,
+                    deopt,
+                    deopt_stack,
+                )?;
+                stack.push(result);
+            }
+            Instr::Not => {
+                let value = pop_native(&mut stack)?;
+                stack.push(builder.ins().bxor_imm(value, 1));
+            }
+            Instr::LtInt
+            | Instr::LeInt
+            | Instr::GtInt
+            | Instr::GeInt
+            | Instr::EqInt
+            | Instr::NeInt => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let condition = match instruction {
+                    Instr::LtInt => IntCC::SignedLessThan,
+                    Instr::LeInt => IntCC::SignedLessThanOrEqual,
+                    Instr::GtInt => IntCC::SignedGreaterThan,
+                    Instr::GeInt => IntCC::SignedGreaterThanOrEqual,
+                    Instr::EqInt => IntCC::Equal,
+                    Instr::NeInt => IntCC::NotEqual,
+                    _ => unreachable!(),
+                };
+                let compared = builder.ins().icmp(condition, left, right);
+                stack.push(builder.ins().uextend(types::I64, compared));
+            }
+            Instr::EqBool | Instr::NeBool => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let condition = if matches!(instruction, Instr::EqBool) {
+                    IntCC::Equal
+                } else {
+                    IntCC::NotEqual
+                };
+                let compared = builder.ins().icmp(condition, left, right);
+                stack.push(builder.ins().uextend(types::I64, compared));
+            }
+            Instr::Numeric(operation) => {
+                emit_float_instruction(builder, &mut stack, operation)?;
+            }
+            Instr::Return => {
+                let result = pop_native(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(CompileError::Backend);
+                }
+                caller_stack.push(result);
+                return Ok(());
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    UnsupportedReason::UnsupportedInstruction,
+                ));
+            }
+        }
+    }
+    Err(CompileError::Backend)
 }
 
 fn pop_native(stack: &mut Vec<ir::Value>) -> Result<ir::Value, CompileError> {
@@ -1584,6 +2103,7 @@ mod tests {
             block: 0,
             start: 0,
             end: 3,
+            cost: 3,
             exit: SegmentExit::Return,
             uses: vec![false, true],
             definitions: vec![true, false],
@@ -1591,6 +2111,7 @@ mod tests {
             live_in: vec![],
             entry_stack: vec![],
             exit_stack: vec![],
+            call_stack: vec![],
         }];
         compute_liveness(&mut segments, 2);
         assert_eq!(segments[0].live_in, vec![false, true]);

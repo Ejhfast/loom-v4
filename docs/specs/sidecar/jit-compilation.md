@@ -1,6 +1,6 @@
 # Guarded JIT compilation
 
-Status: Stages 0 through 4 are implemented for the first native execution experiment.
+Status: Stages 0 through 6 are implemented for the native execution experiment.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -29,7 +29,7 @@ A smaller gain requires an overhead investigation before surface expansion.
 
 The first implementation does not compile these operations:
 
-- function calls;
+- indirect, virtual, generic, and recursive native calls;
 - closures or captures;
 - generic environments;
 - heap references;
@@ -232,9 +232,31 @@ The first supported instructions are:
 - `JumpIfTrue`;
 - `Return`.
 
-Division and remainder follow after exact fault exits pass their tests.
+Division and remainder use exact zero and signed-overflow exits.
 
 An unsupported instruction makes the complete function ineligible.
+
+A direct call is the one exception to this rule.
+
+### 10.1 Direct scalar calls
+
+Stage 6 inlines one bounded, pure, monomorphic scalar leaf function.
+
+Each direct call ends one normalized segment.
+
+The segment cost includes the call instruction and every inlined callee instruction.
+
+The entry guard proves the required frame and stack limits before native execution.
+
+A potential callee fault exits before the call instruction.
+
+The interpreter then creates the callee frame and produces the canonical fault state.
+
+An effectful, recursive, non-leaf, or oversized callee uses the same interpreter exit.
+
+The caller function identity includes each direct callee identity.
+
+The native cache therefore pins the complete compiled call version.
 
 ## 11. Native ABI
 
@@ -373,6 +395,7 @@ The runtime records clock-free counters:
 - native compilation attempts;
 - compiled regions;
 - compiled segments;
+- compiled direct-call sites;
 - native entry attempts;
 - guarded values;
 - guard failures;
@@ -562,6 +585,8 @@ Stop gate: division state, faults, and fuel match interpreter execution exactly.
 - materialize before unsupported callees;
 - add recursive-call limits and tests.
 
+Stop gate: calls preserve fuel, limits, faults, versions, and complete machine state.
+
 ### Stage 7: Heap access
 
 - define stable object guards;
@@ -728,3 +753,25 @@ Both retained rows match the crate-extraction checkpoint.
 Fuel sweeps cover zero and signed-overflow faults for both operations.
 
 Every tested outcome and complete live-state dump matches interpreter execution.
+
+## 26. Stage 6 review measurements
+
+The call benchmark uses a callee local to prevent frontend inlining.
+
+It executes one million direct scalar calls.
+
+| Workload | Interpreter | Native cold | Native warm | Warm gain |
+| --- | ---: | ---: | ---: | ---: |
+| Direct scalar call | 47.400 ms | 1.292 ms | 0.911 ms | 52.05 times |
+
+The retained integer loop used 0.931 milliseconds.
+
+The retained division loop used 1.558 milliseconds.
+
+The retained scheduled loop used 4.822 milliseconds.
+
+All retained rows stay within 2.7 percent of the prior checkpoint.
+
+Fuel sweeps cover every limit from zero through 32 instructions.
+
+Tests also cover frame limits, callee faults, recursive exits, and two callee versions.

@@ -75,6 +75,7 @@ fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetri
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let engine = Arc::new(Engine::new(mode));
+    let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let (arena, namespace) =
@@ -89,12 +90,16 @@ fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetri
             vm.show_outcome(&outcome)
         );
         if round == 0 {
+            compiler_metrics = engine.metrics();
             engine.reset_metrics();
         } else {
             runs.push(elapsed);
         }
     }
-    (median(runs), engine.metrics())
+    (
+        median(runs),
+        with_compiler_metrics(engine.metrics(), compiler_metrics),
+    )
 }
 
 /// Time first native execution with compilation inside each round.
@@ -127,6 +132,7 @@ fn time_program_engine_sliced(
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let engine = Arc::new(Engine::new(mode));
+    let mut compiler_metrics = EngineMetrics::default();
     let root = lm_vm::TaskKey {
         vm: 0,
         generation: 0,
@@ -153,12 +159,16 @@ fn time_program_engine_sliced(
         let elapsed = start.elapsed();
         assert!(matches!(world.task_outcome(root), lm_vm::Outcome::Done(_)));
         if round == 0 {
+            compiler_metrics = engine.metrics();
             engine.reset_metrics();
         } else {
             runs.push(elapsed);
         }
     }
-    (median(runs), engine.metrics())
+    (
+        median(runs),
+        with_compiler_metrics(engine.metrics(), compiler_metrics),
+    )
 }
 
 /// Time one program through the deterministic scheduler.
@@ -166,6 +176,7 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let engine = Arc::new(Engine::new(mode));
+    let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let (arena, namespace) =
@@ -185,15 +196,27 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
         let elapsed = start.elapsed();
         assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
         if round == 0 {
+            compiler_metrics = engine.metrics();
             engine.reset_metrics();
         } else {
             runs.push(elapsed);
         }
     }
-    (median(runs), engine.metrics())
+    (
+        median(runs),
+        with_compiler_metrics(engine.metrics(), compiler_metrics),
+    )
 }
 
-fn report_jit(name: &str, source: &str) {
+fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) -> EngineMetrics {
+    runtime.compilation_attempts = compiler.compilation_attempts;
+    runtime.compiled_regions = compiler.compiled_regions;
+    runtime.compiled_segments = compiler.compiled_segments;
+    runtime.compiled_call_sites = compiler.compiled_call_sites;
+    runtime
+}
+
+fn report_jit(name: &str, source: &str, required_call_sites: u64) {
     if !selected(name) {
         return;
     }
@@ -201,14 +224,16 @@ fn report_jit(name: &str, source: &str) {
     let cold = time_program_native_cold(source);
     let (native, metrics) = time_program_engine(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0);
+    assert!(metrics.compiled_call_sites >= required_call_sites);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         cold.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
         metrics.native_entries,
         metrics.guarded_values,
+        metrics.compiled_call_sites,
     );
 }
 
@@ -220,12 +245,13 @@ fn report_jit_sliced(name: &str, source: &str, quantum: u32) {
     let (native, metrics) = time_program_engine_sliced(source, EngineMode::Native, quantum);
     assert!(metrics.native_retired_instructions > 0);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
         metrics.native_entries,
         metrics.guarded_values,
+        metrics.compiled_call_sites,
     );
 }
 
@@ -237,12 +263,13 @@ fn report_jit_scheduled(name: &str, source: &str) {
     let (native, metrics) = time_program_engine_scheduled(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0);
     println!(
-        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}",
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
         metrics.native_entries,
         metrics.guarded_values,
+        metrics.compiled_call_sites,
     );
 }
 
@@ -899,19 +926,22 @@ end
 #[ignore]
 fn bench_jit_scalar_regions() {
     println!(
-        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards"
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls"
     );
     report_jit(
         "jit_int_loop",
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+        0,
     );
     report_jit(
         "jit_float_add",
         "i = 0\ns = 0.0\nwhile i < 1000000\n  s = s + 1.25\n  i = i + 1\nend\ns\n",
+        0,
     );
     report_jit(
         "jit_int_eq",
         "i = 0\nsame = false\nwhile i < 1000000\n  same = i == i\n  i = i + 1\nend\nsame\n",
+        0,
     );
     report_jit(
         "jit_int_div",
@@ -922,6 +952,7 @@ fn bench_jit_scalar_regions() {
             "  if d > 1009\n    d = 3\n  end\n",
             "  i = i + 1\nend\ns\n",
         ),
+        0,
     );
     report_jit(
         "jit_int_rem",
@@ -932,6 +963,15 @@ fn bench_jit_scalar_regions() {
             "  if d > 1009\n    d = 3\n  end\n",
             "  i = i + 1\nend\ns\n",
         ),
+        0,
+    );
+    report_jit(
+        "jit_direct_call",
+        concat!(
+            "def add1(value: Int): Int\n  next = value + 1\n  next\nend\n",
+            "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
+        ),
+        1,
     );
     report_jit_sliced(
         "jit_int_loop_sliced",

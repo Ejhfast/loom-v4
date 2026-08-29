@@ -66,13 +66,40 @@ impl JitEngine {
                 .code_namespace()
                 .function_unit(function)
                 .map_err(|_| Failure::Unsupported)?;
-            Ok(FunctionInput::new(
+            let mut input = FunctionInput::new(
                 hash,
+                function,
                 runtime,
                 unit.module(),
                 module.bundle(),
                 local,
-            ))
+            );
+            let mut callees = Vec::new();
+            for instruction in runtime.blocks.iter().flatten() {
+                if let lm_bytecode::Instr::Call(callee) = instruction {
+                    if !callees.contains(callee) {
+                        callees.push(*callee);
+                    }
+                }
+            }
+            for callee in callees {
+                let callee_runtime = module
+                    .funcs
+                    .get(callee as usize)
+                    .ok_or(Failure::Unsupported)?;
+                let (callee_unit, callee_local) = module
+                    .code_namespace()
+                    .function_unit(callee)
+                    .map_err(|_| Failure::Unsupported)?;
+                input.add_direct_callee(
+                    callee,
+                    callee_runtime,
+                    callee_unit.module(),
+                    module.bundle(),
+                    callee_local,
+                );
+            }
+            Ok(input)
         }) {
             Ok(region) => region,
             Err(Failure::Unsupported) => {
@@ -103,6 +130,16 @@ impl JitEngine {
             engine.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         }
+        let Some(required_frames) =
+            (machine.vm.frames.len() as u32).checked_add(region.additional_frames())
+        else {
+            engine.note_guard_failure(0);
+            return NativeAttempt::Fallback;
+        };
+        if required_frames > machine.config.max_frames {
+            engine.note_guard_failure(0);
+            return NativeAttempt::Fallback;
+        }
         let Some(entry) = region.entry_plan(frame.block, frame.ip) else {
             engine.note_missing_entry_fallback();
             return region
@@ -130,7 +167,7 @@ impl JitEngine {
             .locals
             .len()
             .checked_add(operand_base)
-            .and_then(|used| used.checked_add(region.max_stack()))
+            .and_then(|used| used.checked_add(region.max_stack_values()))
         else {
             engine.note_guard_failure(0);
             return NativeAttempt::Fallback;
@@ -210,7 +247,8 @@ impl JitEngine {
         engine.note_materialization();
 
         match exit.kind() {
-            ExitKind::Fuel => {
+            ExitKind::Fuel | ExitKind::Interpreter => {
+                let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
                 let Some(stack_kinds) = region.operand_kinds(exit.block(), exit.instruction())
                 else {
                     return malformed_native_exit(retired);
@@ -234,7 +272,9 @@ impl JitEngine {
                 };
                 frame.block = exit.block();
                 frame.ip = exit.instruction();
-                if exit.retired() == batch_fuel {
+                if interpreter {
+                    NativeAttempt::Continue { retired }
+                } else if exit.retired() == batch_fuel {
                     let outcome = if u64::from(instruction_limit) <= original_fuel {
                         Ok(None)
                     } else {

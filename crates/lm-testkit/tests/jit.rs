@@ -25,18 +25,25 @@ fn run_artifact(
     mode: EngineMode,
     fuel: u64,
 ) -> (Outcome, lm_vm::EngineMetrics, String) {
-    let (arena, namespace) =
-        lm_testkit::publish_compiled_artifact(artifact.clone()).expect("the JIT case publishes");
-    let engine = Arc::new(Engine::new(mode));
-    let mut vm = Vm::new_with_engine(
-        arena,
-        namespace,
+    run_artifact_with_config(
+        artifact,
+        mode,
         VmConfig {
             fuel,
             ..VmConfig::default()
         },
-        Arc::clone(&engine),
-    );
+    )
+}
+
+fn run_artifact_with_config(
+    artifact: &lm_bytecode::artifact::Artifact,
+    mode: EngineMode,
+    config: VmConfig,
+) -> (Outcome, lm_vm::EngineMetrics, String) {
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact.clone()).expect("the JIT case publishes");
+    let engine = Arc::new(Engine::new(mode));
+    let mut vm = Vm::new_with_engine(arena, namespace, config, Arc::clone(&engine));
     let outcome = vm.run();
     let dump = vm.dump_live(&outcome);
     (outcome, engine.metrics(), dump)
@@ -140,6 +147,137 @@ fn integer_division_faults_match_at_each_fuel_boundary() {
         assert_eq!(native, Outcome::Fault(expected));
         assert_eq!(metrics.native_fault_exits, 1);
     }
+}
+
+#[test]
+fn direct_scalar_calls_match_at_each_fuel_boundary() {
+    let source = concat!(
+        "def add1(value: Int): Int\n  next = value + 1\n  next\nend\n",
+        "i = 0\n",
+        "while i < 10000\n  i = add1(i)\nend\n",
+        "i\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-call.lm", source).expect("the call case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(10_000)));
+    assert_eq!(metrics.compiled_call_sites, 1);
+    assert!(metrics.native_retired_instructions > 40_000);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+}
+
+#[test]
+fn a_faulting_inline_call_restarts_in_the_interpreter() {
+    let cases = [
+        (
+            concat!(
+                "def add1(value: Int): Int\n  next = value + 1\n  next\nend\n",
+                "value = 9223372036854775807\nadd1(value)\n",
+            ),
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            concat!(
+                "def divide(left: Int, right: Int): Int\n",
+                "  result = left / right\n  result\nend\n",
+                "left = 7\nright = 0\ndivide(left, right)\n",
+            ),
+            lm_vm::FaultCode::DivideByZero,
+        ),
+    ];
+    for (source, expected) in cases {
+        let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted);
+        assert_eq!(native_dump, interpreted_dump);
+        assert_eq!(native, Outcome::Fault(expected));
+        assert_eq!(metrics.compiled_call_sites, 1);
+        assert_eq!(metrics.native_fault_exits, 0);
+    }
+}
+
+#[test]
+fn call_guards_preserve_the_frame_limit() {
+    let source = concat!(
+        "def add1(value: Int): Int\n  next = value + 1\n  next\nend\n",
+        "add1(41)\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-call-limit.lm", source).expect("the call case compiles");
+    let config = VmConfig {
+        max_frames: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::StackLimit));
+    assert!(metrics.guard_failures > 0);
+    assert_eq!(metrics.native_entries, 0);
+}
+
+#[test]
+fn a_recursive_call_uses_an_explicit_interpreter_exit() {
+    let source = concat!(
+        "def sum_to(value: Int): Int\n",
+        "  if value == 0\n    return 0\n  end\n",
+        "  next = value - 1\n",
+        "  rest = sum_to(next)\n",
+        "  value + rest\n",
+        "end\n",
+        "sum_to(100)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(5_050)));
+    assert_eq!(metrics.compiled_call_sites, 0);
+    assert!(metrics.native_entries > 0);
+    assert!(metrics.materializations > 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+}
+
+#[test]
+fn direct_call_cache_entries_pin_the_callee_version() {
+    let first = lm_testkit::compile_text(
+        "jit-call-version.lm",
+        concat!(
+            "def adjust(value: Int): Int\n  next = value + 1\n  next\nend\n",
+            "adjust(40)\n",
+        ),
+    )
+    .expect("the first call version compiles");
+    let second = lm_testkit::compile_text(
+        "jit-call-version.lm",
+        concat!(
+            "def adjust(value: Int): Int\n  next = value + 2\n  next\nend\n",
+            "adjust(40)\n",
+        ),
+    )
+    .expect("the second call version compiles");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let run_version = |artifact: lm_bytecode::artifact::Artifact| {
+        let (arena, namespace) =
+            lm_testkit::publish_compiled_artifact(artifact).expect("the call version publishes");
+        let mut vm =
+            Vm::new_with_engine(arena, namespace, VmConfig::default(), Arc::clone(&engine));
+        vm.run()
+    };
+    assert_eq!(run_version(first), Outcome::Done(lm_value::Value::Int(41)));
+    assert_eq!(run_version(second), Outcome::Done(lm_value::Value::Int(42)));
+    let metrics = engine.metrics();
+    assert_eq!(metrics.compiled_regions, 2);
+    assert_eq!(metrics.compiled_call_sites, 2);
 }
 
 #[test]
