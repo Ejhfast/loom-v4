@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt;
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const MAX_REGION_INSTRUCTIONS: usize = 65_536;
@@ -33,6 +33,7 @@ const EXIT_CALL: u32 = 9;
 const EXIT_ALLOCATION: u32 = 10;
 const EXIT_HEAP_LIMIT: u32 = 11;
 const EXIT_EFFECT: u32 = 12;
+const EXIT_STACK_LIMIT: u32 = 13;
 
 const RUNTIME_LOAD_FIELD: u32 = 1;
 const RUNTIME_ALLOC_INSTANCE: u32 = 2;
@@ -41,6 +42,9 @@ const RUNTIME_TYPE_MISMATCH: u32 = 1;
 const RUNTIME_UNINITIALIZED_FIELD: u32 = 2;
 const RUNTIME_INTERPRETER: u32 = 3;
 const RUNTIME_HEAP_LIMIT: u32 = 4;
+
+const INITIAL_NATIVE_SCALARS: usize = 4_096;
+const INITIAL_NATIVE_FRAMES: usize = 256;
 
 /// The native local changed during this activation.
 pub const LOCAL_DIRTY: u8 = 1;
@@ -58,6 +62,38 @@ struct RawExit {
     result: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct RawNativeFrame {
+    function: u32,
+    block: u32,
+    instruction: u32,
+    scalar_base: u32,
+    local_count: u32,
+    max_stack: u32,
+    operand_len: u32,
+    native_created: u32,
+    caller_stack_values: u32,
+}
+
+#[repr(C)]
+struct RawNativeActivation {
+    scalars: *mut u64,
+    states: *mut u8,
+    scalar_len: u32,
+    scalar_capacity: u32,
+    frames: *mut RawNativeFrame,
+    frame_len: u32,
+    frame_capacity: u32,
+    entries: *const usize,
+    entry_count: u32,
+    base_stack_values: u32,
+    stack_values: u32,
+    max_stack_values: u32,
+    base_frames: u32,
+    max_frames: u32,
+}
+
 type RawRuntimeCall = unsafe extern "C" fn(*mut c_void, u32, u64, u64, u32, *mut u64) -> u32;
 
 type NativeFunction = unsafe extern "C" fn(
@@ -72,10 +108,187 @@ type NativeFunction = unsafe extern "C" fn(
     *mut u64,
     *mut u8,
     *mut RawExit,
+    *mut RawNativeActivation,
 );
+
+/// Reusable scalar and frame storage for one native turn.
+#[derive(Debug, Default)]
+pub struct NativeActivation {
+    scalars: Vec<u64>,
+    states: Vec<u8>,
+    frames: Vec<RawNativeFrame>,
+    scalar_len: usize,
+    frame_len: usize,
+}
+
+/// Root frame data and native scratch limits.
+pub struct NativePreparation {
+    pub function: u32,
+    pub block: u32,
+    pub instruction: u32,
+    pub local_count: usize,
+    pub max_stack: usize,
+    pub operand_len: usize,
+    pub scalar_limit: usize,
+    pub frame_limit: usize,
+}
+
+/// Inputs for one bounded native execution.
+pub struct NativeExecution<'a> {
+    pub entry: u32,
+    pub entries: &'a [usize],
+    pub base_stack_values: usize,
+    pub max_stack_values: usize,
+    pub base_frames: usize,
+    pub max_frames: usize,
+    pub roots: &'a mut [u64],
+    pub root_states: &'a mut [u8],
+    pub fuel: u64,
+}
+
+/// One materialized view of a live native frame.
+pub struct NativeFrameView<'a> {
+    frame: RawNativeFrame,
+    locals: &'a [u64],
+    states: &'a [u8],
+    operands: &'a [u64],
+}
+
+impl NativeFrameView<'_> {
+    /// Return the namespace function slot.
+    pub fn function(&self) -> u32 {
+        self.frame.function
+    }
+
+    /// Return the current bytecode block.
+    pub fn block(&self) -> u32 {
+        self.frame.block
+    }
+
+    /// Return the current bytecode instruction.
+    pub fn instruction(&self) -> u32 {
+        self.frame.instruction
+    }
+
+    /// Return true when native code created this frame.
+    pub fn native_created(&self) -> bool {
+        self.frame.native_created != 0
+    }
+
+    /// Return the local scalar bits.
+    pub fn locals(&self) -> &[u64] {
+        self.locals
+    }
+
+    /// Return the local initialization and mutation states.
+    pub fn states(&self) -> &[u8] {
+        self.states
+    }
+
+    /// Return the operand scalar bits.
+    pub fn operands(&self) -> &[u64] {
+        self.operands
+    }
+}
+
+impl NativeActivation {
+    /// Prepare one root frame without changing guest state.
+    pub fn prepare_root(&mut self, input: NativePreparation) -> Result<(), Failure> {
+        let NativePreparation {
+            function,
+            block,
+            instruction,
+            local_count,
+            max_stack,
+            operand_len,
+            scalar_limit,
+            frame_limit,
+        } = input;
+        let window = local_count
+            .checked_add(max_stack)
+            .ok_or(Failure::BackendUnavailable)?;
+        let scalar_capacity = INITIAL_NATIVE_SCALARS.max(window).min(scalar_limit);
+        let frame_capacity = INITIAL_NATIVE_FRAMES.max(1).min(frame_limit);
+        if window > scalar_capacity || frame_capacity == 0 || operand_len > max_stack {
+            return Err(Failure::BackendUnavailable);
+        }
+        if self
+            .scalars
+            .try_reserve(scalar_capacity.saturating_sub(self.scalars.len()))
+            .is_err()
+            || self
+                .states
+                .try_reserve(scalar_capacity.saturating_sub(self.states.len()))
+                .is_err()
+            || self
+                .frames
+                .try_reserve(frame_capacity.saturating_sub(self.frames.len()))
+                .is_err()
+        {
+            return Err(Failure::BackendUnavailable);
+        }
+        self.scalars.resize(scalar_capacity, 0);
+        self.states.resize(scalar_capacity, 0);
+        self.frames
+            .resize(frame_capacity, RawNativeFrame::default());
+        self.scalars[..window].fill(0);
+        self.states[..window].fill(0);
+        self.frames[0] = RawNativeFrame {
+            function,
+            block,
+            instruction,
+            scalar_base: 0,
+            local_count: u32::try_from(local_count).map_err(|_| Failure::BackendUnavailable)?,
+            max_stack: u32::try_from(max_stack).map_err(|_| Failure::BackendUnavailable)?,
+            operand_len: u32::try_from(operand_len).map_err(|_| Failure::BackendUnavailable)?,
+            native_created: 0,
+            caller_stack_values: 0,
+        };
+        self.scalar_len = window;
+        self.frame_len = 1;
+        Ok(())
+    }
+
+    /// Return all mutable root buffers.
+    pub fn root_buffers_mut(&mut self) -> (&mut [u64], &mut [u8], &mut [u64]) {
+        let locals = self.frames[0].local_count as usize;
+        let stack = self.frames[0].max_stack as usize;
+        let (local_bits, rest) = self.scalars.split_at_mut(locals);
+        let operand_bits = &mut rest[..stack];
+        (local_bits, &mut self.states[..locals], operand_bits)
+    }
+
+    /// Return all immutable root buffers.
+    pub fn root_buffers(&self) -> (&[u64], &[u8], &[u64]) {
+        let locals = self.frames[0].local_count as usize;
+        let stack = self.frames[0].max_stack as usize;
+        (
+            &self.scalars[..locals],
+            &self.states[..locals],
+            &self.scalars[locals..locals + stack],
+        )
+    }
+
+    /// Return every live native frame in call order.
+    pub fn frames(&self) -> impl ExactSizeIterator<Item = NativeFrameView<'_>> {
+        self.frames[..self.frame_len].iter().map(|frame| {
+            let base = frame.scalar_base as usize;
+            let locals = frame.local_count as usize;
+            let operands = frame.operand_len as usize;
+            let operand_base = base + locals;
+            NativeFrameView {
+                frame: *frame,
+                locals: &self.scalars[base..operand_base],
+                states: &self.states[base..operand_base],
+                operands: &self.scalars[operand_base..operand_base + operands],
+            }
+        })
+    }
+}
 
 struct RawRuntimeContext<R> {
     runtime: *mut R,
+    activation: *const RawNativeActivation,
     roots: *const u64,
     root_states: *const u8,
     root_capacity: usize,
@@ -179,7 +392,12 @@ unsafe extern "C" fn runtime_call<R: Runtime>(
             // SAFETY: Both root buffers have the same checked capacity.
             let root_states =
                 unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-            runtime.allocate_instance(first as u32, root_bits, root_states, second != 0)
+            if context.activation.is_null() {
+                return RUNTIME_INTERPRETER;
+            }
+            // SAFETY: The activation remains live during the native call.
+            let nested = unsafe { (*context.activation).frame_len > 1 };
+            runtime.allocate_instance(first as u32, root_bits, root_states, second != 0 && !nested)
         }
         _ => RuntimeResult::Interpreter,
     };
@@ -229,6 +447,58 @@ pub struct CompiledRegion {
     entry: NativeFunction,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
+}
+
+/// One stable native call target for a namespace function slot.
+#[repr(C)]
+pub struct NativeEntryCell {
+    code: AtomicUsize,
+    local_count: AtomicU32,
+    max_stack: AtomicU32,
+    max_stack_values: AtomicU32,
+}
+
+impl NativeEntryCell {
+    /// Create one unpublished native entry.
+    pub fn new() -> NativeEntryCell {
+        NativeEntryCell {
+            code: AtomicUsize::new(0),
+            local_count: AtomicU32::new(0),
+            max_stack: AtomicU32::new(0),
+            max_stack_values: AtomicU32::new(0),
+        }
+    }
+
+    /// Publish one compiled region after its owner retains the region.
+    pub fn publish(&self, region: &CompiledRegion) -> Result<(), Failure> {
+        let local_count = u32::try_from(region.plan.local_kinds.len())
+            .map_err(|_| Failure::BackendUnavailable)?;
+        let max_stack =
+            u32::try_from(region.plan.max_stack).map_err(|_| Failure::BackendUnavailable)?;
+        let max_stack_values =
+            u32::try_from(region.plan.max_stack_values).map_err(|_| Failure::BackendUnavailable)?;
+        self.local_count.store(local_count, Ordering::Relaxed);
+        self.max_stack.store(max_stack, Ordering::Relaxed);
+        self.max_stack_values
+            .store(max_stack_values, Ordering::Relaxed);
+        self.code.store(region.entry as usize, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Default for NativeEntryCell {
+    fn default() -> NativeEntryCell {
+        NativeEntryCell::new()
+    }
+}
+
+impl fmt::Debug for NativeEntryCell {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeEntryCell")
+            .field("published", &(self.code.load(Ordering::Acquire) != 0))
+            .finish()
+    }
 }
 
 impl fmt::Debug for CompiledRegion {
@@ -356,41 +626,104 @@ impl CompiledRegion {
         })
     }
 
+    /// Return operand representations for one suspended native caller.
+    pub fn suspended_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
+        self.plan.segments.iter().find_map(|segment| {
+            let SegmentExit::Call {
+                target,
+                fallthrough_ip,
+            } = segment.exit
+            else {
+                return None;
+            };
+            if segment.block != block || fallthrough_ip != instruction {
+                return None;
+            }
+            let parameters = self.plan.call_contracts.get(&target)?.params.len();
+            let prefix = segment.boundary_stack.len().checked_sub(parameters)?;
+            Some(&segment.boundary_stack[..prefix])
+        })
+    }
+
     /// Execute native code over explicit scalar buffers.
     #[inline(always)]
     pub fn execute<R: Runtime>(
         &self,
         runtime: &mut R,
-        entry: u32,
-        locals: &mut [u64],
-        local_states: &mut [u8],
-        operands: &mut [u64],
-        fuel: u64,
+        activation: &mut NativeActivation,
+        input: NativeExecution<'_>,
     ) -> Result<ExecutionExit, Failure> {
+        let NativeExecution {
+            entry,
+            entries,
+            base_stack_values,
+            max_stack_values,
+            base_frames,
+            max_frames,
+            roots,
+            root_states,
+            fuel,
+        } = input;
         if entry as usize >= self.plan.segments.len()
-            || locals.len() != self.plan.local_kinds.len()
-            || local_states.len() != self.plan.local_kinds.len()
-            || operands.len() < self.plan.max_stack
+            || activation.frame_len != 1
+            || activation.frames[0].local_count as usize != self.plan.local_kinds.len()
+            || (activation.frames[0].max_stack as usize) < self.plan.max_stack
+            || roots.len() < self.plan.max_roots.max(1)
+            || root_states.len() < self.plan.max_roots.max(1)
         {
             return Err(Failure::BackendUnavailable);
         }
+        let scalar_capacity =
+            u32::try_from(activation.scalars.len()).map_err(|_| Failure::BackendUnavailable)?;
+        let frame_capacity =
+            u32::try_from(activation.frames.len()).map_err(|_| Failure::BackendUnavailable)?;
+        let root = activation.frames[0];
+        let mut raw_activation = RawNativeActivation {
+            scalars: activation.scalars.as_mut_ptr(),
+            states: activation.states.as_mut_ptr(),
+            scalar_len: u32::try_from(activation.scalar_len)
+                .map_err(|_| Failure::BackendUnavailable)?,
+            scalar_capacity,
+            frames: activation.frames.as_mut_ptr(),
+            frame_len: u32::try_from(activation.frame_len)
+                .map_err(|_| Failure::BackendUnavailable)?,
+            frame_capacity,
+            entries: entries.as_ptr(),
+            entry_count: u32::try_from(entries.len()).map_err(|_| Failure::BackendUnavailable)?,
+            base_stack_values: u32::try_from(base_stack_values)
+                .map_err(|_| Failure::BackendUnavailable)?,
+            stack_values: u32::try_from(
+                base_stack_values
+                    .checked_add(root.local_count as usize)
+                    .and_then(|count| count.checked_add(root.operand_len as usize))
+                    .ok_or(Failure::BackendUnavailable)?,
+            )
+            .map_err(|_| Failure::BackendUnavailable)?,
+            max_stack_values: u32::try_from(max_stack_values)
+                .map_err(|_| Failure::BackendUnavailable)?,
+            base_frames: u32::try_from(base_frames).map_err(|_| Failure::BackendUnavailable)?,
+            max_frames: u32::try_from(max_frames).map_err(|_| Failure::BackendUnavailable)?,
+        };
         let mut exit = RawExit::default();
         let mut runtime_result = 0u64;
-        let mut roots = vec![0u64; self.plan.max_roots.max(1)];
-        let mut root_states = vec![0u8; self.plan.max_roots.max(1)];
         let mut runtime_context = RawRuntimeContext {
             runtime: std::ptr::from_mut(runtime),
+            activation: std::ptr::from_ref(&raw_activation),
             roots: roots.as_ptr(),
             root_states: root_states.as_ptr(),
             root_capacity: self.plan.max_roots,
         };
+        let local_pointer = activation.scalars.as_mut_ptr();
+        let local_state_pointer = activation.states.as_mut_ptr();
+        // SAFETY: `prepare_root` reserves one complete root window.
+        let operand_pointer = unsafe { local_pointer.add(root.local_count as usize) };
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe {
             (self.entry)(
-                locals.as_mut_ptr(),
-                local_states.as_mut_ptr(),
-                operands.as_mut_ptr(),
+                local_pointer,
+                local_state_pointer,
+                operand_pointer,
                 fuel,
                 entry,
                 std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
@@ -399,8 +732,27 @@ impl CompiledRegion {
                 roots.as_mut_ptr(),
                 root_states.as_mut_ptr(),
                 &mut exit,
+                &mut raw_activation,
             );
         }
+        if raw_activation.scalar_len > raw_activation.scalar_capacity
+            || raw_activation.frame_len > raw_activation.frame_capacity
+            || raw_activation.frame_len == 0
+        {
+            return Err(Failure::BackendUnavailable);
+        }
+        for frame in &activation.frames[..raw_activation.frame_len as usize] {
+            let end = (frame.scalar_base as usize)
+                .checked_add(frame.local_count as usize)
+                .and_then(|value| value.checked_add(frame.max_stack as usize));
+            if end.is_none_or(|value| value > raw_activation.scalar_len as usize)
+                || frame.operand_len > frame.max_stack
+            {
+                return Err(Failure::BackendUnavailable);
+            }
+        }
+        activation.scalar_len = raw_activation.scalar_len as usize;
+        activation.frame_len = raw_activation.frame_len as usize;
         let kind = match exit.kind {
             EXIT_FUEL => ExitKind::Fuel,
             EXIT_RETURN => ExitKind::Return,
@@ -413,6 +765,7 @@ impl CompiledRegion {
             EXIT_ALLOCATION => ExitKind::Allocation,
             EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
             EXIT_EFFECT => ExitKind::Effect,
+            EXIT_STACK_LIMIT => ExitKind::StackLimit,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -580,6 +933,7 @@ pub enum ExitKind {
     Allocation,
     HeapLimit,
     Effect,
+    StackLimit,
     Interpreter,
 }
 
@@ -693,6 +1047,7 @@ struct InlineFunctionPlan {
 #[derive(Debug, Clone)]
 struct CallContract {
     params: Vec<ScalarKind>,
+    local_count: usize,
     result: ScalarKind,
     inline: Option<InlineFunctionPlan>,
 }
@@ -707,8 +1062,9 @@ struct RegionPlan {
     additional_frames: u32,
     segments: Vec<Segment>,
     entries: std::collections::HashMap<(u32, u32), usize>,
+    call_contracts: HashMap<u32, CallContract>,
     inline_functions: HashMap<u32, InlineFunctionPlan>,
-    inline_call_sites: usize,
+    call_sites: usize,
     heap_read_sites: usize,
     allocation_sites: usize,
     effect_sites: usize,
@@ -803,7 +1159,7 @@ impl RegionPlan {
         let mut max_stack = 0;
         let mut max_stack_values = 0;
         let mut additional_frames = 0;
-        let mut inline_call_sites = 0;
+        let mut call_sites = 0;
         let mut heap_read_sites = 0;
         let mut allocation_sites = 0;
         let mut effect_sites = 0;
@@ -856,13 +1212,13 @@ impl RegionPlan {
             allocation_sites += segment.allocations.len();
             segment.cost = segment.end - segment.start;
             if let SegmentExit::Call { target, .. } = segment.exit {
+                call_sites += 1;
                 if let Some(inline) = inline_functions.get(&target) {
                     segment.cost = segment
                         .cost
                         .checked_add(inline.cost)
                         .ok_or(UnsupportedReason::RegionLimit)?;
                     additional_frames = 1;
-                    inline_call_sites += 1;
                 } else {
                     segment.cost = segment.cost.saturating_sub(1);
                 }
@@ -922,8 +1278,9 @@ impl RegionPlan {
             additional_frames,
             segments,
             entries,
+            call_contracts,
             inline_functions,
-            inline_call_sites,
+            call_sites,
             heap_read_sites,
             allocation_sites,
             effect_sites,
@@ -967,6 +1324,7 @@ fn call_contracts(
             definition.function,
             CallContract {
                 params,
+                local_count: source_func.local_types.len(),
                 result,
                 inline,
             },
@@ -1509,7 +1867,7 @@ impl JitEngine {
                 self.compiled_segments
                     .fetch_add(region.plan.segments.len() as u64, Ordering::Relaxed);
                 self.compiled_call_sites
-                    .fetch_add(region.plan.inline_call_sites as u64, Ordering::Relaxed);
+                    .fetch_add(region.plan.call_sites as u64, Ordering::Relaxed);
                 self.compiled_heap_read_sites
                     .fetch_add(region.plan.heap_read_sites as u64, Ordering::Relaxed);
                 self.compiled_allocation_sites
@@ -1591,6 +1949,7 @@ fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileErr
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
     let id = module
         .declare_function("loom_scalar_region", Linkage::Local, &signature)
         .map_err(|_| CompileError::Backend)?;
@@ -1639,7 +1998,10 @@ struct NativeValues<'a> {
     root_pointer: ir::Value,
     root_state_pointer: ir::Value,
     runtime_signature: ir::SigRef,
+    native_signature: ir::SigRef,
     exit_pointer: ir::Value,
+    activation_pointer: ir::Value,
+    pointer_type: ir::Type,
 }
 
 #[derive(Clone, Copy)]
@@ -1679,6 +2041,14 @@ struct FieldExitEmission<'a> {
     deopt_stack: &'a [ir::Value],
 }
 
+struct NativeCallEmission<'a> {
+    target: u32,
+    contract: &'a CallContract,
+    block: u32,
+    instruction: u32,
+    successor: ir::Block,
+}
+
 fn emit_region(
     function: &mut ir::Function,
     frontend: &mut FunctionBuilderContext,
@@ -1698,6 +2068,16 @@ fn emit_region(
     runtime_signature.params.push(AbiParam::new(pointer_type));
     runtime_signature.returns.push(AbiParam::new(types::I32));
     let runtime_signature = builder.import_signature(runtime_signature);
+    let mut native_signature = ir::Signature::new(call_conv);
+    native_signature.params.push(AbiParam::new(pointer_type));
+    native_signature.params.push(AbiParam::new(pointer_type));
+    native_signature.params.push(AbiParam::new(pointer_type));
+    native_signature.params.push(AbiParam::new(types::I64));
+    native_signature.params.push(AbiParam::new(types::I32));
+    for _ in 0..7 {
+        native_signature.params.push(AbiParam::new(pointer_type));
+    }
+    let native_signature = builder.import_signature(native_signature);
     let entry_block = builder.create_block();
     let invalid_block = builder.create_block();
     let blocks: Vec<ir::Block> = (0..plan.segments.len())
@@ -1718,6 +2098,7 @@ fn emit_region(
     let root_pointer = parameters[8];
     let root_state_pointer = parameters[9];
     let exit_pointer = parameters[10];
+    let activation_pointer = parameters[11];
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
     let mut local_states = Vec::with_capacity(plan.local_kinds.len());
@@ -1772,7 +2153,10 @@ fn emit_region(
         root_pointer,
         root_state_pointer,
         runtime_signature,
+        native_signature,
         exit_pointer,
+        activation_pointer,
+        pointer_type,
     };
 
     let mut dispatch = Switch::new();
@@ -1844,7 +2228,6 @@ fn emit_region(
 
     builder.seal_all_blocks();
     builder.finalize();
-    let _ = pointer_type;
     Ok(())
 }
 
@@ -2126,19 +2509,21 @@ fn emit_segment(
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         } else {
             emit_charge(builder, values, segment.cost);
-            let retired = builder.use_var(values.retired);
-            let zero = builder.ins().iconst(types::I64, 0);
-            emit_exit(
+            let contract = plan
+                .call_contracts
+                .get(&target)
+                .ok_or(CompileError::Backend)?;
+            emit_native_call(
                 builder,
                 values,
-                ExitEmission {
-                    retired,
-                    kind: EXIT_CALL,
+                &mut stack,
+                NativeCallEmission {
+                    target,
+                    contract,
                     block: segment.block,
                     instruction: call_instruction,
-                    result: zero,
+                    successor: blocks[segment.successors[0]],
                 },
-                &stack,
             )?;
         }
         return Ok(());
@@ -2205,6 +2590,376 @@ fn emit_segment(
             )?;
         }
     }
+    Ok(())
+}
+
+fn emit_native_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    stack: &mut Vec<ir::Value>,
+    call: NativeCallEmission<'_>,
+) -> Result<(), CompileError> {
+    let NativeCallEmission {
+        target,
+        contract,
+        block,
+        instruction,
+        successor,
+    } = call;
+    let argument_start = stack
+        .len()
+        .checked_sub(contract.params.len())
+        .ok_or(CompileError::Backend)?;
+    let boundary_stack = stack.clone();
+    let caller_stack = stack[..argument_start].to_vec();
+    let arguments = stack[argument_start..].to_vec();
+    let fuel_exit = builder.create_block();
+    let lookup = builder.create_block();
+    let fallback = builder.create_block();
+    let stack_limit = builder.create_block();
+    let capacity = builder.create_block();
+    let invoke = builder.create_block();
+    let returned = builder.create_block();
+    let propagate = builder.create_block();
+
+    let fuel = builder.use_var(values.fuel);
+    let has_fuel = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, fuel, 1);
+    builder.ins().brif(has_fuel, lookup, &[], fuel_exit, &[]);
+
+    builder.switch_to_block(fuel_exit);
+    let retired = builder.use_var(values.retired);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_FUEL,
+            block,
+            instruction,
+            result: zero,
+        },
+        &boundary_stack,
+    )?;
+
+    builder.switch_to_block(lookup);
+    let entry_count = load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, entry_count),
+    )?;
+    let target_in_range =
+        builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, entry_count, i64::from(target));
+    let have_target = builder.create_block();
+    builder
+        .ins()
+        .brif(target_in_range, have_target, &[], fallback, &[]);
+
+    builder.switch_to_block(have_target);
+    let entries = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, entries),
+    )?;
+    let entry_offset = i32::try_from(
+        (target as usize)
+            .checked_mul(mem::size_of::<usize>())
+            .ok_or(CompileError::Backend)?,
+    )
+    .map_err(|_| CompileError::Backend)?;
+    let cell = builder
+        .ins()
+        .load(values.pointer_type, MemFlags::new(), entries, entry_offset);
+    let code = builder
+        .ins()
+        .atomic_load(values.pointer_type, MemFlags::new(), cell);
+    let published = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
+    let limits = builder.create_block();
+    builder.ins().brif(published, limits, &[], fallback, &[]);
+
+    builder.switch_to_block(limits);
+    let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
+    let base_frames = load_activation_u32(builder, values, RawActivationField::BaseFrames)?;
+    let max_frames = load_activation_u32(builder, values, RawActivationField::MaxFrames)?;
+    let total_frames = builder.ins().iadd(base_frames, frame_len);
+    let frame_overflow =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, total_frames, max_frames);
+    let stack_check = builder.create_block();
+    builder
+        .ins()
+        .brif(frame_overflow, stack_limit, &[], stack_check, &[]);
+
+    builder.switch_to_block(stack_check);
+    let stack_values = load_activation_u32(builder, values, RawActivationField::StackValues)?;
+    let caller_values = builder
+        .ins()
+        .iadd_imm(stack_values, -(contract.params.len() as i64));
+    let local_count = load_cell_u32(builder, cell, mem::offset_of!(NativeEntryCell, local_count))?;
+    let pushed_values = builder.ins().iadd(caller_values, local_count);
+    let max_values = load_activation_u32(builder, values, RawActivationField::MaxStackValues)?;
+    let stack_overflow = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, pushed_values, max_values);
+    builder
+        .ins()
+        .brif(stack_overflow, stack_limit, &[], capacity, &[]);
+
+    builder.switch_to_block(stack_limit);
+    emit_charge(builder, values, 1);
+    let retired = builder.use_var(values.retired);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_STACK_LIMIT,
+            block,
+            instruction: instruction + 1,
+            result: zero,
+        },
+        &boundary_stack,
+    )?;
+
+    builder.switch_to_block(capacity);
+    let max_stack = load_cell_u32(builder, cell, mem::offset_of!(NativeEntryCell, max_stack))?;
+    let callee_stack_values = load_cell_u32(
+        builder,
+        cell,
+        mem::offset_of!(NativeEntryCell, max_stack_values),
+    )?;
+    let body_values = builder.ins().iadd(pushed_values, callee_stack_values);
+    let body_fits = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, body_values, max_values);
+    let frame_capacity = load_activation_u32(builder, values, RawActivationField::FrameCapacity)?;
+    let frame_fits = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, frame_len, frame_capacity);
+    let scalar_len = load_activation_u32(builder, values, RawActivationField::ScalarLen)?;
+    let scalar_capacity = load_activation_u32(builder, values, RawActivationField::ScalarCapacity)?;
+    let window = builder.ins().iadd(local_count, max_stack);
+    let scalar_end = builder.ins().iadd(scalar_len, window);
+    let scalars_fit =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, scalar_end, scalar_capacity);
+    let local_count_matches = builder.ins().icmp_imm(
+        IntCC::Equal,
+        local_count,
+        i64::try_from(contract.local_count).map_err(|_| CompileError::Backend)?,
+    );
+    let fits = builder.ins().band(body_fits, frame_fits);
+    let fits = builder.ins().band(fits, scalars_fit);
+    let fits = builder.ins().band(fits, local_count_matches);
+    builder.ins().brif(fits, invoke, &[], fallback, &[]);
+
+    builder.switch_to_block(fallback);
+    let retired = builder.use_var(values.retired);
+    let target_value = builder.ins().iconst(types::I64, i64::from(target));
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_CALL,
+            block,
+            instruction,
+            result: target_value,
+        },
+        &boundary_stack,
+    )?;
+
+    builder.switch_to_block(invoke);
+    emit_charge(builder, values, 1);
+    emit_spill_frame(builder, values, block, instruction + 1, &caller_stack)?;
+    let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
+    let states = load_activation_pointer(builder, values, RawActivationField::States)?;
+    let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
+    let scalar_base = scalar_len;
+    let scalar_base_pointer = builder.ins().uextend(values.pointer_type, scalar_base);
+    let scalar_byte_offset = builder.ins().ishl_imm(scalar_base_pointer, 3);
+    let child_locals = builder.ins().iadd(scalars, scalar_byte_offset);
+    let child_states = builder.ins().iadd(states, scalar_base_pointer);
+    let local_count_pointer = builder.ins().uextend(values.pointer_type, local_count);
+    let local_byte_offset = builder.ins().ishl_imm(local_count_pointer, 3);
+    let child_operands = builder.ins().iadd(child_locals, local_byte_offset);
+    let zero_i8 = builder.ins().iconst(types::I8, 0);
+    for slot in 0..contract.local_count {
+        let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        builder
+            .ins()
+            .store(MemFlags::new(), zero_i8, child_states, offset);
+    }
+    let initialized = builder
+        .ins()
+        .iconst(types::I8, i64::from(LOCAL_INITIALIZED));
+    for (slot, argument) in arguments.iter().copied().enumerate() {
+        let value_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        builder
+            .ins()
+            .store(MemFlags::new(), argument, child_locals, value_offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), initialized, child_states, state_offset);
+    }
+    let frame_index = builder.ins().uextend(values.pointer_type, frame_len);
+    let frame_offset = builder
+        .ins()
+        .imul_imm(frame_index, mem::size_of::<RawNativeFrame>() as i64);
+    let child_frame = builder.ins().iadd(frames, frame_offset);
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, function),
+        target,
+    )?;
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, block),
+        0,
+    )?;
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, instruction),
+        0,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, scalar_base),
+        scalar_base,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, local_count),
+        local_count,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, max_stack),
+        max_stack,
+    )?;
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, operand_len),
+        0,
+    )?;
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, native_created),
+        1,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, caller_stack_values),
+        caller_values,
+    )?;
+    let next_frame_len = builder.ins().iadd_imm(frame_len, 1);
+    store_activation_u32(builder, values, RawActivationField::ScalarLen, scalar_end)?;
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::FrameLen,
+        next_frame_len,
+    )?;
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::StackValues,
+        pushed_values,
+    )?;
+    let child_fuel = builder.use_var(values.fuel);
+    let zero_entry = builder.ins().iconst(types::I32, 0);
+    builder.ins().call_indirect(
+        values.native_signature,
+        code,
+        &[
+            child_locals,
+            child_states,
+            child_operands,
+            child_fuel,
+            zero_entry,
+            values.runtime_context,
+            values.runtime_call,
+            values.runtime_result_pointer,
+            values.root_pointer,
+            values.root_state_pointer,
+            values.exit_pointer,
+            values.activation_pointer,
+        ],
+    );
+    let child_retired = load_value(
+        builder,
+        types::I64,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, retired),
+    )?;
+    let caller_retired = builder.use_var(values.retired);
+    let total_retired = builder.ins().iadd(caller_retired, child_retired);
+    builder.def_var(values.retired, total_retired);
+    let caller_fuel = builder.use_var(values.fuel);
+    let remaining_fuel = builder.ins().isub(caller_fuel, child_retired);
+    builder.def_var(values.fuel, remaining_fuel);
+    let exit_kind = load_value(
+        builder,
+        types::I32,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, kind),
+    )?;
+    let normal_return = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, exit_kind, i64::from(EXIT_RETURN));
+    builder
+        .ins()
+        .brif(normal_return, returned, &[], propagate, &[]);
+
+    builder.switch_to_block(propagate);
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, retired),
+        total_retired,
+    )?;
+    builder.ins().return_(&[]);
+
+    builder.switch_to_block(returned);
+    let result = load_value(
+        builder,
+        types::I64,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, result),
+    )?;
+    store_activation_u32(builder, values, RawActivationField::ScalarLen, scalar_base)?;
+    store_activation_u32(builder, values, RawActivationField::FrameLen, frame_len)?;
+    let returned_stack_values = builder.ins().iadd_imm(caller_values, 1);
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::StackValues,
+        returned_stack_values,
+    )?;
+    stack.truncate(argument_start);
+    stack.push(result);
+    define_stack(builder, values, stack)?;
+    builder.ins().jump(successor, &[]);
     Ok(())
 }
 
@@ -2779,29 +3534,7 @@ fn emit_exit(
     exit: ExitEmission,
     stack: &[ir::Value],
 ) -> Result<(), CompileError> {
-    for (slot, variable) in values.locals.iter().copied().enumerate() {
-        let value = builder.use_var(variable);
-        let state = builder.use_var(values.local_states[slot]);
-        let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), value, values.local_pointer, local_offset);
-        builder.ins().store(
-            MemFlags::new(),
-            state,
-            values.local_state_pointer,
-            state_offset,
-        );
-    }
-    for (slot, value) in stack.iter().copied().enumerate() {
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), value, values.stack_pointer, offset);
-    }
+    emit_spill_frame(builder, values, exit.block, exit.instruction, stack)?;
     store_i64(
         builder,
         values.exit_pointer,
@@ -2842,6 +3575,82 @@ fn emit_exit(
     Ok(())
 }
 
+fn emit_spill_frame(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    block: u32,
+    instruction: u32,
+    stack: &[ir::Value],
+) -> Result<(), CompileError> {
+    for (slot, variable) in values.locals.iter().copied().enumerate() {
+        let value = builder.use_var(variable);
+        let state = builder.use_var(values.local_states[slot]);
+        let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        builder
+            .ins()
+            .store(MemFlags::new(), value, values.local_pointer, local_offset);
+        builder.ins().store(
+            MemFlags::new(),
+            state,
+            values.local_state_pointer,
+            state_offset,
+        );
+    }
+    for (slot, value) in stack.iter().copied().enumerate() {
+        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        builder
+            .ins()
+            .store(MemFlags::new(), value, values.stack_pointer, offset);
+    }
+    let frame = emit_current_frame_pointer(builder, values)?;
+    store_i32_constant(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, block),
+        block,
+    )?;
+    store_i32_constant(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, instruction),
+        instruction,
+    )?;
+    store_i32_constant(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, operand_len),
+        u32::try_from(stack.len()).map_err(|_| CompileError::Backend)?,
+    )?;
+    Ok(())
+}
+
+fn emit_current_frame_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+) -> Result<ir::Value, CompileError> {
+    let frames = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, frames),
+    )?;
+    let frame_len = load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, frame_len),
+    )?;
+    let frame_index = builder.ins().iadd_imm(frame_len, -1);
+    let frame_index = builder.ins().uextend(values.pointer_type, frame_index);
+    let offset = builder
+        .ins()
+        .imul_imm(frame_index, mem::size_of::<RawNativeFrame>() as i64);
+    Ok(builder.ins().iadd(frames, offset))
+}
+
 fn define_stack(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -2866,6 +3675,113 @@ fn store_i32_constant(
     let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
     builder.ins().store(MemFlags::new(), value, pointer, offset);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RawActivationField {
+    Scalars,
+    States,
+    ScalarLen,
+    ScalarCapacity,
+    Frames,
+    FrameLen,
+    FrameCapacity,
+    StackValues,
+    MaxStackValues,
+    BaseFrames,
+    MaxFrames,
+}
+
+impl RawActivationField {
+    fn offset(self) -> usize {
+        match self {
+            RawActivationField::Scalars => mem::offset_of!(RawNativeActivation, scalars),
+            RawActivationField::States => mem::offset_of!(RawNativeActivation, states),
+            RawActivationField::ScalarLen => mem::offset_of!(RawNativeActivation, scalar_len),
+            RawActivationField::ScalarCapacity => {
+                mem::offset_of!(RawNativeActivation, scalar_capacity)
+            }
+            RawActivationField::Frames => mem::offset_of!(RawNativeActivation, frames),
+            RawActivationField::FrameLen => mem::offset_of!(RawNativeActivation, frame_len),
+            RawActivationField::FrameCapacity => {
+                mem::offset_of!(RawNativeActivation, frame_capacity)
+            }
+            RawActivationField::StackValues => {
+                mem::offset_of!(RawNativeActivation, stack_values)
+            }
+            RawActivationField::MaxStackValues => {
+                mem::offset_of!(RawNativeActivation, max_stack_values)
+            }
+            RawActivationField::BaseFrames => {
+                mem::offset_of!(RawNativeActivation, base_frames)
+            }
+            RawActivationField::MaxFrames => mem::offset_of!(RawNativeActivation, max_frames),
+        }
+    }
+}
+
+fn load_activation_u32(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    field: RawActivationField,
+) -> Result<ir::Value, CompileError> {
+    load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        field.offset(),
+    )
+}
+
+fn load_activation_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    field: RawActivationField,
+) -> Result<ir::Value, CompileError> {
+    load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        field.offset(),
+    )
+}
+
+fn store_activation_u32(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    field: RawActivationField,
+    value: ir::Value,
+) -> Result<(), CompileError> {
+    store_i32_value(builder, values.activation_pointer, field.offset(), value)
+}
+
+fn load_cell_u32(
+    builder: &mut FunctionBuilder<'_>,
+    cell: ir::Value,
+    offset: usize,
+) -> Result<ir::Value, CompileError> {
+    load_value(builder, types::I32, cell, offset)
+}
+
+fn store_i32_value(
+    builder: &mut FunctionBuilder<'_>,
+    pointer: ir::Value,
+    offset: usize,
+    value: ir::Value,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
+    builder.ins().store(MemFlags::new(), value, pointer, offset);
+    Ok(())
+}
+
+fn load_value(
+    builder: &mut FunctionBuilder<'_>,
+    ty: ir::Type,
+    pointer: ir::Value,
+    offset: usize,
+) -> Result<ir::Value, CompileError> {
+    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
+    Ok(builder.ins().load(ty, MemFlags::new(), pointer, offset))
 }
 
 fn store_i64(
@@ -3054,14 +3970,41 @@ mod tests {
             .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
             .expect("the field load compiles");
         let reference = u64::from(3u32) | (u64::from(7u32) << 32);
-        let mut locals = [reference];
-        let mut dirty = [0];
-        let mut operands = vec![0; region.max_stack()];
+        let mut activation = NativeActivation::default();
+        activation
+            .prepare_root(NativePreparation {
+                function: 0,
+                block: 0,
+                instruction: 0,
+                local_count: 1,
+                max_stack: region.max_stack(),
+                operand_len: 0,
+                scalar_limit: 4_096,
+                frame_limit: 256,
+            })
+            .expect("the native root prepares");
+        activation.root_buffers_mut().0[0] = reference;
+        let mut roots = vec![0; region.max_roots().max(1)];
+        let mut root_states = vec![0; region.max_roots().max(1)];
         let mut runtime = FieldRuntime {
             result: RuntimeResult::Value(41),
         };
         let exit = region
-            .execute(&mut runtime, 0, &mut locals, &mut dirty, &mut operands, 3)
+            .execute(
+                &mut runtime,
+                &mut activation,
+                NativeExecution {
+                    entry: 0,
+                    entries: &[],
+                    base_stack_values: 0,
+                    max_stack_values: 4_096,
+                    base_frames: 0,
+                    max_frames: 256,
+                    roots: &mut roots,
+                    root_states: &mut root_states,
+                    fuel: 3,
+                },
+            )
             .expect("the field load executes");
         assert_eq!(exit.kind(), ExitKind::Return);
         assert_eq!(exit.retired(), 3);
@@ -3077,14 +4020,41 @@ mod tests {
             .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
             .expect("the field load compiles");
         let reference = u64::from(3u32) | (u64::from(7u32) << 32);
-        let mut locals = [reference];
-        let mut dirty = [0];
-        let mut operands = vec![0; region.max_stack()];
+        let mut activation = NativeActivation::default();
+        activation
+            .prepare_root(NativePreparation {
+                function: 0,
+                block: 0,
+                instruction: 0,
+                local_count: 1,
+                max_stack: region.max_stack(),
+                operand_len: 0,
+                scalar_limit: 4_096,
+                frame_limit: 256,
+            })
+            .expect("the native root prepares");
+        activation.root_buffers_mut().0[0] = reference;
+        let mut roots = vec![0; region.max_roots().max(1)];
+        let mut root_states = vec![0; region.max_roots().max(1)];
         let mut runtime = FieldRuntime {
             result: RuntimeResult::UninitializedField,
         };
         let exit = region
-            .execute(&mut runtime, 0, &mut locals, &mut dirty, &mut operands, 3)
+            .execute(
+                &mut runtime,
+                &mut activation,
+                NativeExecution {
+                    entry: 0,
+                    entries: &[],
+                    base_stack_values: 0,
+                    max_stack_values: 4_096,
+                    base_frames: 0,
+                    max_frames: 256,
+                    roots: &mut roots,
+                    root_states: &mut root_states,
+                    fuel: 3,
+                },
+            )
             .expect("the field fault executes");
         assert_eq!(exit.kind(), ExitKind::UninitializedField);
         assert_eq!(exit.retired(), 2);

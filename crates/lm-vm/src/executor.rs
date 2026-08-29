@@ -536,13 +536,19 @@ fn run_engine_turn(
     if context.engine.mode() == EngineMode::Interpreter {
         return run_interpreter_turn(machine, instruction_limit, &mut context);
     }
+    let mut native_scratch = crate::jit::NativeScratch::default();
+    let mut native_metrics = context.engine.turn_metrics();
     let mut retired_total = 0;
     loop {
         let remaining = instruction_limit - retired_total;
-        match context
-            .engine
-            .execute_native(machine, context.module, context.native, remaining)
-        {
+        match context.engine.execute_native(
+            machine,
+            context.module,
+            context.native,
+            &mut native_scratch,
+            &mut native_metrics,
+            remaining,
+        ) {
             crate::jit::NativeAttempt::Complete { outcome, retired } => {
                 retired_total += retired;
                 return (outcome, retired_total);
@@ -551,6 +557,12 @@ fn run_engine_turn(
                 let advance = instructions.min(remaining).max(1);
                 let (outcome, interpreted) = run_interpreter_turn(machine, advance, &mut context);
                 retired_total += interpreted;
+                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
+                    if retired_total < instruction_limit {
+                        continue;
+                    }
+                    return (Ok(None), retired_total);
+                }
                 if advance < remaining && matches!(outcome, Ok(None)) {
                     continue;
                 }
@@ -564,6 +576,12 @@ fn run_engine_turn(
                 }
                 let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
                 retired_total += interpreted;
+                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
+                    if retired_total < instruction_limit {
+                        continue;
+                    }
+                    return (Ok(None), retired_total);
+                }
                 return (outcome, retired_total);
             }
             crate::jit::NativeAttempt::InterpretOne { retired } => {
@@ -592,6 +610,12 @@ fn run_engine_turn(
             crate::jit::NativeAttempt::Fallback => {
                 let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
                 retired_total += interpreted;
+                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
+                    if retired_total < instruction_limit {
+                        continue;
+                    }
+                    return (Ok(None), retired_total);
+                }
                 return (outcome, retired_total);
             }
         }
@@ -603,6 +627,7 @@ fn run_interpreter_turn(
     instruction_limit: u32,
     context: &mut EngineTurnContext<'_>,
 ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+    let stop_at_native_entry = context.engine.mode() != EngineMode::Interpreter;
     if context.restricted_world {
         machine.exec_for_quantum_restricted(
             context.module,
@@ -610,6 +635,7 @@ fn run_interpreter_turn(
             &mut *context.envs,
             context.slots,
             instruction_limit,
+            stop_at_native_entry,
         )
     } else {
         machine.exec_for_quantum(
@@ -618,6 +644,7 @@ fn run_interpreter_turn(
             &mut *context.envs,
             context.slots,
             instruction_limit,
+            stop_at_native_entry,
         )
     }
 }

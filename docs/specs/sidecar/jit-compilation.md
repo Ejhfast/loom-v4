@@ -987,3 +987,164 @@ Factorial reached 0.14 times interpreter performance.
 Fibonacci reached 0.12 times interpreter performance.
 
 The recursive rows expose the call-transition cost measured in the next stage.
+
+## 32. Production precedent gate
+
+Each expansion stage starts with a production precedent review.
+
+No stage can optimize an engine transition that production systems keep inside compiled code.
+
+The implementation uses these initial precedents:
+
+| Area | Production pattern | Loom form |
+| --- | --- | --- |
+| Calls | Native calls use native frames. | One native frame stack runs for the complete turn. |
+| Lazy compilation | Stable entry stubs publish code once. | Each function slot owns one stable native entry cell. |
+| Deoptimization | Stack maps reconstruct baseline frames. | Frame records and reification maps reconstruct `VmState`. |
+| Tiering | Invocation and backedge counters select hot code. | `Auto` counts useful work before compilation. |
+| Virtual calls | Inline caches guard one observed target. | A class guard selects one direct native entry. |
+| Allocation | Inline fast paths call slow runtime stubs. | Native allocation uses a bounded fast path and one collection exit. |
+| Heap mutation | Stores use write barriers when required. | Native stores preserve heap epochs and future barriers. |
+| Safepoints | Calls and loop backedges poll bounded state. | Segment checkpoints preserve fuel and recall bounds. |
+
+The call design follows HotSpot, V8, RyuJIT, and LLVM ORC lazy entry stubs.
+
+The tiering design follows RyuJIT call counters and loop patchpoints.
+
+The deoptimization design follows HotSpot scope maps and V8 frame descriptions.
+
+## 33. Stage 12 native turn stack
+
+The canonical interpreter frame is a deoptimization format.
+
+It is not the native call format.
+
+One native activation owns all compiled frames for one bounded engine turn.
+
+The activation contains these values:
+
+- one contiguous scalar area;
+- one parallel scalar-state area;
+- one bounded frame table;
+- the shared fuel limit;
+- the stable entry-cell table;
+- one final exit record.
+
+Each native frame records its function, resume position, scalar window, and operand length.
+
+Static region plans supply every scalar kind.
+
+A direct call loads the target entry cell.
+
+A published entry pushes one native frame and performs one native call.
+
+A null entry produces one unsupported-callee exit before the call retires.
+
+The interpreter can execute that call and compile the callee later.
+
+A normal native return pops the native frame and resumes its native caller.
+
+Recursion uses the same operation.
+
+The call instruction charges one LMBC fuel unit.
+
+Frame and stack limits match `Machine::push_frame` exactly.
+
+Fuel expiry, faults, effects, recall, and slow allocation leave native code.
+
+One materializer walks every active native frame at that exit.
+
+It reconstructs canonical frames, locals, operands, and exact program positions.
+
+No native frame survives the turn.
+
+An allocation can collect directly only when the materializer can expose every native root.
+
+Other collection requests use the slow exit and replay the unretired allocation.
+
+The stage has these gates:
+
+- recursive calls perform no interpreter or Rust transition;
+- unsupported callees preserve exact call state;
+- every fuel boundary matches interpreter state;
+- deep faults preserve every caller frame;
+- effects and snapshots preserve complete canonical state;
+- factorial and Fibonacci improve by more than two times when warm;
+- direct non-inline calls improve by more than two times when warm.
+
+### 33.1 Stage record
+
+The release benchmark used the current interpreter and native engine in one session.
+
+| Row | Interpreter | Native warm | Speedup |
+| --- | ---: | ---: | ---: |
+| Factorial | 5.036 ms | 0.908 ms | 5.54 times |
+| Fibonacci | 8.971 ms | 1.836 ms | 4.89 times |
+
+Recursive execution used at most three native entries and materializations.
+
+Mutual recursion used five entries and materializations for 101 calls.
+
+The focused suite covered every recursive fuel boundary through 96 instructions.
+
+It also covered deep faults, effects, frame limits, and mutual recursion.
+
+## 34. Later production-shaped stages
+
+### 34.1 Tiering
+
+`Auto` starts in the interpreter.
+
+Per-function invocation and backedge counters identify hot functions.
+
+A stable negative verdict stops repeated probes.
+
+Compilation does not hold a shared execution lock.
+
+The gate covers startup, short programs, hot leaves, and large unsupported programs.
+
+### 34.2 Heap access and mutation
+
+Field loads and stores use an explicit heap ABI.
+
+The fast path checks handle generation and field bounds.
+
+The store path preserves mutation epochs and required barriers.
+
+The slow path produces a contained interpreter exit.
+
+### 34.3 Virtual calls
+
+Each hot virtual site starts with one monomorphic cache.
+
+The cache guards the receiver class and calls one native entry.
+
+A miss exits through one resolver stub.
+
+The resolver can widen or disable the cache without changing guest state.
+
+### 34.4 Allocation
+
+Native code uses a bounded allocation fast path.
+
+Collection and growth use one runtime slow path.
+
+Root maps cover every live native frame.
+
+### 34.5 Effects
+
+An effect remains an observable engine exit.
+
+Native code materializes once at the effect boundary.
+
+The reply can enter native code through the normal guarded entry.
+
+### 34.6 Representative gates
+
+Permanent rows cover JSON parsing, JSON encoding, HTTP parsing, and HTTP encoding.
+
+The full example and test corpus reports native instruction coverage.
+
+`Auto` cannot slow any large corpus program by more than five percent.
+
+At least one JSON row and one HTTP row must gain more than two times.

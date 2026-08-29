@@ -5553,8 +5553,13 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
+        stop_at_native_entry: bool,
     ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
-        self.exec_for_quantum_mode::<false>(module, dispatch, envs, slots, limit)
+        if stop_at_native_entry {
+            self.exec_for_quantum_mode::<false, true>(module, dispatch, envs, slots, limit)
+        } else {
+            self.exec_for_quantum_mode::<false, false>(module, dispatch, envs, slots, limit)
+        }
     }
 
     /// Execute one restricted worker lease.
@@ -5566,11 +5571,16 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
+        stop_at_native_entry: bool,
     ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
-        self.exec_for_quantum_mode::<true>(module, dispatch, envs, slots, limit)
+        if stop_at_native_entry {
+            self.exec_for_quantum_mode::<true, true>(module, dispatch, envs, slots, limit)
+        } else {
+            self.exec_for_quantum_mode::<true, false>(module, dispatch, envs, slots, limit)
+        }
     }
 
-    fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool>(
+    fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool, const STOP_AT_NATIVE_ENTRY: bool>(
         &mut self,
         module: &NamespaceRuntime,
         dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
@@ -5611,7 +5621,11 @@ impl Machine {
             };
             frame.ip += 1;
             match self.exec_instr(module, dispatch, envs, slots, instr) {
-                Ok(ExecOutcome::Continue) => {}
+                Ok(ExecOutcome::Continue) => {
+                    if STOP_AT_NATIVE_ENTRY && matches!(instr, Instr::Call(_) | Instr::Return) {
+                        break Ok(ExecOutcome::Continue);
+                    }
+                }
                 Ok(outcome) => break Ok(outcome),
                 Err(code) => break Err(ExecError::Fault(code)),
             }
@@ -5643,6 +5657,23 @@ impl Machine {
             self.collect_callbacks();
         }
         Ok(ExecOutcome::Continue)
+    }
+
+    /// Retire one direct call after a materialized native exit.
+    pub(crate) fn start_native_direct_call(
+        &mut self,
+        module: &NamespaceRuntime,
+        callee: u32,
+    ) -> Result<(), FaultCode> {
+        let argc = module
+            .funcs
+            .get(callee as usize)
+            .ok_or(BAD_STATE)?
+            .params
+            .len();
+        let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
+        frame.ip = frame.ip.checked_add(1).ok_or(BAD_STATE)?;
+        self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)
     }
 
     /// Close an `Option` family or arm type to its family type.

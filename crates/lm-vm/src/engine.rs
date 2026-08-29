@@ -114,6 +114,117 @@ impl EngineCounters {
         reset(&self.missing_entry_fallbacks);
         reset(&self.backend_unavailable_fallbacks);
     }
+
+    fn add(&self, values: &EngineMetrics) {
+        let add = |target: &AtomicU64, value: u64| {
+            if value != 0 {
+                target.fetch_add(value, Ordering::Relaxed);
+            }
+        };
+        add(&self.native_entry_attempts, values.native_entry_attempts);
+        add(&self.guarded_values, values.guarded_values);
+        add(&self.guard_failures, values.guard_failures);
+        add(&self.native_entries, values.native_entries);
+        add(
+            &self.native_retired_instructions,
+            values.native_retired_instructions,
+        );
+        add(&self.materializations, values.materializations);
+        add(&self.native_fault_exits, values.native_fault_exits);
+        add(&self.native_heap_reads, values.native_heap_reads);
+        add(
+            &self.native_allocation_exits,
+            values.native_allocation_exits,
+        );
+        add(&self.native_allocations, values.native_allocations);
+        add(&self.native_effect_exits, values.native_effect_exits);
+        add(
+            &self.unsupported_region_fallbacks,
+            values.unsupported_region_fallbacks,
+        );
+        add(
+            &self.missing_entry_fallbacks,
+            values.missing_entry_fallbacks,
+        );
+        add(
+            &self.backend_unavailable_fallbacks,
+            values.backend_unavailable_fallbacks,
+        );
+    }
+}
+
+/// Counters collected during one engine turn.
+pub(crate) struct EngineTurnMetrics<'a> {
+    counters: &'a EngineCounters,
+    values: EngineMetrics,
+}
+
+impl EngineTurnMetrics<'_> {
+    pub(crate) fn note_backend_unavailable(&mut self) {
+        self.values.backend_unavailable_fallbacks += 1;
+    }
+
+    pub(crate) fn note_native_entry_attempt(&mut self) {
+        self.values.native_entry_attempts += 1;
+    }
+
+    pub(crate) fn note_guarded_values(&mut self, values: u64) {
+        self.values.guarded_values = self.values.guarded_values.saturating_add(values);
+    }
+
+    pub(crate) fn note_guard_failure(&mut self, values: u64) {
+        self.note_guarded_values(values);
+        self.values.guard_failures += 1;
+    }
+
+    pub(crate) fn note_native_entry(&mut self) {
+        self.values.native_entries += 1;
+    }
+
+    pub(crate) fn note_native_retired(&mut self, instructions: u64) {
+        self.values.native_retired_instructions = self
+            .values
+            .native_retired_instructions
+            .saturating_add(instructions);
+    }
+
+    pub(crate) fn note_materialization(&mut self) {
+        self.values.materializations += 1;
+    }
+
+    pub(crate) fn note_native_fault_exit(&mut self) {
+        self.values.native_fault_exits += 1;
+    }
+
+    pub(crate) fn note_native_heap_reads(&mut self, reads: u64) {
+        self.values.native_heap_reads = self.values.native_heap_reads.saturating_add(reads);
+    }
+
+    pub(crate) fn note_native_allocation_exit(&mut self) {
+        self.values.native_allocation_exits += 1;
+    }
+
+    pub(crate) fn note_native_allocations(&mut self, allocations: u64) {
+        self.values.native_allocations = self.values.native_allocations.saturating_add(allocations);
+    }
+
+    pub(crate) fn note_native_effect_exit(&mut self) {
+        self.values.native_effect_exits += 1;
+    }
+
+    pub(crate) fn note_unsupported_region_fallback(&mut self) {
+        self.values.unsupported_region_fallbacks += 1;
+    }
+
+    pub(crate) fn note_missing_entry_fallback(&mut self) {
+        self.values.missing_entry_fallbacks += 1;
+    }
+}
+
+impl Drop for EngineTurnMetrics<'_> {
+    fn drop(&mut self) {
+        self.counters.add(&self.values);
+    }
 }
 
 /// One host-owned execution engine and compiled-code cache.
@@ -155,10 +266,11 @@ impl Engine {
         self.jit.reset_metrics();
     }
 
-    pub(crate) fn note_backend_unavailable(&self) {
-        self.counters
-            .backend_unavailable_fallbacks
-            .fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn turn_metrics(&self) -> EngineTurnMetrics<'_> {
+        EngineTurnMetrics {
+            counters: &self.counters,
+            values: EngineMetrics::default(),
+        }
     }
 
     pub(crate) fn execute_native(
@@ -166,10 +278,12 @@ impl Engine {
         machine: &mut crate::machine::Machine,
         module: &crate::NamespaceRuntime,
         native: &crate::jit::NativeCodeState,
+        scratch: &mut crate::jit::NativeScratch,
+        metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
         self.jit
-            .execute(self, machine, module, native, instruction_limit)
+            .execute(machine, module, native, scratch, metrics, instruction_limit)
     }
 
     pub(crate) fn native_code(
@@ -177,81 +291,6 @@ impl Engine {
         module: &crate::NamespaceRuntime,
     ) -> crate::jit::NativeCodeState {
         self.jit.native_code(module)
-    }
-
-    pub(crate) fn note_native_entry_attempt(&self) {
-        self.counters
-            .native_entry_attempts
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_guarded_values(&self, values: u64) {
-        self.counters
-            .guarded_values
-            .fetch_add(values, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_guard_failure(&self, values: u64) {
-        self.note_guarded_values(values);
-        self.counters.guard_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_entry(&self) {
-        self.counters.native_entries.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_retired(&self, instructions: u64) {
-        self.counters
-            .native_retired_instructions
-            .fetch_add(instructions, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_materialization(&self) {
-        self.counters
-            .materializations
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_fault_exit(&self) {
-        self.counters
-            .native_fault_exits
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_heap_reads(&self, reads: u64) {
-        self.counters
-            .native_heap_reads
-            .fetch_add(reads, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_allocation_exit(&self) {
-        self.counters
-            .native_allocation_exits
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_allocations(&self, allocations: u64) {
-        self.counters
-            .native_allocations
-            .fetch_add(allocations, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_native_effect_exit(&self) {
-        self.counters
-            .native_effect_exits
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_unsupported_region_fallback(&self) {
-        self.counters
-            .unsupported_region_fallbacks
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn note_missing_entry_fallback(&self) {
-        self.counters
-            .missing_entry_fallbacks
-            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -271,7 +310,10 @@ mod tests {
         assert_send_sync::<Engine>();
         let engine = Engine::default();
         engine.set_mode(EngineMode::Native);
-        engine.note_backend_unavailable();
+        {
+            let mut metrics = engine.turn_metrics();
+            metrics.note_backend_unavailable();
+        }
         assert_eq!(engine.mode(), EngineMode::Native);
         assert_eq!(engine.metrics().backend_unavailable_fallbacks, 1);
         engine.reset_metrics();

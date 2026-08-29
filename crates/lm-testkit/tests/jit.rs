@@ -245,7 +245,7 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
 }
 
 #[test]
-fn a_faulting_inline_call_restarts_in_the_interpreter() {
+fn a_faulting_inline_deopt_can_enter_the_native_callee() {
     let cases = [
         (
             concat!(
@@ -270,7 +270,7 @@ fn a_faulting_inline_call_restarts_in_the_interpreter() {
         assert_eq!(native_dump, interpreted_dump);
         assert_eq!(native, Outcome::Fault(expected));
         assert_eq!(metrics.compiled_call_sites, 1);
-        assert_eq!(metrics.native_fault_exits, 0);
+        assert_eq!(metrics.native_fault_exits, 1);
     }
 }
 
@@ -298,13 +298,10 @@ fn call_guards_preserve_the_frame_limit() {
 }
 
 #[test]
-fn a_recursive_call_uses_an_explicit_interpreter_exit() {
+fn recursive_calls_stay_on_one_native_turn_stack() {
     let source = concat!(
         "def sum_to(value: Int): Int\n",
-        "  if value == 0\n    return 0\n  end\n",
-        "  next = value - 1\n",
-        "  rest = sum_to(next)\n",
-        "  value + rest\n",
+        "  if value == 0 then 0 else value + sum_to(value - 1) end\n",
         "end\n",
         "sum_to(100)\n",
     );
@@ -313,10 +310,137 @@ fn a_recursive_call_uses_an_explicit_interpreter_exit() {
     assert_eq!(native, interpreted);
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(5_050)));
-    assert_eq!(metrics.compiled_call_sites, 0);
-    assert!(metrics.native_entries > 0);
-    assert!(metrics.materializations > 0);
-    assert_eq!(metrics.unsupported_region_fallbacks, 1, "{metrics:?}");
+    assert_eq!(metrics.compiled_call_sites, 2);
+    assert_eq!(metrics.compiled_regions, 2, "{metrics:?}");
+    assert!(metrics.native_entries <= 3, "{metrics:?}");
+    assert!(metrics.materializations <= 3, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 900, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn mutual_recursion_stays_on_one_native_turn_stack() {
+    let source = concat!(
+        "def even(value: Int): Bool\n",
+        "  if value == 0 then true else odd(value - 1) end\n",
+        "end\n",
+        "def odd(value: Int): Bool\n",
+        "  if value == 0 then false else even(value - 1) end\n",
+        "end\n",
+        "if even(101) then 1 else 2 end\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(2)));
+    assert!(metrics.native_entries <= 6, "{metrics:?}");
+    assert!(metrics.materializations <= 6, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 700, "{metrics:?}");
+}
+
+#[test]
+fn native_recursion_preserves_the_frame_limit() {
+    let source = concat!(
+        "def descend(value: Int): Int\n",
+        "  if value == 0 then 0 else 1 + descend(value - 1) end\n",
+        "end\n",
+        "descend(100)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-recursion-limit.lm", source)
+        .expect("the recursion case compiles");
+    let config = VmConfig {
+        max_frames: 8,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::StackLimit));
+    assert_eq!(metrics.native_fault_exits, 1, "{metrics:?}");
+}
+
+#[test]
+fn a_deep_native_fault_materializes_each_frame() {
+    let source = concat!(
+        "def descend(value: Int): Int\n",
+        "  if value == 0 then 1 / 0 else 1 + descend(value - 1) end\n",
+        "end\n",
+        "descend(20)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::DivideByZero));
+    assert_eq!(metrics.native_fault_exits, 1, "{metrics:?}");
+    assert!(metrics.materializations <= 3, "{metrics:?}");
+}
+
+#[test]
+fn recursive_calls_match_each_fuel_boundary() {
+    let source = concat!(
+        "def sum_to(value: Int): Int\n",
+        "  if value == 0 then 0 else value + sum_to(value - 1) end\n",
+        "end\n",
+        "sum_to(8)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-recursive-fuel.lm", source)
+        .expect("the recursive fuel case compiles");
+    for fuel in 0..=96 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn noninline_calls_match_each_fuel_boundary() {
+    let source = concat!(
+        "def choose(value: Int): Int\n",
+        "  if value > 0 then value + 1 else 0 end\n",
+        "end\n",
+        "i = 0\ns = 0\n",
+        "while i < 3\n",
+        "  s = s + choose(i)\n",
+        "  i = i + 1\n",
+        "end\ns\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-call-transition.lm", source)
+        .expect("the call transition case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn an_unsupported_caller_enters_a_supported_hot_callee() {
+    let source = concat!(
+        "def hot(limit: Int): Int\n",
+        "  i = 0\ns = 0\n",
+        "  while i < limit\n",
+        "    s = s + i\n",
+        "    i = i + 1\n",
+        "  end\ns\n",
+        "end\n",
+        "text = \"loom\"\n",
+        "hot(10000) + text.len()\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert!(metrics.unsupported_region_fallbacks > 0, "{metrics:?}");
 }
 
 #[test]
@@ -617,6 +741,32 @@ fn exact_effects_match_each_fuel_boundary() {
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
         assert_eq!(native_trace, interpreted_trace, "fuel {fuel}");
     }
+}
+
+#[test]
+fn a_deep_effect_materializes_the_native_turn_stack() {
+    let source = concat!(
+        "def descend(value: Int): Int with Clock.Now\n",
+        "  if value == 0 then\n",
+        "    observed = sys.clock.now()\n",
+        "    1\n",
+        "  else\n",
+        "    1 + descend(value - 1)\n",
+        "  end\n",
+        "end\n",
+        "descend(20)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-deep-effect.lm", source)
+        .expect("the deep effect case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) =
+        run_effect(&artifact, EngineMode::Interpreter, u64::MAX, &["Clock.Now"]);
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &["Clock.Now"]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(21)));
+    assert_eq!(metrics.native_effect_exits, 1, "{metrics:?}");
 }
 
 #[test]

@@ -1,11 +1,11 @@
 //! Canonical machine-state adapter for native execution.
 
-use crate::engine::Engine;
-use crate::machine::{ExecError, ExecOutcome, Machine};
+use crate::engine::EngineTurnMetrics;
+use crate::machine::{ExecError, ExecOutcome, Frame, Machine};
 use crate::NamespaceRuntime;
 use lm_jit::{
-    ExitKind, Failure, FunctionInput, Runtime, RuntimeResult, ScalarKind, ValueRepr, LOCAL_DIRTY,
-    LOCAL_INITIALIZED,
+    ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, Runtime, RuntimeResult,
+    ScalarKind, ValueRepr, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, ObjRef, TypeEnvId, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,12 +13,21 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const MAX_COMPILED_REGIONS: usize = 256;
 
+/// Reusable scalar buffers for one engine turn.
+#[derive(Default)]
+pub(crate) struct NativeScratch {
+    activation: lm_jit::NativeActivation,
+    roots: Vec<u64>,
+    root_states: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub(crate) struct NativeCodeState(Arc<NativeCodeRevision>);
 
 #[derive(Clone)]
 struct NativeCodeRevision {
     slots: lm_bytecode::CodeTable<Arc<NativeSlot>>,
+    entries: Arc<Vec<usize>>,
     compiled: Arc<AtomicUsize>,
 }
 
@@ -26,10 +35,11 @@ impl NativeCodeState {
     pub(crate) fn new(functions: usize) -> NativeCodeState {
         let mut revision = NativeCodeRevision {
             slots: lm_bytecode::CodeTable::default(),
+            entries: Arc::new(Vec::new()),
             compiled: Arc::new(AtomicUsize::new(0)),
         };
         while revision.slots.len() < functions {
-            revision.slots.push(Arc::new(NativeSlot::default()));
+            revision.push_slot();
         }
         NativeCodeState(Arc::new(revision))
     }
@@ -40,7 +50,7 @@ impl NativeCodeState {
         }
         let mut revision = self.0.as_ref().clone();
         while revision.slots.len() < functions {
-            revision.slots.push(Arc::new(NativeSlot::default()));
+            revision.push_slot();
         }
         self.0 = Arc::new(revision);
     }
@@ -48,11 +58,24 @@ impl NativeCodeState {
     fn slot(&self, function: u32) -> Option<&Arc<NativeSlot>> {
         self.0.slots.get(function as usize)
     }
+
+    fn entries(&self) -> &[usize] {
+        self.0.entries.as_slice()
+    }
+}
+
+impl NativeCodeRevision {
+    fn push_slot(&mut self) {
+        let slot = Arc::new(NativeSlot::default());
+        Arc::make_mut(&mut self.entries).push(Arc::as_ptr(&slot.entry) as usize);
+        self.slots.push(slot);
+    }
 }
 
 #[derive(Default)]
 struct NativeSlot {
     verdict: OnceLock<Result<Arc<lm_jit::CompiledRegion>, Failure>>,
+    entry: Arc<lm_jit::NativeEntryCell>,
 }
 
 impl NativeSlot {
@@ -72,13 +95,19 @@ impl NativeSlot {
                         (count < MAX_COMPILED_REGIONS).then_some(count + 1)
                     })
                     .map_err(|_| Failure::BackendUnavailable)?;
-                let result = input().and_then(|input| compiler.compile(input));
+                let result = input()
+                    .and_then(|input| compiler.compile(input))
+                    .and_then(|region| self.entry.publish(&region).map(|()| region));
                 if result.is_err() {
                     compiled.fetch_sub(1, Ordering::Relaxed);
                 }
                 result
             })
             .clone()
+    }
+
+    fn compiled(&self) -> Option<Arc<lm_jit::CompiledRegion>> {
+        self.verdict.get()?.as_ref().ok().cloned()
     }
 }
 
@@ -154,20 +183,21 @@ impl JitEngine {
 
     pub(crate) fn execute(
         &self,
-        engine: &Engine,
         machine: &mut Machine,
         module: &NamespaceRuntime,
         native: &NativeCodeState,
+        scratch: &mut NativeScratch,
+        metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> NativeAttempt {
-        engine.note_native_entry_attempt();
+        metrics.note_native_entry_attempt();
         let Some(frame) = machine.vm.frames.last() else {
-            engine.note_missing_entry_fallback();
+            metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
         let function = frame.func;
         let Some(slot) = native.slot(function) else {
-            engine.note_missing_entry_fallback();
+            metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
         let region = match slot.region(&self.compiler, &native.0.compiled, || {
@@ -210,45 +240,54 @@ impl JitEngine {
         }) {
             Ok(region) => region,
             Err(Failure::Unsupported) => {
-                engine.note_unsupported_region_fallback();
+                metrics.note_unsupported_region_fallback();
                 return NativeAttempt::Fallback;
             }
             Err(Failure::BackendUnavailable) => {
-                engine.note_backend_unavailable();
+                metrics.note_backend_unavailable();
                 return NativeAttempt::Fallback;
             }
         };
-        self.execute_region(engine, machine, module, &region, instruction_limit)
+        Self::execute_region(
+            machine,
+            module,
+            native,
+            &region,
+            scratch,
+            metrics,
+            instruction_limit,
+        )
     }
 
     fn execute_region(
-        &self,
-        engine: &Engine,
         machine: &mut Machine,
         module: &NamespaceRuntime,
+        native: &NativeCodeState,
         region: &lm_jit::CompiledRegion,
+        scratch: &mut NativeScratch,
+        metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> NativeAttempt {
         let Some(frame) = machine.vm.frames.last() else {
-            engine.note_missing_entry_fallback();
+            metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
         if frame.closure.is_some() || frame.env != TypeEnvId::EMPTY {
-            engine.note_missing_entry_fallback();
+            metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         }
         let Some(required_frames) =
             (machine.vm.frames.len() as u32).checked_add(region.additional_frames())
         else {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         };
         if required_frames > machine.config.max_frames {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
         let Some(entry) = region.entry_plan(frame.block, frame.ip) else {
-            engine.note_missing_entry_fallback();
+            metrics.note_missing_entry_fallback();
             return region
                 .distance_to_entry(frame.block, frame.ip)
                 .map_or(NativeAttempt::Fallback, |instructions| {
@@ -258,15 +297,15 @@ impl JitEngine {
         let base = frame.base_local as usize;
         let operand_base = frame.base_operand as usize;
         if operand_base > machine.vm.operands.len() {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
         let Some(end) = base.checked_add(region.local_kinds().len()) else {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         };
         let Some(locals) = machine.vm.locals.get(base..end) else {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         };
         let Some(stack_bound) = machine
@@ -276,23 +315,43 @@ impl JitEngine {
             .checked_add(operand_base)
             .and_then(|used| used.checked_add(region.max_stack_values()))
         else {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         };
         if stack_bound > machine.config.max_stack_values as usize {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
 
         let operands = &machine.vm.operands[operand_base..];
         if operands.len() != entry.operand_kinds().len() {
-            engine.note_guard_failure(0);
+            metrics.note_guard_failure(0);
             return NativeAttempt::Fallback;
         }
-        let mut bits = vec![0; region.local_kinds().len()];
-        let mut local_states = vec![0; region.local_kinds().len()];
-        let mut stack_bits = vec![0; region.max_stack()];
+        if scratch
+            .activation
+            .prepare_root(NativePreparation {
+                function: frame.func,
+                block: frame.block,
+                instruction: frame.ip,
+                local_count: region.local_kinds().len(),
+                max_stack: region.max_stack(),
+                operand_len: operands.len(),
+                scalar_limit: machine.config.max_stack_values as usize,
+                frame_limit: machine.config.max_frames as usize,
+            })
+            .is_err()
+        {
+            metrics.note_backend_unavailable();
+            return NativeAttempt::Fallback;
+        }
+        let root_capacity = region.max_roots().max(1);
+        scratch.roots.resize(root_capacity, 0);
+        scratch.roots.fill(0);
+        scratch.root_states.resize(root_capacity, 0);
+        scratch.root_states.fill(0);
         let mut guarded = 0u64;
+        let (bits, local_states, stack_bits) = scratch.activation.root_buffers_mut();
         for (slot, (kind, live)) in region
             .local_kinds()
             .iter()
@@ -310,7 +369,7 @@ impl JitEngine {
             }
             guarded += 1;
             let Some(value) = scalar_bits(kind, locals[slot]) else {
-                engine.note_guard_failure(guarded);
+                metrics.note_guard_failure(guarded);
                 return NativeAttempt::Fallback;
             };
             bits[slot] = value;
@@ -325,16 +384,19 @@ impl JitEngine {
         {
             guarded += 1;
             let Some(value) = scalar_bits(kind, value) else {
-                engine.note_guard_failure(guarded);
+                metrics.note_guard_failure(guarded);
                 return NativeAttempt::Fallback;
             };
             stack_bits[slot] = value;
         }
-        engine.note_guarded_values(guarded);
+        metrics.note_guarded_values(guarded);
 
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
-        engine.note_native_entry();
+        let max_stack_values = machine.config.max_stack_values as usize;
+        let max_frames = machine.config.max_frames as usize;
+        let base_frames = machine.vm.frames.len().saturating_sub(1);
+        metrics.note_native_entry();
         let (exit, heap_reads, allocations) = {
             let mut runtime = MachineRuntime {
                 machine,
@@ -346,27 +408,34 @@ impl JitEngine {
             };
             let exit = region.execute(
                 &mut runtime,
-                entry.index(),
-                &mut bits,
-                &mut local_states,
-                &mut stack_bits,
-                batch_fuel,
+                &mut scratch.activation,
+                NativeExecution {
+                    entry: entry.index(),
+                    entries: native.entries(),
+                    base_stack_values: base.saturating_add(operand_base),
+                    max_stack_values,
+                    base_frames,
+                    max_frames,
+                    roots: &mut scratch.roots,
+                    root_states: &mut scratch.root_states,
+                    fuel: batch_fuel,
+                },
             );
             (exit, runtime.heap_reads, runtime.allocations)
         };
-        engine.note_native_heap_reads(heap_reads);
-        engine.note_native_allocations(allocations);
+        metrics.note_native_heap_reads(heap_reads);
+        metrics.note_native_allocations(allocations);
         let exit = match exit {
             Ok(exit) => exit,
             Err(_) => {
-                engine.note_backend_unavailable();
-                engine.note_native_fault_exit();
+                metrics.note_backend_unavailable();
+                metrics.note_native_fault_exit();
                 return malformed_native_execution(machine, original_fuel, 0, instruction_limit);
             }
         };
         let Ok(retired) = u32::try_from(exit.retired()) else {
-            engine.note_backend_unavailable();
-            engine.note_native_fault_exit();
+            metrics.note_backend_unavailable();
+            metrics.note_native_fault_exit();
             return malformed_native_execution(
                 machine,
                 original_fuel,
@@ -375,8 +444,8 @@ impl JitEngine {
             );
         };
         if retired > instruction_limit || exit.retired() > original_fuel {
-            engine.note_backend_unavailable();
-            engine.note_native_fault_exit();
+            metrics.note_backend_unavailable();
+            metrics.note_native_fault_exit();
             return malformed_native_execution(
                 machine,
                 original_fuel,
@@ -385,13 +454,21 @@ impl JitEngine {
             );
         }
         machine.vm.fuel -= exit.retired();
-        for (slot, state) in local_states.iter().copied().enumerate() {
-            if state & LOCAL_DIRTY != 0 {
-                machine.vm.locals[base + slot] = bits_value(region.local_kinds()[slot], bits[slot]);
-            }
-        }
-        engine.note_native_retired(retired as u64);
-        engine.note_materialization();
+        let top_child = match materialize_native_frames(
+            machine,
+            native,
+            region,
+            &scratch.activation,
+            exit,
+            base,
+            operand_base,
+        ) {
+            Ok(region) => region,
+            Err(()) => return malformed_native_exit(retired),
+        };
+        let top_region = top_child.as_deref().unwrap_or(region);
+        metrics.note_native_retired(retired as u64);
+        metrics.note_materialization();
 
         match exit.kind() {
             ExitKind::Fuel
@@ -400,38 +477,42 @@ impl JitEngine {
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
-                let Some(stack_kinds) = region.operand_kinds(exit.block(), exit.instruction())
-                else {
-                    return malformed_native_exit(retired);
-                };
-                if exit.stack_len() as usize != stack_kinds.len() {
-                    return malformed_native_exit(retired);
-                }
-                machine.vm.operands.truncate(operand_base);
-                machine.vm.operands.extend(
-                    stack_kinds
-                        .iter()
-                        .copied()
-                        .zip(stack_bits.iter().copied())
-                        .map(|(kind, bits)| bits_value(kind, bits)),
-                );
-                let Some(frame) = machine.vm.frames.last_mut() else {
-                    return NativeAttempt::Complete {
-                        outcome: Err(ExecError::Fault(crate::FaultCode::MalformedState)),
-                        retired,
+                if matches!(exit.kind(), ExitKind::Call) {
+                    if retired == instruction_limit {
+                        return NativeAttempt::Complete {
+                            outcome: Ok(None),
+                            retired,
+                        };
+                    }
+                    if exit.retired() == original_fuel {
+                        return NativeAttempt::Complete {
+                            outcome: Err(ExecError::Fault(crate::FaultCode::OutOfFuel)),
+                            retired,
+                        };
+                    }
+                    let Ok(target) = u32::try_from(exit.result()) else {
+                        return malformed_native_exit(retired);
                     };
-                };
-                frame.block = exit.block();
-                frame.ip = exit.instruction();
-                if matches!(
-                    exit.kind(),
-                    ExitKind::Call | ExitKind::Allocation | ExitKind::Effect
-                ) {
+                    machine.vm.fuel -= 1;
+                    let retired = retired + 1;
+                    metrics.note_native_retired(1);
+                    return match machine.start_native_direct_call(module, target) {
+                        Ok(()) => NativeAttempt::Reenter { retired },
+                        Err(fault) => {
+                            metrics.note_native_fault_exit();
+                            NativeAttempt::Complete {
+                                outcome: Err(ExecError::Fault(fault)),
+                                retired,
+                            }
+                        }
+                    };
+                }
+                if matches!(exit.kind(), ExitKind::Allocation | ExitKind::Effect) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
-                        engine.note_native_allocation_exit();
+                        metrics.note_native_allocation_exit();
                     }
                     if matches!(exit.kind(), ExitKind::Effect) {
-                        engine.note_native_effect_exit();
+                        metrics.note_native_effect_exit();
                     }
                     NativeAttempt::InterpretOne { retired }
                 } else if interpreter {
@@ -448,10 +529,10 @@ impl JitEngine {
                 }
             }
             ExitKind::Return => {
-                if exit.stack_len() != 0 {
+                if exit.stack_len() != 0 || top_child.is_some() {
                     return malformed_native_exit(retired);
                 }
-                let value = bits_value(region.result_kind(), exit.result());
+                let value = bits_value(top_region.result_kind(), exit.result());
                 match machine.finish_native_return(value) {
                     Ok(ExecOutcome::Continue) => NativeAttempt::Reenter { retired },
                     Ok(outcome) => NativeAttempt::Complete {
@@ -468,32 +549,16 @@ impl JitEngine {
             | ExitKind::DivideByZero
             | ExitKind::TypeMismatch
             | ExitKind::UninitializedField
-            | ExitKind::HeapLimit => {
-                let fault_kinds = region
-                    .fault_operand_kinds(exit.block(), exit.instruction())
-                    .unwrap_or(&[]);
-                if exit.stack_len() as usize != fault_kinds.len() {
-                    return malformed_native_exit(retired);
-                }
-                if let Some(frame) = machine.vm.frames.last_mut() {
-                    frame.block = exit.block();
-                    frame.ip = exit.instruction();
-                }
-                machine.vm.operands.truncate(operand_base);
-                machine.vm.operands.extend(
-                    fault_kinds
-                        .iter()
-                        .copied()
-                        .zip(stack_bits.iter().copied())
-                        .map(|(kind, bits)| bits_value(kind, bits)),
-                );
-                engine.note_native_fault_exit();
+            | ExitKind::HeapLimit
+            | ExitKind::StackLimit => {
+                metrics.note_native_fault_exit();
                 let fault = match exit.kind() {
                     ExitKind::IntegerOverflow => crate::FaultCode::IntegerOverflow,
                     ExitKind::DivideByZero => crate::FaultCode::DivideByZero,
                     ExitKind::TypeMismatch => crate::FaultCode::TypeMismatch,
                     ExitKind::UninitializedField => crate::FaultCode::UninitializedField,
                     ExitKind::HeapLimit => crate::FaultCode::HeapLimit,
+                    ExitKind::StackLimit => crate::FaultCode::StackLimit,
                     _ => unreachable!(),
                 };
                 NativeAttempt::Complete {
@@ -503,6 +568,136 @@ impl JitEngine {
             }
         }
     }
+}
+
+fn materialize_native_frames(
+    machine: &mut Machine,
+    native: &NativeCodeState,
+    root_region: &lm_jit::CompiledRegion,
+    activation: &lm_jit::NativeActivation,
+    exit: lm_jit::ExecutionExit,
+    root_base: usize,
+    root_operand_base: usize,
+) -> Result<Option<Arc<lm_jit::CompiledRegion>>, ()> {
+    let frames: Vec<_> = activation.frames().collect();
+    let root = frames.first().ok_or(())?;
+    if root.native_created() || root.locals().len() != root_region.local_kinds().len() {
+        return Err(());
+    }
+    let root_index = machine.vm.frames.len().checked_sub(1).ok_or(())?;
+    if machine.vm.frames[root_index].func != root.function() {
+        return Err(());
+    }
+    let child_regions = frames
+        .iter()
+        .skip(1)
+        .map(|frame| {
+            if !frame.native_created() {
+                return Err(());
+            }
+            native
+                .slot(frame.function())
+                .and_then(|slot| slot.compiled())
+                .ok_or(())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    machine.vm.frames.truncate(root_index + 1);
+    machine
+        .vm
+        .locals
+        .truncate(root_base + root_region.local_kinds().len());
+    machine.vm.operands.truncate(root_operand_base);
+
+    for (index, frame) in frames.iter().enumerate() {
+        let region = if index == 0 {
+            root_region
+        } else {
+            child_regions[index - 1].as_ref()
+        };
+        if frame.locals().len() != region.local_kinds().len()
+            || frame.states().len() != region.local_kinds().len()
+        {
+            return Err(());
+        }
+        let top = index + 1 == frames.len();
+        let operand_kinds = if !top {
+            region.suspended_operand_kinds(frame.block(), frame.instruction())
+        } else {
+            match exit.kind() {
+                ExitKind::Return => Some(&[][..]),
+                ExitKind::IntegerOverflow
+                | ExitKind::DivideByZero
+                | ExitKind::TypeMismatch
+                | ExitKind::UninitializedField
+                | ExitKind::HeapLimit => {
+                    region.fault_operand_kinds(frame.block(), frame.instruction())
+                }
+                ExitKind::StackLimit => frame
+                    .instruction()
+                    .checked_sub(1)
+                    .and_then(|instruction| region.operand_kinds(frame.block(), instruction)),
+                _ => region.operand_kinds(frame.block(), frame.instruction()),
+            }
+        }
+        .ok_or(())?;
+        if operand_kinds.len() != frame.operands().len() {
+            return Err(());
+        }
+
+        if index == 0 {
+            for (slot, state) in frame.states().iter().copied().enumerate() {
+                if state & LOCAL_DIRTY != 0 {
+                    machine.vm.locals[root_base + slot] =
+                        bits_value(region.local_kinds()[slot], frame.locals()[slot]);
+                }
+            }
+            let canonical = machine.vm.frames.get_mut(root_index).ok_or(())?;
+            canonical.block = frame.block();
+            canonical.ip = frame.instruction();
+        } else {
+            let base_local = u32::try_from(machine.vm.locals.len()).map_err(|_| ())?;
+            let base_operand = u32::try_from(machine.vm.operands.len()).map_err(|_| ())?;
+            machine.vm.locals.extend(
+                region
+                    .local_kinds()
+                    .iter()
+                    .copied()
+                    .zip(frame.locals().iter().copied())
+                    .zip(frame.states().iter().copied())
+                    .map(|((kind, bits), state)| {
+                        if state & LOCAL_INITIALIZED == 0 {
+                            Value::Uninit
+                        } else {
+                            bits_value(kind, bits)
+                        }
+                    }),
+            );
+            machine.vm.frames.push(Frame {
+                func: frame.function(),
+                block: frame.block(),
+                ip: frame.instruction(),
+                base_local,
+                base_operand,
+                closure: None,
+                env: TypeEnvId::EMPTY,
+            });
+        }
+        machine.vm.operands.extend(
+            operand_kinds
+                .iter()
+                .copied()
+                .zip(frame.operands().iter().copied())
+                .map(|(kind, bits)| bits_value(kind, bits)),
+        );
+    }
+    let top = frames.last().ok_or(())?;
+    if top.block() != exit.block()
+        || top.instruction() != exit.instruction()
+        || top.operands().len() != exit.stack_len() as usize
+    {
+        return Err(());
+    }
+    Ok(child_regions.last().cloned())
 }
 
 fn malformed_native_exit(retired: u32) -> NativeAttempt {
