@@ -90,10 +90,24 @@ enum Flat {
 /// the extended type universe. `None` marks a local slot without a
 /// known value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct State {
+pub struct VerifiedBlockState {
     locals: Vec<Option<u32>>,
     stack: Vec<u32>,
 }
+
+impl VerifiedBlockState {
+    /// Return the proven type of each initialized local slot.
+    pub fn locals(&self) -> &[Option<u32>] {
+        &self.locals
+    }
+
+    /// Return the proven operand types at the block entry.
+    pub fn stack(&self) -> &[u32] {
+        &self.stack
+    }
+}
+
+type State = VerifiedBlockState;
 
 /// The extended type universe: the module table plus the types
 /// created by substitution during verification.
@@ -304,6 +318,22 @@ pub fn verify_module_with_bundle(
     Ok(())
 }
 
+/// Verify one function and return its block-entry type states.
+pub fn verify_function_states_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    function: u32,
+) -> Result<Vec<Option<VerifiedBlockState>>, VerifyError> {
+    let ctx = verify_structure(module, bundle.clone())?;
+    let Some(func) = module.funcs.get(function as usize) else {
+        return Err(err(function, "the function index is out of range"));
+    };
+    if module.extern_funcs()[function as usize] {
+        return Err(err(function, "an imported function has no body"));
+    }
+    verify_func(&ctx, func, function)
+}
+
 /// Validate every module-level rule without the per-function
 /// dataflow: the tables and the entry shape. The verified-code cache
 /// may skip only the dataflow, never this pass, so a hash-equal
@@ -431,6 +461,24 @@ mod tests {
             bindings: vec![],
             debug: Vec::new(),
         }
+    }
+
+    #[test]
+    fn function_metadata_reports_each_reachable_block_entry() {
+        let mut module = module_with(vec![
+            vec![ConstInt(7), StoreLocal(0), Jump(1)],
+            vec![LoadLocal(0), Return],
+        ]);
+        complete_bounds(&mut module);
+        let states =
+            verify_function_states_with_bundle(&module, &lm_abi::standard_bundle(), module.entry)
+                .expect("the function metadata verifies");
+        let entry = states[0].as_ref().expect("the entry block is reachable");
+        assert_eq!(entry.locals(), &[None, None]);
+        assert!(entry.stack().is_empty());
+        let returned = states[1].as_ref().expect("the return block is reachable");
+        assert_eq!(returned.locals(), &[Some(TY_INT), None]);
+        assert!(returned.stack().is_empty());
     }
 
     #[test]

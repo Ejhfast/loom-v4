@@ -726,6 +726,8 @@ pub struct World {
     /// The newest arena table prefix available for execution.
     execution_tables: std::sync::Arc<NamespaceRuntime>,
     namespace_execution: Vec<Option<std::sync::Arc<crate::executor::ExecutionCode>>>,
+    /// The host-selected execution engine and its counters.
+    engine: std::sync::Arc<crate::Engine>,
     pub(crate) machines: Vec<MachineSlot>,
     /// Persistent VM images, separate from run machine records.
     pub(crate) vm_images: Vec<VmImageRecord>,

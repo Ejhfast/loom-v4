@@ -16,13 +16,15 @@
 //! case runs a warm-up round, then reports the median of the
 //! remaining rounds. A workload returns a value the program consumes,
 //! so no work is dead.
+//! JIT rows report the complete timed interval for both engines.
 //!
 //! The output is one tab-separated row per case, so a reader can join
 //! it with the CPython table from `benchmarks/ops.py`.
 
-use lm_vm::{Vm, VmConfig};
+use lm_vm::{Engine, EngineMetrics, EngineMode, Vm, VmConfig};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Rounds per case. One warm-up plus this many measured rounds.
@@ -66,6 +68,246 @@ fn time_program(source: &str) -> Duration {
         }
     }
     median(runs)
+}
+
+/// Time one program with one shared execution engine.
+fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let engine = Arc::new(Engine::new(mode));
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        let start = Instant::now();
+        let mut vm = Vm::new_with_engine(arena, namespace, config(), Arc::clone(&engine));
+        let outcome = vm.run();
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(outcome, lm_vm::Outcome::Done(_)),
+            "the benchmark faulted: {}",
+            vm.show_outcome(&outcome)
+        );
+        if round == 0 {
+            engine.reset_metrics();
+        } else {
+            runs.push(elapsed);
+        }
+    }
+    (median(runs), engine.metrics())
+}
+
+/// Time first native execution with compilation inside each round.
+fn time_program_native_cold(source: &str) -> Duration {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        let engine = Arc::new(Engine::new(EngineMode::Native));
+        let start = Instant::now();
+        let mut vm = Vm::new_with_engine(arena, namespace, config(), engine);
+        let outcome = vm.run();
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    median(runs)
+}
+
+/// Time one program through fixed scheduler slices.
+fn time_program_engine_sliced(
+    source: &str,
+    mode: EngineMode,
+    quantum: u32,
+) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let engine = Arc::new(Engine::new(mode));
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        let start = Instant::now();
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::NullHost),
+            Arc::clone(&engine),
+        );
+        loop {
+            match world.drive_slice(root, quantum) {
+                Some(lm_vm::SliceExit::Yielded) => {}
+                Some(lm_vm::SliceExit::Terminal) => break,
+                other => panic!("the scalar benchmark stopped early: {other:?}"),
+            }
+        }
+        let elapsed = start.elapsed();
+        assert!(matches!(world.task_outcome(root), lm_vm::Outcome::Done(_)));
+        if round == 0 {
+            engine.reset_metrics();
+        } else {
+            runs.push(elapsed);
+        }
+    }
+    (median(runs), engine.metrics())
+}
+
+/// Time one program through the deterministic scheduler.
+fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let engine = Arc::new(Engine::new(mode));
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+        let mut world = lm_vm::World::new_with_engine(
+            arena,
+            namespace,
+            config(),
+            Box::new(lm_vm::NullHost),
+            Arc::clone(&engine),
+        );
+        let mut scheduler = lm_proc::Scheduler::default();
+        let start = Instant::now();
+        let outcome = scheduler
+            .run(&mut world)
+            .expect("the scheduled scalar benchmark must run");
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        if round == 0 {
+            engine.reset_metrics();
+        } else {
+            runs.push(elapsed);
+        }
+    }
+    (median(runs), engine.metrics())
+}
+
+fn report_jit(name: &str, source: &str) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_program_engine(source, EngineMode::Interpreter);
+    let cold = time_program_native_cold(source);
+    let (native, metrics) = time_program_engine(source, EngineMode::Native);
+    assert!(metrics.native_retired_instructions > 0);
+    println!(
+        "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        cold.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        metrics.native_entries,
+        metrics.guarded_values,
+    );
+}
+
+fn report_jit_sliced(name: &str, source: &str, quantum: u32) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_program_engine_sliced(source, EngineMode::Interpreter, quantum);
+    let (native, metrics) = time_program_engine_sliced(source, EngineMode::Native, quantum);
+    assert!(metrics.native_retired_instructions > 0);
+    println!(
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        metrics.native_entries,
+        metrics.guarded_values,
+    );
+}
+
+fn report_jit_scheduled(name: &str, source: &str) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_program_engine_scheduled(source, EngineMode::Interpreter);
+    let (native, metrics) = time_program_engine_scheduled(source, EngineMode::Native);
+    assert!(metrics.native_retired_instructions > 0);
+    println!(
+        "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        metrics.native_entries,
+        metrics.guarded_values,
+    );
+}
+
+fn guard_source(extra_locals: usize) -> String {
+    let mut source = String::new();
+    for local in 0..extra_locals {
+        source.push_str(&format!("v{local} = {local}\n"));
+    }
+    source.push_str("i = 0\nwhile i < 1000000\n  i = i + 1\nend\nsum = i\n");
+    for local in 0..extra_locals {
+        source.push_str(&format!("sum = sum + v{local}\n"));
+    }
+    source.push_str("sum\n");
+    source
+}
+
+fn report_guard_upper_bound() {
+    let name = "jit_guard_state";
+    if !selected(name) {
+        return;
+    }
+    let (small, small_metrics) =
+        time_program_engine_sliced(&guard_source(0), EngineMode::Native, 4096);
+    let (large, large_metrics) =
+        time_program_engine_sliced(&guard_source(32), EngineMode::Native, 4096);
+    let extra_guards = large_metrics
+        .guarded_values
+        .saturating_sub(small_metrics.guarded_values)
+        / ROUNDS as u64;
+    let extra_time = large.saturating_sub(small);
+    let nanoseconds = if extra_guards == 0 {
+        0.0
+    } else {
+        extra_time.as_nanos() as f64 / extra_guards as f64
+    };
+    println!(
+        "LOOM_JIT_GUARD\t{name}\t{:.3}\t{:.3}\t{nanoseconds:.2}\t{extra_guards}",
+        small.as_secs_f64() * 1e3,
+        large.as_secs_f64() * 1e3,
+    );
+}
+
+fn report_auto_fallback() {
+    let name = "jit_unsupported_auto";
+    if !selected(name) {
+        return;
+    }
+    let source = concat!(
+        "text = \"loom\"\n",
+        "i = 0\n",
+        "while i < 1000000\n",
+        "  i = i + 1\n",
+        "end\n",
+        "i + text.len()\n",
+    );
+    let (interpreted, _) = time_program_engine(source, EngineMode::Interpreter);
+    let (automatic, metrics) = time_program_engine(source, EngineMode::Auto);
+    assert_eq!(metrics.native_entries, 0);
+    assert!(metrics.unsupported_region_fallbacks > 0);
+    let ratio = automatic.as_secs_f64() / interpreted.as_secs_f64();
+    println!(
+        "LOOM_JIT_FALLBACK\t{name}\t{:.3}\t{:.3}\t{ratio:.3}",
+        interpreted.as_secs_f64() * 1e3,
+        automatic.as_secs_f64() * 1e3,
+    );
 }
 
 /// The cost of machine construction and entry, with no workload.
@@ -647,6 +889,41 @@ end
     source.push_str(")\n");
     let messages = (pairs as u64).saturating_mul((limit as u64).saturating_mul(2) + 3);
     (source, format!("Done(({}))", expected.join(", ")), messages)
+}
+
+// ---------------------------------------------------------------
+// Group 0: guarded scalar JIT regions.
+// ---------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn bench_jit_scalar_regions() {
+    println!(
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards"
+    );
+    report_jit(
+        "jit_int_loop",
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+    );
+    report_jit(
+        "jit_float_add",
+        "i = 0\ns = 0.0\nwhile i < 1000000\n  s = s + 1.25\n  i = i + 1\nend\ns\n",
+    );
+    report_jit(
+        "jit_int_eq",
+        "i = 0\nsame = false\nwhile i < 1000000\n  same = i == i\n  i = i + 1\nend\nsame\n",
+    );
+    report_jit_sliced(
+        "jit_int_loop_sliced",
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+        4096,
+    );
+    report_jit_scheduled(
+        "jit_int_loop_scheduled",
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+    );
+    report_guard_upper_bound();
+    report_auto_fallback();
 }
 
 // ---------------------------------------------------------------

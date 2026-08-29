@@ -704,6 +704,7 @@ impl World {
             instructions: limit,
             exclusive_world,
             fuel: Arc::clone(&self.budget.fuel),
+            engine: Arc::clone(&self.engine),
         };
         let (worker, reservation) =
             ExecutionLease::new(token, machine, execution_code, envs, slots, limits);

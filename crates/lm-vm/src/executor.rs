@@ -3,6 +3,7 @@
 //! The executor owns one machine and reads immutable code.
 //! It returns before any operation needs world state.
 
+use crate::engine::{Engine, EngineMode};
 use crate::machine::{ExecError, ExecOutcome, ImageSlotTarget, Machine, VmId};
 use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode, NamespaceRuntime};
@@ -150,6 +151,7 @@ pub struct ExecutionLease {
     heap_before: usize,
     objects_before: usize,
     restricted_world: bool,
+    engine: Arc<Engine>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +159,7 @@ pub(crate) struct ExecutionLimits {
     pub(crate) instructions: u32,
     pub(crate) exclusive_world: bool,
     pub(crate) fuel: Arc<ExecutionFuel>,
+    pub(crate) engine: Arc<Engine>,
 }
 
 /// Coordinator-owned accounting for one execution lease.
@@ -209,6 +212,7 @@ impl ExecutionLease {
                 heap_before,
                 objects_before,
                 restricted_world: !limits.exclusive_world,
+                engine: limits.engine,
             },
             reservation,
         )
@@ -418,26 +422,22 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
             envs,
             slots,
             restricted_world,
+            engine,
             ..
         } = &mut lease;
         let slots = slots.as_deref().map(Vec::as_slice);
-        let result = if *restricted_world {
-            machine.exec_for_quantum_restricted(
-                code.module.as_ref(),
-                code.dispatch.as_ref(),
+        let result = run_engine_turn(
+            machine,
+            claim.claimed,
+            EngineTurnContext {
+                module: code.module.as_ref(),
+                dispatch: code.dispatch.as_ref(),
                 envs,
                 slots,
-                claim.claimed,
-            )
-        } else {
-            machine.exec_for_quantum(
-                code.module.as_ref(),
-                code.dispatch.as_ref(),
-                envs,
-                slots,
-                claim.claimed,
-            )
-        };
+                restricted_world: *restricted_world,
+                engine,
+            },
+        );
         claim.retired = result.1;
         result
     };
@@ -477,9 +477,20 @@ pub(crate) fn execute_inline(
     envs: &mut TypeEnvs,
     slots: Option<&[ImageSlotTarget]>,
     instruction_limit: u32,
+    engine: &Engine,
 ) -> InlineExecutionReport {
-    let (outcome, retired_instructions) =
-        machine.exec_for_quantum(module, dispatch, envs, slots, instruction_limit);
+    let (outcome, retired_instructions) = run_engine_turn(
+        machine,
+        instruction_limit,
+        EngineTurnContext {
+            module,
+            dispatch,
+            envs,
+            slots,
+            restricted_world: false,
+            engine,
+        },
+    );
     let stop = match outcome {
         Ok(None) => ExecutionStop::QuantumExpired,
         Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
@@ -488,6 +499,90 @@ pub(crate) fn execute_inline(
     InlineExecutionReport {
         stop,
         retired_instructions,
+    }
+}
+
+/// Run one machine turn through the selected execution engine.
+struct EngineTurnContext<'a> {
+    module: &'a NamespaceRuntime,
+    dispatch: &'a lm_bytecode::CodeTable<DispatchRow>,
+    envs: &'a mut TypeEnvs,
+    slots: Option<&'a [ImageSlotTarget]>,
+    restricted_world: bool,
+    engine: &'a Engine,
+}
+
+fn run_engine_turn(
+    machine: &mut Machine,
+    instruction_limit: u32,
+    mut context: EngineTurnContext<'_>,
+) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+    if instruction_limit == 0 {
+        return (Ok(None), 0);
+    }
+    if context.engine.mode() == EngineMode::Interpreter {
+        return run_interpreter_turn(machine, instruction_limit, &mut context);
+    }
+    let mut retired_total = 0;
+    loop {
+        let remaining = instruction_limit - retired_total;
+        match context
+            .engine
+            .execute_native(machine, context.module, remaining)
+        {
+            crate::jit::NativeAttempt::Complete { outcome, retired } => {
+                retired_total += retired;
+                return (outcome, retired_total);
+            }
+            crate::jit::NativeAttempt::AdvanceToEntry { instructions } => {
+                let advance = instructions.min(remaining).max(1);
+                let (outcome, interpreted) = run_interpreter_turn(machine, advance, &mut context);
+                retired_total += interpreted;
+                if advance < remaining && matches!(outcome, Ok(None)) {
+                    continue;
+                }
+                return (outcome, retired_total);
+            }
+            crate::jit::NativeAttempt::Continue { retired } => {
+                retired_total += retired;
+                let remaining = instruction_limit - retired_total;
+                if remaining == 0 {
+                    return (Ok(None), retired_total);
+                }
+                let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
+                retired_total += interpreted;
+                return (outcome, retired_total);
+            }
+            crate::jit::NativeAttempt::Fallback => {
+                let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
+                retired_total += interpreted;
+                return (outcome, retired_total);
+            }
+        }
+    }
+}
+
+fn run_interpreter_turn(
+    machine: &mut Machine,
+    instruction_limit: u32,
+    context: &mut EngineTurnContext<'_>,
+) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+    if context.restricted_world {
+        machine.exec_for_quantum_restricted(
+            context.module,
+            context.dispatch,
+            &mut *context.envs,
+            context.slots,
+            instruction_limit,
+        )
+    } else {
+        machine.exec_for_quantum(
+            context.module,
+            context.dispatch,
+            &mut *context.envs,
+            context.slots,
+            instruction_limit,
+        )
     }
 }
 
@@ -513,6 +608,7 @@ mod tests {
         assert_send::<TypeEnvs>();
         assert_send::<Box<TypeEnvs>>();
         assert_send::<Arc<Vec<ImageSlotTarget>>>();
+        assert_send::<Arc<Engine>>();
         assert_send::<u32>();
         assert_send::<ExecutionLease>();
         assert_send::<ExecutionReport>();
@@ -569,6 +665,7 @@ mod tests {
             ResourceBudget::new(config.max_resources as usize),
         ));
         machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
+        let engine = Arc::new(Engine::new(EngineMode::Native));
         let (lease, reservation) = ExecutionLease::new(
             ExecutionToken {
                 world: 7,
@@ -584,6 +681,7 @@ mod tests {
                 instructions: 16,
                 exclusive_world: true,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
+                engine: Arc::clone(&engine),
             },
         );
         let report = std::thread::spawn(move || execute(lease))
@@ -599,7 +697,108 @@ mod tests {
             stop,
             ExecutionStop::Boundary(ExecOutcome::Terminal(Value::Int(42)))
         ));
+        assert_eq!(engine.metrics().compiled_regions, 1);
+        assert_eq!(engine.metrics().native_retired_instructions, 2);
         drop(machine);
+    }
+
+    #[test]
+    fn a_native_worker_turn_materializes_before_recall() {
+        let module = crate::unit_from_module_for_test(Module {
+            strings: vec![],
+            bytes: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
+            imports: vec![],
+            slots: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            classes: vec![],
+            funcs: vec![Func {
+                name: "main".to_string(),
+                param_names: vec![],
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 2,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![2],
+                blocks: vec![
+                    vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],
+                    vec![
+                        Instr::LoadLocal(0),
+                        Instr::ConstInt(100),
+                        Instr::LtInt,
+                        Instr::JumpIfFalse(3),
+                        Instr::Jump(2),
+                    ],
+                    vec![
+                        Instr::LoadLocal(0),
+                        Instr::ConstInt(1),
+                        Instr::Add,
+                        Instr::StoreLocal(0),
+                        Instr::Jump(1),
+                    ],
+                    vec![Instr::LoadLocal(0), Instr::Return],
+                ],
+            }],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+            debug: vec![],
+        })
+        .expect("the recall test unit verifies");
+        let config = VmConfig {
+            heap_bytes: 1024,
+            ..VmConfig::default()
+        };
+        let mut machine = Box::new(Machine::empty_with_resource_budget(
+            config,
+            None,
+            0,
+            ResourceBudget::new(config.max_resources as usize),
+        ));
+        machine.load_frame(&module, 0, vec![], None, TypeEnvId::EMPTY);
+        let engine = Arc::new(Engine::new(EngineMode::Native));
+        let (lease, reservation) = ExecutionLease::new(
+            ExecutionToken {
+                world: 7,
+                machine: 0,
+                generation: 0,
+                lease: 2,
+            },
+            machine,
+            Arc::new(ExecutionCode::new(module, Arc::new(Vec::new().into()))),
+            Box::default(),
+            None,
+            ExecutionLimits {
+                instructions: 64,
+                exclusive_world: true,
+                fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
+                engine: Arc::clone(&engine),
+            },
+        );
+        let turn = std::thread::spawn(move || execute_turn(lease, 8))
+            .join()
+            .expect("the worker returns one turn");
+        let ExecutionTurn::Continue(lease) = turn else {
+            panic!("the native lease must remain active");
+        };
+        let report = recall(lease);
+        assert!(report.stopped_by_recall());
+        assert_eq!(report.retired_instructions(), 8);
+        let (_, machine, _, _, _, retired) = report.into_parts(reservation);
+        assert_eq!(retired, 8);
+        assert_eq!(machine.vm.locals, vec![Value::Int(0)]);
+        let frame = machine.vm.frames.last().expect("the frame remains live");
+        assert_eq!((frame.block, frame.ip), (2, 0));
+        assert_eq!(engine.metrics().native_retired_instructions, 8);
     }
 
     #[test]
@@ -663,6 +862,7 @@ mod tests {
                 instructions: 16,
                 exclusive_world: false,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
+                engine: Arc::new(Engine::default()),
             },
         );
         let report = std::thread::spawn(move || execute(lease))
@@ -740,6 +940,7 @@ mod tests {
                 instructions: 16,
                 exclusive_world: true,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
+                engine: Arc::new(Engine::default()),
             },
         );
         assert_eq!(resource_budget.used(), 1);

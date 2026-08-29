@@ -186,7 +186,7 @@ impl CodeNamespace {
 
     /// Build one portable artifact for an arena function.
     pub fn function_artifact(&self, function: u32) -> Result<Artifact, LinkError> {
-        let (unit, local) = self.local_function(function)?;
+        let (unit, local) = self.function_unit(function)?;
         let (export, definition) =
             prepare_definition_export(unit.module(), DefinitionSelection::Function(local))?;
         self.build_definition_artifact(unit, export, definition)
@@ -200,7 +200,8 @@ impl CodeNamespace {
         self.build_definition_artifact(unit, export, definition)
     }
 
-    fn local_function(&self, function: u32) -> Result<(&LinkUnit, u32), LinkError> {
+    /// Return the source unit and local index of one arena function.
+    pub fn function_unit(&self, function: u32) -> Result<(&LinkUnit, u32), LinkError> {
         for (id, unit) in &self.units {
             let Some(reloc) = self.relocations.get(id) else {
                 continue;

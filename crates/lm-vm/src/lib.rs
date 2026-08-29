@@ -10,8 +10,10 @@
 //! Host operations cross one plain-data completion interface defined
 //! in `host`.
 
+mod engine;
 mod executor;
 mod host;
+mod jit;
 mod machine;
 mod resource;
 mod schedule;
@@ -19,6 +21,7 @@ pub mod snapshot;
 mod typecheck;
 mod world;
 
+pub use engine::{Engine, EngineMetrics, EngineMode};
 pub use executor::{execute, execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
@@ -378,8 +381,23 @@ pub struct Vm {
 
 impl Vm {
     pub fn new(arena: lm_link::CodeArena, namespace: lm_link::NamespaceId, config: VmConfig) -> Vm {
+        Vm::new_with_engine(
+            arena,
+            namespace,
+            config,
+            std::sync::Arc::new(Engine::default()),
+        )
+    }
+
+    /// Create one VM with a host-owned execution engine.
+    pub fn new_with_engine(
+        arena: lm_link::CodeArena,
+        namespace: lm_link::NamespaceId,
+        config: VmConfig,
+        engine: std::sync::Arc<Engine>,
+    ) -> Vm {
         Vm {
-            world: World::new(arena, namespace, config, Box::new(NullHost)),
+            world: World::new_with_engine(arena, namespace, config, Box::new(NullHost), engine),
         }
     }
 
@@ -406,6 +424,16 @@ impl Vm {
     /// Run the entry function to a terminal result.
     pub fn run(&mut self) -> Outcome {
         self.world.run_root()
+    }
+
+    /// Select the host execution policy for later machine turns.
+    pub fn set_engine_mode(&mut self, mode: EngineMode) {
+        self.world.set_engine_mode(mode);
+    }
+
+    /// Return the current execution-engine counters.
+    pub fn engine_metrics(&self) -> EngineMetrics {
+        self.world.engine_metrics()
     }
 
     /// Render a terminal outcome as stable text, for example

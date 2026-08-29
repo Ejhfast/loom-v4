@@ -5579,6 +5579,24 @@ impl Machine {
         }
     }
 
+    /// Complete one native return after native state materialization.
+    pub(crate) fn finish_native_return(&mut self, value: Value) -> Result<ExecOutcome, FaultCode> {
+        let frame = self.vm.frames.pop().ok_or(BAD_STATE)?;
+        self.vm.operands.truncate(frame.base_operand as usize);
+        self.vm.locals.truncate(frame.base_local as usize);
+        if self.vm.frames.is_empty() {
+            if !self.callbacks.is_empty() {
+                self.collect_callbacks();
+            }
+            return Ok(ExecOutcome::Terminal(value));
+        }
+        self.push(value)?;
+        if !self.callbacks.is_empty() {
+            self.collect_callbacks();
+        }
+        Ok(ExecOutcome::Continue)
+    }
+
     /// Close an `Option` family or arm type to its family type.
     fn close_option_family(
         &self,

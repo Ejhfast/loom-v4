@@ -4912,5 +4912,5 @@ No `Any` appears in the reply path. Matching the exact operation recovers its ar
 - partial snapshots that exclude reachable machines;
 - sharing one live machine between a restored world and its original;
 - record/replay layers, reply channels, attenuated handles, or remote scheduling;
-- JIT/tiered execution, although verified interpreter state is designed to permit later deoptimization;
+- guest-visible JIT controls or JIT-dependent semantics;
 - guarantees against microarchitectural or process-wide timing side channels.

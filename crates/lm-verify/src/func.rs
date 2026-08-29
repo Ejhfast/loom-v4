@@ -143,7 +143,11 @@ pub(crate) fn check_app(
     Ok(())
 }
 
-pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError> {
+pub(crate) fn verify_func(
+    ctx: &Ctx<'_>,
+    func: &Func,
+    fidx: u32,
+) -> Result<Vec<Option<VerifiedBlockState>>, VerifyError> {
     let module = ctx.module;
     // Reject a forged slot count before any allocation is sized from
     // it. The dataflow pass allocates one state cell per block and
@@ -703,8 +707,7 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
             }
         }
     }
-    dataflow(ctx, func, fidx)?;
-    Ok(())
+    dataflow(ctx, func, fidx)
 }
 
 /// Reconstruct the abstract state at every reachable block entry.
@@ -717,13 +720,13 @@ pub(crate) fn dataflow(
     ctx: &Ctx<'_>,
     func: &Func,
     fidx: u32,
-) -> Result<Vec<Option<State>>, VerifyError> {
-    let mut states: Vec<Option<State>> = vec![None; func.blocks.len()];
+) -> Result<Vec<Option<VerifiedBlockState>>, VerifyError> {
+    let mut states: Vec<Option<VerifiedBlockState>> = vec![None; func.blocks.len()];
     let mut locals = vec![None; func.local_count() as usize];
     for (i, p) in func.params.iter().enumerate() {
         locals[i] = Some(*p);
     }
-    states[0] = Some(State {
+    states[0] = Some(VerifiedBlockState {
         locals,
         stack: Vec::new(),
     });
@@ -752,8 +755,8 @@ pub(crate) fn merge(
     ctx: &Ctx<'_>,
     fidx: u32,
     target: usize,
-    edge: State,
-    states: &mut [Option<State>],
+    edge: VerifiedBlockState,
+    states: &mut [Option<VerifiedBlockState>],
     worklist: &mut VecDeque<usize>,
 ) -> Result<(), VerifyError> {
     match &mut states[target] {

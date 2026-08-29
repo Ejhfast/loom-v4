@@ -34,6 +34,24 @@ impl World {
         World::new_with_limits(arena, namespace, config, WorldLimits::default(), host)
     }
 
+    /// Create a world with one host-owned execution engine.
+    pub fn new_with_engine(
+        arena: lm_link::CodeArena,
+        namespace: lm_link::NamespaceId,
+        config: VmConfig,
+        host: Box<dyn Host>,
+        engine: Arc<crate::Engine>,
+    ) -> World {
+        World::new_with_limits_and_engine(
+            arena,
+            namespace,
+            config,
+            WorldLimits::default(),
+            host,
+            engine,
+        )
+    }
+
     /// Create a world with exact structural and resource limits.
     pub fn new_with_limits(
         arena: lm_link::CodeArena,
@@ -41,6 +59,25 @@ impl World {
         config: VmConfig,
         limits: WorldLimits,
         host: Box<dyn Host>,
+    ) -> World {
+        World::new_with_limits_and_engine(
+            arena,
+            namespace,
+            config,
+            limits,
+            host,
+            Arc::new(crate::Engine::default()),
+        )
+    }
+
+    /// Create a world with exact limits and one host-owned engine.
+    pub fn new_with_limits_and_engine(
+        arena: lm_link::CodeArena,
+        namespace: lm_link::NamespaceId,
+        config: VmConfig,
+        limits: WorldLimits,
+        host: Box<dyn Host>,
+        engine: Arc<crate::Engine>,
     ) -> World {
         let linked = arena
             .namespace(namespace)
@@ -74,6 +111,7 @@ impl World {
             namespaces,
             execution_tables: module.clone(),
             namespace_execution,
+            engine,
             machines: vec![root.into()],
             vm_images: Vec::new(),
             vm_image_free: Vec::new(),
@@ -214,6 +252,22 @@ impl World {
     pub fn reset_metrics(&mut self) {
         self.metrics = WorldMetrics::default();
         self.envs.reset_metrics();
+        self.engine.reset_metrics();
+    }
+
+    /// Select the host execution policy for later machine turns.
+    pub fn set_engine_mode(&mut self, mode: crate::EngineMode) {
+        self.engine.set_mode(mode);
+    }
+
+    /// Return the current host execution policy.
+    pub fn engine_mode(&self) -> crate::EngineMode {
+        self.engine.mode()
+    }
+
+    /// Return the current execution-engine counters.
+    pub fn engine_metrics(&self) -> crate::EngineMetrics {
+        self.engine.metrics()
     }
 
     /// The current closed-type counters.
@@ -786,6 +840,7 @@ impl World {
             &mut self.envs,
             slots,
             limit,
+            self.engine.as_ref(),
         )
     }
 
