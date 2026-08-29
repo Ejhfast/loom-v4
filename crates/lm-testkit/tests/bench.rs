@@ -1146,6 +1146,41 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_expression_stack",
+        concat!(
+            "i = 0\ns = 0\n",
+            "while i < 1000000\n",
+            "  s = s + i * 2 - 1\n",
+            "  i = i + 1\n",
+            "end\ns\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_factorial",
+        concat!(
+            "def factorial(n: Int): Int\n",
+            "  if n <= 1 then 1 else n * factorial(n - 1) end\n",
+            "end\n",
+            "i = 0\ns = 0\n",
+            "while i < 10000\n",
+            "  s = s + factorial(12)\n",
+            "  i = i + 1\n",
+            "end\ns\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_fibonacci",
+        concat!(
+            "def fib(n: Int): Int\n",
+            "  if n <= 1 then n else fib(n - 1) + fib(n - 2) end\n",
+            "end\n",
+            "fib(25)\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_int_div",
         concat!(
             "i = 1\nd = 3\ns = 0\n",

@@ -320,6 +320,62 @@ fn a_recursive_call_uses_an_explicit_interpreter_exit() {
 }
 
 #[test]
+fn nested_arithmetic_compiles_factorial_and_fibonacci() {
+    let source = concat!(
+        "def factorial(n: Int): Int\n",
+        "  if n <= 1 then 1 else n * factorial(n - 1) end\n",
+        "end\n",
+        "def fib(n: Int): Int\n",
+        "  if n <= 1 then n else fib(n - 1) + fib(n - 2) end\n",
+        "end\n",
+        "factorial(10) + fib(12)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3_628_944)));
+    assert!(metrics.compiled_regions >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn nested_arithmetic_faults_keep_residual_operands() {
+    let source = concat!(
+        "left = 7\n",
+        "maximum = 9223372036854775807\n",
+        "left + (maximum + 1)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-nested-fault.lm", source)
+        .expect("the nested fault case compiles");
+    for fuel in 0..=16 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn realistic_scalar_expression_stays_native() {
+    let source = concat!(
+        "i = 0\ns = 0\n",
+        "while i < 10000\n",
+        "  s = s + i * 2 - 1\n",
+        "  i = i + 1\n",
+        "end\n",
+        "s\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn direct_call_cache_entries_pin_the_callee_version() {
     let first = lm_testkit::compile_text(
         "jit-call-version.lm",

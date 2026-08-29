@@ -1289,18 +1289,16 @@ fn analyze_segment(
                 stack.push(ScalarKind::Object(ty));
             }
             Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem => {
-                if stack.len() != 2 {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
+                let instruction = segment.start + offset as u32;
                 expect(&mut stack, ScalarKind::Int)?;
                 expect(&mut stack, ScalarKind::Int)?;
+                fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(ScalarKind::Int);
             }
             Instr::Neg => {
-                if stack.len() != 1 {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
+                let instruction = segment.start + offset as u32;
                 expect(&mut stack, ScalarKind::Int)?;
+                fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(ScalarKind::Int);
             }
             Instr::Not => {

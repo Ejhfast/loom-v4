@@ -965,3 +965,25 @@ The retained warm integer loop used 0.708 milliseconds.
 The scheduled integer loop used 4.614 milliseconds.
 
 Unsupported `Auto` execution used 1.004 times interpreter duration.
+
+## 31. Stage 11 expression-stack correction
+
+The first arithmetic analysis required an operand depth of exactly two.
+
+That rule rejected arithmetic inside larger expressions.
+
+Every arithmetic fault now records the complete residual operand stack.
+
+Native code can therefore preserve pending outer operands during a fault.
+
+Fuel sweeps cover a nested overflow with one retained outer operand.
+
+Factorial and Fibonacci now compile their scalar recursive functions.
+
+The idiomatic expression loop improved from no native coverage to 36.01 times.
+
+Factorial reached 0.14 times interpreter performance.
+
+Fibonacci reached 0.12 times interpreter performance.
+
+The recursive rows expose the call-transition cost measured in the next stage.
