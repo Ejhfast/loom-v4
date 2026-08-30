@@ -3,6 +3,7 @@
 use crate::engine::EngineTurnMetrics;
 use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, Machine};
 use crate::NamespaceRuntime;
+use lm_heap::Object;
 use lm_jit::{
     ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind, LOCAL_DIRTY,
     LOCAL_INITIALIZED,
@@ -43,12 +44,30 @@ struct CanonicalStack {
     operands: Vec<Value>,
 }
 
-fn frame_capture_parts(capture: Option<FrameCapture>) -> Option<(u64, u64)> {
+fn frame_capture_parts(
+    machine: &Machine,
+    capture: Option<FrameCapture>,
+) -> Option<(u64, u64, usize, usize)> {
     let Some(capture) = capture else {
-        return Some((ValueTag::Uninit as u64, 0));
+        return Some((ValueTag::Uninit as u64, 0, 0, 0));
     };
     let value = capture.value();
-    Some((value.tag() as u64, runtime::value_bits(value)?))
+    let (data, len) = match capture {
+        FrameCapture::Closure(reference) => {
+            let Object::Closure { captures, .. } = machine.vm.heap.get(reference) else {
+                return None;
+            };
+            (captures.as_ptr() as usize, captures.len())
+        }
+        FrameCapture::Callback(reference) => {
+            let descriptor = machine.callback(reference).ok()?;
+            (
+                descriptor.captures.as_ptr() as usize,
+                descriptor.captures.len(),
+            )
+        }
+    };
+    Some((value.tag() as u64, runtime::value_bits(value)?, data, len))
 }
 
 fn parts_frame_capture(tag: u64, bits: u64) -> Option<Option<FrameCapture>> {
@@ -440,7 +459,9 @@ impl JitEngine {
                     return NativeAttempt::Fallback;
                 };
                 let frame = &machine.vm.frames[frame_index];
-                let Some((capture_tag, capture_bits)) = frame_capture_parts(frame.closure) else {
+                let Some((capture_tag, capture_bits, capture_data, capture_len)) =
+                    frame_capture_parts(machine, frame.closure)
+                else {
                     metrics.note_guard_failure(0);
                     return NativeAttempt::Fallback;
                 };
@@ -494,6 +515,8 @@ impl JitEngine {
                         environment: frame.env.0,
                         capture_tag,
                         capture_bits,
+                        capture_data,
+                        capture_len,
                         block: frame.block,
                         instruction: frame.ip,
                         local_count: region.local_kinds().len(),
@@ -872,6 +895,8 @@ impl JitEngine {
                             exit.result(),
                             target,
                             environment.0,
+                            0,
+                            0,
                         );
                         let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
                             break Err(Failure::BackendUnavailable);
@@ -938,6 +963,8 @@ impl JitEngine {
                     };
                     let target = descriptor.func;
                     let environment = descriptor.env;
+                    let capture_data = descriptor.captures.as_ptr() as usize;
+                    let capture_len = descriptor.captures.len();
                     let parent = frame.environment();
                     let cached = runtime.resolved_calls.cache_call_site(
                         context.envs.canonical_store_id(),
@@ -948,6 +975,8 @@ impl JitEngine {
                         callable_bits,
                         target,
                         environment.0,
+                        capture_data,
+                        capture_len,
                     );
                     let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
                         break Err(Failure::BackendUnavailable);

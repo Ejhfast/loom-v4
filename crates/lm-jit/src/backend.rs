@@ -366,8 +366,7 @@ enum ObjectGuard<'a> {
 }
 
 struct NativeCallEmission<'a> {
-    target: ir::Value,
-    environment: ir::Value,
+    target: NativeCallTarget,
     capture: Option<NativeValue>,
     fallback: NativeCallFallback,
     contract: &'a CallContract,
@@ -375,6 +374,14 @@ struct NativeCallEmission<'a> {
     instruction: u32,
     successor_entry: u32,
     successor: ir::Block,
+}
+
+#[derive(Clone, Copy)]
+struct NativeCallTarget {
+    function: ir::Value,
+    environment: ir::Value,
+    capture_data: ir::Value,
+    capture_len: ir::Value,
 }
 
 #[derive(Clone, Copy)]
@@ -2125,7 +2132,7 @@ fn emit_segment(
         } else {
             None
         };
-        let (target, environment) = match segment.exit {
+        let target = match segment.exit {
             SegmentExit::Call {
                 target,
                 app: Some(application),
@@ -2150,17 +2157,21 @@ fn emit_segment(
                     },
                     &stack,
                 )?;
-                (
-                    builder.ins().iconst(types::I32, i64::from(target)),
+                NativeCallTarget {
+                    function: builder.ins().iconst(types::I32, i64::from(target)),
                     environment,
-                )
+                    capture_data: builder.ins().iconst(values.pointer_type, 0),
+                    capture_len: builder.ins().iconst(values.pointer_type, 0),
+                }
             }
             SegmentExit::Call {
                 target, app: None, ..
-            } => (
-                builder.ins().iconst(types::I32, i64::from(target)),
-                builder.ins().iconst(types::I32, 0),
-            ),
+            } => NativeCallTarget {
+                function: builder.ins().iconst(types::I32, i64::from(target)),
+                environment: builder.ins().iconst(types::I32, 0),
+                capture_data: builder.ins().iconst(values.pointer_type, 0),
+                capture_len: builder.ins().iconst(values.pointer_type, 0),
+            },
             SegmentExit::VirtualCall { selector, .. } => {
                 let receiver = contract.receiver.ok_or(CompileError::Backend)?;
                 let receiver_value = stack
@@ -2185,7 +2196,12 @@ fn emit_segment(
                     },
                     &stack,
                 )?;
-                (target, builder.ins().iconst(types::I32, 0))
+                NativeCallTarget {
+                    function: target,
+                    environment: builder.ins().iconst(types::I32, 0),
+                    capture_data: builder.ins().iconst(values.pointer_type, 0),
+                    capture_len: builder.ins().iconst(values.pointer_type, 0),
+                }
             }
             SegmentExit::ValueCall { .. } => emit_call_value_target(
                 builder,
@@ -2271,7 +2287,6 @@ fn emit_segment(
             &mut stack,
             NativeCallEmission {
                 target,
-                environment,
                 capture,
                 fallback: if capture.is_some() {
                     NativeCallFallback::Replay
@@ -2513,7 +2528,7 @@ fn emit_call_value_target(
     target: ValueCallTarget,
     point: FaultPoint,
     stack: &[NativeValue],
-) -> Result<(ir::Value, ir::Value), CompileError> {
+) -> Result<NativeCallTarget, CompileError> {
     let guard_point = FaultPoint {
         block: point.block,
         instruction: point.instruction.saturating_add(1),
@@ -2536,7 +2551,24 @@ fn emit_call_value_target(
             )?;
             let function = load_value(builder, types::I32, entry, JIT_CLOSURE_FUNCTION_OFFSET)?;
             let environment = load_value(builder, types::I32, entry, JIT_CLOSURE_ENV_OFFSET)?;
-            Ok((function, environment))
+            let capture_data = load_value(
+                builder,
+                values.pointer_type,
+                entry,
+                JIT_CLOSURE_CAPTURES_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+            )?;
+            let capture_len = load_value(
+                builder,
+                values.pointer_type,
+                entry,
+                JIT_CLOSURE_CAPTURES_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+            )?;
+            Ok(NativeCallTarget {
+                function,
+                environment,
+                capture_data,
+                capture_len,
+            })
         }
         ValueCallTarget::Callback => {
             let closure = builder.create_block();
@@ -2546,6 +2578,8 @@ fn emit_call_value_target(
             let done = builder.create_block();
             builder.append_block_param(done, types::I32);
             builder.append_block_param(done, types::I32);
+            builder.append_block_param(done, values.pointer_type);
+            builder.append_block_param(done, values.pointer_type);
             let is_closure =
                 builder
                     .ins()
@@ -2594,12 +2628,30 @@ fn emit_call_value_target(
                 load_value(builder, types::I32, entry, JIT_CLOSURE_FUNCTION_OFFSET)?;
             let closure_environment =
                 load_value(builder, types::I32, entry, JIT_CLOSURE_ENV_OFFSET)?;
-            builder
-                .ins()
-                .jump(done, &[closure_function.into(), closure_environment.into()]);
+            let closure_capture_data = load_value(
+                builder,
+                values.pointer_type,
+                entry,
+                JIT_CLOSURE_CAPTURES_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+            )?;
+            let closure_capture_len = load_value(
+                builder,
+                values.pointer_type,
+                entry,
+                JIT_CLOSURE_CAPTURES_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+            )?;
+            builder.ins().jump(
+                done,
+                &[
+                    closure_function.into(),
+                    closure_environment.into(),
+                    closure_capture_data.into(),
+                    closure_capture_len.into(),
+                ],
+            );
 
             builder.switch_to_block(callback);
-            let (callback_function, callback_environment) = emit_resolved_call_lookup(
+            let callback_target = emit_resolved_call_lookup(
                 builder,
                 values,
                 function,
@@ -2611,12 +2663,22 @@ fn emit_call_value_target(
             )?;
             builder.ins().jump(
                 done,
-                &[callback_function.into(), callback_environment.into()],
+                &[
+                    callback_target.function.into(),
+                    callback_target.environment.into(),
+                    callback_target.capture_data.into(),
+                    callback_target.capture_len.into(),
+                ],
             );
 
             builder.switch_to_block(done);
             let values = builder.block_params(done);
-            Ok((values[0], values[1]))
+            Ok(NativeCallTarget {
+                function: values[0],
+                environment: values[1],
+                capture_data: values[2],
+                capture_len: values[3],
+            })
         }
     }
 }
@@ -2631,11 +2693,13 @@ fn emit_resolved_call_lookup(
     receiver: NativeValue,
     exit_kind: u32,
     stack: &[NativeValue],
-) -> Result<(ir::Value, ir::Value), CompileError> {
+) -> Result<NativeCallTarget, CompileError> {
     let hit = builder.create_block();
     let miss = builder.create_block();
     builder.append_block_param(hit, types::I32);
     builder.append_block_param(hit, types::I32);
+    builder.append_block_param(hit, values.pointer_type);
+    builder.append_block_param(hit, values.pointer_type);
     let store = load_value(
         builder,
         types::I64,
@@ -2730,6 +2794,18 @@ fn emit_resolved_call_lookup(
             types::I32,
             mem::offset_of!(RawResolvedCallCacheEntry, environment),
         )?;
+        let capture_data = atomic_load_field(
+            builder,
+            entry,
+            values.pointer_type,
+            mem::offset_of!(RawResolvedCallCacheEntry, capture_data),
+        )?;
+        let capture_len = atomic_load_field(
+            builder,
+            entry,
+            values.pointer_type,
+            mem::offset_of!(RawResolvedCallCacheEntry, capture_len),
+        )?;
         let same_store = builder.ins().icmp(IntCC::Equal, cached_store, store);
         let same_function =
             builder
@@ -2755,7 +2831,12 @@ fn emit_resolved_call_lookup(
         builder.ins().brif(
             matched,
             hit,
-            &[target.into(), environment.into()],
+            &[
+                target.into(),
+                environment.into(),
+                capture_data.into(),
+                capture_len.into(),
+            ],
             next,
             &[],
         );
@@ -2784,7 +2865,12 @@ fn emit_resolved_call_lookup(
 
     builder.switch_to_block(hit);
     let values = builder.block_params(hit);
-    Ok((values[0], values[1]))
+    Ok(NativeCallTarget {
+        function: values[0],
+        environment: values[1],
+        capture_data: values[2],
+        capture_len: values[3],
+    })
 }
 
 fn atomic_load_field(
@@ -2969,7 +3055,6 @@ fn emit_native_call(
 ) -> Result<(), CompileError> {
     let NativeCallEmission {
         target,
-        environment,
         capture,
         fallback: fallback_kind,
         contract,
@@ -2978,6 +3063,12 @@ fn emit_native_call(
         successor_entry,
         successor,
     } = call;
+    let NativeCallTarget {
+        function: target,
+        environment,
+        capture_data,
+        capture_len,
+    } = target;
     let argument_start = stack
         .len()
         .checked_sub(contract.params.len())
@@ -3337,6 +3428,18 @@ fn emit_native_call(
         child_frame,
         mem::offset_of!(RawNativeFrame, capture_bits),
         capture_bits,
+    )?;
+    store_i64(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, capture_data),
+        capture_data,
+    )?;
+    store_i64(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, capture_len),
+        capture_len,
     )?;
     store_i32_constant(
         builder,
@@ -3877,41 +3980,35 @@ fn emit_load_capture(
     exit: HeapExitEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
     let frame = emit_current_frame_pointer(builder, values)?;
-    let capture_tag = load_value(
+    let capture_data = load_value(
         builder,
-        types::I64,
+        values.pointer_type,
         frame,
-        mem::offset_of!(RawNativeFrame, capture_tag),
+        mem::offset_of!(RawNativeFrame, capture_data),
     )?;
-    let capture_bits = load_value(
+    let capture_len = load_value(
         builder,
-        types::I64,
+        values.pointer_type,
         frame,
-        mem::offset_of!(RawNativeFrame, capture_bits),
-    )?;
-    let not_closure =
-        builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, capture_tag, ValueTag::Obj as u64 as i64);
-    emit_interpreter_replay(builder, values, not_closure, exit.point, exit.deopt_stack)?;
-    let entry = emit_object_entry(
-        builder,
-        values,
-        capture_bits,
-        JIT_OBJECT_CLOSURE,
-        exit.point,
-        ObjectGuard::Fault(exit.fault_stack),
+        mem::offset_of!(RawNativeFrame, capture_len),
     )?;
     let index = builder.ins().iconst(values.pointer_type, i64::from(index));
-    let value = emit_array_element(
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, capture_len);
+    emit_fault_check(
         builder,
         values,
-        entry,
-        JIT_CLOSURE_CAPTURES_OFFSET,
-        index,
+        outside,
+        EXIT_TYPE_MISMATCH,
         exit.point,
         exit.fault_stack,
     )?;
+    let byte_offset = builder.ins().imul_imm(
+        index,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let value = builder.ins().iadd(capture_data, byte_offset);
     emit_loaded_value(builder, values, value, result, exit.point, exit.deopt_stack)
 }
 

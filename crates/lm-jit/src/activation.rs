@@ -4,7 +4,7 @@ use crate::Failure;
 use lm_heap::JitHeapView;
 use lm_value::Value;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub(super) const RUNTIME_OK: u32 = 0;
 const RUNTIME_INTERPRETER: u32 = 1;
@@ -45,6 +45,8 @@ pub(super) struct RawNativeFrame {
     pub(super) environment: u32,
     pub(super) capture_tag: u64,
     pub(super) capture_bits: u64,
+    pub(super) capture_data: usize,
+    pub(super) capture_len: usize,
     pub(super) block: u32,
     pub(super) instruction: u32,
     pub(super) resume_entry: u32,
@@ -192,6 +194,8 @@ pub(super) struct RawResolvedCallCacheEntry {
     pub(super) receiver: AtomicU64,
     pub(super) target: AtomicU32,
     pub(super) environment: AtomicU32,
+    pub(super) capture_data: AtomicUsize,
+    pub(super) capture_len: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,6 +208,8 @@ struct ResolvedCallCacheRecord {
     receiver: u64,
     target: u32,
     environment: u32,
+    capture_data: usize,
+    capture_len: usize,
 }
 
 impl RawResolvedCallCacheEntry {
@@ -217,6 +223,8 @@ impl RawResolvedCallCacheEntry {
             receiver: AtomicU64::new(0),
             target: AtomicU32::new(0),
             environment: AtomicU32::new(0),
+            capture_data: AtomicUsize::new(0),
+            capture_len: AtomicUsize::new(0),
         }
     }
 
@@ -249,6 +257,10 @@ impl RawResolvedCallCacheEntry {
         self.target.store(record.target, Ordering::Relaxed);
         self.environment
             .store(record.environment, Ordering::Relaxed);
+        self.capture_data
+            .store(record.capture_data, Ordering::Relaxed);
+        self.capture_len
+            .store(record.capture_len, Ordering::Relaxed);
         self.store.store(record.store, Ordering::Release);
     }
 
@@ -266,6 +278,8 @@ impl RawResolvedCallCacheEntry {
             receiver: self.receiver.load(Ordering::Relaxed),
             target: self.target.load(Ordering::Relaxed),
             environment: self.environment.load(Ordering::Relaxed),
+            capture_data: self.capture_data.load(Ordering::Relaxed),
+            capture_len: self.capture_len.load(Ordering::Relaxed),
         })
     }
 }
@@ -395,6 +409,8 @@ pub struct NativePreparation {
     pub environment: u32,
     pub capture_tag: u64,
     pub capture_bits: u64,
+    pub capture_data: usize,
+    pub capture_len: usize,
     pub block: u32,
     pub instruction: u32,
     pub local_count: usize,
@@ -493,6 +509,16 @@ impl NativeFrameView<'_> {
         self.frame.capture_bits
     }
 
+    /// Return the immutable capture-array address.
+    pub fn capture_data(&self) -> usize {
+        self.frame.capture_data
+    }
+
+    /// Return the immutable capture-array length.
+    pub fn capture_len(&self) -> usize {
+        self.frame.capture_len
+    }
+
     /// Return the current bytecode block.
     pub fn block(&self) -> u32 {
         self.frame.block
@@ -542,6 +568,8 @@ impl NativeActivation {
             environment,
             capture_tag,
             capture_bits,
+            capture_data,
+            capture_len,
             block,
             instruction,
             local_count,
@@ -590,6 +618,8 @@ impl NativeActivation {
             environment,
             capture_tag,
             capture_bits,
+            capture_data,
+            capture_len,
             block,
             instruction,
             resume_entry: 0,
@@ -831,6 +861,8 @@ impl NativeResolvedCallCache {
         receiver: u64,
         target: u32,
         environment: u32,
+        capture_data: usize,
+        capture_len: usize,
     ) -> bool {
         if store == 0 || store == RESOLVED_CALL_CACHE_CLAIMED {
             return false;
@@ -844,6 +876,8 @@ impl NativeResolvedCallCache {
             receiver,
             target,
             environment,
+            capture_data,
+            capture_len,
         };
         loop {
             let sets = self.entries.len() / RESOLVED_CALL_CACHE_WAYS;
@@ -857,7 +891,9 @@ impl NativeResolvedCallCache {
             for entry in entries {
                 if entry.matches(store, function, block, instruction, parent, receiver) {
                     return entry.target.load(Ordering::Relaxed) == target
-                        && entry.environment.load(Ordering::Relaxed) == environment;
+                        && entry.environment.load(Ordering::Relaxed) == environment
+                        && entry.capture_data.load(Ordering::Relaxed) == capture_data
+                        && entry.capture_len.load(Ordering::Relaxed) == capture_len;
                 }
             }
             if let Some(entry) = entries
