@@ -361,6 +361,7 @@ fn add_compiler_metrics(total: &mut EngineMetrics, sample: EngineMetrics) {
     total.compiled_heap_write_sites += sample.compiled_heap_write_sites;
     total.compiled_allocation_sites += sample.compiled_allocation_sites;
     total.compiled_effect_sites += sample.compiled_effect_sites;
+    total.compiled_interpreter_sites += sample.compiled_interpreter_sites;
 }
 
 fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) -> EngineMetrics {
@@ -376,6 +377,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_heap_write_sites = compiler.compiled_heap_write_sites;
     runtime.compiled_allocation_sites = compiler.compiled_allocation_sites;
     runtime.compiled_effect_sites = compiler.compiled_effect_sites;
+    runtime.compiled_interpreter_sites = compiler.compiled_interpreter_sites;
     runtime
 }
 
@@ -577,7 +579,7 @@ fn report_jit_representative(name: &str, source: &str) {
         native_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64
     };
     println!(
-        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}",
+        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         automatic.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
@@ -587,6 +589,8 @@ fn report_jit_representative(name: &str, source: &str) {
         auto_metrics.unproductive_native_demotions,
         auto_metrics.unsupported_region_fallbacks,
         native_metrics.unsupported_region_fallbacks,
+        auto_metrics.native_interpreter_exits,
+        native_metrics.native_interpreter_exits,
     );
     if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
         report_jit_profile(name, source);
@@ -622,13 +626,20 @@ fn report_jit_profile(name: &str, source: &str) {
             rejection.reason, rejection.estimated_instructions
         );
     }
+    for gap in profile.treatment_gaps.iter().take(20) {
+        println!(
+            "LOOM_JIT_TREATMENT_GAP\t{name}\t{}\t{}",
+            gap.instruction, gap.estimated_instructions
+        );
+    }
     for function in profile.hot_functions.iter().take(20) {
         println!(
-            "LOOM_JIT_FUNCTION\t{name}\t{}\t{}\t{}\t{}",
+            "LOOM_JIT_FUNCTION\t{name}\t{}\t{}\t{}\t{}\t{}",
             function.name,
             function.estimated_instructions,
             function.candidate,
-            function.rejections.join(",")
+            function.rejections.join(","),
+            function.treatment_gaps.join(",")
         );
     }
 }
@@ -688,7 +699,8 @@ fn report_auto_fallback() {
     let (interpreted, _) = time_program_engine(source, EngineMode::Interpreter);
     let (automatic, metrics) = time_program_engine(source, EngineMode::Auto);
     assert_eq!(metrics.native_entries, 0);
-    assert!(metrics.unsupported_region_fallbacks > 0);
+    assert_eq!(metrics.compilation_attempts, 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0);
     let ratio = automatic.as_secs_f64() / interpreted.as_secs_f64();
     println!(
         "LOOM_JIT_FALLBACK\t{name}\t{:.3}\t{:.3}\t{ratio:.3}",
@@ -1514,7 +1526,7 @@ fn bench_jit_scalar_regions() {
 #[ignore]
 fn bench_jit_representative_programs() {
     println!(
-        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported"
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits"
     );
     report_jit_representative(
         "jit_deep_recursion",
@@ -1551,6 +1563,16 @@ fn bench_jit_representative_programs() {
             "  i = i + 1\n",
             "end\n",
             "items.len()\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_interpreter_site",
+        concat!(
+            "i = 0\ntotal = 0\n",
+            "while i < 1000000\n",
+            "  total = total + (i & 7)\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
         ),
     );
     report_jit_representative(

@@ -131,6 +131,7 @@ pub struct CompilerMetrics {
     pub compiled_heap_write_sites: u64,
     pub compiled_allocation_sites: u64,
     pub compiled_effect_sites: u64,
+    pub compiled_interpreter_sites: u64,
 }
 
 /// One supported native entry and its required scalar values.
@@ -264,7 +265,7 @@ pub(super) enum SegmentExit {
         fallthrough_ip: u32,
     },
     Interpreter {
-        fallthrough_ip: u32,
+        fallthrough_ip: Option<u32>,
     },
     Return,
 }
@@ -370,6 +371,7 @@ pub(super) struct RegionPlan {
     pub(super) heap_write_sites: usize,
     pub(super) allocation_sites: usize,
     pub(super) effect_sites: usize,
+    pub(super) interpreter_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -432,17 +434,42 @@ impl RegionPlan {
             .funcs
             .get(input.root.source_function as usize)
             .ok_or(UnsupportedReason::MissingSource)?;
-        let states = lm_verify::verify_function_states_with_bundle(
-            source,
-            input.root.bundle,
-            input.root.source_function,
-        )
-        .map_err(|_| UnsupportedReason::MissingSource)?;
         if source_func.blocks.len() != runtime.blocks.len()
             || source_func.local_types.len() != runtime.local_types.len()
+            || source_func
+                .blocks
+                .iter()
+                .zip(&runtime.blocks)
+                .any(|(source, linked)| source.len() != linked.len())
         {
             return Err(UnsupportedReason::InvalidControlFlow);
         }
+        let mut segments = split_segments(runtime)?;
+        let interpreter_points: Vec<(u32, u32)> = segments
+            .iter()
+            .filter(|segment| matches!(segment.exit, SegmentExit::Interpreter { .. }))
+            .map(|segment| (segment.block, segment.end))
+            .collect();
+        let (states, interpreter_states) = lm_verify::verify_function_states_at_with_bundle(
+            source,
+            input.root.bundle,
+            input.root.source_function,
+            &interpreter_points,
+        )
+        .map_err(|_| UnsupportedReason::MissingSource)?;
+        let interpreter_stacks: HashMap<(u32, u32), Vec<ScalarKind>> = interpreter_points
+            .into_iter()
+            .zip(interpreter_states)
+            .map(|(point, state)| {
+                let state = state.ok_or(UnsupportedReason::InvalidControlFlow)?;
+                let stack = state
+                    .stack()
+                    .iter()
+                    .map(|ty| scalar_kind(source, *ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((point, stack))
+            })
+            .collect::<Result<_, _>>()?;
         let local_kinds = source_func
             .local_types
             .iter()
@@ -459,7 +486,6 @@ impl RegionPlan {
                     .map(|plan| (*function, plan.clone()))
             })
             .collect();
-        let mut segments = split_segments(runtime)?;
         let entries: std::collections::HashMap<(u32, u32), usize> = segments
             .iter()
             .enumerate()
@@ -474,6 +500,7 @@ impl RegionPlan {
         let mut heap_write_sites = 0;
         let mut allocation_sites = 0;
         let mut effect_sites = 0;
+        let mut interpreter_sites = 0;
         let mut active_block = u32::MAX;
         let mut block_stack = Vec::new();
         let analysis_context = SegmentAnalysisContext {
@@ -511,7 +538,14 @@ impl RegionPlan {
                     *value = true;
                 }
             }
-            let analysis = analyze_segment(&analysis_context, segment, &initialized, &block_stack)?;
+            let interpreter_stack = interpreter_stacks.get(&(segment.block, segment.end));
+            let analysis = analyze_segment(
+                &analysis_context,
+                segment,
+                &initialized,
+                &block_stack,
+                interpreter_stack.map(Vec::as_slice),
+            )?;
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
             segment.exit_stack = analysis.exit_stack.clone();
@@ -549,6 +583,7 @@ impl RegionPlan {
             }
             if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
+                interpreter_sites += 1;
             }
             block_stack = analysis.exit_stack;
             max_stack = max_stack.max(analysis.max_stack);
@@ -639,6 +674,7 @@ impl RegionPlan {
             heap_write_sites,
             allocation_sites,
             effect_sites,
+            interpreter_sites,
         })
     }
 
@@ -793,7 +829,7 @@ fn inline_function_plan(
         calls: &calls,
         class_relocation: definition.class_relocation,
     };
-    let analysis = analyze_segment(&context, &segment, &initialized, &[]).ok()?;
+    let analysis = analyze_segment(&context, &segment, &initialized, &[], None).ok()?;
     Some(InlineFunctionPlan {
         params: params.to_vec(),
         local_kinds,
@@ -852,10 +888,16 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 }),
                 Instr::TupleNew { .. } | Instr::ListNew { .. } | Instr::ListPush => {
                     Some(SegmentExit::Interpreter {
-                        fallthrough_ip: instruction_index as u32 + 1,
+                        fallthrough_ip: Some(instruction_index as u32 + 1),
                     })
                 }
                 Instr::Return => Some(SegmentExit::Return),
+                _ if !crate::instruction_has_dedicated_treatment(instruction) => {
+                    Some(SegmentExit::Interpreter {
+                        fallthrough_ip: (instruction_index + 1 < block.len())
+                            .then_some(instruction_index as u32 + 1),
+                    })
+                }
                 _ => None,
             };
             let Some(exit) = exit else { continue };
@@ -911,9 +953,12 @@ fn resolve_successors(
             SegmentExit::Effect { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
-            SegmentExit::Interpreter { fallthrough_ip } => {
-                vec![entry(entries, segment.block, fallthrough_ip)?]
-            }
+            SegmentExit::Interpreter {
+                fallthrough_ip: Some(fallthrough_ip),
+            } => vec![entry(entries, segment.block, fallthrough_ip)?],
+            SegmentExit::Interpreter {
+                fallthrough_ip: None,
+            } => Vec::new(),
             SegmentExit::Return => Vec::new(),
         };
     }
@@ -936,6 +981,7 @@ fn analyze_segment(
     segment: &Segment,
     initialized: &[bool],
     entry_stack: &[ScalarKind],
+    interpreter_exit_stack: Option<&[ScalarKind]>,
 ) -> Result<SegmentAnalysis, UnsupportedReason> {
     let mut stack = entry_stack.to_vec();
     let mut max_stack = stack.len();
@@ -1287,6 +1333,14 @@ fn analyze_segment(
                 if !stack.is_empty() {
                     return Err(UnsupportedReason::InvalidStack);
                 }
+            }
+            _ if matches!(segment.exit, SegmentExit::Interpreter { .. })
+                && offset + 1 == (segment.end - segment.start) as usize =>
+            {
+                boundary_stack = stack.clone();
+                stack = interpreter_exit_stack
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?
+                    .to_vec();
             }
             _ => return Err(UnsupportedReason::UnsupportedInstruction),
         }

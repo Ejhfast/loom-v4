@@ -55,6 +55,7 @@ pub struct JitEngine {
     compiled_heap_write_sites: AtomicU64,
     compiled_allocation_sites: AtomicU64,
     compiled_effect_sites: AtomicU64,
+    compiled_interpreter_sites: AtomicU64,
 }
 
 impl fmt::Debug for JitEngine {
@@ -494,6 +495,8 @@ impl JitEngine {
                     .fetch_add(region.plan.allocation_sites as u64, Ordering::Relaxed);
                 self.compiled_effect_sites
                     .fetch_add(region.plan.effect_sites as u64, Ordering::Relaxed);
+                self.compiled_interpreter_sites
+                    .fetch_add(region.plan.interpreter_sites as u64, Ordering::Relaxed);
                 Ok(Arc::new(region))
             }
             Err(CompileError::Unsupported(_reason)) => Err(Failure::Unsupported),
@@ -512,6 +515,7 @@ impl JitEngine {
             compiled_heap_write_sites: self.compiled_heap_write_sites.load(Ordering::Relaxed),
             compiled_allocation_sites: self.compiled_allocation_sites.load(Ordering::Relaxed),
             compiled_effect_sites: self.compiled_effect_sites.load(Ordering::Relaxed),
+            compiled_interpreter_sites: self.compiled_interpreter_sites.load(Ordering::Relaxed),
         }
     }
 
@@ -525,12 +529,13 @@ impl JitEngine {
         self.compiled_heap_write_sites.store(0, Ordering::Relaxed);
         self.compiled_allocation_sites.store(0, Ordering::Relaxed);
         self.compiled_effect_sites.store(0, Ordering::Relaxed);
+        self.compiled_interpreter_sites.store(0, Ordering::Relaxed);
     }
 }
 
-/// Return true when one function can enter the current native planner.
+/// Return true when one function fits the current native planner limits.
 ///
-/// This check is conservative. Planning can still reject unsupported types.
+/// Planning can still reject unsupported types or function shapes.
 pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
     if function.type_params != 0
         || function.effect_params != 0
@@ -540,20 +545,17 @@ pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
         return false;
     }
     let mut instructions = 0usize;
-    for instruction in function.blocks.iter().flatten() {
+    for _instruction in function.blocks.iter().flatten() {
         instructions = match instructions.checked_add(1) {
             Some(value) if value <= MAX_REGION_INSTRUCTIONS => value,
             _ => return false,
         };
-        if !instruction_is_supported(instruction) {
-            return false;
-        }
     }
     instructions != 0
 }
 
-/// Return true when the current native planner supports one instruction.
-pub fn instruction_is_supported(instruction: &lm_bytecode::Instr) -> bool {
+/// Return true when one instruction has a dedicated JIT treatment.
+pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> bool {
     use lm_bytecode::{Instr, NumericInstr};
 
     matches!(
@@ -587,9 +589,6 @@ pub fn instruction_is_supported(instruction: &lm_bytecode::Instr) -> bool {
             | Instr::TupleGet(_)
             | Instr::ListLen
             | Instr::ListAt
-            | Instr::TupleNew { .. }
-            | Instr::ListNew { .. }
-            | Instr::ListPush
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
             | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
             | Instr::Native(lm_bytecode::NativeInstr::BytesAt)

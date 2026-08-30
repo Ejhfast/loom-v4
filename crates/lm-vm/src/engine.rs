@@ -36,6 +36,7 @@ pub struct EngineMetrics {
     pub compiled_heap_write_sites: u64,
     pub compiled_allocation_sites: u64,
     pub compiled_effect_sites: u64,
+    pub compiled_interpreter_sites: u64,
     pub native_entry_attempts: u64,
     pub guarded_values: u64,
     pub guard_failures: u64,
@@ -51,6 +52,7 @@ pub struct EngineMetrics {
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
     pub native_effect_exits: u64,
+    pub native_interpreter_exits: u64,
     pub unsupported_region_fallbacks: u64,
     pub missing_entry_fallbacks: u64,
     pub backend_unavailable_fallbacks: u64,
@@ -63,6 +65,13 @@ pub struct JitProfileRejection {
     pub estimated_instructions: u64,
 }
 
+/// One weighted instruction without a permanent JIT treatment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitProfileTreatmentGap {
+    pub instruction: String,
+    pub estimated_instructions: u64,
+}
+
 /// One sampled function and its native eligibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitFunctionProfile {
@@ -71,6 +80,7 @@ pub struct JitFunctionProfile {
     pub estimated_instructions: u64,
     pub candidate: bool,
     pub rejections: Vec<String>,
+    pub treatment_gaps: Vec<String>,
 }
 
 /// A sampled native-eligibility profile.
@@ -79,6 +89,7 @@ pub struct JitProfile {
     pub estimated_instructions: u64,
     pub candidate_instructions: u64,
     pub rejections: Vec<JitProfileRejection>,
+    pub treatment_gaps: Vec<JitProfileTreatmentGap>,
     pub hot_functions: Vec<JitFunctionProfile>,
 }
 
@@ -99,6 +110,7 @@ struct EngineCounters {
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
     native_effect_exits: AtomicU64,
+    native_interpreter_exits: AtomicU64,
     unsupported_region_fallbacks: AtomicU64,
     missing_entry_fallbacks: AtomicU64,
     backend_unavailable_fallbacks: AtomicU64,
@@ -116,6 +128,7 @@ impl EngineCounters {
             compiled_heap_write_sites: compiler.compiled_heap_write_sites,
             compiled_allocation_sites: compiler.compiled_allocation_sites,
             compiled_effect_sites: compiler.compiled_effect_sites,
+            compiled_interpreter_sites: compiler.compiled_interpreter_sites,
             native_entry_attempts: read(&self.native_entry_attempts),
             guarded_values: read(&self.guarded_values),
             guard_failures: read(&self.guard_failures),
@@ -131,6 +144,7 @@ impl EngineCounters {
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
             native_effect_exits: read(&self.native_effect_exits),
+            native_interpreter_exits: read(&self.native_interpreter_exits),
             unsupported_region_fallbacks: read(&self.unsupported_region_fallbacks),
             missing_entry_fallbacks: read(&self.missing_entry_fallbacks),
             backend_unavailable_fallbacks: read(&self.backend_unavailable_fallbacks),
@@ -154,6 +168,7 @@ impl EngineCounters {
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
         reset(&self.native_effect_exits);
+        reset(&self.native_interpreter_exits);
         reset(&self.unsupported_region_fallbacks);
         reset(&self.missing_entry_fallbacks);
         reset(&self.backend_unavailable_fallbacks);
@@ -201,6 +216,10 @@ impl EngineCounters {
         );
         add(&self.native_allocations, values.native_allocations);
         add(&self.native_effect_exits, values.native_effect_exits);
+        add(
+            &self.native_interpreter_exits,
+            values.native_interpreter_exits,
+        );
         add(
             &self.unsupported_region_fallbacks,
             values.unsupported_region_fallbacks,
@@ -294,6 +313,10 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_effect_exit(&mut self) {
         self.values.native_effect_exits += 1;
+    }
+
+    pub(crate) fn note_native_interpreter_exit(&mut self) {
+        self.values.native_interpreter_exits += 1;
     }
 
     pub(crate) fn note_unsupported_region_fallback(&mut self) {

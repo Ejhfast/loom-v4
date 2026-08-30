@@ -129,7 +129,8 @@ impl NativeCodeState {
         &self,
         tables: &lm_bytecode::CodeTables,
         profile: &mut crate::JitProfile,
-        totals: &mut BTreeMap<String, u64>,
+        rejection_totals: &mut BTreeMap<String, u64>,
+        treatment_totals: &mut BTreeMap<String, u64>,
     ) {
         for function in 0..self.0.slots.len() {
             let Some(slot) = self.0.slots.get(function) else {
@@ -150,11 +151,19 @@ impl NativeCodeState {
                     profile.candidate_instructions.saturating_add(estimated);
             }
             let rejections = function_rejections(tables, definition, candidate);
+            let treatment_gaps = function_treatment_gaps(definition);
             let unit = estimated / u64::from(slot.event_weight.max(1));
             for (reason, count) in &rejections {
                 let weight = unit.saturating_mul(u64::from(*count));
-                totals
+                rejection_totals
                     .entry(reason.clone())
+                    .and_modify(|current| *current = current.saturating_add(weight))
+                    .or_insert(weight);
+            }
+            for (instruction, count) in &treatment_gaps {
+                let weight = unit.saturating_mul(u64::from(*count));
+                treatment_totals
+                    .entry(instruction.clone())
                     .and_modify(|current| *current = current.saturating_add(weight))
                     .or_insert(weight);
             }
@@ -164,6 +173,10 @@ impl NativeCodeState {
                 estimated_instructions: estimated,
                 candidate,
                 rejections: rejections.into_iter().map(|(reason, _)| reason).collect(),
+                treatment_gaps: treatment_gaps
+                    .into_iter()
+                    .map(|(instruction, _)| instruction)
+                    .collect(),
             });
         }
     }
@@ -442,9 +455,6 @@ fn function_rejections(
         add_reason(&mut reasons, "non-native value type".to_string());
     }
     for instruction in function.blocks.iter().flatten() {
-        if !lm_jit::instruction_is_supported(instruction) {
-            add_reason(&mut reasons, instruction_rejection(instruction));
-        }
         if let lm_bytecode::Instr::Call(target) = instruction {
             let boundary_supported = tables.funcs.get(*target as usize).is_some_and(|callee| {
                 callee
@@ -462,6 +472,16 @@ fn function_rejections(
         add_reason(&mut reasons, "region shape".to_string());
     }
     reasons.into_iter().collect()
+}
+
+fn function_treatment_gaps(function: &lm_bytecode::Func) -> Vec<(String, u32)> {
+    let mut gaps = BTreeMap::<String, u32>::new();
+    for instruction in function.blocks.iter().flatten() {
+        if !lm_jit::instruction_has_dedicated_treatment(instruction) {
+            add_reason(&mut gaps, instruction_rejection(instruction));
+        }
+    }
+    gaps.into_iter().collect()
 }
 
 fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {

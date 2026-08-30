@@ -225,7 +225,7 @@ Faults, effects, and terminal returns always materialize native state.
 
 ## 7. Region plans
 
-A region is one supported function control-flow graph.
+A region is one verified function control-flow graph.
 
 A segment is one fixed-cost path between fuel checkpoints.
 
@@ -239,11 +239,34 @@ Every segment ends at one of these points:
 - a safepoint;
 - a fault;
 - a return;
-- an unsupported instruction.
+- a temporary interpreter site.
 
 Native code can continue through segment edges and loop backedges.
 
 It does not return to Rust after every segment.
+
+Every instruction receives one permanent treatment:
+
+- A: direct register code;
+- B: guarded memory access;
+- C: an inline fast path with one typed slow path;
+- D: a native call with an inline cache;
+- E: one fixed typed runtime function;
+- F: an observable engine exit.
+
+An unfinished treatment uses one temporary interpreter site.
+
+The site exits before the instruction retires.
+
+The interpreter executes exactly that instruction.
+
+The engine then retries native entry at the next program point.
+
+A temporary site never rejects the complete function.
+
+A temporary site does not count as native instruction coverage.
+
+Auto can demote a function with frequent interpreter sites.
 
 A restored machine can name an interior LMBC position.
 
@@ -495,6 +518,12 @@ Common success paths do not call Rust.
 
 A coarse operation can remain one slow call when its work dominates the transition.
 
+A slow path never replaces an opcode with an inline treatment.
+
+Classes A through D never use a runtime stub.
+
+The JIT does not add a stub only to increase a coverage number.
+
 ## 15. Effects and safepoints
 
 An effect always materializes canonical state.
@@ -537,7 +566,9 @@ The cache key includes the arena layout identity.
 
 Auto starts in the interpreter.
 
-A conservative classifier rejects bytecode that the current planner cannot compile.
+A conservative classifier rejects only unsupported types, shapes, and resource sizes.
+
+One missing instruction treatment does not reject a function.
 
 Rejected functions use no hotness counter and cause no compiler probe.
 
@@ -599,6 +630,8 @@ Clock-free counters include:
 - unproductive-entry demotions;
 - native frame-storage growth;
 - native fault exits.
+- compiled interpreter sites;
+- native interpreter exits.
 
 Native coverage counts instructions executed without runtime slow paths.
 
@@ -823,6 +856,20 @@ Gate: JSON and HTTP meet the representative gains.
 
 Gate: One million indexed byte reads improve by more than five times.
 
+### Stage F2: Mixed instruction coverage
+
+- split a region at each instruction without a dedicated treatment;
+- use verifier states at the exact program points;
+- interpret exactly one instruction at each temporary site;
+- retry native entry after that instruction;
+- preserve exact fuel and canonical machine state;
+- count compiled sites and executed exits;
+- demote functions with frequent exits in Auto mode.
+
+Gate: One untreated integer instruction does not reject its function.
+
+Gate: Every fuel boundary matches the interpreter around that instruction.
+
 Gate result: Scheduled byte reads improved 10.42 times in Auto mode.
 
 Scheduler continuation landed before broader collection access.
@@ -940,9 +987,33 @@ The byte-read gate passes.
 
 The representative-program gate remains open.
 
+The Stage F2 run used nine stable scheduler rounds.
+
+One integer bitwise instruction used one temporary site per loop iteration.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bitwise interpreter site | 39.521 ms | 39.495 ms | 116.588 ms | 1.00 times | 0.34 times |
+| Branch-bearing call | 55.676 ms | 11.879 ms | 11.797 ms | 4.69 times | 4.72 times |
+| Deep recursion | 40.381 ms | 27.854 ms | 27.701 ms | 1.45 times | 1.46 times |
+
+Auto recorded no interpreter exits during measured bitwise rounds.
+
+Forced Native recorded one million interpreter exits in each bitwise round.
+
+JSON parse remained within one percent in Auto mode.
+
+HTTP parse remained within one percent in Auto mode.
+
+Forced Native exposes the expected cost of frequent temporary sites.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
+
+A runtime stub cannot replace an opcode with an inline treatment.
+
+A temporary interpreter site cannot count as native coverage.
 
 A parallel side record cannot mirror mutable object layout.
 

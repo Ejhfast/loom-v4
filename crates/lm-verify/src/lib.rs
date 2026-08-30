@@ -107,6 +107,12 @@ impl VerifiedBlockState {
     }
 }
 
+/// Block entries followed by requested instruction-boundary states.
+pub type VerifiedFunctionPointStates = (
+    Vec<Option<VerifiedBlockState>>,
+    Vec<Option<VerifiedBlockState>>,
+);
+
 type State = VerifiedBlockState;
 
 /// The extended type universe: the module table plus the types
@@ -334,6 +340,28 @@ pub fn verify_function_states_with_bundle(
     verify_func(&ctx, func, function)
 }
 
+/// Verify one function and return states at requested instruction boundaries.
+///
+/// Each point is `(block, instruction)`. The instruction can equal the
+/// block length to request its final state. Results preserve input order.
+pub fn verify_function_states_at_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    function: u32,
+    points: &[(u32, u32)],
+) -> Result<VerifiedFunctionPointStates, VerifyError> {
+    let ctx = verify_structure(module, bundle.clone())?;
+    let Some(func) = module.funcs.get(function as usize) else {
+        return Err(err(function, "the function index is out of range"));
+    };
+    if module.extern_funcs()[function as usize] {
+        return Err(err(function, "an imported function has no body"));
+    }
+    let entries = verify_func(&ctx, func, function)?;
+    let requested = func::states_at_points(&ctx, func, function, &entries, points)?;
+    Ok((entries, requested))
+}
+
 /// Validate every module-level rule without the per-function
 /// dataflow: the tables and the entry shape. The verified-code cache
 /// may skip only the dataflow, never this pass, so a hash-equal
@@ -479,6 +507,44 @@ mod tests {
         let returned = states[1].as_ref().expect("the return block is reachable");
         assert_eq!(returned.locals(), &[Some(TY_INT), None]);
         assert!(returned.stack().is_empty());
+    }
+
+    #[test]
+    fn function_metadata_reports_requested_instruction_entries() {
+        let mut module = module_with(vec![vec![ConstInt(7), StoreLocal(0), LoadLocal(0), Return]]);
+        complete_bounds(&mut module);
+        let (blocks, points) = verify_function_states_at_with_bundle(
+            &module,
+            &lm_abi::standard_bundle(),
+            module.entry,
+            &[(0, 0), (0, 2), (0, 4)],
+        )
+        .expect("the requested function metadata verifies");
+        assert_eq!(
+            blocks[0].as_ref().expect("the block is reachable").locals(),
+            &[None, None]
+        );
+        assert_eq!(
+            points[0]
+                .as_ref()
+                .expect("the first point is reachable")
+                .stack(),
+            &[]
+        );
+        assert_eq!(
+            points[1]
+                .as_ref()
+                .expect("the middle point is reachable")
+                .locals(),
+            &[Some(TY_INT), None]
+        );
+        assert_eq!(
+            points[2]
+                .as_ref()
+                .expect("the final point is reachable")
+                .stack(),
+            &[]
+        );
     }
 
     #[test]

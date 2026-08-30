@@ -1018,7 +1018,9 @@ fn emit_segment(
                 let compared = builder.ins().icmp(condition, left, right);
                 stack.push(builder.ins().uextend(types::I64, compared));
             }
-            Instr::Numeric(operation) => {
+            Instr::Numeric(operation)
+                if crate::instruction_has_dedicated_treatment(&instruction) =>
+            {
                 emit_float_instruction(builder, &mut stack, operation)?;
             }
             Instr::Call(_)
@@ -1031,6 +1033,7 @@ fn emit_segment(
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
             | Instr::Return => {}
+            _ if deferred_boundary && matches!(segment.exit, SegmentExit::Interpreter { .. }) => {}
             _ => {
                 return Err(CompileError::Unsupported(
                     UnsupportedReason::UnsupportedInstruction,

@@ -23,6 +23,7 @@ mod world;
 
 pub use engine::{
     Engine, EngineMetrics, EngineMode, JitFunctionProfile, JitProfile, JitProfileRejection,
+    JitProfileTreatmentGap,
 };
 pub use executor::{execute, execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
 pub use host::{

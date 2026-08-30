@@ -180,12 +180,18 @@ impl JitEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut profile = crate::JitProfile::default();
-        let mut totals = std::collections::BTreeMap::new();
+        let mut rejection_totals = std::collections::BTreeMap::new();
+        let mut treatment_totals = std::collections::BTreeMap::new();
         for (tables, state) in layouts.values() {
             let Some(tables) = tables.upgrade() else {
                 continue;
             };
-            state.append_profile(&tables, &mut profile, &mut totals);
+            state.append_profile(
+                &tables,
+                &mut profile,
+                &mut rejection_totals,
+                &mut treatment_totals,
+            );
         }
         profile.hot_functions.sort_by(|left, right| {
             right
@@ -193,7 +199,7 @@ impl JitEngine {
                 .cmp(&left.estimated_instructions)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        profile.rejections = totals
+        profile.rejections = rejection_totals
             .into_iter()
             .map(
                 |(reason, estimated_instructions)| crate::JitProfileRejection {
@@ -207,6 +213,21 @@ impl JitEngine {
                 .estimated_instructions
                 .cmp(&left.estimated_instructions)
                 .then_with(|| left.reason.cmp(&right.reason))
+        });
+        profile.treatment_gaps = treatment_totals
+            .into_iter()
+            .map(
+                |(instruction, estimated_instructions)| crate::JitProfileTreatmentGap {
+                    instruction,
+                    estimated_instructions,
+                },
+            )
+            .collect();
+        profile.treatment_gaps.sort_by(|left, right| {
+            right
+                .estimated_instructions
+                .cmp(&left.estimated_instructions)
+                .then_with(|| left.instruction.cmp(&right.instruction))
         });
         profile
     }
@@ -791,7 +812,8 @@ impl JitEngine {
                     }
                     NativeAttempt::InterpretOne { retired }
                 } else if interpreter {
-                    NativeAttempt::Continue { retired }
+                    metrics.note_native_interpreter_exit();
+                    NativeAttempt::InterpretOne { retired }
                 } else if exit.retired() == batch_fuel {
                     let outcome = if u64::from(instruction_limit) <= original_fuel {
                         Ok(None)

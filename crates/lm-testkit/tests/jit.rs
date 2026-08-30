@@ -236,6 +236,32 @@ fn scalar_loop_fuel_matches_the_interpreter() {
 }
 
 #[test]
+fn one_interpreter_instruction_does_not_reject_the_function() {
+    let source = concat!(
+        "i = 0\ntotal = 0\n",
+        "while i < 1000\n",
+        "  total = total + (i & 7)\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-interpreter-site.lm", source)
+        .expect("the mixed function compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3_500)));
+    assert!(metrics.compiled_interpreter_sites >= 1, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 1_000, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn integer_overflow_matches_the_interpreter() {
     let source = "value = 9223372036854775807\nvalue + 1\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);

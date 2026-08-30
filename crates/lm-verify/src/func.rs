@@ -751,6 +751,73 @@ pub(crate) fn dataflow(
     }
     Ok(states)
 }
+
+/// Replay verified blocks and copy only the requested program-point states.
+pub(crate) fn states_at_points(
+    ctx: &Ctx<'_>,
+    func: &Func,
+    fidx: u32,
+    entries: &[Option<VerifiedBlockState>],
+    points: &[(u32, u32)],
+) -> Result<Vec<Option<VerifiedBlockState>>, VerifyError> {
+    let mut requests = vec![Vec::<(usize, usize)>::new(); func.blocks.len()];
+    for (result, (block, instruction)) in points.iter().copied().enumerate() {
+        let Some(code) = func.blocks.get(block as usize) else {
+            return Err(err(
+                fidx,
+                "a requested state has a block outside the function",
+            ));
+        };
+        let instruction = instruction as usize;
+        if instruction > code.len() {
+            return Err(err(
+                fidx,
+                "a requested state has an instruction outside the block",
+            ));
+        }
+        requests[block as usize].push((instruction, result));
+    }
+    for block in &mut requests {
+        block.sort_unstable_by_key(|(instruction, _)| *instruction);
+    }
+
+    let mut results = vec![None; points.len()];
+    for (block, requests) in requests.iter().enumerate() {
+        if requests.is_empty() {
+            continue;
+        }
+        let Some(mut state) = entries.get(block).and_then(Clone::clone) else {
+            continue;
+        };
+        let code = &func.blocks[block];
+        let mut request = 0usize;
+        for instruction in 0..=code.len() {
+            while requests
+                .get(request)
+                .is_some_and(|(position, _)| *position == instruction)
+            {
+                let result = requests[request].1;
+                results[result] = Some(state.clone());
+                request += 1;
+            }
+            let Some(operation) = code.get(instruction) else {
+                break;
+            };
+            step(
+                ctx,
+                func,
+                fidx,
+                block,
+                instruction,
+                operation,
+                &mut state,
+                |_, _| Ok(()),
+            )?;
+        }
+    }
+    Ok(results)
+}
+
 pub(crate) fn merge(
     ctx: &Ctx<'_>,
     fidx: u32,
