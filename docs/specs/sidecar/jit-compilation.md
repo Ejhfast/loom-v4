@@ -2,7 +2,7 @@
 
 Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and growable activations are implemented.
 
-Direct instance, tuple, and list access use the canonical heap layout.
+Direct instance, tuple, list, and byte access use the canonical heap layout.
 
 Representative-program gains remain.
 
@@ -814,6 +814,17 @@ Gate: Deep recursion remains faster in single-turn and scheduled execution.
 
 Gate: JSON and HTTP meet the representative gains.
 
+### Stage F1: Immutable byte reads
+
+- make the immutable byte view part of the heap ABI;
+- compile byte length and indexed byte reads directly;
+- deoptimize invalid handles and indexes;
+- keep byte storage immutable during native reads.
+
+Gate: One million indexed byte reads improve by more than five times.
+
+Gate result: Scheduled byte reads improved 10.42 times in Auto mode.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -916,6 +927,18 @@ Auto mode avoids that loss through its productive-entry policy.
 The HTTP parser now passes after native continuations return nested object results.
 
 It still gains only 1.01 times in Auto mode.
+
+The direct byte-read pass used the deterministic scheduler.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Byte reads | 69.597 ms | 6.683 ms | 6.578 ms | 10.42 times | 100.00% |
+| JSON parse | 46.387 ms | 48.011 ms | 56.959 ms | 0.97 times | 1.49% |
+| HTTP parse | 43.394 ms | 43.566 ms | 45.819 ms | 1.00 times | 36.57% |
+
+The byte-read gate passes.
+
+The representative-program gate remains open.
 
 ## 24. Rejected designs
 

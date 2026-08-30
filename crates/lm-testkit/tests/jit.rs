@@ -112,6 +112,57 @@ fn scalar_loop_matches_the_interpreter() {
 }
 
 #[test]
+fn byte_reads_match_the_interpreter() {
+    let source = concat!(
+        "def sum_bytes(bytes: Bytes): Int\n",
+        "  total = 0\n",
+        "  pass = 0\n",
+        "  while pass < 1000\n",
+        "    index = 0\n",
+        "    while index < bytes.len()\n",
+        "      total = total + bytes.at(index)\n",
+        "      index = index + 1\n",
+        "    end\n",
+        "    pass = pass + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "sum_bytes(Bytes(\"loom\"))\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(439_000)));
+    assert!(metrics.native_retired_instructions > 50_000, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+}
+
+#[test]
+fn byte_index_faults_match_the_interpreter() {
+    for index in [-1, 4] {
+        let source = format!(
+            concat!(
+                "def read(bytes: Bytes): Int\n",
+                "  spin = 0\n",
+                "  while spin < 1000\n",
+                "    spin = spin + 1\n",
+                "  end\n",
+                "  bytes.at({})\n",
+                "end\n",
+                "read(Bytes(\"loom\"))\n",
+            ),
+            index
+        );
+        let (interpreted, _, interpreted_dump) = run(&source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(&source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted);
+        assert_eq!(native_dump, interpreted_dump);
+        assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    }
+}
+
+#[test]
 fn auto_mode_compiles_only_after_interpreted_work() {
     let (interpreted, _, interpreted_dump) = run(SCALAR_LOOP, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(SCALAR_LOOP, EngineMode::Auto, u64::MAX);

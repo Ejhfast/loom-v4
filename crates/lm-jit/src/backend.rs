@@ -23,12 +23,13 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
-use lm_bytecode::{ExtendedInstr, Func, Instr, NumericInstr};
+use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
-    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST,
-    JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TUPLE_ITEMS_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
+    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
+    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_BYTES, JIT_OBJECT_INSTANCE,
+    JIT_OBJECT_LIST, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TUPLE_ITEMS_OFFSET,
     VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
@@ -857,6 +858,60 @@ fn emit_segment(
                     },
                 )?;
                 stack.push(builder.ins().iconst(types::I64, 0));
+            }
+            Instr::Native(NativeInstr::BytesLen) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::BytesLen) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_bytes_len(
+                    builder,
+                    values,
+                    reference,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                stack.push(value);
+            }
+            Instr::Native(NativeInstr::BytesAt) => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::BytesAt) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_bytes_at(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                stack.push(value);
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -2118,6 +2173,65 @@ fn emit_list_set(
     emit_store_value(builder, address, stored, contract.kind)
 }
 
+fn emit_bytes_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTES,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let len = load_value(builder, values.pointer_type, entry, JIT_BYTES_LEN_OFFSET)?;
+    Ok(if values.pointer_type == types::I64 {
+        len
+    } else {
+        builder.ins().uextend(types::I64, len)
+    })
+}
+
+fn emit_bytes_at(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTES,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let len = load_value(builder, values.pointer_type, entry, JIT_BYTES_LEN_OFFSET)?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+    let invalid = builder.ins().bor(negative, outside);
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+    let data = load_value(builder, values.pointer_type, entry, JIT_BYTES_DATA_OFFSET)?;
+    let address = builder.ins().iadd(data, index);
+    let byte = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
+    Ok(builder.ins().uextend(types::I64, byte))
+}
+
 fn emit_mutable_guard(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -2239,6 +2353,7 @@ fn emit_value_contract(
         ObjectContract::Instance(_) => JIT_OBJECT_INSTANCE,
         ObjectContract::List => JIT_OBJECT_LIST,
         ObjectContract::Tuple => JIT_OBJECT_TUPLE,
+        ObjectContract::Bytes => JIT_OBJECT_BYTES,
     };
     let entry = emit_object_entry(
         builder,

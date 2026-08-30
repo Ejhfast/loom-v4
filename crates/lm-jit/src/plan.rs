@@ -1,7 +1,7 @@
 //! Verified bytecode analysis and immutable native region plans.
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
-use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NumericInstr};
+use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr, NumericInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -301,6 +301,7 @@ pub(super) enum ObjectContract {
     Instance(u32),
     List,
     Tuple,
+    Bytes,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +330,8 @@ pub(super) enum HeapAccessKind {
     ListSet {
         value: ValueContract,
     },
+    BytesLen,
+    BytesAt,
 }
 
 #[derive(Debug, Clone)]
@@ -806,9 +809,13 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(BcType::Class(_) | BcType::Inst(_, _) | BcType::List(_) | BcType::Tuple(_)) => {
-            Ok(ScalarKind::Object(ty))
-        }
+        Some(
+            BcType::Class(_)
+            | BcType::Inst(_, _)
+            | BcType::List(_)
+            | BcType::Tuple(_)
+            | BcType::Bytes,
+        ) => Ok(ScalarKind::Object(ty)),
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
         _ => Err(UnsupportedReason::NonScalarType),
     }
@@ -1078,6 +1085,29 @@ fn analyze_segment(
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(ScalarKind::Unit);
             }
+            Instr::Native(NativeInstr::BytesLen) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                bytes_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::BytesLen,
+                });
+                stack.push(ScalarKind::Int);
+            }
+            Instr::Native(NativeInstr::BytesAt) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                bytes_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::BytesAt,
+                });
+                stack.push(ScalarKind::Int);
+            }
             Instr::TupleNew { count, .. } => {
                 let Instr::TupleNew {
                     ty: source_ty,
@@ -1330,6 +1360,16 @@ fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, Unsup
     }
 }
 
+fn bytes_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    match module.types.get(ty as usize) {
+        Some(BcType::Bytes) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
 fn value_contract(
     context: &SegmentAnalysisContext<'_>,
     ty: u32,
@@ -1341,6 +1381,7 @@ fn value_contract(
         ),
         Some(BcType::List(_)) => Some(ObjectContract::List),
         Some(BcType::Tuple(_)) => Some(ObjectContract::Tuple),
+        Some(BcType::Bytes) => Some(ObjectContract::Bytes),
         _ => None,
     };
     Ok(ValueContract { kind, object })

@@ -26,6 +26,7 @@ pub use shape::{
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
+use shared::{SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET};
 use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
     ValueArray, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
@@ -227,6 +228,8 @@ pub const JIT_OBJECT_INSTANCE: u32 = 1;
 pub const JIT_OBJECT_LIST: u32 = 2;
 /// Stable tag of one tuple.
 pub const JIT_OBJECT_TUPLE: u32 = 4;
+/// Stable tag of immutable binary data.
+pub const JIT_OBJECT_BYTES: u32 = 8;
 /// Byte offset of an instance class.
 pub const JIT_INSTANCE_CLASS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
@@ -241,6 +244,12 @@ pub const JIT_LIST_ITEMS_OFFSET: usize =
 /// Byte offset of a tuple item array.
 pub const JIT_TUPLE_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(TupleLayout, items);
+/// Byte offset of the immutable byte data pointer.
+pub const JIT_BYTES_DATA_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_BYTES_DATA_OFFSET;
+/// Byte offset of the immutable byte length.
+pub const JIT_BYTES_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_BYTES_LEN_OFFSET;
 
 const _: () = assert!(JIT_ENTRY_GENERATION_OFFSET == 0);
 const _: () = assert!(std::mem::size_of::<Header>() == shape::HEADER_COST);
@@ -1248,6 +1257,33 @@ mod tests {
             JIT_TUPLE_ITEMS_OFFSET
         );
         assert_eq!(live.header.frozen, 1);
+    }
+
+    #[test]
+    fn native_bytes_layout_names_the_immutable_view() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Bytes(SharedBytes::from(&[3, 5, 8])));
+        let entry = heap.entry(reference.slot);
+        let base = std::ptr::from_ref(entry) as usize;
+        let Object::Bytes(bytes) = heap.get(reference) else {
+            panic!("the object remains binary data");
+        };
+
+        // SAFETY: The constants name initialized fields of this live entry.
+        unsafe {
+            assert_eq!(
+                ((base + JIT_ENTRY_OBJECT_TAG_OFFSET) as *const u32).read(),
+                JIT_OBJECT_BYTES
+            );
+            let data = ((base + JIT_BYTES_DATA_OFFSET) as *const usize).read();
+            let len = ((base + JIT_BYTES_LEN_OFFSET) as *const usize).read();
+            assert_eq!(data, bytes.as_slice().as_ptr() as usize);
+            assert_eq!(len, bytes.len());
+            assert_eq!(
+                std::slice::from_raw_parts(data as *const u8, len),
+                [3, 5, 8]
+            );
+        }
     }
 
     #[test]

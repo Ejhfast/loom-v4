@@ -591,6 +591,8 @@ pub fn instruction_is_supported(instruction: &lm_bytecode::Instr) -> bool {
             | Instr::ListNew { .. }
             | Instr::ListPush
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
+            | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
+            | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)

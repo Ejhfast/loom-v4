@@ -435,11 +435,11 @@ pub enum Object {
         env: Witness,
     } = 5,
     /// A string builder.
-    StrBuilder(NativeStringBuilder),
+    StrBuilder(NativeStringBuilder) = 6,
     /// A byte buffer.
-    ByteBuf(NativeByteBuffer),
+    ByteBuf(NativeByteBuffer) = 7,
     /// Immutable binary data. Born frozen.
-    Bytes(SharedBytes),
+    Bytes(SharedBytes) = 8,
     /// A holder-local handle to one persistent VM image.
     NativeVm { image: u32, generation: u32 },
     /// A holder-local handle to one active or stopped invocation.

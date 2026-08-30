@@ -1575,6 +1575,24 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_bytes_read",
+        concat!(
+            "def scan(bytes: Bytes): Int\n",
+            "  total = 0\n  round = 0\n",
+            "  while round < 250000\n",
+            "    index = 0\n",
+            "    while index < bytes.len()\n",
+            "      total = total + bytes.at(index)\n",
+            "      index = index + 1\n",
+            "    end\n",
+            "    round = round + 1\n",
+            "  end\n",
+            "  total\n",
+            "end\n",
+            "scan(Bytes(\"loom\"))\n",
+        ),
+    );
+    report_jit_representative(
         "jit_json_parse",
         r#"
 use std.json.Json

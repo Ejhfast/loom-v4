@@ -177,24 +177,37 @@ impl ByteStorage {
 
 /// One visible range inside a shared byte allocation.
 #[derive(Debug, Clone)]
+#[repr(C)]
 struct ByteSpan {
-    storage: ByteStorage,
-    start: usize,
+    /// The visible bytes are immutable while `storage` owns them.
+    data: usize,
     len: usize,
+    storage: ByteStorage,
 }
 
 impl ByteSpan {
     fn from_vec(data: Vec<u8>) -> ByteSpan {
         let len = data.len();
-        ByteSpan {
-            storage: ByteStorage::Binary(Arc::new(BinaryAllocation::new(data))),
-            start: 0,
-            len,
+        let storage = ByteStorage::Binary(Arc::new(BinaryAllocation::new(data)));
+        ByteSpan::from_storage(storage, 0, len).expect("the complete allocation is one span")
+    }
+
+    fn from_storage(storage: ByteStorage, start: usize, len: usize) -> Option<ByteSpan> {
+        let end = start.checked_add(len)?;
+        let bytes = storage.as_slice();
+        if end > bytes.len() {
+            return None;
         }
+        Some(ByteSpan {
+            data: bytes.as_ptr().wrapping_add(start) as usize,
+            len,
+            storage,
+        })
     }
 
     fn as_slice(&self) -> &[u8] {
-        &self.storage.as_slice()[self.start..self.start + self.len]
+        // SAFETY: `storage` owns immutable bytes at this address.
+        unsafe { std::slice::from_raw_parts(self.data as *const u8, self.len) }
     }
 
     fn slice(&self, start: usize, end: usize) -> Option<ByteSpan> {
@@ -202,9 +215,9 @@ impl ByteSpan {
             return None;
         }
         Some(ByteSpan {
-            storage: self.storage.clone(),
-            start: self.start + start,
+            data: self.data.checked_add(start)?,
             len: end - start,
+            storage: self.storage.clone(),
         })
     }
 
@@ -293,11 +306,9 @@ impl TextRoot {
             return None;
         }
         match &self.storage {
-            TextRootStorage::Owned(_) => Some(ByteSpan {
-                storage: ByteStorage::Text(self.clone()),
-                start,
-                len: end - start,
-            }),
+            TextRootStorage::Owned(_) => {
+                ByteSpan::from_storage(ByteStorage::Text(self.clone()), start, end - start)
+            }
             TextRootStorage::Shared(span) => span.slice(start, end),
         }
     }
@@ -340,17 +351,21 @@ impl SharedText {
     fn from_valid_span(span: ByteSpan) -> SharedText {
         if let ByteStorage::Text(root) = &span.storage {
             let text = root.as_str();
+            let byte_start = span
+                .data
+                .checked_sub(text.as_ptr() as usize)
+                .expect("a shared text span stays inside its root");
             let scalar_start = root
                 .metadata
-                .scalar_of_byte(text, span.start)
+                .scalar_of_byte(text, byte_start)
                 .expect("a valid text span starts at a scalar boundary");
             let scalar_end = root
                 .metadata
-                .scalar_of_byte(text, span.start + span.len)
+                .scalar_of_byte(text, byte_start + span.len)
                 .expect("a valid text span ends at a scalar boundary");
             return SharedText {
                 root: root.clone(),
-                byte_start: span.start,
+                byte_start,
                 byte_len: span.len,
                 scalar_start,
                 scalar_len: scalar_end - scalar_start,
@@ -735,12 +750,20 @@ impl Hash for SharedText {
 }
 
 /// Immutable binary data with shared storage and cached hashes.
+#[repr(C)]
 pub struct SharedBytes {
     span: ByteSpan,
     semantic_hash: AtomicU64,
     lookup_hash: AtomicU64,
     utf8_state: AtomicU8,
 }
+
+/// Byte offset of the immutable byte data pointer.
+pub const SHARED_BYTES_DATA_OFFSET: usize =
+    std::mem::offset_of!(SharedBytes, span) + std::mem::offset_of!(ByteSpan, data);
+/// Byte offset of the immutable byte length.
+pub const SHARED_BYTES_LEN_OFFSET: usize =
+    std::mem::offset_of!(SharedBytes, span) + std::mem::offset_of!(ByteSpan, len);
 
 impl SharedBytes {
     /// Make an empty byte value.
