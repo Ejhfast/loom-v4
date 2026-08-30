@@ -1360,26 +1360,7 @@ fn emit_native_call(
     builder.switch_to_block(invoke);
     emit_charge(builder, values, 1);
     let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
-    let frame_is_earlier = builder
-        .ins()
-        .icmp(IntCC::UnsignedLessThan, frame_len, prior_changed);
-    let changed_from = builder
-        .ins()
-        .select(frame_is_earlier, frame_len, prior_changed);
-    store_activation_u32(
-        builder,
-        values,
-        RawActivationField::ChangedFrom,
-        changed_from,
-    )?;
-    emit_spill_frame(builder, values, block, instruction + 1, &caller_stack)?;
     let caller_frame = emit_current_frame_pointer(builder, values)?;
-    store_i32_constant(
-        builder,
-        caller_frame,
-        mem::offset_of!(RawNativeFrame, resume_entry),
-        successor_entry,
-    )?;
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
     let scalar_base = scalar_len;
@@ -1533,6 +1514,32 @@ fn emit_native_call(
         .brif(normal_return, returned, &[], propagate, &[]);
 
     builder.switch_to_block(propagate);
+    let frame_is_earlier = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, frame_len, prior_changed);
+    let changed_from = builder
+        .ins()
+        .select(frame_is_earlier, frame_len, prior_changed);
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::ChangedFrom,
+        changed_from,
+    )?;
+    emit_spill_frame_to(
+        builder,
+        values,
+        caller_frame,
+        block,
+        instruction + 1,
+        &caller_stack,
+    )?;
+    store_i32_constant(
+        builder,
+        caller_frame,
+        mem::offset_of!(RawNativeFrame, resume_entry),
+        successor_entry,
+    )?;
     store_i64(
         builder,
         values.exit_pointer,
@@ -2665,17 +2672,45 @@ fn emit_function_return(
     stack: &[ir::Value],
 ) -> Result<(), CompileError> {
     let normal = builder.create_block();
+    let direct = builder.create_block();
+    let parent_return = builder.create_block();
     let lookup = builder.create_block();
     let tail = builder.create_block();
     let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
     let has_parent = builder
         .ins()
         .icmp_imm(IntCC::UnsignedGreaterThan, frame_len, 1);
+    builder
+        .ins()
+        .brif(has_parent, parent_return, &[], normal, &[]);
+
+    builder.switch_to_block(parent_return);
     let detached = builder
         .ins()
         .icmp_imm(IntCC::NotEqual, values.detached_return, 0);
-    let tail_return = builder.ins().band(has_parent, detached);
-    builder.ins().brif(tail_return, lookup, &[], normal, &[]);
+    builder.ins().brif(detached, lookup, &[], direct, &[]);
+
+    builder.switch_to_block(direct);
+    let retired = builder.use_var(values.retired);
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, retired),
+        retired,
+    )?;
+    store_i32_constant(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, kind),
+        EXIT_RETURN,
+    )?;
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, result),
+        result,
+    )?;
+    builder.ins().return_(&[]);
 
     builder.switch_to_block(lookup);
     let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
@@ -2844,6 +2879,18 @@ fn emit_spill_frame(
     instruction: u32,
     stack: &[ir::Value],
 ) -> Result<(), CompileError> {
+    let frame = emit_current_frame_pointer(builder, values)?;
+    emit_spill_frame_to(builder, values, frame, block, instruction, stack)
+}
+
+fn emit_spill_frame_to(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    frame: ir::Value,
+    block: u32,
+    instruction: u32,
+    stack: &[ir::Value],
+) -> Result<(), CompileError> {
     for (slot, variable) in values.locals.iter().copied().enumerate() {
         let value = builder.use_var(variable);
         let state = builder.use_var(values.local_states[slot]);
@@ -2867,7 +2914,6 @@ fn emit_spill_frame(
             .ins()
             .store(MemFlags::new(), value, values.stack_pointer, offset);
     }
-    let frame = emit_current_frame_pointer(builder, values)?;
     store_i32_constant(
         builder,
         frame,

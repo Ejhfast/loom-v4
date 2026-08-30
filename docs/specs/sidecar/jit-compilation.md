@@ -171,6 +171,14 @@ A native return pops one native frame.
 
 Recursion uses the same calling convention.
 
+A successful call keeps the caller's live values in native registers.
+
+A successful return does not spill the completed child frame.
+
+An exceptional exit spills each suspended frame while the native calls unwind.
+
+The frame table stores deoptimization state, limits, and continuation positions.
+
 A resumed return tail-calls the saved parent entry.
 
 The final exit uses the active frame's result type.
@@ -785,6 +793,18 @@ Gate result: Deep recursion improved 1.28 times in Native mode.
 
 Gate result: Quick exits remained within three percent in Auto mode.
 
+### Stage E3: Lazy native call state
+
+- keep caller values native across successful calls;
+- avoid child spills on successful returns;
+- spill suspended frames only during exceptional exits;
+- preserve exact faults, effects, fuel, and scheduler continuation;
+- measure shallow and deep non-inline calls.
+
+Gate: A branch-bearing native call improves by more than four times.
+
+Gate: Deep recursion remains faster in single-turn and scheduled execution.
+
 ### Stage F: Representative programs
 
 - measure the complete corpus;
@@ -878,6 +898,17 @@ It used nine stable warm rounds after all native compilation stopped.
 | Quick exits | 3.604 ms | 3.711 ms | 9.056 ms | 0.97 times |
 | Class initialization | 110.204 ms | 41.271 ms | 40.609 ms | 2.67 times |
 
+The lazy-call pass produced these focused release rows.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Branch-bearing call | 52.929 ms | 9.539 ms | 5.55 times |
+| Deep recursion | 36.029 ms | 9.309 ms | 3.87 times |
+
+The scheduled branch-bearing call improved 4.68 times.
+
+The scheduled deep-recursion row improved 1.29 times.
+
 Forced Native mode exposes the expected quick-exit loss.
 
 Auto mode avoids that loss through its productive-entry policy.
@@ -903,6 +934,8 @@ Specialization cannot occur before a cache hit.
 Every eligible function cannot compile on its first entry.
 
 A call cannot materialize canonical state.
+
+A successful call cannot spill a complete caller or child frame.
 
 A scheduler continuation cannot keep stale duplicate scalar state.
 
