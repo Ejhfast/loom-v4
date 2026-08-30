@@ -509,8 +509,8 @@ impl JitEngine {
                     .zip(entry.live_locals().iter().copied())
                     .enumerate()
                 {
-                    let complete_root =
-                        region.requires_complete_roots() && matches!(kind, ScalarKind::Object(_));
+                    let complete_root = region.requires_complete_roots()
+                        && matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_));
                     if !live && !complete_root {
                         continue;
                     }

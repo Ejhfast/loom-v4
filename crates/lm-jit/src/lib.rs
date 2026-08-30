@@ -33,12 +33,14 @@ const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 mod activation;
 
 use activation::{
-    allocate_instance, NativeFunction, RawAllocationContext, RawExit, RawNativeActivation,
+    allocate_instance, grow_list, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
+    RawRuntimeContext,
 };
 pub use activation::{
-    AllocationResult, AllocationRuntime, NativeActivation, NativeExecution, NativeFrameView,
-    NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut,
-    NativeTypeEnvironmentCache, NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    AllocationResult, ListGrowthRequest, ListGrowthResult, NativeActivation, NativeExecution,
+    NativeFrameView, NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut,
+    NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -197,7 +199,7 @@ impl CompiledRegion {
     /// Return true when native execution can collect this machine.
     #[inline(always)]
     pub fn requires_complete_roots(&self) -> bool {
-        self.plan.allocation_sites != 0
+        self.plan.allocation_sites != 0 || self.plan.collection_sites != 0
     }
 
     /// Return true when this region reads the direct heap view.
@@ -347,7 +349,7 @@ impl CompiledRegion {
 
     /// Execute native code over explicit scalar buffers.
     #[inline(always)]
-    pub fn execute<R: AllocationRuntime>(
+    pub fn execute<R: NativeRuntime>(
         &self,
         runtime: &mut R,
         activation: &mut NativeActivation,
@@ -387,6 +389,7 @@ impl CompiledRegion {
             || roots.len() < self.plan.max_roots.max(1)
             || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
+            || (self.plan.collection_sites != 0 && heap.used_bytes.is_null())
             || (!self.type_environment_sites.is_empty()
                 && (type_store_id == 0 || type_environments.entries.is_null()))
         {
@@ -423,6 +426,8 @@ impl CompiledRegion {
             heap_pages: heap.pages,
             heap_page_count: heap.page_count,
             heap_slot_count: heap.slot_count,
+            heap_used_bytes: heap.used_bytes,
+            heap_collection_threshold: heap.collection_threshold,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
             option_families: option_families.as_ptr(),
@@ -435,13 +440,17 @@ impl CompiledRegion {
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
-        let mut allocation_context = RawAllocationContext {
+        let mut runtime_context = RawRuntimeContext {
             runtime: std::ptr::from_mut(runtime),
             activation: std::ptr::from_mut(&mut raw_activation),
             roots: roots.as_ptr(),
             root_tags: root_tags.as_ptr(),
             root_states: root_states.as_ptr(),
             root_capacity: self.plan.max_roots,
+        };
+        let runtime_functions = RawNativeFunctions {
+            allocate_instance: allocate_instance::<R>,
+            grow_list: grow_list::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {
@@ -471,8 +480,8 @@ impl CompiledRegion {
                 operand_tag_pointer,
                 fuel,
                 entry,
-                std::ptr::from_mut(&mut allocation_context).cast::<c_void>(),
-                allocate_instance::<R>,
+                std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
+                std::ptr::from_ref(&runtime_functions),
                 std::ptr::from_mut(&mut allocation_result),
                 roots.as_mut_ptr(),
                 root_tags.as_mut_ptr(),
@@ -658,6 +667,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::CastType(_)
             | Instr::ListLen
             | Instr::ListAt
+            | Instr::ListPush
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListGet { .. })
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListCapacity)

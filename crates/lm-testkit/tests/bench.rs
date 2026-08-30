@@ -1475,6 +1475,17 @@ fn bench_jit_scalar_regions() {
         64,
     );
     report_jit(
+        "jit_list_push",
+        concat!(
+            "items: [Int] = []\ni = 0\n",
+            "while i < 100000\n",
+            "  items.push(i)\n",
+            "  i = i + 1\n",
+            "end\nitems.len()\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_allocation",
         concat!(
             "class Token\nend\n",

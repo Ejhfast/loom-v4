@@ -370,6 +370,9 @@ pub(super) enum HeapAccessKind {
     ListSet {
         value: ValueContract,
     },
+    ListPush {
+        value: ValueContract,
+    },
     ListCapacity,
     ListEpoch,
     ListIterLen,
@@ -454,6 +457,7 @@ pub(super) struct RegionPlan {
     pub(super) heap_read_sites: usize,
     pub(super) heap_write_sites: usize,
     pub(super) allocation_sites: usize,
+    pub(super) collection_sites: usize,
     pub(super) effect_sites: usize,
     pub(super) interpreter_sites: usize,
 }
@@ -591,6 +595,7 @@ impl RegionPlan {
         let mut heap_read_sites = 0;
         let mut heap_write_sites = 0;
         let mut allocation_sites = 0;
+        let mut collection_sites = 0;
         let mut effect_sites = 0;
         let mut interpreter_sites = 0;
         let analysis_context = SegmentAnalysisContext {
@@ -639,9 +644,13 @@ impl RegionPlan {
                 match access.kind {
                     HeapAccessKind::StoreField { .. }
                     | HeapAccessKind::ListSet { .. }
+                    | HeapAccessKind::ListPush { .. }
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
+                        if matches!(access.kind, HeapAccessKind::ListPush { .. }) {
+                            collection_sites += 1;
+                        }
                     }
                     _ => heap_read_sites += 1,
                 }
@@ -760,6 +769,7 @@ impl RegionPlan {
             heap_read_sites,
             heap_write_sites,
             allocation_sites,
+            collection_sites,
             effect_sites,
             interpreter_sites,
         })
@@ -1090,11 +1100,9 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 Instr::Perform { .. } | Instr::PerformValue { .. } => Some(SegmentExit::Effect {
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
-                Instr::TupleNew { .. } | Instr::ListNew { .. } | Instr::ListPush => {
-                    Some(SegmentExit::Interpreter {
-                        fallthrough_ip: Some(instruction_index as u32 + 1),
-                    })
-                }
+                Instr::TupleNew { .. } | Instr::ListNew { .. } => Some(SegmentExit::Interpreter {
+                    fallthrough_ip: Some(instruction_index as u32 + 1),
+                }),
                 Instr::Return => Some(SegmentExit::Return),
                 Instr::Unreachable => Some(SegmentExit::Unreachable),
                 _ if !crate::instruction_has_dedicated_treatment(instruction) => {
@@ -1619,13 +1627,21 @@ fn analyze_segment(
                 stack.push(ScalarKind::Object(source_ty));
             }
             Instr::ListPush => {
-                boundary_stack = stack.clone();
+                let instruction = segment.start + offset as u32;
+                let replay_stack = stack.clone();
                 let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
                 let element = list_element_type(context.module, receiver)?;
-                if value != scalar_kind(context.module, element)? {
+                let contract = value_contract(context, element)?;
+                if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListPush { value: contract },
+                });
+                replay_stacks.push((instruction, replay_stack));
+                fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(ScalarKind::Unit);
             }
             Instr::New(_) | Instr::NewG { .. } => {

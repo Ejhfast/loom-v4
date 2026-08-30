@@ -1,8 +1,8 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, RawTypeEnvironmentCacheEntry,
-    ALLOCATION_HEAP_LIMIT, ALLOCATION_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
+    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, RawNativeFunctions,
+    RawTypeEnvironmentCacheEntry, RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract,
@@ -28,7 +28,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
     JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
     JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
     JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_BYTES,
@@ -218,13 +218,14 @@ struct NativeValues<'a> {
     local_state_pointer: ir::Value,
     stack_pointer: ir::Value,
     stack_tag_pointer: ir::Value,
-    allocation_context: ir::Value,
-    allocate_instance: ir::Value,
+    runtime_context: ir::Value,
+    runtime_functions: ir::Value,
     allocation_result_pointer: ir::Value,
     root_pointer: ir::Value,
     root_tag_pointer: ir::Value,
     root_state_pointer: ir::Value,
     allocation_signature: ir::SigRef,
+    list_growth_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -343,6 +344,18 @@ fn emit_region(
         .push(AbiParam::new(pointer_type));
     allocation_signature.returns.push(AbiParam::new(types::I32));
     let allocation_signature = builder.import_signature(allocation_signature);
+    let mut list_growth_signature = ir::Signature::new(host_call_conv);
+    list_growth_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    list_growth_signature.params.push(AbiParam::new(types::I64));
+    list_growth_signature.params.push(AbiParam::new(types::I64));
+    list_growth_signature.params.push(AbiParam::new(types::I64));
+    list_growth_signature.params.push(AbiParam::new(types::I32));
+    list_growth_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let list_growth_signature = builder.import_signature(list_growth_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -392,8 +405,8 @@ fn emit_region(
     let stack_tag_pointer = parameters[4];
     let initial_fuel = parameters[5];
     let entry = parameters[6];
-    let allocation_context = parameters[7];
-    let allocate_instance = parameters[8];
+    let runtime_context = parameters[7];
+    let runtime_functions = parameters[8];
     let allocation_result_pointer = parameters[9];
     let root_pointer = parameters[10];
     let root_tag_pointer = parameters[11];
@@ -468,13 +481,14 @@ fn emit_region(
         local_state_pointer,
         stack_pointer,
         stack_tag_pointer,
-        allocation_context,
-        allocate_instance,
+        runtime_context,
+        runtime_functions,
         allocation_result_pointer,
         root_pointer,
         root_tag_pointer,
         root_state_pointer,
         allocation_signature,
+        list_growth_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -1233,6 +1247,63 @@ fn emit_segment(
                 let unit = builder.ins().iconst(types::I64, 0);
                 push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
             }
+            Instr::ListPush => {
+                let deopt_stack = stack.clone();
+                let stored = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::ListPush { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let root_kinds = segment
+                    .replay_stacks
+                    .iter()
+                    .find(|(position, _)| *position == instruction)
+                    .map(|(_, stack)| stack.as_slice())
+                    .ok_or(CompileError::Backend)?;
+                let mut roots = Vec::new();
+                for (slot, (kind, variable)) in plan
+                    .local_kinds
+                    .iter()
+                    .copied()
+                    .zip(values.locals.iter().copied())
+                    .enumerate()
+                {
+                    if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+                        roots.push(NativeRoot {
+                            bits: builder.use_var(variable),
+                            tag: builder.use_var(values.local_tags[slot]),
+                            state: Some(builder.use_var(values.local_states[slot])),
+                        });
+                    }
+                }
+                extend_stack_roots(&mut roots, root_kinds, &deopt_stack)?;
+                emit_list_push(
+                    builder,
+                    values,
+                    reference,
+                    stored,
+                    value,
+                    &roots,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
+            }
             Instr::Extended(ExtendedInstr::ListCapacity) => {
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
@@ -1616,7 +1687,6 @@ fn emit_segment(
             | Instr::PerformValue { .. }
             | Instr::TupleNew { .. }
             | Instr::ListNew { .. }
-            | Instr::ListPush
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
@@ -2358,8 +2428,8 @@ fn emit_native_call(
             child_operand_tags,
             child_fuel,
             zero_entry,
-            values.allocation_context,
-            values.allocate_instance,
+            values.runtime_context,
+            values.runtime_functions,
             values.allocation_result_pointer,
             values.root_pointer,
             values.root_tag_pointer,
@@ -2572,10 +2642,9 @@ fn emit_inline_call(
                 let environment = builder.ins().iconst(types::I32, 0);
                 let (status, value) =
                     emit_allocation_call(builder, values, class, environment, &roots, false)?;
-                let replay =
-                    builder
-                        .ins()
-                        .icmp_imm(IntCC::NotEqual, status, i64::from(ALLOCATION_OK));
+                let replay = builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
                 emit_fault_check(
                     builder,
                     values,
@@ -3280,6 +3349,132 @@ fn emit_list_set(
     let index = emit_checked_list_index(builder, values, entry, index, exit)?;
     let address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, index)?;
     emit_store_value(builder, address, stored, contract.kind)
+}
+
+fn emit_list_push(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    stored: NativeValue,
+    contract: ValueContract,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    emit_value_contract(
+        builder,
+        values,
+        stored.bits,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    let epoch = load_value(builder, types::I32, entry, JIT_LIST_EPOCH_OFFSET)?;
+    let epoch_exhausted = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, epoch, i64::from(u32::MAX));
+    emit_interpreter_replay(
+        builder,
+        values,
+        epoch_exhausted,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_CAPACITY_OFFSET,
+    )?;
+    let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
+    let used_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = builder
+        .ins()
+        .load(values.pointer_type, MemFlags::new(), used_pointer, 0);
+    let next_used = builder.ins().iadd_imm(used, VALUE_SIZE as i64);
+    let charge_overflow = builder.ins().icmp(IntCC::UnsignedLessThan, next_used, used);
+    let threshold = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_collection_threshold),
+    )?;
+    let collection_due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, next_used, threshold);
+    let slow_charge = builder.ins().bor(charge_overflow, collection_due);
+    let fast_charge = builder.ins().bxor_imm(slow_charge, 1);
+    let fast = builder.ins().band(has_capacity, fast_charge);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let done = builder.create_block();
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, len)?;
+    emit_store_value(builder, address, stored, contract.kind)?;
+    let next_len = builder.ins().iadd_imm(len, 1);
+    let len_offset = i32::try_from(JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_LEN_OFFSET)
+        .map_err(|_| CompileError::Backend)?;
+    builder
+        .ins()
+        .store(MemFlags::new(), next_len, entry, len_offset);
+    let tracked = builder.ins().icmp_imm(IntCC::NotEqual, epoch, 0);
+    let next_epoch = builder.ins().iadd_imm(epoch, 1);
+    let next_epoch = builder.ins().select(tracked, next_epoch, epoch);
+    store_i32_value(builder, entry, JIT_LIST_EPOCH_OFFSET, next_epoch)?;
+    let object_bytes = load_value(builder, values.pointer_type, entry, JIT_ENTRY_BYTES_OFFSET)?;
+    let object_bytes = builder.ins().iadd_imm(object_bytes, VALUE_SIZE as i64);
+    let bytes_offset = i32::try_from(JIT_ENTRY_BYTES_OFFSET).map_err(|_| CompileError::Backend)?;
+    builder
+        .ins()
+        .store(MemFlags::new(), object_bytes, entry, bytes_offset);
+    builder
+        .ins()
+        .store(MemFlags::new(), next_used, used_pointer, 0);
+    builder.ins().jump(done, &[]);
+
+    builder.switch_to_block(slow_block);
+    let status = emit_list_growth_call(builder, values, reference, stored, roots)?;
+    let heap_limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+    emit_fault_check(
+        builder,
+        values,
+        heap_limit,
+        EXIT_HEAP_LIMIT,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
+    builder.ins().jump(done, &[]);
+
+    builder.switch_to_block(done);
+    Ok(())
 }
 
 fn emit_bytes_len(
@@ -4019,11 +4214,11 @@ fn emit_allocate_instance(
     let (status, result) = emit_allocation_call(builder, values, class, environment, roots, true)?;
     let heap_limit = builder
         .ins()
-        .icmp_imm(IntCC::Equal, status, i64::from(ALLOCATION_HEAP_LIMIT));
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
     emit_fault_check(builder, values, heap_limit, EXIT_HEAP_LIMIT, point, stack)?;
     let replay = builder
         .ins()
-        .icmp_imm(IntCC::NotEqual, status, i64::from(ALLOCATION_OK));
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
     emit_interpreter_replay(builder, values, replay, point, stack)?;
     Ok(result)
 }
@@ -4036,6 +4231,72 @@ fn emit_allocation_call(
     roots: &[NativeRoot],
     allow_collection: bool,
 ) -> Result<(ir::Value, ir::Value), CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let class = builder.ins().iconst(types::I32, i64::from(class));
+    let collection = builder
+        .ins()
+        .iconst(types::I32, i64::from(allow_collection));
+    let allocate_instance = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, allocate_instance),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.allocation_signature,
+        allocate_instance,
+        &[
+            values.runtime_context,
+            class,
+            environment,
+            collection,
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let result = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    );
+    Ok((status, result))
+}
+
+fn emit_list_growth_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    stored: NativeValue,
+    roots: &[NativeRoot],
+) -> Result<ir::Value, CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let grow_list = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, grow_list),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.list_growth_signature,
+        grow_list,
+        &[
+            values.runtime_context,
+            reference,
+            stored.bits,
+            stored.tag,
+            root_count,
+        ],
+    );
+    Ok(builder.inst_results(call)[0])
+}
+
+fn emit_runtime_roots(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    roots: &[NativeRoot],
+) -> Result<ir::Value, CompileError> {
     for (slot, root) in roots.iter().copied().enumerate() {
         let value_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
@@ -4064,34 +4325,10 @@ fn emit_allocation_call(
             state_offset,
         );
     }
-    let class = builder.ins().iconst(types::I32, i64::from(class));
-    let collection = builder
-        .ins()
-        .iconst(types::I32, i64::from(allow_collection));
-    let root_count = builder.ins().iconst(
+    Ok(builder.ins().iconst(
         types::I32,
         i64::try_from(roots.len()).map_err(|_| CompileError::Backend)?,
-    );
-    let call = builder.ins().call_indirect(
-        values.allocation_signature,
-        values.allocate_instance,
-        &[
-            values.allocation_context,
-            class,
-            environment,
-            collection,
-            root_count,
-            values.allocation_result_pointer,
-        ],
-    );
-    let status = builder.inst_results(call)[0];
-    let result = builder.ins().load(
-        types::I64,
-        MemFlags::new(),
-        values.allocation_result_pointer,
-        0,
-    );
-    Ok((status, result))
+    ))
 }
 
 fn emit_interpreter_replay(
@@ -4660,8 +4897,8 @@ fn emit_function_return(
             parent_operand_tags,
             fuel,
             parent_entry,
-            values.allocation_context,
-            values.allocate_instance,
+            values.runtime_context,
+            values.runtime_functions,
             values.allocation_result_pointer,
             values.root_pointer,
             values.root_tag_pointer,

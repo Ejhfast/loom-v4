@@ -1730,6 +1730,26 @@ impl Machine {
         Ok(Value::Obj(self.vm.heap.alloc(object)))
     }
 
+    /// Reserve growth while native code owns the active frame arenas.
+    pub(crate) fn reserve_native(
+        &mut self,
+        delta: usize,
+        base_local: usize,
+        base_operand: usize,
+        active_roots: &[ObjRef],
+    ) -> Result<(), FaultCode> {
+        if self.vm.heap.collection_due(delta) {
+            let roots = self.native_gc_roots(base_local, base_operand, active_roots);
+            lm_graph::collect(&mut self.vm.heap, roots);
+            self.execution_metrics.collections =
+                self.execution_metrics.collections.saturating_add(1);
+            if self.vm.heap.would_exceed_growth(delta) {
+                return Err(FaultCode::HeapLimit);
+            }
+        }
+        Ok(())
+    }
+
     /// Make room for `delta` more bytes of growth on an existing
     /// object. `temps` holds values already popped from the arenas.
     fn reserve(&mut self, delta: usize, temps: &[Value]) -> Result<(), FaultCode> {

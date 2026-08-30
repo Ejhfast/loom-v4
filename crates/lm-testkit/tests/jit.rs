@@ -267,11 +267,12 @@ fn scalar_loop_fuel_matches_the_interpreter() {
 #[test]
 fn one_interpreter_instruction_does_not_reject_the_function() {
     let source = concat!(
-        "items: [Int] = []\ni = 0\n",
+        "i = 0\nsum = 0\n",
         "while i < 1000\n",
-        "  items.push(i)\n",
+        "  pair = (i, 1)\n",
+        "  sum = sum + pair[1]\n",
         "  i = i + 1\n",
-        "end\nitems.len()\n",
+        "end\nsum\n",
     );
     let artifact = lm_testkit::compile_text("jit-interpreter-site.lm", source)
         .expect("the mixed function compiles");
@@ -630,12 +631,11 @@ fn generic_environment_cache_does_not_enter_shared_code() {
 fn generic_environment_cache_survives_interpreter_exits() {
     let source = concat!(
         "def identity[T](value: T): T\n  value\nend\n",
-        "items: [Int] = []\n",
         "i = 0\nwhile i < 1000\n",
         "  value = identity(i)\n",
-        "  items.push(value)\n",
-        "  i = i + 1\n",
-        "end\nitems.len()\n",
+        "  pair = (value, i)\n",
+        "  i = pair[1] + 1\n",
+        "end\ni\n",
     );
     let (outcome, metrics, _) = run(source, EngineMode::Native, u64::MAX);
     assert_eq!(outcome, Outcome::Done(lm_value::Value::Int(1_000)));
@@ -697,6 +697,61 @@ fn optional_list_reads_stay_native() {
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(12_400)));
     assert!(metrics.native_retired_instructions > 15_000, "{metrics:?}");
     assert_eq!(metrics.native_interpreter_exits, 1, "{metrics:?}");
+}
+
+#[test]
+fn list_push_uses_inline_writes_and_typed_growth() {
+    let source = concat!(
+        "items: [Int] = []\ni = 0\n",
+        "while i < 1000\n",
+        "  items.push(i)\n",
+        "  i = i + 1\n",
+        "end\nitems.len()\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-list-push.lm", source).expect("the list push case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_000)));
+    assert!(metrics.compiled_heap_write_sites >= 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 2, "{metrics:?}");
+}
+
+#[test]
+fn list_push_preserves_heap_limit_and_frozen_faults() {
+    let limit_source = concat!(
+        "items: [Int] = []\ni = 0\n",
+        "while i < 1000\n",
+        "  items.push(i)\n",
+        "  i = i + 1\n",
+        "end\nitems.len()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-list-push-limit.lm", limit_source)
+        .expect("the list push limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1024,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+
+    let frozen_source = "items = [1]\nitems.freeze()\nitems.push(2)\n";
+    let (interpreted, _, interpreted_dump) = run(frozen_source, EngineMode::Interpreter, u64::MAX);
+    let (native, _, native_dump) = run(frozen_source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
 }
 
 #[test]

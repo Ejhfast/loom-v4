@@ -6,9 +6,9 @@ use lm_value::Value;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-pub(super) const ALLOCATION_OK: u32 = 0;
-const ALLOCATION_INTERPRETER: u32 = 1;
-pub(super) const ALLOCATION_HEAP_LIMIT: u32 = 2;
+pub(super) const RUNTIME_OK: u32 = 0;
+const RUNTIME_INTERPRETER: u32 = 1;
+pub(super) const RUNTIME_HEAP_LIMIT: u32 = 2;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -69,6 +69,8 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_pages: *const usize,
     pub(super) heap_page_count: usize,
     pub(super) heap_slot_count: usize,
+    pub(super) heap_used_bytes: *mut usize,
+    pub(super) heap_collection_threshold: usize,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
     pub(super) option_families: *const u32,
@@ -174,6 +176,14 @@ fn type_environment_cache_set(
 
 pub(super) type RawAllocateInstance =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
+pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
+
+/// Fixed native entry points for typed runtime slow paths.
+#[repr(C)]
+pub(super) struct RawNativeFunctions {
+    pub(super) allocate_instance: RawAllocateInstance,
+    pub(super) grow_list: RawGrowList,
+}
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
     *mut u64,
@@ -184,7 +194,7 @@ pub(super) type NativeFunction = unsafe extern "C" fn(
     u64,
     u32,
     *mut c_void,
-    RawAllocateInstance,
+    *const RawNativeFunctions,
     *mut u64,
     *mut u64,
     *mut u64,
@@ -660,7 +670,7 @@ fn growth_target(current: usize, required: usize, limit: usize) -> Result<usize,
     Ok(current.max(required).max(doubled))
 }
 
-pub(super) struct RawAllocationContext<R> {
+pub(super) struct RawRuntimeContext<R> {
     pub(super) runtime: *mut R,
     pub(super) activation: *mut RawNativeActivation,
     pub(super) roots: *const u64,
@@ -680,8 +690,8 @@ pub enum AllocationResult {
     Interpreter,
 }
 
-/// The typed allocation slow path of one native activation.
-pub trait AllocationRuntime {
+/// Typed runtime slow paths for one native activation.
+pub trait NativeRuntime {
     /// Allocate one instance with its exact environment and active roots.
     fn allocate_instance(
         &mut self,
@@ -692,9 +702,38 @@ pub trait AllocationRuntime {
         root_states: &[u8],
         allow_collection: bool,
     ) -> AllocationResult;
+
+    /// Grow one list and append one canonical value.
+    fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult;
 }
 
-pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
+/// One checked list-growth result.
+#[derive(Debug, Clone, Copy)]
+pub enum ListGrowthResult {
+    Done { heap: JitHeapView },
+    HeapLimit,
+    Interpreter,
+}
+
+/// One typed request to append a value after list growth.
+pub struct ListGrowthRequest<'a> {
+    /// Canonical list reference bits.
+    pub reference: u64,
+    /// Canonical appended value bits.
+    pub value_bits: u64,
+    /// Canonical appended value tag.
+    pub value_tag: u64,
+    /// Active root payloads.
+    pub root_bits: &'a [u64],
+    /// Active root tags.
+    pub root_tags: &'a [u64],
+    /// Active root states.
+    pub root_states: &'a [u8],
+    /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
+pub(super) unsafe extern "C" fn allocate_instance<R: NativeRuntime>(
     context: *mut c_void,
     class: u32,
     environment: u32,
@@ -703,21 +742,21 @@ pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     result: *mut u64,
 ) -> u32 {
     if context.is_null() || result.is_null() {
-        return ALLOCATION_INTERPRETER;
+        return RUNTIME_INTERPRETER;
     }
     // SAFETY: `CompiledRegion::execute` passes one live context for this call.
-    let context = unsafe { &mut *context.cast::<RawAllocationContext<R>>() };
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
     if context.runtime.is_null() {
-        return ALLOCATION_INTERPRETER;
+        return RUNTIME_INTERPRETER;
     }
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     if allow_collection > 1 || context.activation.is_null() {
-        return ALLOCATION_INTERPRETER;
+        return RUNTIME_INTERPRETER;
     }
     let root_count = root_count as usize;
     if root_count > context.root_capacity {
-        return ALLOCATION_INTERPRETER;
+        return RUNTIME_INTERPRETER;
     }
     // SAFETY: The checked count stays inside the activation root buffer.
     let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
@@ -746,13 +785,69 @@ pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
                     (*context.activation).heap_pages = heap.pages;
                     (*context.activation).heap_page_count = heap.page_count;
                     (*context.activation).heap_slot_count = heap.slot_count;
+                    (*context.activation).heap_used_bytes = heap.used_bytes;
+                    (*context.activation).heap_collection_threshold = heap.collection_threshold;
                 }
             }
             // SAFETY: The caller provides one writable result slot.
             unsafe { result.write(bits) };
-            ALLOCATION_OK
+            RUNTIME_OK
         }
-        AllocationResult::HeapLimit => ALLOCATION_HEAP_LIMIT,
-        AllocationResult::Interpreter => ALLOCATION_INTERPRETER,
+        AllocationResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        AllocationResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn grow_list<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    value_bits: u64,
+    value_tag: u64,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside the activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    match runtime.grow_list(ListGrowthRequest {
+        reference,
+        value_bits,
+        value_tag,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        ListGrowthResult::Done { heap } => {
+            // SAFETY: The native activation remains writable during the slow path.
+            unsafe {
+                (*context.activation).heap_pages = heap.pages;
+                (*context.activation).heap_page_count = heap.page_count;
+                (*context.activation).heap_slot_count = heap.slot_count;
+                (*context.activation).heap_used_bytes = heap.used_bytes;
+                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+            }
+            RUNTIME_OK
+        }
+        ListGrowthResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        ListGrowthResult::Interpreter => RUNTIME_INTERPRETER,
     }
 }

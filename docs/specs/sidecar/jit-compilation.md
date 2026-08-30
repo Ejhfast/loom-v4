@@ -401,6 +401,8 @@ This state gives automatic drops and requires no uninitialized storage.
 
 The heap exposes canonical page addresses, page count, and slot count.
 
+The heap also exposes one writable charge counter and one collection threshold.
+
 One canonical page holds 1,024 entries.
 
 Each page reserves its complete capacity before publication.
@@ -480,7 +482,8 @@ Native code implements these common operations directly:
 - tuple element loads;
 - list length;
 - list element loads;
-- list element replacement.
+- list element replacement;
+- list append when the current array has capacity.
 
 A field load performs these checks:
 
@@ -532,6 +535,8 @@ Slow paths handle:
 
 Each slow path has one fixed typed signature.
 
+Generated code selects each signature from one fixed function table.
+
 No slow path receives a generic operation number.
 
 No slow path decodes a metadata contract.
@@ -544,7 +549,11 @@ A coarse operation can remain one slow call when its work dominates the transiti
 
 A slow path never replaces an opcode with an inline treatment.
 
-Classes A through D never use a runtime stub.
+Class A and class B instructions never use a runtime stub.
+
+Class C instructions call a stub only after their inline fast path fails.
+
+Class D calls use fixed entry cells.
 
 The JIT does not add a stub only to increase a coverage number.
 
@@ -1023,6 +1032,21 @@ Gate: Repeated optional list reads improve by more than five times.
 
 Gate: `NewG` and `ListGet` disappear from representative treatment gaps.
 
+### Stage F12: Direct list append
+
+- compile the common `ListPush` path as one guarded array write;
+- update the canonical object charge and heap charge directly;
+- call one fixed typed slow path for growth or collection;
+- pass complete native roots before a possible collection;
+- preserve heap-limit, frozen-value, and epoch faults;
+- preserve exact state at every tested fuel boundary.
+
+Gate: Repeated list append improves by more than five times.
+
+Gate: `ListPush` disappears from representative treatment gaps.
+
+Gate: The common append path calls no runtime function.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1302,6 +1326,20 @@ The representative profiles contain no `NewG` or `ListGet` gap.
 Representative timing did not improve because other operations dominate these programs.
 
 HTTP Auto performance still does not pass the five-percent gate.
+
+The Stage F12 run added direct list append and typed growth.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| List append | 4.373 ms | 0.253 ms | 17.29 times |
+
+The common append path called no runtime function.
+
+Capacity growth and collection used one fixed typed function.
+
+The parser profiles contain no `ListPush` gap.
+
+Representative timing remained stable because other operations dominate these programs.
 
 ## 24. Rejected designs
 

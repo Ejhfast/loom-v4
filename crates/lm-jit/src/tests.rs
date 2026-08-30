@@ -248,7 +248,7 @@ struct TestRuntime {
     heap: Heap,
 }
 
-impl AllocationRuntime for TestRuntime {
+impl NativeRuntime for TestRuntime {
     fn allocate_instance(
         &mut self,
         _class: u32,
@@ -259,6 +259,10 @@ impl AllocationRuntime for TestRuntime {
         _allow_collection: bool,
     ) -> AllocationResult {
         AllocationResult::Interpreter
+    }
+
+    fn grow_list(&mut self, _request: ListGrowthRequest<'_>) -> ListGrowthResult {
+        ListGrowthResult::Interpreter
     }
 }
 

@@ -53,6 +53,8 @@ pub struct JitHeapView {
     pub pages: *const usize,
     pub page_count: usize,
     pub slot_count: usize,
+    pub used_bytes: *mut usize,
+    pub collection_threshold: usize,
 }
 
 impl JitHeapView {
@@ -61,6 +63,8 @@ impl JitHeapView {
         pages: std::ptr::null(),
         page_count: 0,
         slot_count: 0,
+        used_bytes: std::ptr::null_mut(),
+        collection_threshold: 0,
     };
 }
 
@@ -221,6 +225,11 @@ pub const JIT_ENTRY_FROZEN_OFFSET: usize = std::mem::offset_of!(Entry, state)
     + ENTRY_STATE_PAYLOAD_OFFSET
     + std::mem::offset_of!(LiveEntry, header)
     + std::mem::offset_of!(Header, frozen);
+/// Byte offset of the charged object bytes.
+pub const JIT_ENTRY_BYTES_OFFSET: usize = std::mem::offset_of!(Entry, state)
+    + ENTRY_STATE_PAYLOAD_OFFSET
+    + std::mem::offset_of!(LiveEntry, header)
+    + std::mem::offset_of!(Header, bytes);
 /// Byte offset of the object tag.
 pub const JIT_ENTRY_OBJECT_TAG_OFFSET: usize = std::mem::offset_of!(Entry, state)
     + ENTRY_STATE_PAYLOAD_OFFSET
@@ -452,11 +461,13 @@ impl Heap {
     }
 
     /// Return one native view of the canonical object table.
-    pub fn jit_view(&self) -> JitHeapView {
+    pub fn jit_view(&mut self) -> JitHeapView {
         JitHeapView {
             pages: self.page_addresses.as_ptr(),
             page_count: self.page_addresses.len(),
             slot_count: self.slot_count(),
+            used_bytes: std::ptr::from_mut(&mut self.used_bytes),
+            collection_threshold: self.collection_threshold,
         }
     }
 
@@ -1220,6 +1231,10 @@ mod tests {
             std::ptr::from_ref(fields) as usize - base,
             JIT_INSTANCE_FIELDS_OFFSET
         );
+        assert_eq!(
+            std::ptr::from_ref(&live.header.bytes) as usize - base,
+            JIT_ENTRY_BYTES_OFFSET
+        );
         assert_eq!(fields.as_slice(), [Value::Int(4), Value::Bool(true)]);
 
         // SAFETY: The constants name initialized fields of this live entry.
@@ -1352,17 +1367,20 @@ mod tests {
             }));
         }
         let reference = last.expect("one object exists");
-        let expected = heap.entry(reference.slot);
+        let expected = std::ptr::from_ref(heap.entry(reference.slot));
         let view = heap.jit_view();
         assert_eq!(view.page_count, 2);
         assert_eq!(view.slot_count, PAGE_SLOTS + 1);
+        // SAFETY: The view names this live heap charge counter.
+        assert_eq!(unsafe { view.used_bytes.read() }, heap.used_bytes());
+        assert_eq!(view.collection_threshold, heap.collection_threshold);
 
         // SAFETY: The view names two complete canonical entry pages.
         let pages = unsafe { std::slice::from_raw_parts(view.pages, view.page_count) };
         let page = pages[reference.slot as usize >> JIT_PAGE_SHIFT] as *const Entry;
         // SAFETY: The masked slot stays inside one complete canonical page.
         let actual = unsafe { page.add(reference.slot as usize & JIT_PAGE_MASK as usize) };
-        assert_eq!(actual, std::ptr::from_ref(expected));
+        assert_eq!(actual, expected);
     }
 
     #[test]
