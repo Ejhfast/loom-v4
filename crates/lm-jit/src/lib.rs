@@ -205,6 +205,28 @@ impl CompiledRegion {
         })
     }
 
+    /// Return one internal entry for a retained native activation.
+    #[inline(always)]
+    pub fn resume_plan(&self, block: u32, instruction: u32) -> Option<EntryPlan<'_>> {
+        if let Some(entry) = self.entry_plan(block, instruction) {
+            return Some(entry);
+        }
+        let index = self
+            .plan
+            .resume_entries
+            .get(&(block, instruction))
+            .copied()?;
+        let target_index = index.checked_sub(self.plan.segments.len() as u32)? as usize;
+        let target = self.plan.resume_targets.get(target_index)?;
+        let segment = self.plan.segments.get(target.segment)?;
+        let (_, operand_kinds) = segment.fuel_stacks.get(target.offset)?;
+        Some(EntryPlan {
+            index,
+            live_locals: &segment.live_in,
+            operand_kinds,
+        })
+    }
+
     /// Return the distance from an interior position to its next entry.
     #[inline(always)]
     pub fn distance_to_entry(&self, block: u32, instruction: u32) -> Option<u32> {
@@ -229,6 +251,15 @@ impl CompiledRegion {
                     )
             })
             .map(|segment| segment.boundary_stack.as_slice())
+            .or_else(|| {
+                self.plan.segments.iter().find_map(|segment| {
+                    segment
+                        .fuel_stacks
+                        .iter()
+                        .find(|(at, _)| segment.block == block && *at == instruction)
+                        .map(|(_, stack)| stack.as_slice())
+                })
+            })
             .or_else(|| {
                 self.plan.segments.iter().find_map(|segment| {
                     segment
@@ -291,10 +322,19 @@ impl CompiledRegion {
             fuel,
             heap,
         } = input;
-        if entry as usize >= self.plan.segments.len()
-            || activation.frame_len != 1
-            || activation.frames[0].local_count as usize != self.plan.local_kinds.len()
-            || (activation.frames[0].max_stack as usize) < self.plan.max_stack
+        let top_index = activation
+            .frame_len
+            .checked_sub(1)
+            .ok_or(Failure::BackendUnavailable)?;
+        if entry as usize
+            >= self
+                .plan
+                .segments
+                .len()
+                .checked_add(self.plan.resume_targets.len())
+                .ok_or(Failure::BackendUnavailable)?
+            || activation.frames[top_index].local_count as usize != self.plan.local_kinds.len()
+            || (activation.frames[top_index].max_stack as usize) < self.plan.max_stack
             || roots.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
         {
@@ -304,7 +344,7 @@ impl CompiledRegion {
             u32::try_from(activation.scalars.len()).map_err(|_| Failure::BackendUnavailable)?;
         let frame_capacity =
             u32::try_from(activation.frames.len()).map_err(|_| Failure::BackendUnavailable)?;
-        let root = activation.frames[0];
+        let top = activation.frames[top_index];
         let mut raw_activation = RawNativeActivation {
             scalars: activation.scalars.as_mut_ptr(),
             states: activation.states.as_mut_ptr(),
@@ -321,8 +361,8 @@ impl CompiledRegion {
                 .map_err(|_| Failure::BackendUnavailable)?,
             stack_values: u32::try_from(
                 base_stack_values
-                    .checked_add(root.local_count as usize)
-                    .and_then(|count| count.checked_add(root.operand_len as usize))
+                    .checked_add(top.local_count as usize)
+                    .and_then(|count| count.checked_add(top.operand_len as usize))
                     .ok_or(Failure::BackendUnavailable)?,
             )
             .map_err(|_| Failure::BackendUnavailable)?,
@@ -343,10 +383,18 @@ impl CompiledRegion {
             root_states: root_states.as_ptr(),
             root_capacity: self.plan.max_roots,
         };
-        let local_pointer = activation.scalars.as_mut_ptr();
-        let local_state_pointer = activation.states.as_mut_ptr();
-        // SAFETY: `prepare_root` reserves one complete root window.
-        let operand_pointer = unsafe { local_pointer.add(root.local_count as usize) };
+        // SAFETY: Each checked frame names one complete scalar window.
+        let local_pointer = unsafe {
+            activation
+                .scalars
+                .as_mut_ptr()
+                .add(top.scalar_base as usize)
+        };
+        // SAFETY: The state table uses the same scalar window indexes.
+        let local_state_pointer =
+            unsafe { activation.states.as_mut_ptr().add(top.scalar_base as usize) };
+        // SAFETY: The checked frame reserves its complete local window.
+        let operand_pointer = unsafe { local_pointer.add(top.local_count as usize) };
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe {

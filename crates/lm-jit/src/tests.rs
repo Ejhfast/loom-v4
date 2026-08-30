@@ -82,6 +82,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         exit_stack: vec![],
         boundary_stack: vec![],
         field_results: vec![],
+        fuel_stacks: vec![],
         replay_stacks: vec![],
         fault_stacks: vec![],
         allocations: vec![],

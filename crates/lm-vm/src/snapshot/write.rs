@@ -305,6 +305,12 @@ impl World {
         self_root: bool,
         limit_holder: VmId,
     ) -> Result<SnapshotImage, SnapshotFail> {
+        self.materialize_native_machines().map_err(|code| {
+            SnapshotFail::Fault(
+                code,
+                "the native machine state did not materialize".to_string(),
+            )
+        })?;
         let report = match self.run_cut_many(barrier, roots) {
             Ok(report) => report,
             Err(CutError::ResourceActive { path, kind }) => {

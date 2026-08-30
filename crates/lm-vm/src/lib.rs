@@ -452,7 +452,7 @@ impl Vm {
     }
 
     /// Render the live machine state.
-    pub fn dump_live(&self, outcome: &Outcome) -> String {
+    pub fn dump_live(&mut self, outcome: &Outcome) -> String {
         self.world.dump_live(outcome)
     }
 }

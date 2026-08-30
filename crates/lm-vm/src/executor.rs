@@ -382,7 +382,13 @@ impl ExecutionLease {
         self.local_rotations = self.local_rotations.saturating_add(1);
     }
 
-    fn into_report(self, stop: ExecutionStop) -> ExecutionReport {
+    fn into_report(mut self, mut stop: ExecutionStop) -> ExecutionReport {
+        if !matches!(stop, ExecutionStop::QuantumExpired) && self.machine.has_native_continuation()
+        {
+            if let Err(code) = self.engine.materialize_native_state(&mut self.machine) {
+                stop = ExecutionStop::Fault(code);
+            }
+        }
         let heap_after = self.machine.vm.heap.used_bytes();
         let objects_after = self.machine.vm.heap.stats().live;
         ExecutionReport {
@@ -534,6 +540,9 @@ fn run_engine_turn(
         return (Ok(None), 0);
     }
     if context.engine.mode() == EngineMode::Interpreter {
+        if let Err(code) = context.engine.materialize_native_state(machine) {
+            return (Err(ExecError::Fault(code)), 0);
+        }
         return run_interpreter_turn(machine, instruction_limit, &mut context, None);
     }
     let mut native_scratch = crate::jit::NativeScratch::default();

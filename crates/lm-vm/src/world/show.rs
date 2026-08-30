@@ -39,9 +39,10 @@ impl World {
 
     /// Resolve every frame of `target` to a code origin, top frame first.
     fn execution_origins(
-        &self,
+        &mut self,
         target: VmId,
     ) -> Result<Vec<crate::machine::CodeOrigin>, FaultCode> {
+        self.materialize_native_machine(target)?;
         let code = self.code_of(target);
         let debug =
             lm_bytecode::debug::decode(&code.debug).map_err(|_| FaultCode::MalformedState)?;
@@ -902,11 +903,15 @@ impl World {
 
     /// Render the live root-machine state: outcome, heap statistics,
     /// frame count, and every live object in slot order.
-    pub fn dump_live(&self, outcome: &Outcome) -> String {
+    pub fn dump_live(&mut self, outcome: &Outcome) -> String {
         use std::fmt::Write as _;
+        let materialization = self.materialize_native_machine(0);
         let m = &self.machines[0];
         let mut out = String::new();
         let _ = writeln!(out, "outcome: {}", self.show_outcome(outcome));
+        if let Err(code) = materialization {
+            let _ = writeln!(out, "native state: {code}");
+        }
         let s = m.vm.heap.stats();
         let _ = writeln!(
             out,

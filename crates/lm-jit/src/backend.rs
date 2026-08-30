@@ -186,6 +186,17 @@ struct NativeCallEmission<'a> {
     successor: ir::Block,
 }
 
+struct SegmentEmission<'a, 'b> {
+    bytecode: &'a Func,
+    segment: &'a Segment,
+    blocks: &'a [ir::Block],
+    values: NativeValues<'a>,
+    plan: &'a RegionPlan,
+    input: &'a FunctionInput<'b>,
+    exact_fuel: bool,
+    resume_blocks: Option<&'a [ir::Block]>,
+}
+
 fn emit_region(
     function: &mut ir::Function,
     frontend: &mut FunctionBuilderContext,
@@ -222,6 +233,25 @@ fn emit_region(
     let invalid_block = builder.create_block();
     let blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
+        .collect();
+    let exact_blocks: Vec<Vec<ir::Block>> = plan
+        .segments
+        .iter()
+        .map(|segment| {
+            let has_inline_call = matches!(
+                segment.exit,
+                SegmentExit::Call { target, .. } if plan.inline_functions.contains_key(&target)
+            );
+            if has_inline_call {
+                Vec::new()
+            } else {
+                segment
+                    .fuel_stacks
+                    .iter()
+                    .map(|_| builder.create_block())
+                    .collect()
+            }
+        })
         .collect();
 
     builder.switch_to_block(entry_block);
@@ -303,6 +333,19 @@ fn emit_region(
     for (index, block) in blocks.iter().copied().enumerate() {
         dispatch.set_entry(index as u128, block);
     }
+    for (offset, target) in plan.resume_targets.iter().enumerate() {
+        let index = plan
+            .segments
+            .len()
+            .checked_add(offset)
+            .ok_or(CompileError::Backend)?;
+        let block = exact_blocks
+            .get(target.segment)
+            .and_then(|blocks| blocks.get(target.offset))
+            .copied()
+            .ok_or(CompileError::Backend)?;
+        dispatch.set_entry(index as u128, block);
+    }
     dispatch.emit(&mut builder, entry, invalid_block);
 
     builder.switch_to_block(invalid_block);
@@ -323,46 +366,75 @@ fn emit_region(
     for (index, segment) in plan.segments.iter().enumerate() {
         builder.switch_to_block(blocks[index]);
         let body = builder.create_block();
-        let fuel_exit = builder.create_block();
+        let exact_fuel = builder.create_block();
         let available = builder.use_var(fuel);
         let enough = builder.ins().icmp_imm(
             IntCC::UnsignedGreaterThanOrEqual,
             available,
             i64::from(segment.cost),
         );
-        builder.ins().brif(enough, body, &[], fuel_exit, &[]);
+        builder.ins().brif(enough, body, &[], exact_fuel, &[]);
 
-        builder.switch_to_block(fuel_exit);
-        let retired_value = builder.use_var(retired);
-        let result = builder.ins().iconst(types::I64, 0);
-        let entry_stack: Vec<ir::Value> = values
-            .stack
-            .iter()
-            .take(segment.entry_stack.len())
-            .map(|variable| builder.use_var(*variable))
-            .collect();
-        emit_exit(
-            &mut builder,
-            values,
-            ExitEmission {
-                retired: retired_value,
-                kind: EXIT_FUEL,
-                block: segment.block,
-                instruction: segment.start,
-                result,
-            },
-            &entry_stack,
-        )?;
+        builder.switch_to_block(exact_fuel);
+        let has_inline_call = matches!(
+            segment.exit,
+            SegmentExit::Call { target, .. } if plan.inline_functions.contains_key(&target)
+        );
+        if has_inline_call {
+            let retired_value = builder.use_var(retired);
+            let result = builder.ins().iconst(types::I64, 0);
+            let entry_stack: Vec<ir::Value> = values
+                .stack
+                .iter()
+                .take(segment.entry_stack.len())
+                .map(|variable| builder.use_var(*variable))
+                .collect();
+            emit_exit(
+                &mut builder,
+                values,
+                ExitEmission {
+                    retired: retired_value,
+                    kind: EXIT_FUEL,
+                    block: segment.block,
+                    instruction: segment.start,
+                    result,
+                },
+                &entry_stack,
+            )?;
+        } else {
+            let first = exact_blocks[index]
+                .first()
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            builder.ins().jump(first, &[]);
+            emit_segment(
+                &mut builder,
+                SegmentEmission {
+                    bytecode,
+                    segment,
+                    blocks: &blocks,
+                    values,
+                    plan,
+                    input,
+                    exact_fuel: true,
+                    resume_blocks: Some(&exact_blocks[index]),
+                },
+            )?;
+        }
 
         builder.switch_to_block(body);
         emit_segment(
             &mut builder,
-            bytecode,
-            segment,
-            &blocks,
-            values,
-            plan,
-            input,
+            SegmentEmission {
+                bytecode,
+                segment,
+                blocks: &blocks,
+                values,
+                plan,
+                input,
+                exact_fuel: false,
+                resume_blocks: None,
+            },
         )?;
     }
 
@@ -373,23 +445,67 @@ fn emit_region(
 
 fn emit_segment(
     builder: &mut FunctionBuilder<'_>,
-    bytecode: &Func,
-    segment: &Segment,
-    blocks: &[ir::Block],
-    values: NativeValues<'_>,
-    plan: &RegionPlan,
-    input: &FunctionInput<'_>,
+    emission: SegmentEmission<'_, '_>,
 ) -> Result<(), CompileError> {
-    let mut stack: Vec<ir::Value> = values
-        .stack
-        .iter()
-        .take(segment.entry_stack.len())
-        .map(|variable| builder.use_var(*variable))
-        .collect();
+    let SegmentEmission {
+        bytecode,
+        segment,
+        blocks,
+        values,
+        plan,
+        input,
+        exact_fuel,
+        resume_blocks,
+    } = emission;
+    let mut stack: Vec<ir::Value> = if resume_blocks.is_some() {
+        Vec::new()
+    } else {
+        values
+            .stack
+            .iter()
+            .take(segment.entry_stack.len())
+            .map(|variable| builder.use_var(*variable))
+            .collect()
+    };
     let code =
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
     for (within, instruction) in code.iter().copied().enumerate() {
+        if let Some(resume_blocks) = resume_blocks {
+            let block = resume_blocks
+                .get(within)
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            builder.switch_to_block(block);
+            let (position, kinds) = segment
+                .fuel_stacks
+                .get(within)
+                .ok_or(CompileError::Backend)?;
+            if *position != segment.start + within as u32 {
+                return Err(CompileError::Backend);
+            }
+            stack = values
+                .stack
+                .iter()
+                .take(kinds.len())
+                .map(|variable| builder.use_var(*variable))
+                .collect();
+        }
         let prefix = within as u32 + 1;
+        let deferred_boundary = within + 1 == code.len()
+            && matches!(
+                segment.exit,
+                SegmentExit::Call { .. } | SegmentExit::Effect { .. }
+            );
+        if exact_fuel && !deferred_boundary {
+            emit_exact_fuel_check(
+                builder,
+                values,
+                segment.block,
+                segment.start + within as u32,
+                &stack,
+            )?;
+        }
+        let fault_prefix = if exact_fuel { 1 } else { prefix };
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -426,7 +542,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: instruction + 1,
-                        prefix,
+                        prefix: fault_prefix,
                     },
                     &stack,
                 )?;
@@ -483,7 +599,7 @@ fn emit_segment(
                         point: FaultPoint {
                             block: segment.block,
                             instruction: instruction + 1,
-                            prefix,
+                            prefix: fault_prefix,
                         },
                         fault_stack: &stack,
                         deopt_stack: &deopt_stack,
@@ -508,7 +624,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: segment.start + prefix,
-                        prefix,
+                        prefix: fault_prefix,
                     },
                     &stack,
                 )?;
@@ -520,7 +636,7 @@ fn emit_segment(
                 let point = FaultPoint {
                     block: segment.block,
                     instruction: segment.start + prefix,
-                    prefix,
+                    prefix: fault_prefix,
                 };
                 let zero = builder.ins().icmp_imm(IntCC::Equal, right, 0);
                 emit_fault_check(builder, values, zero, EXIT_DIVIDE_BY_ZERO, point, &stack)?;
@@ -555,7 +671,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: segment.start + prefix,
-                        prefix,
+                        prefix: fault_prefix,
                     },
                     &stack,
                 )?;
@@ -612,6 +728,17 @@ fn emit_segment(
                 ))
             }
         }
+        if exact_fuel && !deferred_boundary {
+            emit_charge(builder, values, 1);
+        }
+        if let Some(resume_blocks) = resume_blocks.filter(|_| within + 1 < code.len()) {
+            define_stack(builder, values, &stack)?;
+            let next = resume_blocks
+                .get(within + 1)
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            builder.ins().jump(next, &[]);
+        }
     }
 
     if let SegmentExit::Call { target, .. } = segment.exit {
@@ -644,11 +771,11 @@ fn emit_segment(
                     deopt_stack: &deopt_stack,
                 },
             )?;
-            emit_charge(builder, values, segment.cost);
+            emit_segment_charge(builder, values, segment.cost, exact_fuel);
             define_stack(builder, values, &stack)?;
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         } else {
-            emit_charge(builder, values, segment.cost);
+            emit_segment_charge(builder, values, segment.cost, exact_fuel);
             let contract = plan
                 .call_contracts
                 .get(&target)
@@ -671,7 +798,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Effect { .. }) {
         let effect_instruction = segment.end - 1;
-        emit_charge(builder, values, segment.cost);
+        emit_segment_charge(builder, values, segment.cost, exact_fuel);
         let retired = builder.use_var(values.retired);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -689,7 +816,7 @@ fn emit_segment(
         return Ok(());
     }
 
-    emit_charge(builder, values, segment.cost);
+    emit_segment_charge(builder, values, segment.cost, exact_fuel);
     match segment.exit {
         SegmentExit::Jump { .. } => {
             define_stack(builder, values, &stack)?;
@@ -1340,6 +1467,48 @@ fn emit_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost
     let retired = builder.ins().iadd_imm(retired, i64::from(cost));
     builder.def_var(values.fuel, fuel);
     builder.def_var(values.retired, retired);
+}
+
+fn emit_segment_charge(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    cost: u32,
+    exact_fuel: bool,
+) {
+    if !exact_fuel {
+        emit_charge(builder, values, cost);
+    }
+}
+
+fn emit_exact_fuel_check(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    block: u32,
+    instruction: u32,
+    stack: &[ir::Value],
+) -> Result<(), CompileError> {
+    let run = builder.create_block();
+    let stop = builder.create_block();
+    let fuel = builder.use_var(values.fuel);
+    let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
+    builder.ins().brif(available, run, &[], stop, &[]);
+    builder.switch_to_block(stop);
+    let retired = builder.use_var(values.retired);
+    let result = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_FUEL,
+            block,
+            instruction,
+            result,
+        },
+        stack,
+    )?;
+    builder.switch_to_block(run);
+    Ok(())
 }
 
 fn emit_overflow_check(

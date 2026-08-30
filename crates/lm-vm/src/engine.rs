@@ -41,6 +41,9 @@ pub struct EngineMetrics {
     pub native_entries: u64,
     pub native_retired_instructions: u64,
     pub materializations: u64,
+    pub native_continuation_suspends: u64,
+    pub native_continuation_resumes: u64,
+    pub native_continuation_materializations: u64,
     pub native_fault_exits: u64,
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
@@ -58,6 +61,9 @@ struct EngineCounters {
     native_entries: AtomicU64,
     native_retired_instructions: AtomicU64,
     materializations: AtomicU64,
+    native_continuation_suspends: AtomicU64,
+    native_continuation_resumes: AtomicU64,
+    native_continuation_materializations: AtomicU64,
     native_fault_exits: AtomicU64,
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
@@ -84,6 +90,9 @@ impl EngineCounters {
             native_entries: read(&self.native_entries),
             native_retired_instructions: read(&self.native_retired_instructions),
             materializations: read(&self.materializations),
+            native_continuation_suspends: read(&self.native_continuation_suspends),
+            native_continuation_resumes: read(&self.native_continuation_resumes),
+            native_continuation_materializations: read(&self.native_continuation_materializations),
             native_fault_exits: read(&self.native_fault_exits),
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
@@ -102,6 +111,9 @@ impl EngineCounters {
         reset(&self.native_entries);
         reset(&self.native_retired_instructions);
         reset(&self.materializations);
+        reset(&self.native_continuation_suspends);
+        reset(&self.native_continuation_resumes);
+        reset(&self.native_continuation_materializations);
         reset(&self.native_fault_exits);
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
@@ -126,6 +138,18 @@ impl EngineCounters {
             values.native_retired_instructions,
         );
         add(&self.materializations, values.materializations);
+        add(
+            &self.native_continuation_suspends,
+            values.native_continuation_suspends,
+        );
+        add(
+            &self.native_continuation_resumes,
+            values.native_continuation_resumes,
+        );
+        add(
+            &self.native_continuation_materializations,
+            values.native_continuation_materializations,
+        );
         add(&self.native_fault_exits, values.native_fault_exits);
         add(
             &self.native_allocation_exits,
@@ -185,6 +209,18 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_materialization(&mut self) {
         self.values.materializations += 1;
+    }
+
+    pub(crate) fn note_native_continuation_suspend(&mut self) {
+        self.values.native_continuation_suspends += 1;
+    }
+
+    pub(crate) fn note_native_continuation_resume(&mut self) {
+        self.values.native_continuation_resumes += 1;
+    }
+
+    pub(crate) fn note_native_continuation_materialization(&mut self) {
+        self.values.native_continuation_materializations += 1;
     }
 
     pub(crate) fn note_native_fault_exit(&mut self) {
@@ -274,6 +310,7 @@ impl Engine {
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
         if self.mode() == EngineMode::Auto
+            && !machine.has_native_continuation()
             && machine
                 .vm
                 .frames
@@ -291,6 +328,27 @@ impl Engine {
         module: &crate::NamespaceRuntime,
     ) -> crate::jit::NativeCodeState {
         self.jit.native_code(module)
+    }
+
+    pub(crate) fn materialize_native_state(
+        &self,
+        machine: &mut crate::machine::Machine,
+    ) -> Result<bool, crate::FaultCode> {
+        let mut metrics = self.turn_metrics();
+        match crate::jit::materialize_native_continuation(machine) {
+            Ok(materialized) => {
+                if materialized {
+                    metrics.note_materialization();
+                    metrics.note_native_continuation_materialization();
+                }
+                Ok(materialized)
+            }
+            Err(()) => {
+                metrics.note_backend_unavailable();
+                metrics.note_native_fault_exit();
+                Err(crate::FaultCode::MalformedState)
+            }
+        }
     }
 }
 

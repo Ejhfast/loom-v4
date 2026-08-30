@@ -1,6 +1,6 @@
 //! Verified bytecode analysis and immutable native region plans.
 
-use crate::{MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
+use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
 use lm_bytecode::{BcType, Func, Instr, Module, NumericInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -218,6 +218,15 @@ impl ExecutionExit {
     pub fn result(&self) -> u64 {
         self.result
     }
+
+    /// Add retired instructions from an earlier detached frame.
+    pub fn add_prior_retired(mut self, retired: u64) -> Result<ExecutionExit, Failure> {
+        self.retired = self
+            .retired
+            .checked_add(retired)
+            .ok_or(Failure::BackendUnavailable)?;
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +279,7 @@ pub(super) struct Segment {
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
     pub(super) field_results: Vec<FieldResult>,
+    pub(super) fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) allocations: Vec<AllocationSite>,
@@ -310,12 +320,20 @@ pub(super) struct RegionPlan {
     pub(super) additional_frames: u32,
     pub(super) segments: Vec<Segment>,
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
+    pub(super) resume_entries: std::collections::HashMap<(u32, u32), u32>,
+    pub(super) resume_targets: Vec<ResumeTarget>,
     pub(super) call_contracts: HashMap<u32, CallContract>,
     pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
     pub(super) call_sites: usize,
     pub(super) heap_read_sites: usize,
     pub(super) allocation_sites: usize,
     pub(super) effect_sites: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResumeTarget {
+    pub(super) segment: usize,
+    pub(super) offset: usize,
 }
 
 struct SegmentAnalysis {
@@ -326,6 +344,7 @@ struct SegmentAnalysis {
     max_stack_values: usize,
     boundary_stack: Vec<ScalarKind>,
     field_results: Vec<FieldResult>,
+    fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
     allocations: Vec<AllocationSite>,
@@ -455,6 +474,7 @@ impl RegionPlan {
             segment.exit_stack = analysis.exit_stack.clone();
             segment.boundary_stack = analysis.boundary_stack;
             segment.field_results = analysis.field_results;
+            segment.fuel_stacks = analysis.fuel_stacks;
             heap_read_sites += segment.field_results.len();
             segment.replay_stacks = analysis.replay_stacks;
             segment.fault_stacks = analysis.fault_stacks;
@@ -519,6 +539,35 @@ impl RegionPlan {
                 total.checked_add(inline.allocations.len())
             })
             .ok_or(UnsupportedReason::RegionLimit)?;
+        let mut resume_entries = std::collections::HashMap::new();
+        let mut resume_targets = Vec::new();
+        for (segment_index, segment) in segments.iter().enumerate() {
+            let has_inline_call = matches!(
+                segment.exit,
+                SegmentExit::Call { target, .. } if inline_functions.contains_key(&target)
+            );
+            if has_inline_call {
+                continue;
+            }
+            for offset in 1..segment.fuel_stacks.len() {
+                let (instruction, _) = &segment.fuel_stacks[offset];
+                let index = segments
+                    .len()
+                    .checked_add(resume_targets.len())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(UnsupportedReason::RegionLimit)?;
+                if resume_entries
+                    .insert((segment.block, *instruction), index)
+                    .is_some()
+                {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                }
+                resume_targets.push(ResumeTarget {
+                    segment: segment_index,
+                    offset,
+                });
+            }
+        }
         Ok(RegionPlan {
             local_kinds,
             result_kind,
@@ -528,6 +577,8 @@ impl RegionPlan {
             additional_frames,
             segments,
             entries,
+            resume_entries,
+            resume_targets,
             call_contracts,
             inline_functions,
             call_sites,
@@ -662,6 +713,7 @@ fn inline_function_plan(
         exit_stack: Vec::new(),
         boundary_stack: Vec::new(),
         field_results: Vec::new(),
+        fuel_stacks: Vec::new(),
         replay_stacks: Vec::new(),
         fault_stacks: Vec::new(),
         allocations: Vec::new(),
@@ -747,6 +799,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 exit_stack: Vec::new(),
                 boundary_stack: Vec::new(),
                 field_results: Vec::new(),
+                fuel_stacks: Vec::new(),
                 replay_stacks: Vec::new(),
                 fault_stacks: Vec::new(),
                 allocations: Vec::new(),
@@ -812,6 +865,7 @@ fn analyze_segment(
     let mut max_stack_values = stack.len();
     let mut boundary_stack = Vec::new();
     let mut field_results = Vec::new();
+    let mut fuel_stacks = Vec::new();
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
     let mut allocations = Vec::new();
@@ -822,6 +876,7 @@ fn analyze_segment(
         .iter()
         .enumerate()
     {
+        fuel_stacks.push((segment.start + offset as u32, stack.clone()));
         let source_instruction = context
             .source_func
             .blocks
@@ -1010,6 +1065,7 @@ fn analyze_segment(
         max_stack_values,
         boundary_stack,
         field_results,
+        fuel_stacks,
         replay_stacks,
         fault_stacks,
         allocations,

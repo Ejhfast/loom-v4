@@ -1,10 +1,10 @@
 # JIT compilation
 
-Status: The native-call foundation, canonical heap ABI, and sampled tiering are implemented.
+Status: Native calls, the heap ABI, sampled tiering, and scheduler continuation are implemented.
 
 Direct instance reads use the canonical heap layout.
 
-Corpus validation, scheduler continuation, and broader direct heap access remain.
+Corpus validation and broader direct heap access remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -142,7 +142,7 @@ A worker can share immutable compiled code with other workers.
 
 ## 6. Native turn stack
 
-One native activation owns all compiled frames for one bounded turn.
+One native activation owns all compiled frames until an observable boundary.
 
 The activation contains:
 
@@ -177,6 +177,28 @@ No call materializes VmState.
 
 No call invokes a generic runtime dispatcher.
 
+An ordinary scheduler quantum can retain the native activation.
+
+The machine moves its canonical stack storage into that continuation.
+
+The machine does not retain a second scalar-state copy.
+
+The continuation pins every active compiled region.
+
+It also stores all active object roots.
+
+A later worker can resume the same continuation.
+
+Worker identity does not enter the continuation.
+
+Recall materializes the continuation before it returns the lease.
+
+Snapshots materialize all selected machines before encoding.
+
+Inspection and interpreter entry also materialize native state.
+
+Faults, effects, and terminal returns always materialize native state.
+
 ## 7. Region plans
 
 A region is one supported function control-flow graph.
@@ -209,7 +231,13 @@ Fuel measures retired LMBC instructions.
 
 Native code checks fuel before each segment.
 
-Insufficient fuel exits before that segment changes state.
+Full segment fuel runs the normal segment path.
+
+Partial segment fuel runs exact instruction checkpoints.
+
+Each checkpoint charges one LMBC instruction.
+
+The final checkpoint records the next instruction position.
 
 A call instruction charges one fuel unit.
 
@@ -529,6 +557,9 @@ Clock-free counters include:
 - direct fast-path operations;
 - slow-path calls by kind;
 - materializations;
+- native continuation suspensions;
+- native continuation resumptions;
+- forced continuation materializations;
 - guard failures;
 - deoptimizations;
 - native fault exits.
@@ -709,6 +740,12 @@ Virtual-call inline caches remain part of Stage F surface expansion.
 
 Gate: JSON and HTTP meet the representative gains.
 
+Scheduler continuation landed before broader collection access.
+
+It retains native frames across ordinary deterministic and parallel quanta.
+
+Recall, snapshots, faults, effects, and engine changes force materialization.
+
 ## 23. Retained baseline
 
 The recovery base is commit 791aff6.
@@ -752,6 +789,14 @@ It used nine measured rounds after one warm round.
 | HTTP encode | 23.087 ms | 22.565 ms | 1.02 times | 41.68% |
 
 Measured warm rounds performed no native compilation.
+
+The first scheduler-continuation measurement used a 1,024-instruction quantum.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Scheduled integer loop | 41.617 ms | 3.843 ms | 10.83 times |
+
+The earlier native path gained 3.89 times on this row.
 
 ## 24. Rejected designs
 

@@ -1237,12 +1237,90 @@ fn engine_switches_preserve_scalar_state() {
         world.drive_slice(root, 4096),
         Some(lm_vm::SliceExit::Yielded)
     ));
-    assert!(engine.metrics().native_retired_instructions > 0);
+    let suspended = engine.metrics();
+    assert!(suspended.native_retired_instructions > 0);
+    assert_eq!(suspended.native_continuation_suspends, 1);
+    assert_eq!(suspended.native_continuation_materializations, 0);
     engine.set_mode(EngineMode::Interpreter);
     assert_eq!(
         world.run_root(),
         Outcome::Done(lm_value::Value::Int(49_995_000))
     );
+    assert_eq!(engine.metrics().native_continuation_materializations, 1);
+}
+
+#[test]
+fn native_quanta_keep_one_authoritative_continuation() {
+    let artifact = lm_testkit::compile_text("jit-quanta.lm", SCALAR_LOOP)
+        .expect("the continuation case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            world.drive_slice(root, 4096),
+            Some(lm_vm::SliceExit::Yielded)
+        ));
+    }
+    let metrics = engine.metrics();
+    assert_eq!(metrics.native_continuation_suspends, 2);
+    assert_eq!(metrics.native_continuation_resumes, 1);
+    assert_eq!(metrics.native_continuation_materializations, 0);
+    engine.set_mode(EngineMode::Interpreter);
+    assert_eq!(
+        world.run_root(),
+        Outcome::Done(lm_value::Value::Int(49_995_000))
+    );
+    assert_eq!(engine.metrics().native_continuation_materializations, 1);
+}
+
+#[test]
+fn a_native_call_stack_survives_a_quantum() {
+    let source = concat!(
+        "def sum_to(value: Int): Int\n",
+        "  if value == 0 then 0 else value + sum_to(value - 1) end\n",
+        "end\n",
+        "sum_to(100)\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-call-quantum.lm", source).expect("the call case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the call case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice(root, 64),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    assert!(matches!(
+        world.drive_slice(root, 64),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    assert_eq!(world.run_root(), Outcome::Done(lm_value::Value::Int(5050)));
+    let metrics = engine.metrics();
+    assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 900, "{metrics:?}");
 }
 
 #[test]
@@ -1327,7 +1405,7 @@ fn native_capture_resumes_in_the_interpreter() {
         namespace,
         VmConfig::default(),
         Box::new(RecordingHost::new(1)),
-        engine,
+        Arc::clone(&engine),
     );
     let root = lm_vm::TaskKey {
         vm: 0,
@@ -1337,10 +1415,13 @@ fn native_capture_resumes_in_the_interpreter() {
         native.drive_slice(root, 4096),
         Some(lm_vm::SliceExit::Yielded)
     ));
+    assert_eq!(engine.metrics().native_continuation_suspends, 1);
+    assert_eq!(engine.metrics().native_continuation_materializations, 0);
     let gate = native.next_gate();
     let snapshot = native
         .capture_snapshot(gate, 0, false)
         .expect("native state captures");
+    assert_eq!(engine.metrics().native_continuation_materializations, 1);
     let bytes =
         lm_vm::snapshot::codec::encode(snapshot.world(), usize::MAX).expect("native state encodes");
     let admitted = lm_testkit::load_snapshot_for_artifact(

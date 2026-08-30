@@ -254,6 +254,35 @@ impl NativeActivation {
             }
         })
     }
+
+    /// Return the live native frame count.
+    pub fn frame_count(&self) -> usize {
+        self.frame_len
+    }
+
+    /// Finish one detached native return inside this activation.
+    pub fn finish_detached_return(&mut self, result: u64) -> Result<(), Failure> {
+        if self.frame_len <= 1 {
+            return Err(Failure::BackendUnavailable);
+        }
+        let child = self.frames[self.frame_len - 1];
+        let parent = &mut self.frames[self.frame_len - 2];
+        if child.scalar_base as usize > self.scalar_len || parent.operand_len >= parent.max_stack {
+            return Err(Failure::BackendUnavailable);
+        }
+        let operand = (parent.scalar_base as usize)
+            .checked_add(parent.local_count as usize)
+            .and_then(|base| base.checked_add(parent.operand_len as usize))
+            .ok_or(Failure::BackendUnavailable)?;
+        if operand >= child.scalar_base as usize || operand >= self.scalars.len() {
+            return Err(Failure::BackendUnavailable);
+        }
+        self.scalars[operand] = result;
+        parent.operand_len += 1;
+        self.frame_len -= 1;
+        self.scalar_len = child.scalar_base as usize;
+        Ok(())
+    }
 }
 
 pub(super) struct RawAllocationContext<R> {

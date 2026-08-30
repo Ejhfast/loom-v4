@@ -210,6 +210,7 @@ impl World {
     /// The image ordinals read this order. They never depend on a
     /// scheduler identifier.
     pub fn machine_references(&mut self, vm: VmId) -> Result<Vec<VmId>, FaultCode> {
+        self.materialize_native_machine(vm)?;
         let roots = self.machines[vm as usize].snapshot_roots();
         let limits = self.machines[vm as usize].config.graph;
         let order = {

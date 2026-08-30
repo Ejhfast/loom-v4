@@ -795,6 +795,10 @@ pub struct Machine {
     pub preparing_wait: Option<WaitPreparation>,
     /// Clock-free execution counters.
     execution_metrics: MachineExecutionMetrics,
+    /// Native frames retained across one ordinary scheduler quantum.
+    ///
+    /// Snapshots exclude this process-local execution state.
+    native_continuation: Option<Box<crate::jit::NativeContinuation>>,
 }
 
 /// Clock-free execution counters for one machine.
@@ -1222,7 +1226,26 @@ impl Machine {
             callbacks: Vec::new(),
             preparing_wait: None,
             execution_metrics: MachineExecutionMetrics::default(),
+            native_continuation: None,
         }
+    }
+
+    pub(crate) fn take_native_continuation(
+        &mut self,
+    ) -> Option<Box<crate::jit::NativeContinuation>> {
+        self.native_continuation.take()
+    }
+
+    pub(crate) fn set_native_continuation(&mut self, continuation: crate::jit::NativeContinuation) {
+        debug_assert!(self.native_continuation.is_none());
+        debug_assert!(self.vm.frames.is_empty());
+        debug_assert!(self.vm.locals.is_empty());
+        debug_assert!(self.vm.operands.is_empty());
+        self.native_continuation = Some(Box::new(continuation));
+    }
+
+    pub(crate) fn has_native_continuation(&self) -> bool {
+        self.native_continuation.is_some()
     }
 
     /// The current clock-free execution counters.
@@ -1281,6 +1304,14 @@ impl Machine {
     }
 
     pub fn set_done(&mut self, value: Value) {
+        if crate::jit::materialize_native_continuation(self).is_err() {
+            self.set_fault(
+                FaultCode::MalformedState,
+                "the native machine state did not materialize",
+                None,
+            );
+            return;
+        }
         self.vm.terminal = Some(Terminal::Done(value));
         self.vm.state = MachineState::Done;
         self.vm.pending = None;
@@ -1292,18 +1323,31 @@ impl Machine {
         self.compact_terminal_proc();
     }
 
-    pub fn set_fault(&mut self, code: FaultCode, message: impl Into<String>, op: Option<u32>) {
+    pub fn set_fault(&mut self, mut code: FaultCode, message: impl Into<String>, op: Option<u32>) {
+        let mut message = message.into();
+        if crate::jit::materialize_native_continuation(self).is_err() {
+            code = FaultCode::MalformedState;
+            message = "the native machine state did not materialize".to_string();
+        }
         let trace = self.execution_trace_from(code == FaultCode::OutOfFuel);
         self.set_fault_record(FaultRec {
             code,
-            message: message.into(),
+            message,
             op,
             trace,
         });
     }
 
     /// Stop this machine with one complete stored fault.
-    pub fn set_fault_record(&mut self, fault: FaultRec) {
+    pub fn set_fault_record(&mut self, mut fault: FaultRec) {
+        if crate::jit::materialize_native_continuation(self).is_err() {
+            fault = FaultRec {
+                code: FaultCode::MalformedState,
+                message: "the native machine state did not materialize".to_string(),
+                op: None,
+                trace: self.execution_trace(),
+            };
+        }
         self.vm.terminal = Some(Terminal::Fault(fault));
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
@@ -1343,6 +1387,9 @@ impl Machine {
 
     /// Capture a trace from the current or next top instruction.
     fn execution_trace_from(&self, next_top: bool) -> Vec<FaultSite> {
+        if let Some(continuation) = &self.native_continuation {
+            return continuation.execution_trace(next_top);
+        }
         self.vm
             .frames
             .iter()
@@ -1440,6 +1487,9 @@ impl Machine {
     /// copy needs the same roots.
     pub fn gc_roots(&self, extra: &[ObjRef]) -> Vec<ObjRef> {
         let mut roots: Vec<ObjRef> = Vec::new();
+        if let Some(continuation) = &self.native_continuation {
+            continuation.extend_gc_roots(&mut roots);
+        }
         for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
             if let Value::Obj(r) = value {
                 roots.push(*r);

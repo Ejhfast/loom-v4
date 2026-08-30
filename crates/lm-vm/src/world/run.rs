@@ -850,6 +850,20 @@ impl World {
         )
     }
 
+    pub(crate) fn materialize_native_machine(&mut self, vm: VmId) -> Result<bool, FaultCode> {
+        self.engine
+            .materialize_native_state(&mut self.machines[vm as usize])
+    }
+
+    pub(crate) fn materialize_native_machines(&mut self) -> Result<(), FaultCode> {
+        for vm in 0..self.machines.len() {
+            if self.machines[vm].has_native_continuation() {
+                self.materialize_native_machine(vm as VmId)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn commit_execution_stop(
         &mut self,
         stack: &mut Vec<Activation>,
