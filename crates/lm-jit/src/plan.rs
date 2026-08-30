@@ -198,6 +198,7 @@ pub enum ExitKind {
     InterfaceCall,
     GenericVirtualCall,
     CallbackCall,
+    GuestFault,
 }
 
 /// One validated native exit record.
@@ -402,6 +403,10 @@ pub(super) enum HeapAccessKind {
     ListEpoch,
     ListIterLen,
     MapLen,
+    MapHas,
+    MapAt {
+        value: ValueContract,
+    },
     MapEpoch,
     MapIterLen,
     DigestCompare,
@@ -1346,6 +1351,24 @@ fn analyze_segment(
                     kind: HeapAccessKind::MapLen,
                 });
             }
+            Instr::MapHas => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapHas,
+                });
+            }
+            Instr::MapAt => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapAt {
+                        value: value_contract(context, value)?,
+                    },
+                });
+            }
             Instr::ListAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
                 let element = list_element_type(context.module, receiver)?;
@@ -1877,12 +1900,12 @@ fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, Unsup
     }
 }
 
-fn map_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+fn map_type(module: &Module, receiver: ScalarKind) -> Result<(u32, u32), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
     match module.types.get(ty as usize) {
-        Some(BcType::Map(_, _)) => Ok(()),
+        Some(BcType::Map(key, value)) => Ok((*key, *value)),
         _ => Err(UnsupportedReason::InvalidStack),
     }
 }

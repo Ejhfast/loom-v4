@@ -1273,7 +1273,8 @@ impl JitEngine {
             | ExitKind::UninitializedField
             | ExitKind::HeapLimit
             | ExitKind::Unreachable
-            | ExitKind::StackLimit => {
+            | ExitKind::StackLimit
+            | ExitKind::GuestFault => {
                 metrics.note_native_fault_exit();
                 let fault = match exit.kind() {
                     ExitKind::IntegerOverflow => crate::FaultCode::IntegerOverflow,
@@ -1283,6 +1284,15 @@ impl JitEngine {
                     ExitKind::HeapLimit => crate::FaultCode::HeapLimit,
                     ExitKind::Unreachable => crate::FaultCode::UnreachableCode,
                     ExitKind::StackLimit => crate::FaultCode::StackLimit,
+                    ExitKind::GuestFault => {
+                        let Ok(index) = usize::try_from(exit.result()) else {
+                            return malformed_native_exit(retired);
+                        };
+                        let Some(fault) = lm_abi::FAULT_CODES.get(index).copied() else {
+                            return malformed_native_exit(retired);
+                        };
+                        fault
+                    }
                     _ => unreachable!(),
                 };
                 NativeAttempt::Complete {
@@ -1406,7 +1416,8 @@ fn frame_operand_kinds<'a>(
             | ExitKind::TypeMismatch
             | ExitKind::UninitializedField
             | ExitKind::HeapLimit
-            | ExitKind::Unreachable,
+            | ExitKind::Unreachable
+            | ExitKind::GuestFault,
         ) => region.fault_operand_kinds(frame.block(), frame.instruction()),
         Some(ExitKind::StackLimit) => region
             .fault_operand_kinds(frame.block(), frame.instruction())

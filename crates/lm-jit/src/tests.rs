@@ -326,6 +326,14 @@ impl NativeRuntime for TestRuntime {
     fn reserve_list(&mut self, _request: ListReserveRequest<'_>) -> ListReserveResult {
         ListReserveResult::Interpreter
     }
+
+    fn map_has(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_at(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
 }
 
 #[test]

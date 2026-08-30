@@ -195,7 +195,10 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::MapLen => dedicated(Guarded).with_replay(),
-        Instr::MapHas | Instr::MapAt | Instr::MapPut { .. } => temporary(Helper),
+        Instr::MapHas | Instr::MapAt => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        Instr::MapPut { .. } => temporary(Helper),
         Instr::Freeze | Instr::Digest { .. } | Instr::EqValue | Instr::NeValue => temporary(Helper),
         Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {

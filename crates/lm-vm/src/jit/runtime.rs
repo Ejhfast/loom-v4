@@ -7,7 +7,7 @@ use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
     ListReserveResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
-    ScalarKind, ValueArrayAllocationRequest, LOCAL_INITIALIZED,
+    RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
 
@@ -344,6 +344,60 @@ impl NativeRuntime for MachineRuntime<'_> {
             request.root_states,
             request.allow_collection,
         )
+    }
+
+    fn map_has(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        let Some(key) = tagged_value(key_tag, key_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        match self.machine.map_lookup(reference, key) {
+            Ok(found) => RuntimeValueResult::Value {
+                bits: u64::from(found.is_some()),
+                tag: ValueTag::Bool as u64,
+            },
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn map_at(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        let Some(key) = tagged_value(key_tag, key_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let position = match self.machine.map_lookup(reference, key) {
+            Ok(Some(position)) => position,
+            Ok(None) => return RuntimeValueResult::Fault(crate::FaultCode::MissingKey),
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        let value = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => {
+                let Some(entry) = entries.get(position) else {
+                    return RuntimeValueResult::Fault(crate::FaultCode::MalformedState);
+                };
+                entry.value
+            }
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        let Some(bits) = value_bits(value) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        RuntimeValueResult::Value {
+            bits,
+            tag: value.tag() as u64,
+        }
     }
 
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult {

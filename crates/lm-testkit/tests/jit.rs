@@ -742,6 +742,69 @@ fn map_literals_match_each_fuel_boundary() {
 }
 
 #[test]
+fn map_lookup_helpers_stay_native() {
+    let source = concat!(
+        "table = {\"a\": 3, \"b\": 5}\n",
+        "i = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  if table.has(\"a\")\n",
+        "    sum = sum + table.at(\"a\")\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-lookup.lm", source)
+        .expect("the map lookup case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3000)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+}
+
+#[test]
+fn map_lookup_helpers_match_each_fuel_boundary() {
+    let source = concat!(
+        "table = {\"a\": 3}\n",
+        "if table.has(\"a\") then table.at(\"a\") else 0 end\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-lookup-fuel.lm", source)
+        .expect("the map lookup fuel case compiles");
+    for fuel in 0..=24 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn missing_native_map_key_preserves_the_fault_state() {
+    let source = concat!(
+        "table = {\"a\": 3}\n",
+        "i = 0\nsum = 0\n",
+        "while i <= 100\n",
+        "  key = if i < 100 then \"a\" else \"missing\" end\n",
+        "  sum = sum + table.at(key)\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-missing-key.lm", source)
+        .expect("the missing map key case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::MissingKey));
+    assert!(metrics.native_fault_exits > 0, "{metrics:?}");
+}
+
+#[test]
 fn captured_closure_calls_stay_native() {
     let source = concat!(
         "base = 7\n",
@@ -919,9 +982,8 @@ fn one_interpreter_instruction_does_not_reject_the_function() {
         "i = 0\nsum = 0\n",
         "while i < 1000\n",
         "  table = {\"value\": i}\n",
-        "  if table.has(\"value\")\n",
-        "    sum = sum + 1\n",
-        "  end\n",
+        "  table.put(\"value\", i + 1)\n",
+        "  sum = sum + 1\n",
         "  i = i + 1\n",
         "end\nsum\n",
     );
@@ -1305,9 +1367,8 @@ fn generic_environment_cache_survives_interpreter_exits() {
         "i = 0\nwhile i < 1000\n",
         "  value = identity(i)\n",
         "  table = {\"value\": value}\n",
-        "  if table.has(\"value\")\n",
-        "    i = i + 1\n",
-        "  end\n",
+        "  table.put(\"value\", value + 1)\n",
+        "  i = i + 1\n",
         "end\ni\n",
     );
     let (outcome, metrics, _) = run(source, EngineMode::Native, u64::MAX);

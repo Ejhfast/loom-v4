@@ -3,8 +3,8 @@
 use crate::activation::{
     NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
     RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
-    RESOLVED_CALL_CACHE_WAYS, RUNTIME_HEAP_LIMIT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
-    TYPE_ENVIRONMENT_CACHE_WAYS,
+    RESOLVED_CALL_CACHE_WAYS, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_OK,
+    RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
@@ -14,8 +14,8 @@ use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
     NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_CALLBACK_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
-    EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INTERPRETER,
-    EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
+    EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
+    EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
     EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
     EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
@@ -306,6 +306,7 @@ struct NativeValues<'a> {
     value_array_allocation_signature: ir::SigRef,
     list_growth_signature: ir::SigRef,
     list_reserve_signature: ir::SigRef,
+    map_lookup_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -389,6 +390,13 @@ struct ValueArrayAllocationEmission<'a> {
     point: FaultPoint,
     replay_stack: &'a [NativeValue],
     fault_stack: &'a [NativeValue],
+}
+
+struct MapLookupEmission<'a> {
+    reference: ir::Value,
+    key: NativeValue,
+    load_value: bool,
+    exit: HeapExitEmission<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -521,6 +529,18 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let list_reserve_signature = builder.import_signature(list_reserve_signature);
+    let mut map_lookup_signature = ir::Signature::new(host_call_conv);
+    map_lookup_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    map_lookup_signature.params.push(AbiParam::new(types::I64));
+    map_lookup_signature.params.push(AbiParam::new(types::I64));
+    map_lookup_signature.params.push(AbiParam::new(types::I64));
+    map_lookup_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    map_lookup_signature.returns.push(AbiParam::new(types::I32));
+    let map_lookup_signature = builder.import_signature(map_lookup_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -649,6 +669,7 @@ fn emit_region(
         value_array_allocation_signature,
         list_growth_signature,
         list_reserve_signature,
+        map_lookup_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -1576,6 +1597,53 @@ fn emit_segment(
                     &deopt_stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::MapHas | Instr::MapAt => {
+                let deopt_stack = stack.clone();
+                let key = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let value_contract = match (instruction, access.kind) {
+                    (Instr::MapHas, HeapAccessKind::MapHas) => None,
+                    (Instr::MapAt, HeapAccessKind::MapAt { value }) => Some(value),
+                    _ => return Err(CompileError::Backend),
+                };
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: instruction_index + 1,
+                    prefix: fault_prefix,
+                };
+                let result = emit_map_lookup(
+                    builder,
+                    values,
+                    MapLookupEmission {
+                        reference,
+                        key,
+                        load_value: matches!(instruction, Instr::MapAt),
+                        exit: HeapExitEmission {
+                            point,
+                            fault_stack: &stack,
+                            deopt_stack: &deopt_stack,
+                        },
+                    },
+                )?;
+                if let Some(contract) = value_contract {
+                    emit_native_value_contract(
+                        builder,
+                        values,
+                        result,
+                        contract,
+                        point,
+                        &deopt_stack,
+                    )?;
+                }
+                stack.push(result);
             }
             Instr::ListAt => {
                 let deopt_stack = stack.clone();
@@ -6229,6 +6297,104 @@ fn emit_list_reserve_call(
         &[values.runtime_context, reference, additional, root_count],
     );
     Ok(builder.inst_results(call)[0])
+}
+
+fn emit_map_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    emission: MapLookupEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let function_offset = if emission.load_value {
+        mem::offset_of!(RawNativeFunctions, map_at)
+    } else {
+        mem::offset_of!(RawNativeFunctions, map_has)
+    };
+    let lookup = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.map_lookup_signature,
+        lookup,
+        &[
+            values.runtime_context,
+            emission.reference,
+            emission.key.bits,
+            emission.key.tag,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        emission.exit.point,
+        emission.exit.fault_stack,
+        emission.exit.deopt_stack,
+    )?;
+    let bits = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    );
+    let tag = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        8,
+    );
+    Ok(NativeValue { bits, tag })
+}
+
+fn emit_runtime_status(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    status: ir::Value,
+    point: FaultPoint,
+    fault_stack: &[NativeValue],
+    replay_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let fault = builder
+        .ins()
+        .band_imm(status, i64::from(RUNTIME_FAULT_FLAG));
+    let fault = builder.ins().icmp_imm(IntCC::NotEqual, fault, 0);
+    let fault_block = builder.create_block();
+    let checked = builder.create_block();
+    builder.ins().brif(fault, fault_block, &[], checked, &[]);
+
+    builder.switch_to_block(fault_block);
+    let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let code = builder
+        .ins()
+        .band_imm(status, i64::from(!RUNTIME_FAULT_FLAG));
+    let code = builder.ins().uextend(types::I64, code);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_GUEST_FAULT,
+            block: point.block,
+            instruction: point.instruction,
+            result: NativeValue {
+                bits: code,
+                tag: zero,
+            },
+        },
+        fault_stack,
+    )?;
+
+    builder.switch_to_block(checked);
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, point, replay_stack)
 }
 
 fn emit_runtime_roots(

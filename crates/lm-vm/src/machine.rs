@@ -1878,7 +1878,7 @@ impl Machine {
     /// Find the entry position of a key in the map object `r` through
     /// the hash index. The index is a cache: the call first indexes
     /// the entries appended since the last lookup.
-    fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
+    pub(crate) fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
         self.ensure_map_index(r)?;
         let hash = self.key_index_hash(key)?;
         let (entries, candidates, dense) = match self.vm.heap.get(r) {

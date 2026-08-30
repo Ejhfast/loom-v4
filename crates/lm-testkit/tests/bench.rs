@@ -1473,6 +1473,19 @@ fn bench_jit_scalar_regions() {
         ),
         64,
     );
+    report_jit_after_setup(
+        "jit_map_lookup",
+        concat!(
+            "table = {\"a\": 3, \"b\": 5}\ni = 0\nsum = 0\n",
+            "while i < 1000000\n",
+            "  if table.has(\"a\")\n",
+            "    sum = sum + table.at(\"a\")\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\nsum\n",
+        ),
+        64,
+    );
     report_jit(
         "jit_list_push",
         concat!(

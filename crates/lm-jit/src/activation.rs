@@ -10,6 +10,7 @@ pub(super) const RUNTIME_OK: u32 = 0;
 const RUNTIME_INTERPRETER: u32 = 1;
 pub(super) const RUNTIME_HEAP_LIMIT: u32 = 2;
 pub(super) const RUNTIME_STACK_LIMIT: u32 = 3;
+pub(super) const RUNTIME_FAULT_FLAG: u32 = 1 << 31;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -327,6 +328,7 @@ pub(super) type RawAllocateValues =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
+pub(super) type RawMapLookup = unsafe extern "C" fn(*mut c_void, u64, u64, u64, *mut u64) -> u32;
 
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
@@ -339,6 +341,8 @@ pub(super) struct RawNativeFunctions {
     pub(super) allocate_map: RawAllocateValues,
     pub(super) grow_list: RawGrowList,
     pub(super) reserve_list: RawReserveList,
+    pub(super) map_has: RawMapLookup,
+    pub(super) map_at: RawMapLookup,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1039,6 +1043,14 @@ pub enum AllocationResult {
     Interpreter,
 }
 
+/// One checked value result from a fixed runtime helper.
+#[derive(Debug, Clone, Copy)]
+pub enum RuntimeValueResult {
+    Value { bits: u64, tag: u64 },
+    Fault(lm_abi::FaultCode),
+    Interpreter,
+}
+
 /// One checked callback-allocation result.
 #[derive(Debug, Clone, Copy)]
 pub enum CallbackAllocationResult {
@@ -1120,6 +1132,12 @@ pub trait NativeRuntime {
 
     /// Reserve additional capacity for one list.
     fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult;
+
+    /// Test one map key with the native map index.
+    fn map_has(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
+
+    /// Load one map value with the native map index.
+    fn map_at(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
 }
 
 /// One checked list-growth result.
@@ -1568,4 +1586,66 @@ pub(super) unsafe extern "C" fn reserve_list<R: NativeRuntime>(
         ListReserveResult::HeapLimit => RUNTIME_HEAP_LIMIT,
         ListReserveResult::Interpreter => RUNTIME_INTERPRETER,
     }
+}
+
+pub(super) unsafe extern "C" fn map_has<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_has) }
+}
+
+pub(super) unsafe extern "C" fn map_at<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_at) }
+}
+
+unsafe fn map_lookup<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+    lookup: fn(&mut R, u64, u64, u64) -> RuntimeValueResult,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match lookup(runtime, reference, key_bits, key_tag) {
+        RuntimeValueResult::Value { bits, tag } => {
+            // SAFETY: The caller provides two writable result words.
+            unsafe {
+                result.write(bits);
+                result.add(1).write(tag);
+            }
+            RUNTIME_OK
+        }
+        RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+fn runtime_fault_status(fault: lm_abi::FaultCode) -> u32 {
+    let index = lm_abi::FAULT_CODES
+        .iter()
+        .position(|candidate| *candidate == fault)
+        .and_then(|index| u32::try_from(index).ok());
+    index.map_or(RUNTIME_INTERPRETER, |index| RUNTIME_FAULT_FLAG | index)
 }

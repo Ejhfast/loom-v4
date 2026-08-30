@@ -1721,6 +1721,33 @@ This stage removed literal allocation exits.
 
 The representative gate remains open because hot operations still use temporary sites.
 
+### Stage F23: Typed map lookups
+
+- use one fixed typed helper for `MapHas`;
+- use one fixed typed helper for `MapAt`;
+- keep map entries in native frames across each helper call;
+- return helper faults through one explicit guest-fault exit;
+- validate loaded values against verifier contracts;
+- keep unexpected state on the replay path.
+
+Gate: Map lookup loops use no temporary interpreter site.
+
+Gate: A missing key preserves the exact fault state.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 107 tests.
+
+The fresh-engine corpus gate took 11.87 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Map lookup | 91.200 ms | 37.039 ms | 31.128 ms | 2.93 times |
+
+The representative JSON and HTTP rows did not change beyond measurement variance.
+
+Their hot functions still contain other temporary sites.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -32,14 +32,15 @@ const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 const EXIT_INTERFACE_CALL: u32 = 20;
 const EXIT_GENERIC_VIRTUAL_CALL: u32 = 21;
 const EXIT_CALLBACK_CALL: u32 = 22;
+const EXIT_GUEST_FAULT: u32 = 23;
 
 mod activation;
 mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, grow_list, reserve_list, NativeFunction, RawExit, RawNativeActivation,
-    RawNativeFunctions, RawRuntimeContext,
+    allocate_tuple, grow_list, map_at, map_has, reserve_list, NativeFunction, RawExit,
+    RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
@@ -47,7 +48,8 @@ pub use activation::{
     ListReserveResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
     NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
     NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, ValueArrayAllocationRequest, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeTypeEnvironmentView, RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -645,7 +647,7 @@ impl CompiledRegion {
             resolved_call_mask: resolved_calls.mask,
         };
         let mut exit = RawExit::default();
-        let mut allocation_result = 0u64;
+        let mut runtime_result = [0u64; 2];
         let mut runtime_context = RawRuntimeContext {
             runtime: std::ptr::from_mut(runtime),
             activation: std::ptr::from_mut(&mut raw_activation),
@@ -663,6 +665,8 @@ impl CompiledRegion {
             allocate_map: allocate_map::<R>,
             grow_list: grow_list::<R>,
             reserve_list: reserve_list::<R>,
+            map_has: map_has::<R>,
+            map_at: map_at::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {
@@ -694,7 +698,7 @@ impl CompiledRegion {
                 entry,
                 std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
                 std::ptr::from_ref(&runtime_functions),
-                std::ptr::from_mut(&mut allocation_result),
+                runtime_result.as_mut_ptr(),
                 roots.as_mut_ptr(),
                 root_tags.as_mut_ptr(),
                 root_states.as_mut_ptr(),
@@ -743,6 +747,7 @@ impl CompiledRegion {
             EXIT_INTERFACE_CALL => ExitKind::InterfaceCall,
             EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
             EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
+            EXIT_GUEST_FAULT => ExitKind::GuestFault,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
