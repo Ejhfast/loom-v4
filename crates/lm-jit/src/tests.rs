@@ -264,6 +264,10 @@ impl NativeRuntime for TestRuntime {
     fn grow_list(&mut self, _request: ListGrowthRequest<'_>) -> ListGrowthResult {
         ListGrowthResult::Interpreter
     }
+
+    fn reserve_list(&mut self, _request: ListReserveRequest<'_>) -> ListReserveResult {
+        ListReserveResult::Interpreter
+    }
 }
 
 #[test]

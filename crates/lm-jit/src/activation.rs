@@ -177,12 +177,14 @@ fn type_environment_cache_set(
 pub(super) type RawAllocateInstance =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
+pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
 pub(super) struct RawNativeFunctions {
     pub(super) allocate_instance: RawAllocateInstance,
     pub(super) grow_list: RawGrowList,
+    pub(super) reserve_list: RawReserveList,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -705,6 +707,9 @@ pub trait NativeRuntime {
 
     /// Grow one list and append one canonical value.
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult;
+
+    /// Reserve additional capacity for one list.
+    fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult;
 }
 
 /// One checked list-growth result.
@@ -723,6 +728,30 @@ pub struct ListGrowthRequest<'a> {
     pub value_bits: u64,
     /// Canonical appended value tag.
     pub value_tag: u64,
+    /// Active root payloads.
+    pub root_bits: &'a [u64],
+    /// Active root tags.
+    pub root_tags: &'a [u64],
+    /// Active root states.
+    pub root_states: &'a [u8],
+    /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
+/// One checked list-reserve result.
+#[derive(Debug, Clone, Copy)]
+pub enum ListReserveResult {
+    Done { heap: JitHeapView },
+    HeapLimit,
+    Interpreter,
+}
+
+/// One typed request to reserve additional list capacity.
+pub struct ListReserveRequest<'a> {
+    /// Canonical list reference bits.
+    pub reference: u64,
+    /// Requested additional capacity.
+    pub additional: i64,
     /// Active root payloads.
     pub root_bits: &'a [u64],
     /// Active root tags.
@@ -849,5 +878,57 @@ pub(super) unsafe extern "C" fn grow_list<R: NativeRuntime>(
         }
         ListGrowthResult::HeapLimit => RUNTIME_HEAP_LIMIT,
         ListGrowthResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn reserve_list<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    additional: i64,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside the activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    match runtime.reserve_list(ListReserveRequest {
+        reference,
+        additional,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        ListReserveResult::Done { heap } => {
+            // SAFETY: The native activation remains writable during the slow path.
+            unsafe {
+                (*context.activation).heap_pages = heap.pages;
+                (*context.activation).heap_page_count = heap.page_count;
+                (*context.activation).heap_slot_count = heap.slot_count;
+                (*context.activation).heap_used_bytes = heap.used_bytes;
+                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+            }
+            RUNTIME_OK
+        }
+        ListReserveResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        ListReserveResult::Interpreter => RUNTIME_INTERPRETER,
     }
 }

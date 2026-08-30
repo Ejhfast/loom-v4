@@ -1047,6 +1047,21 @@ Gate: `ListPush` disappears from representative treatment gaps.
 
 Gate: The common append path calls no runtime function.
 
+### Stage F13: Direct list capacity changes
+
+- compile `ListReserve` with one inline capacity check;
+- call one fixed typed slow path only when capacity must grow;
+- pass complete native roots before a possible collection;
+- compile `ListReorder` as one guarded epoch update;
+- preserve frozen-value, heap-limit, and epoch faults;
+- preserve exact state at every tested fuel boundary.
+
+Gate: Repeated reserve operations improve by more than five times.
+
+Gate: `ListReserve` and `ListReorder` disappear from treatment gaps.
+
+Gate: A reserve operation with sufficient capacity calls no runtime function.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1340,6 +1355,22 @@ Capacity growth and collection used one fixed typed function.
 The parser profiles contain no `ListPush` gap.
 
 Representative timing remained stable because other operations dominate these programs.
+
+The Stage F13 run added direct list reserve and reorder operations.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| List reserve | 44.189 ms | 1.512 ms | 29.23 times |
+
+The common reserve path called no runtime function.
+
+Capacity growth and collection used one fixed typed function.
+
+The list-sort profile contains no `ListReserve` or `ListReorder` gap.
+
+List-sort Auto performance changed from 0.915 times to 0.918 times.
+
+`CallInterface` now dominates the list-sort treatment gaps.
 
 ## 24. Rejected designs
 

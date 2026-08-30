@@ -1486,6 +1486,17 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_list_reserve",
+        concat!(
+            "items = [1]\nitems.reserve(64)\ni = 0\n",
+            "while i < 1000000\n",
+            "  items.reserve(0)\n",
+            "  i = i + 1\n",
+            "end\nitems.capacity()\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_allocation",
         concat!(
             "class Token\nend\n",

@@ -1179,6 +1179,33 @@ fn direct_collection_metadata_matches_selected_fuel_boundaries() {
 }
 
 #[test]
+fn list_reserve_and_reorder_stay_native() {
+    let source = concat!(
+        "items = [4, 1, 3, 2]\n",
+        "items.reserve(32)\n",
+        "items.sort()\n",
+        "items[0] * 100 + items[3]\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-list-reserve.lm", source)
+        .expect("the list reserve case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(104)));
+    assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
 fn native_list_iteration_detects_structural_changes() {
     let source = concat!(
         "items = [1, 2, 3]\n",

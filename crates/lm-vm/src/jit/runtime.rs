@@ -3,8 +3,8 @@
 use crate::machine::Machine;
 use crate::NamespaceRuntime;
 use lm_jit::{
-    AllocationResult, ListGrowthRequest, ListGrowthResult, NativeRuntime,
-    NativeTypeEnvironmentCache, ScalarKind, LOCAL_INITIALIZED,
+    AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
+    NativeRuntime, NativeTypeEnvironmentCache, ScalarKind, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
 
@@ -241,6 +241,83 @@ impl NativeRuntime for MachineRuntime<'_> {
         items.push(value);
         self.machine.vm.heap.recharge_local(reference);
         ListGrowthResult::Done {
+            heap: self.machine.vm.heap.jit_view(),
+        }
+    }
+
+    fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult {
+        let ListReserveRequest {
+            reference,
+            additional,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        } = request;
+        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
+            return ListReserveResult::Interpreter;
+        }
+        let Ok(additional) = usize::try_from(additional) else {
+            return ListReserveResult::Interpreter;
+        };
+        let reference = object_reference(reference);
+        let Some(crate::Object::List { items, epoch }) = self.machine.vm.heap.try_get(reference)
+        else {
+            return ListReserveResult::Interpreter;
+        };
+        if self.machine.vm.heap.is_frozen(reference) {
+            return ListReserveResult::Interpreter;
+        }
+        if additional <= items.capacity().saturating_sub(items.len()) {
+            return ListReserveResult::Done {
+                heap: self.machine.vm.heap.jit_view(),
+            };
+        }
+        if epoch.ensure_bumpable().is_err() {
+            return ListReserveResult::Interpreter;
+        }
+        let Some(growth) = additional.checked_mul(std::mem::size_of::<Value>()) else {
+            return ListReserveResult::HeapLimit;
+        };
+        if self.machine.vm.heap.collection_due(growth) && !allow_collection {
+            return ListReserveResult::Interpreter;
+        }
+        let mut roots = Vec::new();
+        if roots.try_reserve_exact(root_bits.len()).is_err() {
+            return ListReserveResult::HeapLimit;
+        }
+        roots.extend(
+            root_bits
+                .iter()
+                .copied()
+                .zip(root_tags.iter().copied())
+                .zip(root_states.iter().copied())
+                .filter(|((_, tag), state)| {
+                    *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
+                })
+                .map(|((bits, _), _)| object_reference(bits)),
+        );
+        if let Err(fault) =
+            self.machine
+                .reserve_native(growth, self.base_local, self.base_operand, &roots)
+        {
+            return if fault == crate::FaultCode::HeapLimit {
+                ListReserveResult::HeapLimit
+            } else {
+                ListReserveResult::Interpreter
+            };
+        }
+        let crate::Object::List { items, epoch } = self.machine.vm.heap.get_mut(reference) else {
+            return ListReserveResult::Interpreter;
+        };
+        let before = items.capacity();
+        if items.try_reserve(additional).is_err() {
+            return ListReserveResult::HeapLimit;
+        }
+        if items.capacity() != before && epoch.bump().is_err() {
+            return ListReserveResult::Interpreter;
+        }
+        ListReserveResult::Done {
             heap: self.machine.vm.heap.jit_view(),
         }
     }

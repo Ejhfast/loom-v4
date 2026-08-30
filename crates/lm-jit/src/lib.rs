@@ -33,14 +33,14 @@ const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 mod activation;
 
 use activation::{
-    allocate_instance, grow_list, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
-    RawRuntimeContext,
+    allocate_instance, grow_list, reserve_list, NativeFunction, RawExit, RawNativeActivation,
+    RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
-    AllocationResult, ListGrowthRequest, ListGrowthResult, NativeActivation, NativeExecution,
-    NativeFrameView, NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut,
-    NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView, LOCAL_DIRTY,
-    LOCAL_INITIALIZED,
+    AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
+    NativeActivation, NativeExecution, NativeFrameView, NativeLiteralView, NativePreparation,
+    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
+    NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -451,6 +451,7 @@ impl CompiledRegion {
         let runtime_functions = RawNativeFunctions {
             allocate_instance: allocate_instance::<R>,
             grow_list: grow_list::<R>,
+            reserve_list: reserve_list::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {
@@ -673,6 +674,8 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListCapacity)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListEpoch)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListIterLen)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListReserve)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListReorder)
             | Instr::Extended(lm_bytecode::ExtendedInstr::SealInstance)
             | Instr::Extended(lm_bytecode::ExtendedInstr::OptionSome { .. })
             | Instr::Extended(lm_bytecode::ExtendedInstr::OptionNone { .. })

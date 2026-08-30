@@ -373,6 +373,8 @@ pub(super) enum HeapAccessKind {
     ListPush {
         value: ValueContract,
     },
+    ListReserve,
+    ListReorder,
     ListCapacity,
     ListEpoch,
     ListIterLen,
@@ -645,10 +647,15 @@ impl RegionPlan {
                     HeapAccessKind::StoreField { .. }
                     | HeapAccessKind::ListSet { .. }
                     | HeapAccessKind::ListPush { .. }
+                    | HeapAccessKind::ListReserve
+                    | HeapAccessKind::ListReorder
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
-                        if matches!(access.kind, HeapAccessKind::ListPush { .. }) {
+                        if matches!(
+                            access.kind,
+                            HeapAccessKind::ListPush { .. } | HeapAccessKind::ListReserve
+                        ) {
                             collection_sites += 1;
                         }
                     }
@@ -919,6 +926,8 @@ fn inline_function_plan(
                     | Instr::Extended(ExtendedInstr::ListCapacity)
                     | Instr::Extended(ExtendedInstr::ListEpoch)
                     | Instr::Extended(ExtendedInstr::ListIterLen)
+                    | Instr::Extended(ExtendedInstr::ListReserve)
+                    | Instr::Extended(ExtendedInstr::ListReorder)
                     | Instr::Extended(ExtendedInstr::SealInstance)
                     | Instr::Native(
                         NativeInstr::BytesLen
@@ -1488,6 +1497,31 @@ fn analyze_segment(
                     kind: HeapAccessKind::ListCapacity,
                 });
                 stack.push(ScalarKind::Int);
+            }
+            Instr::Extended(ExtendedInstr::ListReserve) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListReserve,
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Unit);
+            }
+            Instr::Extended(ExtendedInstr::ListReorder) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListReorder,
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Unit);
             }
             Instr::Extended(ExtendedInstr::ListEpoch) => {
                 let instruction = segment.start + offset as u32;
