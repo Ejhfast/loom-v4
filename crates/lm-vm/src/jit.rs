@@ -17,8 +17,6 @@ pub(crate) struct NativeScratch {
     roots: Vec<u64>,
     root_tags: Vec<u64>,
     root_states: Vec<u8>,
-    option_layout: usize,
-    option_families: Vec<u32>,
     continuation_regions: Vec<Arc<lm_jit::CompiledRegion>>,
 }
 
@@ -551,12 +549,6 @@ impl JitEngine {
                     operand_base,
                 )
             };
-        let option_layout = Arc::as_ptr(&module.table_store()) as usize;
-        if scratch.option_layout != option_layout {
-            scratch.option_layout = option_layout;
-            scratch.option_families.clear();
-        }
-        scratch.option_families.resize(module.types.len(), u32::MAX);
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
         let max_stack_values = machine.config.max_stack_values as usize;
@@ -616,7 +608,6 @@ impl JitEngine {
                         fuel: remaining,
                         heap,
                         class_parents: native.class_parents(),
-                        option_families: &scratch.option_families,
                         literals,
                         type_store_id: context.envs.canonical_store_id(),
                         type_environments,
@@ -665,17 +656,22 @@ impl JitEngine {
                     let Ok(type_index) = u32::try_from(type_index) else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    let Some(slot) = scratch.option_families.get_mut(type_index as usize) else {
+                    let Some((function, environment)) = scratch
+                        .activation
+                        .frames()
+                        .last()
+                        .map(|frame| (frame.function(), TypeEnvId(frame.environment())))
+                    else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    if *slot != u32::MAX {
+                    if exit.result_tag() != u64::from(environment.0) {
                         break Err(Failure::BackendUnavailable);
                     }
                     let family = runtime.machine.close_option_family_at(
                         module,
                         context.envs,
                         type_index,
-                        TypeEnvId::EMPTY,
+                        environment,
                     );
                     if let Ok(family) = family {
                         let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
@@ -692,11 +688,20 @@ impl JitEngine {
                             .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
                             .map(|entry| entry.index());
                         if let (Some(resolve_region), Some(resume)) = (resolve_region, resume) {
-                            *slot = family;
-                            prior_retired = next_retired;
-                            active_region = resolve_region;
-                            active_entry = resume;
-                            continue;
+                            let cached = runtime.type_environments.cache_type_site(
+                                context.envs.canonical_store_id(),
+                                function,
+                                exit.block(),
+                                exit.instruction(),
+                                environment.0,
+                                family,
+                            );
+                            if cached {
+                                prior_retired = next_retired;
+                                active_region = resolve_region;
+                                active_entry = resume;
+                                continue;
+                            }
                         }
                     }
                 }
@@ -724,7 +729,7 @@ impl JitEngine {
                         break Err(Failure::BackendUnavailable);
                     };
                     if let Ok(child) = context.envs.derive(module, parent, application) {
-                        let cached = runtime.type_environments.cache_type_environment(
+                        let cached = runtime.type_environments.cache_type_site(
                             context.envs.canonical_store_id(),
                             function,
                             exit.block(),
@@ -910,7 +915,6 @@ impl JitEngine {
         if resumed {
             metrics.note_native_continuation_materialization();
         }
-
         match exit.kind() {
             ExitKind::Fuel
             | ExitKind::Interpreter

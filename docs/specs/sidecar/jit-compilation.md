@@ -175,11 +175,11 @@ A generic function uses one type-erased native body.
 
 Each native frame records its exact TypeEnvId.
 
-Each machine owns a small type-environment cache.
+Each machine owns a small type-metadata cache.
 
 Each cache key contains the call site, canonical type-store identity, and parent environment.
 
-The cache value contains the derived child environment.
+The cache value contains a derived environment or one closed type identifier.
 
 The cache persists across scheduler turns and temporary interpreter exits.
 
@@ -974,7 +974,7 @@ Gate: JSON and HTTP remain within five percent in Auto mode.
 - compile `OptionSome`, `OptionNone`, and `OptionPayload` directly;
 - compile `Option` family and arm type tests directly;
 - resolve closed family identifiers through one lazy metadata exit;
-- cache each resolved identifier for the retained native activation;
+- cache each resolved identifier by bytecode site and active type environment;
 - resume the same native instruction after successful resolution;
 - interpret one instruction when type resolution reaches its limit.
 
@@ -1007,7 +1007,7 @@ Gate: Literal and `Unreachable` gaps disappear from parser profiles.
 
 - compile one type-erased body for each generic function;
 - preserve each frame's exact TypeEnvId;
-- add one machine-local type-environment cache for exact `CallG` sites;
+- reuse the machine-local type-metadata cache for exact `CallG` sites;
 - derive one child environment on each cache miss;
 - resume the call without retiring it on a miss;
 - preserve exact state at every tested fuel boundary.

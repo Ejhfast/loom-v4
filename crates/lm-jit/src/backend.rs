@@ -979,6 +979,7 @@ fn emit_segment(
                 let family = emit_option_family(
                     builder,
                     values,
+                    input.root.function,
                     access.family_type,
                     FaultPoint {
                         block: segment.block,
@@ -1010,6 +1011,7 @@ fn emit_segment(
                 let family = emit_option_family(
                     builder,
                     values,
+                    input.root.function,
                     access.family_type,
                     FaultPoint {
                         block: segment.block,
@@ -1062,6 +1064,7 @@ fn emit_segment(
                 let result = emit_list_get(
                     builder,
                     values,
+                    input.root.function,
                     reference,
                     index,
                     value,
@@ -1101,6 +1104,7 @@ fn emit_segment(
                     let family = emit_option_family(
                         builder,
                         values,
+                        input.root.function,
                         access.family_type,
                         FaultPoint {
                             block: segment.block,
@@ -1992,6 +1996,30 @@ fn emit_type_environment_lookup(
     point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
+    emit_type_cache_lookup(
+        builder,
+        values,
+        site.function,
+        point,
+        TypeCacheRequest::Environment,
+        stack,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum TypeCacheRequest {
+    Environment,
+    OptionFamily { ty: u32 },
+}
+
+fn emit_type_cache_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function: u32,
+    point: FaultPoint,
+    request: TypeCacheRequest,
+    stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
     let hit = builder.create_block();
     let miss = builder.create_block();
     builder.append_block_param(hit, types::I32);
@@ -2018,7 +2046,7 @@ fn emit_type_environment_lookup(
     let shifted_parent = builder.ins().ushr_imm(parent, 16);
     let parent_hash = builder.ins().bxor(parent, shifted_parent);
     let site_hash =
-        crate::activation::type_environment_site_hash(site.function, site.block, site.instruction);
+        crate::activation::type_environment_site_hash(function, point.block, point.instruction);
     let site_hash = builder.ins().iconst(types::I32, i64::from(site_hash));
     let set = builder.ins().bxor(site_hash, parent_hash);
     let set = builder.ins().band(set, mask);
@@ -2089,14 +2117,14 @@ fn emit_type_environment_lookup(
         let same_function =
             builder
                 .ins()
-                .icmp_imm(IntCC::Equal, cached_function, i64::from(site.function));
+                .icmp_imm(IntCC::Equal, cached_function, i64::from(function));
         let same_block = builder
             .ins()
-            .icmp_imm(IntCC::Equal, cached_block, i64::from(site.block));
+            .icmp_imm(IntCC::Equal, cached_block, i64::from(point.block));
         let same_instruction = builder.ins().icmp_imm(
             IntCC::Equal,
             cached_instruction,
-            i64::from(site.instruction),
+            i64::from(point.instruction),
         );
         let same_parent = builder.ins().icmp(IntCC::Equal, cached_parent, parent);
         let matched = builder.ins().band(same_store, same_function);
@@ -2112,16 +2140,23 @@ fn emit_type_environment_lookup(
     let retired = builder.use_var(values.retired);
     let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
     let parent_bits = builder.ins().uextend(types::I64, parent);
+    let (kind, bits) = match request {
+        TypeCacheRequest::Environment => (EXIT_TYPE_ENVIRONMENT, parent_bits),
+        TypeCacheRequest::OptionFamily { ty } => (
+            EXIT_TYPE_RESOLUTION,
+            builder.ins().iconst(types::I64, i64::from(ty)),
+        ),
+    };
     emit_exit(
         builder,
         values,
         ExitEmission {
             retired,
-            kind: EXIT_TYPE_ENVIRONMENT,
+            kind,
             block: point.block,
             instruction: point.instruction,
             result: NativeValue {
-                bits: parent_bits,
+                bits,
                 tag: parent_bits,
             },
         },
@@ -3337,6 +3372,7 @@ fn emit_list_at(
 fn emit_list_get(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
+    function: u32,
     reference: ir::Value,
     index: ir::Value,
     result: ValueContract,
@@ -3390,7 +3426,14 @@ fn emit_list_get(
         .jump(done, &[value.bits.into(), value.tag.into()]);
 
     builder.switch_to_block(missing);
-    let family = emit_option_family(builder, values, family_type, resolve, exit.deopt_stack)?;
+    let family = emit_option_family(
+        builder,
+        values,
+        function,
+        family_type,
+        resolve,
+        exit.deopt_stack,
+    )?;
     let arm = builder.ins().iconst(types::I64, 1_i64 << 32);
     let payload = builder.ins().bor(family, arm);
     let tag = builder
@@ -3888,54 +3931,19 @@ fn emit_array_address(
 fn emit_option_family(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
+    function: u32,
     family_type: u32,
     point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
-    let load = builder.create_block();
-    let resolve = builder.create_block();
-    let ready = builder.create_block();
-    let type_index = builder
-        .ins()
-        .iconst(values.pointer_type, i64::from(family_type));
-    let count = load_activation_pointer(builder, values, RawActivationField::OptionFamilyCount)?;
-    let outside = builder
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, type_index, count);
-    builder.ins().brif(outside, resolve, &[], load, &[]);
-
-    builder.switch_to_block(load);
-    let families = load_activation_pointer(builder, values, RawActivationField::OptionFamilies)?;
-    let offset = builder.ins().imul_imm(type_index, 4);
-    let address = builder.ins().iadd(families, offset);
-    let family = builder
-        .ins()
-        .load(types::I32, MemFlags::trusted(), address, 0);
-    let missing = builder.ins().icmp_imm(IntCC::Equal, family, -1);
-    builder.ins().brif(missing, resolve, &[], ready, &[]);
-
-    builder.switch_to_block(resolve);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
-    let requested = builder.ins().iconst(types::I64, i64::from(family_type));
-    let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
+    let family = emit_type_cache_lookup(
         builder,
         values,
-        ExitEmission {
-            retired,
-            kind: EXIT_TYPE_RESOLUTION,
-            block: point.block,
-            instruction: point.instruction,
-            result: NativeValue {
-                bits: requested,
-                tag: zero,
-            },
-        },
+        function,
+        point,
+        TypeCacheRequest::OptionFamily { ty: family_type },
         stack,
     )?;
-
-    builder.switch_to_block(ready);
     Ok(builder.ins().uextend(types::I64, family))
 }
 
@@ -5304,8 +5312,6 @@ enum RawActivationField {
     MaxStackValues,
     BaseFrames,
     MaxFrames,
-    OptionFamilies,
-    OptionFamilyCount,
     LiteralValues,
     LiteralCount,
 }
@@ -5337,12 +5343,6 @@ impl RawActivationField {
                 mem::offset_of!(RawNativeActivation, base_frames)
             }
             RawActivationField::MaxFrames => mem::offset_of!(RawNativeActivation, max_frames),
-            RawActivationField::OptionFamilies => {
-                mem::offset_of!(RawNativeActivation, option_families)
-            }
-            RawActivationField::OptionFamilyCount => {
-                mem::offset_of!(RawNativeActivation, option_family_count)
-            }
             RawActivationField::LiteralValues => {
                 mem::offset_of!(RawNativeActivation, literal_values)
             }

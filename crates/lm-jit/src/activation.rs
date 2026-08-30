@@ -73,8 +73,6 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_collection_threshold: usize,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
-    pub(super) option_families: *const u32,
-    pub(super) option_family_count: usize,
     pub(super) literal_values: *const Value,
     pub(super) literal_count: usize,
     pub(super) type_store_id: u64,
@@ -217,7 +215,7 @@ pub struct NativeActivation {
     pub(super) changed_from: usize,
 }
 
-/// One machine-local cache of derived type environments.
+/// One machine-local cache of environment-dependent type metadata.
 #[derive(Debug, Default)]
 pub struct NativeTypeEnvironmentCache {
     entries: Vec<RawTypeEnvironmentCacheEntry>,
@@ -265,7 +263,6 @@ pub struct NativeExecution<'a> {
     pub fuel: u64,
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
-    pub option_families: &'a [u32],
     pub literals: NativeLiteralView,
     pub type_store_id: u64,
     pub type_environments: NativeTypeEnvironmentView,
@@ -577,8 +574,8 @@ impl NativeTypeEnvironmentCache {
         })
     }
 
-    /// Cache one derived environment for this machine.
-    pub fn cache_type_environment(
+    /// Cache one environment-dependent value for one bytecode site.
+    pub fn cache_type_site(
         &mut self,
         store: u64,
         function: u32,

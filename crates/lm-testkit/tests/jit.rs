@@ -601,6 +601,26 @@ fn generic_calls_preserve_each_exact_type_environment() {
 }
 
 #[test]
+fn generic_option_calls_match_the_interpreter() {
+    let cases = [
+        "missing: Option[Int] = None\nmissing.expect(\"missing item\")\n",
+        concat!(
+            "def choose[T](value: Option[T], fallback: T): T\n",
+            "  value.value_or(fallback)\n",
+            "end\n",
+            "(choose[Int](None, 9), choose[String](None, \"empty\"), ",
+            "choose[Int](Some(4), 9))\n",
+        ),
+    ];
+    for source in cases {
+        let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted, "{metrics:?}");
+        assert_eq!(native_dump, interpreted_dump);
+    }
+}
+
+#[test]
 fn generic_environment_cache_does_not_enter_shared_code() {
     let source = concat!(
         "def identity[T](value: T): T\n  value\nend\n",

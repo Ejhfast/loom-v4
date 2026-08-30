@@ -368,7 +368,6 @@ impl CompiledRegion {
             fuel,
             heap,
             class_parents,
-            option_families,
             literals,
             type_store_id,
             type_environments,
@@ -390,7 +389,7 @@ impl CompiledRegion {
             || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
             || (self.plan.collection_sites != 0 && heap.used_bytes.is_null())
-            || (!self.type_environment_sites.is_empty()
+            || ((!self.type_environment_sites.is_empty() || self.plan.type_resolution_sites != 0)
                 && (type_store_id == 0 || type_environments.entries.is_null()))
         {
             return Err(Failure::BackendUnavailable);
@@ -430,8 +429,6 @@ impl CompiledRegion {
             heap_collection_threshold: heap.collection_threshold,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
-            option_families: option_families.as_ptr(),
-            option_family_count: option_families.len(),
             literal_values: literals.values,
             literal_count: literals.count,
             type_store_id,

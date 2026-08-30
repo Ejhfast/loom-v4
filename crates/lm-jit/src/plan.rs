@@ -462,6 +462,7 @@ pub(super) struct RegionPlan {
     pub(super) collection_sites: usize,
     pub(super) effect_sites: usize,
     pub(super) interpreter_sites: usize,
+    pub(super) type_resolution_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -600,6 +601,7 @@ impl RegionPlan {
         let mut collection_sites = 0;
         let mut effect_sites = 0;
         let mut interpreter_sites = 0;
+        let mut type_resolution_sites = 0;
         let analysis_context = SegmentAnalysisContext {
             func: runtime,
             source_func,
@@ -636,6 +638,7 @@ impl RegionPlan {
             segment.boundary_stack = analysis.boundary_stack;
             segment.heap_accesses = analysis.heap_accesses;
             segment.option_accesses = analysis.option_accesses;
+            type_resolution_sites += segment.option_accesses.len();
             heap_read_sites += segment
                 .option_accesses
                 .iter()
@@ -779,6 +782,7 @@ impl RegionPlan {
             collection_sites,
             effect_sites,
             interpreter_sites,
+            type_resolution_sites,
         })
     }
 
