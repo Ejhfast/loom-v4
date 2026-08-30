@@ -296,6 +296,90 @@ fn interface_calls_preserve_scheduler_retirement_counts() {
 }
 
 #[test]
+fn generic_virtual_calls_preserve_exact_type_environments() {
+    let source = concat!(
+        "class Box[T]\n",
+        "  value: T\n",
+        "  def init(mut self, value: T)\n    self.value = value\n  end\n",
+        "  def keep[U](self, other: U): T\n    self.value\n  end\n",
+        "end\n",
+        "def read[T, U](box: Box[T], other: U): T\n  box.keep(other)\nend\n",
+        "left = Box(7)\nright = Box(true)\n",
+        "index = 0\ntotal = 0\n",
+        "while index < 1000\n",
+        "  if read(right, index) then total = total + 1 end\n",
+        "  total = total + read(left, true)\n",
+        "  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-generic-virtual-call.lm", source)
+        .expect("the generic virtual call case compiles");
+    assert!(artifact.root().module().funcs.iter().any(|function| {
+        function
+            .blocks
+            .iter()
+            .flatten()
+            .any(|instruction| matches!(instruction, lm_bytecode::Instr::CallVirtualG { .. }))
+    }));
+    for fuel in 0..=48 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(8_000)));
+    assert!(metrics.compiled_call_sites >= 4, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 20_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn generic_virtual_calls_preserve_scheduler_retirement_counts() {
+    let source = concat!(
+        "class Box[T]\n",
+        "  value: T\n",
+        "  def init(mut self, value: T)\n    self.value = value\n  end\n",
+        "  def keep[U](self, other: U): T\n    self.value\n  end\n",
+        "end\n",
+        "box = Box(7)\nindex = 0\ntotal = 0\n",
+        "while index < 10000\n",
+        "  total = total + box.keep(index)\n",
+        "  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-generic-virtual-retired.lm", source)
+        .expect("the generic virtual retirement case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the generic virtual retirement case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the generic virtual retirement case runs");
+        (outcome, world.metrics().retired_instructions)
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    let cold = run(Arc::clone(&engine));
+    let warm = run(Arc::clone(&engine));
+    assert_eq!(cold, interpreted);
+    assert_eq!(warm, interpreted);
+    assert!(
+        engine.metrics().native_retired_instructions > 0,
+        "{:?}",
+        engine.metrics()
+    );
+}
+
+#[test]
 fn byte_index_faults_match_the_interpreter() {
     for index in [-1, 4] {
         let source = format!(

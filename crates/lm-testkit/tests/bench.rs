@@ -1637,6 +1637,20 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_generic_virtual_call",
+        concat!(
+            "class Counter\n",
+            "  def keep[U](self, other: U): Int\n    7\n  end\n",
+            "end\n",
+            "counter = Counter()\n",
+            "index = 0\ntotal = 0\n",
+            "while index < 1000000\n",
+            "  total = total + counter.keep(index)\n",
+            "  index = index + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_generic_call",
         concat!(
             "def identity[T](value: T): T\n  value\nend\n",

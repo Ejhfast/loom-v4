@@ -34,6 +34,7 @@ pub struct CallbackRef {
 /// Index zero names the empty environment. A monomorphic state stores
 /// zero, allocates nothing, and performs no type work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
 pub struct TypeEnvId(pub u32);
 
 impl TypeEnvId {
@@ -60,6 +61,7 @@ impl Default for TypeEnvId {
 /// equal structure stay equal when their witnesses differ. The
 /// equality below states that rule for every holder of a witness.
 #[derive(Debug, Clone, Copy, Default, Eq)]
+#[repr(transparent)]
 pub struct Witness(pub TypeEnvId);
 
 impl Witness {

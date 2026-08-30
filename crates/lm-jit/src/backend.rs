@@ -1,21 +1,21 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeDispatchRow, NativeFunction, RawExit, RawInterfaceCallCacheEntry, RawNativeActivation,
-    RawNativeFrame, RawNativeFunctions, RawTypeEnvironmentCacheEntry, INTERFACE_CALL_CACHE_WAYS,
-    RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
+    NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
+    RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
+    RESOLVED_CALL_CACHE_WAYS, RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
     Segment, SegmentExit, UnsupportedReason, ValueContract, VirtualReceiver,
 };
 use crate::{
-    CompiledRegion, FunctionInput, InterfaceCallSite, NativeEntryCell, ScalarKind,
-    TypeEnvironmentSite, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL,
-    EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
-    EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
-    EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
-    EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite, NativeEntryCell,
+    ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL,
+    EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW,
+    EXIT_INTERFACE_CALL, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
+    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
+    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -31,12 +31,13 @@ use lm_heap::{
     JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET,
     JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
     JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET,
-    JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST,
-    JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING,
-    JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TEXT_BYTE_LEN_OFFSET,
-    JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
-    VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
+    JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
+    JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES,
+    JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP,
+    JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
+    JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET,
+    JIT_TUPLE_ITEMS_OFFSET, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET,
+    VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
@@ -104,6 +105,30 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
                 method,
                 receiver_type: recv_ty,
                 application: app,
+                receiver_kind: *contract.params.first()?,
+                parameter_count: contract.params.len(),
+            })
+        })
+        .collect();
+    let generic_virtual_call_sites: Vec<GenericVirtualCallSite> = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let SegmentExit::GenericVirtualCall {
+                selector,
+                application,
+                ..
+            } = segment.exit
+            else {
+                return None;
+            };
+            let contract = segment.call_contract.as_ref()?;
+            Some(GenericVirtualCallSite {
+                function: input.root.function,
+                block: segment.block,
+                instruction: segment.end.checked_sub(1)?,
+                selector,
+                application,
                 receiver_kind: *contract.params.first()?,
                 parameter_count: contract.params.len(),
             })
@@ -183,6 +208,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         call_entry,
         type_environment_sites,
         interface_call_sites,
+        generic_virtual_call_sites,
         module: Mutex::new(Some(module)),
     })
 }
@@ -684,6 +710,7 @@ fn emit_segment(
                 segment.exit,
                 SegmentExit::Call { .. }
                     | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
                     | SegmentExit::Effect { .. }
                     | SegmentExit::Interpreter { .. }
@@ -1978,6 +2005,7 @@ fn emit_segment(
             Instr::Call(_)
             | Instr::CallG { .. }
             | Instr::CallVirtual { .. }
+            | Instr::CallVirtualG { .. }
             | Instr::CallInterface { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
@@ -2012,6 +2040,7 @@ fn emit_segment(
         segment.exit,
         SegmentExit::Call { .. }
             | SegmentExit::VirtualCall { .. }
+            | SegmentExit::GenericVirtualCall { .. }
             | SegmentExit::InterfaceCall { .. }
     ) {
         let call_instruction = segment.end - 1;
@@ -2082,6 +2111,41 @@ fn emit_segment(
                 )?;
                 (target, builder.ins().iconst(types::I32, 0))
             }
+            SegmentExit::GenericVirtualCall { .. } => {
+                let receiver = contract.receiver.ok_or(CompileError::Backend)?;
+                let receiver_value = stack
+                    .get(
+                        stack
+                            .len()
+                            .checked_sub(contract.params.len())
+                            .ok_or(CompileError::Backend)?,
+                    )
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: call_instruction,
+                    prefix: 0,
+                };
+                let receiver = emit_generic_virtual_receiver_key(
+                    builder,
+                    values,
+                    receiver_value,
+                    receiver,
+                    point,
+                    &stack,
+                )?;
+                emit_resolved_call_lookup(
+                    builder,
+                    values,
+                    input.root.function,
+                    point,
+                    receiver,
+                    receiver_value,
+                    EXIT_GENERIC_VIRTUAL_CALL,
+                    &stack,
+                )?
+            }
             SegmentExit::InterfaceCall { .. } => {
                 let receiver_value = stack
                     .get(
@@ -2099,13 +2163,14 @@ fn emit_segment(
                 };
                 let receiver =
                     emit_interface_receiver_key(builder, values, receiver_value, point, &stack)?;
-                emit_interface_call_lookup(
+                emit_resolved_call_lookup(
                     builder,
                     values,
                     input.root.function,
                     point,
                     receiver,
                     receiver_value,
+                    EXIT_INTERFACE_CALL,
                     &stack,
                 )?
             }
@@ -2217,6 +2282,7 @@ fn emit_segment(
         }
         SegmentExit::Call { .. } => unreachable!(),
         SegmentExit::VirtualCall { .. } => unreachable!(),
+        SegmentExit::GenericVirtualCall { .. } => unreachable!(),
         SegmentExit::InterfaceCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
             define_stack(builder, values, &stack)?;
@@ -2308,14 +2374,50 @@ fn emit_interface_receiver_key(
     Ok(builder.block_params(done)[0])
 }
 
+fn emit_generic_virtual_receiver_key(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    receiver: NativeValue,
+    contract: VirtualReceiver,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let VirtualReceiver::Instance { class } = contract else {
+        return Err(CompileError::Backend);
+    };
+    let guard_point = FaultPoint {
+        block: point.block,
+        instruction: point.instruction.saturating_add(1),
+        prefix: point.prefix.saturating_add(1),
+    };
+    let entry = emit_object_entry(
+        builder,
+        values,
+        receiver.bits,
+        JIT_OBJECT_INSTANCE,
+        guard_point,
+        ObjectGuard::Replay(stack),
+    )?;
+    let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let matches = emit_class_matches(builder, values, actual, class)?;
+    let invalid = builder.ins().bxor_imm(matches, 1);
+    emit_interpreter_replay(builder, values, invalid, guard_point, stack)?;
+    let environment = load_value(builder, types::I32, entry, JIT_INSTANCE_ENV_OFFSET)?;
+    let class_key = builder.ins().uextend(types::I64, actual);
+    let environment_key = builder.ins().uextend(types::I64, environment);
+    let environment_key = builder.ins().ishl_imm(environment_key, 32);
+    Ok(builder.ins().bor(environment_key, class_key))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn emit_interface_call_lookup(
+fn emit_resolved_call_lookup(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     function: u32,
     point: FaultPoint,
     receiver_key: ir::Value,
     receiver: NativeValue,
+    exit_kind: u32,
     stack: &[NativeValue],
 ) -> Result<(ir::Value, ir::Value), CompileError> {
     let hit = builder.create_block();
@@ -2334,13 +2436,13 @@ fn emit_interface_call_lookup(
         builder,
         values.pointer_type,
         values.activation_pointer,
-        mem::offset_of!(RawNativeActivation, interface_calls),
+        mem::offset_of!(RawNativeActivation, resolved_calls),
     )?;
     let mask = load_value(
         builder,
         types::I32,
         values.activation_pointer,
-        mem::offset_of!(RawNativeActivation, interface_call_mask),
+        mem::offset_of!(RawNativeActivation, resolved_call_mask),
     )?;
     let shifted_parent = builder.ins().ushr_imm(parent, 16);
     let parent_hash = builder.ins().bxor(parent, shifted_parent);
@@ -2358,13 +2460,13 @@ fn emit_interface_call_lookup(
     let set = builder.ins().uextend(values.pointer_type, set);
     let first = builder.ins().imul_imm(
         set,
-        (INTERFACE_CALL_CACHE_WAYS * mem::size_of::<RawInterfaceCallCacheEntry>()) as i64,
+        (RESOLVED_CALL_CACHE_WAYS * mem::size_of::<RawResolvedCallCacheEntry>()) as i64,
     );
     let first = builder.ins().iadd(cache, first);
-    for index in 0..INTERFACE_CALL_CACHE_WAYS {
+    for index in 0..RESOLVED_CALL_CACHE_WAYS {
         let next = builder.create_block();
         let entry_offset = index
-            .checked_mul(mem::size_of::<RawInterfaceCallCacheEntry>())
+            .checked_mul(mem::size_of::<RawResolvedCallCacheEntry>())
             .ok_or(CompileError::Backend)?;
         let entry_offset = i64::try_from(entry_offset).map_err(|_| CompileError::Backend)?;
         let entry = builder.ins().iadd_imm(first, entry_offset);
@@ -2372,49 +2474,49 @@ fn emit_interface_call_lookup(
             builder,
             entry,
             types::I64,
-            mem::offset_of!(RawInterfaceCallCacheEntry, store),
+            mem::offset_of!(RawResolvedCallCacheEntry, store),
         )?;
         let cached_function = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, function),
+            mem::offset_of!(RawResolvedCallCacheEntry, function),
         )?;
         let cached_block = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, block),
+            mem::offset_of!(RawResolvedCallCacheEntry, block),
         )?;
         let cached_instruction = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, instruction),
+            mem::offset_of!(RawResolvedCallCacheEntry, instruction),
         )?;
         let cached_parent = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, parent),
+            mem::offset_of!(RawResolvedCallCacheEntry, parent),
         )?;
         let cached_receiver = atomic_load_field(
             builder,
             entry,
             types::I64,
-            mem::offset_of!(RawInterfaceCallCacheEntry, receiver),
+            mem::offset_of!(RawResolvedCallCacheEntry, receiver),
         )?;
         let target = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, target),
+            mem::offset_of!(RawResolvedCallCacheEntry, target),
         )?;
         let environment = atomic_load_field(
             builder,
             entry,
             types::I32,
-            mem::offset_of!(RawInterfaceCallCacheEntry, environment),
+            mem::offset_of!(RawResolvedCallCacheEntry, environment),
         )?;
         let same_store = builder.ins().icmp(IntCC::Equal, cached_store, store);
         let same_function =
@@ -2457,7 +2559,7 @@ fn emit_interface_call_lookup(
         values,
         ExitEmission {
             retired,
-            kind: EXIT_INTERFACE_CALL,
+            kind: exit_kind,
             block: point.block,
             instruction: point.instruction,
             result: NativeValue {

@@ -270,6 +270,9 @@ pub const JIT_INSTANCE_CLASS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
 pub const JIT_INSTANCE_FIELDS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
     + std::mem::offset_of!(InstanceLayout, fields);
+/// Byte offset of an instance type environment.
+pub const JIT_INSTANCE_ENV_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(InstanceLayout, env);
 /// Byte offset of a list item array.
 pub const JIT_LIST_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ListLayout, items);
@@ -1246,7 +1249,7 @@ mod tests {
         let EntryState::Live(live) = &entry.state else {
             panic!("the entry is live");
         };
-        let Object::Instance { class, fields, .. } = &live.object else {
+        let Object::Instance { class, fields, env } = &live.object else {
             panic!("the object is an instance");
         };
         assert_eq!(entry.generation, reference.generation);
@@ -1257,6 +1260,10 @@ mod tests {
         assert_eq!(
             std::ptr::from_ref(fields) as usize - base,
             JIT_INSTANCE_FIELDS_OFFSET
+        );
+        assert_eq!(
+            std::ptr::from_ref(env) as usize - base,
+            JIT_INSTANCE_ENV_OFFSET
         );
         assert_eq!(
             std::ptr::from_ref(&live.header.bytes) as usize - base,

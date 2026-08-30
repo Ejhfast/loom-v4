@@ -164,10 +164,9 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::Call(_)
         | Instr::CallG { .. }
         | Instr::CallVirtual { .. }
+        | Instr::CallVirtualG { .. }
         | Instr::CallInterface { .. } => InstructionTreatment::dedicated(Call, ExitBehavior::Call),
-        Instr::CallVirtualG { .. } | Instr::CallValue { .. } => {
-            InstructionTreatment::temporary(Call, ExitBehavior::Call)
-        }
+        Instr::CallValue { .. } => InstructionTreatment::temporary(Call, ExitBehavior::Call),
         Instr::MakeClosure { .. } => temporary(FastPath),
         Instr::LoadCapture(_) => temporary(Guarded),
         Instr::New(_) | Instr::NewG { .. } => {

@@ -1155,6 +1155,21 @@ Gate: Direct and scheduled corpus results match Interpreter results.
 
 Gate: Cold misses preserve exact scheduler retirement counts.
 
+### Stage F19: Generic virtual dispatch caches
+
+- derive the receiver class environment through the direct heap ABI;
+- include the parent environment and receiver environment in the cache key;
+- resolve each cold miss with the interpreter's generic dispatch rules;
+- cache the exact target and method environment;
+- resume the same native instruction after cache publication;
+- use the existing native calling convention after each cache hit.
+
+Gate: One polymorphic generic virtual loop uses no interpreter exit.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Cold misses preserve exact scheduler retirement counts.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1570,6 +1585,32 @@ The warm debug workspace suite took 46.05 seconds.
 | Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Polymorphic interface calls | 141.171 ms | 26.417 ms | 26.078 ms | 5.34 times | 100.00 percent |
+
+The representative-program performance gate remains open.
+
+The Stage F19 run added generic virtual calls to the resolved-call cache.
+
+The cache key includes the call site, parent environment, class, and class environment.
+
+A cold miss uses the interpreter's exact generic dispatch rules.
+
+The miss does not retire the generic virtual call.
+
+Native execution resumes the same instruction after cache publication.
+
+The focused JIT suite passed 92 tests.
+
+Direct and scheduled corpus runs matched Interpreter results across 163 shipped programs.
+
+The direct and scheduled corpus gate took 8.92 seconds after compilation.
+
+The warm debug workspace suite took 44.59 seconds.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Generic virtual calls | 62.757 ms | 17.349 ms | 16.806 ms | 3.62 times | 100.00 percent |
+
+Generic field-result specialization remains outside this stage.
 
 The representative-program performance gate remains open.
 

@@ -30,6 +30,7 @@ const EXIT_LITERAL: u32 = 17;
 const EXIT_UNREACHABLE: u32 = 18;
 const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 const EXIT_INTERFACE_CALL: u32 = 20;
+const EXIT_GENERIC_VIRTUAL_CALL: u32 = 21;
 
 mod activation;
 mod opcode;
@@ -40,10 +41,10 @@ use activation::{
 };
 pub use activation::{
     AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
-    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeInterfaceCallCache, NativeInterfaceCallView, NativeLiteralView, NativePreparation,
-    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView,
+    NativePreparation, NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers,
+    NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView,
+    LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -87,6 +88,7 @@ pub struct CompiledRegion {
     call_entry: usize,
     type_environment_sites: Vec<TypeEnvironmentSite>,
     interface_call_sites: Vec<InterfaceCallSite>,
+    generic_virtual_call_sites: Vec<GenericVirtualCallSite>,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
 }
@@ -141,6 +143,55 @@ impl InterfaceCallSite {
     /// Return the declared receiver type.
     pub fn receiver_type(self) -> u32 {
         self.receiver_type
+    }
+
+    /// Return the method type application.
+    pub fn application(self) -> u32 {
+        self.application
+    }
+
+    /// Return the receiver scalar representation.
+    pub fn receiver_kind(self) -> ScalarKind {
+        self.receiver_kind
+    }
+
+    /// Return the receiver and argument count.
+    pub fn parameter_count(self) -> usize {
+        self.parameter_count
+    }
+}
+
+/// One verified generic virtual-call cache site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericVirtualCallSite {
+    function: u32,
+    block: u32,
+    instruction: u32,
+    selector: u32,
+    application: u32,
+    receiver_kind: ScalarKind,
+    parameter_count: usize,
+}
+
+impl GenericVirtualCallSite {
+    /// Return the caller function.
+    pub fn function(self) -> u32 {
+        self.function
+    }
+
+    /// Return the bytecode block.
+    pub fn block(self) -> u32 {
+        self.block
+    }
+
+    /// Return the bytecode instruction.
+    pub fn instruction(self) -> u32 {
+        self.instruction
+    }
+
+    /// Return the selector table index.
+    pub fn selector(self) -> u32 {
+        self.selector
     }
 
     /// Return the method type application.
@@ -339,6 +390,7 @@ impl CompiledRegion {
                         segment.exit,
                         SegmentExit::Call { .. }
                             | SegmentExit::VirtualCall { .. }
+                            | SegmentExit::GenericVirtualCall { .. }
                             | SegmentExit::InterfaceCall { .. }
                             | SegmentExit::Effect { .. }
                             | SegmentExit::Interpreter { .. }
@@ -395,6 +447,7 @@ impl CompiledRegion {
             let fallthrough_ip = match segment.exit {
                 SegmentExit::Call { fallthrough_ip, .. }
                 | SegmentExit::VirtualCall { fallthrough_ip, .. }
+                | SegmentExit::GenericVirtualCall { fallthrough_ip, .. }
                 | SegmentExit::InterfaceCall { fallthrough_ip, .. } => fallthrough_ip,
                 _ => return None,
             };
@@ -418,6 +471,18 @@ impl CompiledRegion {
     /// Return one interface-call cache site.
     pub fn interface_call_site(&self, block: u32, instruction: u32) -> Option<InterfaceCallSite> {
         self.interface_call_sites
+            .iter()
+            .find(|site| site.block == block && site.instruction == instruction)
+            .copied()
+    }
+
+    /// Return one generic virtual-call cache site.
+    pub fn generic_virtual_call_site(
+        &self,
+        block: u32,
+        instruction: u32,
+    ) -> Option<GenericVirtualCallSite> {
+        self.generic_virtual_call_sites
             .iter()
             .find(|site| site.block == block && site.instruction == instruction)
             .copied()
@@ -449,7 +514,7 @@ impl CompiledRegion {
             literals,
             type_store_id,
             type_environments,
-            interface_calls,
+            resolved_calls,
         } = input;
         let top_index = activation
             .frame_len
@@ -470,8 +535,9 @@ impl CompiledRegion {
             || (self.plan.collection_sites != 0 && heap.used_bytes.is_null())
             || ((!self.type_environment_sites.is_empty() || self.plan.type_resolution_sites != 0)
                 && (type_store_id == 0 || type_environments.entries.is_null()))
-            || (!self.interface_call_sites.is_empty()
-                && (type_store_id == 0 || interface_calls.entries.is_null()))
+            || ((!self.interface_call_sites.is_empty()
+                || !self.generic_virtual_call_sites.is_empty())
+                && (type_store_id == 0 || resolved_calls.entries.is_null()))
         {
             return Err(Failure::BackendUnavailable);
         }
@@ -519,8 +585,8 @@ impl CompiledRegion {
             type_store_id,
             type_environments: type_environments.entries,
             type_environment_mask: type_environments.mask,
-            interface_calls: interface_calls.entries,
-            interface_call_mask: interface_calls.mask,
+            resolved_calls: resolved_calls.entries,
+            resolved_call_mask: resolved_calls.mask,
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
@@ -614,6 +680,7 @@ impl CompiledRegion {
             EXIT_UNREACHABLE => ExitKind::Unreachable,
             EXIT_TYPE_ENVIRONMENT => ExitKind::TypeEnvironment,
             EXIT_INTERFACE_CALL => ExitKind::InterfaceCall,
+            EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };

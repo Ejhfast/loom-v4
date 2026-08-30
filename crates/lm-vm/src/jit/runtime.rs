@@ -4,7 +4,7 @@ use crate::machine::Machine;
 use crate::NamespaceRuntime;
 use lm_jit::{
     AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
-    NativeInterfaceCallCache, NativeRuntime, NativeTypeEnvironmentCache, ScalarKind,
+    NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache, ScalarKind,
     LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
@@ -95,7 +95,7 @@ fn callback_reference(bits: u64) -> CallbackRef {
 pub(super) struct MachineRuntime<'a> {
     pub(super) machine: &'a mut Machine,
     pub(super) type_environments: NativeTypeEnvironmentCache,
-    pub(super) interface_calls: NativeInterfaceCallCache,
+    pub(super) resolved_calls: NativeResolvedCallCache,
     pub(super) module: &'a NamespaceRuntime,
     pub(super) base_local: usize,
     pub(super) base_operand: usize,
@@ -105,7 +105,7 @@ pub(super) struct MachineRuntime<'a> {
 impl Drop for MachineRuntime<'_> {
     fn drop(&mut self) {
         self.machine.native_type_environments = std::mem::take(&mut self.type_environments);
-        self.machine.native_interface_calls = std::mem::take(&mut self.interface_calls);
+        self.machine.native_resolved_calls = std::mem::take(&mut self.resolved_calls);
     }
 }
 

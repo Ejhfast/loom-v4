@@ -16,10 +16,10 @@ pub(super) const TYPE_ENVIRONMENT_CACHE_WAYS: usize = 4;
 const INITIAL_TYPE_ENVIRONMENT_CACHE_SETS: usize = 16;
 const MAX_TYPE_ENVIRONMENT_CACHE_SETS: usize = 1_024;
 const TYPE_ENVIRONMENT_CACHE_CLAIMED: u64 = u64::MAX;
-pub(super) const INTERFACE_CALL_CACHE_WAYS: usize = 4;
-const INITIAL_INTERFACE_CALL_CACHE_SETS: usize = 16;
-const MAX_INTERFACE_CALL_CACHE_SETS: usize = 1_024;
-const INTERFACE_CALL_CACHE_CLAIMED: u64 = u64::MAX;
+pub(super) const RESOLVED_CALL_CACHE_WAYS: usize = 4;
+const INITIAL_RESOLVED_CALL_CACHE_SETS: usize = 16;
+const MAX_RESOLVED_CALL_CACHE_SETS: usize = 1_024;
+const RESOLVED_CALL_CACHE_CLAIMED: u64 = u64::MAX;
 
 /// The native local changed during this activation.
 pub const LOCAL_DIRTY: u8 = 1;
@@ -86,8 +86,8 @@ pub(super) struct RawNativeActivation {
     pub(super) type_store_id: u64,
     pub(super) type_environments: *const RawTypeEnvironmentCacheEntry,
     pub(super) type_environment_mask: u32,
-    pub(super) interface_calls: *const RawInterfaceCallCacheEntry,
-    pub(super) interface_call_mask: u32,
+    pub(super) resolved_calls: *const RawResolvedCallCacheEntry,
+    pub(super) resolved_call_mask: u32,
 }
 
 /// One stable row in the native class dispatch table.
@@ -181,7 +181,7 @@ impl RawTypeEnvironmentCacheEntry {
 
 #[repr(C)]
 #[derive(Debug)]
-pub(super) struct RawInterfaceCallCacheEntry {
+pub(super) struct RawResolvedCallCacheEntry {
     pub(super) store: AtomicU64,
     pub(super) function: AtomicU32,
     pub(super) block: AtomicU32,
@@ -193,7 +193,7 @@ pub(super) struct RawInterfaceCallCacheEntry {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InterfaceCallCacheRecord {
+struct ResolvedCallCacheRecord {
     store: u64,
     function: u32,
     block: u32,
@@ -204,9 +204,9 @@ struct InterfaceCallCacheRecord {
     environment: u32,
 }
 
-impl RawInterfaceCallCacheEntry {
-    fn new() -> RawInterfaceCallCacheEntry {
-        RawInterfaceCallCacheEntry {
+impl RawResolvedCallCacheEntry {
+    fn new() -> RawResolvedCallCacheEntry {
+        RawResolvedCallCacheEntry {
             store: AtomicU64::new(0),
             function: AtomicU32::new(0),
             block: AtomicU32::new(0),
@@ -235,9 +235,9 @@ impl RawInterfaceCallCacheEntry {
             && self.receiver.load(Ordering::Relaxed) == receiver
     }
 
-    fn publish(&self, record: InterfaceCallCacheRecord) {
+    fn publish(&self, record: ResolvedCallCacheRecord) {
         self.store
-            .store(INTERFACE_CALL_CACHE_CLAIMED, Ordering::Release);
+            .store(RESOLVED_CALL_CACHE_CLAIMED, Ordering::Release);
         self.function.store(record.function, Ordering::Relaxed);
         self.block.store(record.block, Ordering::Relaxed);
         self.instruction
@@ -250,12 +250,12 @@ impl RawInterfaceCallCacheEntry {
         self.store.store(record.store, Ordering::Release);
     }
 
-    fn snapshot(&self) -> Option<InterfaceCallCacheRecord> {
+    fn snapshot(&self) -> Option<ResolvedCallCacheRecord> {
         let store = self.store.load(Ordering::Acquire);
-        if store == 0 || store == INTERFACE_CALL_CACHE_CLAIMED {
+        if store == 0 || store == RESOLVED_CALL_CACHE_CLAIMED {
             return None;
         }
-        Some(InterfaceCallCacheRecord {
+        Some(ResolvedCallCacheRecord {
             store,
             function: self.function.load(Ordering::Relaxed),
             block: self.block.load(Ordering::Relaxed),
@@ -287,7 +287,7 @@ fn type_environment_cache_set(
     (type_environment_site_hash(function, block, instruction) ^ parent) as usize & (sets - 1)
 }
 
-pub(super) fn interface_call_cache_set(
+pub(super) fn resolved_call_cache_set(
     function: u32,
     block: u32,
     instruction: u32,
@@ -351,10 +351,10 @@ pub struct NativeTypeEnvironmentCache {
     entries: Vec<RawTypeEnvironmentCacheEntry>,
 }
 
-/// One machine-local polymorphic interface-call cache.
+/// One machine-local polymorphic resolved-call cache.
 #[derive(Debug, Default)]
-pub struct NativeInterfaceCallCache {
-    entries: Vec<RawInterfaceCallCacheEntry>,
+pub struct NativeResolvedCallCache {
+    entries: Vec<RawResolvedCallCacheEntry>,
 }
 
 /// One fixed native view of a machine-local type-environment cache.
@@ -364,16 +364,16 @@ pub struct NativeTypeEnvironmentView {
     pub(super) mask: u32,
 }
 
-/// One fixed native view of a machine-local interface-call cache.
+/// One fixed native view of a machine-local resolved-call cache.
 #[derive(Debug, Clone, Copy)]
-pub struct NativeInterfaceCallView {
-    pub(super) entries: *const RawInterfaceCallCacheEntry,
+pub struct NativeResolvedCallView {
+    pub(super) entries: *const RawResolvedCallCacheEntry,
     pub(super) mask: u32,
 }
 
-impl NativeInterfaceCallView {
-    /// One empty view for code without interface calls.
-    pub const EMPTY: NativeInterfaceCallView = NativeInterfaceCallView {
+impl NativeResolvedCallView {
+    /// One empty view for code without resolved calls.
+    pub const EMPTY: NativeResolvedCallView = NativeResolvedCallView {
         entries: std::ptr::null(),
         mask: 0,
     };
@@ -419,7 +419,7 @@ pub struct NativeExecution<'a> {
     pub literals: NativeLiteralView,
     pub type_store_id: u64,
     pub type_environments: NativeTypeEnvironmentView,
-    pub interface_calls: NativeInterfaceCallView,
+    pub resolved_calls: NativeResolvedCallView,
 }
 
 /// One native view of a machine's canonical literal table.
@@ -783,25 +783,25 @@ impl NativeTypeEnvironmentCache {
     }
 }
 
-impl NativeInterfaceCallCache {
+impl NativeResolvedCallCache {
     /// Return a stable view for one native execution.
-    pub fn view(&mut self) -> Result<NativeInterfaceCallView, Failure> {
+    pub fn view(&mut self) -> Result<NativeResolvedCallView, Failure> {
         if self.entries.is_empty() {
-            self.entries = new_interface_call_cache(INITIAL_INTERFACE_CALL_CACHE_SETS)
+            self.entries = new_resolved_call_cache(INITIAL_RESOLVED_CALL_CACHE_SETS)
                 .ok_or(Failure::BackendUnavailable)?;
         }
-        let sets = self.entries.len() / INTERFACE_CALL_CACHE_WAYS;
+        let sets = self.entries.len() / RESOLVED_CALL_CACHE_WAYS;
         if !sets.is_power_of_two() {
             return Err(Failure::BackendUnavailable);
         }
         let mask = u32::try_from(sets - 1).map_err(|_| Failure::BackendUnavailable)?;
-        Ok(NativeInterfaceCallView {
+        Ok(NativeResolvedCallView {
             entries: self.entries.as_ptr(),
             mask,
         })
     }
 
-    /// Cache one resolved interface target for one receiver shape.
+    /// Cache one resolved target for one receiver shape.
     #[allow(clippy::too_many_arguments)]
     pub fn cache_call_site(
         &mut self,
@@ -814,10 +814,10 @@ impl NativeInterfaceCallCache {
         target: u32,
         environment: u32,
     ) -> bool {
-        if store == 0 || store == INTERFACE_CALL_CACHE_CLAIMED {
+        if store == 0 || store == RESOLVED_CALL_CACHE_CLAIMED {
             return false;
         }
-        let record = InterfaceCallCacheRecord {
+        let record = ResolvedCallCacheRecord {
             store,
             function,
             block,
@@ -828,14 +828,14 @@ impl NativeInterfaceCallCache {
             environment,
         };
         loop {
-            let sets = self.entries.len() / INTERFACE_CALL_CACHE_WAYS;
+            let sets = self.entries.len() / RESOLVED_CALL_CACHE_WAYS;
             if !sets.is_power_of_two() {
                 return false;
             }
             let first =
-                interface_call_cache_set(function, block, instruction, parent, receiver, sets)
-                    * INTERFACE_CALL_CACHE_WAYS;
-            let entries = &self.entries[first..first + INTERFACE_CALL_CACHE_WAYS];
+                resolved_call_cache_set(function, block, instruction, parent, receiver, sets)
+                    * RESOLVED_CALL_CACHE_WAYS;
+            let entries = &self.entries[first..first + RESOLVED_CALL_CACHE_WAYS];
             for entry in entries {
                 if entry.matches(store, function, block, instruction, parent, receiver) {
                     return entry.target.load(Ordering::Relaxed) == target
@@ -849,25 +849,25 @@ impl NativeInterfaceCallCache {
                 entry.publish(record);
                 return true;
             }
-            if self.grow_interface_call_cache(sets) {
+            if self.grow_resolved_call_cache(sets) {
                 continue;
             }
             let first =
-                interface_call_cache_set(function, block, instruction, parent, receiver, sets)
-                    * INTERFACE_CALL_CACHE_WAYS;
-            let replace = receiver as usize % INTERFACE_CALL_CACHE_WAYS;
+                resolved_call_cache_set(function, block, instruction, parent, receiver, sets)
+                    * RESOLVED_CALL_CACHE_WAYS;
+            let replace = receiver as usize % RESOLVED_CALL_CACHE_WAYS;
             self.entries[first + replace].publish(record);
             return true;
         }
     }
 
-    fn grow_interface_call_cache(&mut self, current_sets: usize) -> bool {
+    fn grow_resolved_call_cache(&mut self, current_sets: usize) -> bool {
         let mut target_sets = current_sets.saturating_mul(2);
-        while target_sets <= MAX_INTERFACE_CALL_CACHE_SETS {
-            let Some(target) = new_interface_call_cache(target_sets) else {
+        while target_sets <= MAX_RESOLVED_CALL_CACHE_SETS {
+            let Some(target) = new_resolved_call_cache(target_sets) else {
                 return false;
             };
-            if rehash_interface_call_cache(&self.entries, &target, target_sets) {
+            if rehash_resolved_call_cache(&self.entries, &target, target_sets) {
                 self.entries = target;
                 return true;
             }
@@ -909,34 +909,34 @@ fn rehash_type_environment_cache(
     true
 }
 
-fn new_interface_call_cache(sets: usize) -> Option<Vec<RawInterfaceCallCacheEntry>> {
-    let count = sets.checked_mul(INTERFACE_CALL_CACHE_WAYS)?;
+fn new_resolved_call_cache(sets: usize) -> Option<Vec<RawResolvedCallCacheEntry>> {
+    let count = sets.checked_mul(RESOLVED_CALL_CACHE_WAYS)?;
     let mut entries = Vec::new();
     entries.try_reserve_exact(count).ok()?;
     for _ in 0..count {
-        entries.push(RawInterfaceCallCacheEntry::new());
+        entries.push(RawResolvedCallCacheEntry::new());
     }
     Some(entries)
 }
 
-fn rehash_interface_call_cache(
-    source: &[RawInterfaceCallCacheEntry],
-    target: &[RawInterfaceCallCacheEntry],
+fn rehash_resolved_call_cache(
+    source: &[RawResolvedCallCacheEntry],
+    target: &[RawResolvedCallCacheEntry],
     sets: usize,
 ) -> bool {
     for entry in source {
         let Some(record) = entry.snapshot() else {
             continue;
         };
-        let first = interface_call_cache_set(
+        let first = resolved_call_cache_set(
             record.function,
             record.block,
             record.instruction,
             record.parent,
             record.receiver,
             sets,
-        ) * INTERFACE_CALL_CACHE_WAYS;
-        let Some(empty) = target[first..first + INTERFACE_CALL_CACHE_WAYS]
+        ) * RESOLVED_CALL_CACHE_WAYS;
+        let Some(empty) = target[first..first + RESOLVED_CALL_CACHE_WAYS]
             .iter()
             .find(|entry| entry.store.load(Ordering::Acquire) == 0)
         else {

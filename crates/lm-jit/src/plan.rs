@@ -194,6 +194,7 @@ pub enum ExitKind {
     TypeResolution,
     TypeEnvironment,
     InterfaceCall,
+    GenericVirtualCall,
 }
 
 /// One validated native exit record.
@@ -283,6 +284,11 @@ pub(super) enum SegmentExit {
     },
     VirtualCall {
         selector: u32,
+        fallthrough_ip: u32,
+    },
+    GenericVirtualCall {
+        selector: u32,
+        application: u32,
         fallthrough_ip: u32,
     },
     InterfaceCall {
@@ -671,6 +677,7 @@ impl RegionPlan {
                 segment.exit,
                 SegmentExit::Call { .. }
                     | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
             ) {
                 call_sites += 1;
@@ -980,6 +987,11 @@ fn segment_exit(
                 selector: *selector,
                 fallthrough_ip: next,
             },
+            Instr::CallVirtualG { selector, app, .. } => SegmentExit::GenericVirtualCall {
+                selector: *selector,
+                application: *app,
+                fallthrough_ip: next,
+            },
             Instr::CallInterface { site, recv_ty, app } => {
                 let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
                 SegmentExit::InterfaceCall {
@@ -1022,6 +1034,9 @@ fn resolve_successors(
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::VirtualCall { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
+            SegmentExit::GenericVirtualCall { fallthrough_ip, .. } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::InterfaceCall { fallthrough_ip, .. } => {
@@ -1497,7 +1512,7 @@ fn analyze_segment(
                 boundary_stack = before.stack.clone();
                 call_contract = Some(contract);
             }
-            Instr::CallVirtual { argc, .. } => {
+            Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
                 let parameter_count = usize::try_from(argc)
                     .ok()
                     .and_then(|count| count.checked_add(1))

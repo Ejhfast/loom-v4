@@ -811,7 +811,7 @@ pub struct Machine {
     /// Resolved interface targets used only by native execution.
     ///
     /// Snapshots exclude this process-local cache.
-    pub(crate) native_interface_calls: lm_jit::NativeInterfaceCallCache,
+    pub(crate) native_resolved_calls: lm_jit::NativeResolvedCallCache,
 }
 
 /// Clock-free execution counters for one machine.
@@ -1241,7 +1241,7 @@ impl Machine {
             execution_metrics: MachineExecutionMetrics::default(),
             native_continuation: None,
             native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
-            native_interface_calls: lm_jit::NativeInterfaceCallCache::default(),
+            native_resolved_calls: lm_jit::NativeResolvedCallCache::default(),
         }
     }
 
@@ -2148,17 +2148,34 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let argc = argc as usize;
         let recv = self.peek(argc)?;
+        let parent = self.frame_env();
+        let (target, env) = self
+            .resolve_virtual_generic_target(module, dispatch, envs, parent, selector, app, recv)?;
+        self.push_frame(module, target, argc + 1, None, env)
+    }
+
+    /// Resolve one verified generic virtual call without changing its frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_virtual_generic_target(
+        &self,
+        module: &NamespaceRuntime,
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
+        envs: &mut TypeEnvs,
+        parent: TypeEnvId,
+        selector: u32,
+        app: u32,
+        recv: Value,
+    ) -> Result<(u32, TypeEnvId), FaultCode> {
         let (class, class_env) = match self.vm.heap.get(recv.as_obj().ok_or(BAD_TYPE)?) {
             Object::Instance { class, env, .. } => (*class, env.env()),
             _ => return Err(BAD_TYPE),
         };
         let target = method_of(dispatch, class, selector)?;
-        let parent = self.frame_env();
         let own = envs.derive(module, parent, app).map_err(env_fault)?;
         let env = envs
             .method_env(module, target, class, class_env, own)
             .map_err(env_fault)?;
-        self.push_frame(module, target, argc + 1, None, env)
+        Ok((target, env))
     }
 
     /// Push one method frame selected through an interface bound.

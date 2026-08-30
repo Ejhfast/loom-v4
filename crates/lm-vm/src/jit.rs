@@ -556,11 +556,11 @@ impl JitEngine {
         };
         let (exit, allocations) = {
             let type_environments = std::mem::take(&mut machine.native_type_environments);
-            let interface_calls = std::mem::take(&mut machine.native_interface_calls);
+            let resolved_calls = std::mem::take(&mut machine.native_resolved_calls);
             let mut runtime = MachineRuntime {
                 machine,
                 type_environments,
-                interface_calls,
+                resolved_calls,
                 module,
                 base_local: base,
                 base_operand: operand_base,
@@ -584,7 +584,7 @@ impl JitEngine {
                     Ok(view) => view,
                     Err(error) => break Err(error),
                 };
-                let interface_calls = match runtime.interface_calls.view() {
+                let resolved_calls = match runtime.resolved_calls.view() {
                     Ok(view) => view,
                     Err(error) => break Err(error),
                 };
@@ -610,7 +610,7 @@ impl JitEngine {
                         literals,
                         type_store_id: context.envs.canonical_store_id(),
                         type_environments,
-                        interface_calls,
+                        resolved_calls,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -756,7 +756,14 @@ impl JitEngine {
                         metrics.note_native_type_environment_fallback();
                     }
                 }
-                if exit.kind() == ExitKind::InterfaceCall {
+                if matches!(
+                    exit.kind(),
+                    ExitKind::InterfaceCall | ExitKind::GenericVirtualCall
+                ) {
+                    enum ResolvedCallSite {
+                        Interface(lm_jit::InterfaceCallSite),
+                        GenericVirtual(lm_jit::GenericVirtualCallSite),
+                    }
                     let Some(frame) = scratch.activation.frames().last() else {
                         break Err(Failure::BackendUnavailable);
                     };
@@ -766,16 +773,34 @@ impl JitEngine {
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    let Some(site) =
-                        resolve_region.interface_call_site(exit.block(), exit.instruction())
-                    else {
+                    let site = match exit.kind() {
+                        ExitKind::InterfaceCall => resolve_region
+                            .interface_call_site(exit.block(), exit.instruction())
+                            .map(ResolvedCallSite::Interface),
+                        ExitKind::GenericVirtualCall => resolve_region
+                            .generic_virtual_call_site(exit.block(), exit.instruction())
+                            .map(ResolvedCallSite::GenericVirtual),
+                        _ => None,
+                    };
+                    let Some(site) = site else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    if site.function() != frame.function() || site.parameter_count() == 0 {
+                    let (function, receiver_kind, parameter_count) = match site {
+                        ResolvedCallSite::Interface(site) => (
+                            site.function(),
+                            site.receiver_kind(),
+                            site.parameter_count(),
+                        ),
+                        ResolvedCallSite::GenericVirtual(site) => (
+                            site.function(),
+                            site.receiver_kind(),
+                            site.parameter_count(),
+                        ),
+                    };
+                    if function != frame.function() || parameter_count == 0 {
                         break Err(Failure::BackendUnavailable);
                     }
-                    let Some(receiver_index) =
-                        frame.operands().len().checked_sub(site.parameter_count())
+                    let Some(receiver_index) = frame.operands().len().checked_sub(parameter_count)
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
@@ -786,30 +811,44 @@ impl JitEngine {
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    let Some(receiver) =
-                        parts_value(site.receiver_kind(), receiver_tag, receiver_bits)
+                    let Some(receiver) = parts_value(receiver_kind, receiver_tag, receiver_bits)
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
                     let parent = TypeEnvId(frame.environment());
                     let dispatch = module.dispatch_store();
-                    let resolved = runtime.machine.resolve_interface_target(
-                        module,
-                        dispatch.as_ref(),
-                        context.envs,
-                        parent,
-                        site.interface(),
-                        site.method(),
-                        site.receiver_type(),
-                        site.application(),
-                        receiver,
-                    );
+                    let resolved = match site {
+                        ResolvedCallSite::Interface(site) => {
+                            runtime.machine.resolve_interface_target(
+                                module,
+                                dispatch.as_ref(),
+                                context.envs,
+                                parent,
+                                site.interface(),
+                                site.method(),
+                                site.receiver_type(),
+                                site.application(),
+                                receiver,
+                            )
+                        }
+                        ResolvedCallSite::GenericVirtual(site) => {
+                            runtime.machine.resolve_virtual_generic_target(
+                                module,
+                                dispatch.as_ref(),
+                                context.envs,
+                                parent,
+                                site.selector(),
+                                site.application(),
+                                receiver,
+                            )
+                        }
+                    };
                     if let Ok((target, environment)) = resolved {
-                        let cached = runtime.interface_calls.cache_call_site(
+                        let cached = runtime.resolved_calls.cache_call_site(
                             context.envs.canonical_store_id(),
-                            site.function(),
-                            site.block(),
-                            site.instruction(),
+                            function,
+                            exit.block(),
+                            exit.instruction(),
                             parent.0,
                             exit.result(),
                             target,
@@ -1000,6 +1039,7 @@ impl JitEngine {
             | ExitKind::TypeResolution
             | ExitKind::TypeEnvironment
             | ExitKind::InterfaceCall
+            | ExitKind::GenericVirtualCall
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(
@@ -1050,6 +1090,7 @@ impl JitEngine {
                         | ExitKind::TypeResolution
                         | ExitKind::TypeEnvironment
                         | ExitKind::InterfaceCall
+                        | ExitKind::GenericVirtualCall
                 ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();
