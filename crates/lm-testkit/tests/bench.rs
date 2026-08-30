@@ -1487,6 +1487,17 @@ fn bench_jit_scalar_regions() {
         64,
     );
     report_jit(
+        "jit_map_insert",
+        concat!(
+            "table: {Int: Int} = {}\ni = 0\n",
+            "while i < 50000\n",
+            "  table.put(i, i)\n",
+            "  i = i + 1\n",
+            "end\ntable.len()\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_list_push",
         concat!(
             "items: [Int] = []\ni = 0\n",

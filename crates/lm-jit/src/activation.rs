@@ -11,6 +11,7 @@ const RUNTIME_INTERPRETER: u32 = 1;
 pub(super) const RUNTIME_HEAP_LIMIT: u32 = 2;
 pub(super) const RUNTIME_STACK_LIMIT: u32 = 3;
 pub(super) const RUNTIME_FAULT_FLAG: u32 = 1 << 31;
+pub(super) const RUNTIME_MAP_VACANT: u32 = 4;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -329,6 +330,10 @@ pub(super) type RawAllocateValues =
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 pub(super) type RawMapLookup = unsafe extern "C" fn(*mut c_void, u64, u64, u64, *mut u64) -> u32;
+pub(super) type RawMapPutCommit =
+    unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32) -> u32;
+pub(super) type RawMapPutDiscard =
+    unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u32) -> u32;
 
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
@@ -343,6 +348,9 @@ pub(super) struct RawNativeFunctions {
     pub(super) reserve_list: RawReserveList,
     pub(super) map_has: RawMapLookup,
     pub(super) map_at: RawMapLookup,
+    pub(super) map_put_discard: RawMapPutDiscard,
+    pub(super) map_put_probe: RawMapLookup,
+    pub(super) map_put_commit: RawMapPutCommit,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1051,6 +1059,31 @@ pub enum RuntimeValueResult {
     Interpreter,
 }
 
+/// One checked map insertion probe.
+#[derive(Debug, Clone, Copy)]
+pub enum MapPutProbeResult {
+    Existing {
+        position: u32,
+        entry_count: u32,
+        bits: u64,
+        tag: u64,
+    },
+    Vacant {
+        semantic_hash: i64,
+        entry_count: u32,
+    },
+    Fault(lm_abi::FaultCode),
+    Interpreter,
+}
+
+/// One checked runtime operation without a result value.
+#[derive(Debug, Clone, Copy)]
+pub enum RuntimeUnitResult {
+    Done,
+    Fault(lm_abi::FaultCode),
+    Interpreter,
+}
+
 /// One checked callback-allocation result.
 #[derive(Debug, Clone, Copy)]
 pub enum CallbackAllocationResult {
@@ -1138,6 +1171,15 @@ pub trait NativeRuntime {
 
     /// Load one map value with the native map index.
     fn map_at(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
+
+    /// Probe one map insertion without semantic mutation.
+    fn map_put_probe(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> MapPutProbeResult;
+
+    /// Insert one map value without returning its previous value.
+    fn map_put_discard(&mut self, request: MapPutDiscardRequest<'_>) -> RuntimeUnitResult;
+
+    /// Commit one previously probed map insertion.
+    fn map_put_commit(&mut self, request: MapPutCommitRequest<'_>) -> RuntimeUnitResult;
 }
 
 /// One checked list-growth result.
@@ -1187,6 +1229,35 @@ pub struct ListReserveRequest<'a> {
     /// Active root states.
     pub root_states: &'a [u8],
     /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
+/// One typed map insertion commit.
+pub struct MapPutCommitRequest<'a> {
+    pub reference: u64,
+    pub key_bits: u64,
+    pub key_tag: u64,
+    pub value_bits: u64,
+    pub value_tag: u64,
+    pub token: u64,
+    pub entry_count: u64,
+    pub vacant: bool,
+    pub root_bits: &'a [u64],
+    pub root_tags: &'a [u64],
+    pub root_states: &'a [u8],
+    pub allow_collection: bool,
+}
+
+/// One typed map insertion without a result value.
+pub struct MapPutDiscardRequest<'a> {
+    pub reference: u64,
+    pub key_bits: u64,
+    pub key_tag: u64,
+    pub value_bits: u64,
+    pub value_tag: u64,
+    pub root_bits: &'a [u64],
+    pub root_tags: &'a [u64],
+    pub root_states: &'a [u8],
     pub allow_collection: bool,
 }
 
@@ -1648,4 +1719,157 @@ fn runtime_fault_status(fault: lm_abi::FaultCode) -> u32 {
         .position(|candidate| *candidate == fault)
         .and_then(|index| u32::try_from(index).ok());
     index.map_or(RUNTIME_INTERPRETER, |index| RUNTIME_FAULT_FLAG | index)
+}
+
+pub(super) unsafe extern "C" fn map_put_probe<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.map_put_probe(reference, key_bits, key_tag) {
+        MapPutProbeResult::Existing {
+            position,
+            entry_count,
+            bits,
+            tag,
+        } => {
+            // SAFETY: The caller provides four writable result words.
+            unsafe {
+                result.write(bits);
+                result.add(1).write(tag);
+                result.add(2).write(u64::from(position));
+                result.add(3).write(u64::from(entry_count));
+            }
+            RUNTIME_OK
+        }
+        MapPutProbeResult::Vacant {
+            semantic_hash,
+            entry_count,
+        } => {
+            // SAFETY: The caller provides four writable result words.
+            unsafe {
+                result.write(0);
+                result.add(1).write(0);
+                result.add(2).write(semantic_hash as u64);
+                result.add(3).write(u64::from(entry_count));
+            }
+            RUNTIME_MAP_VACANT
+        }
+        MapPutProbeResult::Fault(fault) => runtime_fault_status(fault),
+        MapPutProbeResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn map_put_commit<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    value_bits: u64,
+    value_tag: u64,
+    token: u64,
+    entry_count: u64,
+    vacant: u32,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() || vacant > 1 {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.map_put_commit(MapPutCommitRequest {
+        reference,
+        key_bits,
+        key_tag,
+        value_bits,
+        value_tag,
+        token,
+        entry_count,
+        vacant: vacant != 0,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        RuntimeUnitResult::Done => RUNTIME_OK,
+        RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeUnitResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    value_bits: u64,
+    value_tag: u64,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.map_put_discard(MapPutDiscardRequest {
+        reference,
+        key_bits,
+        key_tag,
+        value_bits,
+        value_tag,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        RuntimeUnitResult::Done => RUNTIME_OK,
+        RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeUnitResult::Interpreter => RUNTIME_INTERPRETER,
+    }
 }

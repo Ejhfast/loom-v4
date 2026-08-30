@@ -198,7 +198,9 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::MapHas | Instr::MapAt => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        Instr::MapPut { .. } => temporary(Helper),
+        Instr::MapPut { .. } => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
         Instr::Freeze | Instr::Digest { .. } | Instr::EqValue | Instr::NeValue => temporary(Helper),
         Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {

@@ -3,8 +3,8 @@
 use crate::activation::{
     NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
     RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
-    RESOLVED_CALL_CACHE_WAYS, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_OK,
-    RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
+    RESOLVED_CALL_CACHE_WAYS, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT,
+    RUNTIME_OK, RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
@@ -307,6 +307,8 @@ struct NativeValues<'a> {
     list_growth_signature: ir::SigRef,
     list_reserve_signature: ir::SigRef,
     map_lookup_signature: ir::SigRef,
+    map_put_discard_signature: ir::SigRef,
+    map_put_commit_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -541,6 +543,41 @@ fn emit_region(
         .push(AbiParam::new(pointer_type));
     map_lookup_signature.returns.push(AbiParam::new(types::I32));
     let map_lookup_signature = builder.import_signature(map_lookup_signature);
+    let mut map_put_discard_signature = ir::Signature::new(host_call_conv);
+    map_put_discard_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..5 {
+        map_put_discard_signature
+            .params
+            .push(AbiParam::new(types::I64));
+    }
+    map_put_discard_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_put_discard_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let map_put_discard_signature = builder.import_signature(map_put_discard_signature);
+    let mut map_put_commit_signature = ir::Signature::new(host_call_conv);
+    map_put_commit_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..7 {
+        map_put_commit_signature
+            .params
+            .push(AbiParam::new(types::I64));
+    }
+    map_put_commit_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_put_commit_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_put_commit_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let map_put_commit_signature = builder.import_signature(map_put_commit_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -670,6 +707,8 @@ fn emit_region(
         list_growth_signature,
         list_reserve_signature,
         map_lookup_signature,
+        map_put_discard_signature,
+        map_put_commit_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -1644,6 +1683,89 @@ fn emit_segment(
                     )?;
                 }
                 stack.push(result);
+            }
+            Instr::MapPut { discard, .. } => {
+                let deopt_stack = stack.clone();
+                let stored = pop_value(&mut stack)?;
+                let key = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let heap_access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(heap_access.kind, HeapAccessKind::MapPut) {
+                    return Err(CompileError::Backend);
+                }
+                let option_access = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let OptionAccessKind::MapPut {
+                    value: previous_contract,
+                    discard: planned_discard,
+                } = option_access.kind
+                else {
+                    return Err(CompileError::Backend);
+                };
+                if planned_discard != discard {
+                    return Err(CompileError::Backend);
+                }
+                let family = if discard {
+                    None
+                } else {
+                    Some(emit_option_family(
+                        builder,
+                        values,
+                        input.root.function,
+                        option_access.family_type,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: instruction_index,
+                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        },
+                        &deopt_stack,
+                    )?)
+                };
+                let root_kinds = segment
+                    .replay_stacks
+                    .iter()
+                    .find(|(position, _)| *position == instruction_index)
+                    .map(|(_, stack)| stack.as_slice())
+                    .ok_or(CompileError::Backend)?;
+                let roots = collect_native_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    root_kinds,
+                    &deopt_stack,
+                )?;
+                let result = emit_map_put(
+                    builder,
+                    values,
+                    reference,
+                    key,
+                    stored,
+                    family,
+                    previous_contract,
+                    &roots,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction_index + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                if let Some(result) = result {
+                    stack.push(result);
+                }
             }
             Instr::ListAt => {
                 let deopt_stack = stack.clone();
@@ -6350,6 +6472,179 @@ fn emit_map_lookup(
     Ok(NativeValue { bits, tag })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_map_put(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    key: NativeValue,
+    stored: NativeValue,
+    option_family: Option<ir::Value>,
+    previous_contract: ValueContract,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<Option<NativeValue>, CompileError> {
+    let Some(option_family) = option_family else {
+        let root_count = emit_runtime_roots(builder, values, roots)?;
+        let discard = load_value(
+            builder,
+            values.pointer_type,
+            values.runtime_functions,
+            mem::offset_of!(RawNativeFunctions, map_put_discard),
+        )?;
+        let call = builder.ins().call_indirect(
+            values.map_put_discard_signature,
+            discard,
+            &[
+                values.runtime_context,
+                reference,
+                key.bits,
+                key.tag,
+                stored.bits,
+                stored.tag,
+                root_count,
+            ],
+        );
+        let status = builder.inst_results(call)[0];
+        emit_runtime_status(
+            builder,
+            values,
+            status,
+            exit.point,
+            exit.fault_stack,
+            exit.deopt_stack,
+        )?;
+        return Ok(None);
+    };
+
+    let probe = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, map_put_probe),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.map_lookup_signature,
+        probe,
+        &[
+            values.runtime_context,
+            reference,
+            key.bits,
+            key.tag,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_fault_status(builder, values, status, exit.point, exit.fault_stack)?;
+    let existing = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_OK));
+    let vacant = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_MAP_VACANT));
+    let valid = builder.ins().bor(existing, vacant);
+    let invalid = builder.ins().bxor_imm(valid, 1);
+    emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+
+    let token = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        16,
+    );
+    let entry_count = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        24,
+    );
+    let existing_block = builder.create_block();
+    let vacant_block = builder.create_block();
+    let ready = builder.create_block();
+    builder.append_block_param(ready, types::I64);
+    builder.append_block_param(ready, types::I64);
+    builder
+        .ins()
+        .brif(vacant, vacant_block, &[], existing_block, &[]);
+
+    builder.switch_to_block(existing_block);
+    let bits = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    );
+    let tag = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        8,
+    );
+    let previous = NativeValue { bits, tag };
+    emit_native_value_contract(
+        builder,
+        values,
+        previous,
+        previous_contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    builder
+        .ins()
+        .jump(ready, &[previous.bits.into(), previous.tag.into()]);
+
+    builder.switch_to_block(vacant_block);
+    let none_arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+    let bits = builder.ins().bor(option_family, none_arm);
+    let tag = builder
+        .ins()
+        .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+    builder.ins().jump(ready, &[bits.into(), tag.into()]);
+
+    builder.switch_to_block(ready);
+    let result = NativeValue {
+        bits: builder.block_params(ready)[0],
+        tag: builder.block_params(ready)[1],
+    };
+
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let commit = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, map_put_commit),
+    )?;
+    let zero = builder.ins().iconst(types::I32, 0);
+    let one = builder.ins().iconst(types::I32, 1);
+    let vacant = builder.ins().select(vacant, one, zero);
+    let call = builder.ins().call_indirect(
+        values.map_put_commit_signature,
+        commit,
+        &[
+            values.runtime_context,
+            reference,
+            key.bits,
+            key.tag,
+            stored.bits,
+            stored.tag,
+            token,
+            entry_count,
+            vacant,
+            root_count,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    Ok(Some(result))
+}
+
 fn emit_runtime_status(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -6357,6 +6652,20 @@ fn emit_runtime_status(
     point: FaultPoint,
     fault_stack: &[NativeValue],
     replay_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    emit_runtime_fault_status(builder, values, status, point, fault_stack)?;
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, point, replay_stack)
+}
+
+fn emit_runtime_fault_status(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    status: ir::Value,
+    point: FaultPoint,
+    fault_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let fault = builder
         .ins()
@@ -6391,10 +6700,7 @@ fn emit_runtime_status(
     )?;
 
     builder.switch_to_block(checked);
-    let replay = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
-    emit_interpreter_replay(builder, values, replay, point, replay_stack)
+    Ok(())
 }
 
 fn emit_runtime_roots(

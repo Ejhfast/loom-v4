@@ -407,6 +407,7 @@ pub(super) enum HeapAccessKind {
     MapAt {
         value: ValueContract,
     },
+    MapPut,
     MapEpoch,
     MapIterLen,
     DigestCompare,
@@ -436,6 +437,7 @@ pub(super) enum OptionAccessKind {
     None,
     Payload { value: ValueContract },
     ListGet { value: ValueContract },
+    MapPut { value: ValueContract, discard: bool },
     IsType { target: OptionTarget },
     CastType { target: OptionTarget },
 }
@@ -677,6 +679,7 @@ impl RegionPlan {
                     | HeapAccessKind::ListReorder
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::MapEpoch
+                    | HeapAccessKind::MapPut
                     | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
                         if matches!(
@@ -1367,6 +1370,31 @@ fn analyze_segment(
                     kind: HeapAccessKind::MapAt {
                         value: value_contract(context, value)?,
                     },
+                });
+            }
+            Instr::MapPut { ty, discard } => {
+                let receiver = stack_from_end(&before.stack, 2)?;
+                let (_, value_type) = map_type(context.module, receiver)?;
+                let value = value_contract(context, value_type)?;
+                let source_type = match source_instruction {
+                    Instr::MapPut { ty, .. } => ty,
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                let option_value = option_argument_type(context.module, source_type)?;
+                if !uses_equal_representation(
+                    value.kind,
+                    scalar_kind(context.module, option_value)?,
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: OptionAccessKind::MapPut { value, discard },
+                });
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapPut,
                 });
             }
             Instr::ListAt => {

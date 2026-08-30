@@ -6,7 +6,8 @@ use lm_heap::{MapEntry, MapIndex, StructuralEpoch};
 use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
-    ListReserveResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
+    ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult,
+    NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache, RuntimeUnitResult,
     RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
@@ -136,6 +137,53 @@ fn decode_captures(bits: &[u64], tags: &[u64]) -> Result<Vec<Value>, CaptureDeco
     Ok(values)
 }
 
+fn runtime_value(value: Value) -> RuntimeValueResult {
+    let Some(bits) = value_bits(value) else {
+        return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+    };
+    RuntimeValueResult::Value {
+        bits,
+        tag: value.tag() as u64,
+    }
+}
+
+fn decode_root_objects(
+    bits: &[u64],
+    tags: &[u64],
+    states: &[u8],
+) -> Result<Vec<ObjRef>, CaptureDecodeFailure> {
+    if bits.len() != tags.len() || bits.len() != states.len() {
+        return Err(CaptureDecodeFailure::Invalid);
+    }
+    let mut roots = Vec::new();
+    roots
+        .try_reserve_exact(bits.len())
+        .map_err(|_| CaptureDecodeFailure::Limit)?;
+    roots.extend(
+        bits.iter()
+            .copied()
+            .zip(tags.iter().copied())
+            .zip(states.iter().copied())
+            .filter(|((_, tag), state)| {
+                *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
+            })
+            .map(|((bits, _), _)| object_reference(bits)),
+    );
+    Ok(roots)
+}
+
+struct MapInsertRequest<'a> {
+    reference: ObjRef,
+    key: Value,
+    value: Value,
+    semantic_hash: i64,
+    entry_count: usize,
+    root_bits: &'a [u64],
+    root_tags: &'a [u64],
+    root_states: &'a [u8],
+    allow_collection: bool,
+}
+
 impl MachineRuntime<'_> {
     fn allocate_object(
         &mut self,
@@ -195,6 +243,67 @@ impl MachineRuntime<'_> {
             Err(crate::FaultCode::HeapLimit) => AllocationResult::HeapLimit,
             Err(_) => AllocationResult::Interpreter,
         }
+    }
+
+    fn insert_map_entry(&mut self, request: MapInsertRequest<'_>) -> RuntimeUnitResult {
+        let MapInsertRequest {
+            reference,
+            key,
+            value,
+            semantic_hash,
+            entry_count,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        } = request;
+        let can_grow = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, index }) if entries.len() == entry_count => {
+                index.epoch.ensure_bumpable()
+            }
+            Some(crate::Object::Map { .. }) => return RuntimeUnitResult::Interpreter,
+            _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        if let Err(fault) = can_grow {
+            return RuntimeUnitResult::Fault(fault);
+        }
+        if self.machine.vm.heap.collection_due(40) && !allow_collection {
+            return RuntimeUnitResult::Interpreter;
+        }
+        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => {
+                return RuntimeUnitResult::Fault(crate::FaultCode::HeapLimit);
+            }
+            Err(CaptureDecodeFailure::Invalid) => return RuntimeUnitResult::Interpreter,
+        };
+        if let Err(fault) =
+            self.machine
+                .reserve_native(40, self.base_local, self.base_operand, &roots)
+        {
+            return RuntimeUnitResult::Fault(fault);
+        }
+        match self.machine.vm.heap.get_mut(reference) {
+            crate::Object::Map { entries, index } if entries.len() == entry_count => {
+                if entries.try_reserve(1).is_err() {
+                    return RuntimeUnitResult::Fault(crate::FaultCode::HeapLimit);
+                }
+                if let Err(fault) = index.epoch.bump() {
+                    return RuntimeUnitResult::Fault(fault);
+                }
+                let position = entries.len() as u32;
+                entries.push(MapEntry {
+                    key,
+                    value,
+                    semantic_hash,
+                });
+                index.push_live(Machine::map_index_hash(semantic_hash), position);
+            }
+            crate::Object::Map { .. } => return RuntimeUnitResult::Interpreter,
+            _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+        }
+        self.machine.vm.heap.recharge_local(reference);
+        RuntimeUnitResult::Done
     }
 }
 
@@ -391,13 +500,180 @@ impl NativeRuntime for MachineRuntime<'_> {
             }
             _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
         };
-        let Some(bits) = value_bits(value) else {
-            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
-        };
-        RuntimeValueResult::Value {
-            bits,
-            tag: value.tag() as u64,
+        runtime_value(value)
+    }
+
+    fn map_put_probe(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> MapPutProbeResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return MapPutProbeResult::Fault(crate::FaultCode::TypeMismatch);
         }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return MapPutProbeResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(key) = tagged_value(key_tag, key_bits) else {
+            return MapPutProbeResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let position = match self.machine.map_lookup(reference, key) {
+            Ok(position) => position,
+            Err(fault) => return MapPutProbeResult::Fault(fault),
+        };
+        if let Some(position) = position {
+            let (previous, entry_count) = match self.machine.vm.heap.try_get(reference) {
+                Some(crate::Object::Map { entries, .. }) => {
+                    let Some(entry) = entries.get(position) else {
+                        return MapPutProbeResult::Fault(crate::FaultCode::MalformedState);
+                    };
+                    (entry.value, entries.len())
+                }
+                _ => return MapPutProbeResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            let Some(bits) = value_bits(previous) else {
+                return MapPutProbeResult::Fault(crate::FaultCode::TypeMismatch);
+            };
+            let Ok(position) = u32::try_from(position) else {
+                return MapPutProbeResult::Fault(crate::FaultCode::MalformedState);
+            };
+            let Ok(entry_count) = u32::try_from(entry_count) else {
+                return MapPutProbeResult::Fault(crate::FaultCode::MalformedState);
+            };
+            return MapPutProbeResult::Existing {
+                position,
+                entry_count,
+                bits,
+                tag: previous.tag() as u64,
+            };
+        }
+
+        let semantic = match self.machine.key_semantic_hash(key) {
+            Ok(semantic) => semantic,
+            Err(fault) => return MapPutProbeResult::Fault(fault),
+        };
+        let entry_count = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => match u32::try_from(entries.len()) {
+                Ok(count) => count,
+                Err(_) => return MapPutProbeResult::Fault(crate::FaultCode::MalformedState),
+            },
+            _ => return MapPutProbeResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        MapPutProbeResult::Vacant {
+            semantic_hash: semantic,
+            entry_count,
+        }
+    }
+
+    fn map_put_discard(&mut self, request: MapPutDiscardRequest<'_>) -> RuntimeUnitResult {
+        let reference = object_reference(request.reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(key) = tagged_value(request.key_tag, request.key_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Some(value) = tagged_value(request.value_tag, request.value_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let position = match self.machine.map_lookup(reference, key) {
+            Ok(position) => position,
+            Err(fault) => return RuntimeUnitResult::Fault(fault),
+        };
+        if let Some(position) = position {
+            let replaced = match self.machine.vm.heap.get_mut(reference) {
+                crate::Object::Map { entries, .. } => entries.get_mut(position).map(|entry| {
+                    entry.value = value;
+                }),
+                _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            return if replaced.is_some() {
+                RuntimeUnitResult::Done
+            } else {
+                RuntimeUnitResult::Fault(crate::FaultCode::MalformedState)
+            };
+        }
+        let semantic_hash = match self.machine.key_semantic_hash(key) {
+            Ok(hash) => hash,
+            Err(fault) => return RuntimeUnitResult::Fault(fault),
+        };
+        let entry_count = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => entries.len(),
+            _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        self.insert_map_entry(MapInsertRequest {
+            reference,
+            key,
+            value,
+            semantic_hash,
+            entry_count,
+            root_bits: request.root_bits,
+            root_tags: request.root_tags,
+            root_states: request.root_states,
+            allow_collection: request.allow_collection,
+        })
+    }
+
+    fn map_put_commit(&mut self, request: MapPutCommitRequest<'_>) -> RuntimeUnitResult {
+        let reference = object_reference(request.reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(key) = tagged_value(request.key_tag, request.key_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Some(value) = tagged_value(request.value_tag, request.value_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Ok(entry_count) = usize::try_from(request.entry_count) else {
+            return RuntimeUnitResult::Interpreter;
+        };
+
+        if !request.vacant {
+            let Ok(expected) = usize::try_from(request.token) else {
+                return RuntimeUnitResult::Interpreter;
+            };
+            let replaced = match self.machine.vm.heap.get_mut(reference) {
+                crate::Object::Map { entries, .. } if entries.len() == entry_count => {
+                    entries.get_mut(expected).and_then(|entry| {
+                        entry
+                            .is_live()
+                            .then(|| std::mem::replace(&mut entry.value, value))
+                    })
+                }
+                crate::Object::Map { .. } => return RuntimeUnitResult::Interpreter,
+                _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            return if replaced.is_some() {
+                RuntimeUnitResult::Done
+            } else {
+                RuntimeUnitResult::Fault(crate::FaultCode::MalformedState)
+            };
+        }
+
+        self.insert_map_entry(MapInsertRequest {
+            reference,
+            key,
+            value,
+            semantic_hash: request.token as i64,
+            entry_count,
+            root_bits: request.root_bits,
+            root_tags: request.root_tags,
+            root_states: request.root_states,
+            allow_collection: request.allow_collection,
+        })
     }
 
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult {

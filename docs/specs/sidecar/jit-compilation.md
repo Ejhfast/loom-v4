@@ -1748,6 +1748,43 @@ The representative JSON and HTTP rows did not change beyond measurement variance
 
 Their hot functions still contain other temporary sites.
 
+### Stage F24: Typed map insertion
+
+- use one fixed typed helper when the result is discarded;
+- probe before mutation when the program uses the previous value;
+- validate the previous value against its verifier contract;
+- commit only after the validation succeeds;
+- bind each probe token to the unchanged map entry count;
+- preserve frozen, heap-limit, and exact fuel exits;
+- replay malformed external values before native mutation.
+
+Gate: Map insertion loops use no temporary interpreter site.
+
+Gate: Used and discarded results match Interpreter results.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 111 tests.
+
+The direct and scheduled corpus gate took 12.03 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Map insertion | 5.213 ms | 7.711 ms | 4.374 ms | 1.19 times |
+
+Map insertion uses semantic hashing and the derived map index.
+
+The fixed helper keeps this complex work outside generated code.
+
+The representative gate remains open.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| JSON parse | 45.735 ms | 46.908 ms | 80.458 ms | 0.98 times | 0.57 times | 6.38 percent |
+| JSON stringify | 21.659 ms | 21.917 ms | 42.611 ms | 0.99 times | 0.51 times | 52.07 percent |
+| HTTP parse | 43.538 ms | 48.323 ms | 73.675 ms | 0.90 times | 0.59 times | 48.23 percent |
+| HTTP serialize | 22.852 ms | 26.204 ms | 26.467 ms | 0.87 times | 0.86 times | 41.78 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

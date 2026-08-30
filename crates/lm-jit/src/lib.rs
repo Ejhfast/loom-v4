@@ -39,16 +39,18 @@ mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, grow_list, map_at, map_has, reserve_list, NativeFunction, RawExit,
-    RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
+    allocate_tuple, grow_list, map_at, map_has, map_put_commit, map_put_discard, map_put_probe,
+    reserve_list, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
+    RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
-    ListReserveResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
-    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY,
+    ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult,
+    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView,
+    NativePreparation, NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers,
+    NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView,
+    RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY,
     LOCAL_INITIALIZED,
 };
 pub use opcode::{
@@ -647,7 +649,7 @@ impl CompiledRegion {
             resolved_call_mask: resolved_calls.mask,
         };
         let mut exit = RawExit::default();
-        let mut runtime_result = [0u64; 2];
+        let mut runtime_result = [0u64; 4];
         let mut runtime_context = RawRuntimeContext {
             runtime: std::ptr::from_mut(runtime),
             activation: std::ptr::from_mut(&mut raw_activation),
@@ -667,6 +669,9 @@ impl CompiledRegion {
             reserve_list: reserve_list::<R>,
             map_has: map_has::<R>,
             map_at: map_at::<R>,
+            map_put_discard: map_put_discard::<R>,
+            map_put_probe: map_put_probe::<R>,
+            map_put_commit: map_put_commit::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {

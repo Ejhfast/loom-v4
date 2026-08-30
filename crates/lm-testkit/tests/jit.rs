@@ -783,6 +783,88 @@ fn map_lookup_helpers_match_each_fuel_boundary() {
 }
 
 #[test]
+fn map_insertions_use_typed_probe_and_commit_helpers() {
+    let source = concat!(
+        "table: {String: Int} = {}\ni = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  case table.put(\"value\", i)\n",
+        "  in Some(previous) then sum = sum + previous\n",
+        "  in None then sum = sum + 0\n",
+        "  end\n",
+        "  table.put(\"discard\", i)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "(sum, table.at(\"value\"), table.at(\"discard\"))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-put.lm", source)
+        .expect("the map insertion case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert!(native_dump.contains("(498501, 999, 999)"), "{native_dump}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 25_000, "{metrics:?}");
+}
+
+#[test]
+fn map_insertions_match_each_fuel_boundary() {
+    let source = concat!(
+        "table: {String: Int} = {}\n",
+        "first = table.put(\"a\", 1)\n",
+        "second = table.put(\"a\", 2)\n",
+        "table.put(\"b\", 3)\n",
+        "(first, second, table.at(\"a\"), table.at(\"b\"))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-put-fuel.lm", source)
+        .expect("the map insertion fuel case compiles");
+    for fuel in 0..=40 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn map_insertions_preserve_heap_limit_and_frozen_faults() {
+    let limit_source = concat!(
+        "table: {Int: Int} = {}\ni = 0\n",
+        "while i < 1000\n",
+        "  table.put(i, i)\n",
+        "  i = i + 1\n",
+        "end\ntable.len()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-put-limit.lm", limit_source)
+        .expect("the map insertion limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1024,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+
+    let frozen_source = concat!(
+        "table = {\"a\": 1}\n",
+        "table.freeze()\n",
+        "table.put(\"b\", 2)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(frozen_source, EngineMode::Interpreter, u64::MAX);
+    let (native, _, native_dump) = run(frozen_source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::FrozenWrite));
+}
+
+#[test]
 fn missing_native_map_key_preserves_the_fault_state() {
     let source = concat!(
         "table = {\"a\": 3}\n",
@@ -982,7 +1064,7 @@ fn one_interpreter_instruction_does_not_reject_the_function() {
         "i = 0\nsum = 0\n",
         "while i < 1000\n",
         "  table = {\"value\": i}\n",
-        "  table.put(\"value\", i + 1)\n",
+        "  table.freeze()\n",
         "  sum = sum + 1\n",
         "  i = i + 1\n",
         "end\nsum\n",
@@ -1367,7 +1449,7 @@ fn generic_environment_cache_survives_interpreter_exits() {
         "i = 0\nwhile i < 1000\n",
         "  value = identity(i)\n",
         "  table = {\"value\": value}\n",
-        "  table.put(\"value\", value + 1)\n",
+        "  table.freeze()\n",
         "  i = i + 1\n",
         "end\ni\n",
     );
@@ -2606,6 +2688,40 @@ fn a_wrong_external_list_value_replays_before_native_use() {
         matches!(native, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
     );
     assert!(metrics.native_entries > 0, "{metrics:?}");
+}
+
+#[test]
+fn a_wrong_external_map_value_replays_before_native_mutation() {
+    let source = concat!(
+        "table = {\"value\": 1}\ni = 0\ntotal = 0\n",
+        "while i < 100\n",
+        "  case table.put(\"value\", i)\n",
+        "  in Some(previous) then total = total + previous\n",
+        "  in None then total = total + 0\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let (artifact, mut image) = captured_loop("jit-map-snapshot.lm", source);
+    let value = image.machines[0]
+        .objects
+        .iter_mut()
+        .find_map(|object| match &mut object.object {
+            lm_vm::Object::Map { entries, .. } => entries.first_mut(),
+            _ => None,
+        })
+        .expect("the snapshot holds one map entry");
+    value.value = lm_value::Value::Bool(false);
+    let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, &image);
+    assert!(
+        matches!(interpreted, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(
+        matches!(native, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits > 0, "{metrics:?}");
 }
 
 #[test]

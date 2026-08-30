@@ -334,6 +334,23 @@ impl NativeRuntime for TestRuntime {
     fn map_at(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
         RuntimeValueResult::Interpreter
     }
+
+    fn map_put_probe(
+        &mut self,
+        _reference: u64,
+        _key_bits: u64,
+        _key_tag: u64,
+    ) -> MapPutProbeResult {
+        MapPutProbeResult::Interpreter
+    }
+
+    fn map_put_discard(&mut self, _request: MapPutDiscardRequest<'_>) -> RuntimeUnitResult {
+        RuntimeUnitResult::Interpreter
+    }
+
+    fn map_put_commit(&mut self, _request: MapPutCommitRequest<'_>) -> RuntimeUnitResult {
+        RuntimeUnitResult::Interpreter
+    }
 }
 
 #[test]
