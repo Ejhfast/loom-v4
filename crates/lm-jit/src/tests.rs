@@ -140,6 +140,8 @@ fn unreachable_code_uses_one_native_fault_exit() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 2,
@@ -323,6 +325,8 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
             .prepare_root(NativePreparation {
                 function: 0,
                 environment: 0,
+                capture_tag: ValueTag::Uninit as u64,
+                capture_bits: 0,
                 block: 0,
                 instruction: 0,
                 local_count: 2,
@@ -398,6 +402,8 @@ fn native_field_load_uses_the_direct_heap_view() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -468,6 +474,8 @@ fn native_field_fault_keeps_the_exact_program_point() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -539,6 +547,8 @@ fn another_concrete_class_replays_the_field_instruction() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -608,6 +618,8 @@ fn native_field_store_writes_the_canonical_value() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 2,
@@ -684,6 +696,8 @@ fn native_field_store_replays_a_frozen_receiver() {
         .prepare_root(NativePreparation {
             function: 0,
             environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
             block: 0,
             instruction: 0,
             local_count: 2,

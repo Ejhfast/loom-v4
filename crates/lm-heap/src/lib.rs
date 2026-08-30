@@ -207,6 +207,13 @@ struct TupleLayout {
     items: ValueArray,
 }
 
+#[repr(C)]
+struct ClosureLayout {
+    func: u32,
+    captures: ValueArray,
+    env: Witness,
+}
+
 const fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
@@ -292,6 +299,16 @@ pub const JIT_MAP_EPOCH_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
 /// Byte offset of a tuple item array.
 pub const JIT_TUPLE_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(TupleLayout, items);
+/// Byte offset of a closure function.
+pub const JIT_CLOSURE_FUNCTION_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ClosureLayout, func);
+/// Byte offset of a closure capture array.
+pub const JIT_CLOSURE_CAPTURES_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(ClosureLayout, captures);
+/// Byte offset of a closure type environment.
+pub const JIT_CLOSURE_ENV_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ClosureLayout, env);
 /// Byte offset of the immutable byte data pointer.
 pub const JIT_BYTES_DATA_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_BYTES_DATA_OFFSET;
@@ -1282,6 +1299,42 @@ mod tests {
                 JIT_OBJECT_INSTANCE
             );
         }
+    }
+
+    #[test]
+    fn native_closure_offsets_name_the_canonical_object() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Closure {
+            func: 17,
+            captures: vec![Value::Int(4), Value::Bool(true)].into(),
+            env: Witness::EMPTY,
+        });
+        let entry = heap.entry(reference.slot);
+        let base = std::ptr::from_ref(entry) as usize;
+        let EntryState::Live(live) = &entry.state else {
+            panic!("the entry is live");
+        };
+        let Object::Closure {
+            func,
+            captures,
+            env,
+        } = &live.object
+        else {
+            panic!("the object is a closure");
+        };
+        assert_eq!(
+            std::ptr::from_ref(func) as usize - base,
+            JIT_CLOSURE_FUNCTION_OFFSET
+        );
+        assert_eq!(
+            std::ptr::from_ref(captures) as usize - base,
+            JIT_CLOSURE_CAPTURES_OFFSET
+        );
+        assert_eq!(
+            std::ptr::from_ref(env) as usize - base,
+            JIT_CLOSURE_ENV_OFFSET
+        );
+        assert_eq!(captures.as_slice(), [Value::Int(4), Value::Bool(true)]);
     }
 
     #[test]

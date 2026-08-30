@@ -1662,6 +1662,18 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_closure_call",
+        concat!(
+            "base = 7\n",
+            "stored = do |value: Int|: Int base + value end\n",
+            "i = 0\ntotal = 0\n",
+            "while i < 1000000\n",
+            "  total = total + stored(i)\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_quick_exit",
         concat!(
             "def append_one(mut items: [Int]): Int\n",

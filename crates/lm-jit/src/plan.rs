@@ -17,6 +17,8 @@ pub enum ScalarKind {
     Object(u32),
     /// One canonical tagged value with a source-unit type index.
     Tagged(u32),
+    /// One machine-local callback with a source-unit type index.
+    Callback(u32),
     Operation,
 }
 
@@ -195,6 +197,7 @@ pub enum ExitKind {
     TypeEnvironment,
     InterfaceCall,
     GenericVirtualCall,
+    CallbackCall,
 }
 
 /// One validated native exit record.
@@ -259,7 +262,6 @@ impl ExecutionExit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UnsupportedReason {
     MissingSource,
-    CapturedFunction,
     NonScalarType,
     UnsupportedInstruction,
     InvalidStack,
@@ -284,6 +286,9 @@ pub(super) enum SegmentExit {
     },
     VirtualCall {
         selector: u32,
+        fallthrough_ip: u32,
+    },
+    ValueCall {
         fallthrough_ip: u32,
     },
     GenericVirtualCall {
@@ -361,6 +366,9 @@ pub(super) struct HeapAccess {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HeapAccessKind {
+    LoadCapture {
+        value: ValueContract,
+    },
     LoadField {
         receiver_class: u32,
         value: ValueContract,
@@ -440,6 +448,13 @@ pub(super) struct CallContract {
     pub(super) local_count: Option<usize>,
     pub(super) result: ScalarKind,
     pub(super) receiver: Option<VirtualReceiver>,
+    pub(super) value_target: Option<ValueCallTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValueCallTarget {
+    Closure,
+    Callback,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -510,6 +525,7 @@ struct SegmentAnalysis {
 struct VerifiedPoint {
     initialized: Vec<bool>,
     stack: Vec<ScalarKind>,
+    stack_types: Vec<u32>,
 }
 
 struct SegmentAnalysisContext<'a> {
@@ -518,6 +534,7 @@ struct SegmentAnalysisContext<'a> {
     module: &'a Module,
     locals: &'a [ScalarKind],
     calls: &'a HashMap<u32, CallSignature>,
+    verified_types: &'a [BcType],
     class_relocation: Option<&'a [u32]>,
     runtime_core: lm_bytecode::corepin::CoreLayout,
 }
@@ -531,9 +548,6 @@ pub(super) struct AllocationSite {
 impl RegionPlan {
     pub(super) fn for_function(input: &FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
         let runtime = input.root.runtime;
-        if !runtime.captures.is_empty() {
-            return Err(UnsupportedReason::CapturedFunction);
-        }
         let instructions = runtime
             .blocks
             .iter()
@@ -590,6 +604,7 @@ impl RegionPlan {
                     VerifiedPoint {
                         initialized: state.locals().iter().map(Option::is_some).collect(),
                         stack,
+                        stack_types: state.stack().to_vec(),
                     },
                 ))
             })
@@ -623,6 +638,7 @@ impl RegionPlan {
             module: source,
             locals: &local_kinds,
             calls: &call_contracts,
+            verified_types: metadata.types(),
             class_relocation: input.root.class_relocation,
             runtime_core: input.runtime_core,
         };
@@ -677,6 +693,7 @@ impl RegionPlan {
                 segment.exit,
                 SegmentExit::Call { .. }
                     | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::ValueCall { .. }
                     | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
             ) {
@@ -844,6 +861,7 @@ fn instantiate_call(
         local_count: Some(signature.local_count),
         result: instantiate(signature.result)?,
         receiver: None,
+        value_target: None,
     })
 }
 
@@ -861,13 +879,10 @@ fn scalar_kind_in(
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(
-            BcType::Str
-            | BcType::Map(_, _)
-            | BcType::Fn(_, _, _, _)
-            | BcType::Callback(_, _, _, _)
-            | BcType::Digest,
-        ) => Ok(ScalarKind::Object(ty)),
+        Some(BcType::Str | BcType::Map(_, _) | BcType::Fn(_, _, _, _) | BcType::Digest) => {
+            Ok(ScalarKind::Object(ty))
+        }
+        Some(BcType::Callback(_, _, _, _)) => Ok(ScalarKind::Callback(ty)),
         Some(BcType::Class(class)) => {
             let core = lm_bytecode::corepin::declared_layout(module);
             if core.char_value == Some(*class) {
@@ -987,6 +1002,9 @@ fn segment_exit(
                 selector: *selector,
                 fallthrough_ip: next,
             },
+            Instr::CallValue { .. } => SegmentExit::ValueCall {
+                fallthrough_ip: next,
+            },
             Instr::CallVirtualG { selector, app, .. } => SegmentExit::GenericVirtualCall {
                 selector: *selector,
                 application: *app,
@@ -1034,6 +1052,9 @@ fn resolve_successors(
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::VirtualCall { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
+            SegmentExit::ValueCall { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::GenericVirtualCall { fallthrough_ip, .. } => {
@@ -1154,6 +1175,20 @@ fn analyze_segment(
                     .get(at)
                     .ok_or(UnsupportedReason::InvalidControlFlow)?;
                 definitions[at] = true;
+            }
+            Instr::LoadCapture(index) => {
+                let ty = context
+                    .source_func
+                    .captures
+                    .get(index as usize)
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::LoadCapture {
+                        value: value_contract(context, ty)?,
+                    },
+                });
             }
             Instr::LoadField(field) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
@@ -1512,6 +1547,55 @@ fn analyze_segment(
                 boundary_stack = before.stack.clone();
                 call_contract = Some(contract);
             }
+            Instr::CallValue { argc } => {
+                let parameter_count =
+                    usize::try_from(argc).map_err(|_| UnsupportedReason::RegionLimit)?;
+                let callee = before
+                    .stack
+                    .len()
+                    .checked_sub(parameter_count.saturating_add(1))
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let callee_type = before
+                    .stack_types
+                    .get(callee)
+                    .and_then(|ty| context.verified_types.get(*ty as usize))
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let (params, result_type, value_target) = match callee_type {
+                    BcType::Fn(params, _, result, _) => (params, *result, ValueCallTarget::Closure),
+                    BcType::Callback(params, _, result, _) => {
+                        (params, *result, ValueCallTarget::Callback)
+                    }
+                    _ => return Err(UnsupportedReason::InvalidStack),
+                };
+                if params.len() != parameter_count {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                let params = params
+                    .iter()
+                    .map(|ty| scalar_kind_in(context.module, context.verified_types, *ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result_kind =
+                    scalar_kind_in(context.module, context.verified_types, result_type)?;
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                if !uses_equal_representation(result, result_kind) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                boundary_stack = before.stack.clone();
+                let mut stack_limit = before.stack.clone();
+                stack_limit.remove(callee);
+                fault_stacks.push((next, stack_limit));
+                call_contract = Some(CallContract {
+                    params,
+                    local_count: None,
+                    result: result_kind,
+                    receiver: None,
+                    value_target: Some(value_target),
+                });
+            }
             Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
                 let parameter_count = usize::try_from(argc)
                     .ok()
@@ -1538,6 +1622,7 @@ fn analyze_segment(
                     local_count: None,
                     result,
                     receiver: Some(virtual_receiver(context, receiver)?),
+                    value_target: None,
                 });
             }
             Instr::CallInterface { .. } => {
@@ -1569,6 +1654,7 @@ fn analyze_segment(
                     local_count: None,
                     result,
                     receiver: None,
+                    value_target: None,
                 });
             }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {
@@ -1697,7 +1783,9 @@ fn virtual_receiver(
                 _ => Err(UnsupportedReason::NonScalarType),
             }
         }
-        ScalarKind::Tagged(_) | ScalarKind::Operation => Err(UnsupportedReason::NonScalarType),
+        ScalarKind::Tagged(_) | ScalarKind::Callback(_) | ScalarKind::Operation => {
+            Err(UnsupportedReason::NonScalarType)
+        }
     }
 }
 
@@ -1883,9 +1971,7 @@ fn value_contract(
         Some(BcType::List(_)) => Some(ObjectContract::List),
         Some(BcType::Map(_, _)) => Some(ObjectContract::Map),
         Some(BcType::Tuple(_)) => Some(ObjectContract::Tuple),
-        Some(BcType::Fn(_, _, _, _) | BcType::Callback(_, _, _, _)) => {
-            Some(ObjectContract::Closure)
-        }
+        Some(BcType::Fn(_, _, _, _)) => Some(ObjectContract::Closure),
         Some(BcType::Bytes) => Some(ObjectContract::Bytes),
         Some(BcType::Digest) => Some(ObjectContract::Digest),
         _ => None,
@@ -1918,6 +2004,7 @@ fn uses_equal_representation(left: ScalarKind, right: ScalarKind) -> bool {
             (left, right),
             (ScalarKind::Object(_), ScalarKind::Object(_))
                 | (ScalarKind::Tagged(_), ScalarKind::Tagged(_))
+                | (ScalarKind::Callback(_), ScalarKind::Callback(_))
         )
 }
 

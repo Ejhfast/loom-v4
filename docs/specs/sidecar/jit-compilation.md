@@ -1170,6 +1170,23 @@ Gate: Direct and scheduled corpus results match Interpreter results.
 
 Gate: Cold misses preserve exact scheduler retirement counts.
 
+### Stage F20: Native closure calls
+
+- store one closure or callback handle in each native frame;
+- read closure targets and environments through the stable heap ABI;
+- resolve callback slots through one machine-local call-site cache;
+- retain capture handles across calls and scheduler suspension;
+- remove the callable before the child frame starts;
+- preserve exact stack-limit and materialization state.
+
+Gate: A captured closure loop uses no interpreter call exit.
+
+Gate: Direct and scheduled closure results match Interpreter results.
+
+Gate: Closure calls improve in Auto and Native modes.
+
+`MakeClosure` and callback capture reads remain later coverage work.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1613,6 +1630,28 @@ The warm debug workspace suite took 44.59 seconds.
 Generic field-result specialization remains outside this stage.
 
 The representative-program performance gate remains open.
+
+The Stage F20 run added native closure frames and `CallValue` dispatch.
+
+Each native frame now retains its exact closure or callback handle.
+
+Heap closures load their function and environment through the stable heap ABI.
+
+Callback slots resolve through a machine-local call-site cache.
+
+Direct and scheduled closure tests matched Interpreter state.
+
+Stack-limit exits preserved the exact callable and argument state.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Captured closure calls | 65.887 ms | 67.699 ms | 17.247 ms | 0.97 times | 100.00 percent |
+
+Native gained 3.82 times on the scheduled closure row.
+
+Auto retired no measured native instruction on this row.
+
+The Auto closure performance gate remains open.
 
 ## 24. Rejected designs
 

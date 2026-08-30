@@ -1,13 +1,13 @@
 //! Canonical machine-state adapter for native execution.
 
 use crate::engine::EngineTurnMetrics;
-use crate::machine::{ExecError, ExecOutcome, Frame, Machine};
+use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, Machine};
 use crate::NamespaceRuntime;
 use lm_jit::{
     ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind, LOCAL_DIRTY,
     LOCAL_INITIALIZED,
 };
-use lm_value::{ObjRef, TypeEnvId, Value};
+use lm_value::{ObjRef, TypeEnvId, Value, ValueTag};
 use std::sync::{Arc, Mutex, Weak};
 
 /// Reusable scalar buffers for one engine turn.
@@ -41,6 +41,23 @@ struct CanonicalStack {
     frames: Vec<Frame>,
     locals: Vec<Value>,
     operands: Vec<Value>,
+}
+
+fn frame_capture_parts(capture: Option<FrameCapture>) -> Option<(u64, u64)> {
+    let Some(capture) = capture else {
+        return Some((ValueTag::Uninit as u64, 0));
+    };
+    let value = capture.value();
+    Some((value.tag() as u64, runtime::value_bits(value)?))
+}
+
+fn parts_frame_capture(tag: u64, bits: u64) -> Option<Option<FrameCapture>> {
+    if tag == ValueTag::Uninit as u64 {
+        return (bits == 0).then_some(None);
+    }
+    runtime::tagged_value(tag, bits)
+        .and_then(FrameCapture::from_value)
+        .map(Some)
 }
 
 impl CanonicalStack {
@@ -423,10 +440,10 @@ impl JitEngine {
                     return NativeAttempt::Fallback;
                 };
                 let frame = &machine.vm.frames[frame_index];
-                if frame.closure.is_some() {
-                    metrics.note_missing_entry_fallback();
+                let Some((capture_tag, capture_bits)) = frame_capture_parts(frame.closure) else {
+                    metrics.note_guard_failure(0);
                     return NativeAttempt::Fallback;
-                }
+                };
                 let Some(entry) = region.entry_plan(frame.block, frame.ip) else {
                     metrics.note_missing_entry_fallback();
                     return region
@@ -475,6 +492,8 @@ impl JitEngine {
                     .prepare_root(NativePreparation {
                         function: frame.func,
                         environment: frame.env.0,
+                        capture_tag,
+                        capture_bits,
                         block: frame.block,
                         instruction: frame.ip,
                         local_count: region.local_kinds().len(),
@@ -870,6 +889,81 @@ impl JitEngine {
                         }
                     }
                 }
+                if exit.kind() == ExitKind::CallbackCall {
+                    let Some(frame) = scratch.activation.frames().last() else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(resolve_region) = native
+                        .slot(frame.function())
+                        .and_then(|slot| slot.compiled())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(site) = resolve_region
+                        .call_value_site(exit.block(), exit.instruction())
+                        .filter(|site| site.is_callback())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if site.function() != frame.function() {
+                        break Err(Failure::BackendUnavailable);
+                    }
+                    let Some(callable_index) = frame
+                        .operands()
+                        .len()
+                        .checked_sub(site.parameter_count().saturating_add(1))
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some((&callable_bits, &callable_tag)) = frame
+                        .operands()
+                        .get(callable_index)
+                        .zip(frame.operand_tags().get(callable_index))
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if callable_bits != exit.result()
+                        || callable_tag != exit.result_tag()
+                        || callable_tag != ValueTag::Callback as u64
+                    {
+                        break Err(Failure::BackendUnavailable);
+                    }
+                    let Some(Value::Callback(reference)) =
+                        runtime::tagged_value(callable_tag, callable_bits)
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Ok(descriptor) = runtime.machine.callback(reference) else {
+                        break exit.add_prior_retired(prior_retired);
+                    };
+                    let target = descriptor.func;
+                    let environment = descriptor.env;
+                    let parent = frame.environment();
+                    let cached = runtime.resolved_calls.cache_call_site(
+                        context.envs.canonical_store_id(),
+                        frame.function(),
+                        exit.block(),
+                        exit.instruction(),
+                        parent,
+                        callable_bits,
+                        target,
+                        environment.0,
+                    );
+                    let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let resume = resolve_region
+                        .resume_plan(exit.block(), exit.instruction())
+                        .map(|entry| entry.index());
+                    if cached {
+                        if let Some(resume) = resume {
+                            prior_retired = next_retired;
+                            active_region = resolve_region;
+                            active_entry = resume;
+                            continue;
+                        }
+                    }
+                }
                 if exit.kind() != ExitKind::Return || scratch.activation.frame_count() <= 1 {
                     break exit.add_prior_retired(prior_retired);
                 }
@@ -1040,12 +1134,21 @@ impl JitEngine {
             | ExitKind::TypeEnvironment
             | ExitKind::InterfaceCall
             | ExitKind::GenericVirtualCall
+            | ExitKind::CallbackCall
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(
                     exit.kind(),
                     ExitKind::Interpreter | ExitKind::Replay | ExitKind::Literal
                 );
+                let grow_value_call = exit.kind() == ExitKind::GrowActivation
+                    && top_region
+                        .call_value_site(exit.block(), exit.instruction())
+                        .is_some();
+                if grow_value_call {
+                    metrics.note_native_interpreter_exit();
+                    return NativeAttempt::InterpretOne { retired };
+                }
                 if matches!(exit.kind(), ExitKind::Call | ExitKind::GrowActivation) {
                     if retired == instruction_limit {
                         return NativeAttempt::Complete {
@@ -1091,6 +1194,7 @@ impl JitEngine {
                         | ExitKind::TypeEnvironment
                         | ExitKind::InterfaceCall
                         | ExitKind::GenericVirtualCall
+                        | ExitKind::CallbackCall
                 ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();
@@ -1216,6 +1320,11 @@ fn extend_native_roots(
         {
             return;
         }
+        if let Some(Some(FrameCapture::Closure(reference))) =
+            parts_frame_capture(frame.capture_tag(), frame.capture_bits())
+        {
+            roots.push(reference);
+        }
         for (((kind, bits), tag), state) in region
             .local_kinds()
             .iter()
@@ -1270,10 +1379,14 @@ fn frame_operand_kinds<'a>(
             | ExitKind::HeapLimit
             | ExitKind::Unreachable,
         ) => region.fault_operand_kinds(frame.block(), frame.instruction()),
-        Some(ExitKind::StackLimit) => frame
-            .instruction()
-            .checked_sub(1)
-            .and_then(|instruction| region.operand_kinds(frame.block(), instruction)),
+        Some(ExitKind::StackLimit) => region
+            .fault_operand_kinds(frame.block(), frame.instruction())
+            .or_else(|| {
+                frame
+                    .instruction()
+                    .checked_sub(1)
+                    .and_then(|instruction| region.operand_kinds(frame.block(), instruction))
+            }),
         Some(_) => region.operand_kinds(frame.block(), frame.instruction()),
     };
     kinds.ok_or(())
@@ -1341,11 +1454,13 @@ fn materialize_native_frames(
     if root.native_created() || root.locals().len() != root_region.local_kinds().len() {
         return Err(());
     }
-    if machine
-        .vm
-        .frames
-        .get(root_index)
-        .is_none_or(|frame| frame.func != root.function() || frame.env.0 != root.environment())
+    let Some(canonical_root) = machine.vm.frames.get(root_index) else {
+        return Err(());
+    };
+    let root_capture = parts_frame_capture(root.capture_tag(), root.capture_bits()).ok_or(())?;
+    if canonical_root.func != root.function()
+        || canonical_root.env.0 != root.environment()
+        || canonical_root.closure != root_capture
     {
         return Err(());
     }
@@ -1415,7 +1530,7 @@ fn materialize_native_frames(
                 ip: frame.instruction(),
                 base_local,
                 base_operand,
-                closure: None,
+                closure: parts_frame_capture(frame.capture_tag(), frame.capture_bits()).ok_or(())?,
                 env: TypeEnvId(frame.environment()),
             });
         }

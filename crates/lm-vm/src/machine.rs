@@ -5217,6 +5217,9 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 self.push_frame(module, target, argc, Some(capture), env)?;
+                if native.after_call(target) {
+                    return Ok(ExecOutcome::ContinueNative);
+                }
             }
             // The closure retains the environment of the frame that
             // built it. Capture cannot rebuild it later, because the

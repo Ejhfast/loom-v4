@@ -43,6 +43,8 @@ pub(super) struct RawExit {
 pub(super) struct RawNativeFrame {
     pub(super) function: u32,
     pub(super) environment: u32,
+    pub(super) capture_tag: u64,
+    pub(super) capture_bits: u64,
     pub(super) block: u32,
     pub(super) instruction: u32,
     pub(super) resume_entry: u32,
@@ -391,6 +393,8 @@ impl NativeTypeEnvironmentView {
 pub struct NativePreparation {
     pub function: u32,
     pub environment: u32,
+    pub capture_tag: u64,
+    pub capture_bits: u64,
     pub block: u32,
     pub instruction: u32,
     pub local_count: usize,
@@ -479,6 +483,16 @@ impl NativeFrameView<'_> {
         self.frame.environment
     }
 
+    /// Return the canonical frame-capture tag.
+    pub fn capture_tag(&self) -> u64 {
+        self.frame.capture_tag
+    }
+
+    /// Return the canonical frame-capture payload.
+    pub fn capture_bits(&self) -> u64 {
+        self.frame.capture_bits
+    }
+
     /// Return the current bytecode block.
     pub fn block(&self) -> u32 {
         self.frame.block
@@ -526,6 +540,8 @@ impl NativeActivation {
         let NativePreparation {
             function,
             environment,
+            capture_tag,
+            capture_bits,
             block,
             instruction,
             local_count,
@@ -572,6 +588,8 @@ impl NativeActivation {
         self.frames[0] = RawNativeFrame {
             function,
             environment,
+            capture_tag,
+            capture_bits,
             block,
             instruction,
             resume_entry: 0,

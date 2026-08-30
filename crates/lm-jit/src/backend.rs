@@ -7,15 +7,16 @@ use crate::activation::{
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
-    Segment, SegmentExit, UnsupportedReason, ValueContract, VirtualReceiver,
+    Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
 };
 use crate::{
-    CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite, NativeEntryCell,
-    ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL,
-    EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW,
-    EXIT_INTERFACE_CALL, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
-    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
-    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
+    NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_CALLBACK_CALL,
+    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
+    EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INTERPRETER,
+    EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
+    EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
+    EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -28,14 +29,15 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET,
-    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
-    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
-    JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES,
-    JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP,
-    JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
-    JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET,
+    JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET,
+    JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET,
+    JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE,
+    JIT_INSTANCE_CLASS_OFFSET, JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET,
+    JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET,
+    JIT_OBJECT_BYTES, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST,
+    JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK,
+    JIT_PAGE_SHIFT, JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET,
     JIT_TUPLE_ITEMS_OFFSET, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET,
     VALUE_ARRAY_LEN_OFFSET,
 };
@@ -134,6 +136,23 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
             })
         })
         .collect();
+    let call_value_sites: Vec<CallValueSite> = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let SegmentExit::ValueCall { .. } = segment.exit else {
+                return None;
+            };
+            let contract = segment.call_contract.as_ref()?;
+            Some(CallValueSite {
+                function: input.root.function,
+                block: segment.block,
+                instruction: segment.end.checked_sub(1)?,
+                parameter_count: contract.params.len(),
+                callback: contract.value_target == Some(ValueCallTarget::Callback),
+            })
+        })
+        .collect();
 
     let mut flags = settings::builder();
     flags
@@ -209,6 +228,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         type_environment_sites,
         interface_call_sites,
         generic_virtual_call_sites,
+        call_value_sites,
         module: Mutex::new(Some(module)),
     })
 }
@@ -348,11 +368,19 @@ enum ObjectGuard<'a> {
 struct NativeCallEmission<'a> {
     target: ir::Value,
     environment: ir::Value,
+    capture: Option<NativeValue>,
+    fallback: NativeCallFallback,
     contract: &'a CallContract,
     block: u32,
     instruction: u32,
     successor_entry: u32,
     successor: ir::Block,
+}
+
+#[derive(Clone, Copy)]
+enum NativeCallFallback {
+    Direct,
+    Replay,
 }
 
 struct SegmentEmission<'a, 'b> {
@@ -710,6 +738,7 @@ fn emit_segment(
                 segment.exit,
                 SegmentExit::Call { .. }
                     | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::ValueCall { .. }
                     | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
                     | SegmentExit::Effect { .. }
@@ -861,6 +890,34 @@ fn emit_segment(
             }
             Instr::Pop => {
                 pop_native(&mut stack)?;
+            }
+            Instr::LoadCapture(index) => {
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::LoadCapture { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let value = emit_load_capture(
+                    builder,
+                    values,
+                    index,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &stack,
+                    },
+                )?;
+                stack.push(value);
             }
             Instr::LoadField(field) => {
                 let deopt_stack = stack.clone();
@@ -2007,6 +2064,7 @@ fn emit_segment(
             | Instr::CallVirtual { .. }
             | Instr::CallVirtualG { .. }
             | Instr::CallInterface { .. }
+            | Instr::CallValue { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::TupleNew { .. }
@@ -2040,6 +2098,7 @@ fn emit_segment(
         segment.exit,
         SegmentExit::Call { .. }
             | SegmentExit::VirtualCall { .. }
+            | SegmentExit::ValueCall { .. }
             | SegmentExit::GenericVirtualCall { .. }
             | SegmentExit::InterfaceCall { .. }
     ) {
@@ -2049,6 +2108,23 @@ fn emit_segment(
             .call_contract
             .as_ref()
             .ok_or(CompileError::Backend)?;
+        let capture = if matches!(segment.exit, SegmentExit::ValueCall { .. }) {
+            let callable = stack
+                .len()
+                .checked_sub(
+                    contract
+                        .params
+                        .len()
+                        .checked_add(1)
+                        .ok_or(CompileError::Backend)?,
+                )
+                .and_then(|index| stack.get(index))
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            Some(callable)
+        } else {
+            None
+        };
         let (target, environment) = match segment.exit {
             SegmentExit::Call {
                 target,
@@ -2111,6 +2187,19 @@ fn emit_segment(
                 )?;
                 (target, builder.ins().iconst(types::I32, 0))
             }
+            SegmentExit::ValueCall { .. } => emit_call_value_target(
+                builder,
+                values,
+                input.root.function,
+                capture.ok_or(CompileError::Backend)?,
+                contract.value_target.ok_or(CompileError::Backend)?,
+                FaultPoint {
+                    block: segment.block,
+                    instruction: call_instruction,
+                    prefix: 0,
+                },
+                &stack,
+            )?,
             SegmentExit::GenericVirtualCall { .. } => {
                 let receiver = contract.receiver.ok_or(CompileError::Backend)?;
                 let receiver_value = stack
@@ -2183,6 +2272,12 @@ fn emit_segment(
             NativeCallEmission {
                 target,
                 environment,
+                capture,
+                fallback: if capture.is_some() {
+                    NativeCallFallback::Replay
+                } else {
+                    NativeCallFallback::Direct
+                },
                 contract,
                 block: segment.block,
                 instruction: call_instruction,
@@ -2282,6 +2377,7 @@ fn emit_segment(
         }
         SegmentExit::Call { .. } => unreachable!(),
         SegmentExit::VirtualCall { .. } => unreachable!(),
+        SegmentExit::ValueCall { .. } => unreachable!(),
         SegmentExit::GenericVirtualCall { .. } => unreachable!(),
         SegmentExit::InterfaceCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
@@ -2407,6 +2503,122 @@ fn emit_generic_virtual_receiver_key(
     let environment_key = builder.ins().uextend(types::I64, environment);
     let environment_key = builder.ins().ishl_imm(environment_key, 32);
     Ok(builder.ins().bor(environment_key, class_key))
+}
+
+fn emit_call_value_target(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function: u32,
+    callable: NativeValue,
+    target: ValueCallTarget,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let guard_point = FaultPoint {
+        block: point.block,
+        instruction: point.instruction.saturating_add(1),
+        prefix: point.prefix.saturating_add(1),
+    };
+    match target {
+        ValueCallTarget::Closure => {
+            let wrong_tag =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, callable.tag, ValueTag::Obj as u64 as i64);
+            emit_interpreter_replay(builder, values, wrong_tag, guard_point, stack)?;
+            let entry = emit_object_entry(
+                builder,
+                values,
+                callable.bits,
+                JIT_OBJECT_CLOSURE,
+                guard_point,
+                ObjectGuard::Replay(stack),
+            )?;
+            let function = load_value(builder, types::I32, entry, JIT_CLOSURE_FUNCTION_OFFSET)?;
+            let environment = load_value(builder, types::I32, entry, JIT_CLOSURE_ENV_OFFSET)?;
+            Ok((function, environment))
+        }
+        ValueCallTarget::Callback => {
+            let closure = builder.create_block();
+            let test_callback = builder.create_block();
+            let callback = builder.create_block();
+            let invalid = builder.create_block();
+            let done = builder.create_block();
+            builder.append_block_param(done, types::I32);
+            builder.append_block_param(done, types::I32);
+            let is_closure =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, callable.tag, ValueTag::Obj as u64 as i64);
+            builder
+                .ins()
+                .brif(is_closure, closure, &[], test_callback, &[]);
+
+            builder.switch_to_block(test_callback);
+            let is_callback = builder.ins().icmp_imm(
+                IntCC::Equal,
+                callable.tag,
+                ValueTag::Callback as u64 as i64,
+            );
+            builder.ins().brif(is_callback, callback, &[], invalid, &[]);
+
+            builder.switch_to_block(invalid);
+            let retired = builder.use_var(values.retired);
+            let zero = builder.ins().iconst(types::I64, 0);
+            emit_exit(
+                builder,
+                values,
+                ExitEmission {
+                    retired,
+                    kind: EXIT_REPLAY,
+                    block: point.block,
+                    instruction: point.instruction,
+                    result: NativeValue {
+                        bits: zero,
+                        tag: zero,
+                    },
+                },
+                stack,
+            )?;
+
+            builder.switch_to_block(closure);
+            let entry = emit_object_entry(
+                builder,
+                values,
+                callable.bits,
+                JIT_OBJECT_CLOSURE,
+                guard_point,
+                ObjectGuard::Replay(stack),
+            )?;
+            let closure_function =
+                load_value(builder, types::I32, entry, JIT_CLOSURE_FUNCTION_OFFSET)?;
+            let closure_environment =
+                load_value(builder, types::I32, entry, JIT_CLOSURE_ENV_OFFSET)?;
+            builder
+                .ins()
+                .jump(done, &[closure_function.into(), closure_environment.into()]);
+
+            builder.switch_to_block(callback);
+            let (callback_function, callback_environment) = emit_resolved_call_lookup(
+                builder,
+                values,
+                function,
+                point,
+                callable.bits,
+                callable,
+                EXIT_CALLBACK_CALL,
+                stack,
+            )?;
+            builder.ins().jump(
+                done,
+                &[callback_function.into(), callback_environment.into()],
+            );
+
+            builder.switch_to_block(done);
+            let values = builder.block_params(done);
+            Ok((values[0], values[1]))
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2758,6 +2970,8 @@ fn emit_native_call(
     let NativeCallEmission {
         target,
         environment,
+        capture,
+        fallback: fallback_kind,
         contract,
         block,
         instruction,
@@ -2768,9 +2982,21 @@ fn emit_native_call(
         .len()
         .checked_sub(contract.params.len())
         .ok_or(CompileError::Backend)?;
+    let caller_end = argument_start
+        .checked_sub(usize::from(capture.is_some()))
+        .ok_or(CompileError::Backend)?;
     let boundary_stack = stack.clone();
-    let caller_stack = stack[..argument_start].to_vec();
+    let caller_stack = stack[..caller_end].to_vec();
     let arguments = stack[argument_start..].to_vec();
+    let stack_limit_stack = if capture.is_some() {
+        caller_stack
+            .iter()
+            .chain(arguments.iter())
+            .copied()
+            .collect::<Vec<_>>()
+    } else {
+        boundary_stack.clone()
+    };
     let fuel_exit = builder.create_block();
     let lookup = builder.create_block();
     let fallback = builder.create_block();
@@ -2883,9 +3109,17 @@ fn emit_native_call(
         active_values,
         i64::try_from(boundary_stack.len()).map_err(|_| CompileError::Backend)?,
     );
-    let caller_values = builder
-        .ins()
-        .iadd_imm(active_values, -(contract.params.len() as i64));
+    let caller_values = builder.ins().iadd_imm(
+        active_values,
+        -i64::try_from(
+            contract
+                .params
+                .len()
+                .checked_add(usize::from(capture.is_some()))
+                .ok_or(CompileError::Backend)?,
+        )
+        .map_err(|_| CompileError::Backend)?,
+    );
     let local_count = load_cell_u32(builder, cell, mem::offset_of!(NativeEntryCell, local_count))?;
     let pushed_values = builder.ins().iadd(caller_values, local_count);
     let max_values = load_activation_u32(builder, values, RawActivationField::MaxStackValues)?;
@@ -2913,7 +3147,7 @@ fn emit_native_call(
                 tag: zero,
             },
         },
-        &boundary_stack,
+        &stack_limit_stack,
     )?;
 
     builder.switch_to_block(capacity);
@@ -2981,20 +3215,38 @@ fn emit_native_call(
 
     builder.switch_to_block(fallback);
     let retired = builder.use_var(values.retired);
-    let target_value = builder.ins().uextend(types::I64, target);
-    let environment_tag = builder.ins().uextend(types::I64, environment);
+    let (kind, result) = match fallback_kind {
+        NativeCallFallback::Direct => {
+            let target_value = builder.ins().uextend(types::I64, target);
+            let environment_tag = builder.ins().uextend(types::I64, environment);
+            (
+                EXIT_CALL,
+                NativeValue {
+                    bits: target_value,
+                    tag: environment_tag,
+                },
+            )
+        }
+        NativeCallFallback::Replay => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            (
+                EXIT_REPLAY,
+                NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
+            )
+        }
+    };
     emit_exit(
         builder,
         values,
         ExitEmission {
             retired,
-            kind: EXIT_CALL,
+            kind,
             block,
             instruction,
-            result: NativeValue {
-                bits: target_value,
-                tag: environment_tag,
-            },
+            result,
         },
         &boundary_stack,
     )?;
@@ -3061,6 +3313,30 @@ fn emit_native_call(
         child_frame,
         mem::offset_of!(RawNativeFrame, environment),
         environment,
+    )?;
+    let capture_tag = capture.map_or_else(
+        || {
+            builder
+                .ins()
+                .iconst(types::I64, ValueTag::Uninit as u64 as i64)
+        },
+        |capture| capture.tag,
+    );
+    let capture_bits = capture.map_or_else(
+        || builder.ins().iconst(types::I64, 0),
+        |capture| capture.bits,
+    );
+    store_i64(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, capture_tag),
+        capture_tag,
+    )?;
+    store_i64(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, capture_bits),
+        capture_bits,
     )?;
     store_i32_constant(
         builder,
@@ -3231,7 +3507,7 @@ fn emit_native_call(
         RawActivationField::ChangedFrom,
         prior_changed,
     )?;
-    stack.truncate(argument_start);
+    stack.truncate(caller_end);
     stack.push(NativeValue {
         bits: result,
         tag: result_tag,
@@ -3587,6 +3863,52 @@ fn emit_load_field(
         values,
         uninitialized,
         EXIT_UNINITIALIZED_FIELD,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    emit_loaded_value(builder, values, value, result, exit.point, exit.deopt_stack)
+}
+
+fn emit_load_capture(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    index: u32,
+    result: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let frame = emit_current_frame_pointer(builder, values)?;
+    let capture_tag = load_value(
+        builder,
+        types::I64,
+        frame,
+        mem::offset_of!(RawNativeFrame, capture_tag),
+    )?;
+    let capture_bits = load_value(
+        builder,
+        types::I64,
+        frame,
+        mem::offset_of!(RawNativeFrame, capture_bits),
+    )?;
+    let not_closure =
+        builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, capture_tag, ValueTag::Obj as u64 as i64);
+    emit_interpreter_replay(builder, values, not_closure, exit.point, exit.deopt_stack)?;
+    let entry = emit_object_entry(
+        builder,
+        values,
+        capture_bits,
+        JIT_OBJECT_CLOSURE,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let index = builder.ins().iconst(values.pointer_type, i64::from(index));
+    let value = emit_array_element(
+        builder,
+        values,
+        entry,
+        JIT_CLOSURE_CAPTURES_OFFSET,
+        index,
         exit.point,
         exit.fault_stack,
     )?;
@@ -4876,12 +5198,14 @@ fn emit_native_value_contract(
     point: FaultPoint,
     deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    if let Some(expected_tag) = value_tag(contract.kind) {
-        let replay = builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, value.tag, expected_tag as u64 as i64);
-        emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
-    }
+    emit_scalar_tag_guard(
+        builder,
+        values,
+        value.tag,
+        contract.kind,
+        point,
+        deopt_stack,
+    )?;
     if matches!(contract.kind, ScalarKind::Float) {
         emit_canonical_float_guard(builder, values, value.bits, point, deopt_stack)?;
     }
@@ -4897,15 +5221,37 @@ fn emit_loaded_value(
     deopt_stack: &[NativeValue],
 ) -> Result<NativeValue, CompileError> {
     let tag = load_value(builder, types::I64, address, VALUE_TAG_OFFSET)?;
-    if let Some(expected_tag) = value_tag(contract.kind) {
-        let replay = builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
-        emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
-    }
+    emit_scalar_tag_guard(builder, values, tag, contract.kind, point, deopt_stack)?;
     let payload = emit_value_payload(builder, values, address, contract.kind, point, deopt_stack)?;
     emit_value_contract(builder, values, payload, contract, point, deopt_stack)?;
     Ok(NativeValue { bits: payload, tag })
+}
+
+fn emit_scalar_tag_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    tag: ir::Value,
+    kind: ScalarKind,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let invalid = if matches!(kind, ScalarKind::Callback(_)) {
+        let closure = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, tag, ValueTag::Obj as u64 as i64);
+        let callback = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, tag, ValueTag::Callback as u64 as i64);
+        let valid = builder.ins().bor(closure, callback);
+        builder.ins().bxor_imm(valid, 1)
+    } else if let Some(expected_tag) = value_tag(kind) {
+        builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64)
+    } else {
+        return Ok(());
+    };
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)
 }
 
 fn emit_value_contract(
@@ -5164,6 +5510,7 @@ fn value_tag(kind: ScalarKind) -> Option<ValueTag> {
         ScalarKind::Char => ValueTag::Char,
         ScalarKind::Object(_) => ValueTag::Obj,
         ScalarKind::Tagged(_) => return None,
+        ScalarKind::Callback(_) => return None,
         ScalarKind::Operation => ValueTag::Op,
     })
 }
@@ -5182,9 +5529,10 @@ fn emit_value_payload(
             let byte = load_value(builder, types::I8, value, VALUE_PAYLOAD_OFFSET)?;
             builder.ins().uextend(types::I64, byte)
         }
-        ScalarKind::Int | ScalarKind::Object(_) | ScalarKind::Tagged(_) => {
-            load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?
-        }
+        ScalarKind::Int
+        | ScalarKind::Object(_)
+        | ScalarKind::Tagged(_)
+        | ScalarKind::Callback(_) => load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?,
         ScalarKind::Char => {
             let scalar = load_value(builder, types::I32, value, VALUE_PAYLOAD_OFFSET)?;
             builder.ins().uextend(types::I64, scalar)

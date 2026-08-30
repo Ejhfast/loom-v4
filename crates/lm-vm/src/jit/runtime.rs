@@ -18,9 +18,15 @@ pub(super) fn scalar_parts(kind: ScalarKind, value: Value) -> Option<(u64, u64)>
         ScalarKind::Char => Some(ValueTag::Char),
         ScalarKind::Object(_) => Some(ValueTag::Obj),
         ScalarKind::Tagged(_) => None,
+        ScalarKind::Callback(_) => None,
         ScalarKind::Operation => Some(ValueTag::Op),
     };
     if expected.is_some_and(|tag| value.tag() != tag) {
+        return None;
+    }
+    if matches!(kind, ScalarKind::Callback(_))
+        && !matches!(value, Value::Obj(_) | Value::Callback(_))
+    {
         return None;
     }
     let bits = value_bits(value)?;
@@ -35,7 +41,7 @@ pub(super) fn parts_value(kind: ScalarKind, tag: u64, bits: u64) -> Option<Value
     scalar_parts(kind, value).map(|_| value)
 }
 
-fn value_bits(value: Value) -> Option<u64> {
+pub(super) fn value_bits(value: Value) -> Option<u64> {
     Some(match value {
         Value::Unit => 0,
         Value::Bool(value) => u64::from(value),
@@ -50,7 +56,7 @@ fn value_bits(value: Value) -> Option<u64> {
     })
 }
 
-fn tagged_value(tag: u64, bits: u64) -> Option<Value> {
+pub(super) fn tagged_value(tag: u64, bits: u64) -> Option<Value> {
     Some(match tag {
         tag if tag == ValueTag::Unit as u64 && bits == 0 => Value::Unit,
         tag if tag == ValueTag::Bool as u64 && bits <= 1 => Value::Bool(bits != 0),

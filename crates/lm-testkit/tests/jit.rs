@@ -528,10 +528,142 @@ fn guarded_callback_conversion_matches_the_interpreter() {
     let (interpreted, _, interpreted_dump) =
         run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
     let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
-    assert_eq!(native, interpreted);
-    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(42_000)));
     assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+}
+
+#[test]
+fn callback_slots_preserve_captures_across_native_calls() {
+    let source = concat!(
+        "def invoke(f: (Int) -> Int): Int\n",
+        "  f(41)\n",
+        "end\n",
+        "base = 1\n",
+        "i = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  sum = sum + invoke() { |value: Int| value + base }\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-callback-slot.lm", source)
+        .expect("the callback slot case compiles");
+    assert!(artifact.root().module().funcs.iter().any(|function| {
+        function.blocks.iter().flatten().any(|instruction| {
+            matches!(
+                instruction,
+                lm_bytecode::Instr::Extended(lm_bytecode::ExtendedInstr::MakeCallback { .. })
+            )
+        })
+    }));
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(42_000)));
+    assert!(metrics.compiled_call_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+}
+
+#[test]
+fn captured_closure_calls_stay_native() {
+    let source = concat!(
+        "base = 7\n",
+        "stored = do |value: Int|: Int base + value end\n",
+        "i = 0\nsum = 0\n",
+        "while i < 10000\n",
+        "  sum = sum + stored(i)\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-captured-closure.lm", source)
+        .expect("the captured closure case compiles");
+    assert!(artifact.root().module().funcs.iter().any(|function| {
+        function
+            .blocks
+            .iter()
+            .flatten()
+            .any(|instruction| matches!(instruction, lm_bytecode::Instr::CallValue { .. }))
+    }));
+    assert!(artifact.root().module().funcs.iter().any(|function| {
+        function
+            .blocks
+            .iter()
+            .flatten()
+            .any(|instruction| matches!(instruction, lm_bytecode::Instr::LoadCapture(_)))
+    }));
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(50_065_000)));
+    assert!(metrics.compiled_call_sites >= 1, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+}
+
+#[test]
+fn captured_closure_calls_preserve_scheduler_quanta() {
+    let source = concat!(
+        "base = 7\n",
+        "stored = do |value: Int|: Int base + value end\n",
+        "i = 0\nsum = 0\n",
+        "while i < 10000\n",
+        "  sum = sum + stored(i)\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-captured-closure-scheduler.lm", source)
+        .expect("the scheduler closure case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the scheduler closure case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the scheduler closure case runs");
+        let retired = world.metrics().retired_instructions;
+        let dump = world.dump_live(&outcome);
+        (outcome, retired, dump)
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let native = run(Arc::clone(&engine));
+    assert_eq!(native, interpreted, "{:?}", engine.metrics());
+    let metrics = engine.metrics();
+    assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+}
+
+#[test]
+fn closure_call_stack_limits_match_the_interpreter() {
+    let source = concat!(
+        "base = 7\n",
+        "stored = do |value: Int|: Int base + value end\n",
+        "stored(35)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-closure-stack-limit.lm", source)
+        .expect("the closure stack-limit case compiles");
+    let config = VmConfig {
+        max_frames: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::StackLimit));
 }
 
 #[test]
@@ -1319,7 +1451,7 @@ fn noninline_calls_match_each_fuel_boundary() {
 }
 
 #[test]
-fn an_unsupported_caller_enters_a_supported_hot_callee() {
+fn a_closure_caller_reaches_a_hot_native_callee() {
     let source = concat!(
         "def hot(limit: Int): Int\n",
         "  i = 0\ns = 0\n",
@@ -1337,11 +1469,12 @@ fn an_unsupported_caller_enters_a_supported_hot_callee() {
     assert_eq!(native, interpreted);
     assert_eq!(native_dump, interpreted_dump);
     assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
-    assert!(metrics.unsupported_region_fallbacks > 0, "{metrics:?}");
+    assert!(metrics.compiled_regions >= 2, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
     let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
     assert_eq!(automatic, interpreted);
     assert_eq!(automatic_dump, interpreted_dump);
-    assert_eq!(metrics.compiled_regions, 1, "{metrics:?}");
+    assert!(metrics.compiled_regions >= 1, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
     assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
 }
@@ -1922,7 +2055,7 @@ fn auto_mode_does_not_compile_cold_unsupported_code() {
 }
 
 #[test]
-fn auto_mode_does_not_probe_hot_unsupported_code() {
+fn auto_mode_compiles_a_hot_captured_closure() {
     let source = concat!(
         "seed = 1\n",
         "run = do ||: Int\n",
@@ -1936,8 +2069,9 @@ fn auto_mode_does_not_probe_hot_unsupported_code() {
     let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
     assert_eq!(automatic, interpreted);
     assert_eq!(automatic_dump, interpreted_dump);
-    assert_eq!(metrics.native_entries, 0);
-    assert_eq!(metrics.compilation_attempts, 0);
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert!(metrics.compilation_attempts > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
     assert_eq!(metrics.unsupported_region_fallbacks, 0);
 }
 

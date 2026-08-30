@@ -485,6 +485,7 @@ fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
                 | lm_bytecode::BcType::Map(_, _)
                 | lm_bytecode::BcType::Tuple(_)
                 | lm_bytecode::BcType::Fn(_, _, _, _)
+                | lm_bytecode::BcType::Callback(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
                 | lm_bytecode::BcType::Var(_)
@@ -508,6 +509,7 @@ fn table_type_is_candidate(tables: &lm_bytecode::CodeTables, ty: u32) -> bool {
                 | lm_bytecode::BcType::Map(_, _)
                 | lm_bytecode::BcType::Tuple(_)
                 | lm_bytecode::BcType::Fn(_, _, _, _)
+                | lm_bytecode::BcType::Callback(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
                 | lm_bytecode::BcType::Var(_)
@@ -525,9 +527,6 @@ fn function_rejections(
         return Vec::new();
     }
     let mut reasons = BTreeMap::<String, u32>::new();
-    if !function.captures.is_empty() {
-        add_reason(&mut reasons, "captured function".to_string());
-    }
     if !function
         .local_types
         .iter()

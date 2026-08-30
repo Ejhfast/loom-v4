@@ -31,6 +31,7 @@ const EXIT_UNREACHABLE: u32 = 18;
 const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 const EXIT_INTERFACE_CALL: u32 = 20;
 const EXIT_GENERIC_VIRTUAL_CALL: u32 = 21;
+const EXIT_CALLBACK_CALL: u32 = 22;
 
 mod activation;
 mod opcode;
@@ -89,6 +90,7 @@ pub struct CompiledRegion {
     type_environment_sites: Vec<TypeEnvironmentSite>,
     interface_call_sites: Vec<InterfaceCallSite>,
     generic_virtual_call_sites: Vec<GenericVirtualCallSite>,
+    call_value_sites: Vec<CallValueSite>,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
 }
@@ -171,6 +173,43 @@ pub struct GenericVirtualCallSite {
     application: u32,
     receiver_kind: ScalarKind,
     parameter_count: usize,
+}
+
+/// One verified first-class call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallValueSite {
+    function: u32,
+    block: u32,
+    instruction: u32,
+    parameter_count: usize,
+    callback: bool,
+}
+
+impl CallValueSite {
+    /// Return the caller function.
+    pub fn function(self) -> u32 {
+        self.function
+    }
+
+    /// Return the bytecode block.
+    pub fn block(self) -> u32 {
+        self.block
+    }
+
+    /// Return the bytecode instruction.
+    pub fn instruction(self) -> u32 {
+        self.instruction
+    }
+
+    /// Return the argument count.
+    pub fn parameter_count(self) -> usize {
+        self.parameter_count
+    }
+
+    /// Return true when the callable is one machine callback.
+    pub fn is_callback(self) -> bool {
+        self.callback
+    }
 }
 
 impl GenericVirtualCallSite {
@@ -390,6 +429,7 @@ impl CompiledRegion {
                         segment.exit,
                         SegmentExit::Call { .. }
                             | SegmentExit::VirtualCall { .. }
+                            | SegmentExit::ValueCall { .. }
                             | SegmentExit::GenericVirtualCall { .. }
                             | SegmentExit::InterfaceCall { .. }
                             | SegmentExit::Effect { .. }
@@ -447,6 +487,7 @@ impl CompiledRegion {
             let fallthrough_ip = match segment.exit {
                 SegmentExit::Call { fallthrough_ip, .. }
                 | SegmentExit::VirtualCall { fallthrough_ip, .. }
+                | SegmentExit::ValueCall { fallthrough_ip }
                 | SegmentExit::GenericVirtualCall { fallthrough_ip, .. }
                 | SegmentExit::InterfaceCall { fallthrough_ip, .. } => fallthrough_ip,
                 _ => return None,
@@ -455,7 +496,11 @@ impl CompiledRegion {
                 return None;
             }
             let parameters = segment.call_contract.as_ref()?.params.len();
-            let prefix = segment.boundary_stack.len().checked_sub(parameters)?;
+            let callable = usize::from(matches!(segment.exit, SegmentExit::ValueCall { .. }));
+            let prefix = segment
+                .boundary_stack
+                .len()
+                .checked_sub(parameters.checked_add(callable)?)?;
             Some(&segment.boundary_stack[..prefix])
         })
     }
@@ -483,6 +528,14 @@ impl CompiledRegion {
         instruction: u32,
     ) -> Option<GenericVirtualCallSite> {
         self.generic_virtual_call_sites
+            .iter()
+            .find(|site| site.block == block && site.instruction == instruction)
+            .copied()
+    }
+
+    /// Return one first-class call site.
+    pub fn call_value_site(&self, block: u32, instruction: u32) -> Option<CallValueSite> {
+        self.call_value_sites
             .iter()
             .find(|site| site.block == block && site.instruction == instruction)
             .copied()
@@ -536,7 +589,8 @@ impl CompiledRegion {
             || ((!self.type_environment_sites.is_empty() || self.plan.type_resolution_sites != 0)
                 && (type_store_id == 0 || type_environments.entries.is_null()))
             || ((!self.interface_call_sites.is_empty()
-                || !self.generic_virtual_call_sites.is_empty())
+                || !self.generic_virtual_call_sites.is_empty()
+                || self.call_value_sites.iter().any(|site| site.callback))
                 && (type_store_id == 0 || resolved_calls.entries.is_null()))
         {
             return Err(Failure::BackendUnavailable);
@@ -681,6 +735,7 @@ impl CompiledRegion {
             EXIT_TYPE_ENVIRONMENT => ExitKind::TypeEnvironment,
             EXIT_INTERFACE_CALL => ExitKind::InterfaceCall,
             EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
+            EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -763,7 +818,7 @@ impl JitEngine {
 ///
 /// Planning can still reject unsupported types or function shapes.
 pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
-    if !function.captures.is_empty() || function.local_types.len() > MAX_REGION_LOCALS {
+    if function.local_types.len() > MAX_REGION_LOCALS {
         return false;
     }
     let mut instructions = 0usize;
