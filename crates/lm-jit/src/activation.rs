@@ -60,6 +60,8 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_pages: *const usize,
     pub(super) heap_page_count: usize,
     pub(super) heap_slot_count: usize,
+    pub(super) class_parents: *const u32,
+    pub(super) class_count: usize,
 }
 
 pub(super) type RawAllocateInstance =
@@ -115,6 +117,7 @@ pub struct NativeExecution<'a> {
     pub root_states: &'a mut [u8],
     pub fuel: u64,
     pub heap: JitHeapView,
+    pub class_parents: &'a [u32],
 }
 
 /// One materialized view of a live native frame.

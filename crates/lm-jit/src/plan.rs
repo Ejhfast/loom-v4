@@ -325,6 +325,12 @@ pub(super) enum HeapAccessKind {
     TupleGet {
         value: ValueContract,
     },
+    IsType {
+        target_class: u32,
+    },
+    CastType {
+        target_class: u32,
+    },
     ListLen,
     ListAt {
         value: ValueContract,
@@ -593,7 +599,10 @@ impl RegionPlan {
         }
         for segment in &segments {
             for successor in &segment.successors {
-                if segment.exit_stack != segments[*successor].entry_stack {
+                if !stacks_use_equal_representations(
+                    &segment.exit_stack,
+                    &segments[*successor].entry_stack,
+                ) {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 }
             }
@@ -1069,7 +1078,7 @@ fn analyze_segment(
                 let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
                 let (receiver_class, contract) = field_contract(context, receiver, field)?;
-                if value != contract.kind {
+                if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 heap_accesses.push(HeapAccess {
@@ -1092,6 +1101,33 @@ fn analyze_segment(
                 });
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(value.kind);
+            }
+            Instr::IsType(_) | Instr::CastType(_) => {
+                let instruction_index = segment.start + offset as u32;
+                replay_stacks.push((instruction_index, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                if !matches!(receiver, ScalarKind::Object(_)) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                let source_ty = match source_instruction {
+                    Instr::IsType(ty) | Instr::CastType(ty) => ty,
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                let target_class = class_test_target(context, source_ty)?;
+                let kind = if matches!(instruction, Instr::IsType(_)) {
+                    HeapAccessKind::IsType { target_class }
+                } else {
+                    HeapAccessKind::CastType { target_class }
+                };
+                heap_accesses.push(HeapAccess {
+                    instruction: instruction_index,
+                    kind,
+                });
+                if matches!(instruction, Instr::IsType(_)) {
+                    stack.push(ScalarKind::Bool);
+                } else {
+                    stack.push(ScalarKind::Object(source_ty));
+                }
             }
             Instr::ListLen => {
                 let instruction = segment.start + offset as u32;
@@ -1127,7 +1163,7 @@ fn analyze_segment(
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
                 let element = list_element_type(context.module, receiver)?;
                 let contract = value_contract(context, element)?;
-                if value != contract.kind {
+                if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 heap_accesses.push(HeapAccess {
@@ -1440,6 +1476,21 @@ fn bytes_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedRe
     }
 }
 
+fn class_test_target(
+    context: &SegmentAnalysisContext<'_>,
+    ty: u32,
+) -> Result<u32, UnsupportedReason> {
+    let class = match context.module.types.get(ty as usize) {
+        Some(BcType::Class(class) | BcType::Inst(class, _)) => *class,
+        _ => return Err(UnsupportedReason::InvalidStack),
+    };
+    let core = lm_bytecode::corepin::declared_layout(context.module);
+    if [core.option, core.option_some, core.option_none].contains(&Some(class)) {
+        return Err(UnsupportedReason::UnsupportedInstruction);
+    }
+    relocate_class(class, context.class_relocation)
+}
+
 fn value_contract(
     context: &SegmentAnalysisContext<'_>,
     ty: u32,
@@ -1469,9 +1520,26 @@ fn relocate_class(class: u32, relocation: Option<&[u32]>) -> Result<u32, Unsuppo
 
 fn expect(stack: &mut Vec<ScalarKind>, expected: ScalarKind) -> Result<(), UnsupportedReason> {
     match stack.pop() {
-        Some(found) if found == expected => Ok(()),
+        Some(found) if uses_equal_representation(found, expected) => Ok(()),
         _ => Err(UnsupportedReason::InvalidStack),
     }
+}
+
+fn stacks_use_equal_representations(left: &[ScalarKind], right: &[ScalarKind]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .copied()
+            .zip(right.iter().copied())
+            .all(|(left, right)| uses_equal_representation(left, right))
+}
+
+fn uses_equal_representation(left: ScalarKind, right: ScalarKind) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            (ScalarKind::Object(_), ScalarKind::Object(_))
+        )
 }
 
 fn scalar_numeric_operation(

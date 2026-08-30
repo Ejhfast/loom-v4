@@ -334,6 +334,7 @@ impl CompiledRegion {
             root_states,
             fuel,
             heap,
+            class_parents,
         } = input;
         let top_index = activation
             .frame_len
@@ -383,6 +384,8 @@ impl CompiledRegion {
             heap_pages: heap.pages,
             heap_page_count: heap.page_count,
             heap_slot_count: heap.slot_count,
+            class_parents: class_parents.as_ptr(),
+            class_count: class_parents.len(),
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
@@ -590,6 +593,8 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::LoadField(_)
             | Instr::StoreField(_)
             | Instr::TupleGet(_)
+            | Instr::IsType(_)
+            | Instr::CastType(_)
             | Instr::ListLen
             | Instr::ListAt
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)

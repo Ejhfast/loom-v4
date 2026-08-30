@@ -234,6 +234,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
+                class_parents: &[],
             },
         )
         .expect("the field load executes");
@@ -291,6 +292,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
+                class_parents: &[],
             },
         )
         .expect("the field fault executes");
@@ -349,6 +351,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
+                class_parents: &[],
             },
         )
         .expect("the field load executes");
@@ -409,6 +412,7 @@ fn native_field_store_writes_the_canonical_value() {
                 root_states: &mut root_states,
                 fuel: 5,
                 heap,
+                class_parents: &[],
             },
         )
         .expect("the field store executes");
@@ -473,6 +477,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 root_states: &mut root_states,
                 fuel: 5,
                 heap,
+                class_parents: &[],
             },
         )
         .expect("the field store executes");

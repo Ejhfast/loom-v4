@@ -773,6 +773,44 @@ fn emit_segment(
                 )?;
                 stack.push(value);
             }
+            Instr::IsType(_) | Instr::CastType(_) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let target_class = match access.kind {
+                    HeapAccessKind::IsType { target_class }
+                    | HeapAccessKind::CastType { target_class } => target_class,
+                    _ => return Err(CompileError::Backend),
+                };
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: instruction_index + 1,
+                    prefix: fault_prefix,
+                };
+                let entry = emit_object_entry(
+                    builder,
+                    values,
+                    reference,
+                    JIT_OBJECT_INSTANCE,
+                    point,
+                    ObjectGuard::Replay(&deopt_stack),
+                )?;
+                let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+                let matches = emit_class_matches(builder, values, actual, target_class)?;
+                if matches!(instruction, Instr::IsType(_)) {
+                    stack.push(builder.ins().uextend(types::I64, matches));
+                } else {
+                    let mismatch = builder.ins().bxor_imm(matches, 1);
+                    emit_interpreter_replay(builder, values, mismatch, point, &deopt_stack)?;
+                    stack.push(reference);
+                }
+            }
             Instr::ListLen => {
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
@@ -2042,9 +2080,8 @@ fn emit_load_field(
         ObjectGuard::Fault(exit.fault_stack),
     )?;
     let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let other_class = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, class, i64::from(receiver_class));
+    let class_matches = emit_class_matches(builder, values, class, receiver_class)?;
+    let other_class = builder.ins().bxor_imm(class_matches, 1);
     emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
     let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
     let value = emit_array_element(
@@ -2101,9 +2138,8 @@ fn emit_store_field(
         ObjectGuard::Fault(exit.fault_stack),
     )?;
     let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let other_class = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, class, i64::from(receiver_class));
+    let class_matches = emit_class_matches(builder, values, class, receiver_class)?;
+    let other_class = builder.ins().bxor_imm(class_matches, 1);
     emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
     emit_mutable_guard(builder, values, entry, exit)?;
     let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
@@ -2433,12 +2469,82 @@ fn emit_value_contract(
     )?;
     if let ObjectContract::Instance(class) = object {
         let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-        let mismatch = builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, actual, i64::from(class));
+        let matches = emit_class_matches(builder, values, actual, class)?;
+        let mismatch = builder.ins().bxor_imm(matches, 1);
         emit_interpreter_replay(builder, values, mismatch, point, deopt_stack)?;
     }
     Ok(())
+}
+
+fn emit_class_matches(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    actual: ir::Value,
+    target: u32,
+) -> Result<ir::Value, CompileError> {
+    let test = builder.create_block();
+    let parent = builder.create_block();
+    let matched = builder.create_block();
+    let missed = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(test, types::I32);
+    builder.append_block_param(done, types::I8);
+    builder.ins().jump(test, &[actual.into()]);
+
+    builder.switch_to_block(test);
+    let current = builder.block_params(test)[0];
+    let equal = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, current, i64::from(target));
+    builder.ins().brif(equal, matched, &[], parent, &[]);
+
+    builder.switch_to_block(parent);
+    let current_index = builder.ins().uextend(values.pointer_type, current);
+    let class_count = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, class_count),
+    )?;
+    let outside = builder.ins().icmp(
+        IntCC::UnsignedGreaterThanOrEqual,
+        current_index,
+        class_count,
+    );
+    let load_parent = builder.create_block();
+    builder.ins().brif(outside, missed, &[], load_parent, &[]);
+
+    builder.switch_to_block(load_parent);
+    let parents = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, class_parents),
+    )?;
+    let offset = builder
+        .ins()
+        .imul_imm(current_index, mem::size_of::<u32>() as i64);
+    let address = builder.ins().iadd(parents, offset);
+    let next = builder
+        .ins()
+        .load(types::I32, MemFlags::trusted(), address, 0);
+    let at_root = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, next, i64::from(lm_bytecode::NO_PARENT));
+    builder
+        .ins()
+        .brif(at_root, missed, &[], test, &[next.into()]);
+
+    builder.switch_to_block(matched);
+    let one = builder.ins().iconst(types::I8, 1);
+    builder.ins().jump(done, &[one.into()]);
+
+    builder.switch_to_block(missed);
+    let zero = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(done, &[zero.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
 }
 
 fn emit_store_value(

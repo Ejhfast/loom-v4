@@ -1597,6 +1597,22 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_class_guard",
+        concat!(
+            "class Shape\nend\n",
+            "class Circle < Shape\n  radius: Int = 3\nend\n",
+            "class LargeCircle < Circle\nend\n",
+            "def radius(shape: Shape): Int\n",
+            "  if shape is Circle then (shape as Circle).radius else 0 end\n",
+            "end\n",
+            "shape: Shape = LargeCircle()\ni = 0\ntotal = 0\n",
+            "while i < 1000000\n",
+            "  total = total + radius(shape)\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_list_sort",
         concat!(
             "source = [16, 7, 12, 3, 10, 1, 14, 5, 8, 15, 2, 11, 6, 13, 4, 9]\n",

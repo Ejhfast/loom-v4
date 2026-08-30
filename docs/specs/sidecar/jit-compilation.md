@@ -887,6 +887,18 @@ Gate: Character values materialize exactly at every tested fuel boundary.
 
 Gate: The scheduled bitwise loop improves by more than five times.
 
+### Stage F4: Direct class guards
+
+- pass one append-only class-parent table into each native turn;
+- compile `is` and successful `as` operations;
+- use subtype guards for fields and loaded object values;
+- use one native representation for all object references;
+- replay failed casts through one uncommon interpreter exit.
+
+Gate: A subclass passes a guard for its parent without an interpreter exit.
+
+Gate: The scheduled class-guard loop improves by more than five times.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1001,6 +1013,14 @@ The direct byte-read pass used the deterministic scheduler.
 The byte-read gate passes.
 
 The representative-program gate remains open.
+
+The Stage F4 run added direct class guards and subtype-compatible object values.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Class guard | 110.816 ms | 16.512 ms | 17.474 ms | 6.71 times | 6.34 times |
+
+Both native modes reached complete coverage. Neither mode used an interpreter exit.
 
 The Stage F2 run used nine stable scheduler rounds.
 

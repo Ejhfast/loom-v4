@@ -27,6 +27,7 @@ pub(crate) struct NativeCodeState(Arc<NativeCodeRevision>);
 struct NativeCodeRevision {
     slots: lm_bytecode::CodeTable<Arc<NativeSlot>>,
     entries: Arc<Vec<usize>>,
+    class_parents: Arc<Vec<u32>>,
     candidates: Arc<Vec<u64>>,
     compiled: Arc<AtomicUsize>,
 }
@@ -36,23 +37,28 @@ impl NativeCodeState {
         let mut revision = NativeCodeRevision {
             slots: lm_bytecode::CodeTable::default(),
             entries: Arc::new(Vec::new()),
+            class_parents: Arc::new(Vec::new()),
             candidates: Arc::new(Vec::new()),
             compiled: Arc::new(AtomicUsize::new(0)),
         };
         while revision.slots.len() < module.funcs.len() {
             revision.push_slot(module, revision.slots.len());
         }
+        revision.extend_classes(module);
         NativeCodeState(Arc::new(revision))
     }
 
     pub(crate) fn extend(&mut self, module: &crate::NamespaceRuntime) {
-        if self.0.slots.len() >= module.funcs.len() {
+        if self.0.slots.len() >= module.funcs.len()
+            && self.0.class_parents.len() >= module.classes.len()
+        {
             return;
         }
         let mut revision = self.0.as_ref().clone();
         while revision.slots.len() < module.funcs.len() {
             revision.push_slot(module, revision.slots.len());
         }
+        revision.extend_classes(module);
         self.0 = Arc::new(revision);
     }
 
@@ -62,6 +68,10 @@ impl NativeCodeState {
 
     pub(super) fn entries(&self) -> &[usize] {
         self.0.entries.as_slice()
+    }
+
+    pub(super) fn class_parents(&self) -> &[u32] {
+        self.0.class_parents.as_slice()
     }
 
     pub(super) fn compiled_count(&self) -> &AtomicUsize {
@@ -191,6 +201,16 @@ impl NativeCodeState {
 }
 
 impl NativeCodeRevision {
+    fn extend_classes(&mut self, module: &crate::NamespaceRuntime) {
+        let parents = Arc::make_mut(&mut self.class_parents);
+        while parents.len() < module.classes.len() {
+            let parent = module.classes[parents.len()]
+                .parent()
+                .unwrap_or(lm_bytecode::NO_PARENT);
+            parents.push(parent);
+        }
+    }
+
     fn push_slot(&mut self, module: &crate::NamespaceRuntime, function: usize) {
         let definition = &module.funcs[function];
         let candidate = function_is_candidate(module, definition);

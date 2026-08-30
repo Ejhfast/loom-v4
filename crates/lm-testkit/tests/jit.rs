@@ -328,6 +328,30 @@ fn reference_equality_stays_native() {
 }
 
 #[test]
+fn class_tests_and_casts_use_the_runtime_parent_table() {
+    let source = concat!(
+        "class Shape\nend\n",
+        "class Circle < Shape\n  radius: Int = 3\nend\n",
+        "class LargeCircle < Circle\nend\n",
+        "def radius(shape: Shape): Int\n",
+        "  if shape is Circle then (shape as Circle).radius else 0 end\n",
+        "end\n",
+        "shape: Shape = LargeCircle()\ni = 0\ntotal = 0\n",
+        "while i < 10000\n",
+        "  total = total + radius(shape)\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(30_000)));
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
 fn character_operations_materialize_exactly() {
     let source = concat!(
         "i = 0\ntotal = 0\nvalue = '猫'\nsame = true\n",

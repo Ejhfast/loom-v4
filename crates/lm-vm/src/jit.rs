@@ -565,6 +565,7 @@ impl JitEngine {
                         root_states: &mut scratch.root_states,
                         fuel: remaining,
                         heap,
+                        class_parents: native.class_parents(),
                     },
                 ) {
                     Ok(exit) => exit,
