@@ -24,6 +24,7 @@ pub(super) struct RawExit {
     pub(super) block: u32,
     pub(super) instruction: u32,
     pub(super) stack_len: u32,
+    pub(super) result_tag: u64,
     pub(super) result: u64,
 }
 
@@ -45,6 +46,7 @@ pub(super) struct RawNativeFrame {
 #[repr(C)]
 pub(super) struct RawNativeActivation {
     pub(super) scalars: *mut u64,
+    pub(super) tags: *mut u64,
     pub(super) states: *mut u8,
     pub(super) scalar_len: u32,
     pub(super) scalar_capacity: u32,
@@ -69,12 +71,15 @@ pub(super) type RawAllocateInstance =
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
     *mut u64,
+    *mut u64,
     *mut u8,
+    *mut u64,
     *mut u64,
     u64,
     u32,
     *mut c_void,
     RawAllocateInstance,
+    *mut u64,
     *mut u64,
     *mut u64,
     *mut u8,
@@ -86,6 +91,7 @@ pub(super) type NativeFunction = unsafe extern "C" fn(
 #[derive(Debug, Default)]
 pub struct NativeActivation {
     pub(super) scalars: Vec<u64>,
+    pub(super) tags: Vec<u64>,
     pub(super) states: Vec<u8>,
     pub(super) frames: Vec<RawNativeFrame>,
     pub(super) scalar_len: usize,
@@ -114,18 +120,33 @@ pub struct NativeExecution<'a> {
     pub base_frames: usize,
     pub max_frames: usize,
     pub roots: &'a mut [u64],
+    pub root_tags: &'a mut [u64],
     pub root_states: &'a mut [u8],
     pub fuel: u64,
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
 }
 
+/// Mutable canonical buffers for one native root frame.
+pub type NativeRootBuffersMut<'a> = (
+    &'a mut [u64],
+    &'a mut [u64],
+    &'a mut [u8],
+    &'a mut [u64],
+    &'a mut [u64],
+);
+
+/// Immutable canonical buffers for one native root frame.
+pub type NativeRootBuffers<'a> = (&'a [u64], &'a [u64], &'a [u8], &'a [u64], &'a [u64]);
+
 /// One materialized view of a live native frame.
 pub struct NativeFrameView<'a> {
     frame: RawNativeFrame,
     locals: &'a [u64],
+    local_tags: &'a [u64],
     states: &'a [u8],
     operands: &'a [u64],
+    operand_tags: &'a [u64],
 }
 
 impl NativeFrameView<'_> {
@@ -154,6 +175,11 @@ impl NativeFrameView<'_> {
         self.locals
     }
 
+    /// Return the local canonical value tags.
+    pub fn local_tags(&self) -> &[u64] {
+        self.local_tags
+    }
+
     /// Return the local initialization and mutation states.
     pub fn states(&self) -> &[u8] {
         self.states
@@ -162,6 +188,11 @@ impl NativeFrameView<'_> {
     /// Return the operand scalar bits.
     pub fn operands(&self) -> &[u64] {
         self.operands
+    }
+
+    /// Return the operand canonical value tags.
+    pub fn operand_tags(&self) -> &[u64] {
+        self.operand_tags
     }
 }
 
@@ -191,6 +222,10 @@ impl NativeActivation {
             .try_reserve(scalar_capacity.saturating_sub(self.scalars.len()))
             .is_err()
             || self
+                .tags
+                .try_reserve(scalar_capacity.saturating_sub(self.tags.len()))
+                .is_err()
+            || self
                 .states
                 .try_reserve(scalar_capacity.saturating_sub(self.states.len()))
                 .is_err()
@@ -202,10 +237,12 @@ impl NativeActivation {
             return Err(Failure::BackendUnavailable);
         }
         self.scalars.resize(scalar_capacity, 0);
+        self.tags.resize(scalar_capacity, 0);
         self.states.resize(scalar_capacity, 0);
         self.frames
             .resize(frame_capacity, RawNativeFrame::default());
         self.scalars[..window].fill(0);
+        self.tags[..window].fill(0);
         self.states[..window].fill(0);
         self.frames[0] = RawNativeFrame {
             function,
@@ -226,22 +263,32 @@ impl NativeActivation {
     }
 
     /// Return all mutable root buffers.
-    pub fn root_buffers_mut(&mut self) -> (&mut [u64], &mut [u8], &mut [u64]) {
+    pub fn root_buffers_mut(&mut self) -> NativeRootBuffersMut<'_> {
         let locals = self.frames[0].local_count as usize;
         let stack = self.frames[0].max_stack as usize;
         let (local_bits, rest) = self.scalars.split_at_mut(locals);
         let operand_bits = &mut rest[..stack];
-        (local_bits, &mut self.states[..locals], operand_bits)
+        let (local_tags, rest) = self.tags.split_at_mut(locals);
+        let operand_tags = &mut rest[..stack];
+        (
+            local_bits,
+            local_tags,
+            &mut self.states[..locals],
+            operand_bits,
+            operand_tags,
+        )
     }
 
     /// Return all immutable root buffers.
-    pub fn root_buffers(&self) -> (&[u64], &[u8], &[u64]) {
+    pub fn root_buffers(&self) -> NativeRootBuffers<'_> {
         let locals = self.frames[0].local_count as usize;
         let stack = self.frames[0].max_stack as usize;
         (
             &self.scalars[..locals],
+            &self.tags[..locals],
             &self.states[..locals],
             &self.scalars[locals..locals + stack],
+            &self.tags[locals..locals + stack],
         )
     }
 
@@ -255,8 +302,10 @@ impl NativeActivation {
             NativeFrameView {
                 frame: *frame,
                 locals: &self.scalars[base..operand_base],
+                local_tags: &self.tags[base..operand_base],
                 states: &self.states[base..operand_base],
                 operands: &self.scalars[operand_base..operand_base + operands],
+                operand_tags: &self.tags[operand_base..operand_base + operands],
             }
         })
     }
@@ -292,6 +341,9 @@ impl NativeActivation {
         self.scalars
             .try_reserve(scalar_target.saturating_sub(self.scalars.len()))
             .map_err(|_| Failure::BackendUnavailable)?;
+        self.tags
+            .try_reserve(scalar_target.saturating_sub(self.tags.len()))
+            .map_err(|_| Failure::BackendUnavailable)?;
         self.states
             .try_reserve(scalar_target.saturating_sub(self.states.len()))
             .map_err(|_| Failure::BackendUnavailable)?;
@@ -299,13 +351,14 @@ impl NativeActivation {
             .try_reserve(frame_target.saturating_sub(self.frames.len()))
             .map_err(|_| Failure::BackendUnavailable)?;
         self.scalars.resize(scalar_target, 0);
+        self.tags.resize(scalar_target, 0);
         self.states.resize(scalar_target, 0);
         self.frames.resize(frame_target, RawNativeFrame::default());
         Ok(true)
     }
 
     /// Finish one detached native return inside this activation.
-    pub fn finish_detached_return(&mut self, result: u64) -> Result<(), Failure> {
+    pub fn finish_detached_return(&mut self, tag: u64, result: u64) -> Result<(), Failure> {
         if self.frame_len <= 1 {
             return Err(Failure::BackendUnavailable);
         }
@@ -322,6 +375,7 @@ impl NativeActivation {
             return Err(Failure::BackendUnavailable);
         }
         self.scalars[operand] = result;
+        self.tags[operand] = tag;
         parent.operand_len += 1;
         self.frame_len -= 1;
         self.scalar_len = child.scalar_base as usize;
@@ -342,6 +396,7 @@ pub(super) struct RawAllocationContext<R> {
     pub(super) runtime: *mut R,
     pub(super) activation: *mut RawNativeActivation,
     pub(super) roots: *const u64,
+    pub(super) root_tags: *const u64,
     pub(super) root_states: *const u8,
     pub(super) root_capacity: usize,
 }
@@ -364,6 +419,7 @@ pub trait AllocationRuntime {
         &mut self,
         class: u32,
         root_bits: &[u64],
+        root_tags: &[u64],
         root_states: &[u8],
         allow_collection: bool,
     ) -> AllocationResult;
@@ -395,6 +451,8 @@ pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     }
     // SAFETY: The checked count stays inside the activation root buffer.
     let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
     // SAFETY: Both root buffers have the same checked capacity.
     let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
     // SAFETY: The activation remains live during this call.
@@ -402,6 +460,7 @@ pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     let response = runtime.allocate_instance(
         class,
         root_bits,
+        root_tags,
         root_states,
         allow_collection != 0 && !nested,
     );

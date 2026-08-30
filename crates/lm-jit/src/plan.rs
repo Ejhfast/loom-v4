@@ -15,6 +15,8 @@ pub enum ScalarKind {
     Char,
     /// One heap object with a source-unit type index.
     Object(u32),
+    /// One canonical tagged value with a source-unit type index.
+    Tagged(u32),
     Operation,
 }
 
@@ -189,6 +191,7 @@ pub struct ExecutionExit {
     pub(super) block: u32,
     pub(super) instruction: u32,
     pub(super) stack_len: u32,
+    pub(super) result_tag: u64,
     pub(super) result: u64,
 }
 
@@ -216,6 +219,12 @@ impl ExecutionExit {
     #[inline(always)]
     pub fn stack_len(&self) -> u32 {
         self.stack_len
+    }
+
+    /// Return the canonical result tag.
+    #[inline(always)]
+    pub fn result_tag(&self) -> u64 {
+        self.result_tag
     }
 
     #[inline(always)]
@@ -629,7 +638,7 @@ impl RegionPlan {
         compute_liveness(&mut segments, local_kinds.len());
         let root_local_count = local_kinds
             .iter()
-            .filter(|kind| matches!(kind, ScalarKind::Object(_)))
+            .filter(|kind| is_root_kind(**kind))
             .count();
         let inline_root_count = inline_functions
             .values()
@@ -637,7 +646,7 @@ impl RegionPlan {
                 inline
                     .local_kinds
                     .iter()
-                    .filter(|kind| matches!(kind, ScalarKind::Object(_)))
+                    .filter(|kind| is_root_kind(**kind))
                     .count()
                     + inline.max_stack
             })
@@ -893,12 +902,32 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
                 Ok(ScalarKind::Object(ty))
             }
         }
+        Some(BcType::Inst(class, _)) if is_option_class(module, *class) => {
+            Ok(ScalarKind::Tagged(ty))
+        }
         Some(BcType::Inst(_, _) | BcType::List(_) | BcType::Tuple(_) | BcType::Bytes) => {
             Ok(ScalarKind::Object(ty))
         }
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
         _ => Err(UnsupportedReason::NonScalarType),
     }
+}
+
+fn is_option_class(module: &Module, class: u32) -> bool {
+    let core = lm_bytecode::corepin::declared_layout(module);
+    if [core.option_some, core.option_none].contains(&Some(class)) {
+        return true;
+    }
+    [core.option_some, core.option_none]
+        .into_iter()
+        .flatten()
+        .filter_map(|arm| module.classes.get(arm as usize))
+        .filter_map(lm_bytecode::BcClass::parent)
+        .any(|parent| parent == class)
+}
+
+fn is_root_kind(kind: ScalarKind) -> bool {
+    matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_))
 }
 
 pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
@@ -1681,6 +1710,7 @@ fn uses_equal_representation(left: ScalarKind, right: ScalarKind) -> bool {
         || matches!(
             (left, right),
             (ScalarKind::Object(_), ScalarKind::Object(_))
+                | (ScalarKind::Tagged(_), ScalarKind::Tagged(_))
         )
 }
 

@@ -32,7 +32,7 @@ use activation::{
 };
 pub use activation::{
     AllocationResult, AllocationRuntime, NativeActivation, NativeExecution, NativeFrameView,
-    NativePreparation, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativePreparation, NativeRootBuffers, NativeRootBuffersMut, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -331,6 +331,7 @@ impl CompiledRegion {
             base_frames,
             max_frames,
             roots,
+            root_tags,
             root_states,
             fuel,
             heap,
@@ -365,6 +366,7 @@ impl CompiledRegion {
         let top = activation.frames[top_index];
         let mut raw_activation = RawNativeActivation {
             scalars: activation.scalars.as_mut_ptr(),
+            tags: activation.tags.as_mut_ptr(),
             states: activation.states.as_mut_ptr(),
             scalar_len: u32::try_from(activation.scalar_len)
                 .map_err(|_| Failure::BackendUnavailable)?,
@@ -393,6 +395,7 @@ impl CompiledRegion {
             runtime: std::ptr::from_mut(runtime),
             activation: std::ptr::from_mut(&mut raw_activation),
             roots: roots.as_ptr(),
+            root_tags: root_tags.as_ptr(),
             root_states: root_states.as_ptr(),
             root_capacity: self.plan.max_roots,
         };
@@ -403,24 +406,32 @@ impl CompiledRegion {
                 .as_mut_ptr()
                 .add(top.scalar_base as usize)
         };
+        // SAFETY: The tag table uses the same checked scalar window.
+        let local_tag_pointer =
+            unsafe { activation.tags.as_mut_ptr().add(top.scalar_base as usize) };
         // SAFETY: The state table uses the same scalar window indexes.
         let local_state_pointer =
             unsafe { activation.states.as_mut_ptr().add(top.scalar_base as usize) };
         // SAFETY: The checked frame reserves its complete local window.
         let operand_pointer = unsafe { local_pointer.add(top.local_count as usize) };
+        // SAFETY: The checked frame reserves its complete tag window.
+        let operand_tag_pointer = unsafe { local_tag_pointer.add(top.local_count as usize) };
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe {
             (self.entry)(
                 local_pointer,
+                local_tag_pointer,
                 local_state_pointer,
                 operand_pointer,
+                operand_tag_pointer,
                 fuel,
                 entry,
                 std::ptr::from_mut(&mut allocation_context).cast::<c_void>(),
                 allocate_instance::<R>,
                 std::ptr::from_mut(&mut allocation_result),
                 roots.as_mut_ptr(),
+                root_tags.as_mut_ptr(),
                 root_states.as_mut_ptr(),
                 &mut exit,
                 &mut raw_activation,
@@ -468,6 +479,7 @@ impl CompiledRegion {
             block: exit.block,
             instruction: exit.instruction,
             stack_len: exit.stack_len,
+            result_tag: exit.result_tag,
             result: exit.result,
         })
     }

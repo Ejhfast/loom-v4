@@ -2,7 +2,7 @@ use super::*;
 use crate::plan::{compute_liveness, split_segments, Segment};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
 use lm_heap::{Heap, Object, SharedBytes};
-use lm_value::{Value, Witness};
+use lm_value::{Value, ValueTag, Witness};
 
 fn module(blocks: Vec<Vec<Instr>>) -> Module {
     Module {
@@ -207,6 +207,7 @@ impl AllocationRuntime for TestRuntime {
         &mut self,
         _class: u32,
         _root_bits: &[u64],
+        _root_tags: &[u64],
         _root_states: &[u8],
         _allow_collection: bool,
     ) -> AllocationResult {
@@ -230,7 +231,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
         .alloc(Object::Bytes(SharedBytes::from(&[3, 5, 8])));
     let reference = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
 
-    for (index, expected) in [(1, 5), (-1, -1), (3, -1)] {
+    for (index, expected) in [(1_i64, 5_i64), (-1, -1), (3, -1)] {
         let mut activation = NativeActivation::default();
         activation
             .prepare_root(NativePreparation {
@@ -244,12 +245,15 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                 frame_limit: 256,
             })
             .expect("the safe byte root prepares");
-        let (locals, states, _) = activation.root_buffers_mut();
+        let (locals, tags, states, _, _) = activation.root_buffers_mut();
         locals[0] = reference;
         locals[1] = index as u64;
+        tags[0] = ValueTag::Obj as u64;
+        tags[1] = ValueTag::Int as u64;
         states[0] = LOCAL_INITIALIZED;
         states[1] = LOCAL_INITIALIZED;
         let mut roots = vec![0; region.max_roots().max(1)];
+        let mut root_tags = vec![0; region.max_roots().max(1)];
         let mut root_states = vec![0; region.max_roots().max(1)];
         let heap = runtime.heap.jit_view();
         let exit = region
@@ -264,6 +268,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     base_frames: 0,
                     max_frames: 256,
                     roots: &mut roots,
+                    root_tags: &mut root_tags,
                     root_states: &mut root_states,
                     fuel: 4,
                     heap,
@@ -308,8 +313,12 @@ fn native_field_load_uses_the_direct_heap_view() {
             frame_limit: 256,
         })
         .expect("the native root prepares");
-    activation.root_buffers_mut().0[0] = reference;
+    let (locals, tags, states, _, _) = activation.root_buffers_mut();
+    locals[0] = reference;
+    tags[0] = ValueTag::Obj as u64;
+    states[0] = LOCAL_INITIALIZED;
     let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
     let heap = runtime.heap.jit_view();
     let exit = region
@@ -324,6 +333,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 base_frames: 0,
                 max_frames: 256,
                 roots: &mut roots,
+                root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
@@ -366,8 +376,12 @@ fn native_field_fault_keeps_the_exact_program_point() {
             frame_limit: 256,
         })
         .expect("the native root prepares");
-    activation.root_buffers_mut().0[0] = reference;
+    let (locals, tags, states, _, _) = activation.root_buffers_mut();
+    locals[0] = reference;
+    tags[0] = ValueTag::Obj as u64;
+    states[0] = LOCAL_INITIALIZED;
     let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
     let heap = runtime.heap.jit_view();
     let exit = region
@@ -382,6 +396,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 base_frames: 0,
                 max_frames: 256,
                 roots: &mut roots,
+                root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
@@ -425,8 +440,12 @@ fn another_concrete_class_replays_the_field_instruction() {
             frame_limit: 256,
         })
         .expect("the native root prepares");
-    activation.root_buffers_mut().0[0] = reference;
+    let (locals, tags, states, _, _) = activation.root_buffers_mut();
+    locals[0] = reference;
+    tags[0] = ValueTag::Obj as u64;
+    states[0] = LOCAL_INITIALIZED;
     let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
     let heap = runtime.heap.jit_view();
     let exit = region
@@ -441,6 +460,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 base_frames: 0,
                 max_frames: 256,
                 roots: &mut roots,
+                root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
                 heap,
@@ -482,12 +502,15 @@ fn native_field_store_writes_the_canonical_value() {
             frame_limit: 256,
         })
         .expect("the native root prepares");
-    let (locals, states, _) = activation.root_buffers_mut();
+    let (locals, tags, states, _, _) = activation.root_buffers_mut();
     locals[0] = bits;
     locals[1] = 42;
+    tags[0] = ValueTag::Obj as u64;
+    tags[1] = ValueTag::Int as u64;
     states[0] = LOCAL_INITIALIZED;
     states[1] = LOCAL_INITIALIZED;
     let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
     let heap = runtime.heap.jit_view();
     let exit = region
@@ -502,6 +525,7 @@ fn native_field_store_writes_the_canonical_value() {
                 base_frames: 0,
                 max_frames: 256,
                 roots: &mut roots,
+                root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 5,
                 heap,
@@ -547,12 +571,15 @@ fn native_field_store_replays_a_frozen_receiver() {
             frame_limit: 256,
         })
         .expect("the native root prepares");
-    let (locals, states, _) = activation.root_buffers_mut();
+    let (locals, tags, states, _, _) = activation.root_buffers_mut();
     locals[0] = bits;
     locals[1] = 42;
+    tags[0] = ValueTag::Obj as u64;
+    tags[1] = ValueTag::Int as u64;
     states[0] = LOCAL_INITIALIZED;
     states[1] = LOCAL_INITIALIZED;
     let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
     let heap = runtime.heap.jit_view();
     let exit = region
@@ -567,6 +594,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 base_frames: 0,
                 max_frames: 256,
                 roots: &mut roots,
+                root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 5,
                 heap,

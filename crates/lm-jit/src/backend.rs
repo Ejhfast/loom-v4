@@ -135,9 +135,11 @@ fn append_native_parameters(signature: &mut ir::Signature, pointer_type: ir::Typ
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(types::I64));
     signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..7 {
+    for _ in 0..8 {
         signature.params.push(AbiParam::new(pointer_type));
     }
 }
@@ -152,7 +154,7 @@ fn emit_entry_wrapper(
     builder.switch_to_block(entry);
     builder.append_block_params_for_function_params(entry);
     let mut arguments = builder.block_params(entry).to_vec();
-    let activation = *arguments.get(11).ok_or(CompileError::Backend)?;
+    let activation = *arguments.get(14).ok_or(CompileError::Backend)?;
     let frame_len = builder.ins().load(
         types::I32,
         MemFlags::new(),
@@ -179,17 +181,22 @@ fn emit_entry_wrapper(
 #[derive(Clone, Copy)]
 struct NativeValues<'a> {
     locals: &'a [Variable],
+    local_tags: &'a [Variable],
     local_states: &'a [Variable],
     stack: &'a [Variable],
+    stack_tags: &'a [Variable],
     fuel: Variable,
     retired: Variable,
     local_pointer: ir::Value,
+    local_tag_pointer: ir::Value,
     local_state_pointer: ir::Value,
     stack_pointer: ir::Value,
+    stack_tag_pointer: ir::Value,
     allocation_context: ir::Value,
     allocate_instance: ir::Value,
     allocation_result_pointer: ir::Value,
     root_pointer: ir::Value,
+    root_tag_pointer: ir::Value,
     root_state_pointer: ir::Value,
     allocation_signature: ir::SigRef,
     native_signature: ir::SigRef,
@@ -202,7 +209,14 @@ struct NativeValues<'a> {
 #[derive(Clone, Copy)]
 struct NativeRoot {
     bits: ir::Value,
+    tag: ir::Value,
     state: Option<ir::Value>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeValue {
+    bits: ir::Value,
+    tag: ir::Value,
 }
 
 #[derive(Clone, Copy)]
@@ -211,7 +225,7 @@ struct ExitEmission {
     kind: u32,
     block: u32,
     instruction: u32,
-    result: ir::Value,
+    result: NativeValue,
 }
 
 #[derive(Clone, Copy)]
@@ -227,20 +241,20 @@ struct InlineCallEmission<'a> {
     root_local_kinds: &'a [ScalarKind],
     caller_stack_kinds: &'a [ScalarKind],
     deopt: FaultPoint,
-    deopt_stack: &'a [ir::Value],
+    deopt_stack: &'a [NativeValue],
 }
 
 #[derive(Clone, Copy)]
 struct HeapExitEmission<'a> {
     point: FaultPoint,
-    fault_stack: &'a [ir::Value],
-    deopt_stack: &'a [ir::Value],
+    fault_stack: &'a [NativeValue],
+    deopt_stack: &'a [NativeValue],
 }
 
 #[derive(Clone, Copy)]
 struct NumericExitEmission<'a> {
     point: FaultPoint,
-    deopt_stack: &'a [ir::Value],
+    deopt_stack: &'a [NativeValue],
 }
 
 struct StoreFieldEmission<'a> {
@@ -252,8 +266,8 @@ struct StoreFieldEmission<'a> {
 
 #[derive(Clone, Copy)]
 enum ObjectGuard<'a> {
-    Fault(&'a [ir::Value]),
-    Replay(&'a [ir::Value]),
+    Fault(&'a [NativeValue]),
+    Replay(&'a [NativeValue]),
 }
 
 struct NativeCallEmission<'a> {
@@ -303,9 +317,11 @@ fn emit_region(
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
+    native_signature.params.push(AbiParam::new(pointer_type));
+    native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(types::I64));
     native_signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..7 {
+    for _ in 0..8 {
         native_signature.params.push(AbiParam::new(pointer_type));
     }
     native_signature.params.push(AbiParam::new(types::I64));
@@ -340,24 +356,29 @@ fn emit_region(
     builder.append_block_params_for_function_params(entry_block);
     let parameters = builder.block_params(entry_block);
     let local_pointer = parameters[0];
-    let local_state_pointer = parameters[1];
-    let stack_pointer = parameters[2];
-    let initial_fuel = parameters[3];
-    let entry = parameters[4];
-    let allocation_context = parameters[5];
-    let allocate_instance = parameters[6];
-    let allocation_result_pointer = parameters[7];
-    let root_pointer = parameters[8];
-    let root_state_pointer = parameters[9];
-    let exit_pointer = parameters[10];
-    let activation_pointer = parameters[11];
-    let retired_base = parameters[12];
-    let detached_return = parameters[13];
+    let local_tag_pointer = parameters[1];
+    let local_state_pointer = parameters[2];
+    let stack_pointer = parameters[3];
+    let stack_tag_pointer = parameters[4];
+    let initial_fuel = parameters[5];
+    let entry = parameters[6];
+    let allocation_context = parameters[7];
+    let allocate_instance = parameters[8];
+    let allocation_result_pointer = parameters[9];
+    let root_pointer = parameters[10];
+    let root_tag_pointer = parameters[11];
+    let root_state_pointer = parameters[12];
+    let exit_pointer = parameters[13];
+    let activation_pointer = parameters[14];
+    let retired_base = parameters[15];
+    let detached_return = parameters[16];
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
+    let mut local_tags = Vec::with_capacity(plan.local_kinds.len());
     let mut local_states = Vec::with_capacity(plan.local_kinds.len());
     for slot in 0..plan.local_kinds.len() {
         let local = builder.declare_var(types::I64);
+        let tag = builder.declare_var(types::I64);
         let state = builder.declare_var(types::I8);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
@@ -365,6 +386,9 @@ fn emit_region(
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), local_pointer, offset);
+        let value_tag = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), local_tag_pointer, offset);
         let local_state = builder.ins().load(
             types::I8,
             MemFlags::new(),
@@ -372,20 +396,29 @@ fn emit_region(
             state_offset,
         );
         builder.def_var(local, value);
+        builder.def_var(tag, value_tag);
         builder.def_var(state, local_state);
         locals.push(local);
+        local_tags.push(tag);
         local_states.push(state);
     }
     let mut stack = Vec::with_capacity(plan.max_stack);
+    let mut stack_tags = Vec::with_capacity(plan.max_stack);
     for slot in 0..plan.max_stack {
         let variable = builder.declare_var(types::I64);
+        let tag = builder.declare_var(types::I64);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), stack_pointer, offset);
+        let value_tag = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), stack_tag_pointer, offset);
         builder.def_var(variable, value);
+        builder.def_var(tag, value_tag);
         stack.push(variable);
+        stack_tags.push(tag);
     }
     let fuel = builder.declare_var(types::I64);
     let retired = builder.declare_var(types::I64);
@@ -394,17 +427,22 @@ fn emit_region(
     builder.def_var(retired, retired_base);
     let values = NativeValues {
         locals: &locals,
+        local_tags: &local_tags,
         local_states: &local_states,
         stack: &stack,
+        stack_tags: &stack_tags,
         fuel,
         retired,
         local_pointer,
+        local_tag_pointer,
         local_state_pointer,
         stack_pointer,
+        stack_tag_pointer,
         allocation_context,
         allocate_instance,
         allocation_result_pointer,
         root_pointer,
+        root_tag_pointer,
         root_state_pointer,
         allocation_signature,
         native_signature,
@@ -443,7 +481,10 @@ fn emit_region(
             kind: EXIT_INVALID_ENTRY,
             block: 0,
             instruction: 0,
-            result: zero,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         &[],
     )?;
@@ -468,11 +509,16 @@ fn emit_region(
         if has_inline_call {
             let retired_value = builder.use_var(retired);
             let result = builder.ins().iconst(types::I64, 0);
-            let entry_stack: Vec<ir::Value> = values
+            let entry_stack: Vec<NativeValue> = values
                 .stack
                 .iter()
+                .copied()
+                .zip(values.stack_tags.iter().copied())
                 .take(segment.entry_stack.len())
-                .map(|variable| builder.use_var(*variable))
+                .map(|(bits, tag)| NativeValue {
+                    bits: builder.use_var(bits),
+                    tag: builder.use_var(tag),
+                })
                 .collect();
             emit_exit(
                 &mut builder,
@@ -482,7 +528,10 @@ fn emit_region(
                     kind: EXIT_FUEL,
                     block: segment.block,
                     instruction: segment.start,
-                    result,
+                    result: NativeValue {
+                        bits: result,
+                        tag: result,
+                    },
                 },
                 &entry_stack,
             )?;
@@ -542,14 +591,19 @@ fn emit_segment(
         exact_fuel,
         resume_blocks,
     } = emission;
-    let mut stack: Vec<ir::Value> = if resume_blocks.is_some() {
+    let mut stack: Vec<NativeValue> = if resume_blocks.is_some() {
         Vec::new()
     } else {
         values
             .stack
             .iter()
+            .copied()
+            .zip(values.stack_tags.iter().copied())
             .take(segment.entry_stack.len())
-            .map(|variable| builder.use_var(*variable))
+            .map(|(bits, tag)| NativeValue {
+                bits: builder.use_var(bits),
+                tag: builder.use_var(tag),
+            })
             .collect()
     };
     let code =
@@ -571,8 +625,13 @@ fn emit_segment(
             stack = values
                 .stack
                 .iter()
+                .copied()
+                .zip(values.stack_tags.iter().copied())
                 .take(kinds.len())
-                .map(|variable| builder.use_var(*variable))
+                .map(|(bits, tag)| NativeValue {
+                    bits: builder.use_var(bits),
+                    tag: builder.use_var(tag),
+                })
                 .collect();
         }
         let prefix = within as u32 + 1;
@@ -596,7 +655,7 @@ fn emit_segment(
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Unit, value)?;
             }
             Instr::New(class) => {
                 let instruction = segment.start + within as u32;
@@ -613,9 +672,10 @@ fn emit_segment(
                     .zip(values.locals.iter().copied())
                     .enumerate()
                 {
-                    if matches!(kind, ScalarKind::Object(_)) {
+                    if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
                         roots.push(NativeRoot {
                             bits: builder.use_var(variable),
+                            tag: builder.use_var(values.local_tags[slot]),
                             state: Some(builder.use_var(values.local_states[slot])),
                         });
                     }
@@ -633,34 +693,40 @@ fn emit_segment(
                     },
                     &stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Object(0), value)?;
             }
             Instr::ConstBool(value) => {
                 let value = builder.ins().iconst(types::I64, i64::from(value));
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Bool, value)?;
             }
             Instr::ConstInt(value) => {
                 let value = builder.ins().iconst(types::I64, value);
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::ConstFloat(bits) => {
                 let value = builder
                     .ins()
                     .iconst(types::I64, canonical_float_bits(bits) as i64);
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Float, value)?;
             }
             Instr::ConstChar(value) => {
-                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+                let value = builder.ins().iconst(types::I64, i64::from(value));
+                push_static(builder, &mut stack, ScalarKind::Char, value)?;
             }
             Instr::OpConst(operation) => {
-                stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
+                let value = builder.ins().iconst(types::I64, i64::from(operation));
+                push_static(builder, &mut stack, ScalarKind::Operation, value)?;
             }
             Instr::LoadLocal(slot) => {
-                stack.push(builder.use_var(values.locals[slot as usize]));
+                stack.push(NativeValue {
+                    bits: builder.use_var(values.locals[slot as usize]),
+                    tag: builder.use_var(values.local_tags[slot as usize]),
+                });
             }
             Instr::StoreLocal(slot) => {
-                let value = pop_native(&mut stack)?;
-                builder.def_var(values.locals[slot as usize], value);
+                let value = pop_value(&mut stack)?;
+                builder.def_var(values.locals[slot as usize], value.bits);
+                builder.def_var(values.local_tags[slot as usize], value.tag);
                 let state = builder
                     .ins()
                     .iconst(types::I8, i64::from(LOCAL_DIRTY | LOCAL_INITIALIZED));
@@ -707,7 +773,7 @@ fn emit_segment(
             }
             Instr::StoreField(field) => {
                 let deopt_stack = stack.clone();
-                let stored = pop_native(&mut stack)?;
+                let stored = pop_value(&mut stack)?;
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
                 let access = segment
@@ -806,11 +872,12 @@ fn emit_segment(
                 let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
                 let matches = emit_class_matches(builder, values, actual, target_class)?;
                 if matches!(instruction, Instr::IsType(_)) {
-                    stack.push(builder.ins().uextend(types::I64, matches));
+                    let result = builder.ins().uextend(types::I64, matches);
+                    push_static(builder, &mut stack, ScalarKind::Bool, result)?;
                 } else {
                     let mismatch = builder.ins().bxor_imm(matches, 1);
                     emit_interpreter_replay(builder, values, mismatch, point, &deopt_stack)?;
-                    stack.push(reference);
+                    push_static(builder, &mut stack, ScalarKind::Object(0), reference)?;
                 }
             }
             Instr::ListLen => {
@@ -840,7 +907,7 @@ fn emit_segment(
                         deopt_stack: &deopt_stack,
                     },
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::ListAt => {
                 let deopt_stack = stack.clone();
@@ -876,7 +943,7 @@ fn emit_segment(
             }
             Instr::Extended(ExtendedInstr::ListSet) => {
                 let deopt_stack = stack.clone();
-                let stored = pop_native(&mut stack)?;
+                let stored = pop_value(&mut stack)?;
                 let index = pop_native(&mut stack)?;
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
@@ -906,7 +973,8 @@ fn emit_segment(
                         deopt_stack: &deopt_stack,
                     },
                 )?;
-                stack.push(builder.ins().iconst(types::I64, 0));
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
             }
             Instr::Extended(ExtendedInstr::ListCapacity) => {
                 let deopt_stack = stack.clone();
@@ -932,7 +1000,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Extended(ExtendedInstr::ListEpoch) => {
                 let deopt_stack = stack.clone();
@@ -958,7 +1026,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Extended(ExtendedInstr::ListIterLen) => {
                 let deopt_stack = stack.clone();
@@ -986,7 +1054,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Extended(ExtendedInstr::SealInstance) => {
                 let deopt_stack = stack.clone();
@@ -1013,7 +1081,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(reference);
+                push_static(builder, &mut stack, ScalarKind::Object(0), reference)?;
             }
             Instr::Native(NativeInstr::BytesLen) => {
                 let deopt_stack = stack.clone();
@@ -1039,7 +1107,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Native(NativeInstr::BytesAt) => {
                 let deopt_stack = stack.clone();
@@ -1067,7 +1135,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Native(NativeInstr::BytesGet) => {
                 let deopt_stack = stack.clone();
@@ -1095,7 +1163,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
                 let deopt_stack = stack.clone();
@@ -1124,7 +1192,7 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -1147,7 +1215,7 @@ fn emit_segment(
                     },
                     &stack,
                 )?;
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Div | Instr::Rem => {
                 let right = pop_native(&mut stack)?;
@@ -1176,7 +1244,7 @@ fn emit_segment(
                 } else {
                     builder.ins().srem(left, right)
                 };
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Neg => {
                 let value = pop_native(&mut stack)?;
@@ -1194,11 +1262,12 @@ fn emit_segment(
                     },
                     &stack,
                 )?;
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Not => {
                 let value = pop_native(&mut stack)?;
-                stack.push(builder.ins().bxor_imm(value, 1));
+                let result = builder.ins().bxor_imm(value, 1);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
                 let value = pop_native(&mut stack)?;
@@ -1213,7 +1282,7 @@ fn emit_segment(
                 } else {
                     builder.ins().iadd(seed, value)
                 };
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::LtInt
             | Instr::LeInt
@@ -1233,7 +1302,8 @@ fn emit_segment(
                     _ => unreachable!(),
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::EqBool | Instr::NeBool => {
                 let right = pop_native(&mut stack)?;
@@ -1244,7 +1314,8 @@ fn emit_segment(
                     IntCC::NotEqual
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::EqRef | Instr::NeRef => {
                 let right = pop_native(&mut stack)?;
@@ -1255,7 +1326,8 @@ fn emit_segment(
                     IntCC::NotEqual
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::Native(operation)
                 if crate::instruction_has_dedicated_treatment(&instruction) =>
@@ -1381,7 +1453,10 @@ fn emit_segment(
                 kind: EXIT_EFFECT,
                 block: segment.block,
                 instruction: effect_instruction,
-                result: zero,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
             },
             &stack,
         )?;
@@ -1401,7 +1476,10 @@ fn emit_segment(
                 kind: EXIT_INTERPRETER,
                 block: segment.block,
                 instruction,
-                result: zero,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
             },
             &stack,
         )?;
@@ -1434,7 +1512,7 @@ fn emit_segment(
         SegmentExit::Effect { .. } => unreachable!(),
         SegmentExit::Interpreter { .. } => unreachable!(),
         SegmentExit::Return => {
-            let result = pop_native(&mut stack)?;
+            let result = pop_value(&mut stack)?;
             emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
         }
     }
@@ -1444,7 +1522,7 @@ fn emit_segment(
 fn emit_native_call(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    stack: &mut Vec<ir::Value>,
+    stack: &mut Vec<NativeValue>,
     call: NativeCallEmission<'_>,
 ) -> Result<(), CompileError> {
     let NativeCallEmission {
@@ -1490,7 +1568,10 @@ fn emit_native_call(
             kind: EXIT_FUEL,
             block,
             instruction,
-            result: zero,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         &boundary_stack,
     )?;
@@ -1598,7 +1679,10 @@ fn emit_native_call(
             kind: EXIT_STACK_LIMIT,
             block,
             instruction: instruction + 1,
-            result: zero,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         &boundary_stack,
     )?;
@@ -1652,7 +1736,10 @@ fn emit_native_call(
             kind: EXIT_GROW_ACTIVATION,
             block,
             instruction,
-            result: growth,
+            result: NativeValue {
+                bits: growth,
+                tag: target_value,
+            },
         },
         &boundary_stack,
     )?;
@@ -1668,7 +1755,10 @@ fn emit_native_call(
             kind: EXIT_CALL,
             block,
             instruction,
-            result: target_value,
+            result: NativeValue {
+                bits: target_value,
+                tag: target_value,
+            },
         },
         &boundary_stack,
     )?;
@@ -1678,15 +1768,18 @@ fn emit_native_call(
     let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
     let caller_frame = emit_current_frame_pointer(builder, values)?;
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
+    let tags = load_activation_pointer(builder, values, RawActivationField::Tags)?;
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
     let scalar_base = scalar_len;
     let scalar_base_pointer = builder.ins().uextend(values.pointer_type, scalar_base);
     let scalar_byte_offset = builder.ins().ishl_imm(scalar_base_pointer, 3);
     let child_locals = builder.ins().iadd(scalars, scalar_byte_offset);
+    let child_tags = builder.ins().iadd(tags, scalar_byte_offset);
     let child_states = builder.ins().iadd(states, scalar_base_pointer);
     let local_count_pointer = builder.ins().uextend(values.pointer_type, local_count);
     let local_byte_offset = builder.ins().ishl_imm(local_count_pointer, 3);
     let child_operands = builder.ins().iadd(child_locals, local_byte_offset);
+    let child_operand_tags = builder.ins().iadd(child_tags, local_byte_offset);
     let zero_i8 = builder.ins().iconst(types::I8, 0);
     for slot in 0..contract.local_count {
         let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
@@ -1703,7 +1796,10 @@ fn emit_native_call(
         let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         builder
             .ins()
-            .store(MemFlags::new(), argument, child_locals, value_offset);
+            .store(MemFlags::new(), argument.bits, child_locals, value_offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), argument.tag, child_tags, value_offset);
         builder
             .ins()
             .store(MemFlags::new(), initialized, child_states, state_offset);
@@ -1789,14 +1885,17 @@ fn emit_native_call(
         code,
         &[
             child_locals,
+            child_tags,
             child_states,
             child_operands,
+            child_operand_tags,
             child_fuel,
             zero_entry,
             values.allocation_context,
             values.allocate_instance,
             values.allocation_result_pointer,
             values.root_pointer,
+            values.root_tag_pointer,
             values.root_state_pointer,
             values.exit_pointer,
             values.activation_pointer,
@@ -1871,6 +1970,12 @@ fn emit_native_call(
         values.exit_pointer,
         mem::offset_of!(RawExit, result),
     )?;
+    let result_tag = load_value(
+        builder,
+        types::I64,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, result_tag),
+    )?;
     store_activation_u32(builder, values, RawActivationField::ScalarLen, scalar_base)?;
     store_activation_u32(builder, values, RawActivationField::FrameLen, frame_len)?;
     store_activation_u32(
@@ -1880,7 +1985,10 @@ fn emit_native_call(
         prior_changed,
     )?;
     stack.truncate(argument_start);
-    stack.push(result);
+    stack.push(NativeValue {
+        bits: result,
+        tag: result_tag,
+    });
     define_stack(builder, values, stack)?;
     builder.ins().jump(successor, &[]);
     Ok(())
@@ -1889,7 +1997,7 @@ fn emit_native_call(
 fn emit_inline_call(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    caller_stack: &mut Vec<ir::Value>,
+    caller_stack: &mut Vec<NativeValue>,
     call: InlineCallEmission<'_>,
 ) -> Result<(), CompileError> {
     let argument_start = caller_stack
@@ -1910,21 +2018,31 @@ fn emit_inline_call(
         .ok_or(CompileError::Backend)?;
     for (instruction_index, instruction) in code.iter().copied().enumerate() {
         match instruction {
-            Instr::ConstUnit => stack.push(builder.ins().iconst(types::I64, 0)),
-            Instr::ConstBool(value) => {
-                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+            Instr::ConstUnit => {
+                let value = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, value)?;
             }
-            Instr::ConstInt(value) => stack.push(builder.ins().iconst(types::I64, value)),
-            Instr::ConstFloat(bits) => stack.push(
-                builder
+            Instr::ConstBool(value) => {
+                let value = builder.ins().iconst(types::I64, i64::from(value));
+                push_static(builder, &mut stack, ScalarKind::Bool, value)?;
+            }
+            Instr::ConstInt(value) => {
+                let value = builder.ins().iconst(types::I64, value);
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::ConstFloat(bits) => {
+                let value = builder
                     .ins()
-                    .iconst(types::I64, canonical_float_bits(bits) as i64),
-            ),
+                    .iconst(types::I64, canonical_float_bits(bits) as i64);
+                push_static(builder, &mut stack, ScalarKind::Float, value)?;
+            }
             Instr::ConstChar(value) => {
-                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+                let value = builder.ins().iconst(types::I64, i64::from(value));
+                push_static(builder, &mut stack, ScalarKind::Char, value)?;
             }
             Instr::OpConst(operation) => {
-                stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
+                let value = builder.ins().iconst(types::I64, i64::from(operation));
+                push_static(builder, &mut stack, ScalarKind::Operation, value)?;
             }
             Instr::LoadLocal(slot) => {
                 let value = locals
@@ -1935,7 +2053,7 @@ fn emit_inline_call(
                 stack.push(value);
             }
             Instr::StoreLocal(slot) => {
-                let value = pop_native(&mut stack)?;
+                let value = pop_value(&mut stack)?;
                 *locals.get_mut(slot as usize).ok_or(CompileError::Backend)? = Some(value);
             }
             Instr::Pop => {
@@ -1956,9 +2074,10 @@ fn emit_inline_call(
                     .zip(values.locals.iter().copied())
                     .enumerate()
                 {
-                    if matches!(kind, ScalarKind::Object(_)) {
+                    if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
                         roots.push(NativeRoot {
                             bits: builder.use_var(variable),
+                            tag: builder.use_var(values.local_tags[slot]),
                             state: Some(builder.use_var(values.local_states[slot])),
                         });
                     }
@@ -1972,9 +2091,12 @@ fn emit_inline_call(
                     .zip(site.initialized.iter().copied())
                     .zip(locals.iter().copied())
                 {
-                    if initialized && matches!(kind, ScalarKind::Object(_)) {
+                    if initialized && matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_))
+                    {
+                        let value = value.ok_or(CompileError::Backend)?;
                         roots.push(NativeRoot {
-                            bits: value.ok_or(CompileError::Backend)?,
+                            bits: value.bits,
+                            tag: value.tag,
                             state: None,
                         });
                     }
@@ -1993,7 +2115,7 @@ fn emit_inline_call(
                     call.deopt,
                     call.deopt_stack,
                 )?;
-                stack.push(value);
+                push_static(builder, &mut stack, ScalarKind::Object(0), value)?;
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -2012,7 +2134,7 @@ fn emit_inline_call(
                     call.deopt,
                     call.deopt_stack,
                 )?;
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Div | Instr::Rem => {
                 let right = pop_native(&mut stack)?;
@@ -2043,7 +2165,7 @@ fn emit_inline_call(
                 } else {
                     builder.ins().srem(left, right)
                 };
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Neg => {
                 let value = pop_native(&mut stack)?;
@@ -2057,11 +2179,12 @@ fn emit_inline_call(
                     call.deopt,
                     call.deopt_stack,
                 )?;
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Not => {
                 let value = pop_native(&mut stack)?;
-                stack.push(builder.ins().bxor_imm(value, 1));
+                let result = builder.ins().bxor_imm(value, 1);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::LtInt
             | Instr::LeInt
@@ -2081,7 +2204,8 @@ fn emit_inline_call(
                     _ => unreachable!(),
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::EqBool | Instr::NeBool => {
                 let right = pop_native(&mut stack)?;
@@ -2092,7 +2216,8 @@ fn emit_inline_call(
                     IntCC::NotEqual
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::EqRef | Instr::NeRef => {
                 let right = pop_native(&mut stack)?;
@@ -2103,7 +2228,8 @@ fn emit_inline_call(
                     IntCC::NotEqual
                 };
                 let compared = builder.ins().icmp(condition, left, right);
-                stack.push(builder.ins().uextend(types::I64, compared));
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
             Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
                 let value = pop_native(&mut stack)?;
@@ -2118,7 +2244,7 @@ fn emit_inline_call(
                 } else {
                     builder.ins().iadd(seed, value)
                 };
-                stack.push(result);
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Native(operation) => {
                 emit_char_instruction(builder, &mut stack, operation)?;
@@ -2136,7 +2262,7 @@ fn emit_inline_call(
                 )?;
             }
             Instr::Return => {
-                let result = pop_native(&mut stack)?;
+                let result = pop_value(&mut stack)?;
                 if !stack.is_empty() {
                     return Err(CompileError::Backend);
                 }
@@ -2153,8 +2279,34 @@ fn emit_inline_call(
     Err(CompileError::Backend)
 }
 
-fn pop_native(stack: &mut Vec<ir::Value>) -> Result<ir::Value, CompileError> {
+fn pop_value(stack: &mut Vec<NativeValue>) -> Result<NativeValue, CompileError> {
     stack.pop().ok_or(CompileError::Backend)
+}
+
+fn pop_native(stack: &mut Vec<NativeValue>) -> Result<ir::Value, CompileError> {
+    Ok(pop_value(stack)?.bits)
+}
+
+fn static_value(
+    builder: &mut FunctionBuilder<'_>,
+    kind: ScalarKind,
+    bits: ir::Value,
+) -> Result<NativeValue, CompileError> {
+    let tag = value_tag(kind).ok_or(CompileError::Backend)?;
+    Ok(NativeValue {
+        bits,
+        tag: builder.ins().iconst(types::I64, tag as i64),
+    })
+}
+
+fn push_static(
+    builder: &mut FunctionBuilder<'_>,
+    stack: &mut Vec<NativeValue>,
+    kind: ScalarKind,
+    bits: ir::Value,
+) -> Result<(), CompileError> {
+    stack.push(static_value(builder, kind, bits)?);
+    Ok(())
 }
 
 fn emit_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost: u32) {
@@ -2182,7 +2334,7 @@ fn emit_exact_fuel_check(
     values: NativeValues<'_>,
     block: u32,
     instruction: u32,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let run = builder.create_block();
     let stop = builder.create_block();
@@ -2200,7 +2352,10 @@ fn emit_exact_fuel_check(
             kind: EXIT_FUEL,
             block,
             instruction,
-            result,
+            result: NativeValue {
+                bits: result,
+                tag: result,
+            },
         },
         stack,
     )?;
@@ -2214,7 +2369,7 @@ fn emit_overflow_check(
     overflow: ir::Value,
     result: ir::Value,
     point: FaultPoint,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     emit_fault_check(
         builder,
@@ -2233,7 +2388,7 @@ fn emit_fault_check(
     faulted: ir::Value,
     kind: u32,
     point: FaultPoint,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let fault = builder.create_block();
     let success = builder.create_block();
@@ -2250,7 +2405,10 @@ fn emit_fault_check(
             kind,
             block: point.block,
             instruction: point.instruction,
-            result: zero,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         stack,
     )?;
@@ -2266,7 +2424,7 @@ fn emit_load_field(
     receiver_class: u32,
     result: ValueContract,
     exit: HeapExitEmission<'_>,
-) -> Result<ir::Value, CompileError> {
+) -> Result<NativeValue, CompileError> {
     let entry = emit_object_entry(
         builder,
         values,
@@ -2308,7 +2466,7 @@ fn emit_store_field(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,
-    stored: ir::Value,
+    stored: NativeValue,
     emission: StoreFieldEmission<'_>,
 ) -> Result<(), CompileError> {
     let StoreFieldEmission {
@@ -2320,7 +2478,7 @@ fn emit_store_field(
     emit_value_contract(
         builder,
         values,
-        stored,
+        stored.bits,
         contract,
         exit.point,
         exit.deopt_stack,
@@ -2358,7 +2516,7 @@ fn emit_tuple_get(
     index: u32,
     result: ValueContract,
     exit: HeapExitEmission<'_>,
-) -> Result<ir::Value, CompileError> {
+) -> Result<NativeValue, CompileError> {
     let entry = emit_object_entry(
         builder,
         values,
@@ -2419,7 +2577,7 @@ fn emit_list_capacity(
     values: NativeValues<'_>,
     reference: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2447,7 +2605,7 @@ fn emit_list_epoch(
     values: NativeValues<'_>,
     reference: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2471,7 +2629,7 @@ fn emit_list_iter_len(
     reference: ir::Value,
     expected: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2506,7 +2664,7 @@ fn emit_seal_instance(
     reference: ir::Value,
     class: u32,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2531,7 +2689,7 @@ fn emit_list_at(
     index: ir::Value,
     result: ValueContract,
     exit: HeapExitEmission<'_>,
-) -> Result<ir::Value, CompileError> {
+) -> Result<NativeValue, CompileError> {
     let entry = emit_object_entry(
         builder,
         values,
@@ -2557,14 +2715,14 @@ fn emit_list_set(
     values: NativeValues<'_>,
     reference: ir::Value,
     index: ir::Value,
-    stored: ir::Value,
+    stored: NativeValue,
     contract: ValueContract,
     exit: HeapExitEmission<'_>,
 ) -> Result<(), CompileError> {
     emit_value_contract(
         builder,
         values,
-        stored,
+        stored.bits,
         contract,
         exit.point,
         exit.deopt_stack,
@@ -2588,7 +2746,7 @@ fn emit_bytes_len(
     values: NativeValues<'_>,
     reference: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2612,7 +2770,7 @@ fn emit_text_len(
     reference: ir::Value,
     offset: usize,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_text_entry(
         builder,
@@ -2635,7 +2793,7 @@ fn emit_bytes_at(
     reference: ir::Value,
     index: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2671,7 +2829,7 @@ fn emit_bytes_get(
     reference: ir::Value,
     index: ir::Value,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
@@ -2762,7 +2920,7 @@ fn emit_array_element(
     array_offset: usize,
     index: ir::Value,
     point: FaultPoint,
-    fault_stack: &[ir::Value],
+    fault_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let len = load_value(
         builder,
@@ -2810,17 +2968,18 @@ fn emit_loaded_value(
     address: ir::Value,
     contract: ValueContract,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
-) -> Result<ir::Value, CompileError> {
+    deopt_stack: &[NativeValue],
+) -> Result<NativeValue, CompileError> {
     let tag = load_value(builder, types::I64, address, VALUE_TAG_OFFSET)?;
-    let expected_tag = value_tag(contract.kind);
-    let replay = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
-    emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
+    if let Some(expected_tag) = value_tag(contract.kind) {
+        let replay = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
+        emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
+    }
     let payload = emit_value_payload(builder, values, address, contract.kind, point, deopt_stack)?;
     emit_value_contract(builder, values, payload, contract, point, deopt_stack)?;
-    Ok(payload)
+    Ok(NativeValue { bits: payload, tag })
 }
 
 fn emit_value_contract(
@@ -2829,7 +2988,7 @@ fn emit_value_contract(
     payload: ir::Value,
     contract: ValueContract,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let Some(object) = contract.object else {
         return Ok(());
@@ -2945,14 +3104,15 @@ fn emit_class_matches(
 fn emit_store_value(
     builder: &mut FunctionBuilder<'_>,
     address: ir::Value,
-    payload: ir::Value,
+    value: NativeValue,
     kind: ScalarKind,
 ) -> Result<(), CompileError> {
-    let tag = builder
-        .ins()
-        .iconst(types::I64, value_tag(kind) as u64 as i64);
+    let tag = match value_tag(kind) {
+        Some(tag) => builder.ins().iconst(types::I64, tag as u64 as i64),
+        None => value.tag,
+    };
     store_i64(builder, address, VALUE_TAG_OFFSET, tag)?;
-    store_i64(builder, address, VALUE_PAYLOAD_OFFSET, payload)
+    store_i64(builder, address, VALUE_PAYLOAD_OFFSET, value.bits)
 }
 
 fn emit_object_entry(
@@ -3068,16 +3228,17 @@ fn emit_object_guard(
     }
 }
 
-fn value_tag(kind: ScalarKind) -> ValueTag {
-    match kind {
+fn value_tag(kind: ScalarKind) -> Option<ValueTag> {
+    Some(match kind {
         ScalarKind::Unit => ValueTag::Unit,
         ScalarKind::Bool => ValueTag::Bool,
         ScalarKind::Int => ValueTag::Int,
         ScalarKind::Float => ValueTag::Float,
         ScalarKind::Char => ValueTag::Char,
         ScalarKind::Object(_) => ValueTag::Obj,
+        ScalarKind::Tagged(_) => return None,
         ScalarKind::Operation => ValueTag::Op,
-    }
+    })
 }
 
 fn emit_value_payload(
@@ -3086,7 +3247,7 @@ fn emit_value_payload(
     value: ir::Value,
     kind: ScalarKind,
     point: FaultPoint,
-    deopt_stack: &[ir::Value],
+    deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let payload = match kind {
         ScalarKind::Unit => builder.ins().iconst(types::I64, 0),
@@ -3094,7 +3255,7 @@ fn emit_value_payload(
             let byte = load_value(builder, types::I8, value, VALUE_PAYLOAD_OFFSET)?;
             builder.ins().uextend(types::I64, byte)
         }
-        ScalarKind::Int | ScalarKind::Object(_) => {
+        ScalarKind::Int | ScalarKind::Object(_) | ScalarKind::Tagged(_) => {
             load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?
         }
         ScalarKind::Char => {
@@ -3130,15 +3291,16 @@ fn emit_value_payload(
 fn extend_stack_roots(
     roots: &mut Vec<NativeRoot>,
     kinds: &[ScalarKind],
-    values: &[ir::Value],
+    values: &[NativeValue],
 ) -> Result<(), CompileError> {
     if kinds.len() != values.len() {
         return Err(CompileError::Backend);
     }
     for (kind, value) in kinds.iter().copied().zip(values.iter().copied()) {
-        if matches!(kind, ScalarKind::Object(_)) {
+        if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
             roots.push(NativeRoot {
-                bits: value,
+                bits: value.bits,
+                tag: value.tag,
                 state: None,
             });
         }
@@ -3152,7 +3314,7 @@ fn emit_allocate_instance(
     class: u32,
     roots: &[NativeRoot],
     point: FaultPoint,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let (status, result) = emit_allocation_call(builder, values, class, roots, true)?;
     let heap_limit = builder
@@ -3181,6 +3343,12 @@ fn emit_allocation_call(
             MemFlags::new(),
             root.bits,
             values.root_pointer,
+            value_offset,
+        );
+        builder.ins().store(
+            MemFlags::new(),
+            root.tag,
+            values.root_tag_pointer,
             value_offset,
         );
         let state = root.state.unwrap_or_else(|| {
@@ -3229,7 +3397,7 @@ fn emit_interpreter_replay(
     values: NativeValues<'_>,
     replay: ir::Value,
     point: FaultPoint,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let interpreter = builder.create_block();
     let success = builder.create_block();
@@ -3248,7 +3416,10 @@ fn emit_interpreter_replay(
             kind: EXIT_INTERPRETER,
             block: point.block,
             instruction: point.instruction.saturating_sub(1),
-            result: zero,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         stack,
     )?;
@@ -3259,7 +3430,7 @@ fn emit_interpreter_replay(
 fn emit_numeric_instruction(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    stack: &mut Vec<ir::Value>,
+    stack: &mut Vec<NativeValue>,
     operation: NumericInstr,
     exit: NumericExitEmission<'_>,
 ) -> Result<(), CompileError> {
@@ -3281,11 +3452,12 @@ fn emit_numeric_instruction(
                 NumericInstr::IntWrappingMul => builder.ins().imul(left, right),
                 _ => unreachable!(),
             };
-            stack.push(value);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NumericInstr::IntBitNot => {
             let value = pop_native(stack)?;
-            stack.push(builder.ins().bnot(value));
+            let value = builder.ins().bnot(value);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NumericInstr::IntShl
         | NumericInstr::IntShr
@@ -3306,17 +3478,19 @@ fn emit_numeric_instruction(
                 NumericInstr::IntRotateRight => builder.ins().rotr(value, amount),
                 _ => unreachable!(),
             };
-            stack.push(value);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NumericInstr::IntToFloat => {
             let value = pop_native(stack)?;
             let value = builder.ins().fcvt_from_sint(types::F64, value);
-            stack.push(canonical_float(builder, value));
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
         }
         NumericInstr::FloatNeg => {
             let value = float_value(builder, pop_native(stack)?);
             let value = builder.ins().fneg(value);
-            stack.push(canonical_float(builder, value));
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
         }
         NumericInstr::FloatAdd
         | NumericInstr::FloatSub
@@ -3333,7 +3507,8 @@ fn emit_numeric_instruction(
                 NumericInstr::FloatDiv => builder.ins().fdiv(left, right),
                 _ => unreachable!(),
             };
-            stack.push(canonical_float(builder, value));
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
         }
         NumericInstr::FloatEq
         | NumericInstr::FloatNe
@@ -3366,28 +3541,32 @@ fn emit_numeric_instruction(
                 }
                 _ => unreachable!(),
             };
-            stack.push(builder.ins().uextend(types::I64, compared));
+            let value = builder.ins().uextend(types::I64, compared);
+            push_static(builder, stack, ScalarKind::Bool, value)?;
         }
         NumericInstr::FloatIsNan => {
             let value = float_value(builder, pop_native(stack)?);
             let is_nan = builder.ins().fcmp(FloatCC::Unordered, value, value);
-            stack.push(builder.ins().uextend(types::I64, is_nan));
+            let value = builder.ins().uextend(types::I64, is_nan);
+            push_static(builder, stack, ScalarKind::Bool, value)?;
         }
         NumericInstr::FloatHash => {
             let bits = pop_native(stack)?;
             let shifted = builder.ins().ishl_imm(bits, 1);
             let is_zero = builder.ins().icmp_imm(IntCC::Equal, shifted, 0);
             let zero = builder.ins().iconst(types::I64, 0);
-            stack.push(builder.ins().select(is_zero, zero, bits));
+            let value = builder.ins().select(is_zero, zero, bits);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NumericInstr::FloatBits => {
             let bits = pop_native(stack)?;
-            stack.push(bits);
+            push_static(builder, stack, ScalarKind::Int, bits)?;
         }
         NumericInstr::FloatFromBits => {
             let bits = pop_native(stack)?;
             let value = float_value(builder, bits);
-            stack.push(canonical_float(builder, value));
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
         }
         NumericInstr::FloatToIntStatus => {
             let bits = pop_native(stack)?;
@@ -3398,7 +3577,8 @@ fn emit_numeric_instruction(
             let one = builder.ins().iconst(types::I64, 1);
             let two = builder.ins().iconst(types::I64, 2);
             let range_status = builder.ins().select(fits, zero, two);
-            stack.push(builder.ins().select(finite, range_status, one));
+            let value = builder.ins().select(finite, range_status, one);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NumericInstr::FloatToIntValue => {
             let bits = pop_native(stack)?;
@@ -3408,7 +3588,8 @@ fn emit_numeric_instruction(
             let valid = builder.ins().band(finite, fits);
             let invalid = builder.ins().bxor_imm(valid, 1);
             emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
-            stack.push(builder.ins().fcvt_to_sint(types::I64, value));
+            let value = builder.ins().fcvt_to_sint(types::I64, value);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         _ => {
             return Err(CompileError::Unsupported(
@@ -3444,13 +3625,13 @@ fn float_fits_int(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::Va
 
 fn emit_char_instruction(
     builder: &mut FunctionBuilder<'_>,
-    stack: &mut Vec<ir::Value>,
+    stack: &mut Vec<NativeValue>,
     operation: NativeInstr,
 ) -> Result<(), CompileError> {
     match operation {
         NativeInstr::CharCodepoint => {
             let value = pop_native(stack)?;
-            stack.push(value);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NativeInstr::CharUtf8Len => {
             let value = pop_native(stack)?;
@@ -3469,7 +3650,8 @@ fn emit_char_instruction(
                 .icmp_imm(IntCC::UnsignedGreaterThan, value, 0xffff);
             let short = builder.ins().select(over_one, two, one);
             let medium = builder.ins().select(over_two, three, short);
-            stack.push(builder.ins().select(over_three, four, medium));
+            let value = builder.ins().select(over_three, four, medium);
+            push_static(builder, stack, ScalarKind::Int, value)?;
         }
         NativeInstr::EqChar
         | NativeInstr::NeChar
@@ -3489,7 +3671,8 @@ fn emit_char_instruction(
                 _ => unreachable!(),
             };
             let compared = builder.ins().icmp(condition, left, right);
-            stack.push(builder.ins().uextend(types::I64, compared));
+            let value = builder.ins().uextend(types::I64, compared);
+            push_static(builder, stack, ScalarKind::Bool, value)?;
         }
         _ => {
             return Err(CompileError::Unsupported(
@@ -3530,7 +3713,7 @@ fn emit_exit(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     exit: ExitEmission,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     emit_spill_frame(builder, values, exit.block, exit.instruction, stack)?;
     store_i64(
@@ -3566,8 +3749,14 @@ fn emit_exit(
     store_i64(
         builder,
         values.exit_pointer,
+        mem::offset_of!(RawExit, result_tag),
+        exit.result.tag,
+    )?;
+    store_i64(
+        builder,
+        values.exit_pointer,
         mem::offset_of!(RawExit, result),
-        exit.result,
+        exit.result.bits,
     )?;
     builder.ins().return_(&[]);
     Ok(())
@@ -3578,8 +3767,8 @@ fn emit_function_return(
     values: NativeValues<'_>,
     block: u32,
     instruction: u32,
-    result: ir::Value,
-    stack: &[ir::Value],
+    result: NativeValue,
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let normal = builder.create_block();
     let direct = builder.create_block();
@@ -3617,8 +3806,14 @@ fn emit_function_return(
     store_i64(
         builder,
         values.exit_pointer,
+        mem::offset_of!(RawExit, result_tag),
+        result.tag,
+    )?;
+    store_i64(
+        builder,
+        values.exit_pointer,
         mem::offset_of!(RawExit, result),
-        result,
+        result.bits,
     )?;
     builder.ins().return_(&[]);
 
@@ -3687,10 +3882,15 @@ fn emit_function_return(
     let parent_operand = builder.ins().uextend(values.pointer_type, parent_operand);
     let parent_operand_offset = builder.ins().ishl_imm(parent_operand, 3);
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
+    let tags = load_activation_pointer(builder, values, RawActivationField::Tags)?;
     let result_pointer = builder.ins().iadd(scalars, parent_operand_offset);
+    let result_tag_pointer = builder.ins().iadd(tags, parent_operand_offset);
     builder
         .ins()
-        .store(MemFlags::new(), result, result_pointer, 0);
+        .store(MemFlags::new(), result.bits, result_pointer, 0);
+    builder
+        .ins()
+        .store(MemFlags::new(), result.tag, result_tag_pointer, 0);
     let next_operand_len = builder.ins().iadd_imm(parent_operand_len, 1);
     store_i32_value(
         builder,
@@ -3730,6 +3930,7 @@ fn emit_function_return(
         .uextend(values.pointer_type, parent_scalar_base);
     let parent_local_offset = builder.ins().ishl_imm(parent_local_base, 3);
     let parent_locals = builder.ins().iadd(scalars, parent_local_offset);
+    let parent_tags = builder.ins().iadd(tags, parent_local_offset);
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
     let parent_states = builder.ins().iadd(states, parent_local_base);
     let parent_local_count = builder
@@ -3737,6 +3938,7 @@ fn emit_function_return(
         .uextend(values.pointer_type, parent_local_count);
     let parent_operand_offset = builder.ins().ishl_imm(parent_local_count, 3);
     let parent_operands = builder.ins().iadd(parent_locals, parent_operand_offset);
+    let parent_operand_tags = builder.ins().iadd(parent_tags, parent_operand_offset);
     let parent_entry = load_cell_u32(
         builder,
         parent,
@@ -3750,14 +3952,17 @@ fn emit_function_return(
         code,
         &[
             parent_locals,
+            parent_tags,
             parent_states,
             parent_operands,
+            parent_operand_tags,
             fuel,
             parent_entry,
             values.allocation_context,
             values.allocate_instance,
             values.allocation_result_pointer,
             values.root_pointer,
+            values.root_tag_pointer,
             values.root_state_pointer,
             values.exit_pointer,
             values.activation_pointer,
@@ -3787,7 +3992,7 @@ fn emit_spill_frame(
     values: NativeValues<'_>,
     block: u32,
     instruction: u32,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let frame = emit_current_frame_pointer(builder, values)?;
     emit_spill_frame_to(builder, values, frame, block, instruction, stack)
@@ -3799,10 +4004,11 @@ fn emit_spill_frame_to(
     frame: ir::Value,
     block: u32,
     instruction: u32,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     for (slot, variable) in values.locals.iter().copied().enumerate() {
         let value = builder.use_var(variable);
+        let tag = builder.use_var(values.local_tags[slot]);
         let state = builder.use_var(values.local_states[slot]);
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
@@ -3810,6 +4016,9 @@ fn emit_spill_frame_to(
         builder
             .ins()
             .store(MemFlags::new(), value, values.local_pointer, local_offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), tag, values.local_tag_pointer, local_offset);
         builder.ins().store(
             MemFlags::new(),
             state,
@@ -3822,7 +4031,10 @@ fn emit_spill_frame_to(
             .map_err(|_| CompileError::Backend)?;
         builder
             .ins()
-            .store(MemFlags::new(), value, values.stack_pointer, offset);
+            .store(MemFlags::new(), value.bits, values.stack_pointer, offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), value.tag, values.stack_tag_pointer, offset);
     }
     store_i32_constant(
         builder,
@@ -3872,13 +4084,20 @@ fn emit_current_frame_pointer(
 fn define_stack(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    stack: &[ir::Value],
+    stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     if stack.len() > values.stack.len() {
         return Err(CompileError::Backend);
     }
-    for (variable, value) in values.stack.iter().copied().zip(stack.iter().copied()) {
-        builder.def_var(variable, value);
+    for ((variable, tag), value) in values
+        .stack
+        .iter()
+        .copied()
+        .zip(values.stack_tags.iter().copied())
+        .zip(stack.iter().copied())
+    {
+        builder.def_var(variable, value.bits);
+        builder.def_var(tag, value.tag);
     }
     Ok(())
 }
@@ -3898,6 +4117,7 @@ fn store_i32_constant(
 #[derive(Clone, Copy)]
 enum RawActivationField {
     Scalars,
+    Tags,
     States,
     ScalarLen,
     ScalarCapacity,
@@ -3916,6 +4136,7 @@ impl RawActivationField {
     fn offset(self) -> usize {
         match self {
             RawActivationField::Scalars => mem::offset_of!(RawNativeActivation, scalars),
+            RawActivationField::Tags => mem::offset_of!(RawNativeActivation, tags),
             RawActivationField::States => mem::offset_of!(RawNativeActivation, states),
             RawActivationField::ScalarLen => mem::offset_of!(RawNativeActivation, scalar_len),
             RawActivationField::ScalarCapacity => {

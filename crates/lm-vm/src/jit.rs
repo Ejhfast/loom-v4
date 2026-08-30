@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, Weak};
 pub(crate) struct NativeScratch {
     activation: lm_jit::NativeActivation,
     roots: Vec<u64>,
+    root_tags: Vec<u64>,
     root_states: Vec<u8>,
     continuation_regions: Vec<Arc<lm_jit::CompiledRegion>>,
 }
@@ -475,7 +476,8 @@ impl JitEngine {
                     return NativeAttempt::Fallback;
                 }
                 let mut guarded = 0u64;
-                let (bits, local_states, stack_bits) = scratch.activation.root_buffers_mut();
+                let (bits, tags, local_states, stack_bits, stack_tags) =
+                    scratch.activation.root_buffers_mut();
                 for (slot, (kind, live)) in region
                     .local_kinds()
                     .iter()
@@ -492,11 +494,12 @@ impl JitEngine {
                         continue;
                     }
                     guarded += 1;
-                    let Some(value) = scalar_bits(kind, locals[slot]) else {
+                    let Some((tag, value)) = scalar_parts(kind, locals[slot]) else {
                         metrics.note_guard_failure(guarded);
                         return NativeAttempt::Fallback;
                     };
                     bits[slot] = value;
+                    tags[slot] = tag;
                     local_states[slot] = LOCAL_INITIALIZED;
                 }
                 for (slot, (kind, value)) in entry
@@ -507,11 +510,12 @@ impl JitEngine {
                     .enumerate()
                 {
                     guarded += 1;
-                    let Some(value) = scalar_bits(kind, value) else {
+                    let Some((tag, value)) = scalar_parts(kind, value) else {
                         metrics.note_guard_failure(guarded);
                         return NativeAttempt::Fallback;
                     };
                     stack_bits[slot] = value;
+                    stack_tags[slot] = tag;
                 }
                 metrics.note_guarded_values(guarded);
                 (
@@ -545,6 +549,8 @@ impl JitEngine {
                 let root_capacity = active_region.max_roots().max(1);
                 scratch.roots.resize(root_capacity, 0);
                 scratch.roots.fill(0);
+                scratch.root_tags.resize(root_capacity, 0);
+                scratch.root_tags.fill(0);
                 scratch.root_states.resize(root_capacity, 0);
                 scratch.root_states.fill(0);
                 let Some(remaining) = batch_fuel.checked_sub(prior_retired) else {
@@ -562,6 +568,7 @@ impl JitEngine {
                         base_frames,
                         max_frames,
                         roots: &mut scratch.roots,
+                        root_tags: &mut scratch.root_tags,
                         root_states: &mut scratch.root_states,
                         fuel: remaining,
                         heap,
@@ -629,7 +636,7 @@ impl JitEngine {
                 };
                 if scratch
                     .activation
-                    .finish_detached_return(exit.result())
+                    .finish_detached_return(exit.result_tag(), exit.result())
                     .is_err()
                 {
                     break Err(Failure::BackendUnavailable);
@@ -830,7 +837,9 @@ impl JitEngine {
                 if exit.stack_len() != 0 || top_child.is_some() {
                     return malformed_native_exit(retired);
                 }
-                let Some(value) = bits_value(top_region.result_kind(), exit.result()) else {
+                let Some(value) =
+                    parts_value(top_region.result_kind(), exit.result_tag(), exit.result())
+                else {
                     return malformed_native_exit(retired);
                 };
                 match machine.finish_native_return(value) {
@@ -920,19 +929,21 @@ fn extend_native_roots(
     let frame_count = activation.frame_count();
     for (index, (frame, region)) in activation.frames().zip(regions.iter()).enumerate() {
         if frame.locals().len() != region.local_kinds().len()
+            || frame.local_tags().len() != region.local_kinds().len()
             || frame.states().len() != region.local_kinds().len()
         {
             return;
         }
-        for ((kind, bits), state) in region
+        for (((kind, bits), tag), state) in region
             .local_kinds()
             .iter()
             .copied()
             .zip(frame.locals().iter().copied())
+            .zip(frame.local_tags().iter().copied())
             .zip(frame.states().iter().copied())
         {
             if state & LOCAL_INITIALIZED != 0 {
-                if let Some(Value::Obj(reference)) = bits_value(kind, bits) {
+                if let Some(Value::Obj(reference)) = parts_value(kind, tag, bits) {
                     roots.push(reference);
                 }
             }
@@ -944,8 +955,16 @@ fn extend_native_roots(
         if kinds.len() != frame.operands().len() {
             return;
         }
-        for (kind, bits) in kinds.iter().copied().zip(frame.operands().iter().copied()) {
-            if let Some(Value::Obj(reference)) = bits_value(kind, bits) {
+        if frame.operand_tags().len() != kinds.len() {
+            return;
+        }
+        for ((kind, bits), tag) in kinds
+            .iter()
+            .copied()
+            .zip(frame.operands().iter().copied())
+            .zip(frame.operand_tags().iter().copied())
+        {
+            if let Some(Value::Obj(reference)) = parts_value(kind, tag, bits) {
                 roots.push(reference);
             }
         }
@@ -1063,6 +1082,7 @@ fn materialize_native_frames(
             regions[index].as_ref()
         };
         if frame.locals().len() != region.local_kinds().len()
+            || frame.local_tags().len() != region.local_kinds().len()
             || frame.states().len() != region.local_kinds().len()
         {
             return Err(());
@@ -1076,8 +1096,12 @@ fn materialize_native_frames(
         if index == 0 {
             for (slot, state) in frame.states().iter().copied().enumerate() {
                 if state & LOCAL_DIRTY != 0 {
-                    machine.vm.locals[root_base + slot] =
-                        bits_value(region.local_kinds()[slot], frame.locals()[slot]).ok_or(())?;
+                    machine.vm.locals[root_base + slot] = parts_value(
+                        region.local_kinds()[slot],
+                        frame.local_tags()[slot],
+                        frame.locals()[slot],
+                    )
+                    .ok_or(())?;
                 }
             }
             let canonical = machine.vm.frames.get_mut(root_index).ok_or(())?;
@@ -1086,17 +1110,18 @@ fn materialize_native_frames(
         } else {
             let base_local = u32::try_from(machine.vm.locals.len()).map_err(|_| ())?;
             let base_operand = u32::try_from(machine.vm.operands.len()).map_err(|_| ())?;
-            for ((kind, bits), state) in region
+            for (((kind, bits), tag), state) in region
                 .local_kinds()
                 .iter()
                 .copied()
                 .zip(frame.locals().iter().copied())
+                .zip(frame.local_tags().iter().copied())
                 .zip(frame.states().iter().copied())
             {
                 let value = if state & LOCAL_INITIALIZED == 0 {
                     Value::Uninit
                 } else {
-                    bits_value(kind, bits).ok_or(())?
+                    parts_value(kind, tag, bits).ok_or(())?
                 };
                 machine.vm.locals.push(value);
             }
@@ -1110,12 +1135,19 @@ fn materialize_native_frames(
                 env: TypeEnvId::EMPTY,
             });
         }
-        for (kind, bits) in operand_kinds
+        if frame.operand_tags().len() != operand_kinds.len() {
+            return Err(());
+        }
+        for ((kind, bits), tag) in operand_kinds
             .iter()
             .copied()
             .zip(frame.operands().iter().copied())
+            .zip(frame.operand_tags().iter().copied())
         {
-            machine.vm.operands.push(bits_value(kind, bits).ok_or(())?);
+            machine
+                .vm
+                .operands
+                .push(parts_value(kind, tag, bits).ok_or(())?);
         }
     }
     let top = frames.last().ok_or(())?;
@@ -1153,4 +1185,4 @@ fn malformed_native_execution(
 
 mod runtime;
 
-use runtime::{bits_value, scalar_bits, MachineRuntime};
+use runtime::{parts_value, scalar_parts, MachineRuntime};
