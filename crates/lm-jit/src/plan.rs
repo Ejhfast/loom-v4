@@ -118,17 +118,6 @@ impl<'a> FunctionInput<'a> {
         }
     }
 
-    pub(super) fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
-        if function == self.root.function {
-            Some(self.root)
-        } else {
-            self.direct_callees
-                .iter()
-                .find(|definition| definition.function == function)
-                .copied()
-        }
-    }
-
     pub(super) fn runtime_string_count(&self) -> usize {
         self.runtime_string_count
     }
@@ -412,20 +401,10 @@ pub(super) enum OptionTarget {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct InlineFunctionPlan {
-    pub(super) params: Vec<ScalarKind>,
-    pub(super) local_kinds: Vec<ScalarKind>,
-    pub(super) max_stack: usize,
-    pub(super) cost: u32,
-    pub(super) allocations: Vec<AllocationSite>,
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct CallContract {
     pub(super) params: Vec<ScalarKind>,
     pub(super) local_count: usize,
     pub(super) result: ScalarKind,
-    pub(super) inline: Option<InlineFunctionPlan>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -439,7 +418,6 @@ struct CallSignature {
     params: Vec<CallValueKind>,
     local_count: usize,
     result: CallValueKind,
-    inline: Option<InlineFunctionPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -449,12 +427,10 @@ pub(super) struct RegionPlan {
     pub(super) max_stack: usize,
     pub(super) max_stack_values: usize,
     pub(super) max_roots: usize,
-    pub(super) additional_frames: u32,
     pub(super) segments: Vec<Segment>,
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
     pub(super) resume_entries: std::collections::HashMap<(u32, u32), u32>,
     pub(super) resume_targets: Vec<ResumeTarget>,
-    pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
     pub(super) call_sites: usize,
     pub(super) heap_read_sites: usize,
     pub(super) heap_write_sites: usize,
@@ -500,7 +476,6 @@ struct SegmentAnalysisContext<'a> {
 #[derive(Debug, Clone)]
 pub(super) struct AllocationSite {
     pub(super) instruction: u32,
-    pub(super) initialized: Vec<bool>,
     pub(super) stack: Vec<ScalarKind>,
 }
 
@@ -576,15 +551,6 @@ impl RegionPlan {
             .collect::<Result<Vec<_>, _>>()?;
         let result_kind = scalar_kind(source, source_func.ret)?;
         let call_contracts = call_contracts(input)?;
-        let inline_functions: HashMap<u32, InlineFunctionPlan> = call_contracts
-            .iter()
-            .filter_map(|(function, contract)| {
-                contract
-                    .inline
-                    .as_ref()
-                    .map(|plan| (*function, plan.clone()))
-            })
-            .collect();
         let entries: std::collections::HashMap<(u32, u32), usize> = segments
             .iter()
             .enumerate()
@@ -593,7 +559,6 @@ impl RegionPlan {
         resolve_successors(&mut segments, &entries)?;
         let mut max_stack = 0;
         let mut max_stack_values = 0;
-        let mut additional_frames = 0;
         let mut call_sites = 0;
         let mut heap_read_sites = 0;
         let mut heap_write_sites = 0;
@@ -670,17 +635,9 @@ impl RegionPlan {
             segment.allocations = analysis.allocations;
             allocation_sites += segment.allocations.len();
             segment.cost = segment.end - segment.start;
-            if let SegmentExit::Call { target, .. } = segment.exit {
+            if matches!(segment.exit, SegmentExit::Call { .. }) {
                 call_sites += 1;
-                if let Some(inline) = inline_functions.get(&target) {
-                    segment.cost = segment
-                        .cost
-                        .checked_add(inline.cost)
-                        .ok_or(UnsupportedReason::RegionLimit)?;
-                    additional_frames = 1;
-                } else {
-                    segment.cost = segment.cost.saturating_sub(1);
-                }
+                segment.cost = segment.cost.saturating_sub(1);
             }
             if matches!(segment.exit, SegmentExit::Effect { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
@@ -712,38 +669,12 @@ impl RegionPlan {
             .iter()
             .filter(|kind| is_root_kind(**kind))
             .count();
-        let inline_root_count = inline_functions
-            .values()
-            .map(|inline| {
-                inline
-                    .local_kinds
-                    .iter()
-                    .filter(|kind| is_root_kind(**kind))
-                    .count()
-                    + inline.max_stack
-            })
-            .max()
-            .unwrap_or(0);
         let max_roots = root_local_count
             .checked_add(max_stack)
-            .and_then(|count| count.checked_add(inline_root_count))
-            .ok_or(UnsupportedReason::RegionLimit)?;
-        allocation_sites = inline_functions
-            .values()
-            .try_fold(allocation_sites, |total, inline| {
-                total.checked_add(inline.allocations.len())
-            })
             .ok_or(UnsupportedReason::RegionLimit)?;
         let mut resume_entries = std::collections::HashMap::new();
         let mut resume_targets = Vec::new();
         for (segment_index, segment) in segments.iter().enumerate() {
-            let has_inline_call = matches!(
-                segment.exit,
-                SegmentExit::Call { target, .. } if inline_functions.contains_key(&target)
-            );
-            if has_inline_call {
-                continue;
-            }
             for offset in 1..segment.fuel_stacks.len() {
                 let (instruction, _) = &segment.fuel_stacks[offset];
                 let index = segments
@@ -769,12 +700,10 @@ impl RegionPlan {
             max_stack,
             max_stack_values,
             max_roots,
-            additional_frames,
             segments,
             entries,
             resume_entries,
             resume_targets,
-            inline_functions,
             call_sites,
             heap_read_sites,
             heap_write_sites,
@@ -818,36 +747,16 @@ fn call_contracts(
             .map(|ty| call_value_kind(definition.source, *ty))
             .collect::<Result<Vec<_>, _>>()?;
         let result = call_value_kind(definition.source, source_func.ret)?;
-        let concrete_params = params
-            .iter()
-            .copied()
-            .map(CallValueKind::concrete)
-            .collect::<Option<Vec<_>>>();
-        let concrete_result = result.concrete();
-        let inline = concrete_params
-            .as_deref()
-            .zip(concrete_result)
-            .and_then(|(params, result)| inline_function_plan(definition, params, result));
         contracts.insert(
             definition.function,
             CallSignature {
                 params,
                 local_count: source_func.local_types.len(),
                 result,
-                inline,
             },
         );
     }
     Ok(contracts)
-}
-
-impl CallValueKind {
-    fn concrete(self) -> Option<ScalarKind> {
-        match self {
-            CallValueKind::Fixed(kind) => Some(kind),
-            CallValueKind::Variable(_) => None,
-        }
-    }
 }
 
 fn call_value_kind(module: &Module, ty: u32) -> Result<CallValueKind, UnsupportedReason> {
@@ -890,137 +799,6 @@ fn instantiate_call(
             .collect::<Result<Vec<_>, _>>()?,
         local_count: signature.local_count,
         result: instantiate(signature.result)?,
-        inline: signature.inline.clone(),
-    })
-}
-
-fn inline_function_plan(
-    definition: FunctionDefinition<'_>,
-    params: &[ScalarKind],
-    result: ScalarKind,
-) -> Option<InlineFunctionPlan> {
-    const MAX_INLINE_INSTRUCTIONS: usize = 256;
-
-    let runtime = definition.runtime;
-    if runtime.type_params != 0
-        || runtime.effect_params != 0
-        || !runtime.captures.is_empty()
-        || !runtime.row.is_empty()
-        || runtime.blocks.len() != 1
-    {
-        return None;
-    }
-    let code = runtime.blocks.first()?;
-    if code.is_empty()
-        || code.len() > MAX_INLINE_INSTRUCTIONS
-        || !matches!(code.last(), Some(Instr::Return))
-        || code[..code.len() - 1].iter().any(|instruction| {
-            matches!(
-                instruction,
-                Instr::Jump(_)
-                    | Instr::JumpIfFalse(_)
-                    | Instr::JumpIfTrue(_)
-                    | Instr::Call(_)
-                    | Instr::LoadField(_)
-                    | Instr::StoreField(_)
-                    | Instr::TupleGet(_)
-                    | Instr::ListLen
-                    | Instr::ListAt
-                    | Instr::Extended(ExtendedInstr::ListSet)
-                    | Instr::Extended(ExtendedInstr::ListCapacity)
-                    | Instr::Extended(ExtendedInstr::ListEpoch)
-                    | Instr::Extended(ExtendedInstr::ListIterLen)
-                    | Instr::Extended(ExtendedInstr::ListReserve)
-                    | Instr::Extended(ExtendedInstr::ListReorder)
-                    | Instr::Extended(ExtendedInstr::SealInstance)
-                    | Instr::Native(
-                        NativeInstr::BytesLen
-                            | NativeInstr::BytesAt
-                            | NativeInstr::BytesGet
-                            | NativeInstr::StrByteLen
-                            | NativeInstr::StrCharCount,
-                    )
-                    | Instr::TupleNew { .. }
-                    | Instr::ListNew { .. }
-                    | Instr::ListPush
-                    | Instr::Return
-            )
-        })
-    {
-        return None;
-    }
-    let mut allocated = false;
-    for instruction in &code[..code.len() - 1] {
-        if allocated
-            && matches!(
-                instruction,
-                Instr::New(_)
-                    | Instr::LoadField(_)
-                    | Instr::Add
-                    | Instr::Sub
-                    | Instr::Mul
-                    | Instr::Div
-                    | Instr::Rem
-                    | Instr::Neg
-            )
-        {
-            return None;
-        }
-        allocated |= matches!(instruction, Instr::New(_));
-    }
-    let source_func = definition
-        .source
-        .funcs
-        .get(definition.source_function as usize)?;
-    let local_kinds = source_func
-        .local_types
-        .iter()
-        .map(|ty| scalar_kind(definition.source, *ty))
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    if local_kinds.len() > MAX_REGION_LOCALS || local_kinds.get(..params.len()) != Some(params) {
-        return None;
-    }
-    let segment = Segment {
-        block: 0,
-        start: 0,
-        end: code.len() as u32,
-        cost: code.len() as u32,
-        exit: SegmentExit::Return,
-        uses: Vec::new(),
-        definitions: Vec::new(),
-        successors: Vec::new(),
-        live_in: Vec::new(),
-        entry_stack: Vec::new(),
-        call_contract: None,
-        exit_stack: Vec::new(),
-        boundary_stack: Vec::new(),
-        heap_accesses: Vec::new(),
-        option_accesses: Vec::new(),
-        fuel_stacks: Vec::new(),
-        replay_stacks: Vec::new(),
-        fault_stacks: Vec::new(),
-        allocations: Vec::new(),
-    };
-    let mut initialized = vec![false; local_kinds.len()];
-    initialized[..params.len()].fill(true);
-    let calls = HashMap::new();
-    let context = SegmentAnalysisContext {
-        func: runtime,
-        source_func,
-        module: definition.source,
-        locals: &local_kinds,
-        result,
-        calls: &calls,
-        class_relocation: definition.class_relocation,
-    };
-    let analysis = analyze_segment(&context, &segment, &initialized, &[], None).ok()?;
-    Some(InlineFunctionPlan {
-        params: params.to_vec(),
-        local_kinds,
-        max_stack: analysis.max_stack,
-        cost: code.len() as u32,
-        allocations: analysis.allocations,
     })
 }
 
@@ -1709,13 +1487,8 @@ fn analyze_segment(
                 .ok_or(UnsupportedReason::NonScalarType)?;
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
-                let mut initialized_now = initialized.to_vec();
-                for (slot, defined) in definitions.iter().copied().enumerate() {
-                    initialized_now[slot] |= defined;
-                }
                 allocations.push(AllocationSite {
                     instruction,
-                    initialized: initialized_now,
                     stack: stack.clone(),
                 });
                 fault_stacks.push((instruction + 1, stack.clone()));
@@ -1777,18 +1550,6 @@ fn analyze_segment(
                 boundary_stack = stack.clone();
                 for parameter in contract.params.iter().rev().copied() {
                     expect(&mut stack, parameter)?;
-                }
-                if let Some(inline) = &contract.inline {
-                    let prefix = stack.len();
-                    let push_limit = boundary_stack
-                        .len()
-                        .checked_add(inline.local_kinds.len())
-                        .ok_or(UnsupportedReason::RegionLimit)?;
-                    let body_limit = prefix
-                        .checked_add(inline.local_kinds.len())
-                        .and_then(|value| value.checked_add(inline.max_stack))
-                        .ok_or(UnsupportedReason::RegionLimit)?;
-                    max_stack_values = max_stack_values.max(push_limit).max(body_limit);
                 }
                 stack.push(contract.result);
                 call_contract = Some(contract);

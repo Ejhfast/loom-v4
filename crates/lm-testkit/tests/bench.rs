@@ -686,8 +686,8 @@ fn report_guard_upper_bound() {
     );
 }
 
-fn report_auto_fallback() {
-    let name = "jit_unsupported_auto";
+fn report_auto_mixed() {
+    let name = "jit_mixed_auto";
     if !selected(name) {
         return;
     }
@@ -701,12 +701,11 @@ fn report_auto_fallback() {
     );
     let (interpreted, _) = time_program_engine(source, EngineMode::Interpreter);
     let (automatic, metrics) = time_program_engine(source, EngineMode::Auto);
-    assert_eq!(metrics.native_entries, 0);
-    assert_eq!(metrics.compilation_attempts, 0);
-    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+    assert!(metrics.native_retired_instructions > 0);
+    assert!(metrics.native_interpreter_exits > 0);
     let ratio = automatic.as_secs_f64() / interpreted.as_secs_f64();
     println!(
-        "LOOM_JIT_FALLBACK\t{name}\t{:.3}\t{:.3}\t{ratio:.3}",
+        "LOOM_JIT_MIXED\t{name}\t{:.3}\t{:.3}\t{ratio:.3}",
         interpreted.as_secs_f64() * 1e3,
         automatic.as_secs_f64() * 1e3,
     );
@@ -1565,7 +1564,7 @@ fn bench_jit_scalar_regions() {
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
     );
     report_guard_upper_bound();
-    report_auto_fallback();
+    report_auto_mixed();
 }
 
 // ---------------------------------------------------------------

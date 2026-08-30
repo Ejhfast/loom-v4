@@ -214,12 +214,6 @@ impl CompiledRegion {
         self.plan.max_stack_values
     }
 
-    /// Return the largest additional native call depth.
-    #[inline(always)]
-    pub fn additional_frames(&self) -> u32 {
-        self.plan.additional_frames
-    }
-
     /// Return the plan for one exact program position.
     #[inline(always)]
     pub fn entry_plan(&self, block: u32, instruction: u32) -> Option<EntryPlan<'_>> {

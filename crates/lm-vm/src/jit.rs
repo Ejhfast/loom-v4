@@ -426,16 +426,6 @@ impl JitEngine {
                     metrics.note_missing_entry_fallback();
                     return NativeAttempt::Fallback;
                 }
-                let Some(required_frames) =
-                    (machine.vm.frames.len() as u32).checked_add(region.additional_frames())
-                else {
-                    metrics.note_guard_failure(0);
-                    return NativeAttempt::Fallback;
-                };
-                if required_frames > machine.config.max_frames {
-                    metrics.note_guard_failure(0);
-                    return NativeAttempt::Fallback;
-                }
                 let Some(entry) = region.entry_plan(frame.block, frame.ip) else {
                     metrics.note_missing_entry_fallback();
                     return region

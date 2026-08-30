@@ -5,17 +5,15 @@ use crate::activation::{
     RawTypeEnvironmentCacheEntry, RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
-    CallContract, FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract,
-    OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit, UnsupportedReason,
-    ValueContract,
+    CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
+    Segment, SegmentExit, UnsupportedReason, ValueContract,
 };
 use crate::{
-    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, TypeEnvironmentSite,
-    EXIT_ALLOCATION, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION,
-    EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL,
-    EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH,
-    EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY,
-    LOCAL_INITIALIZED,
+    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL,
+    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
+    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
+    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -263,15 +261,6 @@ struct FaultPoint {
     prefix: u32,
 }
 
-struct InlineCallEmission<'a> {
-    definition: FunctionDefinition<'a>,
-    plan: &'a InlineFunctionPlan,
-    root_local_kinds: &'a [ScalarKind],
-    caller_stack_kinds: &'a [ScalarKind],
-    deopt: FaultPoint,
-    deopt_stack: &'a [NativeValue],
-}
-
 #[derive(Clone, Copy)]
 struct HeapExitEmission<'a> {
     point: FaultPoint,
@@ -397,19 +386,11 @@ fn emit_region(
         .segments
         .iter()
         .map(|segment| {
-            let has_inline_call = matches!(
-                segment.exit,
-                SegmentExit::Call { target, .. } if plan.inline_functions.contains_key(&target)
-            );
-            if has_inline_call {
-                Vec::new()
-            } else {
-                segment
-                    .fuel_stacks
-                    .iter()
-                    .map(|_| builder.create_block())
-                    .collect()
-            }
+            segment
+                .fuel_stacks
+                .iter()
+                .map(|_| builder.create_block())
+                .collect()
         })
         .collect();
 
@@ -565,60 +546,25 @@ fn emit_region(
         builder.ins().brif(enough, body, &[], exact_fuel, &[]);
 
         builder.switch_to_block(exact_fuel);
-        let has_inline_call = matches!(
-            segment.exit,
-            SegmentExit::Call { target, .. } if plan.inline_functions.contains_key(&target)
-        );
-        if has_inline_call {
-            let retired_value = builder.use_var(retired);
-            let result = builder.ins().iconst(types::I64, 0);
-            let entry_stack: Vec<NativeValue> = values
-                .stack
-                .iter()
-                .copied()
-                .zip(values.stack_tags.iter().copied())
-                .take(segment.entry_stack.len())
-                .map(|(bits, tag)| NativeValue {
-                    bits: builder.use_var(bits),
-                    tag: builder.use_var(tag),
-                })
-                .collect();
-            emit_exit(
-                &mut builder,
+        let first = exact_blocks[index]
+            .first()
+            .copied()
+            .ok_or(CompileError::Backend)?;
+        builder.ins().jump(first, &[]);
+        emit_segment(
+            &mut builder,
+            SegmentEmission {
+                bytecode,
+                segment,
+                blocks: &blocks,
                 values,
-                ExitEmission {
-                    retired: retired_value,
-                    kind: EXIT_FUEL,
-                    block: segment.block,
-                    instruction: segment.start,
-                    result: NativeValue {
-                        bits: result,
-                        tag: result,
-                    },
-                },
-                &entry_stack,
-            )?;
-        } else {
-            let first = exact_blocks[index]
-                .first()
-                .copied()
-                .ok_or(CompileError::Backend)?;
-            builder.ins().jump(first, &[]);
-            emit_segment(
-                &mut builder,
-                SegmentEmission {
-                    bytecode,
-                    segment,
-                    blocks: &blocks,
-                    values,
-                    plan,
-                    input,
-                    type_environment_sites,
-                    exact_fuel: true,
-                    resume_blocks: Some(&exact_blocks[index]),
-                },
-            )?;
-        }
+                plan,
+                input,
+                type_environment_sites,
+                exact_fuel: true,
+                resume_blocks: Some(&exact_blocks[index]),
+            },
+        )?;
 
         builder.switch_to_block(body);
         emit_segment(
@@ -1803,87 +1749,54 @@ fn emit_segment(
 
     if let SegmentExit::Call { target, .. } = segment.exit {
         let call_instruction = segment.end - 1;
-        let prefix = segment.end - segment.start - 1;
-        if let Some(inline) = plan.inline_functions.get(&target) {
-            let definition = input
-                .definition(target)
-                .ok_or(CompileError::Unsupported(UnsupportedReason::MissingSource))?;
-            let deopt_stack = stack.clone();
-            let caller_kind_count = segment
-                .boundary_stack
-                .len()
-                .checked_sub(inline.params.len())
-                .ok_or(CompileError::Backend)?;
-            emit_inline_call(
-                builder,
-                values,
-                &mut stack,
-                InlineCallEmission {
-                    definition,
-                    plan: inline,
-                    root_local_kinds: &plan.local_kinds,
-                    caller_stack_kinds: &segment.boundary_stack[..caller_kind_count],
-                    deopt: FaultPoint {
+        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        let contract = segment
+            .call_contract
+            .as_ref()
+            .ok_or(CompileError::Backend)?;
+        let environment = match segment.exit {
+            SegmentExit::Call {
+                app: Some(application),
+                ..
+            } => {
+                let site = type_environment_sites
+                    .iter()
+                    .find(|site| {
+                        site.block == segment.block
+                            && site.instruction == call_instruction
+                            && site.application == application
+                    })
+                    .ok_or(CompileError::Backend)?;
+                emit_type_environment_lookup(
+                    builder,
+                    values,
+                    site,
+                    FaultPoint {
                         block: segment.block,
                         instruction: call_instruction,
-                        prefix,
+                        prefix: 0,
                     },
-                    deopt_stack: &deopt_stack,
-                },
-            )?;
-            emit_segment_charge(builder, values, segment.cost, exact_fuel);
-            define_stack(builder, values, &stack)?;
-            builder.ins().jump(blocks[segment.successors[0]], &[]);
-        } else {
-            emit_segment_charge(builder, values, segment.cost, exact_fuel);
-            let contract = segment
-                .call_contract
-                .as_ref()
-                .ok_or(CompileError::Backend)?;
-            let environment = match segment.exit {
-                SegmentExit::Call {
-                    app: Some(application),
-                    ..
-                } => {
-                    let site = type_environment_sites
-                        .iter()
-                        .find(|site| {
-                            site.block == segment.block
-                                && site.instruction == call_instruction
-                                && site.application == application
-                        })
-                        .ok_or(CompileError::Backend)?;
-                    emit_type_environment_lookup(
-                        builder,
-                        values,
-                        site,
-                        FaultPoint {
-                            block: segment.block,
-                            instruction: call_instruction,
-                            prefix: 0,
-                        },
-                        &stack,
-                    )?
-                }
-                SegmentExit::Call { app: None, .. } => builder.ins().iconst(types::I32, 0),
-                _ => return Err(CompileError::Backend),
-            };
-            emit_native_call(
-                builder,
-                values,
-                &mut stack,
-                NativeCallEmission {
-                    target,
-                    environment,
-                    contract,
-                    block: segment.block,
-                    instruction: call_instruction,
-                    successor_entry: u32::try_from(segment.successors[0])
-                        .map_err(|_| CompileError::Backend)?,
-                    successor: blocks[segment.successors[0]],
-                },
-            )?;
-        }
+                    &stack,
+                )?
+            }
+            SegmentExit::Call { app: None, .. } => builder.ins().iconst(types::I32, 0),
+            _ => return Err(CompileError::Backend),
+        };
+        emit_native_call(
+            builder,
+            values,
+            &mut stack,
+            NativeCallEmission {
+                target,
+                environment,
+                contract,
+                block: segment.block,
+                instruction: call_instruction,
+                successor_entry: u32::try_from(segment.successors[0])
+                    .map_err(|_| CompileError::Backend)?,
+                successor: blocks[segment.successors[0]],
+            },
+        )?;
         return Ok(());
     }
 
@@ -2649,292 +2562,6 @@ fn emit_native_call(
     define_stack(builder, values, stack)?;
     builder.ins().jump(successor, &[]);
     Ok(())
-}
-
-fn emit_inline_call(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    caller_stack: &mut Vec<NativeValue>,
-    call: InlineCallEmission<'_>,
-) -> Result<(), CompileError> {
-    let argument_start = caller_stack
-        .len()
-        .checked_sub(call.plan.params.len())
-        .ok_or(CompileError::Backend)?;
-    let arguments = caller_stack.split_off(argument_start);
-    let mut locals = vec![None; call.plan.local_kinds.len()];
-    for (slot, value) in arguments.into_iter().enumerate() {
-        locals[slot] = Some(value);
-    }
-    let mut stack = Vec::with_capacity(call.plan.max_stack);
-    let code = call
-        .definition
-        .runtime
-        .blocks
-        .first()
-        .ok_or(CompileError::Backend)?;
-    for (instruction_index, instruction) in code.iter().copied().enumerate() {
-        match instruction {
-            Instr::ConstUnit => {
-                let value = builder.ins().iconst(types::I64, 0);
-                push_static(builder, &mut stack, ScalarKind::Unit, value)?;
-            }
-            Instr::ConstBool(value) => {
-                let value = builder.ins().iconst(types::I64, i64::from(value));
-                push_static(builder, &mut stack, ScalarKind::Bool, value)?;
-            }
-            Instr::ConstInt(value) => {
-                let value = builder.ins().iconst(types::I64, value);
-                push_static(builder, &mut stack, ScalarKind::Int, value)?;
-            }
-            Instr::ConstFloat(bits) => {
-                let value = builder
-                    .ins()
-                    .iconst(types::I64, canonical_float_bits(bits) as i64);
-                push_static(builder, &mut stack, ScalarKind::Float, value)?;
-            }
-            Instr::ConstChar(value) => {
-                let value = builder.ins().iconst(types::I64, i64::from(value));
-                push_static(builder, &mut stack, ScalarKind::Char, value)?;
-            }
-            Instr::OpConst(operation) => {
-                let value = builder.ins().iconst(types::I64, i64::from(operation));
-                push_static(builder, &mut stack, ScalarKind::Operation, value)?;
-            }
-            Instr::LoadLocal(slot) => {
-                let value = locals
-                    .get(slot as usize)
-                    .copied()
-                    .flatten()
-                    .ok_or(CompileError::Backend)?;
-                stack.push(value);
-            }
-            Instr::StoreLocal(slot) => {
-                let value = pop_value(&mut stack)?;
-                *locals.get_mut(slot as usize).ok_or(CompileError::Backend)? = Some(value);
-            }
-            Instr::Pop => {
-                pop_native(&mut stack)?;
-            }
-            Instr::New(class) => {
-                let site = call
-                    .plan
-                    .allocations
-                    .iter()
-                    .find(|site| site.instruction as usize == instruction_index)
-                    .ok_or(CompileError::Backend)?;
-                let mut roots = Vec::new();
-                for (slot, (kind, variable)) in call
-                    .root_local_kinds
-                    .iter()
-                    .copied()
-                    .zip(values.locals.iter().copied())
-                    .enumerate()
-                {
-                    if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
-                        roots.push(NativeRoot {
-                            bits: builder.use_var(variable),
-                            tag: builder.use_var(values.local_tags[slot]),
-                            state: Some(builder.use_var(values.local_states[slot])),
-                        });
-                    }
-                }
-                extend_stack_roots(&mut roots, call.caller_stack_kinds, caller_stack)?;
-                for ((kind, initialized), value) in call
-                    .plan
-                    .local_kinds
-                    .iter()
-                    .copied()
-                    .zip(site.initialized.iter().copied())
-                    .zip(locals.iter().copied())
-                {
-                    if initialized && matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_))
-                    {
-                        let value = value.ok_or(CompileError::Backend)?;
-                        roots.push(NativeRoot {
-                            bits: value.bits,
-                            tag: value.tag,
-                            state: None,
-                        });
-                    }
-                }
-                extend_stack_roots(&mut roots, &site.stack, &stack)?;
-                let environment = builder.ins().iconst(types::I32, 0);
-                let (status, value) =
-                    emit_allocation_call(builder, values, class, environment, &roots, false)?;
-                let replay = builder
-                    .ins()
-                    .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
-                emit_fault_check(
-                    builder,
-                    values,
-                    replay,
-                    EXIT_ALLOCATION,
-                    call.deopt,
-                    call.deopt_stack,
-                )?;
-                push_static(builder, &mut stack, ScalarKind::Object(0), value)?;
-            }
-            Instr::Add | Instr::Sub | Instr::Mul => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let (result, overflow) = match instruction {
-                    Instr::Add => builder.ins().sadd_overflow(left, right),
-                    Instr::Sub => builder.ins().ssub_overflow(left, right),
-                    Instr::Mul => builder.ins().smul_overflow(left, right),
-                    _ => unreachable!(),
-                };
-                emit_fault_check(
-                    builder,
-                    values,
-                    overflow,
-                    EXIT_INTERPRETER,
-                    call.deopt,
-                    call.deopt_stack,
-                )?;
-                push_static(builder, &mut stack, ScalarKind::Int, result)?;
-            }
-            Instr::Div | Instr::Rem => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let zero = builder.ins().icmp_imm(IntCC::Equal, right, 0);
-                emit_fault_check(
-                    builder,
-                    values,
-                    zero,
-                    EXIT_INTERPRETER,
-                    call.deopt,
-                    call.deopt_stack,
-                )?;
-                let minimum = builder.ins().iconst(types::I64, i64::MIN);
-                let minimum_left = builder.ins().icmp(IntCC::Equal, left, minimum);
-                let negative_one = builder.ins().icmp_imm(IntCC::Equal, right, -1);
-                let overflow = builder.ins().band(minimum_left, negative_one);
-                emit_fault_check(
-                    builder,
-                    values,
-                    overflow,
-                    EXIT_INTERPRETER,
-                    call.deopt,
-                    call.deopt_stack,
-                )?;
-                let result = if matches!(instruction, Instr::Div) {
-                    builder.ins().sdiv(left, right)
-                } else {
-                    builder.ins().srem(left, right)
-                };
-                push_static(builder, &mut stack, ScalarKind::Int, result)?;
-            }
-            Instr::Neg => {
-                let value = pop_native(&mut stack)?;
-                let zero = builder.ins().iconst(types::I64, 0);
-                let (result, overflow) = builder.ins().ssub_overflow(zero, value);
-                emit_fault_check(
-                    builder,
-                    values,
-                    overflow,
-                    EXIT_INTERPRETER,
-                    call.deopt,
-                    call.deopt_stack,
-                )?;
-                push_static(builder, &mut stack, ScalarKind::Int, result)?;
-            }
-            Instr::Not => {
-                let value = pop_native(&mut stack)?;
-                let result = builder.ins().bxor_imm(value, 1);
-                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
-            }
-            Instr::LtInt
-            | Instr::LeInt
-            | Instr::GtInt
-            | Instr::GeInt
-            | Instr::EqInt
-            | Instr::NeInt => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let condition = match instruction {
-                    Instr::LtInt => IntCC::SignedLessThan,
-                    Instr::LeInt => IntCC::SignedLessThanOrEqual,
-                    Instr::GtInt => IntCC::SignedGreaterThan,
-                    Instr::GeInt => IntCC::SignedGreaterThanOrEqual,
-                    Instr::EqInt => IntCC::Equal,
-                    Instr::NeInt => IntCC::NotEqual,
-                    _ => unreachable!(),
-                };
-                let compared = builder.ins().icmp(condition, left, right);
-                let result = builder.ins().uextend(types::I64, compared);
-                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
-            }
-            Instr::EqBool | Instr::NeBool => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let condition = if matches!(instruction, Instr::EqBool) {
-                    IntCC::Equal
-                } else {
-                    IntCC::NotEqual
-                };
-                let compared = builder.ins().icmp(condition, left, right);
-                let result = builder.ins().uextend(types::I64, compared);
-                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
-            }
-            Instr::EqRef | Instr::NeRef => {
-                let right = pop_native(&mut stack)?;
-                let left = pop_native(&mut stack)?;
-                let condition = if matches!(instruction, Instr::EqRef) {
-                    IntCC::Equal
-                } else {
-                    IntCC::NotEqual
-                };
-                let compared = builder.ins().icmp(condition, left, right);
-                let result = builder.ins().uextend(types::I64, compared);
-                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
-            }
-            Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
-                let value = pop_native(&mut stack)?;
-                let seed = pop_native(&mut stack)?;
-                let value = builder
-                    .ins()
-                    .iadd_imm(value, 0x9e37_79b9_7f4a_7c15_u64 as i64);
-                let value = emit_stable_hash_mix(builder, value);
-                let result = if matches!(instruction, Instr::Native(NativeInstr::HashCombine)) {
-                    let mixed = builder.ins().bxor(seed, value);
-                    emit_stable_hash_mix(builder, mixed)
-                } else {
-                    builder.ins().iadd(seed, value)
-                };
-                push_static(builder, &mut stack, ScalarKind::Int, result)?;
-            }
-            Instr::Native(operation) => {
-                emit_char_instruction(builder, &mut stack, operation)?;
-            }
-            Instr::Numeric(operation) => {
-                emit_numeric_instruction(
-                    builder,
-                    values,
-                    &mut stack,
-                    operation,
-                    NumericExitEmission {
-                        point: call.deopt,
-                        deopt_stack: call.deopt_stack,
-                    },
-                )?;
-            }
-            Instr::Return => {
-                let result = pop_value(&mut stack)?;
-                if !stack.is_empty() {
-                    return Err(CompileError::Backend);
-                }
-                caller_stack.push(result);
-                return Ok(());
-            }
-            _ => {
-                return Err(CompileError::Unsupported(
-                    UnsupportedReason::UnsupportedInstruction,
-                ));
-            }
-        }
-    }
-    Err(CompileError::Backend)
 }
 
 fn pop_value(stack: &mut Vec<NativeValue>) -> Result<NativeValue, CompileError> {
