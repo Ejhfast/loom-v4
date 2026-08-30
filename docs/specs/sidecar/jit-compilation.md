@@ -1,1150 +1,709 @@
-# Guarded JIT compilation
+# JIT compilation
 
-Status: Stages 0 through 9 implement the native mechanism.
+Status: The scalar and native-call foundations are implemented.
 
-Stages 10 and later expand performance across complete programs.
+The direct heap ABI is the next implementation stage.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
-The first milestone tests whether native execution preserves Loom's reified machine state.
-
-The milestone does not define the final compiled surface.
-
 ## 1. Goals
 
-The first implementation has these goals:
+The JIT has these goals:
 
-- compile verified scalar control flow with Cranelift;
-- preserve canonical `VmState` at every engine boundary;
-- preserve exact LMBC fuel accounting;
-- preserve deterministic interpreter behavior;
-- support fresh, captured, and externally restored state through guarded entry;
-- measure native entry guard cost;
-- measure cold compilation and warm execution separately;
-- keep engine choice under host control.
+- improve complete Loom programs;
+- preserve exact interpreter results and faults;
+- preserve canonical machine state at every observable boundary;
+- preserve LMBC fuel accounting;
+- support fresh, captured, and externally restored machines;
+- keep engine policy under host control;
+- keep common operations inside native code;
+- report cold and warm costs separately.
 
-The experiment succeeds when supported warm loops improve by more than two times.
+A supported warm workload must improve by more than two times.
 
-A smaller gain requires an overhead investigation before surface expansion.
+A representative program cannot regress by more than five percent in Auto mode.
 
-## 2. Non-goals
+## 2. Core rules
 
-The first implementation does not compile these operations:
+Verified LMBC is the only executable input.
 
-- indirect, virtual, generic, and recursive native calls;
-- closures or captures;
-- generic environments;
-- generic and aggregate allocation;
-- heap mutation;
-- selectable wait preparation;
-- native LMBC instructions;
-- extended LMBC instructions.
+The verifier proves code structure and instruction types.
 
-The implementation does not replace `restored_any` during this milestone.
+Native entry guards prove the active value representations.
 
-The implementation does not validate all values in an external snapshot.
+External snapshot bytes never assert type integrity.
 
-The implementation does not store native code in artifacts or snapshots.
+Generated code uses one explicit runtime memory ABI.
 
-The implementation does not expose a guest engine-selection operation.
+Generated code does not depend on private Rust layouts.
+
+A private Rust layout and an explicit runtime ABI are different things.
+
+Common field and element operations use direct native memory access.
+
+Runtime slow paths handle uncommon or complex work.
+
+A call path does not become an engine transition.
+
+An effect remains an observable engine exit.
+
+VmState remains the canonical form at observable engine exits.
 
 ## 3. Independent proofs
 
-Every native execution needs verified code.
+Native execution uses two independent facts.
 
-Publication verifies every executable function.
+The code proof states that the LMBC passed the verifier.
 
-Native compilation rechecks the target function to obtain block-entry states.
+The state proof states that each active value has its required representation.
 
-It also checks the target unit tables.
+Artifact publication establishes the code proof.
 
-It does not check other function bodies.
+The JIT consumes verifier program-point metadata.
 
-The JIT also needs valid representations for the values that its region reads.
+The JIT does not implement another type checker.
 
-The first implementation proves that fact locally at native entry.
+The entry plan names only values that the region can read.
 
-It does not attach a global type-integrity property to the world.
+The entry guard checks those values before native entry.
 
-`restored_any` continues to select existing boundary checks.
+A failed guard changes no machine state.
+
+A failed guard resumes interpreter execution at the same position.
+
+The guard does not prove dormant locals or other machines.
+
+The guard does not prove every value reachable through the heap.
+
+A native heap load checks its loaded tag when state has structural integrity only.
+
+A loaded object reference also checks generation and shape.
+
+These checks use direct native comparisons.
+
+They do not use a runtime callback.
+
+The existing restored_any property continues to select interpreter boundary checks.
 
 It does not select the execution engine.
 
-## 4. Terms
+A later StateTypeIntegrity design can remove redundant native type guards.
 
-An **engine** executes one bounded machine turn.
+That later design does not change this heap ABI.
 
-A **region** is one supported function control-flow graph.
+## 4. Engine policy
 
-A **segment** is a fixed-cost path between fuel checkpoints.
+The host selects one engine policy.
 
-An **entry point** is a supported LMBC program position for one region.
+    pub enum EngineMode {
+        Interpreter,
+        Auto,
+        Native,
+    }
 
-An **entry plan** lists the live scalar values required by one entry point.
+Interpreter executes no native code.
 
-A **materialization map** describes canonical machine state at one native exit.
+Auto begins with interpreter execution.
 
-A **root map** lists every initialized object value held by one active native frame.
+Auto compiles only after measured useful work.
 
-A **guard** checks one required `Value` representation without changing machine state.
-
-## 5. Engine policy
-
-The host selects one engine policy:
-
-```rust
-pub enum EngineMode {
-    Interpreter,
-    Auto,
-    Native,
-}
-```
-
-`Interpreter` executes no native code.
-
-`Auto` compiles an eligible region at its first entry.
-
-It uses interpreter fallback for an ineligible region.
-
-`Native` exposes every eligibility failure through metrics and test assertions.
-
-Engine policy is not part of `VmConfig`.
+Native exposes eligibility failures through metrics and tests.
 
 Engine policy is not guest state.
 
 Artifacts and snapshots never contain engine policy.
 
-Engine choice cannot change a guest result, fault, trace, or fuel charge.
+Engine choice cannot change guest results, faults, traces, or fuel.
 
-## 6. Executor boundary
+Interpreter mode must add almost no JIT work.
 
-Deterministic execution borrows machine state.
+## 5. Executor boundary
 
-Parallel execution owns an `ExecutionLease`.
+Deterministic execution borrows one machine.
 
-The implementation keeps these ownership forms.
+Parallel execution owns one ExecutionLease.
 
-Both forms call one internal engine operation:
+Both forms call one internal engine operation.
 
-```text
-run_engine_turn(machine, code, environments, slots, limits, engine)
-    -> engine result
-```
+    run_engine_turn(machine, code, environments, slots, limits, engine)
+        -> engine result
 
-The operation receives no mutable `World` pointer.
+The operation receives no mutable World pointer.
 
-Compiled code stores no worker identifier.
+The machine lease gives one turn exclusive heap access.
 
-Compiled code uses one immutable function version.
+Compiled code stores no worker identity.
 
-The parallel lease pins that version through its existing execution code.
+Compiled code pins one exact function version.
 
-The deterministic path reads the same immutable execution code.
+A worker can share immutable compiled code with other workers.
 
-## 7. Guarded native entry
+## 6. Native turn stack
 
-The entry plan comes from verifier-derived program-point metadata.
+One native activation owns all compiled frames for one bounded turn.
 
-The plan names only values that the native region can read.
-
-The guard process follows this order:
-
-1. Read every required local and operand.
-2. Match each value against its scalar representation.
-3. Copy each scalar into the native activation.
-4. Enter native code after every match succeeds.
-
-The guard process changes no machine state.
-
-A failed guard resumes the interpreter from the original program position.
-
-A failed guard does not produce a guest fault.
-
-A successful guard proves only the active region inputs.
-
-It does not prove dormant locals, heap values, mailboxes, or other machines.
-
-External snapshots can therefore enter supported native regions.
-
-Native operations preserve the scalar types established by the entry plan.
-
-Native loop backedges do not repeat entry guards.
-
-## 8. Verifier metadata
-
-The verifier already computes local and operand types at each block entry.
-
-The JIT consumes that result through a public immutable metadata type.
-
-The metadata contains no verifier implementation state.
-
-The metadata states these facts for each reachable block:
-
-- initialized local types;
-- operand-stack types;
-- block reachability.
-
-The JIT does not maintain a second type checker.
-
-The first implementation recomputes one function's metadata during cold compilation.
-
-Measurement decides whether publication retains this metadata later.
-
-## 9. Region normalization
-
-Conditional jumps split one LMBC block into fixed-cost segments.
-
-Every segment has one known LMBC instruction cost.
-
-Every segment ends at one of these points:
-
-- a control-flow transfer;
-- a native exit;
-- a fault exit;
-- a return;
-- a fuel checkpoint.
-
-The native function can continue across segment edges and loop backedges.
-
-It does not return to Rust after every segment.
-
-A restored program can name an instruction inside an LMBC block.
-
-The interpreter runs until it reaches a supported native entry point.
-
-## 10. Initial compiled surface
-
-The first region has one monomorphic frame and an empty type environment.
-
-It has no active closure or callback.
-
-The first scalar types are `Int`, `Bool`, `Float`, and `Unit`.
-
-The first supported instructions are:
-
-- scalar constants;
-- `LoadLocal`;
-- `StoreLocal`;
-- `Pop`;
-- checked integer add, subtract, multiply, and negate;
-- integer comparisons;
-- Boolean equality and negation;
-- float add, subtract, multiply, divide, negate, and comparisons;
-- `Jump`;
-- `JumpIfFalse`;
-- `JumpIfTrue`;
-- `Return`.
-
-Division and remainder use exact zero and signed-overflow exits.
-
-An unsupported instruction makes the complete function ineligible.
-
-A direct call is the one exception to this rule.
-
-### 10.1 Direct scalar calls
-
-Stage 6 inlines one bounded, pure, monomorphic scalar leaf function.
-
-Each direct call ends one normalized segment.
-
-The segment cost includes the call instruction and every inlined callee instruction.
-
-The entry guard proves the required frame and stack limits before native execution.
-
-A potential callee fault exits before the call instruction.
-
-The interpreter then creates the callee frame and produces the canonical fault state.
-
-An effectful, recursive, non-leaf, or oversized callee uses the same interpreter exit.
-
-The caller function identity includes each direct callee identity.
-
-The native cache therefore pins the complete compiled call version.
-
-### 10.2 Guarded instance field reads
-
-Stage 7 adds non-generic class references and `LoadField`.
-
-The native ABI stores `ObjRef` as two packed `u32` values.
-
-The low half stores the object slot.
-
-The high half stores the object generation.
-
-Generated code calls one checked runtime service for each field read.
-
-The service copies the field value into the native result slot.
-
-The service never returns a heap pointer.
-
-A stale reference or invalid field produces an exact `TypeMismatch` exit.
-
-An uninitialized field produces an exact `UninitializedField` exit.
-
-A wrong field representation requests interpreter replay before the read.
-
-This replay preserves malformed external-state behavior.
-
-Generic instances remain unsupported in this stage.
-
-## 11. Native ABI
-
-Generated code does not depend on Rust's `Value` layout.
-
-`Value` has no stable foreign-function ABI.
-
-The runtime uses an explicit native function ABI:
-
-```rust
-#[repr(C)]
-struct NativeExit {
-    retired: u64,
-    kind: u32,
-    block: u32,
-    instruction: u32,
-    stack_len: u32,
-    result: u64,
-}
-
-type NativeFunction = unsafe extern "C" fn(
-    locals: *mut u64,
-    local_states: *mut u8,
-    operands: *mut u64,
-    fuel: u64,
-    entry: u32,
-    runtime_context: *mut (),
-    runtime_call: RuntimeCall,
-    runtime_result: *mut u64,
-    roots: *mut u64,
-    root_states: *mut u8,
-    exit: *mut NativeExit,
-);
-```
-
-The ABI stores scalar payloads without Rust enum tags.
-
-Boolean payloads use zero and one.
-
-Float payloads use canonical binary64 bits.
-
-Rust converts `Value` instances before native entry.
-
-Rust reconstructs canonical `Value` instances after native exit.
-
-Native registers and stack slots are execution caches only.
-
-Local state bytes record initialization and changed values.
-
-`lm-jit` owns the unsafe callback adapter.
-
-`lm-vm` implements the safe runtime service trait.
-
-The callback context stays valid only during one native activation.
-
-## 12. Canonical state
-
-`Frame`, `VmState.locals`, and `VmState.operands` remain canonical state.
-
-Native code materializes all changed state before returning to Rust.
-
-An effect exit materializes before the interpreter retires the effect instruction.
-
-An allocation callback receives complete object roots for every active native frame.
-
-Generated code retains no raw heap pointer across an allocation or collection.
-
-Each exit records the next LMBC program position.
-
-Fault exits record the post-increment instruction position.
-
-Fault exits reproduce the interpreter's operand consumption.
-
-Return can initially exit before the interpreter executes `Return`.
-
-That choice must preserve the exact retired instruction count.
-
-## 13. Fuel
-
-Fuel remains measured in retired LMBC instructions.
-
-Every segment has one fixed LMBC cost.
-
-Native code checks available fuel before entering a segment.
-
-Insufficient fuel exits before that segment changes state.
-
-Native code can continue through loop backedges while fuel remains.
-
-A faulting instruction charges only its executed LMBC prefix.
-
-Deterministic and native turns return the same state for every fuel limit.
-
-Parallel recall occurs at a native fuel checkpoint.
-
-The first implementation can use every normalized segment as a recall checkpoint.
-
-## 14. Faults
-
-The first implementation supports exact integer overflow exits.
-
-Later integer division adds divide-by-zero and signed-overflow exits.
-
-Each fault exit records these values:
-
-- the Loom fault code;
-- the exact retired count;
-- the post-increment program position;
-- the exact local and operand state.
-
-Cranelift traps do not represent Loom guest faults.
-
-Generated code returns explicit fault records to Rust.
-
-## 15. Compiled-code ownership
-
-One host engine owns native compilers and exact arena-layout caches.
-
-Each compiled region owns one finalized Cranelift `JITModule`.
-
-The final region drop releases its executable memory.
-
-The implementation pins Cranelift 0.129.2 for Rust 1.91 compatibility.
-
-Each dense function slot stores one immutable compilation verdict.
-
-Compilation serializes only concurrent requests for the same function slot.
-
-Published native functions are immutable.
-
-Workers can call published functions concurrently.
-
-The engine owner outlives every published function pointer.
-
-One cache prefix belongs to one exact arena table prefix.
-
-Equal arena clones can share this prefix.
-
-Divergent arena extensions receive separate appended slots.
-
-A semantic function hash never identifies arena-relative operands.
-
-The first cache limits region count, instructions, locals, and operand depth.
-
-An exhausted cache keeps interpreter execution available.
-
-### 15.1 Crate boundary
-
-`lm-jit` owns region analysis, Cranelift, the native ABI, and executable memory.
-
-`lm-vm` owns engine policy, entry guards, canonical state, and exit materialization.
-
-`lm-jit` depends only on lower bytecode, verifier, ABI, and value crates.
-
-`lm-jit` never depends on `lm-vm`.
-
-The native backend never reads `Machine`, `VmState`, or Rust `Value` storage.
-
-## 16. Metrics
-
-The runtime records clock-free counters:
-
-- native compilation attempts;
-- compiled regions;
-- compiled segments;
-- compiled direct-call sites;
-- compiled heap-read sites;
-- compiled allocation sites;
-- compiled effect sites;
-- native entry attempts;
-- guarded values;
-- guard failures;
-- native entries;
-- native-retired LMBC instructions;
-- materializations;
-- native fault exits;
-- native heap reads;
-- native allocations;
-- native allocation exits;
-- native effect exits;
-- fallbacks by reason.
-
-The benchmark harness measures wall time outside pure runtime crates.
-
-## 17. Correctness tests
-
-Each supported semantic test compares `Interpreter` and forced `Native` policies.
-
-Separate tests cover `Auto` fallback.
-
-Forced `Native` tests reject an unexpected eligible-region fallback.
-
-### 17.1 Segment comparison
-
-Fuel-limited differential tests force materialization at segment boundaries.
-
-The tests compare complete native and interpreter machine states.
-
-### 17.2 Fuel sweep
-
-Tests sweep every fuel limit around each segment cost.
-
-They compare these values:
-
-- stop reason;
-- retired instructions;
-- remaining fuel;
-- frame program position;
-- locals;
-- operands;
-- terminal state;
-- fault state.
-
-### 17.3 Engine switching
-
-Tests alternate interpreter and native turns on one machine.
-
-Tests capture after native execution and resume through the interpreter.
-
-Tests capture after interpreter execution and resume through native code.
-
-Tests capture native allocation state and resume through both engines.
-
-Tests capture completed effect state and resume through both engines.
-
-### 17.4 External state
-
-External snapshots can enter a native region after successful guards.
-
-A malformed required scalar causes interpreter fallback without state mutation.
-
-A malformed dormant value does not block an unrelated native region.
-
-### 17.5 Parallel execution
-
-A forced native test executes supported regions through `ExecutionLease`.
-
-The tests cover worker execution, effect exits, turn expiry, materialization, and recall.
-
-Later surface stages repeat the pause, barrier, and replacement tests.
-
-Workers share immutable compiled functions.
-
-No raw guest pointer survives a checkpoint.
-
-## 18. Performance measurements
-
-The benchmark report separates these measurements:
-
-- interpreter execution;
-- native cold execution with compilation;
-- native warm execution;
-- sliced native execution;
-- a guard-cost upper bound.
-
-Every native benchmark asserts a nonzero native-retired count.
-
-The first workload set contains `int_loop`, `float_add`, and `int_eq`.
-
-The report also records an unsupported tiny program in `Auto` mode.
-
-That program measures the interpreter fallback overhead.
-
-The guard report compares zero and 32 additional live scalar values.
-
-It reports an upper-bound cost for each additional guarded value.
-
-## 19. Performance gates
-
-Warm supported loops must improve by more than two times.
-
-The target is a clear multiple of interpreter performance.
-
-A typical two-value guard must stay below five percent of scheduled native loop time.
-
-The 32-value stress row reports the linear cost without this threshold.
-
-`Auto` mode must keep unsupported interpreter workloads within five percent.
-
-Interpreter mode must stay within benchmark noise.
-
-Cold results must report compilation cost without hiding it in setup.
-
-Workspace build time and release binary size must appear in the report.
-
-## 20. Platform behavior
-
-The first backend supports platforms accepted by the pinned Cranelift version.
-
-An unsupported platform reports that native execution is unavailable.
-
-`Interpreter` always remains available.
-
-`Auto` uses the interpreter on unsupported platforms.
-
-No unsupported platform changes guest semantics.
-
-## 21. Stages
-
-### Stage 0: Specification and baseline
-
-- write this sidecar;
-- record interpreter rows for the first workloads;
-- record workspace build and suite measurements;
-- record the current executor ownership forms.
-
-Stop gate: the baseline names revision, profile, engine, processor, and measurement method.
-
-### Stage 1: Engine boundary
-
-- add host engine policy;
-- factor one internal engine operation for both executor wrappers;
-- add clock-free engine metrics;
-- keep interpreter behavior unchanged;
-- add forced-policy tests.
-
-Stop gate: interpreter traces and execution benchmarks remain within noise.
-
-### Stage 2: Verified region metadata
-
-- expose immutable verifier block-entry metadata;
-- normalize supported scalar control flow;
-- build entry plans and materialization maps;
-- test unsupported-region diagnostics and reasons;
-- add one-segment state comparison scaffolding.
-
-Stop gate: metadata matches verifier states for crafted control-flow functions.
-
-### Stage 3: Native integer and Boolean regions
-
-- add the pinned Cranelift backend;
-- add the explicit activation ABI;
-- compile supported integer and Boolean control flow;
-- add guarded entry;
-- add exact fuel and overflow exits;
-- add native code ownership and cache limits.
-
-Stop gate: `int_loop` and `int_eq` pass differential tests and improve by more than two times.
-
-### Stage 4: Float regions and measurement
-
-- add canonical float arithmetic and comparisons;
-- pass engine-switch and external-snapshot tests;
-- measure cold, warm, guard, and fallback costs;
-- record binary size and build time;
-- run the complete workspace suite.
-
-Stop gate: report the first workload results and guard overhead.
-
-This stage is the first review point.
-
-### Stage 5: Exact division faults
-
-- add integer division and remainder;
-- add exact zero and overflow exits;
-- sweep fuel around every faulting instruction.
-
-Stop gate: division state, faults, and fuel match interpreter execution exactly.
-
-### Stage 6: Calls
-
-- compile direct monomorphic calls;
-- keep exact function versions pinned;
-- materialize before unsupported callees;
-- add recursive-call limits and tests.
-
-Stop gate: calls preserve fuel, limits, faults, versions, and complete machine state.
-
-### Stage 7: Guarded heap reads
-
-- define stable object guards;
-- pack generation-checked object handles in the native ABI;
-- add checked instance field reads;
-- preserve exact malformed-state behavior;
-- add field-read counters and measurements.
-
-Stop gate: field reads preserve full state and show a clear warm gain.
-
-### Stage 8: Bounded allocation
-
-- define safepoint root maps;
-- compile plain non-generic instance allocation;
-- collect through the checked runtime callback;
-- exit before an inline allocation that needs collection;
-- resume native execution after the constructor boundary;
-- preserve collection and snapshot rules.
-
-Stop gate: allocation preserves heap limits, collection roots, fuel, and snapshots.
-
-### Stage 9: Effects
-
-- add explicit effect exits;
-- support direct and first-class operation values;
-- keep selectable wait preparation outside this stage;
-- resume native execution after each completion;
-- preserve requests, replies, traces, and fuel.
-
-Stop gate: effectful regions match interpreter state at every completion boundary.
-
-## 22. Acceptance statement
-
-The first milestone answers one architectural question.
-
-It proves whether native scalar execution can preserve Loom's canonical reified state.
-
-Success requires exact interpreter equivalence and clear warm speedups.
-
-Later stages expand the compiled surface without changing the executor contract.
-
-## 23. Stage 0 measurements
-
-The base revision is `44c43a7bcaa40f9fe39da24afcf1e9e57eb96722`.
-
-The host uses an AMD Ryzen 9 9950X processor.
-
-The host has 16 physical cores and 32 logical processors.
-
-Runtime measurements use the release profile and `Interpreter` mode.
-
-Each runtime process runs on logical processor zero.
-
-Each result is the median of nine measured runs after one warm run.
-
-| Workload | Base time |
-| --- | ---: |
-| `int_loop` | 33.7–33.8 ms |
-| `float_add` | 34.5–35.4 ms |
-| `int_eq` | 33.0 ms |
-
-The pre-change same-worktree suite took 39.37 seconds.
-
-Cargo used 9.30 seconds of that time for compilation.
-
-One clean release CLI build took 16.60 seconds.
-
-The base release benchmark executable used 14,390,048 bytes.
-
-## 24. Stage 4 review measurements
-
-One final pinned run produced these results.
-
-Cold time starts after artifact publication.
-
-It includes region analysis and native compilation.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| `jit_int_loop` | 33.951 ms | 1.261 ms | 0.910 ms | 37.31 times |
-| `jit_float_add` | 34.700 ms | 2.753 ms | 2.410 ms | 14.40 times |
-| `jit_int_eq` | 32.832 ms | 1.243 ms | 0.933 ms | 35.20 times |
-
-The interpreter-only base comparison used separate interleaved processes.
-
-No interpreter row changed by more than 2.4 percent.
-
-The 4,096-instruction sliced integer loop improved by 19.43 times.
-
-The deterministic scheduler loop improved by 7.23 times.
-
-An early implementation interpreted a complete quantum after an interior stop.
-
-That defect limited the scheduled gain to 1.1 times.
-
-The executor now advances only to the next native segment entry.
-
-The guard stress row measured 7.62 nanoseconds for each additional live scalar.
-
-Two live values account for approximately 4.2 percent of the scheduled native loop.
-
-This estimate excludes fixed activation and materialization costs.
-
-The 32-value stress case increased its sliced time from 1.334 milliseconds to 1.930 milliseconds.
-
-The wide stress case confirms that guard cost scales with live state.
-
-It does not justify a world-wide integrity property for this first surface.
-
-The stable unsupported `Auto` workload stayed within 0.4 percent of `Interpreter`.
-
-The complete workspace suite passes.
-
-The first final run took 46.33 seconds and rebuilt test targets.
-
-The next warm run took 31.08 seconds.
-
-The new JIT test target used 1.23 seconds.
-
-The pre-change execution component took approximately 30.07 seconds.
-
-The other warm test targets used approximately 29.85 seconds.
-
-Existing test execution therefore stayed within 0.8 percent of the pre-change result.
-
-One clean release CLI build took 29.94 seconds.
-
-Cranelift increases this clean Rust build by 80.4 percent.
-
-The JIT-enabled benchmark executable uses 20,056,000 bytes.
-
-This size is 39.4 percent larger than the base executable.
-
-The release CLI uses 19,163,064 bytes.
-
-This size is 41.7 percent larger than its 13,521,160-byte base.
-
-`Engine` owns the JIT cache even when it selects `Interpreter`.
-
-That ownership retains Cranelift drop code in the CLI.
-
-The backend build cost and enabled binary size remain review items.
-
-### 24.1 Crate extraction measurements
-
-The extraction moved native compilation from `lm-vm` into `lm-jit`.
-
-The adapter resolves source-unit data only when a function misses the native cache.
-
-All measurements used one pinned processor and the release profile.
-
-| Workload | Before | After |
-| --- | ---: | ---: |
-| Integer warm | 0.910 ms | 0.912 ms |
-| Float warm | 2.410 ms | 2.383 ms |
-| Equality warm | 0.933 ms | 0.948 ms |
-| Sliced warm | 1.780 ms | 1.826 ms |
-| Scheduled warm | 4.890 ms | 4.698 ms |
-| Wide guard | 1.930 ms | 1.945 ms |
-
-The values remain within measurement variance.
-
-An initial extraction resolved the source unit before every cache lookup.
-
-That error made scheduled execution more than two times slower.
-
-The lazy lookup removed that cost without weakening the crate boundary.
-
-## 25. Stage 5 review measurements
-
-The permanent rows vary the divisor during each loop.
-
-This form prevents constant-divisor strength reduction.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| Integer division | 78.691 ms | 2.251 ms | 1.561 ms | 50.40 times |
-| Integer remainder | 78.629 ms | 2.500 ms | 1.822 ms | 43.15 times |
-
-The retained integer loop used 0.912 milliseconds.
-
-The retained scheduled loop used 4.696 milliseconds.
-
-Both retained rows match the crate-extraction checkpoint.
-
-Fuel sweeps cover zero and signed-overflow faults for both operations.
-
-Every tested outcome and complete live-state dump matches interpreter execution.
-
-## 26. Stage 6 review measurements
-
-The call benchmark uses a callee local to prevent frontend inlining.
-
-It executes one million direct scalar calls.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| Direct scalar call | 47.400 ms | 1.292 ms | 0.911 ms | 52.05 times |
-
-The retained integer loop used 0.931 milliseconds.
-
-The retained division loop used 1.558 milliseconds.
-
-The retained scheduled loop used 4.822 milliseconds.
-
-All retained rows stay within 2.7 percent of the prior checkpoint.
-
-Fuel sweeps cover every limit from zero through 32 instructions.
-
-Tests also cover frame limits, callee faults, recursive exits, and two callee versions.
-
-## 27. Stage 7 review measurements
-
-The field benchmark creates one object before the timed region.
-
-The timed loop reads one integer field one million times.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| Instance field read | 47.753 ms | 6.074 ms | 5.380 ms | 8.88 times |
-
-The callback performs one checked heap lookup for each field read.
-
-Native code retains only generation-checked object handles.
-
-Unit tests cover successful reads and exact uninitialized-field exits.
-
-An integration test resumes native execution from interpreter-created heap state.
-
-The retained scalar, division, call, sliced, and scheduled rows remain within prior variation.
-
-## 28. Stage 8 review measurements
-
-The allocation benchmark creates 100,000 empty instances.
-
-It keeps one prior instance in a local at each allocation.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| Plain instance allocation | 7.697 ms | 3.046 ms | 2.599 ms | 2.96 times |
-
-An initial design returned to the interpreter for every allocation.
-
-That design achieved only 0.19 times interpreter performance.
-
-Native bounded allocation removed that handoff.
-
-Removing one host vector allocation from each callback improved the gain from 2.02 times to 2.96 times.
-
-Collecting inline allocations use one explicit constructor exit.
-
-The nested constructor then performs one collection and resumes native execution.
-
-Tests cover exact fuel, heap limits, root retention, collection state, and snapshot continuation.
-
-All retained native rows remain faster than their interpreter rows.
-
-## 29. Stage 9 review measurements
-
-The mixed workload performs one million integer-loop iterations and 100 direct effects.
-
-The boundary workload performs 20,000 direct effects with only loop control.
-
-| Workload | Interpreter | Native cold | Native warm | Warm gain |
-| --- | ---: | ---: | ---: | ---: |
-| Mixed compute and effects | 30.692 ms | 1.645 ms | 0.808 ms | 37.99 times |
-| Effect boundaries only | 2.279 ms | 5.794 ms | 5.289 ms | 0.43 times |
-
-Forced native execution adds approximately 151 nanoseconds per effect boundary in the boundary workload.
-
-This cost comes from state materialization, one interpreter instruction, reply handling, guards, and native reentry.
-
-An `Auto` density policy remains future work.
-
-Tests cover direct operations, first-class operations, deferred replies, denied effects, fuel sweeps, snapshots, and worker leases.
-
-Every test compares complete live-state dumps and proc traces where those values apply.
-
-The retained scalar, call, field, allocation, sliced, and scheduled rows remain within prior variation.
-
-## 30. Stage 10 cache correction
-
-The first cache keyed regions only by semantic function hash.
-
-Generated allocation code also embeds arena-relative class indices.
-
-Two arenas could therefore reuse incompatible native code.
-
-The corrected cache uses direct function slots under one exact arena prefix.
-
-The hot lookup performs no semantic hash or hash-table probe.
-
-Failed compilation stores one stable verdict without consuming compiled-region capacity.
-
-Concurrent compilation holds only the requested slot initializer.
-
-The engine retains shared arena prefixes while their source tables remain live.
-
-Each dropped region calls Cranelift's executable-memory release operation.
-
-Invalid retired counts now produce `MalformedState` without replaying native heap changes.
-
-A regression test runs equal function identities under two different class layouts.
-
-Both runs now construct their declared class.
-
-The retained warm integer loop used 0.708 milliseconds.
-
-The scheduled integer loop used 4.614 milliseconds.
-
-Unsupported `Auto` execution used 1.004 times interpreter duration.
-
-## 31. Stage 11 expression-stack correction
-
-The first arithmetic analysis required an operand depth of exactly two.
-
-That rule rejected arithmetic inside larger expressions.
-
-Every arithmetic fault now records the complete residual operand stack.
-
-Native code can therefore preserve pending outer operands during a fault.
-
-Fuel sweeps cover a nested overflow with one retained outer operand.
-
-Factorial and Fibonacci now compile their scalar recursive functions.
-
-The idiomatic expression loop improved from no native coverage to 36.01 times.
-
-Factorial reached 0.14 times interpreter performance.
-
-Fibonacci reached 0.12 times interpreter performance.
-
-The recursive rows expose the call-transition cost measured in the next stage.
-
-## 32. Production precedent gate
-
-Each expansion stage starts with a production precedent review.
-
-No stage can optimize an engine transition that production systems keep inside compiled code.
-
-The implementation uses these initial precedents:
-
-| Area | Production pattern | Loom form |
-| --- | --- | --- |
-| Calls | Native calls use native frames. | One native frame stack runs for the complete turn. |
-| Lazy compilation | Stable entry stubs publish code once. | Each function slot owns one stable native entry cell. |
-| Deoptimization | Stack maps reconstruct baseline frames. | Frame records and reification maps reconstruct `VmState`. |
-| Tiering | Invocation and backedge counters select hot code. | `Auto` counts useful work before compilation. |
-| Virtual calls | Inline caches guard one observed target. | A class guard selects one direct native entry. |
-| Allocation | Inline fast paths call slow runtime stubs. | Native allocation uses a bounded fast path and one collection exit. |
-| Heap mutation | Stores use write barriers when required. | Native stores preserve heap epochs and future barriers. |
-| Safepoints | Calls and loop backedges poll bounded state. | Segment checkpoints preserve fuel and recall bounds. |
-
-The call design follows HotSpot, V8, RyuJIT, and LLVM ORC lazy entry stubs.
-
-The tiering design follows RyuJIT call counters and loop patchpoints.
-
-The deoptimization design follows HotSpot scope maps and V8 frame descriptions.
-
-## 33. Stage 12 native turn stack
-
-The canonical interpreter frame is a deoptimization format.
-
-It is not the native call format.
-
-One native activation owns all compiled frames for one bounded engine turn.
-
-The activation contains these values:
+The activation contains:
 
 - one contiguous scalar area;
-- one parallel scalar-state area;
+- one scalar-state area;
 - one bounded frame table;
-- the shared fuel limit;
-- the stable entry-cell table;
+- one stable function-entry table;
+- one fuel balance;
 - one final exit record.
 
-Each native frame records its function, resume position, scalar window, and operand length.
+Each native frame records its function and resume position.
+
+Each frame also records its scalar window and operand length.
 
 Static region plans supply every scalar kind.
 
-A direct call loads the target entry cell.
+A direct call loads one stable function entry cell.
 
 A published entry pushes one native frame and performs one native call.
 
-A null entry produces one unsupported-callee exit before the call retires.
+A null entry exits before the call retires.
 
 The interpreter can execute that call and compile the callee later.
 
-A normal native return pops the native frame and resumes its native caller.
+A native return pops one native frame.
 
-Recursion uses the same operation.
+Recursion uses the same calling convention.
 
-The call instruction charges one LMBC fuel unit.
+Frame and stack limits match the interpreter limits.
 
-Frame and stack limits match `Machine::push_frame` exactly.
+No call materializes VmState.
 
-Fuel expiry, faults, effects, recall, and slow allocation leave native code.
+No call invokes a generic runtime dispatcher.
 
-One materializer walks every active native frame at that exit.
+## 7. Region plans
 
-It reconstructs canonical frames, locals, operands, and exact program positions.
+A region is one supported function control-flow graph.
 
-No native frame survives the turn.
+A segment is one fixed-cost path between fuel checkpoints.
 
-An allocation can collect directly only when the materializer can expose every native root.
+Conditional jumps split LMBC blocks into segments.
 
-Other collection requests use the slow exit and replay the unretired allocation.
+Each segment has one exact LMBC instruction cost.
 
-The stage has these gates:
+Every segment ends at one of these points:
 
-- recursive calls perform no interpreter or Rust transition;
-- unsupported callees preserve exact call state;
-- every fuel boundary matches interpreter state;
-- deep faults preserve every caller frame;
-- effects and snapshots preserve complete canonical state;
-- factorial and Fibonacci improve by more than two times when warm;
-- direct non-inline calls improve by more than two times when warm.
+- a control transfer;
+- a safepoint;
+- a fault;
+- a return;
+- an unsupported instruction.
 
-### 33.1 Stage record
+Native code can continue through segment edges and loop backedges.
 
-The release benchmark used the current interpreter and native engine in one session.
+It does not return to Rust after every segment.
 
-| Row | Interpreter | Native warm | Speedup |
-| --- | ---: | ---: | ---: |
-| Factorial | 5.036 ms | 0.908 ms | 5.54 times |
-| Fibonacci | 8.971 ms | 1.836 ms | 4.89 times |
+A restored machine can name an interior LMBC position.
 
-Recursive execution used at most three native entries and materializations.
+The interpreter advances to a supported native entry.
 
-Mutual recursion used five entries and materializations for 101 calls.
+## 8. Fuel and faults
 
-The focused suite covered every recursive fuel boundary through 96 instructions.
+Fuel measures retired LMBC instructions.
 
-It also covered deep faults, effects, frame limits, and mutual recursion.
+Native code checks fuel before each segment.
 
-## 34. Later production-shaped stages
+Insufficient fuel exits before that segment changes state.
 
-### 34.1 Tiering
+A call instruction charges one fuel unit.
 
-`Auto` starts in the interpreter.
+A faulting instruction charges its executed prefix.
 
-Per-function invocation and backedge counters identify hot functions.
+Fault exits record the post-increment LMBC position.
 
-A stable negative verdict stops repeated probes.
+Fault exits preserve exact operand consumption.
+
+Loom faults use explicit exit records.
+
+Cranelift traps never represent guest faults.
+
+Every fuel limit must produce the same interpreter and native state.
+
+## 9. Value ABI
+
+Value is the canonical 16-byte runtime value.
+
+The implementation gives Value a fixed representation.
+
+    #[repr(C, u8)]
+    pub enum Value {
+        Unit = 0,
+        Bool(bool) = 1,
+        Int(i64) = 2,
+        Float(u64) = 3,
+        Char(char) = 4,
+        Obj(ObjRef) = 5,
+        Op(u32) = 6,
+        Callback(CallbackRef) = 7,
+        EmptyCase { ty: u32, arm: u32 } = 8,
+        Uninit = 9,
+    }
+
+The discriminants are append-only.
+
+A removed variant leaves one reserved discriminant.
+
+The runtime asserts the size, alignment, tag width, and payload offset.
+
+The runtime tests every variant conversion.
+
+Native scalar registers can keep unboxed payloads.
+
+Heap arrays store canonical Value instances.
+
+Generated code reads their tag and payload through fixed offsets.
+
+Native code writes only valid tags and canonical payloads.
+
+Float writes use the canonical NaN encoding.
+
+## 10. Heap ABI
+
+The heap keeps Rust Object values as canonical storage.
+
+Generated code never reads the Rust Object enum.
+
+The heap also maintains fixed-layout JIT side records.
+
+    #[repr(C)]
+    pub struct JitObjectEntry {
+        generation: u32,
+        kind: u16,
+        flags: u16,
+        class: u32,
+        len: u32,
+        data: usize,
+    }
+
+Each object-table slot has one side record.
+
+Dead slots use the dead kind and a zero data address.
+
+Instance records name their dense runtime class.
+
+Instance data points to the fixed field array.
+
+Tuple data points to the immutable item array.
+
+List data points to the current item allocation.
+
+The flags include the frozen state.
+
+The heap exposes page addresses, page count, and slot count.
+
+One page contains 1,024 side records.
+
+The native activation copies page addresses into reusable scratch storage.
+
+No raw pointer becomes guest data.
+
+## 11. Heap pointer lifetime
+
+A validated handle remains stable until one safepoint.
+
+The heap does not move live objects.
+
+The machine lease prevents concurrent heap mutation.
+
+A native fast segment retains no pointer across a slow path.
+
+After a slow path, native code reloads:
+
+- the page table;
+- the object entry;
+- the data address;
+- the length;
+- required guards.
+
+A collection slow path receives complete roots for all native frames.
+
+The materializer exposes those roots before collection.
+
+Generation checks can move above repeated accesses within one safe segment.
+
+Bounds checks remain before every unchecked address calculation.
+
+## 12. Side-record maintenance
+
+Allocation initializes both canonical storage and the side record.
+
+Freeing advances the generation and marks the side record dead.
+
+Freezing updates the canonical header and the side-record flag.
+
+Instance and tuple array addresses never change after allocation.
+
+List growth refreshes the list address and length.
+
+List truncation and removal refresh the length.
+
+Shape-changing heap mutation uses one centralized heap operation.
+
+A mutable heap guard refreshes its side record before release.
+
+Tests compare every live side record with its canonical Object.
+
+Graph operations and snapshots continue to read canonical Object values.
+
+The side records never affect snapshot bytes or semantic digests.
+
+## 13. Direct fast paths
+
+Native code implements these common operations directly:
+
+- handle validation;
+- exact class tests;
+- monomorphic subclass guards;
+- instance field loads;
+- instance field stores;
+- tuple element loads;
+- list length;
+- list element loads;
+- list element replacement.
+
+A field load performs these checks:
+
+1. Check the slot bound.
+2. Load the page and entry.
+3. Check generation and liveness.
+4. Check the cached concrete class.
+5. Check the field bound.
+6. Load the Value.
+7. Check the loaded representation when required.
+
+A field store also checks the frozen flag.
+
+The store writes one canonical Value.
+
+The current collector needs no generational write barrier.
+
+Future collectors must extend this explicit ABI.
+
+Runtime execution never walks semantic hashes.
+
+Linked dense class indexes select runtime classes.
+
+Inherited fields keep their verified prefix offsets.
+
+A monomorphic cache guards the observed concrete class.
+
+A miss leaves native code through one typed resolver path.
+
+## 14. Slow paths
+
+Slow paths handle:
+
+- object allocation;
+- collection;
+- list growth;
+- map operations;
+- complex hashing;
+- string construction;
+- builder growth;
+- deoptimization;
+- observable effects.
+
+Each slow path has one fixed typed signature.
+
+No slow path receives a generic operation number.
+
+No slow path decodes a metadata contract.
+
+A slow path returns one explicit result code.
+
+Common success paths do not call Rust.
+
+A coarse operation can remain one slow call when its work dominates the transition.
+
+## 15. Effects and safepoints
+
+An effect always materializes canonical state.
+
+The interpreter retires the effect instruction.
+
+Policy and host handling remain outside generated code.
+
+A reply can enter native code through the normal guard.
+
+Recall, pause, capture, and debugging require canonical state.
+
+Each such boundary materializes every native frame once.
+
+Ordinary calls and field accesses are not safepoints.
+
+## 16. Compiled-code ownership
+
+One host engine owns native compilers.
+
+The cache belongs to one exact arena layout.
+
+Each dense function slot owns one compilation verdict.
+
+Each slot also owns one stable native entry cell.
+
+A failed compilation records one negative verdict.
+
+Concurrent compilation serializes only one function request.
+
+Published native code is immutable.
+
+Every region releases its executable memory on final drop.
+
+A semantic function hash never identifies arena-relative operands.
+
+The cache key includes the arena layout identity.
+
+## 17. Tiering and profiling
+
+Auto starts in the interpreter.
+
+Per-function relaxed counters record calls and loop backedges.
+
+The interpreter path performs no mutex operation.
+
+Each virtual site owns one atomic inline-cache cell.
+
+A classified site stops collecting observations.
+
+A cache lookup occurs before specialization work.
+
+A negative verdict stops later entry probes.
+
+Compilation uses an expected-retirement budget.
+
+The budget includes region size and observed hotness.
 
 Compilation does not hold a shared execution lock.
 
-The gate covers startup, short programs, hot leaves, and large unsupported programs.
+Cold compilation time is a permanent metric.
 
-### 34.2 Heap access and mutation
+## 18. Metrics
 
-Field loads and stores use an explicit heap ABI.
+Clock-free counters include:
 
-The fast path checks handle generation and field bounds.
+- compilation attempts;
+- compiled regions;
+- compilation rejections by reason;
+- native entries;
+- native-retired LMBC instructions;
+- direct fast-path operations;
+- slow-path calls by kind;
+- materializations;
+- guard failures;
+- deoptimizations;
+- native fault exits.
 
-The store path preserves mutation epochs and required barriers.
+Native coverage counts instructions executed without runtime slow paths.
 
-The slow path produces a contained interpreter exit.
+A slow-path instruction does not count as direct native work.
 
-### 34.3 Virtual calls
+Wall-time reports include:
 
-Each hot virtual site starts with one monomorphic cache.
+- interpreter execution;
+- Auto cold execution;
+- Auto warm execution;
+- forced native execution;
+- compilation time;
+- code size.
 
-The cache guards the receiver class and calls one native entry.
+## 19. Correctness tests
 
-A miss exits through one resolver stub.
+Every supported test compares Interpreter and Native.
 
-The resolver can widen or disable the cache without changing guest state.
+Tests compare complete live machine state.
 
-### 34.4 Allocation
+Fuel tests sweep every segment boundary.
 
-Native code uses a bounded allocation fast path.
+Tests alternate engines between bounded turns.
 
-Collection and growth use one runtime slow path.
+Tests capture after native execution and resume in the interpreter.
 
-Root maps cover every live native frame.
+Tests capture after interpreter execution and resume in native code.
 
-### 34.5 Effects
+External snapshot tests include wrong scalar values.
 
-An effect remains an observable engine exit.
+They also include wrong field and collection element values.
 
-Native code materializes once at the effect boundary.
+Malformed state must never cause host memory access outside the checked ABI.
 
-The reply can enter native code through the normal guarded entry.
+Parallel tests cover recall, pause, barriers, and replacement.
 
-### 34.6 Representative gates
+Heap ABI tests cover stale handles and dead slots.
 
-Permanent rows cover JSON parsing, JSON encoding, HTTP parsing, and HTTP encoding.
+They cover every object kind exposed to native code.
 
-The full example and test corpus reports native instruction coverage.
+Mutation tests force list reallocation between two native entries.
 
-`Auto` cannot slow any large corpus program by more than five percent.
+## 20. Performance gates
 
-At least one JSON row and one HTTP row must gain more than two times.
+The complete corpus is a permanent gate.
+
+The language benchmark set is a permanent gate.
+
+Representative rows include:
+
+- JSON parsing;
+- JSON encoding;
+- HTTP parsing;
+- HTTP encoding;
+- field access;
+- list indexing;
+- virtual calls;
+- recursion;
+- scheduler-sliced scalar loops.
+
+Auto cannot slow a large corpus program by more than five percent.
+
+Interpreter mode must remain within measurement noise.
+
+At least one JSON row must improve by more than two times.
+
+At least one HTTP row must improve by more than two times.
+
+Common field and list loops target the scalar-loop performance range.
+
+Cold and warm results remain separate.
+
+Every report names the revision, host, profile, and measurement method.
+
+## 21. Crate boundaries
+
+lm-jit owns:
+
+- verified region planning;
+- Cranelift lowering;
+- native activation records;
+- executable memory;
+- JIT ABI offsets.
+
+lm-heap owns:
+
+- canonical object storage;
+- fixed JIT side records;
+- side-record maintenance;
+- checked JIT heap views.
+
+lm-vm owns:
+
+- engine policy;
+- canonical machine state;
+- entry guards;
+- materialization;
+- typed slow-path implementations.
+
+lm-jit never depends on lm-vm.
+
+lm-vm passes one heap view into each native activation.
+
+No compiled function captures a mutable World pointer.
+
+## 22. Implementation stages
+
+### Stage A: Recovery baseline
+
+- preserve the arena-scoped cache;
+- preserve general arithmetic stacks;
+- preserve native call frames;
+- preserve entry cells;
+- preserve exact chain materialization;
+- split compiler and adapter modules;
+- record scalar, call, field, allocation, and scheduler rows.
+
+Gate: The split changes no result or benchmark profile.
+
+### Stage B: Remove the callback architecture
+
+- delete the generic runtime service trait;
+- delete the operation-number dispatcher;
+- make heap instructions temporarily ineligible;
+- keep effects as explicit exits;
+- keep allocation as one typed slow path;
+- retain every differential test as a future gate.
+
+Gate: Unsupported programs stay within five percent in Auto mode.
+
+### Stage C: Fixed value and heap ABI
+
+- fix the Value representation;
+- add side-record pages;
+- expose checked heap views;
+- centralize side-record refresh;
+- add layout and mutation tests.
+
+Gate: Side records match canonical objects after every heap operation.
+
+### Stage D: Direct object access
+
+- compile instance field loads and stores;
+- compile tuple element loads;
+- compile list length and element operations;
+- add structural-state result guards;
+- remove equivalent runtime slow paths.
+
+Gate: Common operations use zero slow calls per iteration.
+
+### Stage E: Tiering and inline caches
+
+- add lock-free hotness counters;
+- add negative verdicts;
+- add monomorphic call-site cells;
+- move specialization behind cache hits;
+- add compilation budgets.
+
+Gate: Unsupported large programs remain within five percent.
+
+### Stage F: Representative programs
+
+- measure the complete corpus;
+- profile weighted unsupported instructions;
+- add only high-value fast paths;
+- keep complex operations in typed slow paths.
+
+Gate: JSON and HTTP meet the representative gains.
+
+## 23. Retained baseline
+
+The recovery base is commit 791aff6.
+
+The module split checkpoint is commit 73c70d1.
+
+The release measurements used one same-session run.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Integer loop | 33.712 ms | 0.709 ms | 47.54 times |
+| Factorial | 5.355 ms | 0.905 ms | 5.92 times |
+| Direct scalar call | 48.229 ms | 0.886 ms | 54.45 times |
+| Instance field read | 48.113 ms | 5.406 ms | 8.90 times |
+| Plain allocation | 7.854 ms | 2.575 ms | 3.05 times |
+| Scheduled integer loop | 35.937 ms | 8.850 ms | 4.06 times |
+
+The field and allocation rows use the temporary callback layer.
+
+Later stages replace those rows with direct ABI measurements.
+
+## 24. Rejected designs
+
+A generic callback dispatcher cannot implement common heap instructions.
+
+Per-operation metadata decoding cannot remain on a native fast path.
+
+Semantic hash walks cannot remain in runtime class checks.
+
+Interpreter profiling cannot take a mutex per call.
+
+Specialization cannot occur before a cache hit.
+
+Every eligible function cannot compile on its first entry.
+
+A call cannot materialize canonical state.
+
+A scheduler continuation cannot keep stale duplicate scalar state.
+
+Generated code cannot serialize process-local heap addresses.
+
+These designs remain rejected even when local differential tests pass.
