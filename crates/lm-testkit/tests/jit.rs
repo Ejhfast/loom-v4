@@ -192,6 +192,81 @@ fn text_metadata_and_hash_mix_stay_native() {
 }
 
 #[test]
+fn map_metadata_and_digest_comparison_stay_native() {
+    let source = concat!(
+        "left = [1, 2, 3]\nleft.freeze()\n",
+        "right = [1, 2, 3]\nright.freeze()\n",
+        "left_digest = left.digest()\nright_digest = right.digest()\n",
+        "table = {1: 10, 2: 20}\n",
+        "i = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  sum = sum + table.len()\n",
+        "  if left_digest == right_digest\n",
+        "    sum = sum + 1\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3_000)));
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 8, "{metrics:?}");
+}
+
+#[test]
+fn utf8_byte_guards_match_the_interpreter() {
+    let source = concat!(
+        "text = \"aé猫z\"\n",
+        "valid = text.slice_bytes(1, 5).is_ok()\n",
+        "invalid = text.slice_bytes(2, 1).is_err()\n",
+        "mapped = text.map() { |value: Char| value }\n",
+        "(valid, invalid, mapped)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+}
+
+#[test]
+fn guarded_callback_conversion_matches_the_interpreter() {
+    let source = concat!(
+        "def invoke(f: (Int) -> Int): Int\n",
+        "  f(41)\n",
+        "end\n",
+        "stored = do |value: Int|: Int value + 1 end\n",
+        "i = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  sum = sum + invoke(stored)\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-callback-conversion.lm", source)
+        .expect("the callback conversion compiles");
+    assert!(artifact.root().module().funcs.iter().any(|function| {
+        function.blocks.iter().flatten().any(|instruction| {
+            matches!(
+                instruction,
+                lm_bytecode::Instr::Extended(lm_bytecode::ExtendedInstr::AsCallback)
+            )
+        })
+    }));
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(42_000)));
+    assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+}
+
+#[test]
 fn auto_mode_compiles_only_after_interpreted_work() {
     let (interpreted, _, interpreted_dump) = run(SCALAR_LOOP, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(SCALAR_LOOP, EngineMode::Auto, u64::MAX);

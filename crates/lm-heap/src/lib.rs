@@ -20,15 +20,15 @@ use lm_value::Value;
 use lm_value::{ObjRef, Witness};
 pub use shape::{
     dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapIndex, Object,
-    PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch, MIN_OBJECT_COST,
-    SHAPES,
+    PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch,
+    MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
 use shared::{
     SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET, SHARED_TEXT_BYTE_LEN_OFFSET,
-    SHARED_TEXT_SCALAR_LEN_OFFSET,
+    SHARED_TEXT_DATA_OFFSET, SHARED_TEXT_SCALAR_LEN_OFFSET,
 };
 use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
@@ -197,6 +197,12 @@ struct ListLayout {
 }
 
 #[repr(C)]
+struct MapLayout {
+    entries: Vec<MapEntry>,
+    index: MapIndex,
+}
+
+#[repr(C)]
 struct TupleLayout {
     items: ValueArray,
 }
@@ -250,6 +256,8 @@ pub const JIT_OBJECT_CLOSURE: u32 = 5;
 pub const JIT_OBJECT_BYTES: u32 = 8;
 /// Stable tag of one immutable text view.
 pub const JIT_OBJECT_SUBSTRING: u32 = 9;
+/// Stable tag of one graph digest.
+pub const JIT_OBJECT_DIGEST: u32 = 20;
 /// Byte offset of an instance class.
 pub const JIT_INSTANCE_CLASS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
@@ -264,6 +272,16 @@ pub const JIT_LIST_ITEMS_OFFSET: usize =
 /// Byte offset of a list structural epoch.
 pub const JIT_LIST_EPOCH_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ListLayout, epoch);
+/// Byte offset of the live map-entry count.
+pub const JIT_MAP_LIVE_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, index)
+    + MAP_INDEX_LIVE_OFFSET;
+/// Byte offset of the map structural epoch.
+pub const JIT_MAP_EPOCH_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, index)
+    + MAP_INDEX_EPOCH_OFFSET;
 /// Byte offset of a tuple item array.
 pub const JIT_TUPLE_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(TupleLayout, items);
@@ -279,6 +297,11 @@ pub const JIT_TEXT_BYTE_LEN_OFFSET: usize =
 /// Byte offset of the visible Unicode scalar length.
 pub const JIT_TEXT_SCALAR_LEN_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_TEXT_SCALAR_LEN_OFFSET;
+/// Byte offset of the visible UTF-8 data pointer.
+pub const JIT_TEXT_DATA_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_TEXT_DATA_OFFSET;
+/// Byte offset of the graph digest bytes.
+pub const JIT_DIGEST_BYTES_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET;
 
 const _: () = assert!(JIT_ENTRY_GENERATION_OFFSET == 0);
 const _: () = assert!(std::mem::size_of::<Header>() == shape::HEADER_COST);
@@ -1278,6 +1301,48 @@ mod tests {
     }
 
     #[test]
+    fn native_map_layout_names_live_count_and_epoch() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Map {
+            entries: Vec::new(),
+            index: MapIndex::with_live(StructuralEpoch(7), 3),
+        });
+        let entry = heap.entry(reference.slot);
+        let base = std::ptr::from_ref(entry) as usize;
+
+        // SAFETY: The constants name initialized fields of this live entry.
+        unsafe {
+            assert_eq!(
+                ((base + JIT_ENTRY_OBJECT_TAG_OFFSET) as *const u32).read(),
+                JIT_OBJECT_MAP
+            );
+            assert_eq!(((base + JIT_MAP_LIVE_OFFSET) as *const u32).read(), 3);
+            assert_eq!(((base + JIT_MAP_EPOCH_OFFSET) as *const u32).read(), 7);
+        }
+    }
+
+    #[test]
+    fn native_digest_layout_names_the_canonical_bytes() {
+        let mut heap = Heap::new(1 << 20);
+        let bytes = [0x5a; 32];
+        let reference = heap.alloc(Object::NativeDigest(bytes));
+        let entry = heap.entry(reference.slot);
+        let base = std::ptr::from_ref(entry) as usize;
+
+        // SAFETY: The constants name initialized fields of this live entry.
+        unsafe {
+            assert_eq!(
+                ((base + JIT_ENTRY_OBJECT_TAG_OFFSET) as *const u32).read(),
+                JIT_OBJECT_DIGEST
+            );
+            assert_eq!(
+                std::slice::from_raw_parts((base + JIT_DIGEST_BYTES_OFFSET) as *const u8, 32),
+                bytes
+            );
+        }
+    }
+
+    #[test]
     fn native_tuple_layout_keeps_the_canonical_header() {
         let mut heap = Heap::new(1 << 20);
         let reference = heap.alloc(Object::Tuple {
@@ -1339,6 +1404,10 @@ mod tests {
         ] {
             let entry = heap.entry(reference.slot);
             let base = std::ptr::from_ref(entry) as usize;
+            let expected = match heap.get(reference) {
+                Object::Str(text) | Object::Substring(text) => text.as_str().as_bytes(),
+                _ => panic!("the object is text"),
+            };
             // SAFETY: The constants name initialized fields of this live entry.
             unsafe {
                 assert_eq!(
@@ -1352,6 +1421,11 @@ mod tests {
                 assert_eq!(
                     ((base + JIT_TEXT_SCALAR_LEN_OFFSET) as *const usize).read(),
                     scalar_len
+                );
+                let data = ((base + JIT_TEXT_DATA_OFFSET) as *const usize).read();
+                assert_eq!(
+                    std::slice::from_raw_parts(data as *const u8, byte_len),
+                    expected
                 );
             }
         }

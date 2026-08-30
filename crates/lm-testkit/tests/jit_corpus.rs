@@ -11,6 +11,8 @@ const GRANTS: &[&str] = &[
     "Proc", "Rand", "Reflect", "Signal", "Tcp", "Tls", "Tty", "Udp", "Vm", "Wait",
 ];
 
+type ObservedRun = (Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>);
+
 fn collect_programs(path: &Path, programs: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(path).expect("the corpus directory reads") {
         let path = entry.expect("the corpus entry reads").path();
@@ -22,10 +24,11 @@ fn collect_programs(path: &Path, programs: &mut Vec<PathBuf>) {
     }
 }
 
-fn run_direct(artifact: lm_bytecode::artifact::Artifact, mode: EngineMode) -> (Outcome, String) {
-    let (arena, namespace) =
-        lm_testkit::publish_compiled_artifact(artifact).expect("the corpus artifact publishes");
-    let engine = Arc::new(Engine::new(mode));
+fn run_direct(
+    arena: lm_link::CodeArena,
+    namespace: lm_link::NamespaceId,
+    engine: Arc<Engine>,
+) -> (Outcome, String) {
     let mut vm = Vm::new_with_engine(arena, namespace, VmConfig::default(), engine);
     let outcome = vm.run();
     let dump = vm.dump_live(&outcome);
@@ -33,12 +36,10 @@ fn run_direct(artifact: lm_bytecode::artifact::Artifact, mode: EngineMode) -> (O
 }
 
 fn run_scheduled(
-    artifact: lm_bytecode::artifact::Artifact,
-    mode: EngineMode,
-) -> ((Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>), u64) {
-    let (arena, namespace) =
-        lm_testkit::publish_compiled_artifact(artifact).expect("the corpus artifact publishes");
-    let engine = Arc::new(Engine::new(mode));
+    arena: lm_link::CodeArena,
+    namespace: lm_link::NamespaceId,
+    engine: Arc<Engine>,
+) -> (ObservedRun, u64) {
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     let mut world = World::new_with_engine(
         arena,
@@ -95,16 +96,29 @@ fn forced_native_matches_the_standalone_program_corpus() {
                             std::fs::read_to_string(path).expect("the corpus program reads");
                         let artifact = lm_testkit::compile_text(&name, &source)
                             .unwrap_or_else(|error| panic!("{name} does not compile: {error}"));
-                        let interpreted = run_direct(artifact.clone(), EngineMode::Interpreter);
-                        let native = run_direct(artifact.clone(), EngineMode::Native);
+                        let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+                            .expect("the corpus artifact publishes");
+                        let interpreted = run_direct(
+                            arena.clone(),
+                            namespace,
+                            Arc::new(Engine::new(EngineMode::Interpreter)),
+                        );
+                        let native_engine = Arc::new(Engine::new(EngineMode::Native));
+                        let native =
+                            run_direct(arena.clone(), namespace, Arc::clone(&native_engine));
                         if native != interpreted {
                             failures.push(format!(
                                 "{name}: direct interpreter {interpreted:?}, native {native:?}"
                             ));
                         }
-                        let (interpreted, _) =
-                            run_scheduled(artifact.clone(), EngineMode::Interpreter);
-                        let (native, native_retired) = run_scheduled(artifact, EngineMode::Native);
+                        let (interpreted, _) = run_scheduled(
+                            arena.clone(),
+                            namespace,
+                            Arc::new(Engine::new(EngineMode::Interpreter)),
+                        );
+                        native_engine.reset_metrics();
+                        let (native, native_retired) =
+                            run_scheduled(arena, namespace, native_engine);
                         if native != interpreted {
                             failures.push(format!(
                                 "{name}: scheduler interpreter {interpreted:?}, native {native:?}"

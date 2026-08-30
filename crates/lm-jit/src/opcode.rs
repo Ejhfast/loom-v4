@@ -188,10 +188,10 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::ListPush => dedicated(FastPath)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        Instr::MapLen => temporary(Guarded),
+        Instr::MapLen => dedicated(Guarded).with_replay(),
         Instr::MapHas | Instr::MapAt | Instr::MapPut { .. } => temporary(Helper),
         Instr::Freeze | Instr::Digest { .. } | Instr::EqValue | Instr::NeValue => temporary(Helper),
-        Instr::EqDigest | Instr::NeDigest => temporary(Inline),
+        Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
             InstructionTreatment::dedicated(Inline, ExitBehavior::Branch)
         }
@@ -263,7 +263,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
 
     match operation {
         ExtendedInstr::MakeCallback { .. } => temporary(FastPath),
-        ExtendedInstr::AsCallback => temporary(Guarded),
+        ExtendedInstr::AsCallback => dedicated(Guarded).with_replay(),
         ExtendedInstr::OptionSome { .. } => dedicated(Inline),
         ExtendedInstr::OptionNone { .. } => dedicated(Inline),
         ExtendedInstr::OptionPayload { .. } => dedicated(Guarded)
@@ -273,7 +273,6 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapGet { .. }
-        | ExtendedInstr::MapIterLen
         | ExtendedInstr::MapNextIndex
         | ExtendedInstr::MapKeyAt
         | ExtendedInstr::MapValueAt
@@ -295,7 +294,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::ListSet => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
-        ExtendedInstr::MapEpoch => temporary(Guarded),
+        ExtendedInstr::MapEpoch | ExtendedInstr::MapIterLen => dedicated(Guarded).with_replay(),
         ExtendedInstr::ListPop { .. }
         | ExtendedInstr::ListInsert
         | ExtendedInstr::ListRemove
@@ -348,9 +347,8 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::BytesLen
         | NativeInstr::BytesAt
         | NativeInstr::BytesGet => dedicated(Guarded).with_replay(),
-        NativeInstr::TextAtByte | NativeInstr::TextAt | NativeInstr::TextIsBoundary => {
-            temporary(Guarded)
-        }
+        NativeInstr::TextAtByte | NativeInstr::TextIsBoundary => dedicated(Guarded).with_replay(),
+        NativeInstr::TextAt => temporary(Guarded),
         NativeInstr::CharCodepoint
         | NativeInstr::CharUtf8Len
         | NativeInstr::EqChar

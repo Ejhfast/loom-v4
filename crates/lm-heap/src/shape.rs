@@ -111,6 +111,7 @@ mod epoch_tests {
 /// `ENTRY_COST` charges 40 bytes for each entry.
 /// This charge includes each stored semantic hash and most index capacity.
 #[derive(Debug, Clone, Default)]
+#[repr(C)]
 pub struct MapIndex {
     /// The raw entry prefix that the table already indexes.
     pub built: u32,
@@ -120,6 +121,11 @@ pub struct MapIndex {
     pub epoch: StructuralEpoch,
     slots: Box<[MapSlot]>,
 }
+
+/// Byte offset of the live map-entry count.
+pub const MAP_INDEX_LIVE_OFFSET: usize = std::mem::offset_of!(MapIndex, live);
+/// Byte offset of the map structural epoch.
+pub const MAP_INDEX_EPOCH_OFFSET: usize = std::mem::offset_of!(MapIndex, epoch);
 
 const EMPTY_MAP_ENTRY: u32 = u32::MAX;
 const MIN_MAP_SLOTS: usize = 8;
@@ -486,7 +492,7 @@ pub enum Object {
         trace: Box<[FaultSite]>,
     },
     /// A frozen canonical graph digest. Born frozen.
-    NativeDigest([u8; 32]),
+    NativeDigest([u8; 32]) = 20,
     /// A stable proc reference: the machine identifier and the
     /// generation of that slot. Born frozen and sendable, so send
     /// rights travel as data (specification 18.5).

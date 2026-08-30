@@ -335,7 +335,7 @@ impl TextRoot {
 #[repr(C)]
 pub struct SharedText {
     root: Arc<TextRoot>,
-    byte_start: usize,
+    data: usize,
     byte_len: usize,
     scalar_start: usize,
     scalar_len: usize,
@@ -343,6 +343,8 @@ pub struct SharedText {
     lookup_hash: AtomicU64,
 }
 
+/// Byte offset of the visible UTF-8 data pointer.
+pub const SHARED_TEXT_DATA_OFFSET: usize = std::mem::offset_of!(SharedText, data);
 /// Byte offset of the visible UTF-8 byte length.
 pub const SHARED_TEXT_BYTE_LEN_OFFSET: usize = std::mem::offset_of!(SharedText, byte_len);
 /// Byte offset of the visible Unicode scalar length.
@@ -371,7 +373,7 @@ impl SharedText {
                 .expect("a valid text span ends at a scalar boundary");
             return SharedText {
                 root: root.clone(),
-                byte_start,
+                data: text.as_ptr() as usize + byte_start,
                 byte_len: span.len,
                 scalar_start,
                 scalar_len: scalar_end - scalar_start,
@@ -383,10 +385,11 @@ impl SharedText {
     }
 
     fn from_root(root: Arc<TextRoot>) -> SharedText {
+        let data = root.as_str().as_ptr() as usize;
         let byte_len = root.as_str().len();
         let scalar_len = root.metadata.scalar_count;
         SharedText {
-            byte_start: 0,
+            data,
             byte_len,
             scalar_start: 0,
             scalar_len,
@@ -460,9 +463,15 @@ impl SharedText {
 
     /// Get the visible text.
     pub fn as_str(&self) -> &str {
-        let start = self.byte_start;
+        let start = self.byte_start();
         let end = start + self.byte_len;
         &self.root.as_str()[start..end]
+    }
+
+    fn byte_start(&self) -> usize {
+        self.data
+            .checked_sub(self.root.as_str().as_ptr() as usize)
+            .expect("a text view stays inside its root")
     }
 
     /// Get the visible byte length.
@@ -514,13 +523,13 @@ impl SharedText {
         if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
             return None;
         }
-        let root_start = self.byte_start.checked_add(start)?;
-        let root_end = self.byte_start.checked_add(end)?;
+        let root_start = self.byte_start().checked_add(start)?;
+        let root_end = self.byte_start().checked_add(end)?;
         let scalar_start = self.root.scalar_of_byte(root_start)?;
         let scalar_end = self.root.scalar_of_byte(root_end)?;
         Some(SharedText {
             root: self.root.clone(),
-            byte_start: root_start,
+            data: self.data.checked_add(start)?,
             byte_len: end - start,
             scalar_start,
             scalar_len: scalar_end - scalar_start,
@@ -541,7 +550,7 @@ impl SharedText {
         let byte_end = self.root.byte_of_scalar(root_end)?;
         Some(SharedText {
             root: self.root.clone(),
-            byte_start,
+            data: self.root.as_str().as_ptr() as usize + byte_start,
             byte_len: byte_end - byte_start,
             scalar_start: root_start,
             scalar_len: length,
@@ -579,7 +588,7 @@ impl SharedText {
     /// Find text and return its scalar position.
     pub fn find_scalar(&self, needle: &SharedText) -> Option<usize> {
         let byte = self.as_str().find(needle.as_str())?;
-        let root_byte = self.byte_start.checked_add(byte)?;
+        let root_byte = self.byte_start().checked_add(byte)?;
         self.root
             .scalar_of_byte(root_byte)?
             .checked_sub(self.scalar_start)
@@ -629,9 +638,13 @@ impl SharedText {
 
     /// Share this text allocation as immutable bytes.
     pub fn bytes(&self) -> SharedBytes {
+        let start = self.byte_start();
+        let end = start
+            .checked_add(self.byte_len)
+            .expect("a text view stays inside its root");
         let span = self
             .root
-            .byte_span(self.byte_start, self.byte_start + self.byte_len)
+            .byte_span(start, end)
             .expect("a text view stays inside its root");
         SharedBytes {
             span,
@@ -693,7 +706,7 @@ impl Clone for SharedText {
     fn clone(&self) -> SharedText {
         SharedText {
             root: self.root.clone(),
-            byte_start: self.byte_start,
+            data: self.data,
             byte_len: self.byte_len,
             scalar_start: self.scalar_start,
             scalar_len: self.scalar_len,

@@ -1096,6 +1096,20 @@ Gate: Both corpus paths match Interpreter state and host observations.
 
 Gate: The structural change preserves existing warm performance.
 
+### Stage F15: Direct immutable and collection views
+
+- compile map length and epoch operations directly;
+- compile digest comparison through direct immutable reads;
+- compile UTF-8 byte access and boundary tests directly;
+- validate callback conversion with one closure guard;
+- keep each failure on one exact replay exit.
+
+Gate: Common map, digest, and UTF-8 reads call no runtime function.
+
+Gate: Direct and scheduler corpus results match Interpreter results.
+
+Gate: Representative Auto performance does not regress.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1425,6 +1439,30 @@ The release scalar results remained within the prior variance.
 JSON parse remained at 0.975 times in Auto mode.
 
 HTTP parse remained at 0.907 times in Auto mode.
+
+The representative-program performance gate remains open.
+
+The Stage F15 run added direct map, digest, callback, and UTF-8 treatments.
+
+The text ABI now exposes one stable visible-data pointer.
+
+This pointer replaced a redundant byte offset.
+
+The object payload stayed within its 64-byte limit.
+
+Direct and scheduled corpus runs matched Interpreter results across 163 shipped programs.
+
+The focused JIT suite passed 85 tests.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List iteration | 7.755 times | 100.00 percent |
+| JSON parse | 0.969 times | 6.33 percent |
+| JSON stringify | 0.892 times | 51.76 percent |
+| HTTP parse | 0.925 times | 48.23 percent |
+| HTTP serialize | 0.913 times | 41.78 percent |
+
+These treatments removed no dominant representative gap.
 
 The representative-program performance gate remains open.
 

@@ -26,13 +26,14 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
-    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
-    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_BYTES,
-    JIT_OBJECT_CLOSURE, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR,
-    JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
-    JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET,
+    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
+    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET,
+    JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST,
+    JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING,
+    JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TEXT_BYTE_LEN_OFFSET,
+    JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
     VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
@@ -907,6 +908,67 @@ fn emit_segment(
                 )?;
                 stack.push(value);
             }
+            Instr::EqDigest | Instr::NeDigest => {
+                let deopt_stack = stack.clone();
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::DigestCompare) {
+                    return Err(CompileError::Backend);
+                }
+                let equal = emit_digest_equal(
+                    builder,
+                    values,
+                    left,
+                    right,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                let result = if matches!(instruction, Instr::EqDigest) {
+                    equal
+                } else {
+                    builder.ins().bxor_imm(equal, 1)
+                };
+                let result = builder.ins().uextend(types::I64, result);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+            }
+            Instr::Extended(ExtendedInstr::AsCallback) => {
+                let deopt_stack = stack.clone();
+                let value = pop_value(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::AsCallback) {
+                    return Err(CompileError::Backend);
+                }
+                emit_object_entry(
+                    builder,
+                    values,
+                    value.bits,
+                    JIT_OBJECT_CLOSURE,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    ObjectGuard::Replay(&deopt_stack),
+                )?;
+                stack.push(value);
+            }
             Instr::Extended(ExtendedInstr::OptionSome { .. }) => {
                 let value = pop_value(&mut stack)?;
                 stack.push(value);
@@ -1146,6 +1208,32 @@ fn emit_segment(
                         fault_stack: &stack,
                         deopt_stack: &deopt_stack,
                     },
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::MapLen => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapLen) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_map_len(
+                    builder,
+                    values,
+                    reference,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
@@ -1419,6 +1507,60 @@ fn emit_segment(
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, value)?;
             }
+            Instr::Extended(ExtendedInstr::MapEpoch) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapEpoch) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_map_epoch(
+                    builder,
+                    values,
+                    reference,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::Extended(ExtendedInstr::MapIterLen) => {
+                let deopt_stack = stack.clone();
+                let expected = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapIterLen) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_map_iter_len(
+                    builder,
+                    values,
+                    reference,
+                    expected,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
             Instr::Extended(ExtendedInstr::SealInstance) => {
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
@@ -1556,6 +1698,62 @@ fn emit_segment(
                     &deopt_stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::Native(NativeInstr::TextAtByte) => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::TextAtByte) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_text_at_byte(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Char, value)?;
+            }
+            Instr::Native(NativeInstr::TextIsBoundary) => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::TextIsBoundary) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_text_is_boundary(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Bool, value)?;
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -3380,6 +3578,275 @@ fn emit_text_len(
     })
 }
 
+fn emit_map_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let len = load_value(builder, types::I32, entry, JIT_MAP_LIVE_OFFSET)?;
+    Ok(builder.ins().uextend(types::I64, len))
+}
+
+fn emit_map_epoch(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let epoch = load_value(builder, types::I32, entry, JIT_MAP_EPOCH_OFFSET)?;
+    let unobserved = builder.ins().icmp_imm(IntCC::Equal, epoch, 0);
+    let one = builder.ins().iconst(types::I32, 1);
+    let observed = builder.ins().select(unobserved, one, epoch);
+    store_i32_value(builder, entry, JIT_MAP_EPOCH_OFFSET, observed)?;
+    Ok(builder.ins().uextend(types::I64, observed))
+}
+
+fn emit_map_iter_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    expected: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let epoch = load_value(builder, types::I32, entry, JIT_MAP_EPOCH_OFFSET)?;
+    let expected_epoch = builder.ins().ireduce(types::I32, expected);
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, expected, 0);
+    let changed = builder.ins().icmp(IntCC::NotEqual, epoch, expected_epoch);
+    let invalid = builder.ins().bor(negative, changed);
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+    let len = load_value(builder, types::I32, entry, JIT_MAP_LIVE_OFFSET)?;
+    Ok(builder.ins().uextend(types::I64, len))
+}
+
+fn emit_digest_equal(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    left: ir::Value,
+    right: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let left = emit_object_entry(
+        builder,
+        values,
+        left,
+        JIT_OBJECT_DIGEST,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let right = emit_object_entry(
+        builder,
+        values,
+        right,
+        JIT_OBJECT_DIGEST,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let mut equal = builder.ins().iconst(types::I8, 1);
+    for word in 0..4 {
+        let offset = JIT_DIGEST_BYTES_OFFSET
+            .checked_add(word * mem::size_of::<u64>())
+            .ok_or(CompileError::Backend)?;
+        let left_word = load_value(builder, types::I64, left, offset)?;
+        let right_word = load_value(builder, types::I64, right, offset)?;
+        let word_equal = builder.ins().icmp(IntCC::Equal, left_word, right_word);
+        equal = builder.ins().band(equal, word_equal);
+    }
+    Ok(equal)
+}
+
+fn emit_text_at_byte(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_text_entry(
+        builder,
+        values,
+        reference,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let native_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_BYTE_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, native_index, len);
+    let invalid = builder.ins().bor(negative, outside);
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let address = builder.ins().iadd(data, native_index);
+    let first = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
+    let prefix = builder.ins().band_imm(first, 0xc0);
+    let continuation = builder.ins().icmp_imm(IntCC::Equal, prefix, 0x80);
+    emit_interpreter_replay(builder, values, continuation, point, deopt_stack)?;
+
+    let ascii = builder.create_block();
+    let two = builder.create_block();
+    let three = builder.create_block();
+    let four = builder.create_block();
+    let after_ascii = builder.create_block();
+    let after_two = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    let is_ascii = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0x80);
+    builder.ins().brif(is_ascii, ascii, &[], after_ascii, &[]);
+
+    builder.switch_to_block(ascii);
+    let scalar = builder.ins().uextend(types::I64, first);
+    builder.ins().jump(done, &[scalar.into()]);
+
+    builder.switch_to_block(after_ascii);
+    let is_two = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0xe0);
+    builder.ins().brif(is_two, two, &[], after_two, &[]);
+
+    builder.switch_to_block(two);
+    let scalar = emit_utf8_scalar(builder, address, first, 2)?;
+    builder.ins().jump(done, &[scalar.into()]);
+
+    builder.switch_to_block(after_two);
+    let is_three = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0xf0);
+    builder.ins().brif(is_three, three, &[], four, &[]);
+
+    builder.switch_to_block(three);
+    let scalar = emit_utf8_scalar(builder, address, first, 3)?;
+    builder.ins().jump(done, &[scalar.into()]);
+
+    builder.switch_to_block(four);
+    let scalar = emit_utf8_scalar(builder, address, first, 4)?;
+    builder.ins().jump(done, &[scalar.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_utf8_scalar(
+    builder: &mut FunctionBuilder<'_>,
+    address: ir::Value,
+    first: ir::Value,
+    length: u8,
+) -> Result<ir::Value, CompileError> {
+    let lead_mask = match length {
+        2 => 0x1f,
+        3 => 0x0f,
+        4 => 0x07,
+        _ => return Err(CompileError::Backend),
+    };
+    let first = builder.ins().uextend(types::I64, first);
+    let mut scalar = builder.ins().band_imm(first, lead_mask);
+    for offset in 1..length {
+        let byte = builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), address, i32::from(offset));
+        let byte = builder.ins().uextend(types::I64, byte);
+        let byte = builder.ins().band_imm(byte, 0x3f);
+        scalar = builder.ins().ishl_imm(scalar, 6);
+        scalar = builder.ins().bor(scalar, byte);
+    }
+    Ok(scalar)
+}
+
+fn emit_text_is_boundary(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_text_entry(
+        builder,
+        values,
+        reference,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    emit_interpreter_replay(builder, values, negative, point, deopt_stack)?;
+    let native_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_BYTE_LEN_OFFSET,
+    )?;
+    let inside = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, native_index, len);
+    let inspect = builder.create_block();
+    let outside = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(inside, inspect, &[], outside, &[]);
+
+    builder.switch_to_block(inspect);
+    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let address = builder.ins().iadd(data, native_index);
+    let byte = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
+    let prefix = builder.ins().band_imm(byte, 0xc0);
+    let continuation = builder.ins().icmp_imm(IntCC::Equal, prefix, 0x80);
+    let boundary = builder.ins().bxor_imm(continuation, 1);
+    let boundary = builder.ins().uextend(types::I64, boundary);
+    builder.ins().jump(done, &[boundary.into()]);
+
+    builder.switch_to_block(outside);
+    let boundary = builder.ins().icmp(IntCC::Equal, native_index, len);
+    let boundary = builder.ins().uextend(types::I64, boundary);
+    builder.ins().jump(done, &[boundary.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
 fn emit_bytes_at(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -3719,6 +4186,7 @@ fn emit_value_contract(
         ObjectContract::Tuple => JIT_OBJECT_TUPLE,
         ObjectContract::Closure => JIT_OBJECT_CLOSURE,
         ObjectContract::Bytes => JIT_OBJECT_BYTES,
+        ObjectContract::Digest => JIT_OBJECT_DIGEST,
     };
     let entry = emit_object_entry(
         builder,

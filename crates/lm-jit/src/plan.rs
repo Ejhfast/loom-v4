@@ -325,6 +325,7 @@ pub(super) enum ObjectContract {
     Tuple,
     Closure,
     Bytes,
+    Digest,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +368,11 @@ pub(super) enum HeapAccessKind {
     ListCapacity,
     ListEpoch,
     ListIterLen,
+    MapLen,
+    MapEpoch,
+    MapIterLen,
+    DigestCompare,
+    AsCallback,
     SealInstance {
         class: u32,
     },
@@ -375,6 +381,8 @@ pub(super) enum HeapAccessKind {
     BytesGet,
     TextByteLen,
     TextScalarLen,
+    TextAtByte,
+    TextIsBoundary,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -610,6 +618,7 @@ impl RegionPlan {
                     | HeapAccessKind::ListReserve
                     | HeapAccessKind::ListReorder
                     | HeapAccessKind::ListEpoch
+                    | HeapAccessKind::MapEpoch
                     | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
                         if matches!(
@@ -808,9 +817,13 @@ fn scalar_kind_in(
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(BcType::Str | BcType::Map(_, _) | BcType::Fn(_, _, _, _)) => {
-            Ok(ScalarKind::Object(ty))
-        }
+        Some(
+            BcType::Str
+            | BcType::Map(_, _)
+            | BcType::Fn(_, _, _, _)
+            | BcType::Callback(_, _, _, _)
+            | BcType::Digest,
+        ) => Ok(ScalarKind::Object(ty)),
         Some(BcType::Class(class)) => {
             let core = lm_bytecode::corepin::declared_layout(module);
             if core.char_value == Some(*class) {
@@ -1104,6 +1117,24 @@ fn analyze_segment(
                     kind: HeapAccessKind::TupleGet { value },
                 });
             }
+            Instr::EqDigest | Instr::NeDigest => {
+                let right = stack_from_end(&before.stack, 0)?;
+                let left = stack_from_end(&before.stack, 1)?;
+                digest_type(context.module, left)?;
+                digest_type(context.module, right)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::DigestCompare,
+                });
+            }
+            Instr::Extended(ExtendedInstr::AsCallback) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                function_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::AsCallback,
+                });
+            }
             Instr::Extended(ExtendedInstr::OptionNone { ty }) => {
                 let Instr::Extended(ExtendedInstr::OptionNone { ty: source_ty }) =
                     source_instruction
@@ -1200,6 +1231,14 @@ fn analyze_segment(
                     kind: HeapAccessKind::ListLen,
                 });
             }
+            Instr::MapLen => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapLen,
+                });
+            }
             Instr::ListAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
                 let element = list_element_type(context.module, receiver)?;
@@ -1262,6 +1301,22 @@ fn analyze_segment(
                     kind: HeapAccessKind::ListIterLen,
                 });
             }
+            Instr::Extended(ExtendedInstr::MapEpoch) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapEpoch,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapIterLen) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapIterLen,
+                });
+            }
             Instr::Extended(ExtendedInstr::SealInstance) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
                 let ScalarKind::Object(ty) = receiver else {
@@ -1307,6 +1362,19 @@ fn analyze_segment(
                     HeapAccessKind::TextByteLen
                 } else {
                     HeapAccessKind::TextScalarLen
+                };
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind,
+                });
+            }
+            Instr::Native(NativeInstr::TextAtByte | NativeInstr::TextIsBoundary) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                text_type(context, receiver)?;
+                let kind = if matches!(*instruction, Instr::Native(NativeInstr::TextAtByte)) {
+                    HeapAccessKind::TextAtByte
+                } else {
+                    HeapAccessKind::TextIsBoundary
                 };
                 heap_accesses.push(HeapAccess {
                     instruction: position,
@@ -1469,6 +1537,36 @@ fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, Unsup
     }
 }
 
+fn map_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    match module.types.get(ty as usize) {
+        Some(BcType::Map(_, _)) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
+fn digest_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    match module.types.get(ty as usize) {
+        Some(BcType::Digest) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
+fn function_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    match module.types.get(ty as usize) {
+        Some(BcType::Fn(_, _, _, _)) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
 fn option_argument_type(module: &Module, ty: u32) -> Result<u32, UnsupportedReason> {
     let Some(BcType::Inst(class, arguments)) = module.types.get(ty as usize) else {
         return Err(UnsupportedReason::InvalidStack);
@@ -1558,8 +1656,11 @@ fn value_contract(
         Some(BcType::List(_)) => Some(ObjectContract::List),
         Some(BcType::Map(_, _)) => Some(ObjectContract::Map),
         Some(BcType::Tuple(_)) => Some(ObjectContract::Tuple),
-        Some(BcType::Fn(_, _, _, _)) => Some(ObjectContract::Closure),
+        Some(BcType::Fn(_, _, _, _) | BcType::Callback(_, _, _, _)) => {
+            Some(ObjectContract::Closure)
+        }
         Some(BcType::Bytes) => Some(ObjectContract::Bytes),
+        Some(BcType::Digest) => Some(ObjectContract::Digest),
         _ => None,
     };
     Ok(ValueContract { kind, object })
