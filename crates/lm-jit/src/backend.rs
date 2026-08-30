@@ -3,7 +3,8 @@
 use crate::activation::{
     NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
     RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
-    RESOLVED_CALL_CACHE_WAYS, RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
+    RESOLVED_CALL_CACHE_WAYS, RUNTIME_HEAP_LIMIT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
+    TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
@@ -301,6 +302,7 @@ struct NativeValues<'a> {
     root_tag_pointer: ir::Value,
     root_state_pointer: ir::Value,
     allocation_signature: ir::SigRef,
+    capture_allocation_signature: ir::SigRef,
     list_growth_signature: ir::SigRef,
     list_reserve_signature: ir::SigRef,
     native_signature: ir::SigRef,
@@ -357,6 +359,18 @@ struct StoreFieldEmission<'a> {
     receiver_class: u32,
     contract: ValueContract,
     exit: HeapExitEmission<'a>,
+}
+
+struct CaptureAllocationEmission<'a> {
+    function: u32,
+    environment: ir::Value,
+    capture_start: usize,
+    capture_count: usize,
+    roots: &'a [NativeRoot],
+    callback: bool,
+    point: FaultPoint,
+    replay_stack: &'a [NativeValue],
+    fault_stack: &'a [NativeValue],
 }
 
 #[derive(Clone, Copy)]
@@ -427,6 +441,22 @@ fn emit_region(
         .push(AbiParam::new(pointer_type));
     allocation_signature.returns.push(AbiParam::new(types::I32));
     let allocation_signature = builder.import_signature(allocation_signature);
+    let mut capture_allocation_signature = ir::Signature::new(host_call_conv);
+    capture_allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..6 {
+        capture_allocation_signature
+            .params
+            .push(AbiParam::new(types::I32));
+    }
+    capture_allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    capture_allocation_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let capture_allocation_signature = builder.import_signature(capture_allocation_signature);
     let mut list_growth_signature = ir::Signature::new(host_call_conv);
     list_growth_signature
         .params
@@ -580,6 +610,7 @@ fn emit_region(
         root_tag_pointer,
         root_state_pointer,
         allocation_signature,
+        capture_allocation_signature,
         list_growth_signature,
         list_reserve_signature,
         native_signature,
@@ -765,6 +796,101 @@ fn emit_segment(
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
                 push_static(builder, &mut stack, ScalarKind::Unit, value)?;
+            }
+            Instr::MakeClosure { func, captures } => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let capture_count = usize::try_from(captures).map_err(|_| CompileError::Backend)?;
+                let stack_start = stack
+                    .len()
+                    .checked_sub(capture_count)
+                    .ok_or(CompileError::Backend)?;
+                let post_stack = stack[..stack_start].to_vec();
+                let (roots, capture_start) = collect_capture_allocation_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    &site.stack,
+                    &stack,
+                    capture_count,
+                )?;
+                let frame = emit_current_frame_pointer(builder, values)?;
+                let environment =
+                    load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, environment))?;
+                let result = emit_capture_allocation(
+                    builder,
+                    values,
+                    CaptureAllocationEmission {
+                        function: func,
+                        environment,
+                        capture_start,
+                        capture_count,
+                        roots: &roots,
+                        callback: false,
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        replay_stack: &stack,
+                        fault_stack: &post_stack,
+                    },
+                )?;
+                stack.truncate(stack_start);
+                push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
+            }
+            Instr::Extended(ExtendedInstr::MakeCallback { func, captures }) => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let capture_count = usize::try_from(captures).map_err(|_| CompileError::Backend)?;
+                let stack_start = stack
+                    .len()
+                    .checked_sub(capture_count)
+                    .ok_or(CompileError::Backend)?;
+                let post_stack = stack[..stack_start].to_vec();
+                let (roots, capture_start) = collect_capture_allocation_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    &site.stack,
+                    &stack,
+                    capture_count,
+                )?;
+                let frame = emit_current_frame_pointer(builder, values)?;
+                let environment =
+                    load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, environment))?;
+                let result = emit_capture_allocation(
+                    builder,
+                    values,
+                    CaptureAllocationEmission {
+                        function: func,
+                        environment,
+                        capture_start,
+                        capture_count,
+                        roots: &roots,
+                        callback: true,
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        replay_stack: &stack,
+                        fault_stack: &post_stack,
+                    },
+                )?;
+                stack.truncate(stack_start);
+                let tag = builder
+                    .ins()
+                    .iconst(types::I64, ValueTag::Callback as u64 as i64);
+                stack.push(NativeValue { bits: result, tag });
             }
             Instr::New(class) | Instr::NewG { class, .. } => {
                 let position = segment.start + within as u32;
@@ -5713,6 +5839,123 @@ fn collect_native_roots(
     }
     extend_stack_roots(&mut roots, stack_kinds, stack)?;
     Ok(roots)
+}
+
+fn collect_capture_allocation_roots(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    local_kinds: &[ScalarKind],
+    stack_kinds: &[ScalarKind],
+    stack: &[NativeValue],
+    capture_count: usize,
+) -> Result<(Vec<NativeRoot>, usize), CompileError> {
+    if stack_kinds.len() != stack.len() || capture_count > stack.len() {
+        return Err(CompileError::Backend);
+    }
+    let mut roots = Vec::new();
+    for (slot, (kind, variable)) in local_kinds
+        .iter()
+        .copied()
+        .zip(values.locals.iter().copied())
+        .enumerate()
+    {
+        if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+            roots.push(NativeRoot {
+                bits: builder.use_var(variable),
+                tag: builder.use_var(values.local_tags[slot]),
+                state: Some(builder.use_var(values.local_states[slot])),
+            });
+        }
+    }
+    let stack_start = roots.len();
+    roots.extend(stack.iter().copied().map(|value| NativeRoot {
+        bits: value.bits,
+        tag: value.tag,
+        state: None,
+    }));
+    let capture_start = stack_start
+        .checked_add(stack.len() - capture_count)
+        .ok_or(CompileError::Backend)?;
+    Ok((roots, capture_start))
+}
+
+fn emit_capture_allocation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    emission: CaptureAllocationEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let CaptureAllocationEmission {
+        function,
+        environment,
+        capture_start,
+        capture_count,
+        roots,
+        callback,
+        point,
+        replay_stack,
+        fault_stack,
+    } = emission;
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let function = builder.ins().iconst(types::I32, i64::from(function));
+    let collection = builder.ins().iconst(types::I32, 1);
+    let capture_start = builder.ins().iconst(
+        types::I32,
+        i64::try_from(capture_start).map_err(|_| CompileError::Backend)?,
+    );
+    let capture_count = builder.ins().iconst(
+        types::I32,
+        i64::try_from(capture_count).map_err(|_| CompileError::Backend)?,
+    );
+    let function_offset = if callback {
+        mem::offset_of!(RawNativeFunctions, allocate_callback)
+    } else {
+        mem::offset_of!(RawNativeFunctions, allocate_closure)
+    };
+    let allocation = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.capture_allocation_signature,
+        allocation,
+        &[
+            values.runtime_context,
+            function,
+            environment,
+            collection,
+            capture_start,
+            capture_count,
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let limit_status = if callback {
+        RUNTIME_STACK_LIMIT
+    } else {
+        RUNTIME_HEAP_LIMIT
+    };
+    let limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(limit_status));
+    let limit_exit = if callback {
+        EXIT_STACK_LIMIT
+    } else {
+        EXIT_HEAP_LIMIT
+    };
+    emit_fault_check(builder, values, limit, limit_exit, point, fault_stack)?;
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, point, replay_stack)?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
 }
 
 fn emit_allocate_instance(

@@ -296,6 +296,17 @@ impl NativeRuntime for TestRuntime {
         AllocationResult::Interpreter
     }
 
+    fn allocate_closure(&mut self, _request: ClosureAllocationRequest<'_>) -> AllocationResult {
+        AllocationResult::Interpreter
+    }
+
+    fn allocate_callback(
+        &mut self,
+        _request: CallbackAllocationRequest<'_>,
+    ) -> CallbackAllocationResult {
+        CallbackAllocationResult::Interpreter
+    }
+
     fn grow_list(&mut self, _request: ListGrowthRequest<'_>) -> ListGrowthResult {
         ListGrowthResult::Interpreter
     }

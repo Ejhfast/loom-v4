@@ -3,9 +3,10 @@
 use crate::machine::Machine;
 use crate::NamespaceRuntime;
 use lm_jit::{
-    AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
-    NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache, ScalarKind,
-    LOCAL_INITIALIZED,
+    AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
+    ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
+    ListReserveResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
+    ScalarKind, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
 
@@ -115,11 +116,29 @@ impl Drop for MachineRuntime<'_> {
     }
 }
 
-impl NativeRuntime for MachineRuntime<'_> {
-    fn allocate_instance(
+enum CaptureDecodeFailure {
+    Limit,
+    Invalid,
+}
+
+fn decode_captures(bits: &[u64], tags: &[u64]) -> Result<Vec<Value>, CaptureDecodeFailure> {
+    if bits.len() != tags.len() {
+        return Err(CaptureDecodeFailure::Invalid);
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(bits.len())
+        .map_err(|_| CaptureDecodeFailure::Limit)?;
+    for (&bits, &tag) in bits.iter().zip(tags) {
+        values.push(tagged_value(tag, bits).ok_or(CaptureDecodeFailure::Invalid)?);
+    }
+    Ok(values)
+}
+
+impl MachineRuntime<'_> {
+    fn allocate_object(
         &mut self,
-        class: u32,
-        environment: u32,
+        object: crate::Object,
         root_bits: &[u64],
         root_tags: &[u64],
         root_states: &[u8],
@@ -128,14 +147,6 @@ impl NativeRuntime for MachineRuntime<'_> {
         if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
             return AllocationResult::Interpreter;
         }
-        let Some(class_entry) = self.module.classes.get(class as usize) else {
-            return AllocationResult::Interpreter;
-        };
-        let object = crate::Object::Instance {
-            class,
-            fields: vec![Value::Uninit; class_entry.fields.len()].into(),
-            env: lm_value::Witness(lm_value::TypeEnvId(environment)),
-        };
         let cost = self.machine.vm.heap.allocation_cost(&object);
         if !self.machine.vm.heap.collection_due(cost) {
             let reference = self.machine.vm.heap.alloc(object);
@@ -174,15 +185,82 @@ impl NativeRuntime for MachineRuntime<'_> {
         {
             Ok(Value::Obj(reference)) => {
                 self.allocations = self.allocations.saturating_add(1);
-                let heap = Some(self.machine.vm.heap.jit_view());
                 AllocationResult::Value {
                     bits: object_bits(reference),
-                    heap,
+                    heap: Some(self.machine.vm.heap.jit_view()),
                 }
             }
             Ok(_) => AllocationResult::Interpreter,
             Err(crate::FaultCode::HeapLimit) => AllocationResult::HeapLimit,
             Err(_) => AllocationResult::Interpreter,
+        }
+    }
+}
+
+impl NativeRuntime for MachineRuntime<'_> {
+    fn allocate_instance(
+        &mut self,
+        class: u32,
+        environment: u32,
+        root_bits: &[u64],
+        root_tags: &[u64],
+        root_states: &[u8],
+        allow_collection: bool,
+    ) -> AllocationResult {
+        let Some(class_entry) = self.module.classes.get(class as usize) else {
+            return AllocationResult::Interpreter;
+        };
+        let object = crate::Object::Instance {
+            class,
+            fields: vec![Value::Uninit; class_entry.fields.len()].into(),
+            env: lm_value::Witness(lm_value::TypeEnvId(environment)),
+        };
+        self.allocate_object(object, root_bits, root_tags, root_states, allow_collection)
+    }
+
+    fn allocate_closure(&mut self, request: ClosureAllocationRequest<'_>) -> AllocationResult {
+        let captures = match decode_captures(request.capture_bits, request.capture_tags) {
+            Ok(captures) => captures,
+            Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return AllocationResult::Interpreter,
+        };
+        let object = crate::Object::Closure {
+            func: request.function,
+            captures: captures.into(),
+            env: lm_value::Witness(lm_value::TypeEnvId(request.environment)),
+        };
+        self.allocate_object(
+            object,
+            request.root_bits,
+            request.root_tags,
+            request.root_states,
+            request.allow_collection,
+        )
+    }
+
+    fn allocate_callback(
+        &mut self,
+        request: CallbackAllocationRequest<'_>,
+    ) -> CallbackAllocationResult {
+        let captures = match decode_captures(request.capture_bits, request.capture_tags) {
+            Ok(captures) => captures,
+            Err(CaptureDecodeFailure::Limit) => return CallbackAllocationResult::StackLimit,
+            Err(CaptureDecodeFailure::Invalid) => {
+                return CallbackAllocationResult::Interpreter;
+            }
+        };
+        match self.machine.alloc_callback_native(
+            request.function,
+            captures,
+            lm_value::TypeEnvId(request.environment),
+            request.owner_depth,
+        ) {
+            Ok(Value::Callback(reference)) => CallbackAllocationResult::Value {
+                bits: reference_bits(reference),
+            },
+            Ok(_) => CallbackAllocationResult::Interpreter,
+            Err(crate::FaultCode::StackLimit) => CallbackAllocationResult::StackLimit,
+            Err(_) => CallbackAllocationResult::Interpreter,
         }
     }
 

@@ -37,15 +37,16 @@ mod activation;
 mod opcode;
 
 use activation::{
-    allocate_instance, grow_list, reserve_list, NativeFunction, RawExit, RawNativeActivation,
-    RawNativeFunctions, RawRuntimeContext,
+    allocate_callback, allocate_closure, allocate_instance, grow_list, reserve_list,
+    NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
-    AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
-    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView,
-    NativePreparation, NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers,
-    NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView,
-    LOCAL_DIRTY, LOCAL_INITIALIZED,
+    AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
+    ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
+    ListReserveResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
+    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
+    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
+    NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -654,6 +655,8 @@ impl CompiledRegion {
         };
         let runtime_functions = RawNativeFunctions {
             allocate_instance: allocate_instance::<R>,
+            allocate_closure: allocate_closure::<R>,
+            allocate_callback: allocate_callback::<R>,
             grow_list: grow_list::<R>,
             reserve_list: reserve_list::<R>,
         };

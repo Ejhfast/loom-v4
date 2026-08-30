@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 pub(super) const RUNTIME_OK: u32 = 0;
 const RUNTIME_INTERPRETER: u32 = 1;
 pub(super) const RUNTIME_HEAP_LIMIT: u32 = 2;
+pub(super) const RUNTIME_STACK_LIMIT: u32 = 3;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -320,6 +321,8 @@ pub(super) fn resolved_call_cache_set(
 
 pub(super) type RawAllocateInstance =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
+pub(super) type RawAllocateCapture =
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 
@@ -327,6 +330,8 @@ pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32
 #[repr(C)]
 pub(super) struct RawNativeFunctions {
     pub(super) allocate_instance: RawAllocateInstance,
+    pub(super) allocate_closure: RawAllocateCapture,
+    pub(super) allocate_callback: RawAllocateCapture,
     pub(super) grow_list: RawGrowList,
     pub(super) reserve_list: RawReserveList,
 }
@@ -1029,6 +1034,35 @@ pub enum AllocationResult {
     Interpreter,
 }
 
+/// One checked callback-allocation result.
+#[derive(Debug, Clone, Copy)]
+pub enum CallbackAllocationResult {
+    Value { bits: u64 },
+    StackLimit,
+    Interpreter,
+}
+
+/// One typed closure-allocation request.
+pub struct ClosureAllocationRequest<'a> {
+    pub function: u32,
+    pub environment: u32,
+    pub capture_bits: &'a [u64],
+    pub capture_tags: &'a [u64],
+    pub root_bits: &'a [u64],
+    pub root_tags: &'a [u64],
+    pub root_states: &'a [u8],
+    pub allow_collection: bool,
+}
+
+/// One typed callback-allocation request.
+pub struct CallbackAllocationRequest<'a> {
+    pub function: u32,
+    pub environment: u32,
+    pub capture_bits: &'a [u64],
+    pub capture_tags: &'a [u64],
+    pub owner_depth: u32,
+}
+
 /// Typed runtime slow paths for one native activation.
 pub trait NativeRuntime {
     /// Allocate one instance with its exact environment and active roots.
@@ -1041,6 +1075,15 @@ pub trait NativeRuntime {
         root_states: &[u8],
         allow_collection: bool,
     ) -> AllocationResult;
+
+    /// Allocate one closure with exact captures and active roots.
+    fn allocate_closure(&mut self, request: ClosureAllocationRequest<'_>) -> AllocationResult;
+
+    /// Allocate one nonescaping callback with exact captures.
+    fn allocate_callback(
+        &mut self,
+        request: CallbackAllocationRequest<'_>,
+    ) -> CallbackAllocationResult;
 
     /// Grow one list and append one canonical value.
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult;
@@ -1140,23 +1183,134 @@ pub(super) unsafe extern "C" fn allocate_instance<R: NativeRuntime>(
         root_states,
         allow_collection != 0 && !nested,
     );
+    finish_object_allocation(context.activation, result, response)
+}
+
+pub(super) unsafe extern "C" fn allocate_closure<R: NativeRuntime>(
+    context: *mut c_void,
+    function: u32,
+    environment: u32,
+    allow_collection: u32,
+    capture_start: u32,
+    capture_count: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() || allow_collection > 1 {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    let capture_start = capture_start as usize;
+    let capture_count = capture_count as usize;
+    let Some(capture_end) = capture_start.checked_add(capture_count) else {
+        return RUNTIME_INTERPRETER;
+    };
+    if root_count > context.root_capacity || capture_end > root_count {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let nested = unsafe { (*context.activation).frame_len > 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    let response = runtime.allocate_closure(ClosureAllocationRequest {
+        function,
+        environment,
+        capture_bits: &root_bits[capture_start..capture_end],
+        capture_tags: &root_tags[capture_start..capture_end],
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection: allow_collection != 0 && !nested,
+    });
+    finish_object_allocation(context.activation, result, response)
+}
+
+pub(super) unsafe extern "C" fn allocate_callback<R: NativeRuntime>(
+    context: *mut c_void,
+    function: u32,
+    environment: u32,
+    _allow_collection: u32,
+    capture_start: u32,
+    capture_count: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    let capture_start = capture_start as usize;
+    let capture_count = capture_count as usize;
+    let Some(capture_end) = capture_start.checked_add(capture_count) else {
+        return RUNTIME_INTERPRETER;
+    };
+    if root_count > context.root_capacity || capture_end > root_count {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let activation = unsafe { &*context.activation };
+    let Some(owner_depth) = activation.base_frames.checked_add(activation.frame_len) else {
+        return RUNTIME_STACK_LIMIT;
+    };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.allocate_callback(CallbackAllocationRequest {
+        function,
+        environment,
+        capture_bits: &root_bits[capture_start..capture_end],
+        capture_tags: &root_tags[capture_start..capture_end],
+        owner_depth,
+    }) {
+        CallbackAllocationResult::Value { bits } => {
+            // SAFETY: The caller provides one writable result slot.
+            unsafe { result.write(bits) };
+            RUNTIME_OK
+        }
+        CallbackAllocationResult::StackLimit => RUNTIME_STACK_LIMIT,
+        CallbackAllocationResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+fn finish_object_allocation(
+    activation: *mut RawNativeActivation,
+    result: *mut u64,
+    response: AllocationResult,
+) -> u32 {
     match response {
         AllocationResult::Value { bits, heap } => {
             let slot_count = (bits as u32 as usize).saturating_add(1);
-            // SAFETY: The native activation remains writable during the slow path.
+            // SAFETY: The native activation remains writable during this slow path.
             unsafe {
-                (*context.activation).heap_slot_count =
-                    (*context.activation).heap_slot_count.max(slot_count);
+                (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
                 if let Some(heap) = heap {
-                    (*context.activation).heap_pages = heap.pages;
-                    (*context.activation).heap_page_count = heap.page_count;
-                    (*context.activation).heap_slot_count = heap.slot_count;
-                    (*context.activation).heap_used_bytes = heap.used_bytes;
-                    (*context.activation).heap_collection_threshold = heap.collection_threshold;
+                    (*activation).heap_pages = heap.pages;
+                    (*activation).heap_page_count = heap.page_count;
+                    (*activation).heap_slot_count = heap.slot_count;
+                    (*activation).heap_used_bytes = heap.used_bytes;
+                    (*activation).heap_collection_threshold = heap.collection_threshold;
                 }
+                result.write(bits);
             }
-            // SAFETY: The caller provides one writable result slot.
-            unsafe { result.write(bits) };
             RUNTIME_OK
         }
         AllocationResult::HeapLimit => RUNTIME_HEAP_LIMIT,

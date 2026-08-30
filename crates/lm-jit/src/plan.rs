@@ -1504,11 +1504,29 @@ fn analyze_segment(
                     kind: HeapAccessKind::ListPush { value: contract },
                 });
             }
-            Instr::New(_) | Instr::NewG { .. } => {
+            Instr::New(_)
+            | Instr::NewG { .. }
+            | Instr::MakeClosure { .. }
+            | Instr::Extended(ExtendedInstr::MakeCallback { .. }) => {
                 allocations.push(AllocationSite {
                     instruction: position,
                     stack: before.stack.clone(),
                 });
+                let captures = match instruction {
+                    Instr::MakeClosure { captures, .. }
+                    | Instr::Extended(ExtendedInstr::MakeCallback { captures, .. }) => {
+                        Some(*captures)
+                    }
+                    _ => None,
+                };
+                if let Some(captures) = captures {
+                    let length = before
+                        .stack
+                        .len()
+                        .checked_sub(captures as usize)
+                        .ok_or(UnsupportedReason::InvalidStack)?;
+                    fault_stacks.push((next, before.stack[..length].to_vec()));
+                }
             }
             Instr::Call(target) => {
                 let signature = context

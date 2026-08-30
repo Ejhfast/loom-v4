@@ -6086,6 +6086,20 @@ impl Machine {
         env: TypeEnvId,
     ) -> Result<Value, FaultCode> {
         let owner_depth = u32::try_from(self.vm.frames.len()).map_err(|_| FaultCode::StackLimit)?;
+        self.alloc_callback_native(func, captures, env, owner_depth)
+    }
+
+    /// Create one callback at an exact native frame depth.
+    pub(crate) fn alloc_callback_native(
+        &mut self,
+        func: u32,
+        captures: Vec<Value>,
+        env: TypeEnvId,
+        owner_depth: u32,
+    ) -> Result<Value, FaultCode> {
+        if owner_depth == 0 || owner_depth > self.config.max_frames {
+            return Err(FaultCode::StackLimit);
+        }
         let descriptor = CallbackDescriptor {
             func,
             captures,

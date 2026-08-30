@@ -169,7 +169,9 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::CallValue { .. } => {
             InstructionTreatment::dedicated(Call, ExitBehavior::Call).with_replay()
         }
-        Instr::MakeClosure { .. } => temporary(FastPath),
+        Instr::MakeClosure { .. } => {
+            InstructionTreatment::dedicated(FastPath, ExitBehavior::Allocation).with_replay()
+        }
         Instr::LoadCapture(_) => dedicated(Guarded).with_replay(),
         Instr::New(_) | Instr::NewG { .. } => {
             InstructionTreatment::dedicated(FastPath, ExitBehavior::Allocation)
@@ -263,7 +265,9 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
     use TreatmentClass::{Call, Exit, FastPath, Guarded, Helper, Inline};
 
     match operation {
-        ExtendedInstr::MakeCallback { .. } => temporary(FastPath),
+        ExtendedInstr::MakeCallback { .. } => {
+            InstructionTreatment::dedicated(FastPath, ExitBehavior::Allocation).with_replay()
+        }
         ExtendedInstr::AsCallback => dedicated(Guarded).with_replay(),
         ExtendedInstr::OptionSome { .. } => dedicated(Inline),
         ExtendedInstr::OptionNone { .. } => dedicated(Inline),

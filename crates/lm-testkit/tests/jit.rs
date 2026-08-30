@@ -564,7 +564,90 @@ fn callback_slots_preserve_captures_across_native_calls() {
     assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(42_000)));
     assert!(metrics.compiled_call_sites >= 2, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 1, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+}
+
+#[test]
+fn closure_and_callback_creation_match_each_fuel_boundary() {
+    let source = concat!(
+        "base = 1\n",
+        "stored = do |value: Int|: Int value + base end\n",
+        "def invoke(f: (Int) -> Int): Int\n",
+        "  f(41)\n",
+        "end\n",
+        "invoke() { |value: Int| value + stored(value) }\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-capture-allocation-fuel.lm", source)
+        .expect("the capture-allocation case compiles");
+    for fuel in 0..=40 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn callback_creation_preserves_scheduler_quanta() {
+    let source = concat!(
+        "def invoke(f: (Int) -> Int): Int\n",
+        "  f(41)\n",
+        "end\n",
+        "base = 1\n",
+        "i = 0\nsum = 0\n",
+        "while i < 2000\n",
+        "  sum = sum + invoke() { |value: Int| value + base }\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-callback-allocation-scheduler.lm", source)
+        .expect("the scheduler callback case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the scheduler callback case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the scheduler callback case runs");
+        let retired = world.metrics().retired_instructions;
+        let dump = world.dump_live(&outcome);
+        (outcome, retired, dump)
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let native = run(Arc::clone(&engine));
+    assert_eq!(native, interpreted, "{:?}", engine.metrics());
+    let metrics = engine.metrics();
+    assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
+fn native_closure_creation_preserves_the_heap_limit_fault() {
+    let source = "base = 1\ndo |value: Int|: Int value + base end\n";
+    let artifact = lm_testkit::compile_text("jit-closure-allocation-limit.lm", source)
+        .expect("the closure-allocation case compiles");
+    let config = VmConfig {
+        heap_bytes: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+    assert!(metrics.native_entries > 0, "{metrics:?}");
 }
 
 #[test]

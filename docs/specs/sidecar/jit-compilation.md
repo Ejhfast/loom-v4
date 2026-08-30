@@ -896,7 +896,8 @@ Gate: Deep recursion remains faster in single-turn and scheduled execution.
 
 - measure the complete corpus;
 - profile weighted unsupported instructions;
-- add only high-value fast paths;
+- complete every opcode treatment by production class;
+- use profile weights only to order the work;
 - keep complex operations in typed slow paths.
 
 Gate: JSON and HTTP meet the representative gains.
@@ -1185,7 +1186,7 @@ Gate: Direct and scheduled closure results match Interpreter results.
 
 Gate: Closure calls improve in Auto and Native modes.
 
-`MakeClosure` and callback capture reads remain later coverage work.
+Closure and callback creation remain later coverage work.
 
 Scheduler continuation landed before broader collection access.
 
@@ -1656,6 +1657,38 @@ Native gained 3.82 times on the scheduled closure row.
 Auto retired no measured native instruction on this row.
 
 The Auto closure performance gate remains open.
+
+### Stage F21: Native capture allocation
+
+- keep one immutable capture-array view in each native frame;
+- load closure and callback captures through the same frame view;
+- allocate closures through one fixed typed helper;
+- allocate callback descriptors through one fixed typed helper;
+- stage captures and complete collection roots in one bounded buffer;
+- replay nested collection before it changes state;
+- record dynamic post-pop fault stacks in the region plan.
+
+Gate: Closure and callback creation use no temporary interpreter site.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Fuel and heap-limit exits preserve exact canonical state.
+
+The focused JIT suite passed 99 tests.
+
+The fresh-engine corpus gate took 11.82 seconds after compilation.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Captured closure calls | 66.528 ms | 70.356 ms | 16.682 ms | 0.95 times | 3.99 times | 100.00 percent |
+
+The callback path used no compiled temporary site.
+
+Auto retired no measured native instruction on the closure row.
+
+The Auto closure performance gate remains open.
+
+JSON and HTTP remain below the representative gate.
 
 ## 24. Rejected designs
 
