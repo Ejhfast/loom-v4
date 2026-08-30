@@ -571,6 +571,80 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
 }
 
 #[test]
+fn generic_calls_preserve_each_exact_type_environment() {
+    let source = concat!(
+        "def identity[T](value: T): T\n  value\nend\n",
+        "def outer[T](value: T): T\n  identity(value)\nend\n",
+        "i = 0\nsum = 0\nwhile i < 1000\n",
+        "  number = outer(i)\n",
+        "  text = outer[String](\"x\")\n",
+        "  sum = sum + number + text.byte_len()\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-generic-call.lm", source)
+        .expect("the generic call case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(500_500)));
+    assert!(metrics.compiled_call_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 15_000, "{metrics:?}");
+    assert!(metrics.native_type_environment_exits <= 4, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn generic_environment_cache_does_not_enter_shared_code() {
+    let source = concat!(
+        "def identity[T](value: T): T\n  value\nend\n",
+        "def outer[T](value: T): T\n  identity(value)\nend\n",
+        "i = 0\nsum = 0\nwhile i < 100\n",
+        "  number = outer(i)\n",
+        "  text = outer[String](\"x\")\n",
+        "  sum = sum + number + text.byte_len()\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-generic-shared.lm", source)
+        .expect("the shared generic case compiles");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    for _ in 0..8 {
+        let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact.clone())
+            .expect("the shared generic case publishes");
+        let mut vm =
+            Vm::new_with_engine(arena, namespace, VmConfig::default(), Arc::clone(&engine));
+        assert_eq!(vm.run(), Outcome::Done(lm_value::Value::Int(5_050)));
+    }
+    let metrics = engine.metrics();
+    assert!(metrics.native_type_environment_exits <= 32, "{metrics:?}");
+    assert_eq!(metrics.native_type_environment_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn generic_environment_cache_survives_interpreter_exits() {
+    let source = concat!(
+        "def identity[T](value: T): T\n  value\nend\n",
+        "items: [Int] = []\n",
+        "i = 0\nwhile i < 1000\n",
+        "  value = identity(i)\n",
+        "  items.push(value)\n",
+        "  i = i + 1\n",
+        "end\nitems.len()\n",
+    );
+    let (outcome, metrics, _) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(outcome, Outcome::Done(lm_value::Value::Int(1_000)));
+    assert!(metrics.native_interpreter_exits > 100, "{metrics:?}");
+    assert!(metrics.native_type_environment_exits <= 2, "{metrics:?}");
+    assert_eq!(metrics.native_type_environment_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn a_faulting_inline_deopt_can_enter_the_native_callee() {
     let cases = [
         (

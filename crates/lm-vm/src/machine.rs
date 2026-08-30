@@ -804,6 +804,10 @@ pub struct Machine {
     ///
     /// Snapshots exclude this process-local execution state.
     native_continuation: Option<Box<crate::jit::NativeContinuation>>,
+    /// Derived type environments used only by native execution.
+    ///
+    /// Snapshots exclude this process-local cache.
+    pub(crate) native_type_environments: lm_jit::NativeTypeEnvironmentCache,
 }
 
 /// Clock-free execution counters for one machine.
@@ -1232,6 +1236,7 @@ impl Machine {
             preparing_wait: None,
             execution_metrics: MachineExecutionMetrics::default(),
             native_continuation: None,
+            native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
         }
     }
 
@@ -5086,6 +5091,9 @@ impl Machine {
             // index.
             Instr::CallG { func: callee, app } => {
                 self.call_generic(module, envs, callee, app)?;
+                if native.after_call(callee) {
+                    return Ok(ExecOutcome::ContinueNative);
+                }
             }
             Instr::CallVirtual { selector, argc } => {
                 let argc = argc as usize;
@@ -5824,11 +5832,12 @@ impl Machine {
         Ok(ExecOutcome::Continue)
     }
 
-    /// Retire one direct call after a materialized native exit.
-    pub(crate) fn start_native_direct_call(
+    /// Retire one call after a materialized native exit.
+    pub(crate) fn start_native_call(
         &mut self,
         module: &NamespaceRuntime,
         callee: u32,
+        environment: TypeEnvId,
     ) -> Result<(), FaultCode> {
         let argc = module
             .funcs
@@ -5838,7 +5847,7 @@ impl Machine {
             .len();
         let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
         frame.ip = frame.ip.checked_add(1).ok_or(BAD_STATE)?;
-        self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)
+        self.push_frame(module, callee, argc, None, environment)
     }
 
     /// Close an `Option` family or arm type to its family type.

@@ -398,7 +398,7 @@ fn function_is_candidate(module: &crate::NamespaceRuntime, function: &lm_bytecod
         .iter()
         .flatten()
         .all(|instruction| match instruction {
-            lm_bytecode::Instr::Call(target) => {
+            lm_bytecode::Instr::Call(target) | lm_bytecode::Instr::CallG { func: target, .. } => {
                 module.funcs.get(*target as usize).is_some_and(|callee| {
                     callee
                         .params
@@ -432,6 +432,8 @@ fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
                 | lm_bytecode::BcType::Fn(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
+                | lm_bytecode::BcType::Var(_)
+                | lm_bytecode::BcType::Projection { .. }
         )
     )
 }
@@ -453,6 +455,8 @@ fn table_type_is_candidate(tables: &lm_bytecode::CodeTables, ty: u32) -> bool {
                 | lm_bytecode::BcType::Fn(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
+                | lm_bytecode::BcType::Var(_)
+                | lm_bytecode::BcType::Projection { .. }
         )
     )
 }
@@ -466,9 +470,6 @@ fn function_rejections(
         return Vec::new();
     }
     let mut reasons = BTreeMap::<String, u32>::new();
-    if function.type_params != 0 || function.effect_params != 0 {
-        add_reason(&mut reasons, "generic function".to_string());
-    }
     if !function.captures.is_empty() {
         add_reason(&mut reasons, "captured function".to_string());
     }
@@ -481,7 +482,9 @@ fn function_rejections(
         add_reason(&mut reasons, "non-native value type".to_string());
     }
     for instruction in function.blocks.iter().flatten() {
-        if let lm_bytecode::Instr::Call(target) = instruction {
+        if let lm_bytecode::Instr::Call(target) | lm_bytecode::Instr::CallG { func: target, .. } =
+            instruction
+        {
             let boundary_supported = tables.funcs.get(*target as usize).is_some_and(|callee| {
                 callee
                     .params

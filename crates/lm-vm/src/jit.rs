@@ -308,7 +308,9 @@ impl JitEngine {
             input.set_class_relocation(relocation.classes());
             let mut callees = Vec::new();
             for instruction in runtime.blocks.iter().flatten() {
-                if let lm_bytecode::Instr::Call(callee) = instruction {
+                if let lm_bytecode::Instr::Call(callee)
+                | lm_bytecode::Instr::CallG { func: callee, .. } = instruction
+                {
                     if !callees.contains(callee) {
                         callees.push(*callee);
                     }
@@ -422,7 +424,7 @@ impl JitEngine {
                     return NativeAttempt::Fallback;
                 };
                 let frame = &machine.vm.frames[frame_index];
-                if frame.closure.is_some() || frame.env != TypeEnvId::EMPTY {
+                if frame.closure.is_some() {
                     metrics.note_missing_entry_fallback();
                     return NativeAttempt::Fallback;
                 }
@@ -483,6 +485,7 @@ impl JitEngine {
                     .activation
                     .prepare_root(NativePreparation {
                         function: frame.func,
+                        environment: frame.env.0,
                         block: frame.block,
                         instruction: frame.ip,
                         local_count: region.local_kinds().len(),
@@ -569,8 +572,10 @@ impl JitEngine {
             )
         };
         let (exit, allocations) = {
+            let type_environments = std::mem::take(&mut machine.native_type_environments);
             let mut runtime = MachineRuntime {
                 machine,
+                type_environments,
                 module,
                 base_local: base,
                 base_operand: operand_base,
@@ -589,6 +594,10 @@ impl JitEngine {
                 scratch.root_states.fill(0);
                 let Some(remaining) = batch_fuel.checked_sub(prior_retired) else {
                     break Err(Failure::BackendUnavailable);
+                };
+                let type_environments = match runtime.type_environments.view() {
+                    Ok(view) => view,
+                    Err(error) => break Err(error),
                 };
                 let heap = runtime.machine.vm.heap.jit_view();
                 let exit = match active_region.execute(
@@ -609,6 +618,8 @@ impl JitEngine {
                         class_parents: native.class_parents(),
                         option_families: &scratch.option_families,
                         literals,
+                        type_store_id: context.envs.canonical_store_id(),
+                        type_environments,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -687,6 +698,57 @@ impl JitEngine {
                             active_entry = resume;
                             continue;
                         }
+                    }
+                }
+                if exit.kind() == ExitKind::TypeEnvironment {
+                    metrics.note_native_type_environment_exit();
+                    let Some((function, parent)) = scratch
+                        .activation
+                        .frames()
+                        .last()
+                        .map(|frame| (frame.function(), TypeEnvId(frame.environment())))
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if exit.result() != u64::from(parent.0) {
+                        break Err(Failure::BackendUnavailable);
+                    }
+                    let Some(resolve_region) =
+                        native.slot(function).and_then(|slot| slot.compiled())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(application) =
+                        resolve_region.generic_call_application(exit.block(), exit.instruction())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if let Ok(child) = context.envs.derive(module, parent, application) {
+                        let cached = runtime.type_environments.cache_type_environment(
+                            context.envs.canonical_store_id(),
+                            function,
+                            exit.block(),
+                            exit.instruction(),
+                            parent.0,
+                            child.0,
+                        );
+                        if cached {
+                            let Some(next_retired) = prior_retired.checked_add(exit.retired())
+                            else {
+                                break Err(Failure::BackendUnavailable);
+                            };
+                            let Some(resume) = resolve_region
+                                .resume_plan(exit.block(), exit.instruction())
+                                .map(|entry| entry.index())
+                            else {
+                                break Err(Failure::BackendUnavailable);
+                            };
+                            prior_retired = next_retired;
+                            active_region = resolve_region;
+                            active_entry = resume;
+                            continue;
+                        }
+                        metrics.note_native_type_environment_fallback();
                     }
                 }
                 if exit.kind() != ExitKind::Return || scratch.activation.frame_count() <= 1 {
@@ -857,6 +919,7 @@ impl JitEngine {
             | ExitKind::Call
             | ExitKind::GrowActivation
             | ExitKind::TypeResolution
+            | ExitKind::TypeEnvironment
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(
@@ -880,10 +943,13 @@ impl JitEngine {
                     let Ok(target) = u32::try_from(target) else {
                         return malformed_native_exit(retired);
                     };
+                    let Ok(environment) = u32::try_from(exit.result_tag()) else {
+                        return malformed_native_exit(retired);
+                    };
                     machine.vm.fuel -= 1;
                     let retired = retired + 1;
                     metrics.note_native_retired(1);
-                    return match machine.start_native_direct_call(module, target) {
+                    return match machine.start_native_call(module, target, TypeEnvId(environment)) {
                         Ok(()) => NativeAttempt::Reenter { retired },
                         Err(fault) => {
                             metrics.note_native_fault_exit();
@@ -896,7 +962,10 @@ impl JitEngine {
                 }
                 if matches!(
                     exit.kind(),
-                    ExitKind::Allocation | ExitKind::Effect | ExitKind::TypeResolution
+                    ExitKind::Allocation
+                        | ExitKind::Effect
+                        | ExitKind::TypeResolution
+                        | ExitKind::TypeEnvironment
                 ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();
@@ -1151,7 +1220,7 @@ fn materialize_native_frames(
         .vm
         .frames
         .get(root_index)
-        .is_none_or(|frame| frame.func != root.function())
+        .is_none_or(|frame| frame.func != root.function() || frame.env.0 != root.environment())
     {
         return Err(());
     }
@@ -1222,7 +1291,7 @@ fn materialize_native_frames(
                 base_local,
                 base_operand,
                 closure: None,
-                env: TypeEnvId::EMPTY,
+                env: TypeEnvId(frame.environment()),
             });
         }
         if frame.operand_tags().len() != operand_kinds.len() {

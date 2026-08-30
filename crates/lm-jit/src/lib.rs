@@ -28,6 +28,7 @@ const EXIT_TYPE_RESOLUTION: u32 = 15;
 const EXIT_REPLAY: u32 = 16;
 const EXIT_LITERAL: u32 = 17;
 const EXIT_UNREACHABLE: u32 = 18;
+const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 
 mod activation;
 
@@ -36,8 +37,8 @@ use activation::{
 };
 pub use activation::{
     AllocationResult, AllocationRuntime, NativeActivation, NativeExecution, NativeFrameView,
-    NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut, LOCAL_DIRTY,
-    LOCAL_INITIALIZED,
+    NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut,
+    NativeTypeEnvironmentCache, NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -75,8 +76,16 @@ pub struct CompiledRegion {
     plan: RegionPlan,
     entry: NativeFunction,
     call_entry: usize,
+    generic_calls: Vec<GenericCallSite>,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
+}
+
+struct GenericCallSite {
+    function: u32,
+    block: u32,
+    instruction: u32,
+    application: u32,
 }
 
 /// One stable native call target for a namespace function slot.
@@ -316,20 +325,24 @@ impl CompiledRegion {
     /// Return operand representations for one suspended native caller.
     pub fn suspended_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
         self.plan.segments.iter().find_map(|segment| {
-            let SegmentExit::Call {
-                target,
-                fallthrough_ip,
-            } = segment.exit
-            else {
+            let SegmentExit::Call { fallthrough_ip, .. } = segment.exit else {
                 return None;
             };
             if segment.block != block || fallthrough_ip != instruction {
                 return None;
             }
-            let parameters = self.plan.call_contracts.get(&target)?.params.len();
+            let parameters = segment.call_contract.as_ref()?.params.len();
             let prefix = segment.boundary_stack.len().checked_sub(parameters)?;
             Some(&segment.boundary_stack[..prefix])
         })
+    }
+
+    /// Return the type application of one generic call site.
+    pub fn generic_call_application(&self, block: u32, instruction: u32) -> Option<u32> {
+        self.generic_calls
+            .iter()
+            .find(|site| site.block == block && site.instruction == instruction)
+            .map(|site| site.application)
     }
 
     /// Execute native code over explicit scalar buffers.
@@ -355,6 +368,8 @@ impl CompiledRegion {
             class_parents,
             option_families,
             literals,
+            type_store_id,
+            type_environments,
         } = input;
         let top_index = activation
             .frame_len
@@ -372,6 +387,8 @@ impl CompiledRegion {
             || roots.len() < self.plan.max_roots.max(1)
             || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
+            || (!self.generic_calls.is_empty()
+                && (type_store_id == 0 || type_environments.entries.is_null()))
         {
             return Err(Failure::BackendUnavailable);
         }
@@ -412,6 +429,9 @@ impl CompiledRegion {
             option_family_count: option_families.len(),
             literal_values: literals.values,
             literal_count: literals.count,
+            type_store_id,
+            type_environments: type_environments.entries,
+            type_environment_mask: type_environments.mask,
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
@@ -498,6 +518,7 @@ impl CompiledRegion {
             EXIT_REPLAY => ExitKind::Replay,
             EXIT_LITERAL => ExitKind::Literal,
             EXIT_UNREACHABLE => ExitKind::Unreachable,
+            EXIT_TYPE_ENVIRONMENT => ExitKind::TypeEnvironment,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -580,11 +601,7 @@ impl JitEngine {
 ///
 /// Planning can still reject unsupported types or function shapes.
 pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
-    if function.type_params != 0
-        || function.effect_params != 0
-        || !function.captures.is_empty()
-        || function.local_types.len() > MAX_REGION_LOCALS
-    {
+    if !function.captures.is_empty() || function.local_types.len() > MAX_REGION_LOCALS {
         return false;
     }
     let mut instructions = 0usize;
@@ -631,6 +648,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::EqRef
             | Instr::NeRef
             | Instr::Call(_)
+            | Instr::CallG { .. }
             | Instr::New(_)
             | Instr::LoadField(_)
             | Instr::StoreField(_)

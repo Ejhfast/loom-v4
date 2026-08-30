@@ -579,7 +579,7 @@ fn report_jit_representative(name: &str, source: &str) {
         native_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64
     };
     println!(
-        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         automatic.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
@@ -591,6 +591,9 @@ fn report_jit_representative(name: &str, source: &str) {
         native_metrics.unsupported_region_fallbacks,
         auto_metrics.native_interpreter_exits,
         native_metrics.native_interpreter_exits,
+        auto_metrics.native_type_environment_exits,
+        native_metrics.native_type_environment_exits,
+        native_metrics.native_type_environment_fallbacks,
     );
     if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
         report_jit_profile(name, source);
@@ -1526,7 +1529,7 @@ fn bench_jit_scalar_regions() {
 #[ignore]
 fn bench_jit_representative_programs() {
     println!(
-        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits"
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits\tauto_env_exits\tnative_env_exits\tnative_env_fallbacks"
     );
     report_jit_representative(
         "jit_deep_recursion",
@@ -1547,6 +1550,17 @@ fn bench_jit_representative_programs() {
             "  if value < 0 then value - 1 else value + 1 end\n",
             "end\n",
             "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_generic_call",
+        concat!(
+            "def identity[T](value: T): T\n  value\nend\n",
+            "def outer[T](value: T): T\n  identity(value)\nend\n",
+            "i = 0\ns = 0\n",
+            "while i < 1000000\n",
+            "  s = s + outer(i)\n  i = i + 1\n",
+            "end\ns\n",
         ),
     );
     report_jit_representative(

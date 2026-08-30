@@ -113,6 +113,35 @@ pub type VerifiedFunctionPointStates = (
     Vec<Option<VerifiedBlockState>>,
 );
 
+/// Verified states and the complete type universe used by those states.
+pub struct VerifiedFunctionMetadata {
+    blocks: Vec<Option<VerifiedBlockState>>,
+    points: Vec<Option<VerifiedBlockState>>,
+    types: Vec<BcType>,
+}
+
+impl VerifiedFunctionMetadata {
+    /// Return each reachable block-entry state.
+    pub fn blocks(&self) -> &[Option<VerifiedBlockState>] {
+        &self.blocks
+    }
+
+    /// Return each requested instruction-boundary state.
+    pub fn points(&self) -> &[Option<VerifiedBlockState>] {
+        &self.points
+    }
+
+    /// Return the extended verified type universe.
+    pub fn types(&self) -> &[BcType] {
+        &self.types
+    }
+
+    /// Remove the type universe and return the two state tables.
+    pub fn into_states(self) -> VerifiedFunctionPointStates {
+        (self.blocks, self.points)
+    }
+}
+
 type State = VerifiedBlockState;
 
 /// The extended type universe: the module table plus the types
@@ -350,6 +379,17 @@ pub fn verify_function_states_at_with_bundle(
     function: u32,
     points: &[(u32, u32)],
 ) -> Result<VerifiedFunctionPointStates, VerifyError> {
+    verify_function_metadata_at_with_bundle(module, bundle, function, points)
+        .map(VerifiedFunctionMetadata::into_states)
+}
+
+/// Verify one function and return states with their extended type universe.
+pub fn verify_function_metadata_at_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    function: u32,
+    points: &[(u32, u32)],
+) -> Result<VerifiedFunctionMetadata, VerifyError> {
     let ctx = verify_structure(module, bundle.clone())?;
     let Some(func) = module.funcs.get(function as usize) else {
         return Err(err(function, "the function index is out of range"));
@@ -359,7 +399,12 @@ pub fn verify_function_states_at_with_bundle(
     }
     let entries = verify_func(&ctx, func, function)?;
     let requested = func::states_at_points(&ctx, func, function, &entries, points)?;
-    Ok((entries, requested))
+    let types = ctx.uni.borrow().types.clone();
+    Ok(VerifiedFunctionMetadata {
+        blocks: entries,
+        points: requested,
+        types,
+    })
 }
 
 /// Validate every module-level rule without the per-function

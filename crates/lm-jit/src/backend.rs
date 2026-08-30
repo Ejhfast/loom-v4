@@ -1,8 +1,8 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, ALLOCATION_HEAP_LIMIT,
-    ALLOCATION_OK,
+    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, RawTypeEnvironmentCacheEntry,
+    ALLOCATION_HEAP_LIMIT, ALLOCATION_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract,
@@ -10,10 +10,10 @@ use crate::plan::{
     ValueContract,
 };
 use crate::{
-    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
-    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
+    CompiledRegion, FunctionInput, GenericCallSite, NativeEntryCell, ScalarKind, EXIT_ALLOCATION,
+    EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
     EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
-    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
+    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
     EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
@@ -56,7 +56,25 @@ impl From<UnsupportedReason> for CompileError {
 
 pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileError> {
     let plan = RegionPlan::for_function(&input)?;
-    let func = input.root.runtime;
+    let generic_calls: Vec<GenericCallSite> = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let SegmentExit::Call {
+                app: Some(application),
+                ..
+            } = segment.exit
+            else {
+                return None;
+            };
+            Some(GenericCallSite {
+                function: input.root.function,
+                block: segment.block,
+                instruction: segment.end.checked_sub(1)?,
+                application,
+            })
+        })
+        .collect();
 
     let mut flags = settings::builder();
     flags
@@ -99,9 +117,9 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         &mut frontend,
         pointer_type,
         host_call_conv,
-        func,
         &plan,
         &input,
+        &generic_calls,
     )?;
     module
         .define_function(body_id, &mut body_context)
@@ -129,6 +147,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         plan,
         entry,
         call_entry,
+        generic_calls,
         module: Mutex::new(Some(module)),
     })
 }
@@ -274,6 +293,7 @@ enum ObjectGuard<'a> {
 
 struct NativeCallEmission<'a> {
     target: u32,
+    environment: ir::Value,
     contract: &'a CallContract,
     block: u32,
     instruction: u32,
@@ -288,6 +308,7 @@ struct SegmentEmission<'a, 'b> {
     values: NativeValues<'a>,
     plan: &'a RegionPlan,
     input: &'a FunctionInput<'b>,
+    generic_calls: &'a [GenericCallSite],
     exact_fuel: bool,
     resume_blocks: Option<&'a [ir::Block]>,
 }
@@ -297,10 +318,11 @@ fn emit_region(
     frontend: &mut FunctionBuilderContext,
     pointer_type: ir::Type,
     host_call_conv: CallConv,
-    bytecode: &Func,
     plan: &RegionPlan,
     input: &FunctionInput<'_>,
+    generic_calls: &[GenericCallSite],
 ) -> Result<(), CompileError> {
+    let bytecode = input.root.runtime;
     let call_conv = function.signature.call_conv;
     let mut builder = FunctionBuilder::new(function, frontend);
     let mut allocation_signature = ir::Signature::new(host_call_conv);
@@ -552,6 +574,7 @@ fn emit_region(
                     values,
                     plan,
                     input,
+                    generic_calls,
                     exact_fuel: true,
                     resume_blocks: Some(&exact_blocks[index]),
                 },
@@ -568,6 +591,7 @@ fn emit_region(
                 values,
                 plan,
                 input,
+                generic_calls,
                 exact_fuel: false,
                 resume_blocks: None,
             },
@@ -590,6 +614,7 @@ fn emit_segment(
         values,
         plan,
         input,
+        generic_calls,
         exact_fuel,
         resume_blocks,
     } = emission;
@@ -1522,6 +1547,7 @@ fn emit_segment(
                 )?;
             }
             Instr::Call(_)
+            | Instr::CallG { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::TupleNew { .. }
@@ -1587,16 +1613,42 @@ fn emit_segment(
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         } else {
             emit_segment_charge(builder, values, segment.cost, exact_fuel);
-            let contract = plan
-                .call_contracts
-                .get(&target)
+            let contract = segment
+                .call_contract
+                .as_ref()
                 .ok_or(CompileError::Backend)?;
+            let environment = match segment.exit {
+                SegmentExit::Call {
+                    app: Some(application),
+                    ..
+                } => {
+                    let site = generic_calls
+                        .iter()
+                        .find(|site| {
+                            site.block == segment.block
+                                && site.instruction == call_instruction
+                                && site.application == application
+                        })
+                        .ok_or(CompileError::Backend)?;
+                    emit_type_environment_lookup(
+                        builder,
+                        values,
+                        site,
+                        segment.block,
+                        call_instruction,
+                        &stack,
+                    )?
+                }
+                SegmentExit::Call { app: None, .. } => builder.ins().iconst(types::I32, 0),
+                _ => return Err(CompileError::Backend),
+            };
             emit_native_call(
                 builder,
                 values,
                 &mut stack,
                 NativeCallEmission {
                     target,
+                    environment,
                     contract,
                     block: segment.block,
                     instruction: call_instruction,
@@ -1711,6 +1763,153 @@ fn emit_segment(
     Ok(())
 }
 
+fn emit_type_environment_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    site: &GenericCallSite,
+    block: u32,
+    instruction: u32,
+    stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let hit = builder.create_block();
+    let miss = builder.create_block();
+    builder.append_block_param(hit, types::I32);
+    let store = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, type_store_id),
+    )?;
+    let frame = emit_current_frame_pointer(builder, values)?;
+    let parent = load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, environment))?;
+    let cache = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, type_environments),
+    )?;
+    let mask = load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, type_environment_mask),
+    )?;
+    let shifted_parent = builder.ins().ushr_imm(parent, 16);
+    let parent_hash = builder.ins().bxor(parent, shifted_parent);
+    let site_hash =
+        crate::activation::type_environment_site_hash(site.function, site.block, site.instruction);
+    let site_hash = builder.ins().iconst(types::I32, i64::from(site_hash));
+    let set = builder.ins().bxor(site_hash, parent_hash);
+    let set = builder.ins().band(set, mask);
+    let set = builder.ins().uextend(values.pointer_type, set);
+    let first = builder.ins().imul_imm(
+        set,
+        (TYPE_ENVIRONMENT_CACHE_WAYS * mem::size_of::<RawTypeEnvironmentCacheEntry>()) as i64,
+    );
+    let first = builder.ins().iadd(cache, first);
+    for index in 0..TYPE_ENVIRONMENT_CACHE_WAYS {
+        let next = builder.create_block();
+        let entry_offset = index
+            .checked_mul(mem::size_of::<RawTypeEnvironmentCacheEntry>())
+            .ok_or(CompileError::Backend)?;
+        let entry_offset = i64::try_from(entry_offset).map_err(|_| CompileError::Backend)?;
+        let entry = builder.ins().iadd_imm(first, entry_offset);
+        let store_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, store))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let cached_store = builder
+            .ins()
+            .atomic_load(types::I64, MemFlags::new(), store_address);
+        let function_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, function))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let cached_function =
+            builder
+                .ins()
+                .atomic_load(types::I32, MemFlags::new(), function_address);
+        let block_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, block))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let cached_block = builder
+            .ins()
+            .atomic_load(types::I32, MemFlags::new(), block_address);
+        let instruction_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, instruction))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let cached_instruction =
+            builder
+                .ins()
+                .atomic_load(types::I32, MemFlags::new(), instruction_address);
+        let parent_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, parent))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let cached_parent = builder
+            .ins()
+            .atomic_load(types::I32, MemFlags::new(), parent_address);
+        let child_address = builder.ins().iadd_imm(
+            entry,
+            i64::try_from(mem::offset_of!(RawTypeEnvironmentCacheEntry, child))
+                .map_err(|_| CompileError::Backend)?,
+        );
+        let child = builder
+            .ins()
+            .atomic_load(types::I32, MemFlags::new(), child_address);
+        let same_store = builder.ins().icmp(IntCC::Equal, cached_store, store);
+        let same_function =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, cached_function, i64::from(site.function));
+        let same_block = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, cached_block, i64::from(site.block));
+        let same_instruction = builder.ins().icmp_imm(
+            IntCC::Equal,
+            cached_instruction,
+            i64::from(site.instruction),
+        );
+        let same_parent = builder.ins().icmp(IntCC::Equal, cached_parent, parent);
+        let matched = builder.ins().band(same_store, same_function);
+        let matched = builder.ins().band(matched, same_block);
+        let matched = builder.ins().band(matched, same_instruction);
+        let matched = builder.ins().band(matched, same_parent);
+        builder.ins().brif(matched, hit, &[child.into()], next, &[]);
+        builder.switch_to_block(next);
+    }
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    let retired = builder.use_var(values.retired);
+    let parent_bits = builder.ins().uextend(types::I64, parent);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_TYPE_ENVIRONMENT,
+            block,
+            instruction,
+            result: NativeValue {
+                bits: parent_bits,
+                tag: parent_bits,
+            },
+        },
+        stack,
+    )?;
+
+    builder.switch_to_block(hit);
+    Ok(builder.block_params(hit)[0])
+}
+
 fn emit_native_call(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -1719,6 +1918,7 @@ fn emit_native_call(
 ) -> Result<(), CompileError> {
     let NativeCallEmission {
         target,
+        environment,
         contract,
         block,
         instruction,
@@ -1920,6 +2120,7 @@ fn emit_native_call(
     let required_scalars = builder.ins().uextend(types::I64, scalar_end);
     let required_scalars = builder.ins().ishl_imm(required_scalars, 32);
     let growth = builder.ins().bor(required_scalars, target_value);
+    let environment_tag = builder.ins().uextend(types::I64, environment);
     emit_exit(
         builder,
         values,
@@ -1930,7 +2131,7 @@ fn emit_native_call(
             instruction,
             result: NativeValue {
                 bits: growth,
-                tag: target_value,
+                tag: environment_tag,
             },
         },
         &boundary_stack,
@@ -1939,6 +2140,7 @@ fn emit_native_call(
     builder.switch_to_block(fallback);
     let retired = builder.use_var(values.retired);
     let target_value = builder.ins().iconst(types::I64, i64::from(target));
+    let environment_tag = builder.ins().uextend(types::I64, environment);
     emit_exit(
         builder,
         values,
@@ -1949,7 +2151,7 @@ fn emit_native_call(
             instruction,
             result: NativeValue {
                 bits: target_value,
-                tag: target_value,
+                tag: environment_tag,
             },
         },
         &boundary_stack,
@@ -2006,6 +2208,12 @@ fn emit_native_call(
         child_frame,
         mem::offset_of!(RawNativeFrame, function),
         target,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, environment),
+        environment,
     )?;
     store_i32_constant(
         builder,

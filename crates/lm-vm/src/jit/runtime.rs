@@ -2,7 +2,9 @@
 
 use crate::machine::Machine;
 use crate::NamespaceRuntime;
-use lm_jit::{AllocationResult, AllocationRuntime, ScalarKind, LOCAL_INITIALIZED};
+use lm_jit::{
+    AllocationResult, AllocationRuntime, NativeTypeEnvironmentCache, ScalarKind, LOCAL_INITIALIZED,
+};
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
 
 pub(super) fn scalar_parts(kind: ScalarKind, value: Value) -> Option<(u64, u64)> {
@@ -90,10 +92,17 @@ fn callback_reference(bits: u64) -> CallbackRef {
 
 pub(super) struct MachineRuntime<'a> {
     pub(super) machine: &'a mut Machine,
+    pub(super) type_environments: NativeTypeEnvironmentCache,
     pub(super) module: &'a NamespaceRuntime,
     pub(super) base_local: usize,
     pub(super) base_operand: usize,
     pub(super) allocations: u64,
+}
+
+impl Drop for MachineRuntime<'_> {
+    fn drop(&mut self) {
+        self.machine.native_type_environments = std::mem::take(&mut self.type_environments);
+    }
 }
 
 impl AllocationRuntime for MachineRuntime<'_> {

@@ -52,6 +52,8 @@ pub struct EngineMetrics {
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
     pub native_effect_exits: u64,
+    pub native_type_environment_exits: u64,
+    pub native_type_environment_fallbacks: u64,
     pub native_interpreter_exits: u64,
     pub unsupported_region_fallbacks: u64,
     pub missing_entry_fallbacks: u64,
@@ -110,6 +112,8 @@ struct EngineCounters {
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
     native_effect_exits: AtomicU64,
+    native_type_environment_exits: AtomicU64,
+    native_type_environment_fallbacks: AtomicU64,
     native_interpreter_exits: AtomicU64,
     unsupported_region_fallbacks: AtomicU64,
     missing_entry_fallbacks: AtomicU64,
@@ -144,6 +148,8 @@ impl EngineCounters {
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
             native_effect_exits: read(&self.native_effect_exits),
+            native_type_environment_exits: read(&self.native_type_environment_exits),
+            native_type_environment_fallbacks: read(&self.native_type_environment_fallbacks),
             native_interpreter_exits: read(&self.native_interpreter_exits),
             unsupported_region_fallbacks: read(&self.unsupported_region_fallbacks),
             missing_entry_fallbacks: read(&self.missing_entry_fallbacks),
@@ -168,6 +174,8 @@ impl EngineCounters {
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
         reset(&self.native_effect_exits);
+        reset(&self.native_type_environment_exits);
+        reset(&self.native_type_environment_fallbacks);
         reset(&self.native_interpreter_exits);
         reset(&self.unsupported_region_fallbacks);
         reset(&self.missing_entry_fallbacks);
@@ -216,6 +224,14 @@ impl EngineCounters {
         );
         add(&self.native_allocations, values.native_allocations);
         add(&self.native_effect_exits, values.native_effect_exits);
+        add(
+            &self.native_type_environment_exits,
+            values.native_type_environment_exits,
+        );
+        add(
+            &self.native_type_environment_fallbacks,
+            values.native_type_environment_fallbacks,
+        );
         add(
             &self.native_interpreter_exits,
             values.native_interpreter_exits,
@@ -313,6 +329,14 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_effect_exit(&mut self) {
         self.values.native_effect_exits += 1;
+    }
+
+    pub(crate) fn note_native_type_environment_exit(&mut self) {
+        self.values.native_type_environment_exits += 1;
+    }
+
+    pub(crate) fn note_native_type_environment_fallback(&mut self) {
+        self.values.native_type_environment_fallbacks += 1;
     }
 
     pub(crate) fn note_native_interpreter_exit(&mut self) {

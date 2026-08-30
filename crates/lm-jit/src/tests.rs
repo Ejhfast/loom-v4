@@ -79,6 +79,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         successors: vec![],
         live_in: vec![],
         entry_stack: vec![],
+        call_contract: None,
         exit_stack: vec![],
         boundary_stack: vec![],
         heap_accesses: vec![],
@@ -109,6 +110,7 @@ fn unreachable_code_uses_one_native_fault_exit() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 2,
@@ -140,6 +142,8 @@ fn unreachable_code_uses_one_native_fault_exit() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the terminal function executes");
@@ -278,6 +282,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
         activation
             .prepare_root(NativePreparation {
                 function: 0,
+                environment: 0,
                 block: 0,
                 instruction: 0,
                 local_count: 2,
@@ -317,6 +322,8 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     class_parents: &[],
                     option_families: &[],
                     literals: NativeLiteralView::EMPTY,
+                    type_store_id: 1,
+                    type_environments: NativeTypeEnvironmentView::EMPTY,
                 },
             )
             .expect("the safe byte read executes");
@@ -348,6 +355,7 @@ fn native_field_load_uses_the_direct_heap_view() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -384,6 +392,8 @@ fn native_field_load_uses_the_direct_heap_view() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -413,6 +423,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -449,6 +460,8 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the field fault executes");
@@ -479,6 +492,7 @@ fn another_concrete_class_replays_the_field_instruction() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 1,
@@ -515,6 +529,8 @@ fn another_concrete_class_replays_the_field_instruction() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -543,6 +559,7 @@ fn native_field_store_writes_the_canonical_value() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 2,
@@ -582,6 +599,8 @@ fn native_field_store_writes_the_canonical_value() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the field store executes");
@@ -614,6 +633,7 @@ fn native_field_store_replays_a_frozen_receiver() {
     activation
         .prepare_root(NativePreparation {
             function: 0,
+            environment: 0,
             block: 0,
             instruction: 0,
             local_count: 2,
@@ -653,6 +673,8 @@ fn native_field_store_replays_a_frozen_receiver() {
                 class_parents: &[],
                 option_families: &[],
                 literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
             },
         )
         .expect("the field store executes");

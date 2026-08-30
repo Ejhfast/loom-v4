@@ -196,6 +196,7 @@ pub enum ExitKind {
     Unreachable,
     GrowActivation,
     TypeResolution,
+    TypeEnvironment,
 }
 
 /// One validated native exit record.
@@ -260,7 +261,6 @@ impl ExecutionExit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UnsupportedReason {
     MissingSource,
-    GenericFunction,
     CapturedFunction,
     NonScalarType,
     UnsupportedInstruction,
@@ -281,6 +281,7 @@ pub(super) enum SegmentExit {
     },
     Call {
         target: u32,
+        app: Option<u32>,
         fallthrough_ip: u32,
     },
     Allocation {
@@ -308,6 +309,7 @@ pub(super) struct Segment {
     pub(super) successors: Vec<usize>,
     pub(super) live_in: Vec<bool>,
     pub(super) entry_stack: Vec<ScalarKind>,
+    pub(super) call_contract: Option<CallContract>,
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
     pub(super) heap_accesses: Vec<HeapAccess>,
@@ -420,6 +422,20 @@ pub(super) struct CallContract {
     pub(super) inline: Option<InlineFunctionPlan>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CallValueKind {
+    Fixed(ScalarKind),
+    Variable(u32),
+}
+
+#[derive(Debug, Clone)]
+struct CallSignature {
+    params: Vec<CallValueKind>,
+    local_count: usize,
+    result: CallValueKind,
+    inline: Option<InlineFunctionPlan>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RegionPlan {
     pub(super) local_kinds: Vec<ScalarKind>,
@@ -432,7 +448,6 @@ pub(super) struct RegionPlan {
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
     pub(super) resume_entries: std::collections::HashMap<(u32, u32), u32>,
     pub(super) resume_targets: Vec<ResumeTarget>,
-    pub(super) call_contracts: HashMap<u32, CallContract>,
     pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
     pub(super) call_sites: usize,
     pub(super) heap_read_sites: usize,
@@ -461,6 +476,7 @@ struct SegmentAnalysis {
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
     allocations: Vec<AllocationSite>,
+    call_contract: Option<CallContract>,
 }
 
 struct SegmentAnalysisContext<'a> {
@@ -469,7 +485,7 @@ struct SegmentAnalysisContext<'a> {
     module: &'a Module,
     locals: &'a [ScalarKind],
     result: ScalarKind,
-    calls: &'a HashMap<u32, CallContract>,
+    calls: &'a HashMap<u32, CallSignature>,
     class_relocation: Option<&'a [u32]>,
 }
 
@@ -483,9 +499,6 @@ pub(super) struct AllocationSite {
 impl RegionPlan {
     pub(super) fn for_function(input: &FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
         let runtime = input.root.runtime;
-        if runtime.type_params != 0 || runtime.effect_params != 0 {
-            return Err(UnsupportedReason::GenericFunction);
-        }
         if !runtime.captures.is_empty() {
             return Err(UnsupportedReason::CapturedFunction);
         }
@@ -514,27 +527,36 @@ impl RegionPlan {
             return Err(UnsupportedReason::InvalidControlFlow);
         }
         let mut segments = split_segments(runtime)?;
+        let segment_points: Vec<(u32, u32)> = segments
+            .iter()
+            .map(|segment| (segment.block, segment.start))
+            .collect();
         let interpreter_points: Vec<(u32, u32)> = segments
             .iter()
             .filter(|segment| matches!(segment.exit, SegmentExit::Interpreter { .. }))
             .map(|segment| (segment.block, segment.end))
             .collect();
-        let (states, interpreter_states) = lm_verify::verify_function_states_at_with_bundle(
+        let mut requested_points = segment_points.clone();
+        requested_points.extend(interpreter_points.iter().copied());
+        let metadata = lm_verify::verify_function_metadata_at_with_bundle(
             source,
             input.root.bundle,
             input.root.source_function,
-            &interpreter_points,
+            &requested_points,
         )
         .map_err(|_| UnsupportedReason::MissingSource)?;
+        let (segment_states, interpreter_states) = metadata.points().split_at(segments.len());
         let interpreter_stacks: HashMap<(u32, u32), Vec<ScalarKind>> = interpreter_points
             .into_iter()
-            .zip(interpreter_states)
+            .zip(interpreter_states.iter())
             .map(|(point, state)| {
-                let state = state.ok_or(UnsupportedReason::InvalidControlFlow)?;
+                let state = state
+                    .as_ref()
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
                 let stack = state
                     .stack()
                     .iter()
-                    .map(|ty| scalar_kind(source, *ty))
+                    .map(|ty| scalar_kind_in(source, metadata.types(), *ty))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((point, stack))
             })
@@ -570,8 +592,6 @@ impl RegionPlan {
         let mut allocation_sites = 0;
         let mut effect_sites = 0;
         let mut interpreter_sites = 0;
-        let mut active_block = u32::MAX;
-        let mut block_stack = Vec::new();
         let analysis_context = SegmentAnalysisContext {
             func: runtime,
             source_func,
@@ -582,41 +602,28 @@ impl RegionPlan {
             class_relocation: input.root.class_relocation,
         };
         for (index, segment) in segments.iter_mut().enumerate() {
-            let state = states
-                .get(segment.block as usize)
+            let state = segment_states
+                .get(index)
                 .and_then(Option::as_ref)
                 .ok_or(UnsupportedReason::InvalidControlFlow)?;
-            if active_block != segment.block {
-                active_block = segment.block;
-                block_stack = state
-                    .stack()
-                    .iter()
-                    .map(|ty| scalar_kind(source, *ty))
-                    .collect::<Result<Vec<_>, _>>()?;
-            }
-            segment.entry_stack = block_stack.clone();
-            let mut initialized: Vec<bool> = state.locals().iter().map(Option::is_some).collect();
-            for instruction in runtime.blocks[segment.block as usize]
+            let entry_stack = state
+                .stack()
                 .iter()
-                .take(segment.start as usize)
-            {
-                if let Instr::StoreLocal(slot) = instruction {
-                    let Some(value) = initialized.get_mut(*slot as usize) else {
-                        return Err(UnsupportedReason::InvalidControlFlow);
-                    };
-                    *value = true;
-                }
-            }
+                .map(|ty| scalar_kind_in(source, metadata.types(), *ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            segment.entry_stack = entry_stack.clone();
+            let initialized: Vec<bool> = state.locals().iter().map(Option::is_some).collect();
             let interpreter_stack = interpreter_stacks.get(&(segment.block, segment.end));
             let analysis = analyze_segment(
                 &analysis_context,
                 segment,
                 &initialized,
-                &block_stack,
+                &entry_stack,
                 interpreter_stack.map(Vec::as_slice),
             )?;
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
+            segment.call_contract = analysis.call_contract;
             segment.exit_stack = analysis.exit_stack.clone();
             segment.boundary_stack = analysis.boundary_stack;
             segment.heap_accesses = analysis.heap_accesses;
@@ -658,7 +665,6 @@ impl RegionPlan {
                 segment.cost = segment.cost.saturating_sub(1);
                 interpreter_sites += 1;
             }
-            block_stack = analysis.exit_stack;
             max_stack = max_stack.max(analysis.max_stack);
             max_stack_values = max_stack_values.max(analysis.max_stack_values);
             debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
@@ -743,7 +749,6 @@ impl RegionPlan {
             entries,
             resume_entries,
             resume_targets,
-            call_contracts,
             inline_functions,
             call_sites,
             heap_read_sites,
@@ -766,7 +771,7 @@ impl RegionPlan {
 
 fn call_contracts(
     input: &FunctionInput<'_>,
-) -> Result<HashMap<u32, CallContract>, UnsupportedReason> {
+) -> Result<HashMap<u32, CallSignature>, UnsupportedReason> {
     let mut contracts = HashMap::new();
     let definitions = std::iter::once(input.root).chain(input.direct_callees.iter().copied());
     for definition in definitions {
@@ -783,13 +788,22 @@ fn call_contracts(
         let params = source_func
             .params
             .iter()
-            .map(|ty| scalar_kind(definition.source, *ty))
+            .map(|ty| call_value_kind(definition.source, *ty))
             .collect::<Result<Vec<_>, _>>()?;
-        let result = scalar_kind(definition.source, source_func.ret)?;
-        let inline = inline_function_plan(definition, &params, result);
+        let result = call_value_kind(definition.source, source_func.ret)?;
+        let concrete_params = params
+            .iter()
+            .copied()
+            .map(CallValueKind::concrete)
+            .collect::<Option<Vec<_>>>();
+        let concrete_result = result.concrete();
+        let inline = concrete_params
+            .as_deref()
+            .zip(concrete_result)
+            .and_then(|(params, result)| inline_function_plan(definition, params, result));
         contracts.insert(
             definition.function,
-            CallContract {
+            CallSignature {
                 params,
                 local_count: source_func.local_types.len(),
                 result,
@@ -798,6 +812,59 @@ fn call_contracts(
         );
     }
     Ok(contracts)
+}
+
+impl CallValueKind {
+    fn concrete(self) -> Option<ScalarKind> {
+        match self {
+            CallValueKind::Fixed(kind) => Some(kind),
+            CallValueKind::Variable(_) => None,
+        }
+    }
+}
+
+fn call_value_kind(module: &Module, ty: u32) -> Result<CallValueKind, UnsupportedReason> {
+    match module.types.get(ty as usize) {
+        Some(BcType::Var(variable)) => Ok(CallValueKind::Variable(*variable)),
+        _ => scalar_kind(module, ty).map(CallValueKind::Fixed),
+    }
+}
+
+fn instantiate_call(
+    signature: &CallSignature,
+    caller: &Module,
+    app: Option<u32>,
+) -> Result<CallContract, UnsupportedReason> {
+    let application = match app {
+        Some(app) => Some(
+            caller
+                .apps
+                .get(app as usize)
+                .ok_or(UnsupportedReason::InvalidControlFlow)?,
+        ),
+        None => None,
+    };
+    let instantiate = |value: CallValueKind| match value {
+        CallValueKind::Fixed(kind) => Ok(kind),
+        CallValueKind::Variable(variable) => {
+            let ty = application
+                .and_then(|application| application.types.get(variable as usize))
+                .copied()
+                .ok_or(UnsupportedReason::InvalidControlFlow)?;
+            scalar_kind(caller, ty)
+        }
+    };
+    Ok(CallContract {
+        params: signature
+            .params
+            .iter()
+            .copied()
+            .map(instantiate)
+            .collect::<Result<Vec<_>, _>>()?,
+        local_count: signature.local_count,
+        result: instantiate(signature.result)?,
+        inline: signature.inline.clone(),
+    })
 }
 
 fn inline_function_plan(
@@ -896,6 +963,7 @@ fn inline_function_plan(
         successors: Vec::new(),
         live_in: Vec::new(),
         entry_stack: Vec::new(),
+        call_contract: None,
         exit_stack: Vec::new(),
         boundary_stack: Vec::new(),
         heap_accesses: Vec::new(),
@@ -928,7 +996,15 @@ fn inline_function_plan(
 }
 
 fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, UnsupportedReason> {
-    match module.types.get(ty as usize) {
+    scalar_kind_in(module, &module.types, ty)
+}
+
+fn scalar_kind_in(
+    module: &lm_bytecode::Module,
+    types: &[BcType],
+    ty: u32,
+) -> Result<ScalarKind, UnsupportedReason> {
+    match types.get(ty as usize) {
         Some(BcType::Unit) => Ok(ScalarKind::Unit),
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
@@ -951,6 +1027,7 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
             Ok(ScalarKind::Object(ty))
         }
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
+        Some(BcType::Var(_) | BcType::Projection { .. }) => Ok(ScalarKind::Tagged(ty)),
         _ => Err(UnsupportedReason::NonScalarType),
     }
 }
@@ -993,6 +1070,12 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 }),
                 Instr::Call(target) => Some(SegmentExit::Call {
                     target: *target,
+                    app: None,
+                    fallthrough_ip: instruction_index as u32 + 1,
+                }),
+                Instr::CallG { func, app } => Some(SegmentExit::Call {
+                    target: *func,
+                    app: Some(*app),
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
                 Instr::New(_) => Some(SegmentExit::Allocation {
@@ -1028,6 +1111,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 successors: Vec::new(),
                 live_in: Vec::new(),
                 entry_stack: Vec::new(),
+                call_contract: None,
                 exit_stack: Vec::new(),
                 boundary_stack: Vec::new(),
                 heap_accesses: Vec::new(),
@@ -1110,6 +1194,7 @@ fn analyze_segment(
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
     let mut allocations = Vec::new();
+    let mut call_contract = None;
     let mut uses = vec![false; context.locals.len()];
     let mut definitions = vec![false; context.locals.len()];
     for (offset, instruction) in context.func.blocks[segment.block as usize]
@@ -1583,10 +1668,11 @@ fn analyze_segment(
             }
             Instr::Native(operation) if char_operation(operation, &mut stack)? => {}
             Instr::Call(target) => {
-                let contract = context
+                let signature = context
                     .calls
                     .get(&target)
                     .ok_or(UnsupportedReason::MissingSource)?;
+                let contract = instantiate_call(signature, context.module, None)?;
                 boundary_stack = stack.clone();
                 for parameter in contract.params.iter().rev().copied() {
                     expect(&mut stack, parameter)?;
@@ -1604,6 +1690,23 @@ fn analyze_segment(
                     max_stack_values = max_stack_values.max(push_limit).max(body_limit);
                 }
                 stack.push(contract.result);
+                call_contract = Some(contract);
+            }
+            Instr::CallG { func: target, .. } => {
+                let Instr::CallG { app, .. } = source_instruction else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let signature = context
+                    .calls
+                    .get(&target)
+                    .ok_or(UnsupportedReason::MissingSource)?;
+                let contract = instantiate_call(signature, context.module, Some(app))?;
+                boundary_stack = stack.clone();
+                for parameter in contract.params.iter().rev().copied() {
+                    expect(&mut stack, parameter)?;
+                }
+                stack.push(contract.result);
+                call_contract = Some(contract);
             }
             Instr::Perform { argc, .. } => {
                 let Instr::Perform {
@@ -1684,6 +1787,7 @@ fn analyze_segment(
         replay_stacks,
         fault_stacks,
         allocations,
+        call_contract,
     })
 }
 

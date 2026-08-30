@@ -171,6 +171,26 @@ A native return pops one native frame.
 
 Recursion uses the same calling convention.
 
+A generic function uses one type-erased native body.
+
+Each native frame records its exact TypeEnvId.
+
+Each machine owns a small type-environment cache.
+
+Each cache key contains the call site, canonical type-store identity, and parent environment.
+
+The cache value contains the derived child environment.
+
+The cache persists across scheduler turns and temporary interpreter exits.
+
+Compiled code contains no world-local type-environment index.
+
+A cache miss exits before the call retires.
+
+The VM derives the child environment and resumes the native site.
+
+Generated code does not call a generic type dispatcher.
+
 A successful call keeps the caller's live values in native registers.
 
 A successful return does not spill the completed child frame.
@@ -974,6 +994,19 @@ Gate: Cached literal loops improve by more than five times.
 
 Gate: Literal and `Unreachable` gaps disappear from parser profiles.
 
+### Stage F10: Generic direct calls
+
+- compile one type-erased body for each generic function;
+- preserve each frame's exact TypeEnvId;
+- add one machine-local type-environment cache for exact `CallG` sites;
+- derive one child environment on each cache miss;
+- resume the call without retiring it on a miss;
+- preserve exact state at every tested fuel boundary.
+
+Gate: Repeated generic direct calls improve by more than two times.
+
+Gate: `CallG` disappears from representative treatment gaps.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1212,6 +1245,28 @@ The parser profiles contain no literal or `Unreachable` gap.
 `CallG` is now the largest gap in both parsers.
 
 The HTTP Auto row does not pass the five-percent gate.
+
+The Stage F10 run added generic direct calls and one machine-local environment cache.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Generic direct calls | 53.957 ms | 15.290 ms | 15.069 ms | 3.53 times | 100.00% |
+| JSON parse | 46.514 ms | 46.850 ms | 80.981 ms | 0.99 times | 6.33% |
+| JSON encode | 20.591 ms | 20.922 ms | 42.236 ms | 0.98 times | 51.76% |
+| HTTP parse | 42.607 ms | 46.681 ms | 70.908 ms | 0.91 times | 48.23% |
+| HTTP encode | 22.803 ms | 25.303 ms | 25.686 ms | 0.90 times | 41.78% |
+
+The generic row used nine setup exits and no cache fallback.
+
+Each parser used at most 27 setup exits across all measured rounds.
+
+The cache persists across scheduler turns and temporary interpreter sites.
+
+The parser profiles contain no `CallG` gap.
+
+Builder, collection, text, and virtual-call operations now dominate the gaps.
+
+The representative-program performance gate remains open.
 
 ## 24. Rejected designs
 

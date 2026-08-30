@@ -25,6 +25,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+static NEXT_TYPE_STORE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// One entry of the closed type table, by index.
 pub type ClosedTypeId = u32;
 
@@ -253,6 +255,7 @@ struct CanonicalTypeStore {
 struct SharedCanonicalTypeStore {
     store: Mutex<CanonicalTypeStore>,
     counts: AtomicU64,
+    identity: u64,
 }
 
 #[derive(Debug)]
@@ -368,6 +371,11 @@ impl TypeEnvs {
             max_types,
             max_envs,
         };
+        let identity = NEXT_TYPE_STORE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .unwrap_or(0);
         let mut table = TypeEnvs {
             bundle,
             types: Vec::new(),
@@ -388,6 +396,7 @@ impl TypeEnvs {
             canonical: Arc::new(SharedCanonicalTypeStore {
                 store: Mutex::new(canonical),
                 counts: AtomicU64::new(Self::packed_counts(0, 1)),
+                identity,
             }),
         };
         table.envs.push(empty.clone());
@@ -608,6 +617,11 @@ impl TypeEnvs {
     /// One environment by index.
     pub fn env(&self, id: TypeEnvId) -> Option<&TypeEnv> {
         self.envs.get(id.0 as usize)
+    }
+
+    /// Return one process-unique identity for the shared canonical store.
+    pub fn canonical_store_id(&self) -> u64 {
+        self.canonical.identity
     }
 
     /// Reserve table storage without adding a record.

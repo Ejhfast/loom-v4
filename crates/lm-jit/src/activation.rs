@@ -4,6 +4,7 @@ use crate::Failure;
 use lm_heap::JitHeapView;
 use lm_value::Value;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(super) const ALLOCATION_OK: u32 = 0;
 const ALLOCATION_INTERPRETER: u32 = 1;
@@ -11,6 +12,10 @@ pub(super) const ALLOCATION_HEAP_LIMIT: u32 = 2;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
+pub(super) const TYPE_ENVIRONMENT_CACHE_WAYS: usize = 4;
+const INITIAL_TYPE_ENVIRONMENT_CACHE_SETS: usize = 16;
+const MAX_TYPE_ENVIRONMENT_CACHE_SETS: usize = 1_024;
+const TYPE_ENVIRONMENT_CACHE_CLAIMED: u64 = u64::MAX;
 
 /// The native local changed during this activation.
 pub const LOCAL_DIRTY: u8 = 1;
@@ -33,6 +38,7 @@ pub(super) struct RawExit {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct RawNativeFrame {
     pub(super) function: u32,
+    pub(super) environment: u32,
     pub(super) block: u32,
     pub(super) instruction: u32,
     pub(super) resume_entry: u32,
@@ -69,6 +75,101 @@ pub(super) struct RawNativeActivation {
     pub(super) option_family_count: usize,
     pub(super) literal_values: *const Value,
     pub(super) literal_count: usize,
+    pub(super) type_store_id: u64,
+    pub(super) type_environments: *const RawTypeEnvironmentCacheEntry,
+    pub(super) type_environment_mask: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub(super) struct RawTypeEnvironmentCacheEntry {
+    pub(super) store: AtomicU64,
+    pub(super) function: AtomicU32,
+    pub(super) block: AtomicU32,
+    pub(super) instruction: AtomicU32,
+    pub(super) parent: AtomicU32,
+    pub(super) child: AtomicU32,
+}
+
+impl RawTypeEnvironmentCacheEntry {
+    fn new() -> RawTypeEnvironmentCacheEntry {
+        RawTypeEnvironmentCacheEntry {
+            store: AtomicU64::new(0),
+            function: AtomicU32::new(0),
+            block: AtomicU32::new(0),
+            instruction: AtomicU32::new(0),
+            parent: AtomicU32::new(0),
+            child: AtomicU32::new(0),
+        }
+    }
+
+    fn matches(
+        &self,
+        store: u64,
+        function: u32,
+        block: u32,
+        instruction: u32,
+        parent: u32,
+    ) -> bool {
+        self.store.load(Ordering::Acquire) == store
+            && self.function.load(Ordering::Relaxed) == function
+            && self.block.load(Ordering::Relaxed) == block
+            && self.instruction.load(Ordering::Relaxed) == instruction
+            && self.parent.load(Ordering::Relaxed) == parent
+    }
+
+    fn publish(
+        &self,
+        store: u64,
+        function: u32,
+        block: u32,
+        instruction: u32,
+        parent: u32,
+        child: u32,
+    ) {
+        self.store
+            .store(TYPE_ENVIRONMENT_CACHE_CLAIMED, Ordering::Release);
+        self.function.store(function, Ordering::Relaxed);
+        self.block.store(block, Ordering::Relaxed);
+        self.instruction.store(instruction, Ordering::Relaxed);
+        self.parent.store(parent, Ordering::Relaxed);
+        self.child.store(child, Ordering::Relaxed);
+        self.store.store(store, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> Option<(u64, u32, u32, u32, u32, u32)> {
+        let store = self.store.load(Ordering::Acquire);
+        if store == 0 || store == TYPE_ENVIRONMENT_CACHE_CLAIMED {
+            return None;
+        }
+        Some((
+            store,
+            self.function.load(Ordering::Relaxed),
+            self.block.load(Ordering::Relaxed),
+            self.instruction.load(Ordering::Relaxed),
+            self.parent.load(Ordering::Relaxed),
+            self.child.load(Ordering::Relaxed),
+        ))
+    }
+}
+
+pub(super) fn type_environment_site_hash(function: u32, block: u32, instruction: u32) -> u32 {
+    let mut value = function.wrapping_mul(0x9e37_79b9);
+    value ^= block.rotate_left(11);
+    value ^= instruction.wrapping_mul(0x85eb_ca6b);
+    value ^= value >> 16;
+    value
+}
+
+fn type_environment_cache_set(
+    function: u32,
+    block: u32,
+    instruction: u32,
+    parent: u32,
+    sets: usize,
+) -> usize {
+    let parent = parent ^ (parent >> 16);
+    (type_environment_site_hash(function, block, instruction) ^ parent) as usize & (sets - 1)
 }
 
 pub(super) type RawAllocateInstance =
@@ -104,9 +205,31 @@ pub struct NativeActivation {
     pub(super) changed_from: usize,
 }
 
+/// One machine-local cache of derived type environments.
+#[derive(Debug, Default)]
+pub struct NativeTypeEnvironmentCache {
+    entries: Vec<RawTypeEnvironmentCacheEntry>,
+}
+
+/// One fixed native view of a machine-local type-environment cache.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeTypeEnvironmentView {
+    pub(super) entries: *const RawTypeEnvironmentCacheEntry,
+    pub(super) mask: u32,
+}
+
+impl NativeTypeEnvironmentView {
+    /// One empty view for code without generic calls.
+    pub const EMPTY: NativeTypeEnvironmentView = NativeTypeEnvironmentView {
+        entries: std::ptr::null(),
+        mask: 0,
+    };
+}
+
 /// Root frame data and native scratch limits.
 pub struct NativePreparation {
     pub function: u32,
+    pub environment: u32,
     pub block: u32,
     pub instruction: u32,
     pub local_count: usize,
@@ -132,6 +255,8 @@ pub struct NativeExecution<'a> {
     pub class_parents: &'a [u32],
     pub option_families: &'a [u32],
     pub literals: NativeLiteralView,
+    pub type_store_id: u64,
+    pub type_environments: NativeTypeEnvironmentView,
 }
 
 /// One native view of a machine's canonical literal table.
@@ -186,6 +311,11 @@ impl NativeFrameView<'_> {
         self.frame.function
     }
 
+    /// Return the canonical type environment.
+    pub fn environment(&self) -> u32 {
+        self.frame.environment
+    }
+
     /// Return the current bytecode block.
     pub fn block(&self) -> u32 {
         self.frame.block
@@ -232,6 +362,7 @@ impl NativeActivation {
     pub fn prepare_root(&mut self, input: NativePreparation) -> Result<(), Failure> {
         let NativePreparation {
             function,
+            environment,
             block,
             instruction,
             local_count,
@@ -277,6 +408,7 @@ impl NativeActivation {
         self.states[..window].fill(0);
         self.frames[0] = RawNativeFrame {
             function,
+            environment,
             block,
             instruction,
             resume_entry: 0,
@@ -413,6 +545,111 @@ impl NativeActivation {
         self.changed_from = self.changed_from.min(self.frame_len);
         Ok(())
     }
+}
+
+impl NativeTypeEnvironmentCache {
+    /// Return a stable view for one native execution.
+    pub fn view(&mut self) -> Result<NativeTypeEnvironmentView, Failure> {
+        if self.entries.is_empty() {
+            self.entries = new_type_environment_cache(INITIAL_TYPE_ENVIRONMENT_CACHE_SETS)
+                .ok_or(Failure::BackendUnavailable)?;
+        }
+        let sets = self.entries.len() / TYPE_ENVIRONMENT_CACHE_WAYS;
+        if !sets.is_power_of_two() {
+            return Err(Failure::BackendUnavailable);
+        }
+        let mask = u32::try_from(sets - 1).map_err(|_| Failure::BackendUnavailable)?;
+        Ok(NativeTypeEnvironmentView {
+            entries: self.entries.as_ptr(),
+            mask,
+        })
+    }
+
+    /// Cache one derived environment for this machine.
+    pub fn cache_type_environment(
+        &mut self,
+        store: u64,
+        function: u32,
+        block: u32,
+        instruction: u32,
+        parent: u32,
+        child: u32,
+    ) -> bool {
+        if store == 0 || store == TYPE_ENVIRONMENT_CACHE_CLAIMED {
+            return false;
+        }
+        loop {
+            let sets = self.entries.len() / TYPE_ENVIRONMENT_CACHE_WAYS;
+            if !sets.is_power_of_two() {
+                return false;
+            }
+            let first = type_environment_cache_set(function, block, instruction, parent, sets)
+                * TYPE_ENVIRONMENT_CACHE_WAYS;
+            let entries = &self.entries[first..first + TYPE_ENVIRONMENT_CACHE_WAYS];
+            for entry in entries {
+                if entry.matches(store, function, block, instruction, parent) {
+                    return entry.child.load(Ordering::Relaxed) == child;
+                }
+            }
+            if let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.store.load(Ordering::Acquire) == 0)
+            {
+                entry.publish(store, function, block, instruction, parent, child);
+                return true;
+            }
+            if !self.grow_type_environment_cache(sets) {
+                return false;
+            }
+        }
+    }
+
+    fn grow_type_environment_cache(&mut self, current_sets: usize) -> bool {
+        let mut target_sets = current_sets.saturating_mul(2);
+        while target_sets <= MAX_TYPE_ENVIRONMENT_CACHE_SETS {
+            let Some(target) = new_type_environment_cache(target_sets) else {
+                return false;
+            };
+            if rehash_type_environment_cache(&self.entries, &target, target_sets) {
+                self.entries = target;
+                return true;
+            }
+            target_sets = target_sets.saturating_mul(2);
+        }
+        false
+    }
+}
+
+fn new_type_environment_cache(sets: usize) -> Option<Vec<RawTypeEnvironmentCacheEntry>> {
+    let count = sets.checked_mul(TYPE_ENVIRONMENT_CACHE_WAYS)?;
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(count).ok()?;
+    for _ in 0..count {
+        entries.push(RawTypeEnvironmentCacheEntry::new());
+    }
+    Some(entries)
+}
+
+fn rehash_type_environment_cache(
+    source: &[RawTypeEnvironmentCacheEntry],
+    target: &[RawTypeEnvironmentCacheEntry],
+    sets: usize,
+) -> bool {
+    for entry in source {
+        let Some((store, function, block, instruction, parent, child)) = entry.snapshot() else {
+            continue;
+        };
+        let first = type_environment_cache_set(function, block, instruction, parent, sets)
+            * TYPE_ENVIRONMENT_CACHE_WAYS;
+        let Some(empty) = target[first..first + TYPE_ENVIRONMENT_CACHE_WAYS]
+            .iter()
+            .find(|entry| entry.store.load(Ordering::Acquire) == 0)
+        else {
+            return false;
+        };
+        empty.publish(store, function, block, instruction, parent, child);
+    }
+    true
 }
 
 fn growth_target(current: usize, required: usize, limit: usize) -> Result<usize, Failure> {
