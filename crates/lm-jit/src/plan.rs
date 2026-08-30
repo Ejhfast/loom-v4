@@ -12,6 +12,7 @@ pub enum ScalarKind {
     Bool,
     Int,
     Float,
+    Char,
     /// One heap object with a source-unit type index.
     Object(u32),
     Operation,
@@ -845,13 +846,17 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(
-            BcType::Class(_)
-            | BcType::Inst(_, _)
-            | BcType::List(_)
-            | BcType::Tuple(_)
-            | BcType::Bytes,
-        ) => Ok(ScalarKind::Object(ty)),
+        Some(BcType::Class(class)) => {
+            let core = lm_bytecode::corepin::declared_layout(module);
+            if core.char_value == Some(*class) {
+                Ok(ScalarKind::Char)
+            } else {
+                Ok(ScalarKind::Object(ty))
+            }
+        }
+        Some(BcType::Inst(_, _) | BcType::List(_) | BcType::Tuple(_) | BcType::Bytes) => {
+            Ok(ScalarKind::Object(ty))
+        }
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
         _ => Err(UnsupportedReason::NonScalarType),
     }
@@ -1012,6 +1017,7 @@ fn analyze_segment(
             Instr::ConstBool(_) => stack.push(ScalarKind::Bool),
             Instr::ConstInt(_) => stack.push(ScalarKind::Int),
             Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
+            Instr::ConstChar(_) => stack.push(ScalarKind::Char),
             Instr::OpConst(_) => stack.push(ScalarKind::Operation),
             Instr::LoadLocal(slot) => {
                 let at = slot as usize;
@@ -1267,6 +1273,16 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Bool)?;
                 stack.push(ScalarKind::Bool);
             }
+            Instr::EqRef | Instr::NeRef => {
+                let right = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let left = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                if !matches!(left, ScalarKind::Object(_)) || !matches!(right, ScalarKind::Object(_))
+                {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                stack.push(ScalarKind::Bool);
+            }
+            Instr::Native(operation) if char_operation(operation, &mut stack)? => {}
             Instr::Call(target) => {
                 let contract = context
                     .calls
@@ -1323,7 +1339,7 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Operation)?;
                 stack.push(scalar_kind(context.module, source_reply)?);
             }
-            Instr::Numeric(operation) if float_operation(operation, &mut stack)? => {}
+            Instr::Numeric(operation) if scalar_numeric_operation(operation, &mut stack)? => {}
             Instr::Jump(_) => {}
             Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
                 expect(&mut stack, ScalarKind::Bool)?;
@@ -1458,11 +1474,34 @@ fn expect(stack: &mut Vec<ScalarKind>, expected: ScalarKind) -> Result<(), Unsup
     }
 }
 
-fn float_operation(
+fn scalar_numeric_operation(
     operation: NumericInstr,
     stack: &mut Vec<ScalarKind>,
 ) -> Result<bool, UnsupportedReason> {
     match operation {
+        NumericInstr::IntBitAnd
+        | NumericInstr::IntBitOr
+        | NumericInstr::IntBitXor
+        | NumericInstr::IntShl
+        | NumericInstr::IntShr
+        | NumericInstr::IntUshr
+        | NumericInstr::IntWrappingAdd
+        | NumericInstr::IntWrappingSub
+        | NumericInstr::IntWrappingMul
+        | NumericInstr::IntRotateLeft
+        | NumericInstr::IntRotateRight => {
+            expect(stack, ScalarKind::Int)?;
+            expect(stack, ScalarKind::Int)?;
+            stack.push(ScalarKind::Int);
+        }
+        NumericInstr::IntBitNot => {
+            expect(stack, ScalarKind::Int)?;
+            stack.push(ScalarKind::Int);
+        }
+        NumericInstr::IntToFloat => {
+            expect(stack, ScalarKind::Int)?;
+            stack.push(ScalarKind::Float);
+        }
         NumericInstr::FloatNeg => {
             expect(stack, ScalarKind::Float)?;
             stack.push(ScalarKind::Float);
@@ -1483,6 +1522,45 @@ fn float_operation(
         | NumericInstr::FloatGe => {
             expect(stack, ScalarKind::Float)?;
             expect(stack, ScalarKind::Float)?;
+            stack.push(ScalarKind::Bool);
+        }
+        NumericInstr::FloatIsNan => {
+            expect(stack, ScalarKind::Float)?;
+            stack.push(ScalarKind::Bool);
+        }
+        NumericInstr::FloatHash
+        | NumericInstr::FloatBits
+        | NumericInstr::FloatToIntStatus
+        | NumericInstr::FloatToIntValue => {
+            expect(stack, ScalarKind::Float)?;
+            stack.push(ScalarKind::Int);
+        }
+        NumericInstr::FloatFromBits => {
+            expect(stack, ScalarKind::Int)?;
+            stack.push(ScalarKind::Float);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn char_operation(
+    operation: NativeInstr,
+    stack: &mut Vec<ScalarKind>,
+) -> Result<bool, UnsupportedReason> {
+    match operation {
+        NativeInstr::CharCodepoint | NativeInstr::CharUtf8Len => {
+            expect(stack, ScalarKind::Char)?;
+            stack.push(ScalarKind::Int);
+        }
+        NativeInstr::EqChar
+        | NativeInstr::NeChar
+        | NativeInstr::LtChar
+        | NativeInstr::LeChar
+        | NativeInstr::GtChar
+        | NativeInstr::GeChar => {
+            expect(stack, ScalarKind::Char)?;
+            expect(stack, ScalarKind::Char)?;
             stack.push(ScalarKind::Bool);
         }
         _ => return Ok(false),

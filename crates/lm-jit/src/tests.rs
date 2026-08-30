@@ -1,6 +1,6 @@
 use super::*;
 use crate::plan::{compute_liveness, split_segments, Segment};
-use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NumericInstr, NO_PARENT};
+use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NO_PARENT};
 use lm_heap::{Heap, Object};
 use lm_value::{Value, Witness};
 
@@ -93,12 +93,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
 
 #[test]
 fn an_instruction_without_a_dedicated_treatment_splits_the_region() {
-    let module = module(vec![vec![
-        Instr::ConstInt(7),
-        Instr::ConstInt(3),
-        Instr::Numeric(NumericInstr::IntBitAnd),
-        Instr::Return,
-    ]]);
+    let module = module(vec![vec![Instr::Unreachable]]);
     let bundle = lm_abi::standard_bundle();
     lm_verify::verify_module_with_bundle(&module, &bundle).expect("the function verifies");
     let input = FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0);
@@ -108,7 +103,7 @@ fn an_instruction_without_a_dedicated_treatment_splits_the_region() {
         .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
         .expect("the mixed function compiles");
     assert_eq!(region.plan.interpreter_sites, 1);
-    assert_eq!(region.plan.segments.len(), 2);
+    assert_eq!(region.plan.segments.len(), 1);
 }
 
 fn field_module() -> Module {

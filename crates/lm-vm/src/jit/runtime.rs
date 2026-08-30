@@ -11,21 +11,23 @@ pub(super) fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {
         (ScalarKind::Bool, Value::Bool(value)) => Some(u64::from(value)),
         (ScalarKind::Int, Value::Int(value)) => Some(value as u64),
         (ScalarKind::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
+        (ScalarKind::Char, Value::Char(value)) => Some(u64::from(u32::from(value))),
         (ScalarKind::Object(_), Value::Obj(reference)) => Some(object_bits(reference)),
         (ScalarKind::Operation, Value::Op(operation)) => Some(u64::from(operation)),
         _ => None,
     }
 }
 
-pub(super) fn bits_value(kind: ScalarKind, bits: u64) -> Value {
-    match kind {
+pub(super) fn bits_value(kind: ScalarKind, bits: u64) -> Option<Value> {
+    Some(match kind {
         ScalarKind::Unit => Value::Unit,
         ScalarKind::Bool => Value::Bool(bits != 0),
         ScalarKind::Int => Value::Int(bits as i64),
         ScalarKind::Float => Value::Float(canonical_float_bits(bits)),
+        ScalarKind::Char => Value::Char(char::from_u32(bits as u32)?),
         ScalarKind::Object(_) => Value::Obj(object_reference(bits)),
         ScalarKind::Operation => Value::Op(bits as u32),
-    }
+    })
 }
 
 fn object_bits(reference: ObjRef) -> u64 {

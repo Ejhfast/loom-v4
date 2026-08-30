@@ -829,7 +829,9 @@ impl JitEngine {
                 if exit.stack_len() != 0 || top_child.is_some() {
                     return malformed_native_exit(retired);
                 }
-                let value = bits_value(top_region.result_kind(), exit.result());
+                let Some(value) = bits_value(top_region.result_kind(), exit.result()) else {
+                    return malformed_native_exit(retired);
+                };
                 match machine.finish_native_return(value) {
                     Ok(ExecOutcome::Continue) => NativeAttempt::Reenter { retired },
                     Ok(outcome) => NativeAttempt::Complete {
@@ -929,7 +931,7 @@ fn extend_native_roots(
             .zip(frame.states().iter().copied())
         {
             if state & LOCAL_INITIALIZED != 0 {
-                if let Value::Obj(reference) = bits_value(kind, bits) {
+                if let Some(Value::Obj(reference)) = bits_value(kind, bits) {
                     roots.push(reference);
                 }
             }
@@ -942,7 +944,7 @@ fn extend_native_roots(
             return;
         }
         for (kind, bits) in kinds.iter().copied().zip(frame.operands().iter().copied()) {
-            if let Value::Obj(reference) = bits_value(kind, bits) {
+            if let Some(Value::Obj(reference)) = bits_value(kind, bits) {
                 roots.push(reference);
             }
         }
@@ -1074,7 +1076,7 @@ fn materialize_native_frames(
             for (slot, state) in frame.states().iter().copied().enumerate() {
                 if state & LOCAL_DIRTY != 0 {
                     machine.vm.locals[root_base + slot] =
-                        bits_value(region.local_kinds()[slot], frame.locals()[slot]);
+                        bits_value(region.local_kinds()[slot], frame.locals()[slot]).ok_or(())?;
                 }
             }
             let canonical = machine.vm.frames.get_mut(root_index).ok_or(())?;
@@ -1083,21 +1085,20 @@ fn materialize_native_frames(
         } else {
             let base_local = u32::try_from(machine.vm.locals.len()).map_err(|_| ())?;
             let base_operand = u32::try_from(machine.vm.operands.len()).map_err(|_| ())?;
-            machine.vm.locals.extend(
-                region
-                    .local_kinds()
-                    .iter()
-                    .copied()
-                    .zip(frame.locals().iter().copied())
-                    .zip(frame.states().iter().copied())
-                    .map(|((kind, bits), state)| {
-                        if state & LOCAL_INITIALIZED == 0 {
-                            Value::Uninit
-                        } else {
-                            bits_value(kind, bits)
-                        }
-                    }),
-            );
+            for ((kind, bits), state) in region
+                .local_kinds()
+                .iter()
+                .copied()
+                .zip(frame.locals().iter().copied())
+                .zip(frame.states().iter().copied())
+            {
+                let value = if state & LOCAL_INITIALIZED == 0 {
+                    Value::Uninit
+                } else {
+                    bits_value(kind, bits).ok_or(())?
+                };
+                machine.vm.locals.push(value);
+            }
             machine.vm.frames.push(Frame {
                 func: frame.function(),
                 block: frame.block(),
@@ -1108,13 +1109,13 @@ fn materialize_native_frames(
                 env: TypeEnvId::EMPTY,
             });
         }
-        machine.vm.operands.extend(
-            operand_kinds
-                .iter()
-                .copied()
-                .zip(frame.operands().iter().copied())
-                .map(|(kind, bits)| bits_value(kind, bits)),
-        );
+        for (kind, bits) in operand_kinds
+            .iter()
+            .copied()
+            .zip(frame.operands().iter().copied())
+        {
+            machine.vm.operands.push(bits_value(kind, bits).ok_or(())?);
+        }
     }
     let top = frames.last().ok_or(())?;
     if top.block() != exit.block()

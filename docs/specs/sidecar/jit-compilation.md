@@ -856,6 +856,8 @@ Gate: JSON and HTTP meet the representative gains.
 
 Gate: One million indexed byte reads improve by more than five times.
 
+Gate result: Scheduled byte reads improved 10.42 times in Auto mode.
+
 ### Stage F2: Mixed instruction coverage
 
 - split a region at each instruction without a dedicated treatment;
@@ -870,7 +872,20 @@ Gate: One untreated integer instruction does not reject its function.
 
 Gate: Every fuel boundary matches the interpreter around that instruction.
 
-Gate result: Scheduled byte reads improved 10.42 times in Auto mode.
+### Stage F3: Direct scalar coverage
+
+- compile integer bit operations and wrapping arithmetic;
+- compile checked shifts and rotations;
+- compile scalar float conversions and queries;
+- compile Char constants, queries, and comparisons;
+- compile reference equality for supported object types;
+- replay invalid shifts and casts through one uncommon exit.
+
+Gate: The scalar surface uses no temporary interpreter site.
+
+Gate: Character values materialize exactly at every tested fuel boundary.
+
+Gate: The scheduled bitwise loop improves by more than five times.
 
 Scheduler continuation landed before broader collection access.
 
@@ -1006,6 +1021,25 @@ JSON parse remained within one percent in Auto mode.
 HTTP parse remained within one percent in Auto mode.
 
 Forced Native exposes the expected cost of frequent temporary sites.
+
+The Stage F3 run added direct scalar treatments.
+
+The numeric row includes bit operations, wrapping arithmetic, shifts, and rotations.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Numeric surface | 40.940 ms | 3.897 ms | 3.848 ms | 10.51 times | 10.64 times |
+| List-push interpreter site | 2.271 ms | 2.332 ms | 6.201 ms | 0.97 times | 0.37 times |
+| JSON parse | 46.050 ms | 46.584 ms | 58.970 ms | 0.99 times | 0.78 times |
+| HTTP parse | 44.187 ms | 42.366 ms | 45.416 ms | 1.04 times | 0.97 times |
+
+The numeric row reached complete native coverage.
+
+The list-push row still uses one temporary site per append.
+
+Auto demoted the list-push region before measured execution.
+
+The representative-program gate remains open.
 
 ## 24. Rejected designs
 

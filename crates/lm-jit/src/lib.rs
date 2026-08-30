@@ -564,6 +564,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::ConstBool(_)
             | Instr::ConstInt(_)
             | Instr::ConstFloat(_)
+            | Instr::ConstChar(_)
             | Instr::LoadLocal(_)
             | Instr::StoreLocal(_)
             | Instr::Pop
@@ -582,6 +583,8 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::NeInt
             | Instr::EqBool
             | Instr::NeBool
+            | Instr::EqRef
+            | Instr::NeRef
             | Instr::Call(_)
             | Instr::New(_)
             | Instr::LoadField(_)
@@ -599,8 +602,31 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::OpConst(_)
+            | Instr::Native(
+                lm_bytecode::NativeInstr::CharCodepoint
+                    | lm_bytecode::NativeInstr::CharUtf8Len
+                    | lm_bytecode::NativeInstr::EqChar
+                    | lm_bytecode::NativeInstr::NeChar
+                    | lm_bytecode::NativeInstr::LtChar
+                    | lm_bytecode::NativeInstr::LeChar
+                    | lm_bytecode::NativeInstr::GtChar
+                    | lm_bytecode::NativeInstr::GeChar,
+            )
             | Instr::Numeric(
-                NumericInstr::FloatNeg
+                NumericInstr::IntBitAnd
+                    | NumericInstr::IntBitOr
+                    | NumericInstr::IntBitXor
+                    | NumericInstr::IntBitNot
+                    | NumericInstr::IntShl
+                    | NumericInstr::IntShr
+                    | NumericInstr::IntUshr
+                    | NumericInstr::IntWrappingAdd
+                    | NumericInstr::IntWrappingSub
+                    | NumericInstr::IntWrappingMul
+                    | NumericInstr::IntRotateLeft
+                    | NumericInstr::IntRotateRight
+                    | NumericInstr::IntToFloat
+                    | NumericInstr::FloatNeg
                     | NumericInstr::FloatAdd
                     | NumericInstr::FloatSub
                     | NumericInstr::FloatMul
@@ -611,6 +637,12 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
                     | NumericInstr::FloatLe
                     | NumericInstr::FloatGt
                     | NumericInstr::FloatGe
+                    | NumericInstr::FloatIsNan
+                    | NumericInstr::FloatHash
+                    | NumericInstr::FloatBits
+                    | NumericInstr::FloatFromBits
+                    | NumericInstr::FloatToIntStatus
+                    | NumericInstr::FloatToIntValue
             )
     )
 }

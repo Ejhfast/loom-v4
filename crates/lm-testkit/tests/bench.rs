@@ -1566,13 +1566,23 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
-        "jit_interpreter_site",
+        "jit_numeric_surface",
         concat!(
             "i = 0\ntotal = 0\n",
             "while i < 1000000\n",
             "  total = total + (i & 7)\n",
             "  i = i + 1\n",
             "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_interpreter_site",
+        concat!(
+            "items: [Int] = []\ni = 0\n",
+            "while i < 50000\n",
+            "  items.push(i)\n",
+            "  i = i + 1\n",
+            "end\nitems.len()\n",
         ),
     );
     report_jit_representative(

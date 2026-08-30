@@ -235,6 +235,12 @@ struct HeapExitEmission<'a> {
     deopt_stack: &'a [ir::Value],
 }
 
+#[derive(Clone, Copy)]
+struct NumericExitEmission<'a> {
+    point: FaultPoint,
+    deopt_stack: &'a [ir::Value],
+}
+
 struct StoreFieldEmission<'a> {
     field: u32,
     receiver_class: u32,
@@ -641,6 +647,9 @@ fn emit_segment(
                     .iconst(types::I64, canonical_float_bits(bits) as i64);
                 stack.push(value);
             }
+            Instr::ConstChar(value) => {
+                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+            }
             Instr::OpConst(operation) => {
                 stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
             }
@@ -1018,10 +1027,40 @@ fn emit_segment(
                 let compared = builder.ins().icmp(condition, left, right);
                 stack.push(builder.ins().uextend(types::I64, compared));
             }
+            Instr::EqRef | Instr::NeRef => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let condition = if matches!(instruction, Instr::EqRef) {
+                    IntCC::Equal
+                } else {
+                    IntCC::NotEqual
+                };
+                let compared = builder.ins().icmp(condition, left, right);
+                stack.push(builder.ins().uextend(types::I64, compared));
+            }
+            Instr::Native(operation)
+                if crate::instruction_has_dedicated_treatment(&instruction) =>
+            {
+                emit_char_instruction(builder, &mut stack, operation)?;
+            }
             Instr::Numeric(operation)
                 if crate::instruction_has_dedicated_treatment(&instruction) =>
             {
-                emit_float_instruction(builder, &mut stack, operation)?;
+                let deopt_stack = stack.clone();
+                emit_numeric_instruction(
+                    builder,
+                    values,
+                    &mut stack,
+                    operation,
+                    NumericExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
             }
             Instr::Call(_)
             | Instr::Perform { .. }
@@ -1662,6 +1701,9 @@ fn emit_inline_call(
                     .ins()
                     .iconst(types::I64, canonical_float_bits(bits) as i64),
             ),
+            Instr::ConstChar(value) => {
+                stack.push(builder.ins().iconst(types::I64, i64::from(value)));
+            }
             Instr::OpConst(operation) => {
                 stack.push(builder.ins().iconst(types::I64, i64::from(operation)));
             }
@@ -1833,8 +1875,31 @@ fn emit_inline_call(
                 let compared = builder.ins().icmp(condition, left, right);
                 stack.push(builder.ins().uextend(types::I64, compared));
             }
+            Instr::EqRef | Instr::NeRef => {
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let condition = if matches!(instruction, Instr::EqRef) {
+                    IntCC::Equal
+                } else {
+                    IntCC::NotEqual
+                };
+                let compared = builder.ins().icmp(condition, left, right);
+                stack.push(builder.ins().uextend(types::I64, compared));
+            }
+            Instr::Native(operation) => {
+                emit_char_instruction(builder, &mut stack, operation)?;
+            }
             Instr::Numeric(operation) => {
-                emit_float_instruction(builder, &mut stack, operation)?;
+                emit_numeric_instruction(
+                    builder,
+                    values,
+                    &mut stack,
+                    operation,
+                    NumericExitEmission {
+                        point: call.deopt,
+                        deopt_stack: call.deopt_stack,
+                    },
+                )?;
             }
             Instr::Return => {
                 let result = pop_native(&mut stack)?;
@@ -2476,6 +2541,7 @@ fn value_tag(kind: ScalarKind) -> ValueTag {
         ScalarKind::Bool => ValueTag::Bool,
         ScalarKind::Int => ValueTag::Int,
         ScalarKind::Float => ValueTag::Float,
+        ScalarKind::Char => ValueTag::Char,
         ScalarKind::Object(_) => ValueTag::Obj,
         ScalarKind::Operation => ValueTag::Op,
     }
@@ -2497,6 +2563,10 @@ fn emit_value_payload(
         }
         ScalarKind::Int | ScalarKind::Object(_) => {
             load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?
+        }
+        ScalarKind::Char => {
+            let scalar = load_value(builder, types::I32, value, VALUE_PAYLOAD_OFFSET)?;
+            builder.ins().uextend(types::I64, scalar)
         }
         ScalarKind::Float => {
             let bits = load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?;
@@ -2653,12 +2723,63 @@ fn emit_interpreter_replay(
     Ok(())
 }
 
-fn emit_float_instruction(
+fn emit_numeric_instruction(
     builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
     stack: &mut Vec<ir::Value>,
     operation: NumericInstr,
+    exit: NumericExitEmission<'_>,
 ) -> Result<(), CompileError> {
     match operation {
+        NumericInstr::IntBitAnd
+        | NumericInstr::IntBitOr
+        | NumericInstr::IntBitXor
+        | NumericInstr::IntWrappingAdd
+        | NumericInstr::IntWrappingSub
+        | NumericInstr::IntWrappingMul => {
+            let right = pop_native(stack)?;
+            let left = pop_native(stack)?;
+            let value = match operation {
+                NumericInstr::IntBitAnd => builder.ins().band(left, right),
+                NumericInstr::IntBitOr => builder.ins().bor(left, right),
+                NumericInstr::IntBitXor => builder.ins().bxor(left, right),
+                NumericInstr::IntWrappingAdd => builder.ins().iadd(left, right),
+                NumericInstr::IntWrappingSub => builder.ins().isub(left, right),
+                NumericInstr::IntWrappingMul => builder.ins().imul(left, right),
+                _ => unreachable!(),
+            };
+            stack.push(value);
+        }
+        NumericInstr::IntBitNot => {
+            let value = pop_native(stack)?;
+            stack.push(builder.ins().bnot(value));
+        }
+        NumericInstr::IntShl
+        | NumericInstr::IntShr
+        | NumericInstr::IntUshr
+        | NumericInstr::IntRotateLeft
+        | NumericInstr::IntRotateRight => {
+            let amount = pop_native(stack)?;
+            let value = pop_native(stack)?;
+            let invalid = builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, amount, 63);
+            emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+            let value = match operation {
+                NumericInstr::IntShl => builder.ins().ishl(value, amount),
+                NumericInstr::IntShr => builder.ins().sshr(value, amount),
+                NumericInstr::IntUshr => builder.ins().ushr(value, amount),
+                NumericInstr::IntRotateLeft => builder.ins().rotl(value, amount),
+                NumericInstr::IntRotateRight => builder.ins().rotr(value, amount),
+                _ => unreachable!(),
+            };
+            stack.push(value);
+        }
+        NumericInstr::IntToFloat => {
+            let value = pop_native(stack)?;
+            let value = builder.ins().fcvt_from_sint(types::F64, value);
+            stack.push(canonical_float(builder, value));
+        }
         NumericInstr::FloatNeg => {
             let value = float_value(builder, pop_native(stack)?);
             let value = builder.ins().fneg(value);
@@ -2712,6 +2833,129 @@ fn emit_float_instruction(
                 }
                 _ => unreachable!(),
             };
+            stack.push(builder.ins().uextend(types::I64, compared));
+        }
+        NumericInstr::FloatIsNan => {
+            let value = float_value(builder, pop_native(stack)?);
+            let is_nan = builder.ins().fcmp(FloatCC::Unordered, value, value);
+            stack.push(builder.ins().uextend(types::I64, is_nan));
+        }
+        NumericInstr::FloatHash => {
+            let bits = pop_native(stack)?;
+            let shifted = builder.ins().ishl_imm(bits, 1);
+            let is_zero = builder.ins().icmp_imm(IntCC::Equal, shifted, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            stack.push(builder.ins().select(is_zero, zero, bits));
+        }
+        NumericInstr::FloatBits => {
+            let bits = pop_native(stack)?;
+            stack.push(bits);
+        }
+        NumericInstr::FloatFromBits => {
+            let bits = pop_native(stack)?;
+            let value = float_value(builder, bits);
+            stack.push(canonical_float(builder, value));
+        }
+        NumericInstr::FloatToIntStatus => {
+            let bits = pop_native(stack)?;
+            let value = float_value(builder, bits);
+            let finite = float_is_finite(builder, bits);
+            let fits = float_fits_int(builder, value);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            let two = builder.ins().iconst(types::I64, 2);
+            let range_status = builder.ins().select(fits, zero, two);
+            stack.push(builder.ins().select(finite, range_status, one));
+        }
+        NumericInstr::FloatToIntValue => {
+            let bits = pop_native(stack)?;
+            let value = float_value(builder, bits);
+            let finite = float_is_finite(builder, bits);
+            let fits = float_fits_int(builder, value);
+            let valid = builder.ins().band(finite, fits);
+            let invalid = builder.ins().bxor_imm(valid, 1);
+            emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+            stack.push(builder.ins().fcvt_to_sint(types::I64, value));
+        }
+        _ => {
+            return Err(CompileError::Unsupported(
+                UnsupportedReason::UnsupportedInstruction,
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn float_is_finite(builder: &mut FunctionBuilder<'_>, bits: ir::Value) -> ir::Value {
+    let exponent = builder.ins().band_imm(bits, 0x7ff0_0000_0000_0000);
+    builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, exponent, 0x7ff0_0000_0000_0000)
+}
+
+fn float_fits_int(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::Value {
+    let minimum_bits = builder
+        .ins()
+        .iconst(types::I64, (i64::MIN as f64).to_bits() as i64);
+    let maximum_bits = builder
+        .ins()
+        .iconst(types::I64, 9_223_372_036_854_775_808.0_f64.to_bits() as i64);
+    let minimum = float_value(builder, minimum_bits);
+    let maximum = float_value(builder, maximum_bits);
+    let at_least_minimum = builder
+        .ins()
+        .fcmp(FloatCC::GreaterThanOrEqual, value, minimum);
+    let below_maximum = builder.ins().fcmp(FloatCC::LessThan, value, maximum);
+    builder.ins().band(at_least_minimum, below_maximum)
+}
+
+fn emit_char_instruction(
+    builder: &mut FunctionBuilder<'_>,
+    stack: &mut Vec<ir::Value>,
+    operation: NativeInstr,
+) -> Result<(), CompileError> {
+    match operation {
+        NativeInstr::CharCodepoint => {
+            let value = pop_native(stack)?;
+            stack.push(value);
+        }
+        NativeInstr::CharUtf8Len => {
+            let value = pop_native(stack)?;
+            let one = builder.ins().iconst(types::I64, 1);
+            let two = builder.ins().iconst(types::I64, 2);
+            let three = builder.ins().iconst(types::I64, 3);
+            let four = builder.ins().iconst(types::I64, 4);
+            let over_one = builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, value, 0x7f);
+            let over_two = builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, value, 0x7ff);
+            let over_three = builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, value, 0xffff);
+            let short = builder.ins().select(over_one, two, one);
+            let medium = builder.ins().select(over_two, three, short);
+            stack.push(builder.ins().select(over_three, four, medium));
+        }
+        NativeInstr::EqChar
+        | NativeInstr::NeChar
+        | NativeInstr::LtChar
+        | NativeInstr::LeChar
+        | NativeInstr::GtChar
+        | NativeInstr::GeChar => {
+            let right = pop_native(stack)?;
+            let left = pop_native(stack)?;
+            let condition = match operation {
+                NativeInstr::EqChar => IntCC::Equal,
+                NativeInstr::NeChar => IntCC::NotEqual,
+                NativeInstr::LtChar => IntCC::UnsignedLessThan,
+                NativeInstr::LeChar => IntCC::UnsignedLessThanOrEqual,
+                NativeInstr::GtChar => IntCC::UnsignedGreaterThan,
+                NativeInstr::GeChar => IntCC::UnsignedGreaterThanOrEqual,
+                _ => unreachable!(),
+            };
+            let compared = builder.ins().icmp(condition, left, right);
             stack.push(builder.ins().uextend(types::I64, compared));
         }
         _ => {

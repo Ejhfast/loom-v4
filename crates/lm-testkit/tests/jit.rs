@@ -238,11 +238,11 @@ fn scalar_loop_fuel_matches_the_interpreter() {
 #[test]
 fn one_interpreter_instruction_does_not_reject_the_function() {
     let source = concat!(
-        "i = 0\ntotal = 0\n",
+        "items: [Int] = []\ni = 0\n",
         "while i < 1000\n",
-        "  total = total + (i & 7)\n",
+        "  items.push(i)\n",
         "  i = i + 1\n",
-        "end\ntotal\n",
+        "end\nitems.len()\n",
     );
     let artifact = lm_testkit::compile_text("jit-interpreter-site.lm", source)
         .expect("the mixed function compiles");
@@ -254,11 +254,102 @@ fn one_interpreter_instruction_does_not_reject_the_function() {
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
     let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
-    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3_500)));
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_000)));
     assert!(metrics.compiled_interpreter_sites >= 1, "{metrics:?}");
-    assert_eq!(metrics.native_interpreter_exits, 1_000, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits >= 1_000, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
     assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn simple_numeric_operations_stay_native() {
+    let source = concat!(
+        "i = 0\ntotal = 0\nsame = true\n",
+        "while i < 10000\n",
+        "  value = ((i & 7) | 8) ^ 3\n",
+        "  value = (value << 2) >> 1\n",
+        "  value = value ^ (-1 >>> 60)\n",
+        "  value = value.wrapping_add(i).wrapping_sub(i)\n",
+        "  value = value.wrapping_mul(3)\n",
+        "  value = value.rotate_left(5).rotate_right(5)\n",
+        "  float = value.to_float()\n",
+        "  same = same and Float.from_bits(float.bits()) == float\n",
+        "  same = same and not float.is_nan()\n",
+        "  total = total + value\n",
+        "  i = i + 1\n",
+        "end\n",
+        "if same then total else 0 end\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 200_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn invalid_shift_amounts_replay_one_instruction() {
+    for source in ["1 << 64\n", "1 >> -1\n", "1.rotate_left(64)\n"] {
+        let artifact = lm_testkit::compile_text("jit-shift-fault.lm", source)
+            .expect("the shift case compiles");
+        for fuel in 0..=4 {
+            let (interpreted, _, interpreted_dump) =
+                run_artifact(&artifact, EngineMode::Interpreter, fuel);
+            let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+            assert_eq!(native, interpreted, "fuel {fuel}");
+            assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+        }
+        let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+        assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::ShiftOutOfRange));
+        assert_eq!(metrics.native_interpreter_exits, 1, "{metrics:?}");
+    }
+}
+
+#[test]
+fn reference_equality_stays_native() {
+    let source = concat!(
+        "class Token\nend\n",
+        "first = Token()\nalias = first\nother = Token()\n",
+        "i = 0\nsame = false\n",
+        "while i < 10000\n",
+        "  same = first == alias\n",
+        "  if first == other then same = false end\n",
+        "  i = i + 1\n",
+        "end\nsame\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn character_operations_materialize_exactly() {
+    let source = concat!(
+        "i = 0\ntotal = 0\nvalue = '猫'\nsame = true\n",
+        "while i < 1000\n",
+        "  total = total + value.codepoint() + value.utf8_len()\n",
+        "  same = same and value == '猫' and value > 'a'\n",
+        "  i = i + 1\n",
+        "end\n",
+        "if same then total else 0 end\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-char.lm", source).expect("the Char case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(29_486_000)));
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
 }
 
 #[test]
