@@ -2086,7 +2086,7 @@ impl Machine {
         let env = envs.derive(module, parent, app).map_err(env_fault)?;
         self.alloc(Object::Instance {
             class,
-            fields: vec![Value::Uninit; field_count],
+            fields: vec![Value::Uninit; field_count].into(),
             env: Witness(env),
         })
     }
@@ -3082,7 +3082,7 @@ impl Machine {
                     self.vm.operands.pop();
                 }
                 let value = self.alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })?;
                 self.push(value)?;
@@ -3788,7 +3788,7 @@ impl Machine {
     ) -> Result<Value, FaultCode> {
         let value = self.alloc(Object::Instance {
             class,
-            fields: vec![source, records, Value::Int(i64::from(index))],
+            fields: vec![source, records, Value::Int(i64::from(index))].into(),
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -3805,7 +3805,7 @@ impl Machine {
     ) -> Result<Value, FaultCode> {
         let value = self.alloc(Object::Instance {
             class,
-            fields: vec![source, records],
+            fields: vec![source, records].into(),
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -3849,7 +3849,8 @@ impl Machine {
                 qualified_key,
                 contract_hash,
                 implementation_hash,
-            ],
+            ]
+            .into(),
             env: Witness::EMPTY,
         })?;
         let reference = definition_identity.as_obj().ok_or(BAD_STATE)?;
@@ -3895,7 +3896,7 @@ impl Machine {
             return Err(BAD_STATE);
         }
         let slots = self.alloc(Object::List {
-            items: slot_values,
+            items: slot_values.into(),
             epoch: StructuralEpoch::default(),
         })?;
         let reference = slots.as_obj().ok_or(BAD_STATE)?;
@@ -3903,7 +3904,7 @@ impl Machine {
         self.push(slots)?;
         let value = self.alloc(Object::Instance {
             class: spec_class,
-            fields: vec![definition_identity, module_hash, slots],
+            fields: vec![definition_identity, module_hash, slots].into(),
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(BAD_STATE)?;
@@ -3994,7 +3995,7 @@ impl Machine {
         self.push(spec)?;
         let value = self.alloc(Object::Instance {
             class: source_class,
-            fields: vec![path, syntax, spec],
+            fields: vec![path, syntax, spec].into(),
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(BAD_STATE)?;
@@ -4079,7 +4080,7 @@ impl Machine {
                 self.push(path)?;
                 let range = self.alloc(Object::Instance {
                     class: range_class,
-                    fields: vec![Value::Int(i64::from(lo)), Value::Int(i64::from(hi))],
+                    fields: vec![Value::Int(i64::from(lo)), Value::Int(i64::from(hi))].into(),
                     env: Witness::EMPTY,
                 })?;
                 let range_ref = range.as_obj().ok_or(BAD_STATE)?;
@@ -4103,7 +4104,7 @@ impl Machine {
         self.push(digest)?;
         let location = self.alloc(Object::Instance {
             class: location_class,
-            fields: vec![path, range, digest, Value::Int(origin.offset)],
+            fields: vec![path, range, digest, Value::Int(origin.offset)].into(),
             env: Witness::EMPTY,
         })?;
         let location_ref = location.as_obj().ok_or(BAD_STATE)?;
@@ -4151,7 +4152,7 @@ impl Machine {
             locations.push(location);
         }
         let list = self.alloc(Object::List {
-            items: locations,
+            items: locations.into(),
             epoch: StructuralEpoch::default(),
         })?;
         self.vm.operands.truncate(root);
@@ -4275,7 +4276,7 @@ impl Machine {
                 }
                 let items = self.vm.operands.split_off(base);
                 let list = self.alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })?;
                 self.push(list)?;
@@ -4983,7 +4984,7 @@ impl Machine {
                 let env = Witness(self.frame_env());
                 let value = self.alloc(Object::Closure {
                     func,
-                    captures: captured,
+                    captures: captured.into(),
                     env,
                 })?;
                 self.push(value)?;
@@ -5012,7 +5013,7 @@ impl Machine {
                 let field_count = module.classes[class as usize].fields.len();
                 let value = self.alloc(Object::Instance {
                     class,
-                    fields: vec![Value::Uninit; field_count],
+                    fields: vec![Value::Uninit; field_count].into(),
                     env: Witness::EMPTY,
                 })?;
                 self.push(value)?;
@@ -5032,7 +5033,9 @@ impl Machine {
                     .checked_sub(count as usize)
                     .ok_or(BAD_STATE)?;
                 let items: Vec<Value> = self.vm.operands.split_off(split);
-                let value = self.alloc(Object::Tuple { items })?;
+                let value = self.alloc(Object::Tuple {
+                    items: items.into(),
+                })?;
                 self.push(value)?;
             }
             Instr::TupleGet(index) => {
@@ -5088,7 +5091,7 @@ impl Machine {
                     .ok_or(BAD_STATE)?;
                 let items: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })?;
                 self.push(value)?;

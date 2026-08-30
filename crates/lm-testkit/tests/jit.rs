@@ -572,7 +572,6 @@ fn native_field_reads_resume_from_interpreter_created_state() {
     let metrics = engine.metrics();
     assert!(metrics.native_retired_instructions > 50_000);
     assert_eq!(metrics.compiled_heap_read_sites, 1);
-    assert!(metrics.native_heap_reads > 9_000);
     assert_eq!(metrics.guard_failures, 0);
 }
 
@@ -1091,6 +1090,39 @@ fn a_wrong_external_scalar_value_never_enters_native_code() {
     );
     assert_eq!(metrics.guard_failures, 1);
     assert_eq!(metrics.native_entries, 0);
+}
+
+#[test]
+fn a_wrong_external_field_value_replays_before_native_use() {
+    let source = concat!(
+        "class Pair\n",
+        "  left: Int\n",
+        "  def init(mut self, left: Int)\n    self.left = left\n  end\n",
+        "end\n",
+        "pair = Pair(7)\ni = 0\nsum = 0\n",
+        "while i < 100\n",
+        "  sum = sum + pair.left\n  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let (artifact, mut image) = captured_loop("jit-field-snapshot.lm", source);
+    let field = image.machines[0]
+        .objects
+        .iter_mut()
+        .find_map(|object| match &mut object.object {
+            lm_vm::Object::Instance { fields, .. } => fields.first_mut(),
+            _ => None,
+        })
+        .expect("the snapshot holds the pair field");
+    *field = lm_value::Value::Bool(false);
+    let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, &image);
+    assert!(
+        matches!(interpreted, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(
+        matches!(native, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(metrics.native_entries > 0, "{metrics:?}");
 }
 
 #[test]

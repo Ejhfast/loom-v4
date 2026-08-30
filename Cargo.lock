@@ -474,6 +474,7 @@ dependencies = [
  "cranelift-native",
  "lm-abi",
  "lm-bytecode",
+ "lm-heap",
  "lm-value",
  "lm-verify",
 ]

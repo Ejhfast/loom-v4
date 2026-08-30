@@ -2143,7 +2143,7 @@ mod tests {
         // A mutable graph copies, so the message is a second object.
         let mutable = world.machines[0]
             .alloc(Object::List {
-                items: vec![Value::Int(1)],
+                items: vec![Value::Int(1)].into(),
                 epoch: Default::default(),
             })
             .expect("the list allocates");
@@ -2160,7 +2160,7 @@ mod tests {
         }
         world.machines[0].vm.heap.recharge(source);
         match world.machines[0].vm.heap.get(copy) {
-            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items.as_slice(), [Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
     }
@@ -2215,7 +2215,7 @@ mod tests {
         // just as it is at the top of a message.
         let wrapper = world.machines[0]
             .alloc(Object::Tuple {
-                items: vec![handle],
+                items: vec![handle].into(),
             })
             .expect("the tuple allocates");
         assert_eq!(

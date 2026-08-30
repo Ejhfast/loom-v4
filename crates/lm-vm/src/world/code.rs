@@ -1698,7 +1698,7 @@ impl World {
         let values = match arguments {
             Value::Unit => Vec::new(),
             Value::Obj(reference) => match self.machines[vm as usize].vm.heap.get(reference) {
-                Object::Tuple { items } => items.clone(),
+                Object::Tuple { items } => items.to_vec(),
                 _ => {
                     self.fault_caller(
                         vm,

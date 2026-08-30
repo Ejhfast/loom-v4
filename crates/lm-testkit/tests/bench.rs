@@ -256,7 +256,7 @@ fn time_program_engine_sliced(
 }
 
 /// Time one program through the deterministic scheduler.
-fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, EngineMetrics) {
+fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, EngineMetrics, u64) {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let (arena, namespace) =
@@ -264,6 +264,7 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    let mut retired_instructions = None;
     for round in 0..=ROUNDS {
         let mut world = lm_vm::World::new_with_engine(
             arena.clone(),
@@ -279,6 +280,12 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
             .expect("the scheduled scalar benchmark must run");
         let elapsed = start.elapsed();
         assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        let retired = world.metrics().retired_instructions;
+        if let Some(expected) = retired_instructions {
+            assert_eq!(retired, expected);
+        } else {
+            retired_instructions = Some(retired);
+        }
         if round == 0 {
             compiler_metrics = engine.metrics();
             engine.reset_metrics();
@@ -289,6 +296,7 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
     (
         median(runs),
         with_compiler_metrics(engine.metrics(), compiler_metrics),
+        retired_instructions.unwrap_or(0),
     )
 }
 
@@ -459,8 +467,8 @@ fn report_jit_scheduled(name: &str, source: &str) {
     if !selected(name) {
         return;
     }
-    let (interpreted, _) = time_program_engine_scheduled(source, EngineMode::Interpreter);
-    let (native, metrics) = time_program_engine_scheduled(source, EngineMode::Native);
+    let (interpreted, _, _) = time_program_engine_scheduled(source, EngineMode::Interpreter);
+    let (native, metrics, _) = time_program_engine_scheduled(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0);
     println!(
         "LOOM_JIT\t{name}\t{:.3}\t-\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
@@ -472,6 +480,40 @@ fn report_jit_scheduled(name: &str, source: &str) {
         metrics.compiled_call_sites,
         metrics.compiled_allocation_sites,
         metrics.native_allocations,
+    );
+}
+
+fn report_jit_representative(name: &str, source: &str) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _, retired) = time_program_engine_scheduled(source, EngineMode::Interpreter);
+    let (automatic, auto_metrics, auto_retired) =
+        time_program_engine_scheduled(source, EngineMode::Auto);
+    let (native, native_metrics, native_retired) =
+        time_program_engine_scheduled(source, EngineMode::Native);
+    assert_eq!(auto_retired, retired);
+    assert_eq!(native_retired, retired);
+    let auto_coverage = if retired == 0 {
+        0.0
+    } else {
+        auto_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64
+    };
+    let native_coverage = if retired == 0 {
+        0.0
+    } else {
+        native_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64
+    };
+    println!(
+        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        automatic.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / automatic.as_secs_f64(),
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        auto_metrics.compilation_attempts,
+        auto_metrics.unsupported_region_fallbacks,
+        native_metrics.unsupported_region_fallbacks,
     );
 }
 
@@ -1286,7 +1328,109 @@ fn bench_jit_scalar_regions() {
 }
 
 // ---------------------------------------------------------------
-// Group 1: the language operations.
+// Group 1: representative JIT programs.
+// ---------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn bench_jit_representative_programs() {
+    println!(
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_unsupported\tnative_unsupported"
+    );
+    report_jit_representative(
+        "jit_json_parse",
+        r#"
+use std.json.Json
+use std.json.parse
+
+source = "{\"name\":\"loom\",\"values\":[1,2,3,4],\"ready\":true}"
+round = 0
+total = 0
+while round < 2000
+  case parse(source)
+  in Ok(Json.Object(fields)) then total = total + fields.len()
+  in _ then total = total - 1000
+  end
+  round = round + 1
+end
+total
+"#,
+    );
+    report_jit_representative(
+        "jit_json_stringify",
+        r#"
+use std.json.Json
+use std.json.stringify
+
+fields = Map[String, Json]()
+fields.put("name", Json.Text("loom"))
+fields.put("ready", Json.Boolean(true))
+values: [Json] = [Json.Number(1.0), Json.Number(2.0), Json.Number(3.0)]
+fields.put("values", Json.ListValue(values))
+document = Json.Object(fields)
+round = 0
+total = 0
+while round < 2000
+  case stringify(document)
+  in Ok(text) then total = total + text.len()
+  in Err(_) then total = total - 1000
+  end
+  round = round + 1
+end
+total
+"#,
+    );
+    report_jit_representative(
+        "jit_http_parse",
+        r#"
+use std.http.Http
+
+http = Http()
+limits = http.default_limits()
+wire = Bytes("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Loom: ready\r\n\r\nworld")
+round = 0
+total = 0
+while round < 2000
+  case http.parse_response(wire, "GET", limits)
+  in Ok(response) then total = total + response.status + response.body.len()
+  in Err(_) then total = total - 1000
+  end
+  round = round + 1
+end
+total
+"#,
+    );
+    report_jit_representative(
+        "jit_http_serialize",
+        r#"
+use std.http.Http
+use std.http.HttpHeader
+use std.http.HttpRequest
+
+http = Http()
+limits = http.default_limits()
+request = HttpRequest(
+  "POST",
+  "/echo",
+  [HttpHeader("Content-Type", Bytes("text/plain"))],
+  Bytes("hello")
+)
+round = 0
+total = 0
+while round < 2000
+  case http.serialize_request("example.test", 80, request, limits)
+  in Ok(wire) then total = total + wire.len()
+  in Err(_) then total = total - 1000
+  end
+  round = round + 1
+end
+total
+"#,
+    );
+}
+
+// ---------------------------------------------------------------
+// Group 2: the language operations.
 // ---------------------------------------------------------------
 
 #[test]

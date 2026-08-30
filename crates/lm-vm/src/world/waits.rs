@@ -638,7 +638,7 @@ impl World {
                     (lm_abi::OP_WAIT_WAIT, None) => Ok(value),
                     (lm_abi::OP_WAIT_ANY, Some(index)) => {
                         self.machines[vm as usize].alloc(Object::Tuple {
-                            items: vec![Value::Int(index as i64), value],
+                            items: vec![Value::Int(index as i64), value].into(),
                         })
                     }
                     _ => Err(FaultCode::MalformedState),

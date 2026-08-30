@@ -122,6 +122,11 @@ impl JitEngine {
                 .map_err(|_| Failure::Unsupported)?;
             let mut input =
                 FunctionInput::new(function, runtime, unit.module(), module.bundle(), local);
+            let relocation = module
+                .code_namespace()
+                .relocation(unit.id())
+                .ok_or(Failure::Unsupported)?;
+            input.set_class_relocation(relocation.classes());
             let mut callees = Vec::new();
             for instruction in runtime.blocks.iter().flatten() {
                 if let lm_bytecode::Instr::Call(callee) = instruction {
@@ -139,12 +144,17 @@ impl JitEngine {
                     .code_namespace()
                     .function_unit(callee)
                     .map_err(|_| Failure::Unsupported)?;
-                input.add_direct_callee(
+                let callee_relocation = module
+                    .code_namespace()
+                    .relocation(callee_unit.id())
+                    .ok_or(Failure::Unsupported)?;
+                input.add_relocated_direct_callee(
                     callee,
                     callee_runtime,
                     callee_unit.module(),
                     module.bundle(),
                     callee_local,
+                    callee_relocation.classes(),
                 );
             }
             Ok(input)
@@ -307,14 +317,18 @@ impl JitEngine {
         let max_stack_values = machine.config.max_stack_values as usize;
         let max_frames = machine.config.max_frames as usize;
         let base_frames = machine.vm.frames.len().saturating_sub(1);
+        let heap = if region.requires_heap_view() {
+            machine.vm.heap.jit_view()
+        } else {
+            lm_heap::JitHeapView::EMPTY
+        };
         metrics.note_native_entry();
-        let (exit, heap_reads, allocations) = {
+        let (exit, allocations) = {
             let mut runtime = MachineRuntime {
                 machine,
                 module,
                 base_local: base,
                 base_operand: operand_base,
-                heap_reads: 0,
                 allocations: 0,
             };
             let exit = region.execute(
@@ -330,11 +344,11 @@ impl JitEngine {
                     roots: &mut scratch.roots,
                     root_states: &mut scratch.root_states,
                     fuel: batch_fuel,
+                    heap,
                 },
             );
-            (exit, runtime.heap_reads, runtime.allocations)
+            (exit, runtime.allocations)
         };
-        metrics.note_native_heap_reads(heap_reads);
         metrics.note_native_allocations(allocations);
         let exit = match exit {
             Ok(exit) => exit,

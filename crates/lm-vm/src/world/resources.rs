@@ -147,7 +147,7 @@ impl World {
                     items.push(self.build_host_value(vm, value, element)?);
                 }
                 self.machines[vm as usize].alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })
             }
@@ -160,7 +160,9 @@ impl World {
                 for (value, element) in values.iter().zip(elements) {
                     items.push(self.build_host_value(vm, value, element)?);
                 }
-                self.machines[vm as usize].alloc(Object::Tuple { items })
+                self.machines[vm as usize].alloc(Object::Tuple {
+                    items: items.into(),
+                })
             }
             HostValue::SocketAddress(address) => self.build_host_address(vm, *address),
             HostValue::TcpStream(token) => {
@@ -488,7 +490,7 @@ impl World {
                 values.push(value);
             }
             let diagnostics = self.machines[vm as usize].alloc(Object::List {
-                items: values,
+                items: values.into(),
                 epoch: StructuralEpoch::default(),
             })?;
             let diagnostics_ref = diagnostics.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -1111,7 +1113,7 @@ impl World {
             }
         }
         let list = self.machines[holder as usize].alloc(Object::List {
-            items,
+            items: items.into(),
             epoch: StructuralEpoch::default(),
         });
         for root in roots {

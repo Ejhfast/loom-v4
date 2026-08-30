@@ -2116,7 +2116,11 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             let class = class_slot(cur)?;
             let env = env_ref(cur, ctx)?;
             let fields = decode_values(cur, objects, 0, limits.max_stack_values as u64, "field")?;
-            Object::Instance { class, fields, env }
+            Object::Instance {
+                class,
+                fields: fields.into(),
+                env,
+            }
         }
         2 => {
             let epoch = decode_epoch(cur)?;
@@ -2133,7 +2137,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             for _ in 0..count {
                 items.push(decode_value(cur, objects, 0)?);
             }
-            Object::List { epoch, items }
+            Object::List {
+                epoch,
+                items: items.into(),
+            }
         }
         3 => {
             let epoch = decode_epoch(cur)?;
@@ -2166,7 +2173,8 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 0,
                 limits.max_stack_values as u64,
                 "tuple item",
-            )?,
+            )?
+            .into(),
         },
         5 => {
             let func = cur.leb()?;
@@ -2177,7 +2185,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 decode_values(cur, objects, 0, limits.max_stack_values as u64, "capture")?;
             Object::Closure {
                 func,
-                captures,
+                captures: captures.into(),
                 env,
             }
         }

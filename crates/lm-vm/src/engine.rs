@@ -42,7 +42,6 @@ pub struct EngineMetrics {
     pub native_retired_instructions: u64,
     pub materializations: u64,
     pub native_fault_exits: u64,
-    pub native_heap_reads: u64,
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
     pub native_effect_exits: u64,
@@ -60,7 +59,6 @@ struct EngineCounters {
     native_retired_instructions: AtomicU64,
     materializations: AtomicU64,
     native_fault_exits: AtomicU64,
-    native_heap_reads: AtomicU64,
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
     native_effect_exits: AtomicU64,
@@ -87,7 +85,6 @@ impl EngineCounters {
             native_retired_instructions: read(&self.native_retired_instructions),
             materializations: read(&self.materializations),
             native_fault_exits: read(&self.native_fault_exits),
-            native_heap_reads: read(&self.native_heap_reads),
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
             native_effect_exits: read(&self.native_effect_exits),
@@ -106,7 +103,6 @@ impl EngineCounters {
         reset(&self.native_retired_instructions);
         reset(&self.materializations);
         reset(&self.native_fault_exits);
-        reset(&self.native_heap_reads);
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
         reset(&self.native_effect_exits);
@@ -131,7 +127,6 @@ impl EngineCounters {
         );
         add(&self.materializations, values.materializations);
         add(&self.native_fault_exits, values.native_fault_exits);
-        add(&self.native_heap_reads, values.native_heap_reads);
         add(
             &self.native_allocation_exits,
             values.native_allocation_exits,
@@ -194,10 +189,6 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_fault_exit(&mut self) {
         self.values.native_fault_exits += 1;
-    }
-
-    pub(crate) fn note_native_heap_reads(&mut self, reads: u64) {
-        self.values.native_heap_reads = self.values.native_heap_reads.saturating_add(reads);
     }
 
     pub(crate) fn note_native_allocation_exit(&mut self) {

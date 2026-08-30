@@ -1,8 +1,10 @@
 # JIT compilation
 
-Status: The scalar and native-call foundations are implemented.
+Status: The native-call foundation and canonical heap ABI are implemented.
 
-The direct heap ABI is the next implementation stage.
+Direct instance reads use the canonical heap layout.
+
+Corpus validation, tiering, and scheduler continuation work remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -263,41 +265,48 @@ Float writes use the canonical NaN encoding.
 
 ## 10. Heap ABI
 
-The heap keeps Rust Object values as canonical storage.
+The heap's canonical storage is the native ABI.
 
-Generated code never reads the Rust Object enum.
+The heap keeps no parallel object record.
 
-The heap also maintains fixed-layout JIT side records.
+ValueArray owns one allocation through a stable record.
 
     #[repr(C)]
-    pub struct JitObjectEntry {
-        generation: u32,
-        kind: u16,
-        flags: u16,
-        class: u32,
+    pub struct ValueArray {
+        data: *mut Value,
         len: usize,
-        data: usize,
+        capacity: usize,
     }
 
-Each object-table slot has one side record.
+ValueArray supports fallible reservation before guest-controlled growth.
 
-Dead slots use the dead kind and a zero data address.
+Instance fields, list items, tuple items, and closure captures use ValueArray.
 
-Instance records name their dense runtime class.
+Object uses a fixed u32 tag and C field layout.
 
-Instance data points to the fixed field array.
+Native code reads only the object variants named by this ABI.
 
-Tuple data points to the immutable item array.
+Other object variants remain opaque to native code.
 
-List data points to the current item allocation.
+Header uses a fixed C layout.
 
-The flags include the frozen state.
+Its first byte contains the frozen flag.
 
-The heap exposes page addresses, page count, and slot count.
+Each entry stores its generation and one tagged state.
 
-One page contains 1,024 side records.
+The state is Dead or Live.
 
-The native activation copies page addresses into reusable scratch storage.
+The live payload contains Header and Object.
+
+This state gives automatic drops and requires no uninitialized storage.
+
+The heap exposes canonical page addresses, page count, and slot count.
+
+One canonical page holds 1,024 entries.
+
+Each page reserves its complete capacity before publication.
+
+The page address never changes after publication.
 
 No raw pointer becomes guest data.
 
@@ -309,7 +318,13 @@ The heap does not move live objects.
 
 The machine lease prevents concurrent heap mutation.
 
-A native fast segment retains no pointer across a slow path.
+A payload pointer lives only in straight-line code between calls.
+
+Native code reloads every payload pointer after call_indirect.
+
+Native code reloads every payload pointer after a native call.
+
+Any callee can allocate or collect.
 
 After a slow path, native code reloads:
 
@@ -327,29 +342,33 @@ Generation checks can move above repeated accesses within one safe segment.
 
 Bounds checks remain before every unchecked address calculation.
 
-## 12. Side-record maintenance
+## 12. Canonical storage maintenance
 
-Allocation initializes both canonical storage and the side record.
+Allocation writes one canonical live entry.
 
-Freeing advances the generation and marks the side record dead.
+Freeing drops its object and changes the state to Dead.
 
-Freezing updates the canonical header and the side-record flag.
+Freeing also advances the generation.
+
+Freezing changes the canonical header byte.
 
 Instance and tuple array addresses never change after allocation.
 
-List growth refreshes the list address and length.
+List growth updates its ValueArray directly.
 
-List truncation and removal refresh the length.
+List truncation and removal update the same ValueArray.
 
-Shape-changing heap mutation uses one centralized heap operation.
+No mutation path synchronizes duplicate object metadata.
 
-A mutable heap guard refreshes its side record before release.
+A new page extends the page-address table.
 
-Tests compare every live side record with its canonical Object.
+An allocation slow path refreshes the activation after that extension.
+
+Tests compare exported offsets with canonical field addresses.
 
 Graph operations and snapshots continue to read canonical Object values.
 
-The side records never affect snapshot bytes or semantic digests.
+The native layout does not affect snapshot bytes or semantic digests.
 
 ## 13. Direct fast paths
 
@@ -357,7 +376,6 @@ Native code implements these common operations directly:
 
 - handle validation;
 - exact class tests;
-- monomorphic subclass guards;
 - instance field loads;
 - instance field stores;
 - tuple element loads;
@@ -388,6 +406,12 @@ Runtime execution never walks semantic hashes.
 Linked dense class indexes select runtime classes.
 
 Inherited fields keep their verified prefix offsets.
+
+The first tier uses an exact concrete-class guard.
+
+A class mismatch replays the instruction in the interpreter.
+
+A later inline cache can add one observed subclass guard.
 
 A monomorphic cache guards the observed concrete class.
 
@@ -583,8 +607,9 @@ lm-jit owns:
 lm-heap owns:
 
 - canonical object storage;
-- fixed JIT side records;
-- side-record maintenance;
+- stable ValueArray storage;
+- canonical heap layout constants;
+- canonical page-address views;
 - checked JIT heap views.
 
 lm-vm owns:
@@ -596,6 +621,8 @@ lm-vm owns:
 - typed slow-path implementations.
 
 lm-jit never depends on lm-vm.
+
+lm-jit depends on lm-heap only for explicit ABI types and constants.
 
 lm-vm passes one heap view into each native activation.
 
@@ -615,30 +642,30 @@ No compiled function captures a mutable World pointer.
 
 Gate: The split changes no result or benchmark profile.
 
-### Stage B: Remove the callback architecture
+### Stage B: Fixed value and heap ABI
+
+- fix the Value representation;
+- add stable ValueArray storage;
+- fix the Object, Header, and entry layouts;
+- expose checked heap views;
+- add layout and mutation tests.
+
+Gate: Exported offsets name canonical objects after every heap operation.
+
+### Stage C: Remove the callback architecture
 
 - delete the generic runtime service trait;
 - delete the operation-number dispatcher;
-- make heap instructions temporarily ineligible;
+- compile direct instance field loads;
 - keep effects as explicit exits;
 - keep allocation as one typed slow path;
-- retain every differential test as a future gate.
+- retain every differential test as a gate.
 
-Gate: Unsupported programs stay within five percent in Auto mode.
+Gate: Field reads use no runtime slow call.
 
-### Stage C: Fixed value and heap ABI
+### Stage D: Complete direct object access
 
-- fix the Value representation;
-- add side-record pages;
-- expose checked heap views;
-- centralize side-record refresh;
-- add layout and mutation tests.
-
-Gate: Side records match canonical objects after every heap operation.
-
-### Stage D: Direct object access
-
-- compile instance field loads and stores;
+- compile instance field stores;
 - compile tuple element loads;
 - compile list length and element operations;
 - add structural-state result guards;
@@ -686,9 +713,21 @@ The field and allocation rows use the temporary callback layer.
 
 Later stages replace those rows with direct ABI measurements.
 
+The canonical heap candidate produced these focused release rows.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Integer loop | 30.044 ms | 0.713 ms | 42.12 times |
+| Instance field read | 45.751 ms | 1.675 ms | 27.32 times |
+| Plain allocation | 7.673 ms | 2.625 ms | 2.92 times |
+
+These rows do not replace the scheduler corpus gate.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
+
+A parallel side record cannot mirror mutable object layout.
 
 Per-operation metadata decoding cannot remain on a native fast path.
 

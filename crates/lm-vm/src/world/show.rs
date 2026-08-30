@@ -29,7 +29,7 @@ impl World {
                 locations.push(location);
             }
             self.machines[holder as usize].alloc(Object::List {
-                items: locations,
+                items: locations.into(),
                 epoch: lm_heap::StructuralEpoch::default(),
             })
         })();

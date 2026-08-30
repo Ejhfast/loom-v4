@@ -13,7 +13,7 @@ use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
 use std::collections::TryReserveError;
 
-use crate::{NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText};
+use crate::{NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText, ValueArray};
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -117,7 +117,7 @@ pub struct MapIndex {
     live: u32,
     /// The structural epoch stored in existing index padding.
     pub epoch: StructuralEpoch,
-    slots: Vec<MapSlot>,
+    slots: Box<[MapSlot]>,
 }
 
 const EMPTY_MAP_ENTRY: u32 = u32::MAX;
@@ -143,7 +143,7 @@ impl MapIndex {
             built: 0,
             live: u32::try_from(live).expect("map entry count fits u32"),
             epoch,
-            slots: Vec::new(),
+            slots: Box::default(),
         }
     }
 
@@ -179,14 +179,14 @@ impl MapIndex {
     /// Drop derived data after stable compaction.
     pub fn record_compaction(&mut self) {
         self.built = 0;
-        self.slots.clear();
+        self.slots = Box::default();
     }
 
     /// Reset one empty map.
     pub fn reset(&mut self) {
         self.built = 0;
         self.live = 0;
-        self.slots.clear();
+        self.slots = Box::default();
     }
 
     /// Entry indices whose stored key has this hash.
@@ -245,12 +245,15 @@ impl MapIndex {
     /// Clear the derived lookup table and keep the structural epoch.
     pub fn clear(&mut self) {
         self.built = 0;
-        self.slots.clear();
+        self.slots = Box::default();
     }
 
     fn grow(&mut self) {
         let new_len = (self.slots.len() * 2).max(MIN_MAP_SLOTS);
-        let old = std::mem::replace(&mut self.slots, vec![MapSlot::EMPTY; new_len]);
+        let old = std::mem::replace(
+            &mut self.slots,
+            vec![MapSlot::EMPTY; new_len].into_boxed_slice(),
+        );
         for slot in old {
             if slot.entry != EMPTY_MAP_ENTRY {
                 insert_map_slot(&mut self.slots, slot.hash, slot.entry);
@@ -392,9 +395,10 @@ pub struct PortableCode {
 
 /// The payload of one heap object.
 #[derive(Debug, Clone, PartialEq)]
+#[repr(C, u32)]
 pub enum Object {
     /// Immutable UTF-8 text. Born frozen.
-    Str(SharedText),
+    Str(SharedText) = 0,
     /// A class instance. Fields follow the class layout. A field holds
     /// `Value::Uninit` before its first assignment.
     ///
@@ -403,22 +407,22 @@ pub enum Object {
     /// read them from the object alone.
     Instance {
         class: u32,
-        fields: Vec<Value>,
+        fields: ValueArray,
         env: Witness,
-    },
+    } = 1,
     /// A growable list.
     List {
-        items: Vec<Value>,
+        items: ValueArray,
         epoch: StructuralEpoch,
-    },
+    } = 2,
     /// A map with entries in insertion order plus a derived lookup
     /// index.
     Map {
         entries: Vec<MapEntry>,
         index: MapIndex,
-    },
+    } = 3,
     /// A fixed-arity immutable tuple. Born frozen.
-    Tuple { items: Vec<Value> },
+    Tuple { items: ValueArray } = 4,
     /// A closure: code index plus captured values. Born frozen.
     ///
     /// `env` is the witness: the type environment of the frame that
@@ -427,9 +431,9 @@ pub enum Object {
     /// does not hold, so the value must retain the environment.
     Closure {
         func: u32,
-        captures: Vec<Value>,
+        captures: ValueArray,
         env: Witness,
-    },
+    } = 5,
     /// A string builder.
     StrBuilder(NativeStringBuilder),
     /// A byte buffer.
@@ -1022,11 +1026,11 @@ impl Object {
             Object::Str(text) => Object::Str(text.clone()),
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
-                fields: copy_values(fields, fields.len(), &mut map)?,
+                fields: copy_values(fields, fields.len(), &mut map)?.into(),
                 env: *env,
             },
             Object::List { items, epoch } => Object::List {
-                items: copy_values(items, items.capacity(), &mut map)?,
+                items: copy_values(items, items.capacity(), &mut map)?.into(),
                 epoch: *epoch,
             },
             Object::Map { entries, index } => {
@@ -1057,7 +1061,7 @@ impl Object {
                 }
             }
             Object::Tuple { items } => Object::Tuple {
-                items: copy_values(items, items.len(), &mut map)?,
+                items: copy_values(items, items.len(), &mut map)?.into(),
             },
             Object::Closure {
                 func,
@@ -1065,7 +1069,7 @@ impl Object {
                 env,
             } => Object::Closure {
                 func: *func,
-                captures: copy_values(captures, captures.len(), &mut map)?,
+                captures: copy_values(captures, captures.len(), &mut map)?.into(),
                 env: *env,
             },
             Object::StrBuilder(text) => Object::StrBuilder(text.try_clone_buffer()?),
@@ -1452,10 +1456,10 @@ impl Object {
                 resource: *resource,
             },
             Object::Tuple { items } => Object::Tuple {
-                items: vec![Value::Unit; items.len()],
+                items: vec![Value::Unit; items.len()].into(),
             },
             Object::List { items, epoch } => Object::List {
-                items: vec![Value::Unit; items.len()],
+                items: vec![Value::Unit; items.len()].into(),
                 epoch: *epoch,
             },
             Object::Map { entries, index } => {
@@ -1475,7 +1479,7 @@ impl Object {
             }
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
-                fields: vec![Value::Unit; fields.len()],
+                fields: vec![Value::Unit; fields.len()].into(),
                 env: *env,
             },
             Object::Closure {
@@ -1484,7 +1488,7 @@ impl Object {
                 env,
             } => Object::Closure {
                 func: *func,
-                captures: vec![Value::Unit; captures.len()],
+                captures: vec![Value::Unit; captures.len()].into(),
                 env: *env,
             },
             Object::DynValue { ty, .. } => Object::DynValue {
@@ -1620,7 +1624,8 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn the_object_payload_stays_compact() {
-        assert!(std::mem::size_of::<Object>() <= 64);
+        let bytes = std::mem::size_of::<Object>();
+        assert!(bytes <= 64, "the object payload uses {bytes} bytes");
     }
 
     #[test]
@@ -1663,11 +1668,11 @@ mod tests {
             Object::Str("text".into()),
             Object::Instance {
                 class: 3,
-                fields: vec![Value::Obj(a), Value::Int(1), Value::Obj(b)],
+                fields: vec![Value::Obj(a), Value::Int(1), Value::Obj(b)].into(),
                 env: Witness(lm_value::TypeEnvId(5)),
             },
             Object::List {
-                items: vec![Value::Obj(a), Value::Obj(b)],
+                items: vec![Value::Obj(a), Value::Obj(b)].into(),
                 epoch: Default::default(),
             },
             Object::Map {
@@ -1679,11 +1684,11 @@ mod tests {
                 index: MapIndex::with_live(StructuralEpoch::default(), 1),
             },
             Object::Tuple {
-                items: vec![Value::Obj(b), Value::Obj(a)],
+                items: vec![Value::Obj(b), Value::Obj(a)].into(),
             },
             Object::Closure {
                 func: 4,
-                captures: vec![Value::Obj(b), Value::Unit, Value::Obj(a)],
+                captures: vec![Value::Obj(b), Value::Unit, Value::Obj(a)].into(),
                 env: Witness(lm_value::TypeEnvId(7)),
             },
             Object::StrBuilder(NativeStringBuilder::from_string("buffer".to_string())),
@@ -1853,12 +1858,12 @@ mod tests {
     fn two_objects_with_other_witnesses_stay_equal() {
         let one = Object::Closure {
             func: 1,
-            captures: vec![Value::Int(3)],
+            captures: vec![Value::Int(3)].into(),
             env: Witness(lm_value::TypeEnvId(1)),
         };
         let other = Object::Closure {
             func: 1,
-            captures: vec![Value::Int(3)],
+            captures: vec![Value::Int(3)].into(),
             env: Witness(lm_value::TypeEnvId(2)),
         };
         assert_eq!(one, other);
@@ -1878,21 +1883,23 @@ mod tests {
             Object::Str(SharedText::new()),
             Object::Instance {
                 class: 0,
-                fields: vec![],
+                fields: vec![].into(),
                 env: Witness::EMPTY,
             },
             Object::List {
-                items: vec![],
+                items: vec![].into(),
                 epoch: Default::default(),
             },
             Object::Map {
                 entries: vec![],
                 index: MapIndex::default(),
             },
-            Object::Tuple { items: vec![] },
+            Object::Tuple {
+                items: vec![].into(),
+            },
             Object::Closure {
                 func: 0,
-                captures: vec![],
+                captures: vec![].into(),
                 env: Witness::EMPTY,
             },
             Object::StrBuilder(NativeStringBuilder::new()),

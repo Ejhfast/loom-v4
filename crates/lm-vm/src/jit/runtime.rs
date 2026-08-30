@@ -1,8 +1,8 @@
-//! Temporary native runtime slow paths.
+//! Typed native allocation slow paths.
 
 use crate::machine::Machine;
 use crate::NamespaceRuntime;
-use lm_jit::{Runtime, RuntimeResult, ScalarKind, ValueRepr, LOCAL_INITIALIZED};
+use lm_jit::{AllocationResult, AllocationRuntime, ScalarKind, LOCAL_INITIALIZED};
 use lm_value::{canonical_float_bits, ObjRef, Value};
 
 pub(super) fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {
@@ -44,59 +44,48 @@ pub(super) struct MachineRuntime<'a> {
     pub(super) module: &'a NamespaceRuntime,
     pub(super) base_local: usize,
     pub(super) base_operand: usize,
-    pub(super) heap_reads: u64,
     pub(super) allocations: u64,
 }
 
-impl Runtime for MachineRuntime<'_> {
-    fn load_field(&mut self, reference: ObjRef, field: u32, expected: ValueRepr) -> RuntimeResult {
-        self.heap_reads = self.heap_reads.saturating_add(1);
-        let Some(crate::Object::Instance { fields, .. }) = self.machine.vm.heap.try_get(reference)
-        else {
-            return RuntimeResult::TypeMismatch;
-        };
-        let Some(value) = fields.get(field as usize).copied() else {
-            return RuntimeResult::TypeMismatch;
-        };
-        if value == Value::Uninit {
-            return RuntimeResult::UninitializedField;
-        }
-        match representation_bits(expected, value) {
-            Some(bits) => RuntimeResult::Value(bits),
-            None => RuntimeResult::Interpreter,
-        }
-    }
-
+impl AllocationRuntime for MachineRuntime<'_> {
     fn allocate_instance(
         &mut self,
         class: u32,
         root_bits: &[u64],
         root_states: &[u8],
         allow_collection: bool,
-    ) -> RuntimeResult {
+    ) -> AllocationResult {
         if root_bits.len() != root_states.len() {
-            return RuntimeResult::Interpreter;
+            return AllocationResult::Interpreter;
         }
         let Some(class_entry) = self.module.classes.get(class as usize) else {
-            return RuntimeResult::Interpreter;
+            return AllocationResult::Interpreter;
         };
         let object = crate::Object::Instance {
             class,
-            fields: vec![Value::Uninit; class_entry.fields.len()],
+            fields: vec![Value::Uninit; class_entry.fields.len()].into(),
             env: lm_value::Witness::EMPTY,
         };
         let cost = self.machine.vm.heap.allocation_cost(&object);
         if !self.machine.vm.heap.collection_due(cost) {
             let reference = self.machine.vm.heap.alloc(object);
             self.allocations = self.allocations.saturating_add(1);
-            return RuntimeResult::Value(object_bits(reference));
+            let heap = if reference.slot & lm_heap::JIT_PAGE_MASK == 0 {
+                Some(self.machine.vm.heap.jit_view())
+            } else {
+                None
+            };
+            return AllocationResult::Value {
+                bits: object_bits(reference),
+                heap,
+            };
         }
         if !allow_collection {
-            return RuntimeResult::Interpreter;
+            return AllocationResult::Interpreter;
         }
         let mut roots = Vec::new();
         if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return RuntimeResult::HeapLimit;
+            return AllocationResult::HeapLimit;
         }
         roots.extend(
             root_bits
@@ -112,23 +101,15 @@ impl Runtime for MachineRuntime<'_> {
         {
             Ok(Value::Obj(reference)) => {
                 self.allocations = self.allocations.saturating_add(1);
-                RuntimeResult::Value(object_bits(reference))
+                let heap = Some(self.machine.vm.heap.jit_view());
+                AllocationResult::Value {
+                    bits: object_bits(reference),
+                    heap,
+                }
             }
-            Ok(_) => RuntimeResult::Interpreter,
-            Err(crate::FaultCode::HeapLimit) => RuntimeResult::HeapLimit,
-            Err(_) => RuntimeResult::Interpreter,
+            Ok(_) => AllocationResult::Interpreter,
+            Err(crate::FaultCode::HeapLimit) => AllocationResult::HeapLimit,
+            Err(_) => AllocationResult::Interpreter,
         }
-    }
-}
-
-fn representation_bits(expected: ValueRepr, value: Value) -> Option<u64> {
-    match (expected, value) {
-        (ValueRepr::Unit, Value::Unit) => Some(0),
-        (ValueRepr::Bool, Value::Bool(value)) => Some(u64::from(value)),
-        (ValueRepr::Int, Value::Int(value)) => Some(value as u64),
-        (ValueRepr::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
-        (ValueRepr::Object, Value::Obj(reference)) => Some(object_bits(reference)),
-        (ValueRepr::Operation, Value::Op(operation)) => Some(u64::from(operation)),
-        _ => None,
     }
 }

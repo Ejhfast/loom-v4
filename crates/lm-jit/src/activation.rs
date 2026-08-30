@@ -1,15 +1,12 @@
-//! Native activation storage and the temporary runtime boundary.
+//! Native activation storage and typed slow-path boundaries.
 
 use crate::Failure;
+use lm_heap::JitHeapView;
 use std::ffi::c_void;
 
-pub(super) const RUNTIME_LOAD_FIELD: u32 = 1;
-pub(super) const RUNTIME_ALLOC_INSTANCE: u32 = 2;
-pub(super) const RUNTIME_OK: u32 = 0;
-pub(super) const RUNTIME_TYPE_MISMATCH: u32 = 1;
-pub(super) const RUNTIME_UNINITIALIZED_FIELD: u32 = 2;
-const RUNTIME_INTERPRETER: u32 = 3;
-pub(super) const RUNTIME_HEAP_LIMIT: u32 = 4;
+pub(super) const ALLOCATION_OK: u32 = 0;
+const ALLOCATION_INTERPRETER: u32 = 1;
+pub(super) const ALLOCATION_HEAP_LIMIT: u32 = 2;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -60,10 +57,13 @@ pub(super) struct RawNativeActivation {
     pub(super) max_stack_values: u32,
     pub(super) base_frames: u32,
     pub(super) max_frames: u32,
+    pub(super) heap_pages: *const usize,
+    pub(super) heap_page_count: usize,
+    pub(super) heap_slot_count: usize,
 }
 
-pub(super) type RawRuntimeCall =
-    unsafe extern "C" fn(*mut c_void, u32, u64, u64, u32, *mut u64) -> u32;
+pub(super) type RawAllocateInstance =
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, *mut u64) -> u32;
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
     *mut u64,
@@ -72,7 +72,7 @@ pub(super) type NativeFunction = unsafe extern "C" fn(
     u64,
     u32,
     *mut c_void,
-    RawRuntimeCall,
+    RawAllocateInstance,
     *mut u64,
     *mut u64,
     *mut u8,
@@ -113,6 +113,7 @@ pub struct NativeExecution<'a> {
     pub roots: &'a mut [u64],
     pub root_states: &'a mut [u8],
     pub fuel: u64,
+    pub heap: JitHeapView,
 }
 
 /// One materialized view of a live native frame.
@@ -255,60 +256,27 @@ impl NativeActivation {
     }
 }
 
-pub(super) struct RawRuntimeContext<R> {
+pub(super) struct RawAllocationContext<R> {
     pub(super) runtime: *mut R,
-    pub(super) activation: *const RawNativeActivation,
+    pub(super) activation: *mut RawNativeActivation,
     pub(super) roots: *const u64,
     pub(super) root_states: *const u8,
     pub(super) root_capacity: usize,
 }
 
-/// One stable value representation at the native runtime boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ValueRepr {
-    Unit = 0,
-    Bool = 1,
-    Int = 2,
-    Float = 3,
-    Object = 4,
-    Operation = 5,
-}
-
-impl ValueRepr {
-    fn from_raw(value: u32) -> Option<ValueRepr> {
-        match value {
-            0 => Some(ValueRepr::Unit),
-            1 => Some(ValueRepr::Bool),
-            2 => Some(ValueRepr::Int),
-            3 => Some(ValueRepr::Float),
-            4 => Some(ValueRepr::Object),
-            5 => Some(ValueRepr::Operation),
-            _ => None,
-        }
-    }
-}
-
-/// One checked runtime operation result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeResult {
-    Value(u64),
-    TypeMismatch,
-    UninitializedField,
+/// One checked instance-allocation result.
+#[derive(Debug, Clone, Copy)]
+pub enum AllocationResult {
+    Value {
+        bits: u64,
+        heap: Option<JitHeapView>,
+    },
     HeapLimit,
     Interpreter,
 }
 
-/// Safe runtime services available during one native activation.
-pub trait Runtime {
-    /// Copy one field value into its stable native representation.
-    fn load_field(
-        &mut self,
-        reference: lm_value::ObjRef,
-        field: u32,
-        expected: ValueRepr,
-    ) -> RuntimeResult;
-
+/// The typed allocation slow path of one native activation.
+pub trait AllocationRuntime {
     /// Allocate one plain instance with the supplied active roots.
     fn allocate_instance(
         &mut self,
@@ -316,69 +284,63 @@ pub trait Runtime {
         root_bits: &[u64],
         root_states: &[u8],
         allow_collection: bool,
-    ) -> RuntimeResult;
+    ) -> AllocationResult;
 }
 
-pub(super) unsafe extern "C" fn runtime_call<R: Runtime>(
+pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     context: *mut c_void,
-    operation: u32,
-    first: u64,
-    second: u64,
-    representation: u32,
+    class: u32,
+    allow_collection: u32,
+    root_count: u32,
     result: *mut u64,
 ) -> u32 {
     if context.is_null() || result.is_null() {
-        return RUNTIME_INTERPRETER;
+        return ALLOCATION_INTERPRETER;
     }
     // SAFETY: `CompiledRegion::execute` passes one live context for this call.
-    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    let context = unsafe { &mut *context.cast::<RawAllocationContext<R>>() };
     if context.runtime.is_null() {
-        return RUNTIME_INTERPRETER;
+        return ALLOCATION_INTERPRETER;
     }
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
-    let response = match operation {
-        RUNTIME_LOAD_FIELD => {
-            let Some(expected) = ValueRepr::from_raw(representation) else {
-                return RUNTIME_INTERPRETER;
-            };
-            let reference = lm_value::ObjRef {
-                slot: first as u32,
-                generation: (first >> 32) as u32,
-            };
-            runtime.load_field(reference, second as u32, expected)
-        }
-        RUNTIME_ALLOC_INSTANCE => {
-            if second > 1 {
-                return RUNTIME_INTERPRETER;
-            }
-            let root_count = representation as usize;
-            if root_count > context.root_capacity {
-                return RUNTIME_INTERPRETER;
-            }
-            // SAFETY: The checked count stays inside the activation root buffer.
-            let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-            // SAFETY: Both root buffers have the same checked capacity.
-            let root_states =
-                unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-            if context.activation.is_null() {
-                return RUNTIME_INTERPRETER;
-            }
-            // SAFETY: The activation remains live during this call.
-            let nested = unsafe { (*context.activation).frame_len > 1 };
-            runtime.allocate_instance(first as u32, root_bits, root_states, second != 0 && !nested)
-        }
-        _ => RuntimeResult::Interpreter,
-    };
+    if allow_collection > 1 || context.activation.is_null() {
+        return ALLOCATION_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return ALLOCATION_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside the activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let nested = unsafe { (*context.activation).frame_len > 1 };
+    let response = runtime.allocate_instance(
+        class,
+        root_bits,
+        root_states,
+        allow_collection != 0 && !nested,
+    );
     match response {
-        RuntimeResult::Value(value) => {
+        AllocationResult::Value { bits, heap } => {
+            let slot_count = (bits as u32 as usize).saturating_add(1);
+            // SAFETY: The native activation remains writable during the slow path.
+            unsafe {
+                (*context.activation).heap_slot_count =
+                    (*context.activation).heap_slot_count.max(slot_count);
+                if let Some(heap) = heap {
+                    (*context.activation).heap_pages = heap.pages;
+                    (*context.activation).heap_page_count = heap.page_count;
+                    (*context.activation).heap_slot_count = heap.slot_count;
+                }
+            }
             // SAFETY: The caller provides one writable result slot.
-            unsafe { result.write(value) };
-            RUNTIME_OK
+            unsafe { result.write(bits) };
+            ALLOCATION_OK
         }
-        RuntimeResult::TypeMismatch => RUNTIME_TYPE_MISMATCH,
-        RuntimeResult::UninitializedField => RUNTIME_UNINITIALIZED_FIELD,
-        RuntimeResult::HeapLimit => RUNTIME_HEAP_LIMIT,
-        RuntimeResult::Interpreter => RUNTIME_INTERPRETER,
+        AllocationResult::HeapLimit => ALLOCATION_HEAP_LIMIT,
+        AllocationResult::Interpreter => ALLOCATION_INTERPRETER,
     }
 }

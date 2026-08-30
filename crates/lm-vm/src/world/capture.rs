@@ -68,7 +68,7 @@ impl World {
             crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
                 let items: Vec<Value> = path.iter().map(|p| Value::Int(*p as i64)).collect();
                 let list = self.machines[vm as usize].alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })?;
                 // The list holds no root yet, so it stays host-rooted
@@ -318,7 +318,7 @@ impl World {
             crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
                 let items: Vec<Value> = path.iter().map(|part| Value::Int(*part as i64)).collect();
                 let list = self.machines[vm as usize].alloc(Object::List {
-                    items,
+                    items: items.into(),
                     epoch: StructuralEpoch::default(),
                 })?;
                 let list_ref = list.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -597,7 +597,7 @@ impl World {
         fields.push(Value::Unit);
         let mut reply = Object::Instance {
             class,
-            fields,
+            fields: fields.into(),
             env: lm_value::Witness::EMPTY,
         };
         let bytes = handle
@@ -658,7 +658,7 @@ impl World {
         fields.push(Value::Unit);
         let mut reply = Object::Instance {
             class,
-            fields,
+            fields: fields.into(),
             env: lm_value::Witness::EMPTY,
         };
         let bytes = handle

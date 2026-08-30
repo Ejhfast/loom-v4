@@ -26,10 +26,12 @@ const EXIT_STACK_LIMIT: u32 = 13;
 
 mod activation;
 
-use activation::{runtime_call, NativeFunction, RawExit, RawNativeActivation, RawRuntimeContext};
+use activation::{
+    allocate_instance, NativeFunction, RawAllocationContext, RawExit, RawNativeActivation,
+};
 pub use activation::{
-    NativeActivation, NativeExecution, NativeFrameView, NativePreparation, Runtime, RuntimeResult,
-    ValueRepr, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    AllocationResult, AllocationRuntime, NativeActivation, NativeExecution, NativeFrameView,
+    NativePreparation, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -173,6 +175,12 @@ impl CompiledRegion {
         self.plan.allocation_sites != 0
     }
 
+    /// Return true when this region reads the direct heap view.
+    #[inline(always)]
+    pub fn requires_heap_view(&self) -> bool {
+        self.plan.heap_read_sites != 0
+    }
+
     /// Return the largest complete stack use above the root locals.
     #[inline(always)]
     pub fn max_stack_values(&self) -> usize {
@@ -265,7 +273,7 @@ impl CompiledRegion {
 
     /// Execute native code over explicit scalar buffers.
     #[inline(always)]
-    pub fn execute<R: Runtime>(
+    pub fn execute<R: AllocationRuntime>(
         &self,
         runtime: &mut R,
         activation: &mut NativeActivation,
@@ -281,6 +289,7 @@ impl CompiledRegion {
             roots,
             root_states,
             fuel,
+            heap,
         } = input;
         if entry as usize >= self.plan.segments.len()
             || activation.frame_len != 1
@@ -321,12 +330,15 @@ impl CompiledRegion {
                 .map_err(|_| Failure::BackendUnavailable)?,
             base_frames: u32::try_from(base_frames).map_err(|_| Failure::BackendUnavailable)?,
             max_frames: u32::try_from(max_frames).map_err(|_| Failure::BackendUnavailable)?,
+            heap_pages: heap.pages,
+            heap_page_count: heap.page_count,
+            heap_slot_count: heap.slot_count,
         };
         let mut exit = RawExit::default();
-        let mut runtime_result = 0u64;
-        let mut runtime_context = RawRuntimeContext {
+        let mut allocation_result = 0u64;
+        let mut allocation_context = RawAllocationContext {
             runtime: std::ptr::from_mut(runtime),
-            activation: std::ptr::from_ref(&raw_activation),
+            activation: std::ptr::from_mut(&mut raw_activation),
             roots: roots.as_ptr(),
             root_states: root_states.as_ptr(),
             root_capacity: self.plan.max_roots,
@@ -344,9 +356,9 @@ impl CompiledRegion {
                 operand_pointer,
                 fuel,
                 entry,
-                std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
-                runtime_call::<R>,
-                std::ptr::from_mut(&mut runtime_result),
+                std::ptr::from_mut(&mut allocation_context).cast::<c_void>(),
+                allocate_instance::<R>,
+                std::ptr::from_mut(&mut allocation_result),
                 roots.as_mut_ptr(),
                 root_states.as_mut_ptr(),
                 &mut exit,

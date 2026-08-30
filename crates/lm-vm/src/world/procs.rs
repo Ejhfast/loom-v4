@@ -1124,8 +1124,11 @@ impl World {
         } else {
             // The tuple allocation reads its own children as roots,
             // so the values need no root after `transfer_all`.
-            self.transfer_all(cv, vm, &source_args)
-                .and_then(|items| self.machines[vm as usize].alloc(Object::Tuple { items }))
+            self.transfer_all(cv, vm, &source_args).and_then(|items| {
+                self.machines[vm as usize].alloc(Object::Tuple {
+                    items: items.into(),
+                })
+            })
         };
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}

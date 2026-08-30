@@ -155,15 +155,15 @@ mod tests {
         // Allocate the right branch first, so allocation order and
         // child order disagree.
         let right = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let left = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
-            items: vec![Value::Obj(left), Value::Obj(right)],
+            items: vec![Value::Obj(left), Value::Obj(right)].into(),
             epoch: Default::default(),
         });
         let mut scratch = heap.take_scratch();
@@ -185,11 +185,11 @@ mod tests {
     fn a_cycle_terminates_and_sharing_takes_one_ordinal() {
         let mut heap = Heap::new(1 << 20);
         let shared = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
-            items: vec![Value::Obj(shared), Value::Obj(shared)],
+            items: vec![Value::Obj(shared), Value::Obj(shared)].into(),
             epoch: Default::default(),
         });
         if let Object::List { items, .. } = heap.get_mut(shared) {
@@ -213,11 +213,11 @@ mod tests {
     fn each_limit_rejects_on_its_own() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
-            items: vec![Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf)].into(),
             epoch: Default::default(),
         });
         let base = GraphLimits::default();
@@ -258,12 +258,12 @@ mod tests {
             .spawn(|| {
                 let mut heap = Heap::new(64 << 20);
                 let mut head = heap.alloc(Object::List {
-                    items: vec![],
+                    items: vec![].into(),
                     epoch: Default::default(),
                 });
                 for _ in 0..100_000 {
                     head = heap.alloc(Object::List {
-                        items: vec![Value::Obj(head)],
+                        items: vec![Value::Obj(head)].into(),
                         epoch: Default::default(),
                     });
                 }

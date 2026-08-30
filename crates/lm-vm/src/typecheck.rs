@@ -873,7 +873,7 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let closure = heap.alloc(Object::Closure {
             func: 0,
-            captures: Vec::new(),
+            captures: Vec::new().into(),
             env: Witness::EMPTY,
         });
         let mut envs = TypeEnvs::default();
@@ -900,7 +900,7 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let closure = heap.alloc(Object::Closure {
             func: 0,
-            captures: Vec::new(),
+            captures: Vec::new().into(),
             env: Witness::EMPTY,
         });
         let mut envs = TypeEnvs::default();
@@ -946,7 +946,7 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let instance = heap.alloc(Object::Instance {
             class: 1,
-            fields: Vec::new(),
+            fields: Vec::new().into(),
             env: Witness::EMPTY,
         });
         let mut envs = TypeEnvs::default();

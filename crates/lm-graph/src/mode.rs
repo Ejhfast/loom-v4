@@ -556,11 +556,11 @@ mod tests {
     /// Build a frozen two-node cycle and return its root.
     fn frozen_ring(heap: &mut Heap, first: i64, second: i64) -> ObjRef {
         let a = heap.alloc(Object::List {
-            items: vec![Value::Int(first)],
+            items: vec![Value::Int(first)].into(),
             epoch: Default::default(),
         });
         let b = heap.alloc(Object::List {
-            items: vec![Value::Int(second), Value::Obj(a)],
+            items: vec![Value::Int(second), Value::Obj(a)].into(),
             epoch: Default::default(),
         });
         if let Object::List { items, .. } = heap.get_mut(a) {
@@ -605,11 +605,11 @@ mod tests {
     fn a_rejected_freeze_leaves_every_bit_alone() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
-            items: vec![Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf)].into(),
             epoch: Default::default(),
         });
         let tight = GraphLimits {
@@ -628,11 +628,11 @@ mod tests {
     fn verification_rejects_a_mutable_child() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::Tuple {
-            items: vec![Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf)].into(),
         });
         // A tuple is born frozen, but its child is not.
         assert!(heap.is_frozen(root));
@@ -664,7 +664,7 @@ mod tests {
         // A holder-local object inside a frozen container hides from
         // the frozen check as well.
         let wrapper = heap.alloc(Object::Tuple {
-            items: vec![Value::Obj(handle)],
+            items: vec![Value::Obj(handle)].into(),
         });
         assert!(verify_frozen(&mut heap, wrapper, &limits()).is_ok());
         assert_eq!(
@@ -679,11 +679,11 @@ mod tests {
     fn the_sendable_check_admits_a_mutable_graph() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::Tuple {
-            items: vec![Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf)].into(),
         });
         assert_eq!(
             verify_sendable(&mut heap, root, &limits())
@@ -733,7 +733,7 @@ mod tests {
         let mut src = Heap::new(1 << 20);
         let mut dst = Heap::new(1 << 20);
         let mutable = src.alloc(Object::List {
-            items: vec![Value::Int(1)],
+            items: vec![Value::Int(1)].into(),
             epoch: Default::default(),
         });
         let moved = transfer(&mut src, &mut dst, &[], Value::Obj(mutable), &limits())
@@ -748,7 +748,7 @@ mod tests {
         }
         src.recharge(mutable);
         match dst.get(new_root) {
-            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items.as_slice(), [Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
         let handle = src.alloc(Object::NativeVm {
@@ -770,12 +770,12 @@ mod tests {
         let mut src = Heap::new(1 << 20);
         let mut dst = Heap::new(1 << 20);
         let inner = src.alloc(Object::List {
-            items: vec![Value::Int(7)],
+            items: vec![Value::Int(7)].into(),
             epoch: Default::default(),
         });
         freeze(&mut src, inner, &limits()).expect("the inner list freezes");
         let outer = src.alloc(Object::List {
-            items: vec![Value::Obj(inner)],
+            items: vec![Value::Obj(inner)].into(),
             epoch: Default::default(),
         });
         assert!(!src.is_frozen(outer));
@@ -796,11 +796,11 @@ mod tests {
     fn a_copy_inside_one_heap_makes_a_second_graph() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
-            items: vec![Value::Int(1)],
+            items: vec![Value::Int(1)].into(),
             epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
-            items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf), Value::Obj(leaf)].into(),
             epoch: Default::default(),
         });
         let copy = copy_within(&mut heap, &[root], Value::Obj(root), &limits())
@@ -825,7 +825,7 @@ mod tests {
         }
         heap.recharge(leaf);
         match heap.get(first) {
-            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items.as_slice(), [Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
         // The one-heap path keeps the shape rule of the copy.
@@ -857,7 +857,7 @@ mod tests {
         let mut chain = src.alloc(Object::Str("tail".into()));
         for _ in 0..8 {
             chain = src.alloc(Object::Tuple {
-                items: vec![Value::Obj(chain)],
+                items: vec![Value::Obj(chain)].into(),
             });
         }
         freeze(&mut src, chain, &limits()).expect("the chain freezes");
@@ -878,7 +878,7 @@ mod tests {
         let payload = |heap: &mut Heap, text: &str| {
             let leaf = heap.alloc(Object::Str(text.into()));
             heap.alloc(Object::Tuple {
-                items: vec![Value::Obj(leaf)],
+                items: vec![Value::Obj(leaf)].into(),
             })
         };
         let build = || {
@@ -928,7 +928,7 @@ mod tests {
         let mut chain = heap.alloc(Object::Str("tail".into()));
         for _ in 0..4 {
             chain = heap.alloc(Object::Tuple {
-                items: vec![Value::Obj(chain)],
+                items: vec![Value::Obj(chain)].into(),
             });
         }
         let before_live = heap.live_count();
@@ -951,7 +951,7 @@ mod tests {
         let mut dst = Heap::new(1 << 20);
         let leaf = src.alloc(Object::Str("leaf".into()));
         let root = src.alloc(Object::List {
-            items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+            items: vec![Value::Obj(leaf), Value::Obj(leaf)].into(),
             epoch: Default::default(),
         });
         assert!(!src.is_frozen(root));
@@ -998,12 +998,12 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let shared = heap.alloc(Object::Str("x".into()));
         let one = heap.alloc(Object::Tuple {
-            items: vec![Value::Obj(shared), Value::Obj(shared)],
+            items: vec![Value::Obj(shared), Value::Obj(shared)].into(),
         });
         let left = heap.alloc(Object::Str("x".into()));
         let right = heap.alloc(Object::Str("x".into()));
         let two = heap.alloc(Object::Tuple {
-            items: vec![Value::Obj(left), Value::Obj(right)],
+            items: vec![Value::Obj(left), Value::Obj(right)].into(),
         });
         let d1 =
             digest_value(&mut heap, Value::Obj(one), &mut Slots, &limits()).expect("one digests");
@@ -1017,7 +1017,7 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let tuple = |heap: &mut Heap, bits| {
             heap.alloc(Object::Tuple {
-                items: vec![Value::Float(bits)],
+                items: vec![Value::Float(bits)].into(),
             })
         };
         let positive_zero = tuple(&mut heap, 0.0f64.to_bits());
@@ -1038,7 +1038,7 @@ mod tests {
     fn the_digest_rejects_mutable_and_nondigestible_graphs() {
         let mut heap = Heap::new(1 << 20);
         let mutable = heap.alloc(Object::List {
-            items: vec![],
+            items: vec![].into(),
             epoch: Default::default(),
         });
         assert_eq!(
@@ -1179,12 +1179,12 @@ mod tests {
             .spawn(|| {
                 let mut heap = Heap::new(64 << 20);
                 let mut head = heap.alloc(Object::List {
-                    items: vec![],
+                    items: vec![].into(),
                     epoch: Default::default(),
                 });
                 for _ in 0..50_000 {
                     head = heap.alloc(Object::List {
-                        items: vec![Value::Obj(head)],
+                        items: vec![Value::Obj(head)].into(),
                         epoch: Default::default(),
                     });
                 }

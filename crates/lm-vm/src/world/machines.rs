@@ -1805,7 +1805,7 @@ impl World {
                     .and_then(|stream| {
                         if token.2 == lm_abi::OP_TCP_ACCEPT {
                             self.machines[sink.target as usize].alloc(Object::Tuple {
-                                items: vec![stream, peer],
+                                items: vec![stream, peer].into(),
                             })
                         } else {
                             Ok(stream)

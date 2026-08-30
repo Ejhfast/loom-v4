@@ -1,17 +1,16 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, RUNTIME_ALLOC_INSTANCE,
-    RUNTIME_HEAP_LIMIT, RUNTIME_LOAD_FIELD, RUNTIME_OK, RUNTIME_TYPE_MISMATCH,
-    RUNTIME_UNINITIALIZED_FIELD,
+    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, ALLOCATION_HEAP_LIMIT,
+    ALLOCATION_OK,
 };
 use crate::plan::{
-    CallContract, FunctionDefinition, InlineFunctionPlan, RegionPlan, Segment, SegmentExit,
-    UnsupportedReason,
+    CallContract, FieldResult, FunctionDefinition, InlineFunctionPlan, RegionPlan, Segment,
+    SegmentExit, UnsupportedReason,
 };
 use crate::{
-    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, ValueRepr, EXIT_ALLOCATION,
-    EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW,
+    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
+    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW,
     EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH,
     EXIT_UNINITIALIZED_FIELD, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
@@ -24,7 +23,16 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variab
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{Func, Instr, NumericInstr};
-use lm_value::{canonical_float_bits, CANONICAL_NAN_BITS};
+use lm_heap::{
+    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
+    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_INSTANCE_FIELDS_OFFSET, JIT_OBJECT_INSTANCE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
+    VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
+};
+use lm_value::{
+    canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
+    VALUE_TAG_OFFSET,
+};
 use std::mem;
 use std::sync::Mutex;
 
@@ -114,12 +122,12 @@ struct NativeValues<'a> {
     local_pointer: ir::Value,
     local_state_pointer: ir::Value,
     stack_pointer: ir::Value,
-    runtime_context: ir::Value,
-    runtime_call: ir::Value,
-    runtime_result_pointer: ir::Value,
+    allocation_context: ir::Value,
+    allocate_instance: ir::Value,
+    allocation_result_pointer: ir::Value,
     root_pointer: ir::Value,
     root_state_pointer: ir::Value,
-    runtime_signature: ir::SigRef,
+    allocation_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -157,10 +165,17 @@ struct InlineCallEmission<'a> {
     deopt_stack: &'a [ir::Value],
 }
 
+#[derive(Clone, Copy)]
 struct FieldExitEmission<'a> {
     point: FaultPoint,
     fault_stack: &'a [ir::Value],
     deopt_stack: &'a [ir::Value],
+}
+
+#[derive(Clone, Copy)]
+enum ObjectGuard<'a> {
+    Fault(&'a [ir::Value]),
+    Replay(&'a [ir::Value]),
 }
 
 struct NativeCallEmission<'a> {
@@ -181,15 +196,18 @@ fn emit_region(
 ) -> Result<(), CompileError> {
     let call_conv = function.signature.call_conv;
     let mut builder = FunctionBuilder::new(function, frontend);
-    let mut runtime_signature = ir::Signature::new(call_conv);
-    runtime_signature.params.push(AbiParam::new(pointer_type));
-    runtime_signature.params.push(AbiParam::new(types::I32));
-    runtime_signature.params.push(AbiParam::new(types::I64));
-    runtime_signature.params.push(AbiParam::new(types::I64));
-    runtime_signature.params.push(AbiParam::new(types::I32));
-    runtime_signature.params.push(AbiParam::new(pointer_type));
-    runtime_signature.returns.push(AbiParam::new(types::I32));
-    let runtime_signature = builder.import_signature(runtime_signature);
+    let mut allocation_signature = ir::Signature::new(call_conv);
+    allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    allocation_signature.params.push(AbiParam::new(types::I32));
+    allocation_signature.params.push(AbiParam::new(types::I32));
+    allocation_signature.params.push(AbiParam::new(types::I32));
+    allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    allocation_signature.returns.push(AbiParam::new(types::I32));
+    let allocation_signature = builder.import_signature(allocation_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -214,9 +232,9 @@ fn emit_region(
     let stack_pointer = parameters[2];
     let initial_fuel = parameters[3];
     let entry = parameters[4];
-    let runtime_context = parameters[5];
-    let runtime_call = parameters[6];
-    let runtime_result_pointer = parameters[7];
+    let allocation_context = parameters[5];
+    let allocate_instance = parameters[6];
+    let allocation_result_pointer = parameters[7];
     let root_pointer = parameters[8];
     let root_state_pointer = parameters[9];
     let exit_pointer = parameters[10];
@@ -269,12 +287,12 @@ fn emit_region(
         local_pointer,
         local_state_pointer,
         stack_pointer,
-        runtime_context,
-        runtime_call,
-        runtime_result_pointer,
+        allocation_context,
+        allocate_instance,
+        allocation_result_pointer,
         root_pointer,
         root_state_pointer,
-        runtime_signature,
+        allocation_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -449,18 +467,18 @@ fn emit_segment(
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
-                let kind = segment
+                let field_result = segment
                     .field_results
                     .iter()
-                    .find(|(at, _)| *at == instruction)
-                    .map(|(_, kind)| *kind)
+                    .find(|result| result.instruction == instruction)
+                    .copied()
                     .ok_or(CompileError::Backend)?;
                 let value = emit_load_field(
                     builder,
                     values,
                     reference,
                     field,
-                    kind.representation(),
+                    field_result,
                     FieldExitEmission {
                         point: FaultPoint {
                             block: segment.block,
@@ -1019,9 +1037,9 @@ fn emit_native_call(
             child_operands,
             child_fuel,
             zero_entry,
-            values.runtime_context,
-            values.runtime_call,
-            values.runtime_result_pointer,
+            values.allocation_context,
+            values.allocate_instance,
+            values.allocation_result_pointer,
             values.root_pointer,
             values.root_state_pointer,
             values.exit_pointer,
@@ -1177,9 +1195,10 @@ fn emit_inline_call(
                 }
                 extend_stack_roots(&mut roots, &site.stack, &stack)?;
                 let (status, value) = emit_allocation_call(builder, values, class, &roots, false)?;
-                let replay = builder
-                    .ins()
-                    .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+                let replay =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::NotEqual, status, i64::from(ALLOCATION_OK));
                 emit_fault_check(
                     builder,
                     values,
@@ -1378,44 +1397,55 @@ fn emit_load_field(
     values: NativeValues<'_>,
     reference: ir::Value,
     field: u32,
-    representation: ValueRepr,
+    result: FieldResult,
     exit: FieldExitEmission<'_>,
 ) -> Result<ir::Value, CompileError> {
-    let operation = builder
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let other_class =
+        builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, class, i64::from(result.receiver_class));
+    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
+    let outside = builder
         .ins()
-        .iconst(types::I32, i64::from(RUNTIME_LOAD_FIELD));
-    let field = builder.ins().iconst(types::I64, i64::from(field));
-    let representation = builder
-        .ins()
-        .iconst(types::I32, representation as u32 as i64);
-    let call = builder.ins().call_indirect(
-        values.runtime_signature,
-        values.runtime_call,
-        &[
-            values.runtime_context,
-            operation,
-            reference,
-            field,
-            representation,
-            values.runtime_result_pointer,
-        ],
-    );
-    let status = builder.inst_results(call)[0];
-    let mismatch = builder
-        .ins()
-        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_TYPE_MISMATCH));
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, field_index, len);
     emit_fault_check(
         builder,
         values,
-        mismatch,
+        outside,
         EXIT_TYPE_MISMATCH,
         exit.point,
         exit.fault_stack,
     )?;
-    let uninitialized =
-        builder
-            .ins()
-            .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_UNINITIALIZED_FIELD));
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+    )?;
+    let byte_offset = builder.ins().imul_imm(
+        field_index,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let value = builder.ins().iadd(data, byte_offset);
+    let tag = load_value(builder, types::I64, value, VALUE_TAG_OFFSET)?;
+    let uninitialized = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, tag, ValueTag::Uninit as u64 as i64);
     emit_fault_check(
         builder,
         values,
@@ -1424,16 +1454,168 @@ fn emit_load_field(
         exit.point,
         exit.fault_stack,
     )?;
+    let expected_tag = value_tag(result.kind);
     let replay = builder
         .ins()
-        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+        .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
     emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
-    Ok(builder.ins().load(
-        types::I64,
-        MemFlags::new(),
-        values.runtime_result_pointer,
-        0,
-    ))
+    let payload = emit_value_payload(
+        builder,
+        values,
+        value,
+        result.kind,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    if let Some(class) = result.result_class {
+        let loaded = emit_object_entry(
+            builder,
+            values,
+            payload,
+            exit.point,
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?;
+        let actual = load_value(builder, types::I32, loaded, JIT_INSTANCE_CLASS_OFFSET)?;
+        let mismatch = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, actual, i64::from(class));
+        emit_interpreter_replay(builder, values, mismatch, exit.point, exit.deopt_stack)?;
+    }
+    Ok(payload)
+}
+
+fn emit_object_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
+    let slot = builder.ins().ireduce(types::I32, reference);
+    let slot_index = builder.ins().uextend(values.pointer_type, slot);
+    let slot_count = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_slot_count),
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, slot_index, slot_count);
+    emit_object_guard(builder, values, outside, point, guard)?;
+
+    let pages = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_pages),
+    )?;
+    let page_index = builder
+        .ins()
+        .ushr_imm(slot_index, i64::from(JIT_PAGE_SHIFT));
+    let page_offset = builder.ins().imul_imm(
+        page_index,
+        i64::try_from(mem::size_of::<usize>()).map_err(|_| CompileError::Backend)?,
+    );
+    let page_address = builder.ins().iadd(pages, page_offset);
+    let page = builder
+        .ins()
+        .load(values.pointer_type, MemFlags::trusted(), page_address, 0);
+    let within_page = builder.ins().band_imm(slot_index, i64::from(JIT_PAGE_MASK));
+    let entry_offset = builder.ins().imul_imm(
+        within_page,
+        i64::try_from(JIT_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(page, entry_offset);
+    let expected_generation = builder.ins().ushr_imm(reference, 32);
+    let expected_generation = builder.ins().ireduce(types::I32, expected_generation);
+    let generation = load_value(builder, types::I32, entry, JIT_ENTRY_GENERATION_OFFSET)?;
+    let live = load_value(builder, types::I32, entry, JIT_ENTRY_LIVE_OFFSET)?;
+    let stale = builder
+        .ins()
+        .icmp(IntCC::NotEqual, generation, expected_generation);
+    let dead = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, live, i64::from(JIT_ENTRY_LIVE_TAG));
+    let invalid = builder.ins().bor(stale, dead);
+    emit_object_guard(builder, values, invalid, point, guard)?;
+    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let wrong_kind = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, kind, i64::from(JIT_OBJECT_INSTANCE));
+    emit_object_guard(builder, values, wrong_kind, point, guard)?;
+    Ok(entry)
+}
+
+fn emit_object_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    invalid: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<(), CompileError> {
+    match guard {
+        ObjectGuard::Fault(stack) => {
+            emit_fault_check(builder, values, invalid, EXIT_TYPE_MISMATCH, point, stack)
+        }
+        ObjectGuard::Replay(stack) => {
+            emit_interpreter_replay(builder, values, invalid, point, stack)
+        }
+    }
+}
+
+fn value_tag(kind: ScalarKind) -> ValueTag {
+    match kind {
+        ScalarKind::Unit => ValueTag::Unit,
+        ScalarKind::Bool => ValueTag::Bool,
+        ScalarKind::Int => ValueTag::Int,
+        ScalarKind::Float => ValueTag::Float,
+        ScalarKind::Object(_) => ValueTag::Obj,
+        ScalarKind::Operation => ValueTag::Op,
+    }
+}
+
+fn emit_value_payload(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    value: ir::Value,
+    kind: ScalarKind,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let payload = match kind {
+        ScalarKind::Unit => builder.ins().iconst(types::I64, 0),
+        ScalarKind::Bool => {
+            let byte = load_value(builder, types::I8, value, VALUE_PAYLOAD_OFFSET)?;
+            builder.ins().uextend(types::I64, byte)
+        }
+        ScalarKind::Int | ScalarKind::Object(_) => {
+            load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?
+        }
+        ScalarKind::Float => {
+            let bits = load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?;
+            let exponent = builder.ins().band_imm(bits, 0x7ff0_0000_0000_0000);
+            let exponent_is_nan =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, exponent, 0x7ff0_0000_0000_0000);
+            let fraction = builder.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
+            let has_fraction = builder.ins().icmp_imm(IntCC::NotEqual, fraction, 0);
+            let is_nan = builder.ins().band(exponent_is_nan, has_fraction);
+            let canonical = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, bits, CANONICAL_NAN_BITS as i64);
+            let not_canonical = builder.ins().bnot(canonical);
+            let noncanonical = builder.ins().band(is_nan, not_canonical);
+            emit_interpreter_replay(builder, values, noncanonical, point, deopt_stack)?;
+            bits
+        }
+        ScalarKind::Operation => {
+            let operation = load_value(builder, types::I32, value, VALUE_PAYLOAD_OFFSET)?;
+            builder.ins().uextend(types::I64, operation)
+        }
+    };
+    Ok(payload)
 }
 
 fn extend_stack_roots(
@@ -1466,11 +1648,11 @@ fn emit_allocate_instance(
     let (status, result) = emit_allocation_call(builder, values, class, roots, true)?;
     let heap_limit = builder
         .ins()
-        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+        .icmp_imm(IntCC::Equal, status, i64::from(ALLOCATION_HEAP_LIMIT));
     emit_fault_check(builder, values, heap_limit, EXIT_HEAP_LIMIT, point, stack)?;
     let replay = builder
         .ins()
-        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+        .icmp_imm(IntCC::NotEqual, status, i64::from(ALLOCATION_OK));
     emit_interpreter_replay(builder, values, replay, point, stack)?;
     Ok(result)
 }
@@ -1504,34 +1686,30 @@ fn emit_allocation_call(
             state_offset,
         );
     }
-    let operation = builder
-        .ins()
-        .iconst(types::I32, i64::from(RUNTIME_ALLOC_INSTANCE));
-    let class = builder.ins().iconst(types::I64, i64::from(class));
+    let class = builder.ins().iconst(types::I32, i64::from(class));
     let collection = builder
         .ins()
-        .iconst(types::I64, i64::from(allow_collection));
+        .iconst(types::I32, i64::from(allow_collection));
     let root_count = builder.ins().iconst(
         types::I32,
         i64::try_from(roots.len()).map_err(|_| CompileError::Backend)?,
     );
     let call = builder.ins().call_indirect(
-        values.runtime_signature,
-        values.runtime_call,
+        values.allocation_signature,
+        values.allocate_instance,
         &[
-            values.runtime_context,
-            operation,
+            values.allocation_context,
             class,
             collection,
             root_count,
-            values.runtime_result_pointer,
+            values.allocation_result_pointer,
         ],
     );
     let status = builder.inst_results(call)[0];
     let result = builder.ins().load(
         types::I64,
         MemFlags::new(),
-        values.runtime_result_pointer,
+        values.allocation_result_pointer,
         0,
     );
     Ok((status, result))

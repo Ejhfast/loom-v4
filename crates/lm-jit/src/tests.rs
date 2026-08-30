@@ -1,6 +1,8 @@
 use super::*;
 use crate::plan::{compute_liveness, split_segments, Segment};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NO_PARENT};
+use lm_heap::{Heap, Object};
+use lm_value::{Value, Witness};
 
 fn module(blocks: Vec<Vec<Instr>>) -> Module {
     Module {
@@ -133,37 +135,24 @@ fn field_module() -> Module {
     module
 }
 
-struct FieldRuntime {
-    result: RuntimeResult,
+struct TestRuntime {
+    heap: Heap,
 }
 
-impl Runtime for FieldRuntime {
-    fn load_field(
-        &mut self,
-        reference: lm_value::ObjRef,
-        field: u32,
-        expected: ValueRepr,
-    ) -> RuntimeResult {
-        assert_eq!(reference.slot, 3);
-        assert_eq!(reference.generation, 7);
-        assert_eq!(field, 0);
-        assert_eq!(expected, ValueRepr::Int);
-        self.result
-    }
-
+impl AllocationRuntime for TestRuntime {
     fn allocate_instance(
         &mut self,
         _class: u32,
         _root_bits: &[u64],
         _root_states: &[u8],
         _allow_collection: bool,
-    ) -> RuntimeResult {
-        RuntimeResult::Interpreter
+    ) -> AllocationResult {
+        AllocationResult::Interpreter
     }
 }
 
 #[test]
-fn native_field_load_uses_the_checked_runtime_boundary() {
+fn native_field_load_uses_the_direct_heap_view() {
     let module = field_module();
     let bundle = lm_abi::standard_bundle();
     lm_verify::verify_module_with_bundle(&module, &bundle).expect("the field load verifies");
@@ -171,7 +160,15 @@ fn native_field_load_uses_the_checked_runtime_boundary() {
     let region = engine
         .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
         .expect("the field load compiles");
-    let reference = u64::from(3u32) | (u64::from(7u32) << 32);
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime.heap.alloc(Object::Instance {
+        class: 0,
+        fields: vec![Value::Int(41)].into(),
+        env: Witness::EMPTY,
+    });
+    let reference = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
     let mut activation = NativeActivation::default();
     activation
         .prepare_root(NativePreparation {
@@ -188,9 +185,7 @@ fn native_field_load_uses_the_checked_runtime_boundary() {
     activation.root_buffers_mut().0[0] = reference;
     let mut roots = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
-    let mut runtime = FieldRuntime {
-        result: RuntimeResult::Value(41),
-    };
+    let heap = runtime.heap.jit_view();
     let exit = region
         .execute(
             &mut runtime,
@@ -205,6 +200,7 @@ fn native_field_load_uses_the_checked_runtime_boundary() {
                 roots: &mut roots,
                 root_states: &mut root_states,
                 fuel: 3,
+                heap,
             },
         )
         .expect("the field load executes");
@@ -221,7 +217,15 @@ fn native_field_fault_keeps_the_exact_program_point() {
     let region = engine
         .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
         .expect("the field load compiles");
-    let reference = u64::from(3u32) | (u64::from(7u32) << 32);
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime.heap.alloc(Object::Instance {
+        class: 0,
+        fields: vec![Value::Uninit].into(),
+        env: Witness::EMPTY,
+    });
+    let reference = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
     let mut activation = NativeActivation::default();
     activation
         .prepare_root(NativePreparation {
@@ -238,9 +242,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
     activation.root_buffers_mut().0[0] = reference;
     let mut roots = vec![0; region.max_roots().max(1)];
     let mut root_states = vec![0; region.max_roots().max(1)];
-    let mut runtime = FieldRuntime {
-        result: RuntimeResult::UninitializedField,
-    };
+    let heap = runtime.heap.jit_view();
     let exit = region
         .execute(
             &mut runtime,
@@ -255,6 +257,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 roots: &mut roots,
                 root_states: &mut root_states,
                 fuel: 3,
+                heap,
             },
         )
         .expect("the field fault executes");
@@ -262,4 +265,60 @@ fn native_field_fault_keeps_the_exact_program_point() {
     assert_eq!(exit.retired(), 2);
     assert_eq!((exit.block(), exit.instruction()), (0, 2));
     assert_eq!(exit.stack_len(), 0);
+}
+
+#[test]
+fn another_concrete_class_replays_the_field_instruction() {
+    let module = field_module();
+    let bundle = lm_abi::standard_bundle();
+    let engine = JitEngine::default();
+    let region = engine
+        .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
+        .expect("the field load compiles");
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime.heap.alloc(Object::Instance {
+        class: 1,
+        fields: vec![Value::Int(41)].into(),
+        env: Witness::EMPTY,
+    });
+    let reference = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
+    let mut activation = NativeActivation::default();
+    activation
+        .prepare_root(NativePreparation {
+            function: 0,
+            block: 0,
+            instruction: 0,
+            local_count: 1,
+            max_stack: region.max_stack(),
+            operand_len: 0,
+            scalar_limit: 4_096,
+            frame_limit: 256,
+        })
+        .expect("the native root prepares");
+    activation.root_buffers_mut().0[0] = reference;
+    let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_states = vec![0; region.max_roots().max(1)];
+    let heap = runtime.heap.jit_view();
+    let exit = region
+        .execute(
+            &mut runtime,
+            &mut activation,
+            NativeExecution {
+                entry: 0,
+                entries: &[],
+                base_stack_values: 0,
+                max_stack_values: 4_096,
+                base_frames: 0,
+                max_frames: 256,
+                roots: &mut roots,
+                root_states: &mut root_states,
+                fuel: 3,
+                heap,
+            },
+        )
+        .expect("the field load executes");
+    assert_eq!(exit.kind(), ExitKind::Interpreter);
+    assert_eq!((exit.block(), exit.instruction()), (0, 1));
 }

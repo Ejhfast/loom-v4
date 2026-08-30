@@ -1,6 +1,6 @@
 //! Verified bytecode analysis and immutable native region plans.
 
-use crate::{ValueRepr, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
+use crate::{MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
 use lm_bytecode::{BcType, Func, Instr, Module, NumericInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,19 +17,6 @@ pub enum ScalarKind {
     Operation,
 }
 
-impl ScalarKind {
-    pub(super) fn representation(self) -> ValueRepr {
-        match self {
-            ScalarKind::Unit => ValueRepr::Unit,
-            ScalarKind::Bool => ValueRepr::Bool,
-            ScalarKind::Int => ValueRepr::Int,
-            ScalarKind::Float => ValueRepr::Float,
-            ScalarKind::Object(_) => ValueRepr::Object,
-            ScalarKind::Operation => ValueRepr::Operation,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct FunctionDefinition<'a> {
     pub(super) function: u32,
@@ -37,6 +24,7 @@ pub(super) struct FunctionDefinition<'a> {
     pub(super) source: &'a Module,
     pub(super) bundle: &'a Arc<lm_abi::AbiBundle>,
     pub(super) source_function: u32,
+    pub(super) class_relocation: Option<&'a [u32]>,
 }
 
 /// Immutable verified input for one native compilation.
@@ -62,9 +50,15 @@ impl<'a> FunctionInput<'a> {
                 source,
                 bundle,
                 source_function,
+                class_relocation: None,
             },
             direct_callees: Vec::new(),
         }
+    }
+
+    /// Supply the source-to-runtime class relocation for this unit.
+    pub fn set_class_relocation(&mut self, classes: &'a [u32]) {
+        self.root.class_relocation = Some(classes);
     }
 
     /// Add one exact direct callee used by the root function.
@@ -90,7 +84,28 @@ impl<'a> FunctionInput<'a> {
             source,
             bundle,
             source_function,
+            class_relocation: None,
         });
+    }
+
+    /// Supply one direct callee and its source-to-runtime class relocation.
+    pub fn add_relocated_direct_callee(
+        &mut self,
+        function: u32,
+        runtime: &'a Func,
+        source: &'a Module,
+        bundle: &'a Arc<lm_abi::AbiBundle>,
+        source_function: u32,
+        classes: &'a [u32],
+    ) {
+        self.add_direct_callee(function, runtime, source, bundle, source_function);
+        if let Some(definition) = self
+            .direct_callees
+            .iter_mut()
+            .find(|definition| definition.function == function)
+        {
+            definition.class_relocation = Some(classes);
+        }
     }
 
     pub(super) fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
@@ -254,10 +269,18 @@ pub(super) struct Segment {
     pub(super) entry_stack: Vec<ScalarKind>,
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
-    pub(super) field_results: Vec<(u32, ScalarKind)>,
+    pub(super) field_results: Vec<FieldResult>,
     pub(super) replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) allocations: Vec<AllocationSite>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FieldResult {
+    pub(super) instruction: u32,
+    pub(super) receiver_class: u32,
+    pub(super) kind: ScalarKind,
+    pub(super) result_class: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +325,7 @@ struct SegmentAnalysis {
     max_stack: usize,
     max_stack_values: usize,
     boundary_stack: Vec<ScalarKind>,
-    field_results: Vec<(u32, ScalarKind)>,
+    field_results: Vec<FieldResult>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
     allocations: Vec<AllocationSite>,
@@ -315,6 +338,7 @@ struct SegmentAnalysisContext<'a> {
     locals: &'a [ScalarKind],
     result: ScalarKind,
     calls: &'a HashMap<u32, CallContract>,
+    class_relocation: Option<&'a [u32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +421,7 @@ impl RegionPlan {
             locals: &local_kinds,
             result: result_kind,
             calls: &call_contracts,
+            class_relocation: input.root.class_relocation,
         };
         for (index, segment) in segments.iter_mut().enumerate() {
             let state = states
@@ -651,6 +676,7 @@ fn inline_function_plan(
         locals: &local_kinds,
         result,
         calls: &calls,
+        class_relocation: definition.class_relocation,
     };
     let analysis = analyze_segment(&context, &segment, &initialized, &[]).ok()?;
     Some(InlineFunctionPlan {
@@ -841,8 +867,9 @@ fn analyze_segment(
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let kind = field_kind(context.module, receiver, field)?;
-                field_results.push((instruction, kind));
+                let field = field_result(context, receiver, field, instruction)?;
+                let kind = field.kind;
+                field_results.push(field);
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(kind);
             }
@@ -989,24 +1016,52 @@ fn analyze_segment(
     })
 }
 
-fn field_kind(
-    module: &Module,
+fn field_result(
+    context: &SegmentAnalysisContext<'_>,
     receiver: ScalarKind,
     field: u32,
-) -> Result<ScalarKind, UnsupportedReason> {
+    instruction: u32,
+) -> Result<FieldResult, UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    let Some(BcType::Class(class)) = module.types.get(ty as usize) else {
+    let Some(BcType::Class(class)) = context.module.types.get(ty as usize) else {
         return Err(UnsupportedReason::NonScalarType);
     };
-    let field_type = module
+    let field_type = context
+        .module
         .classes
         .get(*class as usize)
         .and_then(|class| class.fields.get(field as usize))
         .map(|(_, ty)| *ty)
         .ok_or(UnsupportedReason::InvalidControlFlow)?;
-    scalar_kind(module, field_type)
+    let kind = scalar_kind(context.module, field_type)?;
+    let result_class = match kind {
+        ScalarKind::Object(result_ty) => {
+            let Some(BcType::Class(result_class)) = context.module.types.get(result_ty as usize)
+            else {
+                return Err(UnsupportedReason::NonScalarType);
+            };
+            Some(relocate_class(*result_class, context.class_relocation)?)
+        }
+        _ => None,
+    };
+    Ok(FieldResult {
+        instruction,
+        receiver_class: relocate_class(*class, context.class_relocation)?,
+        kind,
+        result_class,
+    })
+}
+
+fn relocate_class(class: u32, relocation: Option<&[u32]>) -> Result<u32, UnsupportedReason> {
+    match relocation {
+        Some(classes) => classes
+            .get(class as usize)
+            .copied()
+            .ok_or(UnsupportedReason::MissingSource),
+        None => Ok(class),
+    }
 }
 
 fn expect(stack: &mut Vec<ScalarKind>, expected: ScalarKind) -> Result<(), UnsupportedReason> {

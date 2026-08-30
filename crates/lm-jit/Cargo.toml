@@ -12,5 +12,6 @@ cranelift-module = "=0.129.2"
 cranelift-native = "=0.129.2"
 lm-abi = { path = "../lm-abi" }
 lm-bytecode = { path = "../lm-bytecode" }
+lm-heap = { path = "../lm-heap" }
 lm-value = { path = "../lm-value" }
 lm-verify = { path = "../lm-verify" }

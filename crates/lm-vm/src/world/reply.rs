@@ -533,7 +533,7 @@ impl World {
         // the edge that reaches the value, so no rule depends on it.
         self.machines[vm as usize].alloc(Object::Instance {
             class,
-            fields,
+            fields: fields.into(),
             env: lm_value::Witness::EMPTY,
         })
     }
