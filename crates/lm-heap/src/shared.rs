@@ -332,6 +332,7 @@ impl TextRoot {
 }
 
 /// Immutable UTF-8 text with shared storage and cached metadata.
+#[repr(C)]
 pub struct SharedText {
     root: Arc<TextRoot>,
     byte_start: usize,
@@ -341,6 +342,11 @@ pub struct SharedText {
     semantic_hash: AtomicU64,
     lookup_hash: AtomicU64,
 }
+
+/// Byte offset of the visible UTF-8 byte length.
+pub const SHARED_TEXT_BYTE_LEN_OFFSET: usize = std::mem::offset_of!(SharedText, byte_len);
+/// Byte offset of the visible Unicode scalar length.
+pub const SHARED_TEXT_SCALAR_LEN_OFFSET: usize = std::mem::offset_of!(SharedText, scalar_len);
 
 impl SharedText {
     /// Make an empty text value.

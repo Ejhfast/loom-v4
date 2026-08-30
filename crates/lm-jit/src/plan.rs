@@ -301,6 +301,7 @@ pub(super) struct ValueContract {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ObjectContract {
     Str,
+    Text,
     Instance(u32),
     List,
     Map,
@@ -350,6 +351,8 @@ pub(super) enum HeapAccessKind {
     BytesLen,
     BytesAt,
     BytesGet,
+    TextByteLen,
+    TextScalarLen,
 }
 
 #[derive(Debug, Clone)]
@@ -784,6 +787,13 @@ fn inline_function_plan(
                     | Instr::Extended(ExtendedInstr::ListEpoch)
                     | Instr::Extended(ExtendedInstr::ListIterLen)
                     | Instr::Extended(ExtendedInstr::SealInstance)
+                    | Instr::Native(
+                        NativeInstr::BytesLen
+                            | NativeInstr::BytesAt
+                            | NativeInstr::BytesGet
+                            | NativeInstr::StrByteLen
+                            | NativeInstr::StrCharCount,
+                    )
                     | Instr::TupleNew { .. }
                     | Instr::ListNew { .. }
                     | Instr::ListPush
@@ -1279,6 +1289,22 @@ fn analyze_segment(
                 });
                 stack.push(ScalarKind::Int);
             }
+            Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
+                let position = segment.start + offset as u32;
+                replay_stacks.push((position, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                text_type(context, receiver)?;
+                let kind = if matches!(*instruction, Instr::Native(NativeInstr::StrByteLen)) {
+                    HeapAccessKind::TextByteLen
+                } else {
+                    HeapAccessKind::TextScalarLen
+                };
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind,
+                });
+                stack.push(ScalarKind::Int);
+            }
             Instr::TupleNew { count, .. } => {
                 let Instr::TupleNew {
                     ty: source_ty,
@@ -1391,6 +1417,11 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Bool)?;
                 expect(&mut stack, ScalarKind::Bool)?;
                 stack.push(ScalarKind::Bool);
+            }
+            Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
+                expect(&mut stack, ScalarKind::Int)?;
+                expect(&mut stack, ScalarKind::Int)?;
+                stack.push(ScalarKind::Int);
             }
             Instr::EqRef | Instr::NeRef => {
                 let right = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
@@ -1559,6 +1590,20 @@ fn bytes_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedRe
     }
 }
 
+fn text_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let contract = value_contract(context, ty)?;
+    match contract.object {
+        Some(ObjectContract::Str | ObjectContract::Text) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
 fn class_test_target(
     context: &SegmentAnalysisContext<'_>,
     ty: u32,
@@ -1579,8 +1624,14 @@ fn value_contract(
     ty: u32,
 ) -> Result<ValueContract, UnsupportedReason> {
     let kind = scalar_kind(context.module, ty)?;
+    let core = lm_bytecode::corepin::declared_layout(context.module);
     let object = match context.module.types.get(ty as usize) {
         Some(BcType::Str) => Some(ObjectContract::Str),
+        Some(BcType::Class(class) | BcType::Inst(class, _))
+            if [core.text, core.substring].contains(&Some(*class)) =>
+        {
+            Some(ObjectContract::Text)
+        }
         Some(BcType::Class(class) | BcType::Inst(class, _))
             if matches!(kind, ScalarKind::Object(_)) =>
         {

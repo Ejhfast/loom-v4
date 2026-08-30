@@ -441,6 +441,8 @@ pub enum Object {
     ByteBuf(NativeByteBuffer) = 7,
     /// Immutable binary data. Born frozen.
     Bytes(SharedBytes) = 8,
+    /// An immutable UTF-8 view. Born frozen.
+    Substring(SharedText) = 9,
     /// A holder-local handle to one persistent VM image.
     NativeVm { image: u32, generation: u32 },
     /// A holder-local handle to one active or stopped invocation.
@@ -509,8 +511,6 @@ pub enum Object {
     NativeResourceHandle { surface: u32, resource: u64 },
     /// A holder-local one-shot wait token.
     NativeWait { owner: u32, token: u64 },
-    /// An immutable UTF-8 view. Born frozen.
-    Substring(SharedText),
     /// A TCP stream resource designator. Zero marks a closed handle.
     NativeTcpStream { resource: u64 },
     /// A TCP listener resource designator. Zero marks a closed handle.

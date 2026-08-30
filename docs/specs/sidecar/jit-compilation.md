@@ -330,6 +330,10 @@ The runtime tests every variant conversion.
 
 Native scalar registers can keep unboxed payloads.
 
+A bare union uses its canonical tag and payload as two native values.
+
+The JIT never reserves one payload bit pattern for `Option` or another union.
+
 Heap arrays store canonical Value instances.
 
 Generated code reads their tag and payload through fixed offsets.
@@ -924,6 +928,17 @@ Gate: A changed collection produces the exact interpreter fault and state.
 
 Gate: Safe byte reads return the byte or minus one without a runtime helper.
 
+### Stage F7: Direct text metadata and hash mixing
+
+- make immutable text metadata part of the heap ABI;
+- compile byte and scalar length reads for String and Substring;
+- compile ordered and unordered integer hash mixing;
+- guard both text object tags before each direct metadata read.
+
+Gate: Text metadata reads and hash mixing use no runtime helper.
+
+Gate: JSON and HTTP remain within five percent in Auto mode.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1071,6 +1086,22 @@ Both modes reached complete measured coverage after one setup exit per round.
 JSON remained within three percent in Auto mode.
 
 HTTP improved by one percent in Auto mode.
+
+The representative-program performance gate remains open.
+
+The Stage F7 run added direct text metadata and integer hash mixing.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Text metadata | 134.918 ms | 29.616 ms | 29.458 ms | 4.56 times | 100.00% |
+| JSON parse | 45.652 ms | 46.568 ms | 67.168 ms | 0.98 times | 5.23% |
+| HTTP parse | 43.319 ms | 44.206 ms | 60.916 ms | 0.98 times | 46.88% |
+
+The text row uses exact String and Substring functions.
+
+The measured loop reaches complete native coverage.
+
+Its `ConstStr`, `CallG`, and `TupleNew` sites run only during setup.
 
 The representative-program performance gate remains open.
 

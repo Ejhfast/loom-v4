@@ -26,7 +26,10 @@ pub use shape::{
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
-use shared::{SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET};
+use shared::{
+    SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET, SHARED_TEXT_BYTE_LEN_OFFSET,
+    SHARED_TEXT_SCALAR_LEN_OFFSET,
+};
 use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
     ValueArray, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
@@ -236,6 +239,8 @@ pub const JIT_OBJECT_TUPLE: u32 = 4;
 pub const JIT_OBJECT_CLOSURE: u32 = 5;
 /// Stable tag of immutable binary data.
 pub const JIT_OBJECT_BYTES: u32 = 8;
+/// Stable tag of one immutable text view.
+pub const JIT_OBJECT_SUBSTRING: u32 = 9;
 /// Byte offset of an instance class.
 pub const JIT_INSTANCE_CLASS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
@@ -259,6 +264,12 @@ pub const JIT_BYTES_DATA_OFFSET: usize =
 /// Byte offset of the immutable byte length.
 pub const JIT_BYTES_LEN_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_BYTES_LEN_OFFSET;
+/// Byte offset of the visible UTF-8 byte length.
+pub const JIT_TEXT_BYTE_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_TEXT_BYTE_LEN_OFFSET;
+/// Byte offset of the visible Unicode scalar length.
+pub const JIT_TEXT_SCALAR_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_TEXT_SCALAR_LEN_OFFSET;
 
 const _: () = assert!(JIT_ENTRY_GENERATION_OFFSET == 0);
 const _: () = assert!(std::mem::size_of::<Header>() == shape::HEADER_COST);
@@ -1296,6 +1307,38 @@ mod tests {
                 std::slice::from_raw_parts(data as *const u8, len),
                 [3, 5, 8]
             );
+        }
+    }
+
+    #[test]
+    fn native_text_layout_names_both_text_shapes() {
+        let mut heap = Heap::new(1 << 20);
+        let text = SharedText::from("aé猫z");
+        let view = text.scalar_slice(1, 2).expect("the scalar range is valid");
+        let string = heap.alloc(Object::Str(text));
+        let substring = heap.alloc(Object::Substring(view));
+
+        for (reference, tag, byte_len, scalar_len) in [
+            (string, JIT_OBJECT_STR, 7, 4),
+            (substring, JIT_OBJECT_SUBSTRING, 5, 2),
+        ] {
+            let entry = heap.entry(reference.slot);
+            let base = std::ptr::from_ref(entry) as usize;
+            // SAFETY: The constants name initialized fields of this live entry.
+            unsafe {
+                assert_eq!(
+                    ((base + JIT_ENTRY_OBJECT_TAG_OFFSET) as *const u32).read(),
+                    tag
+                );
+                assert_eq!(
+                    ((base + JIT_TEXT_BYTE_LEN_OFFSET) as *const usize).read(),
+                    byte_len
+                );
+                assert_eq!(
+                    ((base + JIT_TEXT_SCALAR_LEN_OFFSET) as *const usize).read(),
+                    scalar_len
+                );
+            }
         }
     }
 

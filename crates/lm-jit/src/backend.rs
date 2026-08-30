@@ -30,7 +30,8 @@ use lm_heap::{
     JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
     JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_BYTES,
     JIT_OBJECT_CLOSURE, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR,
-    JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TUPLE_ITEMS_OFFSET,
+    JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
+    JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
     VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
@@ -1096,6 +1097,35 @@ fn emit_segment(
                 )?;
                 stack.push(value);
             }
+            Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let offset = match access.kind {
+                    HeapAccessKind::TextByteLen => JIT_TEXT_BYTE_LEN_OFFSET,
+                    HeapAccessKind::TextScalarLen => JIT_TEXT_SCALAR_LEN_OFFSET,
+                    _ => return Err(CompileError::Backend),
+                };
+                let value = emit_text_len(
+                    builder,
+                    values,
+                    reference,
+                    offset,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                stack.push(value);
+            }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
                 let left = pop_native(&mut stack)?;
@@ -1169,6 +1199,21 @@ fn emit_segment(
             Instr::Not => {
                 let value = pop_native(&mut stack)?;
                 stack.push(builder.ins().bxor_imm(value, 1));
+            }
+            Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
+                let value = pop_native(&mut stack)?;
+                let seed = pop_native(&mut stack)?;
+                let value = builder
+                    .ins()
+                    .iadd_imm(value, 0x9e37_79b9_7f4a_7c15_u64 as i64);
+                let value = emit_stable_hash_mix(builder, value);
+                let result = if matches!(instruction, Instr::Native(NativeInstr::HashCombine)) {
+                    let mixed = builder.ins().bxor(seed, value);
+                    emit_stable_hash_mix(builder, mixed)
+                } else {
+                    builder.ins().iadd(seed, value)
+                };
+                stack.push(result);
             }
             Instr::LtInt
             | Instr::LeInt
@@ -2060,6 +2105,21 @@ fn emit_inline_call(
                 let compared = builder.ins().icmp(condition, left, right);
                 stack.push(builder.ins().uextend(types::I64, compared));
             }
+            Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
+                let value = pop_native(&mut stack)?;
+                let seed = pop_native(&mut stack)?;
+                let value = builder
+                    .ins()
+                    .iadd_imm(value, 0x9e37_79b9_7f4a_7c15_u64 as i64);
+                let value = emit_stable_hash_mix(builder, value);
+                let result = if matches!(instruction, Instr::Native(NativeInstr::HashCombine)) {
+                    let mixed = builder.ins().bxor(seed, value);
+                    emit_stable_hash_mix(builder, mixed)
+                } else {
+                    builder.ins().iadd(seed, value)
+                };
+                stack.push(result);
+            }
             Instr::Native(operation) => {
                 emit_char_instruction(builder, &mut stack, operation)?;
             }
@@ -2546,6 +2606,29 @@ fn emit_bytes_len(
     })
 }
 
+fn emit_text_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    offset: usize,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_text_entry(
+        builder,
+        values,
+        reference,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let len = load_value(builder, values.pointer_type, entry, offset)?;
+    Ok(if values.pointer_type == types::I64 {
+        len
+    } else {
+        builder.ins().uextend(types::I64, len)
+    })
+}
+
 fn emit_bytes_at(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -2751,8 +2834,19 @@ fn emit_value_contract(
     let Some(object) = contract.object else {
         return Ok(());
     };
+    if matches!(object, ObjectContract::Text) {
+        emit_text_entry(
+            builder,
+            values,
+            payload,
+            point,
+            ObjectGuard::Replay(deopt_stack),
+        )?;
+        return Ok(());
+    }
     let tag = match object {
         ObjectContract::Str => JIT_OBJECT_STR,
+        ObjectContract::Text => unreachable!(),
         ObjectContract::Instance(_) => JIT_OBJECT_INSTANCE,
         ObjectContract::List => JIT_OBJECT_LIST,
         ObjectContract::Map => JIT_OBJECT_MAP,
@@ -2869,6 +2963,43 @@ fn emit_object_entry(
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
+    let entry = emit_heap_entry(builder, values, reference, point, guard)?;
+    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let wrong_kind = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
+    emit_object_guard(builder, values, wrong_kind, point, guard)?;
+    Ok(entry)
+}
+
+fn emit_text_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_heap_entry(builder, values, reference, point, guard)?;
+    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let string = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, kind, i64::from(JIT_OBJECT_STR));
+    let substring = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, kind, i64::from(JIT_OBJECT_SUBSTRING));
+    let valid = builder.ins().bor(string, substring);
+    let invalid = builder.ins().bxor_imm(valid, 1);
+    emit_object_guard(builder, values, invalid, point, guard)?;
+    Ok(entry)
+}
+
+fn emit_heap_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
     let slot = builder.ins().ireduce(types::I32, reference);
     let slot_index = builder.ins().uextend(values.pointer_type, slot);
     let slot_count = load_value(
@@ -2917,11 +3048,6 @@ fn emit_object_entry(
         .icmp_imm(IntCC::NotEqual, live, i64::from(JIT_ENTRY_LIVE_TAG));
     let invalid = builder.ins().bor(stale, dead);
     emit_object_guard(builder, values, invalid, point, guard)?;
-    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
-    let wrong_kind = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
-    emit_object_guard(builder, values, wrong_kind, point, guard)?;
     Ok(entry)
 }
 
@@ -3383,6 +3509,21 @@ fn canonical_float(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::V
     let is_nan = builder.ins().fcmp(FloatCC::Unordered, value, value);
     let canonical = builder.ins().iconst(types::I64, CANONICAL_NAN_BITS as i64);
     builder.ins().select(is_nan, canonical, bits)
+}
+
+fn emit_stable_hash_mix(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::Value {
+    let shifted = builder.ins().ushr_imm(value, 30);
+    let value = builder.ins().bxor(value, shifted);
+    let value = builder
+        .ins()
+        .imul_imm(value, 0xbf58_476d_1ce4_e5b9_u64 as i64);
+    let shifted = builder.ins().ushr_imm(value, 27);
+    let value = builder.ins().bxor(value, shifted);
+    let value = builder
+        .ins()
+        .imul_imm(value, 0x94d0_49bb_1331_11eb_u64 as i64);
+    let shifted = builder.ins().ushr_imm(value, 31);
+    builder.ins().bxor(value, shifted)
 }
 
 fn emit_exit(

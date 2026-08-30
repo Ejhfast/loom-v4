@@ -1637,6 +1637,26 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_text_metadata",
+        concat!(
+            "def measure_string(value: String): Int\n",
+            "  value.byte_len() * 10 + value.len()\n",
+            "end\n",
+            "def measure_view(value: Substring): Int\n",
+            "  value.byte_len() * 10 + value.len()\n",
+            "end\n",
+            "text = \"aé猫z\"\n",
+            "view = text.slice(1, 2).expect(\"the text slice exists\")\n",
+            "i = 0\ntotal = 0\nhash = 0\n",
+            "while i < 1000000\n",
+            "  total = total + measure_string(text) + measure_view(view)\n",
+            "  hash = hash_combine(hash, i)\n",
+            "  i = i + 1\n",
+            "end\n",
+            "(total, hash)\n",
+        ),
+    );
+    report_jit_representative(
         "jit_bytes_read",
         concat!(
             "def scan(bytes: Bytes): Int\n",

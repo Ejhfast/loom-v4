@@ -163,6 +163,35 @@ fn byte_index_faults_match_the_interpreter() {
 }
 
 #[test]
+fn text_metadata_and_hash_mix_stay_native() {
+    let source = concat!(
+        "def measure_string(value: String): Int\n",
+        "  value.byte_len() * 10 + value.len()\n",
+        "end\n",
+        "def measure_view(value: Substring): Int\n",
+        "  value.byte_len() * 10 + value.len()\n",
+        "end\n",
+        "text = \"aé猫z\"\n",
+        "view = text.slice(1, 2).expect(\"the text slice exists\")\n",
+        "i = 0\n",
+        "total = 0\n",
+        "hash = 0\n",
+        "while i < 1000\n",
+        "  total = total + measure_string(text) + measure_view(view)\n",
+        "  hash = hash_combine(hash, i)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "(total, hash)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 20_000, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+}
+
+#[test]
 fn auto_mode_compiles_only_after_interpreted_work() {
     let (interpreted, _, interpreted_dump) = run(SCALAR_LOOP, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(SCALAR_LOOP, EngineMode::Auto, u64::MAX);
