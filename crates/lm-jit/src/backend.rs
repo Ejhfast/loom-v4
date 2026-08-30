@@ -6,13 +6,15 @@ use crate::activation::{
 };
 use crate::plan::{
     CallContract, FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract,
-    RegionPlan, Segment, SegmentExit, UnsupportedReason, ValueContract,
+    OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit, UnsupportedReason,
+    ValueContract,
 };
 use crate::{
     CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
-    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_RETURN, EXIT_STACK_LIMIT,
-    EXIT_TYPE_MISMATCH, EXIT_UNINITIALIZED_FIELD, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_REPLAY, EXIT_RETURN,
+    EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
+    LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -841,43 +843,175 @@ fn emit_segment(
                 )?;
                 stack.push(value);
             }
-            Instr::IsType(_) | Instr::CastType(_) => {
-                let deopt_stack = stack.clone();
-                let reference = pop_native(&mut stack)?;
+            Instr::Extended(ExtendedInstr::OptionSome { .. }) => {
+                let value = pop_value(&mut stack)?;
+                stack.push(value);
+            }
+            Instr::Extended(ExtendedInstr::OptionNone { .. }) => {
                 let instruction_index = segment.start + within as u32;
                 let access = segment
-                    .heap_accesses
+                    .option_accesses
                     .iter()
                     .find(|access| access.instruction == instruction_index)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                let target_class = match access.kind {
-                    HeapAccessKind::IsType { target_class }
-                    | HeapAccessKind::CastType { target_class } => target_class,
-                    _ => return Err(CompileError::Backend),
-                };
-                let point = FaultPoint {
-                    block: segment.block,
-                    instruction: instruction_index + 1,
-                    prefix: fault_prefix,
-                };
-                let entry = emit_object_entry(
+                if !matches!(access.kind, OptionAccessKind::None) {
+                    return Err(CompileError::Backend);
+                }
+                let family = emit_option_family(
                     builder,
                     values,
-                    reference,
-                    JIT_OBJECT_INSTANCE,
-                    point,
-                    ObjectGuard::Replay(&deopt_stack),
+                    access.family_type,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &stack,
                 )?;
-                let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-                let matches = emit_class_matches(builder, values, actual, target_class)?;
-                if matches!(instruction, Instr::IsType(_)) {
-                    let result = builder.ins().uextend(types::I64, matches);
-                    push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+                let arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+                let payload = builder.ins().bor(family, arm);
+                let tag = builder
+                    .ins()
+                    .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+                stack.push(NativeValue { bits: payload, tag });
+            }
+            Instr::Extended(ExtendedInstr::OptionPayload { .. }) => {
+                let instruction_index = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let value = pop_value(&mut stack)?;
+                let access = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let OptionAccessKind::Payload { value: contract } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let family = emit_option_family(
+                    builder,
+                    values,
+                    access.family_type,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &deopt_stack,
+                )?;
+                let exact_none = emit_exact_option_none(builder, value, family);
+                emit_fault_check(
+                    builder,
+                    values,
+                    exact_none,
+                    EXIT_TYPE_MISMATCH,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                emit_native_value_contract(
+                    builder,
+                    values,
+                    value,
+                    contract,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                stack.push(value);
+            }
+            Instr::IsType(_) | Instr::CastType(_) => {
+                let deopt_stack = stack.clone();
+                let value = pop_value(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let option = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied();
+                if let Some(access) = option {
+                    let target = match access.kind {
+                        OptionAccessKind::IsType { target }
+                        | OptionAccessKind::CastType { target } => target,
+                        _ => return Err(CompileError::Backend),
+                    };
+                    let family = emit_option_family(
+                        builder,
+                        values,
+                        access.family_type,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: instruction_index,
+                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        },
+                        &deopt_stack,
+                    )?;
+                    let exact_none = emit_exact_option_none(builder, value, family);
+                    let matches = match target {
+                        OptionTarget::Family => builder.ins().iconst(types::I8, 1),
+                        OptionTarget::Some => builder.ins().bxor_imm(exact_none, 1),
+                        OptionTarget::None => exact_none,
+                    };
+                    if matches!(instruction, Instr::IsType(_)) {
+                        let result = builder.ins().uextend(types::I64, matches);
+                        push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+                    } else {
+                        let mismatch = builder.ins().bxor_imm(matches, 1);
+                        emit_interpreter_replay(
+                            builder,
+                            values,
+                            mismatch,
+                            FaultPoint {
+                                block: segment.block,
+                                instruction: instruction_index + 1,
+                                prefix: fault_prefix,
+                            },
+                            &deopt_stack,
+                        )?;
+                        stack.push(value);
+                    }
                 } else {
-                    let mismatch = builder.ins().bxor_imm(matches, 1);
-                    emit_interpreter_replay(builder, values, mismatch, point, &deopt_stack)?;
-                    push_static(builder, &mut stack, ScalarKind::Object(0), reference)?;
+                    let access = segment
+                        .heap_accesses
+                        .iter()
+                        .find(|access| access.instruction == instruction_index)
+                        .copied()
+                        .ok_or(CompileError::Backend)?;
+                    let target_class = match access.kind {
+                        HeapAccessKind::IsType { target_class }
+                        | HeapAccessKind::CastType { target_class } => target_class,
+                        _ => return Err(CompileError::Backend),
+                    };
+                    let point = FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    };
+                    let entry = emit_object_entry(
+                        builder,
+                        values,
+                        value.bits,
+                        JIT_OBJECT_INSTANCE,
+                        point,
+                        ObjectGuard::Replay(&deopt_stack),
+                    )?;
+                    let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+                    let matches = emit_class_matches(builder, values, actual, target_class)?;
+                    if matches!(instruction, Instr::IsType(_)) {
+                        let result = builder.ins().uextend(types::I64, matches);
+                        push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+                    } else {
+                        let mismatch = builder.ins().bxor_imm(matches, 1);
+                        emit_interpreter_replay(builder, values, mismatch, point, &deopt_stack)?;
+                        stack.push(value);
+                    }
                 }
             }
             Instr::ListLen => {
@@ -2962,6 +3096,97 @@ fn emit_array_address(
     Ok(builder.ins().iadd(data, byte_offset))
 }
 
+fn emit_option_family(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    family_type: u32,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let load = builder.create_block();
+    let resolve = builder.create_block();
+    let ready = builder.create_block();
+    let type_index = builder
+        .ins()
+        .iconst(values.pointer_type, i64::from(family_type));
+    let count = load_activation_pointer(builder, values, RawActivationField::OptionFamilyCount)?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, type_index, count);
+    builder.ins().brif(outside, resolve, &[], load, &[]);
+
+    builder.switch_to_block(load);
+    let families = load_activation_pointer(builder, values, RawActivationField::OptionFamilies)?;
+    let offset = builder.ins().imul_imm(type_index, 4);
+    let address = builder.ins().iadd(families, offset);
+    let family = builder
+        .ins()
+        .load(types::I32, MemFlags::trusted(), address, 0);
+    let missing = builder.ins().icmp_imm(IntCC::Equal, family, -1);
+    builder.ins().brif(missing, resolve, &[], ready, &[]);
+
+    builder.switch_to_block(resolve);
+    let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let requested = builder.ins().iconst(types::I64, i64::from(family_type));
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_TYPE_RESOLUTION,
+            block: point.block,
+            instruction: point.instruction,
+            result: NativeValue {
+                bits: requested,
+                tag: zero,
+            },
+        },
+        stack,
+    )?;
+
+    builder.switch_to_block(ready);
+    Ok(builder.ins().uextend(types::I64, family))
+}
+
+fn emit_exact_option_none(
+    builder: &mut FunctionBuilder<'_>,
+    value: NativeValue,
+    family: ir::Value,
+) -> ir::Value {
+    let empty = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, ValueTag::EmptyCase as u64 as i64);
+    let stored_family = builder.ins().ireduce(types::I32, value.bits);
+    let family = builder.ins().ireduce(types::I32, family);
+    let same_family = builder.ins().icmp(IntCC::Equal, stored_family, family);
+    let arm = builder.ins().ushr_imm(value.bits, 32);
+    let none_arm = builder.ins().icmp_imm(IntCC::Equal, arm, 1);
+    let exact_none = builder.ins().band(empty, same_family);
+    builder.ins().band(exact_none, none_arm)
+}
+
+fn emit_native_value_contract(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    value: NativeValue,
+    contract: ValueContract,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    if let Some(expected_tag) = value_tag(contract.kind) {
+        let replay = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, value.tag, expected_tag as u64 as i64);
+        emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
+    }
+    if matches!(contract.kind, ScalarKind::Float) {
+        emit_canonical_float_guard(builder, values, value.bits, point, deopt_stack)?;
+    }
+    emit_value_contract(builder, values, value.bits, contract, point, deopt_stack)
+}
+
 fn emit_loaded_value(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -3264,20 +3489,7 @@ fn emit_value_payload(
         }
         ScalarKind::Float => {
             let bits = load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?;
-            let exponent = builder.ins().band_imm(bits, 0x7ff0_0000_0000_0000);
-            let exponent_is_nan =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, exponent, 0x7ff0_0000_0000_0000);
-            let fraction = builder.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
-            let has_fraction = builder.ins().icmp_imm(IntCC::NotEqual, fraction, 0);
-            let is_nan = builder.ins().band(exponent_is_nan, has_fraction);
-            let canonical = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, bits, CANONICAL_NAN_BITS as i64);
-            let not_canonical = builder.ins().bnot(canonical);
-            let noncanonical = builder.ins().band(is_nan, not_canonical);
-            emit_interpreter_replay(builder, values, noncanonical, point, deopt_stack)?;
+            emit_canonical_float_guard(builder, values, bits, point, deopt_stack)?;
             bits
         }
         ScalarKind::Operation => {
@@ -3286,6 +3498,28 @@ fn emit_value_payload(
         }
     };
     Ok(payload)
+}
+
+fn emit_canonical_float_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    bits: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let exponent = builder.ins().band_imm(bits, 0x7ff0_0000_0000_0000);
+    let exponent_is_nan = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, exponent, 0x7ff0_0000_0000_0000);
+    let fraction = builder.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
+    let has_fraction = builder.ins().icmp_imm(IntCC::NotEqual, fraction, 0);
+    let is_nan = builder.ins().band(exponent_is_nan, has_fraction);
+    let canonical = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, bits, CANONICAL_NAN_BITS as i64);
+    let not_canonical = builder.ins().bnot(canonical);
+    let noncanonical = builder.ins().band(is_nan, not_canonical);
+    emit_interpreter_replay(builder, values, noncanonical, point, deopt_stack)
 }
 
 fn extend_stack_roots(
@@ -3413,7 +3647,7 @@ fn emit_interpreter_replay(
         values,
         ExitEmission {
             retired,
-            kind: EXIT_INTERPRETER,
+            kind: EXIT_REPLAY,
             block: point.block,
             instruction: point.instruction.saturating_sub(1),
             result: NativeValue {
@@ -4130,6 +4364,8 @@ enum RawActivationField {
     MaxStackValues,
     BaseFrames,
     MaxFrames,
+    OptionFamilies,
+    OptionFamilyCount,
 }
 
 impl RawActivationField {
@@ -4159,6 +4395,12 @@ impl RawActivationField {
                 mem::offset_of!(RawNativeActivation, base_frames)
             }
             RawActivationField::MaxFrames => mem::offset_of!(RawNativeActivation, max_frames),
+            RawActivationField::OptionFamilies => {
+                mem::offset_of!(RawNativeActivation, option_families)
+            }
+            RawActivationField::OptionFamilyCount => {
+                mem::offset_of!(RawNativeActivation, option_family_count)
+            }
         }
     }
 }

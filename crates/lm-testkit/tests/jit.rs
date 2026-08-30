@@ -406,6 +406,42 @@ fn character_operations_materialize_exactly() {
 }
 
 #[test]
+fn canonical_option_values_stay_native() {
+    let source = concat!(
+        "def read(value: Option[Int]): Int\n",
+        "  case value\n",
+        "  in Some(found) then found\n",
+        "  in None then 0\n",
+        "  end\n",
+        "end\n",
+        "i = 0\ntotal = 0\n",
+        "while i < 10000\n",
+        "  value: Option[Int] = if i % 2 == 0 then Some(i) else None end\n",
+        "  total = total + read(value)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "nested: Option[Option[Int]] = Some(None)\n",
+        "case nested\n",
+        "in Some(None) then total\n",
+        "in _ then 0\n",
+        "end\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-option.lm", source).expect("the Option case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(24_995_000)));
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
 fn integer_overflow_matches_the_interpreter() {
     let source = "value = 9223372036854775807\nvalue + 1\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
@@ -1592,6 +1628,41 @@ fn a_wrong_external_list_value_replays_before_native_use() {
     );
     assert!(
         matches!(native, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+}
+
+#[test]
+fn a_wrong_external_option_payload_matches_the_interpreter() {
+    let source = concat!(
+        "def read(value: Option[Int]): Int\n",
+        "  case value\n",
+        "  in Some(found) then found\n",
+        "  in None then 0\n",
+        "  end\n",
+        "end\n",
+        "value: Option[Int] = Some(7)\n",
+        "i = 0\ntotal = 0\n",
+        "while i < 100\n",
+        "  total = total + read(value)\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let (artifact, mut image) = captured_loop("jit-option-snapshot.lm", source);
+    let local = image.machines[0]
+        .locals
+        .iter_mut()
+        .find(|value| **value == lm_value::Value::Int(7))
+        .expect("the snapshot holds the Option payload");
+    *local = lm_value::Value::Bool(false);
+    let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, &image);
+    assert!(
+        matches!(interpreted, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(
+        matches!(native, RootEvent::Fault(ref record) if record.code == lm_vm::FaultCode::TypeMismatch),
+        "{native:?}: {metrics:?}"
     );
     assert!(metrics.native_entries > 0, "{metrics:?}");
 }

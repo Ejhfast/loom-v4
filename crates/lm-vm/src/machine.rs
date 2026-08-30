@@ -5850,9 +5850,18 @@ impl Machine {
         envs: &mut TypeEnvs,
         ty: u32,
     ) -> Result<ClosedTypeId, FaultCode> {
-        let closed = envs
-            .close(module, ty, self.frame_env())
-            .map_err(env_fault)?;
+        self.close_option_family_at(module, envs, ty, self.frame_env())
+    }
+
+    /// Close one `Option` family under an explicit type environment.
+    pub(crate) fn close_option_family_at(
+        &self,
+        module: &NamespaceRuntime,
+        envs: &mut TypeEnvs,
+        ty: u32,
+        env: TypeEnvId,
+    ) -> Result<ClosedTypeId, FaultCode> {
+        let closed = envs.close(module, ty, env).map_err(env_fault)?;
         let (class, argument) = match envs.ty(closed) {
             Some(ClosedType::Inst(class, args)) if args.len() == 1 => (*class, args[0]),
             _ => return Err(BAD_STATE),

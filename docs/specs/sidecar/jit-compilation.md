@@ -939,6 +939,24 @@ Gate: Text metadata reads and hash mixing use no runtime helper.
 
 Gate: JSON and HTTP remain within five percent in Auto mode.
 
+### Stage F8: Canonical Option values
+
+- preserve one canonical tag and payload for each bare union value;
+- compile `OptionSome`, `OptionNone`, and `OptionPayload` directly;
+- compile `Option` family and arm type tests directly;
+- resolve closed family identifiers through one lazy metadata exit;
+- cache each resolved identifier for the retained native activation;
+- resume the same native instruction after successful resolution;
+- interpret one instruction when type resolution reaches its limit.
+
+The metadata exit does not retire the pending `Option` instruction.
+
+The steady native path uses no runtime helper or sentinel payload.
+
+Gate: An `Option` loop uses no temporary interpreter site.
+
+Gate: Every tested fuel boundary matches the interpreter.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1141,6 +1159,22 @@ The numeric row reached complete native coverage.
 The list-push row still uses one temporary site per append.
 
 Auto demoted the list-push region before measured execution.
+
+The representative-program gate remains open.
+
+The Stage F8 run added canonical tagged values and direct `Option` operations.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Option values | 232.038 ms | 22.014 ms | 23.119 ms | 10.54 times | 100.00% |
+| JSON parse | 45.780 ms | 47.849 ms | 72.378 ms | 0.96 times | 5.23% |
+| HTTP parse | 44.832 ms | 46.995 ms | 66.870 ms | 0.95 times | 47.30% |
+
+The `Option` row used no temporary interpreter exit.
+
+External invalid payloads replay through the interpreter and preserve `TypeMismatch`.
+
+JSON and HTTP remain within five percent in Auto mode.
 
 The representative-program gate remains open.
 

@@ -64,6 +64,8 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_slot_count: usize,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
+    pub(super) option_families: *const u32,
+    pub(super) option_family_count: usize,
 }
 
 pub(super) type RawAllocateInstance =
@@ -125,6 +127,7 @@ pub struct NativeExecution<'a> {
     pub fuel: u64,
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
+    pub option_families: &'a [u32],
 }
 
 /// Mutable canonical buffers for one native root frame.

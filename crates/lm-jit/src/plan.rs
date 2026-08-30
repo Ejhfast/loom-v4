@@ -180,7 +180,9 @@ pub enum ExitKind {
     Effect,
     StackLimit,
     Interpreter,
+    Replay,
     GrowActivation,
+    TypeResolution,
 }
 
 /// One validated native exit record.
@@ -295,6 +297,7 @@ pub(super) struct Segment {
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
     pub(super) heap_accesses: Vec<HeapAccess>,
+    pub(super) option_accesses: Vec<OptionAccess>,
     pub(super) fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -364,6 +367,28 @@ pub(super) enum HeapAccessKind {
     TextScalarLen,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OptionAccess {
+    pub(super) instruction: u32,
+    pub(super) family_type: u32,
+    pub(super) kind: OptionAccessKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum OptionAccessKind {
+    None,
+    Payload { value: ValueContract },
+    IsType { target: OptionTarget },
+    CastType { target: OptionTarget },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum OptionTarget {
+    Family,
+    Some,
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct InlineFunctionPlan {
     pub(super) params: Vec<ScalarKind>,
@@ -417,6 +442,7 @@ struct SegmentAnalysis {
     max_stack_values: usize,
     boundary_stack: Vec<ScalarKind>,
     heap_accesses: Vec<HeapAccess>,
+    option_accesses: Vec<OptionAccess>,
     fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -580,6 +606,7 @@ impl RegionPlan {
             segment.exit_stack = analysis.exit_stack.clone();
             segment.boundary_stack = analysis.boundary_stack;
             segment.heap_accesses = analysis.heap_accesses;
+            segment.option_accesses = analysis.option_accesses;
             segment.fuel_stacks = analysis.fuel_stacks;
             for access in &segment.heap_accesses {
                 match access.kind {
@@ -858,6 +885,7 @@ fn inline_function_plan(
         exit_stack: Vec::new(),
         boundary_stack: Vec::new(),
         heap_accesses: Vec::new(),
+        option_accesses: Vec::new(),
         fuel_stacks: Vec::new(),
         replay_stacks: Vec::new(),
         fault_stacks: Vec::new(),
@@ -988,6 +1016,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 exit_stack: Vec::new(),
                 boundary_stack: Vec::new(),
                 heap_accesses: Vec::new(),
+                option_accesses: Vec::new(),
                 fuel_stacks: Vec::new(),
                 replay_stacks: Vec::new(),
                 fault_stacks: Vec::new(),
@@ -1061,6 +1090,7 @@ fn analyze_segment(
     let mut max_stack_values = stack.len();
     let mut boundary_stack = Vec::new();
     let mut heap_accesses = Vec::new();
+    let mut option_accesses = Vec::new();
     let mut fuel_stacks = Vec::new();
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
@@ -1161,31 +1191,95 @@ fn analyze_segment(
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(value.kind);
             }
+            Instr::Extended(ExtendedInstr::OptionSome { .. }) => {
+                let Instr::Extended(ExtendedInstr::OptionSome { ty: source_ty }) =
+                    source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let payload = option_argument_type(context.module, source_ty)?;
+                expect(&mut stack, scalar_kind(context.module, payload)?)?;
+                stack.push(ScalarKind::Tagged(source_ty));
+            }
+            Instr::Extended(ExtendedInstr::OptionNone { ty }) => {
+                let Instr::Extended(ExtendedInstr::OptionNone { ty: source_ty }) =
+                    source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                option_argument_type(context.module, source_ty)?;
+                option_accesses.push(OptionAccess {
+                    instruction: segment.start + offset as u32,
+                    family_type: ty,
+                    kind: OptionAccessKind::None,
+                });
+                stack.push(ScalarKind::Tagged(source_ty));
+            }
+            Instr::Extended(ExtendedInstr::OptionPayload { ty }) => {
+                let Instr::Extended(ExtendedInstr::OptionPayload { ty: source_ty }) =
+                    source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let instruction = segment.start + offset as u32;
+                let replay_stack = stack.clone();
+                expect(&mut stack, ScalarKind::Tagged(source_ty))?;
+                let payload = option_argument_type(context.module, source_ty)?;
+                let value = value_contract(context, payload)?;
+                option_accesses.push(OptionAccess {
+                    instruction,
+                    family_type: ty,
+                    kind: OptionAccessKind::Payload { value },
+                });
+                replay_stacks.push((instruction, replay_stack.clone()));
+                fault_stacks.push((instruction + 1, replay_stack));
+                stack.push(value.kind);
+            }
             Instr::IsType(_) | Instr::CastType(_) => {
                 let instruction_index = segment.start + offset as u32;
                 replay_stacks.push((instruction_index, stack.clone()));
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                if !matches!(receiver, ScalarKind::Object(_)) {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
                 let source_ty = match source_instruction {
                     Instr::IsType(ty) | Instr::CastType(ty) => ty,
                     _ => return Err(UnsupportedReason::InvalidControlFlow),
                 };
-                let target_class = class_test_target(context, source_ty)?;
-                let kind = if matches!(instruction, Instr::IsType(_)) {
-                    HeapAccessKind::IsType { target_class }
+                if let Some(target) = option_test_target(context.module, source_ty)? {
+                    if !matches!(receiver, ScalarKind::Tagged(_)) {
+                        return Err(UnsupportedReason::InvalidStack);
+                    }
+                    let kind = if matches!(instruction, Instr::IsType(_)) {
+                        OptionAccessKind::IsType { target }
+                    } else {
+                        OptionAccessKind::CastType { target }
+                    };
+                    let family_type = match instruction {
+                        Instr::IsType(ty) | Instr::CastType(ty) => ty,
+                        _ => return Err(UnsupportedReason::InvalidControlFlow),
+                    };
+                    option_accesses.push(OptionAccess {
+                        instruction: instruction_index,
+                        family_type: *family_type,
+                        kind,
+                    });
                 } else {
-                    HeapAccessKind::CastType { target_class }
-                };
-                heap_accesses.push(HeapAccess {
-                    instruction: instruction_index,
-                    kind,
-                });
+                    if !matches!(receiver, ScalarKind::Object(_)) {
+                        return Err(UnsupportedReason::InvalidStack);
+                    }
+                    let target_class = class_test_target(context, source_ty)?;
+                    let kind = if matches!(instruction, Instr::IsType(_)) {
+                        HeapAccessKind::IsType { target_class }
+                    } else {
+                        HeapAccessKind::CastType { target_class }
+                    };
+                    heap_accesses.push(HeapAccess {
+                        instruction: instruction_index,
+                        kind,
+                    });
+                }
                 if matches!(instruction, Instr::IsType(_)) {
                     stack.push(ScalarKind::Bool);
                 } else {
-                    stack.push(ScalarKind::Object(source_ty));
+                    stack.push(scalar_kind(context.module, source_ty)?);
                 }
             }
             Instr::ListLen => {
@@ -1518,6 +1612,12 @@ fn analyze_segment(
                 expect(&mut stack, ScalarKind::Operation)?;
                 stack.push(scalar_kind(context.module, source_reply)?);
             }
+            Instr::Numeric(operation) if numeric_operation_replays(operation) => {
+                replay_stacks.push((segment.start + offset as u32, stack.clone()));
+                if !scalar_numeric_operation(operation, &mut stack)? {
+                    return Err(UnsupportedReason::UnsupportedInstruction);
+                }
+            }
             Instr::Numeric(operation) if scalar_numeric_operation(operation, &mut stack)? => {}
             Instr::Jump(_) => {}
             Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
@@ -1550,11 +1650,24 @@ fn analyze_segment(
         max_stack_values,
         boundary_stack,
         heap_accesses,
+        option_accesses,
         fuel_stacks,
         replay_stacks,
         fault_stacks,
         allocations,
     })
+}
+
+fn numeric_operation_replays(operation: NumericInstr) -> bool {
+    matches!(
+        operation,
+        NumericInstr::IntShl
+            | NumericInstr::IntShr
+            | NumericInstr::IntUshr
+            | NumericInstr::IntRotateLeft
+            | NumericInstr::IntRotateRight
+            | NumericInstr::FloatToIntValue
+    )
 }
 
 fn field_contract(
@@ -1609,6 +1722,19 @@ fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, Unsup
     }
 }
 
+fn option_argument_type(module: &Module, ty: u32) -> Result<u32, UnsupportedReason> {
+    let Some(BcType::Inst(class, arguments)) = module.types.get(ty as usize) else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let core = lm_bytecode::corepin::declared_layout(module);
+    if ![core.option, core.option_some, core.option_none].contains(&Some(*class))
+        || arguments.len() != 1
+    {
+        return Err(UnsupportedReason::InvalidStack);
+    }
+    Ok(arguments[0])
+}
+
 fn bytes_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
@@ -1641,11 +1767,24 @@ fn class_test_target(
         Some(BcType::Class(class) | BcType::Inst(class, _)) => *class,
         _ => return Err(UnsupportedReason::InvalidStack),
     };
-    let core = lm_bytecode::corepin::declared_layout(context.module);
-    if [core.option, core.option_some, core.option_none].contains(&Some(class)) {
-        return Err(UnsupportedReason::UnsupportedInstruction);
-    }
     relocate_class(class, context.class_relocation)
+}
+
+fn option_test_target(module: &Module, ty: u32) -> Result<Option<OptionTarget>, UnsupportedReason> {
+    let class = match module.types.get(ty as usize) {
+        Some(BcType::Class(class) | BcType::Inst(class, _)) => *class,
+        _ => return Err(UnsupportedReason::InvalidStack),
+    };
+    let core = lm_bytecode::corepin::declared_layout(module);
+    Ok(if core.option == Some(class) {
+        Some(OptionTarget::Family)
+    } else if core.option_some == Some(class) {
+        Some(OptionTarget::Some)
+    } else if core.option_none == Some(class) {
+        Some(OptionTarget::None)
+    } else {
+        None
+    })
 }
 
 fn value_contract(

@@ -82,6 +82,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         exit_stack: vec![],
         boundary_stack: vec![],
         heap_accesses: vec![],
+        option_accesses: vec![],
         fuel_stacks: vec![],
         replay_stacks: vec![],
         fault_stacks: vec![],
@@ -273,6 +274,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     fuel: 4,
                     heap,
                     class_parents: &[],
+                    option_families: &[],
                 },
             )
             .expect("the safe byte read executes");
@@ -338,6 +340,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 fuel: 3,
                 heap,
                 class_parents: &[],
+                option_families: &[],
             },
         )
         .expect("the field load executes");
@@ -401,6 +404,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 fuel: 3,
                 heap,
                 class_parents: &[],
+                option_families: &[],
             },
         )
         .expect("the field fault executes");
@@ -465,10 +469,11 @@ fn another_concrete_class_replays_the_field_instruction() {
                 fuel: 3,
                 heap,
                 class_parents: &[],
+                option_families: &[],
             },
         )
         .expect("the field load executes");
-    assert_eq!(exit.kind(), ExitKind::Interpreter);
+    assert_eq!(exit.kind(), ExitKind::Replay);
     assert_eq!((exit.block(), exit.instruction()), (0, 1));
 }
 
@@ -530,6 +535,7 @@ fn native_field_store_writes_the_canonical_value() {
                 fuel: 5,
                 heap,
                 class_parents: &[],
+                option_families: &[],
             },
         )
         .expect("the field store executes");
@@ -599,10 +605,11 @@ fn native_field_store_replays_a_frozen_receiver() {
                 fuel: 5,
                 heap,
                 class_parents: &[],
+                option_families: &[],
             },
         )
         .expect("the field store executes");
-    assert_eq!(exit.kind(), ExitKind::Interpreter);
+    assert_eq!(exit.kind(), ExitKind::Replay);
     assert_eq!(exit.retired(), 2);
     assert_eq!((exit.block(), exit.instruction()), (0, 2));
     assert_eq!(exit.stack_len(), 2);

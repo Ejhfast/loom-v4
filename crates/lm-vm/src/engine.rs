@@ -405,7 +405,7 @@ impl Engine {
     pub(crate) fn execute_native(
         &self,
         machine: &mut crate::machine::Machine,
-        module: &crate::NamespaceRuntime,
+        context: &mut crate::jit::NativeExecutionContext<'_>,
         native: &crate::jit::NativeCodeState,
         scratch: &mut crate::jit::NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
@@ -421,8 +421,14 @@ impl Engine {
         {
             return crate::jit::NativeAttempt::Fallback;
         }
-        self.jit
-            .execute(machine, module, native, scratch, metrics, instruction_limit)
+        self.jit.execute(
+            machine,
+            context,
+            native,
+            scratch,
+            metrics,
+            instruction_limit,
+        )
     }
 
     pub(crate) fn native_code(

@@ -24,6 +24,8 @@ const EXIT_HEAP_LIMIT: u32 = 11;
 const EXIT_EFFECT: u32 = 12;
 const EXIT_STACK_LIMIT: u32 = 13;
 const EXIT_GROW_ACTIVATION: u32 = 14;
+const EXIT_TYPE_RESOLUTION: u32 = 15;
+const EXIT_REPLAY: u32 = 16;
 
 mod activation;
 
@@ -296,6 +298,18 @@ impl CompiledRegion {
         })
     }
 
+    /// Return operand representations for one guarded interpreter replay.
+    #[inline(always)]
+    pub fn replay_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
+        self.plan.segments.iter().find_map(|segment| {
+            segment
+                .replay_stacks
+                .iter()
+                .find(|(at, _)| segment.block == block && *at == instruction)
+                .map(|(_, stack)| stack.as_slice())
+        })
+    }
+
     /// Return operand representations for one suspended native caller.
     pub fn suspended_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
         self.plan.segments.iter().find_map(|segment| {
@@ -336,6 +350,7 @@ impl CompiledRegion {
             fuel,
             heap,
             class_parents,
+            option_families,
         } = input;
         let top_index = activation
             .frame_len
@@ -351,6 +366,7 @@ impl CompiledRegion {
             || activation.frames[top_index].local_count as usize != self.plan.local_kinds.len()
             || (activation.frames[top_index].max_stack as usize) < self.plan.max_stack
             || roots.len() < self.plan.max_roots.max(1)
+            || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
         {
             return Err(Failure::BackendUnavailable);
@@ -388,6 +404,8 @@ impl CompiledRegion {
             heap_slot_count: heap.slot_count,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
+            option_families: option_families.as_ptr(),
+            option_family_count: option_families.len(),
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
@@ -470,6 +488,8 @@ impl CompiledRegion {
             EXIT_EFFECT => ExitKind::Effect,
             EXIT_STACK_LIMIT => ExitKind::StackLimit,
             EXIT_GROW_ACTIVATION => ExitKind::GrowActivation,
+            EXIT_TYPE_RESOLUTION => ExitKind::TypeResolution,
+            EXIT_REPLAY => ExitKind::Replay,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -614,6 +634,9 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListEpoch)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListIterLen)
             | Instr::Extended(lm_bytecode::ExtendedInstr::SealInstance)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionSome { .. })
+            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionNone { .. })
+            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionPayload { .. })
             | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
             | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
             | Instr::Native(lm_bytecode::NativeInstr::BytesGet)

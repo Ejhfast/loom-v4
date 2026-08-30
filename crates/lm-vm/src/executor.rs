@@ -550,9 +550,13 @@ fn run_engine_turn(
     let mut retired_total = 0;
     loop {
         let remaining = instruction_limit - retired_total;
+        let mut native_context = crate::jit::NativeExecutionContext {
+            module: context.module,
+            envs: &mut *context.envs,
+        };
         match context.engine.execute_native(
             machine,
-            context.module,
+            &mut native_context,
             context.native,
             &mut native_scratch,
             &mut native_metrics,

@@ -17,7 +17,15 @@ pub(crate) struct NativeScratch {
     roots: Vec<u64>,
     root_tags: Vec<u64>,
     root_states: Vec<u8>,
+    option_layout: usize,
+    option_families: Vec<u32>,
     continuation_regions: Vec<Arc<lm_jit::CompiledRegion>>,
+}
+
+/// Mutable runtime data used during one native entry attempt.
+pub(crate) struct NativeExecutionContext<'a> {
+    pub(crate) module: &'a NamespaceRuntime,
+    pub(crate) envs: &'a mut lm_bytecode::closed::TypeEnvs,
 }
 
 /// One native activation retained at an ordinary scheduler quantum.
@@ -246,7 +254,7 @@ impl JitEngine {
     pub(crate) fn execute(
         &self,
         machine: &mut Machine,
-        module: &NamespaceRuntime,
+        context: &mut NativeExecutionContext<'_>,
         native: &NativeCodeState,
         scratch: &mut NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
@@ -255,7 +263,7 @@ impl JitEngine {
         if machine.has_native_continuation() {
             return Self::execute_region(
                 machine,
-                module,
+                context,
                 native,
                 None,
                 scratch,
@@ -274,17 +282,25 @@ impl JitEngine {
         };
         metrics.note_native_entry_attempt();
         let region = match slot.region(&self.compiler, native.compiled_count(), || {
-            let runtime = module
+            let runtime = context
+                .module
                 .funcs
                 .get(function as usize)
                 .ok_or(Failure::Unsupported)?;
-            let (unit, local) = module
+            let (unit, local) = context
+                .module
                 .code_namespace()
                 .function_unit(function)
                 .map_err(|_| Failure::Unsupported)?;
-            let mut input =
-                FunctionInput::new(function, runtime, unit.module(), module.bundle(), local);
-            let relocation = module
+            let mut input = FunctionInput::new(
+                function,
+                runtime,
+                unit.module(),
+                context.module.bundle(),
+                local,
+            );
+            let relocation = context
+                .module
                 .code_namespace()
                 .relocation(unit.id())
                 .ok_or(Failure::Unsupported)?;
@@ -298,15 +314,18 @@ impl JitEngine {
                 }
             }
             for callee in callees {
-                let callee_runtime = module
+                let callee_runtime = context
+                    .module
                     .funcs
                     .get(callee as usize)
                     .ok_or(Failure::Unsupported)?;
-                let (callee_unit, callee_local) = module
+                let (callee_unit, callee_local) = context
+                    .module
                     .code_namespace()
                     .function_unit(callee)
                     .map_err(|_| Failure::Unsupported)?;
-                let callee_relocation = module
+                let callee_relocation = context
+                    .module
                     .code_namespace()
                     .relocation(callee_unit.id())
                     .ok_or(Failure::Unsupported)?;
@@ -314,7 +333,7 @@ impl JitEngine {
                     callee,
                     callee_runtime,
                     callee_unit.module(),
-                    module.bundle(),
+                    context.module.bundle(),
                     callee_local,
                     callee_relocation.classes(),
                 );
@@ -333,7 +352,7 @@ impl JitEngine {
         };
         Self::execute_region(
             machine,
-            module,
+            context,
             native,
             Some(region),
             scratch,
@@ -344,13 +363,14 @@ impl JitEngine {
 
     fn execute_region(
         machine: &mut Machine,
-        module: &NamespaceRuntime,
+        context: &mut NativeExecutionContext<'_>,
         native: &NativeCodeState,
         region: Option<Arc<lm_jit::CompiledRegion>>,
         scratch: &mut NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> NativeAttempt {
+        let module = context.module;
         let mut continuation = machine.take_native_continuation();
         let resumed = continuation.is_some();
         let (root_region, active_region, entry_index, root_frame, base, operand_base) =
@@ -527,6 +547,12 @@ impl JitEngine {
                     operand_base,
                 )
             };
+        let option_layout = Arc::as_ptr(&module.table_store()) as usize;
+        if scratch.option_layout != option_layout {
+            scratch.option_layout = option_layout;
+            scratch.option_families.clear();
+        }
+        scratch.option_families.resize(module.types.len(), u32::MAX);
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
         let max_stack_values = machine.config.max_stack_values as usize;
@@ -573,6 +599,7 @@ impl JitEngine {
                         fuel: remaining,
                         heap,
                         class_parents: native.class_parents(),
+                        option_families: &scratch.option_families,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -609,6 +636,46 @@ impl JitEngine {
                             active_region = grow_region;
                             active_entry = resume;
                             metrics.note_native_activation_grow();
+                            continue;
+                        }
+                    }
+                }
+                if exit.kind() == ExitKind::TypeResolution {
+                    let type_index = exit.result() & u64::from(u32::MAX);
+                    let Ok(type_index) = u32::try_from(type_index) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(slot) = scratch.option_families.get_mut(type_index as usize) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if *slot != u32::MAX {
+                        break Err(Failure::BackendUnavailable);
+                    }
+                    let family = runtime.machine.close_option_family_at(
+                        module,
+                        context.envs,
+                        type_index,
+                        TypeEnvId::EMPTY,
+                    );
+                    if let Ok(family) = family {
+                        let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                            break Err(Failure::BackendUnavailable);
+                        };
+                        let resolve_region = scratch
+                            .activation
+                            .frames()
+                            .last()
+                            .and_then(|frame| native.slot(frame.function()))
+                            .and_then(|slot| slot.compiled());
+                        let resume = resolve_region
+                            .as_deref()
+                            .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
+                            .map(|entry| entry.index());
+                        if let (Some(resolve_region), Some(resume)) = (resolve_region, resume) {
+                            *slot = family;
+                            prior_retired = next_retired;
+                            active_region = resolve_region;
+                            active_entry = resume;
                             continue;
                         }
                     }
@@ -681,6 +748,7 @@ impl JitEngine {
                 ExitKind::Fuel
                 | ExitKind::Return
                 | ExitKind::Interpreter
+                | ExitKind::Replay
                 | ExitKind::Allocation
                 | ExitKind::Effect => true,
                 ExitKind::Call => u32::try_from(exit.result())
@@ -775,11 +843,13 @@ impl JitEngine {
         match exit.kind() {
             ExitKind::Fuel
             | ExitKind::Interpreter
+            | ExitKind::Replay
             | ExitKind::Call
             | ExitKind::GrowActivation
+            | ExitKind::TypeResolution
             | ExitKind::Allocation
             | ExitKind::Effect => {
-                let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
+                let interpreter = matches!(exit.kind(), ExitKind::Interpreter | ExitKind::Replay);
                 if matches!(exit.kind(), ExitKind::Call | ExitKind::GrowActivation) {
                     if retired == instruction_limit {
                         return NativeAttempt::Complete {
@@ -811,7 +881,10 @@ impl JitEngine {
                         }
                     };
                 }
-                if matches!(exit.kind(), ExitKind::Allocation | ExitKind::Effect) {
+                if matches!(
+                    exit.kind(),
+                    ExitKind::Allocation | ExitKind::Effect | ExitKind::TypeResolution
+                ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();
                     }
@@ -979,6 +1052,7 @@ fn frame_operand_kinds<'a>(
     let kinds = match exit.map(|exit| exit.kind()) {
         None => region.suspended_operand_kinds(frame.block(), frame.instruction()),
         Some(ExitKind::Return) => Some(&[][..]),
+        Some(ExitKind::Replay) => region.replay_operand_kinds(frame.block(), frame.instruction()),
         Some(
             ExitKind::IntegerOverflow
             | ExitKind::DivideByZero

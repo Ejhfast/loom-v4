@@ -1576,6 +1576,23 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_option_values",
+        concat!(
+            "def read(value: Option[Int]): Int\n",
+            "  case value\n",
+            "  in Some(found) then found\n",
+            "  in None then 0\n",
+            "  end\n",
+            "end\n",
+            "i = 0\ntotal = 0\n",
+            "while i < 1000000\n",
+            "  value: Option[Int] = if i % 2 == 0 then Some(i) else None end\n",
+            "  total = total + read(value)\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_interpreter_site",
         concat!(
             "items: [Int] = []\ni = 0\n",
