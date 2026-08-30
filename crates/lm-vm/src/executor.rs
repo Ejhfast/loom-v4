@@ -115,7 +115,7 @@ impl ExecutionCode {
         module: Arc<NamespaceRuntime>,
         dispatch: Arc<lm_bytecode::CodeTable<DispatchRow>>,
     ) -> ExecutionCode {
-        let native = crate::jit::NativeCodeState::new(module.funcs.len());
+        let native = crate::jit::NativeCodeState::new(&module);
         ExecutionCode {
             module,
             dispatch,
@@ -534,7 +534,7 @@ fn run_engine_turn(
         return (Ok(None), 0);
     }
     if context.engine.mode() == EngineMode::Interpreter {
-        return run_interpreter_turn(machine, instruction_limit, &mut context);
+        return run_interpreter_turn(machine, instruction_limit, &mut context, None);
     }
     let mut native_scratch = crate::jit::NativeScratch::default();
     let mut native_metrics = context.engine.turn_metrics();
@@ -555,7 +555,8 @@ fn run_engine_turn(
             }
             crate::jit::NativeAttempt::AdvanceToEntry { instructions } => {
                 let advance = instructions.min(remaining).max(1);
-                let (outcome, interpreted) = run_interpreter_turn(machine, advance, &mut context);
+                let (outcome, interpreted) =
+                    run_interpreter_turn(machine, advance, &mut context, None);
                 retired_total += interpreted;
                 if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
                     if retired_total < instruction_limit {
@@ -574,7 +575,9 @@ fn run_engine_turn(
                 if remaining == 0 {
                     return (Ok(None), retired_total);
                 }
-                let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
+                let resume_depth = machine.vm.frames.len();
+                let (outcome, interpreted) =
+                    run_interpreter_turn(machine, remaining, &mut context, Some(resume_depth));
                 retired_total += interpreted;
                 if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
                     if retired_total < instruction_limit {
@@ -590,7 +593,7 @@ fn run_engine_turn(
                 if remaining == 0 {
                     return (Ok(None), retired_total);
                 }
-                let (outcome, interpreted) = run_interpreter_turn(machine, 1, &mut context);
+                let (outcome, interpreted) = run_interpreter_turn(machine, 1, &mut context, None);
                 retired_total += interpreted;
                 if interpreted == 1
                     && retired_total < instruction_limit
@@ -608,7 +611,8 @@ fn run_engine_turn(
                 return (Ok(None), retired_total);
             }
             crate::jit::NativeAttempt::Fallback => {
-                let (outcome, interpreted) = run_interpreter_turn(machine, remaining, &mut context);
+                let (outcome, interpreted) =
+                    run_interpreter_turn(machine, remaining, &mut context, None);
                 retired_total += interpreted;
                 if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
                     if retired_total < instruction_limit {
@@ -626,8 +630,16 @@ fn run_interpreter_turn(
     machine: &mut Machine,
     instruction_limit: u32,
     context: &mut EngineTurnContext<'_>,
+    resume_native_depth: Option<usize>,
 ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
-    let stop_at_native_entry = context.engine.mode() != EngineMode::Interpreter;
+    let native = match context.engine.mode() {
+        EngineMode::Interpreter => crate::machine::NativeResume::Disabled,
+        EngineMode::Auto => crate::machine::NativeResume::Tiered {
+            state: context.native,
+            resume_depth: resume_native_depth,
+        },
+        EngineMode::Native => crate::machine::NativeResume::EveryDirectCall,
+    };
     if context.restricted_world {
         machine.exec_for_quantum_restricted(
             context.module,
@@ -635,7 +647,7 @@ fn run_interpreter_turn(
             &mut *context.envs,
             context.slots,
             instruction_limit,
-            stop_at_native_entry,
+            native,
         )
     } else {
         machine.exec_for_quantum(
@@ -644,7 +656,7 @@ fn run_interpreter_turn(
             &mut *context.envs,
             context.slots,
             instruction_limit,
-            stop_at_native_entry,
+            native,
         )
     }
 }

@@ -79,7 +79,7 @@ impl JitEngine {
         if layouts.len() >= 256 {
             layouts.retain(|_, (tables, _)| tables.strong_count() != 0);
         }
-        let state = NativeCodeState::new(module.funcs.len());
+        let state = NativeCodeState::new(module);
         layouts.insert(key, (Arc::downgrade(&tables), state.clone()));
         state
     }
@@ -101,7 +101,6 @@ impl JitEngine {
         metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> NativeAttempt {
-        metrics.note_native_entry_attempt();
         let Some(frame) = machine.vm.frames.last() else {
             metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
@@ -111,6 +110,7 @@ impl JitEngine {
             metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
+        metrics.note_native_entry_attempt();
         let region = match slot.region(&self.compiler, native.compiled_count(), || {
             let runtime = module
                 .funcs

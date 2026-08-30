@@ -188,7 +188,7 @@ impl World {
         self.namespaces[namespace.index()] = Some(code.clone());
         if tables_extend(code.as_ref(), self.execution_tables.as_ref()) {
             self.execution_tables = code.clone();
-            self.native_code.extend(self.execution_tables.funcs.len());
+            self.native_code.extend(&self.execution_tables);
             for (index, namespace) in self.namespaces.iter().enumerate() {
                 if let Some(namespace) = namespace {
                     self.namespace_execution[index] = Some(execution_code(
@@ -889,7 +889,8 @@ impl World {
             }
             ExecutionStop::QuantumExpired
             | ExecutionStop::Recalled
-            | ExecutionStop::Boundary(ExecOutcome::Continue) => {}
+            | ExecutionStop::Boundary(ExecOutcome::Continue)
+            | ExecutionStop::Boundary(ExecOutcome::ContinueNative) => {}
             ExecutionStop::Boundary(ExecOutcome::Terminal(value)) => {
                 if self.machines[vm as usize].start_body.is_some() {
                     self.enter_proc_body(vm, value);

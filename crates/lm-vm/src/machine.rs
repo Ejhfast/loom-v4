@@ -522,6 +522,9 @@ pub struct CallbackSlot {
 pub enum ExecOutcome {
     /// The instruction retired inside the machine.
     Continue,
+    /// The instruction reached a native entry point.
+    #[doc(hidden)]
+    ContinueNative,
     /// The last frame returned this terminal value.
     Terminal(Value),
     /// Guest code stopped itself with a message.
@@ -585,6 +588,83 @@ pub enum ExecOutcome {
 /// Why one execution batch stopped without a world action.
 pub(crate) enum ExecError {
     Fault(FaultCode),
+}
+
+/// Interpreter policy for transitions into native code.
+#[derive(Clone, Copy)]
+pub(crate) enum NativeResume<'a> {
+    Disabled,
+    EveryDirectCall,
+    Tiered {
+        state: &'a crate::jit::NativeCodeState,
+        resume_depth: Option<usize>,
+    },
+}
+
+const TIER_SAMPLE_INTERVAL: u32 = 64;
+
+struct InterpreterNative<'a> {
+    policy: NativeResume<'a>,
+    sample: u8,
+    check_native_calls: bool,
+}
+
+impl<'a> InterpreterNative<'a> {
+    fn new(policy: NativeResume<'a>, fuel: u64) -> InterpreterNative<'a> {
+        let mixed_fuel = fuel ^ (fuel >> 7) ^ (fuel >> 17);
+        let check_native_calls = match policy {
+            NativeResume::Tiered { state, .. } => state.has_compiled_code(),
+            _ => false,
+        };
+        InterpreterNative {
+            policy,
+            sample: mixed_fuel as u8 & (TIER_SAMPLE_INTERVAL as u8 - 1),
+            check_native_calls,
+        }
+    }
+
+    #[inline(always)]
+    fn after_call(&mut self, target: u32) -> bool {
+        match self.policy {
+            NativeResume::Disabled => false,
+            NativeResume::EveryDirectCall => true,
+            NativeResume::Tiered { state, .. } => {
+                let sampled = sample_tier_event(&mut self.sample);
+                if self.check_native_calls {
+                    state
+                        .enter_frame(target, if sampled { TIER_SAMPLE_INTERVAL } else { 0 })
+                        .enter_native
+                } else {
+                    sampled && state.note_event(target, TIER_SAMPLE_INTERVAL)
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn after_return(&self, depth: usize) -> bool {
+        match self.policy {
+            NativeResume::Disabled => false,
+            NativeResume::EveryDirectCall => true,
+            NativeResume::Tiered { resume_depth, .. } => resume_depth == Some(depth),
+        }
+    }
+
+    #[inline(always)]
+    fn after_backedge(&mut self, function: u32) -> bool {
+        match self.policy {
+            NativeResume::Tiered { state, .. } if sample_tier_event(&mut self.sample) => {
+                state.note_event(function, TIER_SAMPLE_INTERVAL)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[inline(always)]
+fn sample_tier_event(counter: &mut u8) -> bool {
+    *counter = counter.wrapping_add(1) & (TIER_SAMPLE_INTERVAL as u8 - 1);
+    *counter == 0
 }
 
 /// The serializable state of one machine.
@@ -4727,6 +4807,7 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         instr: Instr,
+        native: &mut InterpreterNative<'_>,
     ) -> Result<ExecOutcome, FaultCode> {
         if matches!(instr, Instr::Native(_)) {
             let result = self.exec_native_instr(instr);
@@ -4851,22 +4932,49 @@ impl Machine {
                 self.push(Value::Bool(a != b))?;
             }
             Instr::Jump(target) => {
+                let (function, block) = self
+                    .vm
+                    .frames
+                    .last()
+                    .map(|frame| (frame.func, frame.block))
+                    .ok_or(BAD_STATE)?;
                 let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                 frame.block = target;
                 frame.ip = 0;
+                if target <= block && native.after_backedge(function) {
+                    return Ok(ExecOutcome::ContinueNative);
+                }
             }
             Instr::JumpIfFalse(target) => {
                 if !self.pop_bool()? {
+                    let (function, block) = self
+                        .vm
+                        .frames
+                        .last()
+                        .map(|frame| (frame.func, frame.block))
+                        .ok_or(BAD_STATE)?;
                     let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                     frame.block = target;
                     frame.ip = 0;
+                    if target <= block && native.after_backedge(function) {
+                        return Ok(ExecOutcome::ContinueNative);
+                    }
                 }
             }
             Instr::JumpIfTrue(target) => {
                 if self.pop_bool()? {
+                    let (function, block) = self
+                        .vm
+                        .frames
+                        .last()
+                        .map(|frame| (frame.func, frame.block))
+                        .ok_or(BAD_STATE)?;
                     let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                     frame.block = target;
                     frame.ip = 0;
+                    if target <= block && native.after_backedge(function) {
+                        return Ok(ExecOutcome::ContinueNative);
+                    }
                 }
             }
             Instr::Native(_) => unreachable!("native instructions return before dispatch"),
@@ -4912,6 +5020,9 @@ impl Machine {
             Instr::Call(callee) => {
                 let argc = module.funcs[callee as usize].params.len();
                 self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)?;
+                if native.after_call(callee) {
+                    return Ok(ExecOutcome::ContinueNative);
+                }
             }
             // A generic call derives one environment from the caller
             // environment and the application of the call site. The
@@ -5222,6 +5333,9 @@ impl Machine {
                 self.push(value)?;
                 if !self.callbacks.is_empty() {
                     self.collect_callbacks();
+                }
+                if native.after_return(self.vm.frames.len()) {
+                    return Ok(ExecOutcome::ContinueNative);
                 }
             }
             Instr::Unreachable => {
@@ -5556,13 +5670,9 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
-        stop_at_native_entry: bool,
+        native: NativeResume<'_>,
     ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
-        if stop_at_native_entry {
-            self.exec_for_quantum_mode::<false, true>(module, dispatch, envs, slots, limit)
-        } else {
-            self.exec_for_quantum_mode::<false, false>(module, dispatch, envs, slots, limit)
-        }
+        self.exec_for_quantum_mode::<false>(module, dispatch, envs, slots, limit, native)
     }
 
     /// Execute one restricted worker lease.
@@ -5574,22 +5684,19 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
-        stop_at_native_entry: bool,
+        native: NativeResume<'_>,
     ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
-        if stop_at_native_entry {
-            self.exec_for_quantum_mode::<true, true>(module, dispatch, envs, slots, limit)
-        } else {
-            self.exec_for_quantum_mode::<true, false>(module, dispatch, envs, slots, limit)
-        }
+        self.exec_for_quantum_mode::<true>(module, dispatch, envs, slots, limit, native)
     }
 
-    fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool, const STOP_AT_NATIVE_ENTRY: bool>(
+    fn exec_for_quantum_mode<const RESTRICTED_LEASE: bool>(
         &mut self,
         module: &NamespaceRuntime,
         dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         limit: u32,
+        native: NativeResume<'_>,
     ) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
         debug_assert!(limit > 0);
         let original_fuel = self.vm.fuel;
@@ -5597,6 +5704,7 @@ impl Machine {
         let held_fuel = original_fuel - batch_fuel;
         let count_expiry = u64::from(limit) <= original_fuel;
         self.vm.fuel = batch_fuel;
+        let mut native = InterpreterNative::new(native, original_fuel);
 
         // Verification bounds every function, block, branch, and instruction.
         // Snapshot admission applies the same bounds to restored frames.
@@ -5612,7 +5720,8 @@ impl Machine {
                 break Err(ExecError::Fault(BAD_STATE));
             };
             let (func, block, ip) = (frame.func, frame.block, frame.ip);
-            if func != cached_func || block != cached_block {
+            let function_changed = func != cached_func;
+            if function_changed || block != cached_block {
                 code = &module.funcs[func as usize].blocks[block as usize];
                 cached_func = func;
                 cached_block = block;
@@ -5623,12 +5732,9 @@ impl Machine {
                 break Err(ExecError::Fault(BAD_STATE));
             };
             frame.ip += 1;
-            match self.exec_instr(module, dispatch, envs, slots, instr) {
-                Ok(ExecOutcome::Continue) => {
-                    if STOP_AT_NATIVE_ENTRY && matches!(instr, Instr::Call(_) | Instr::Return) {
-                        break Ok(ExecOutcome::Continue);
-                    }
-                }
+            match self.exec_instr(module, dispatch, envs, slots, instr, &mut native) {
+                Ok(ExecOutcome::Continue) => {}
+                Ok(ExecOutcome::ContinueNative) => break Ok(ExecOutcome::Continue),
                 Ok(outcome) => break Ok(outcome),
                 Err(code) => break Err(ExecError::Fault(code)),
             }

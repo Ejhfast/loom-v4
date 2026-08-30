@@ -273,6 +273,15 @@ impl Engine {
         metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
+        if self.mode() == EngineMode::Auto
+            && machine
+                .vm
+                .frames
+                .last()
+                .is_some_and(|frame| !native.ready_for_auto(frame.func))
+        {
+            return crate::jit::NativeAttempt::Fallback;
+        }
         self.jit
             .execute(machine, module, native, scratch, metrics, instruction_limit)
     }

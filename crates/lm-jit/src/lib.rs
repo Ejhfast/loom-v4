@@ -465,6 +465,80 @@ impl JitEngine {
     }
 }
 
+/// Return true when one function can enter the current native planner.
+///
+/// This check is conservative. Planning can still reject unsupported types.
+pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
+    use lm_bytecode::{Instr, NumericInstr};
+
+    if function.type_params != 0
+        || function.effect_params != 0
+        || !function.captures.is_empty()
+        || function.local_types.len() > MAX_REGION_LOCALS
+    {
+        return false;
+    }
+    let mut instructions = 0usize;
+    for instruction in function.blocks.iter().flatten() {
+        instructions = match instructions.checked_add(1) {
+            Some(value) if value <= MAX_REGION_INSTRUCTIONS => value,
+            _ => return false,
+        };
+        let supported = matches!(
+            instruction,
+            Instr::ConstUnit
+                | Instr::ConstBool(_)
+                | Instr::ConstInt(_)
+                | Instr::ConstFloat(_)
+                | Instr::LoadLocal(_)
+                | Instr::StoreLocal(_)
+                | Instr::Pop
+                | Instr::Add
+                | Instr::Sub
+                | Instr::Mul
+                | Instr::Div
+                | Instr::Rem
+                | Instr::Neg
+                | Instr::Not
+                | Instr::LtInt
+                | Instr::LeInt
+                | Instr::GtInt
+                | Instr::GeInt
+                | Instr::EqInt
+                | Instr::NeInt
+                | Instr::EqBool
+                | Instr::NeBool
+                | Instr::Call(_)
+                | Instr::New(_)
+                | Instr::LoadField(_)
+                | Instr::Jump(_)
+                | Instr::JumpIfFalse(_)
+                | Instr::JumpIfTrue(_)
+                | Instr::Return
+                | Instr::Perform { .. }
+                | Instr::PerformValue { .. }
+                | Instr::OpConst(_)
+                | Instr::Numeric(
+                    NumericInstr::FloatNeg
+                        | NumericInstr::FloatAdd
+                        | NumericInstr::FloatSub
+                        | NumericInstr::FloatMul
+                        | NumericInstr::FloatDiv
+                        | NumericInstr::FloatEq
+                        | NumericInstr::FloatNe
+                        | NumericInstr::FloatLt
+                        | NumericInstr::FloatLe
+                        | NumericInstr::FloatGt
+                        | NumericInstr::FloatGe
+                )
+        );
+        if !supported {
+            return false;
+        }
+    }
+    instructions != 0
+}
+
 mod backend;
 
 use backend::{compile_region, CompileError};

@@ -112,6 +112,17 @@ fn scalar_loop_matches_the_interpreter() {
 }
 
 #[test]
+fn auto_mode_compiles_only_after_interpreted_work() {
+    let (interpreted, _, interpreted_dump) = run(SCALAR_LOOP, EngineMode::Interpreter, u64::MAX);
+    let (automatic, metrics, automatic_dump) = run(SCALAR_LOOP, EngineMode::Auto, u64::MAX);
+    assert_eq!(automatic, interpreted);
+    assert_eq!(automatic_dump, interpreted_dump);
+    assert_eq!(metrics.compilation_attempts, 1, "{metrics:?}");
+    assert_eq!(metrics.compiled_regions, 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
 fn native_cache_is_scoped_to_one_arena_layout() {
     let engine = Arc::new(Engine::new(EngineMode::Native));
     let first = concat!("class P\nend\n", "def make(): P\n  P()\nend\n", "make()\n",);
@@ -441,6 +452,12 @@ fn an_unsupported_caller_enters_a_supported_hot_callee() {
     assert_eq!(native_dump, interpreted_dump);
     assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
     assert!(metrics.unsupported_region_fallbacks > 0, "{metrics:?}");
+    let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
+    assert_eq!(automatic, interpreted);
+    assert_eq!(automatic_dump, interpreted_dump);
+    assert_eq!(metrics.compiled_regions, 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
 }
 
 #[test]
@@ -852,14 +869,32 @@ fn native_float_results_use_the_canonical_nan() {
 }
 
 #[test]
-fn auto_mode_reports_an_unsupported_fallback() {
+fn auto_mode_does_not_compile_cold_unsupported_code() {
     let source = "text = \"loom\"\ntext\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
     assert_eq!(automatic, interpreted);
     assert_eq!(automatic_dump, interpreted_dump);
     assert_eq!(metrics.native_entries, 0);
-    assert_eq!(metrics.unsupported_region_fallbacks, 1);
+    assert_eq!(metrics.compilation_attempts, 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0);
+}
+
+#[test]
+fn auto_mode_does_not_probe_hot_unsupported_code() {
+    let source = concat!(
+        "text = \"loom\"\n",
+        "i = 0\n",
+        "while i < 100000\n  i = i + 1\nend\n",
+        "i\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
+    assert_eq!(automatic, interpreted);
+    assert_eq!(automatic_dump, interpreted_dump);
+    assert_eq!(metrics.native_entries, 0);
+    assert_eq!(metrics.compilation_attempts, 0);
+    assert_eq!(metrics.unsupported_region_fallbacks, 0);
 }
 
 fn captured_loop(

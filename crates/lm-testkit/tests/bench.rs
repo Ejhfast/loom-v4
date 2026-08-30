@@ -301,6 +301,10 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
 }
 
 fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) -> EngineMetrics {
+    assert_eq!(
+        runtime.compilation_attempts, 0,
+        "a warm benchmark compiled another region"
+    );
     runtime.compilation_attempts = compiler.compilation_attempts;
     runtime.compiled_regions = compiler.compiled_regions;
     runtime.compiled_segments = compiler.compiled_segments;

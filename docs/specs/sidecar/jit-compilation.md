@@ -1,10 +1,10 @@
 # JIT compilation
 
-Status: The native-call foundation and canonical heap ABI are implemented.
+Status: The native-call foundation, canonical heap ABI, and sampled tiering are implemented.
 
 Direct instance reads use the canonical heap layout.
 
-Corpus validation, tiering, and scheduler continuation work remain.
+Corpus validation, scheduler continuation, and broader direct heap access remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -485,11 +485,23 @@ The cache key includes the arena layout identity.
 
 Auto starts in the interpreter.
 
-Per-function relaxed counters record calls and loop backedges.
+A conservative classifier rejects bytecode that the current planner cannot compile.
+
+Rejected functions use no hotness counter and cause no compiler probe.
+
+Auto samples direct calls and loop backedges before it compiles one region.
+
+Each sample adds an estimated retired-instruction count to one relaxed counter.
 
 The interpreter path performs no mutex operation.
 
-Each virtual site owns one atomic inline-cache cell.
+Tier checks run inside direct-call, return, and taken-backedge dispatch.
+
+Ordinary interpreter instructions run the unchanged dispatch path.
+
+A compiled region enables direct-call entry checks for its namespace.
+
+A future virtual-call tier owns one atomic inline-cache cell per site.
 
 A classified site stops collecting observations.
 
@@ -675,13 +687,18 @@ Gate: Common operations use zero slow calls per iteration.
 
 ### Stage E: Tiering and inline caches
 
+- classify unsupported function shapes before execution;
+- sample calls and loop backedges;
 - add lock-free hotness counters;
 - add negative verdicts;
-- add monomorphic call-site cells;
-- move specialization behind cache hits;
+- keep specialization behind cache hits;
 - add compilation budgets.
 
 Gate: Unsupported large programs remain within five percent.
+
+Gate result: The four representative rows remain within two percent in Auto mode.
+
+Virtual-call inline caches remain part of Stage F surface expansion.
 
 ### Stage F: Representative programs
 
@@ -722,6 +739,19 @@ The canonical heap candidate produced these focused release rows.
 | Plain allocation | 7.673 ms | 2.625 ms | 2.92 times |
 
 These rows do not replace the scheduler corpus gate.
+
+The first sampled-tiering run used the deterministic scheduler.
+
+It used nine measured rounds after one warm round.
+
+| Workload | Interpreter | Auto warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: |
+| JSON parse | 46.161 ms | 46.534 ms | 0.99 times | 0.00% |
+| JSON encode | 20.537 ms | 20.914 ms | 0.98 times | 0.00% |
+| HTTP parse | 44.545 ms | 43.983 ms | 1.01 times | 35.46% |
+| HTTP encode | 23.087 ms | 22.565 ms | 1.02 times | 41.68% |
+
+Measured warm rounds performed no native compilation.
 
 ## 24. Rejected designs
 
