@@ -4,14 +4,11 @@ use crate::engine::EngineTurnMetrics;
 use crate::machine::{ExecError, ExecOutcome, Frame, Machine};
 use crate::NamespaceRuntime;
 use lm_jit::{
-    ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, Runtime, RuntimeResult,
-    ScalarKind, ValueRepr, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
 };
-use lm_value::{canonical_float_bits, ObjRef, TypeEnvId, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-
-const MAX_COMPILED_REGIONS: usize = 256;
+use lm_value::{TypeEnvId, Value};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Reusable scalar buffers for one engine turn.
 #[derive(Default)]
@@ -21,95 +18,9 @@ pub(crate) struct NativeScratch {
     root_states: Vec<u8>,
 }
 
-#[derive(Clone)]
-pub(crate) struct NativeCodeState(Arc<NativeCodeRevision>);
+mod cache;
 
-#[derive(Clone)]
-struct NativeCodeRevision {
-    slots: lm_bytecode::CodeTable<Arc<NativeSlot>>,
-    entries: Arc<Vec<usize>>,
-    compiled: Arc<AtomicUsize>,
-}
-
-impl NativeCodeState {
-    pub(crate) fn new(functions: usize) -> NativeCodeState {
-        let mut revision = NativeCodeRevision {
-            slots: lm_bytecode::CodeTable::default(),
-            entries: Arc::new(Vec::new()),
-            compiled: Arc::new(AtomicUsize::new(0)),
-        };
-        while revision.slots.len() < functions {
-            revision.push_slot();
-        }
-        NativeCodeState(Arc::new(revision))
-    }
-
-    pub(crate) fn extend(&mut self, functions: usize) {
-        if self.0.slots.len() >= functions {
-            return;
-        }
-        let mut revision = self.0.as_ref().clone();
-        while revision.slots.len() < functions {
-            revision.push_slot();
-        }
-        self.0 = Arc::new(revision);
-    }
-
-    fn slot(&self, function: u32) -> Option<&Arc<NativeSlot>> {
-        self.0.slots.get(function as usize)
-    }
-
-    fn entries(&self) -> &[usize] {
-        self.0.entries.as_slice()
-    }
-}
-
-impl NativeCodeRevision {
-    fn push_slot(&mut self) {
-        let slot = Arc::new(NativeSlot::default());
-        Arc::make_mut(&mut self.entries).push(Arc::as_ptr(&slot.entry) as usize);
-        self.slots.push(slot);
-    }
-}
-
-#[derive(Default)]
-struct NativeSlot {
-    verdict: OnceLock<Result<Arc<lm_jit::CompiledRegion>, Failure>>,
-    entry: Arc<lm_jit::NativeEntryCell>,
-}
-
-impl NativeSlot {
-    fn region<'a, F>(
-        &self,
-        compiler: &lm_jit::JitEngine,
-        compiled: &AtomicUsize,
-        input: F,
-    ) -> Result<Arc<lm_jit::CompiledRegion>, Failure>
-    where
-        F: FnOnce() -> Result<FunctionInput<'a>, Failure>,
-    {
-        self.verdict
-            .get_or_init(|| {
-                compiled
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        (count < MAX_COMPILED_REGIONS).then_some(count + 1)
-                    })
-                    .map_err(|_| Failure::BackendUnavailable)?;
-                let result = input()
-                    .and_then(|input| compiler.compile(input))
-                    .and_then(|region| self.entry.publish(&region).map(|()| region));
-                if result.is_err() {
-                    compiled.fetch_sub(1, Ordering::Relaxed);
-                }
-                result
-            })
-            .clone()
-    }
-
-    fn compiled(&self) -> Option<Arc<lm_jit::CompiledRegion>> {
-        self.verdict.get()?.as_ref().ok().cloned()
-    }
-}
+pub(crate) use cache::NativeCodeState;
 
 pub(crate) enum NativeAttempt {
     Fallback,
@@ -200,7 +111,7 @@ impl JitEngine {
             metrics.note_missing_entry_fallback();
             return NativeAttempt::Fallback;
         };
-        let region = match slot.region(&self.compiler, &native.0.compiled, || {
+        let region = match slot.region(&self.compiler, native.compiled_count(), || {
             let runtime = module
                 .funcs
                 .get(function as usize)
@@ -720,130 +631,6 @@ fn malformed_native_execution(
     malformed_native_exit(retired)
 }
 
-fn scalar_bits(kind: ScalarKind, value: Value) -> Option<u64> {
-    match (kind, value) {
-        (ScalarKind::Unit, Value::Unit) => Some(0),
-        (ScalarKind::Bool, Value::Bool(value)) => Some(u64::from(value)),
-        (ScalarKind::Int, Value::Int(value)) => Some(value as u64),
-        (ScalarKind::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
-        (ScalarKind::Object(_), Value::Obj(reference)) => Some(object_bits(reference)),
-        (ScalarKind::Operation, Value::Op(operation)) => Some(u64::from(operation)),
-        _ => None,
-    }
-}
+mod runtime;
 
-fn bits_value(kind: ScalarKind, bits: u64) -> Value {
-    match kind {
-        ScalarKind::Unit => Value::Unit,
-        ScalarKind::Bool => Value::Bool(bits != 0),
-        ScalarKind::Int => Value::Int(bits as i64),
-        ScalarKind::Float => Value::Float(canonical_float_bits(bits)),
-        ScalarKind::Object(_) => Value::Obj(object_reference(bits)),
-        ScalarKind::Operation => Value::Op(bits as u32),
-    }
-}
-
-fn object_bits(reference: ObjRef) -> u64 {
-    u64::from(reference.slot) | (u64::from(reference.generation) << 32)
-}
-
-fn object_reference(bits: u64) -> ObjRef {
-    ObjRef {
-        slot: bits as u32,
-        generation: (bits >> 32) as u32,
-    }
-}
-
-struct MachineRuntime<'a> {
-    machine: &'a mut Machine,
-    module: &'a NamespaceRuntime,
-    base_local: usize,
-    base_operand: usize,
-    heap_reads: u64,
-    allocations: u64,
-}
-
-impl Runtime for MachineRuntime<'_> {
-    fn load_field(&mut self, reference: ObjRef, field: u32, expected: ValueRepr) -> RuntimeResult {
-        self.heap_reads = self.heap_reads.saturating_add(1);
-        let Some(crate::Object::Instance { fields, .. }) = self.machine.vm.heap.try_get(reference)
-        else {
-            return RuntimeResult::TypeMismatch;
-        };
-        let Some(value) = fields.get(field as usize).copied() else {
-            return RuntimeResult::TypeMismatch;
-        };
-        if value == Value::Uninit {
-            return RuntimeResult::UninitializedField;
-        }
-        match representation_bits(expected, value) {
-            Some(bits) => RuntimeResult::Value(bits),
-            None => RuntimeResult::Interpreter,
-        }
-    }
-
-    fn allocate_instance(
-        &mut self,
-        class: u32,
-        root_bits: &[u64],
-        root_states: &[u8],
-        allow_collection: bool,
-    ) -> RuntimeResult {
-        if root_bits.len() != root_states.len() {
-            return RuntimeResult::Interpreter;
-        }
-        let Some(class_entry) = self.module.classes.get(class as usize) else {
-            return RuntimeResult::Interpreter;
-        };
-        let object = crate::Object::Instance {
-            class,
-            fields: vec![Value::Uninit; class_entry.fields.len()],
-            env: lm_value::Witness::EMPTY,
-        };
-        let cost = self.machine.vm.heap.allocation_cost(&object);
-        if !self.machine.vm.heap.collection_due(cost) {
-            let reference = self.machine.vm.heap.alloc(object);
-            self.allocations = self.allocations.saturating_add(1);
-            return RuntimeResult::Value(object_bits(reference));
-        }
-        if !allow_collection {
-            return RuntimeResult::Interpreter;
-        }
-        let mut roots = Vec::new();
-        if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return RuntimeResult::HeapLimit;
-        }
-        roots.extend(
-            root_bits
-                .iter()
-                .copied()
-                .zip(root_states.iter().copied())
-                .filter(|(_, state)| state & LOCAL_INITIALIZED != 0)
-                .map(|(bits, _)| object_reference(bits)),
-        );
-        match self
-            .machine
-            .alloc_native(object, self.base_local, self.base_operand, &roots)
-        {
-            Ok(Value::Obj(reference)) => {
-                self.allocations = self.allocations.saturating_add(1);
-                RuntimeResult::Value(object_bits(reference))
-            }
-            Ok(_) => RuntimeResult::Interpreter,
-            Err(crate::FaultCode::HeapLimit) => RuntimeResult::HeapLimit,
-            Err(_) => RuntimeResult::Interpreter,
-        }
-    }
-}
-
-fn representation_bits(expected: ValueRepr, value: Value) -> Option<u64> {
-    match (expected, value) {
-        (ValueRepr::Unit, Value::Unit) => Some(0),
-        (ValueRepr::Bool, Value::Bool(value)) => Some(u64::from(value)),
-        (ValueRepr::Int, Value::Int(value)) => Some(value as u64),
-        (ValueRepr::Float, Value::Float(bits)) if canonical_float_bits(bits) == bits => Some(bits),
-        (ValueRepr::Object, Value::Obj(reference)) => Some(object_bits(reference)),
-        (ValueRepr::Operation, Value::Op(operation)) => Some(u64::from(operation)),
-        _ => None,
-    }
-}
+use runtime::{bits_value, scalar_bits, MachineRuntime};
