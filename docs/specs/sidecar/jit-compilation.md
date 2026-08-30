@@ -229,7 +229,7 @@ Value is the canonical 16-byte runtime value.
 
 The implementation gives Value a fixed representation.
 
-    #[repr(C, u8)]
+    #[repr(C, u64)]
     pub enum Value {
         Unit = 0,
         Bool(bool) = 1,
@@ -275,7 +275,7 @@ The heap also maintains fixed-layout JIT side records.
         kind: u16,
         flags: u16,
         class: u32,
-        len: u32,
+        len: usize,
         data: usize,
     }
 

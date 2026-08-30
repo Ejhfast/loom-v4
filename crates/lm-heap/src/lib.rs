@@ -32,6 +32,118 @@ const PAGE_SLOTS: usize = 1024;
 /// The first collection point for a heap with a larger hard limit.
 const INITIAL_COLLECTION_BYTES: usize = 4 << 20;
 
+/// One dead or unused JIT object slot.
+pub const JIT_OBJECT_DEAD: u16 = 0;
+/// One ordinary class instance.
+pub const JIT_OBJECT_INSTANCE: u16 = 1;
+/// One growable list.
+pub const JIT_OBJECT_LIST: u16 = 2;
+/// One immutable tuple.
+pub const JIT_OBJECT_TUPLE: u16 = 3;
+/// One object that requires a typed runtime slow path.
+pub const JIT_OBJECT_OPAQUE: u16 = 4;
+/// The object cannot accept a native store.
+pub const JIT_OBJECT_FROZEN: u16 = 1;
+/// One object kind without a runtime class.
+pub const JIT_NO_CLASS: u32 = u32::MAX;
+/// Shift from an object slot to its JIT page index.
+pub const JIT_PAGE_SHIFT: u32 = 10;
+/// Mask from an object slot to its JIT page offset.
+pub const JIT_PAGE_MASK: u32 = (PAGE_SLOTS as u32) - 1;
+
+/// Fixed native view of one object-table slot.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitObjectEntry {
+    pub generation: u32,
+    pub kind: u16,
+    pub flags: u16,
+    pub class: u32,
+    pub len: usize,
+    pub data: usize,
+}
+
+impl JitObjectEntry {
+    fn dead(generation: u32) -> JitObjectEntry {
+        JitObjectEntry {
+            generation,
+            kind: JIT_OBJECT_DEAD,
+            flags: 0,
+            class: JIT_NO_CLASS,
+            len: 0,
+            data: 0,
+        }
+    }
+
+    fn live(generation: u32, header: Header, object: &Object) -> JitObjectEntry {
+        let flags = if header.frozen { JIT_OBJECT_FROZEN } else { 0 };
+        match object {
+            Object::Instance { class, fields, .. } => JitObjectEntry {
+                generation,
+                kind: JIT_OBJECT_INSTANCE,
+                flags,
+                class: *class,
+                len: fields.len(),
+                data: slice_address(fields),
+            },
+            Object::List { items, .. } => JitObjectEntry {
+                generation,
+                kind: JIT_OBJECT_LIST,
+                flags,
+                class: JIT_NO_CLASS,
+                len: items.len(),
+                data: slice_address(items),
+            },
+            Object::Tuple { items } => JitObjectEntry {
+                generation,
+                kind: JIT_OBJECT_TUPLE,
+                flags,
+                class: JIT_NO_CLASS,
+                len: items.len(),
+                data: slice_address(items),
+            },
+            _ => JitObjectEntry {
+                generation,
+                kind: JIT_OBJECT_OPAQUE,
+                flags,
+                class: JIT_NO_CLASS,
+                len: 0,
+                data: 0,
+            },
+        }
+    }
+}
+
+fn slice_address(values: &[lm_value::Value]) -> usize {
+    if values.is_empty() {
+        0
+    } else {
+        values.as_ptr() as usize
+    }
+}
+
+/// Borrowed native view of one heap revision.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct JitHeapView {
+    pub pages: *const usize,
+    pub page_count: usize,
+    pub slot_count: usize,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<JitObjectEntry>() == 32);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::align_of::<JitObjectEntry>() == 8);
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, generation) == 0);
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, kind) == 4);
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, flags) == 6);
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, class) == 8);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, len) == 16);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::offset_of!(JitObjectEntry, data) == 24);
+
 fn next_collection_threshold(used_bytes: usize, cap_bytes: usize) -> usize {
     let live_target = used_bytes.saturating_mul(2);
     cap_bytes.min(INITIAL_COLLECTION_BYTES.max(live_target))
@@ -194,6 +306,14 @@ struct DigestCacheEntry {
 /// The VM heap.
 pub struct Heap {
     pages: Vec<Vec<Entry>>,
+    /// Fixed-layout native side records for each object page.
+    jit_pages: Vec<Vec<JitObjectEntry>>,
+    /// Stable addresses of the fixed-layout side-record pages.
+    jit_page_addresses: Vec<usize>,
+    /// Slots that need a side-record refresh before native entry.
+    jit_dirty: Vec<u32>,
+    /// One bit for each slot already present in `jit_dirty`.
+    jit_dirty_bits: Vec<u64>,
     /// The latest generation of every slot ever allocated.
     generations: Vec<u32>,
     free: Vec<u32>,
@@ -218,6 +338,10 @@ impl Heap {
     pub fn new(cap_bytes: usize) -> Heap {
         Heap {
             pages: Vec::new(),
+            jit_pages: Vec::new(),
+            jit_page_addresses: Vec::new(),
+            jit_dirty: Vec::new(),
+            jit_dirty_bits: Vec::new(),
             generations: Vec::new(),
             free: Vec::new(),
             live: 0,
@@ -259,6 +383,96 @@ impl Heap {
     /// The number of object-table slots, live and free.
     pub fn slot_count(&self) -> usize {
         self.pages.iter().map(Vec::len).sum()
+    }
+
+    /// Return a synchronized native view of the object table.
+    pub fn jit_view(&mut self) -> JitHeapView {
+        self.sync_jit_entries();
+        JitHeapView {
+            pages: self.jit_page_addresses.as_ptr(),
+            page_count: self.jit_page_addresses.len(),
+            slot_count: self.slot_count(),
+        }
+    }
+
+    /// Synchronize side records after Rust object mutations.
+    pub fn sync_jit_entries(&mut self) {
+        while let Some(slot) = self.jit_dirty.pop() {
+            let word = slot as usize / 64;
+            let bit = slot as usize % 64;
+            self.jit_dirty_bits[word] &= !(1u64 << bit);
+            self.refresh_jit_entry(slot);
+        }
+    }
+
+    /// Return one synchronized side record.
+    pub fn jit_entry(&mut self, slot: u32) -> Option<JitObjectEntry> {
+        if slot as usize >= self.slot_count() {
+            return None;
+        }
+        self.sync_jit_entries();
+        self.jit_pages
+            .get(slot as usize / PAGE_SLOTS)
+            .and_then(|page| page.get(slot as usize % PAGE_SLOTS))
+            .copied()
+    }
+
+    fn add_jit_page(&mut self) {
+        self.jit_dirty.reserve(PAGE_SLOTS);
+        self.jit_dirty_bits
+            .resize(self.jit_pages.len() * 16 + 16, 0);
+        let page = vec![JitObjectEntry::dead(0); PAGE_SLOTS];
+        let address = page.as_ptr() as usize;
+        self.jit_pages.push(page);
+        self.jit_page_addresses.push(address);
+    }
+
+    fn try_add_page(&mut self) -> bool {
+        if self.pages.try_reserve(1).is_err()
+            || self.jit_pages.try_reserve(1).is_err()
+            || self.jit_page_addresses.try_reserve(1).is_err()
+            || self.jit_dirty.try_reserve(PAGE_SLOTS).is_err()
+            || self.jit_dirty_bits.try_reserve(16).is_err()
+        {
+            return false;
+        }
+        let mut page = Vec::new();
+        if page.try_reserve(1).is_err() {
+            return false;
+        }
+        let mut jit_page = Vec::new();
+        if jit_page.try_reserve_exact(PAGE_SLOTS).is_err() {
+            return false;
+        }
+        jit_page.resize(PAGE_SLOTS, JitObjectEntry::dead(0));
+        let address = jit_page.as_ptr() as usize;
+        self.pages.push(page);
+        self.jit_pages.push(jit_page);
+        self.jit_page_addresses.push(address);
+        self.jit_dirty_bits.resize(self.jit_pages.len() * 16, 0);
+        true
+    }
+
+    fn mark_jit_dirty(&mut self, slot: u32) {
+        let word = slot as usize / 64;
+        let bit = slot as usize % 64;
+        debug_assert!(word < self.jit_dirty_bits.len());
+        let mask = 1u64 << bit;
+        if self.jit_dirty_bits[word] & mask == 0 {
+            self.jit_dirty_bits[word] |= mask;
+            self.jit_dirty.push(slot);
+        }
+    }
+
+    fn refresh_jit_entry(&mut self, slot: u32) {
+        let record = {
+            let entry = self.entry(slot);
+            match entry.live.as_ref() {
+                Some((header, object)) => JitObjectEntry::live(entry.generation, *header, object),
+                None => JitObjectEntry::dead(entry.generation),
+            }
+        };
+        self.jit_pages[slot as usize / PAGE_SLOTS][slot as usize % PAGE_SLOTS] = record;
     }
 
     /// True when charging `cost` more bytes would exceed the cap.
@@ -422,6 +636,7 @@ impl Heap {
             debug_assert!(entry.live.is_none());
             let generation = entry.generation;
             entry.live = Some((header, object));
+            self.refresh_jit_entry(slot);
             return ObjRef { slot, generation };
         }
 
@@ -432,6 +647,7 @@ impl Heap {
             .unwrap_or(true);
         if need_page {
             self.pages.push(Vec::with_capacity(PAGE_SLOTS));
+            self.add_jit_page();
         }
         let page_idx = self.pages.len() - 1;
         let page = &mut self.pages[page_idx];
@@ -447,6 +663,7 @@ impl Heap {
             generation,
             live: Some((header, object)),
         });
+        self.refresh_jit_entry(slot as u32);
         ObjRef {
             slot: slot as u32,
             generation,
@@ -465,14 +682,9 @@ impl Heap {
                 .map(|page| page.len() == PAGE_SLOTS)
                 .unwrap_or(true);
             if need_page {
-                if self.pages.try_reserve(1).is_err() || self.generations.try_reserve(1).is_err() {
+                if self.generations.try_reserve(1).is_err() || !self.try_add_page() {
                     return Err(object);
                 }
-                let mut page = Vec::new();
-                if page.try_reserve(1).is_err() {
-                    return Err(object);
-                }
-                self.pages.push(page);
             } else if self
                 .pages
                 .last_mut()
@@ -514,6 +726,7 @@ impl Heap {
     /// first and must recompute the charged bytes after growth with
     /// `recharge`.
     pub fn get_mut(&mut self, r: ObjRef) -> &mut Object {
+        self.mark_jit_dirty(r.slot);
         let entry = self.entry_mut(r.slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
         entry
@@ -537,6 +750,7 @@ impl Heap {
         assert_eq!(entry.generation, r.generation, "stale object reference");
         let (header, _) = entry.live.as_mut().expect("live object");
         header.frozen = true;
+        self.refresh_jit_entry(r.slot);
     }
 
     /// Update the charged byte count of one object after a mutation.
@@ -563,6 +777,7 @@ impl Heap {
         header.bytes = new_cost;
         header.shared = new_shared_key;
         self.used_bytes = self.used_bytes - old_cost - released + new_cost + added;
+        self.refresh_jit_entry(r.slot);
     }
 
     /// Update one object that has no shared allocation.
@@ -579,6 +794,7 @@ impl Heap {
             (old_cost, new_cost)
         };
         self.used_bytes = self.used_bytes - old_cost + new_cost;
+        self.refresh_jit_entry(r.slot);
     }
 
     /// Free one live object now.
@@ -599,6 +815,7 @@ impl Heap {
         self.live -= 1;
         self.free.push(slot);
         self.digests.remove(&slot);
+        self.refresh_jit_entry(slot);
     }
 
     /// Register a host root. Pop it later in LIFO order.
@@ -703,6 +920,7 @@ impl Heap {
         // costs a hash, so the empty case skips it.
         let has_digests = !self.digests.is_empty();
         let shared_allocations = &mut self.shared_allocations;
+        let jit_pages = &mut self.jit_pages;
         for (page_idx, page) in self.pages.iter_mut().enumerate() {
             for (idx, entry) in page.iter_mut().enumerate() {
                 let slot = (page_idx * PAGE_SLOTS + idx) as u32;
@@ -726,6 +944,7 @@ impl Heap {
                 freed += 1;
                 entry.generation = entry.generation.wrapping_add(1);
                 self.generations[slot as usize] = entry.generation;
+                jit_pages[page_idx][idx] = JitObjectEntry::dead(entry.generation);
                 self.free.push(slot);
                 if has_digests {
                     self.digests.remove(&slot);
@@ -745,10 +964,15 @@ impl Heap {
             .is_some_and(|page| page.iter().all(|entry| entry.live.is_none()))
         {
             self.pages.pop();
+            self.jit_pages.pop();
+            self.jit_page_addresses.pop();
         }
         let slots = self.slot_count();
         self.free.retain(|slot| (*slot as usize) < slots);
         self.free.shrink_to_fit();
+        self.jit_dirty.retain(|slot| (*slot as usize) < slots);
+        self.jit_dirty.shrink_to(slots);
+        self.jit_dirty_bits.truncate(self.jit_pages.len() * 16);
         self.scratch.trim(slots);
     }
 
@@ -825,6 +1049,8 @@ impl Heap {
             compacted.generations[mapped.slot as usize] = expected.generation;
             if *frozen {
                 compacted.set_frozen(expected);
+            } else {
+                compacted.refresh_jit_entry(expected.slot);
             }
         }
         if compacted.live != self.live || compacted.used_bytes != self.used_bytes {
@@ -832,6 +1058,10 @@ impl Heap {
         }
 
         self.pages = std::mem::take(&mut compacted.pages);
+        self.jit_pages = std::mem::take(&mut compacted.jit_pages);
+        self.jit_page_addresses = std::mem::take(&mut compacted.jit_page_addresses);
+        self.jit_dirty = std::mem::take(&mut compacted.jit_dirty);
+        self.jit_dirty_bits = std::mem::take(&mut compacted.jit_dirty_bits);
         self.generations = std::mem::take(&mut compacted.generations);
         self.free = std::mem::take(&mut compacted.free);
         self.host_roots = mapped_host_roots;
@@ -989,6 +1219,93 @@ mod tests {
     }
 
     #[test]
+    fn jit_instance_records_expose_the_canonical_field_array() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Instance {
+            class: 17,
+            fields: vec![Value::Int(4), Value::Bool(true)],
+            env: lm_value::Witness::EMPTY,
+        });
+        let record = heap.jit_entry(reference.slot).expect("the slot exists");
+        assert_eq!(record.generation, reference.generation);
+        assert_eq!(record.kind, JIT_OBJECT_INSTANCE);
+        assert_eq!(record.flags, 0);
+        assert_eq!(record.class, 17);
+        assert_eq!(record.len, 2);
+
+        // SAFETY: The live side record names two canonical field values.
+        let fields = unsafe { std::slice::from_raw_parts(record.data as *const Value, record.len) };
+        assert_eq!(fields, [Value::Int(4), Value::Bool(true)]);
+    }
+
+    #[test]
+    fn jit_list_records_refresh_after_unaccounted_growth() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::List {
+            items: vec![Value::Int(1)],
+            epoch: Default::default(),
+        });
+        if let Object::List { items, .. } = heap.get_mut(reference) {
+            items.reserve(1_024);
+            items.push(Value::Int(2));
+        }
+        let record = heap.jit_entry(reference.slot).expect("the slot exists");
+        let Object::List { items, .. } = heap.get(reference) else {
+            panic!("the object remains a list");
+        };
+        assert_eq!(record.kind, JIT_OBJECT_LIST);
+        assert_eq!(record.len, items.len());
+        assert_eq!(record.data, items.as_ptr() as usize);
+    }
+
+    #[test]
+    fn jit_tuple_records_are_frozen() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Tuple {
+            items: vec![Value::Unit],
+        });
+        let record = heap.jit_entry(reference.slot).expect("the slot exists");
+        assert_eq!(record.kind, JIT_OBJECT_TUPLE);
+        assert_ne!(record.flags & JIT_OBJECT_FROZEN, 0);
+        assert_eq!(record.len, 1);
+    }
+
+    #[test]
+    fn jit_pages_match_slot_addressing() {
+        let mut heap = Heap::new(64 << 20);
+        let mut last = None;
+        for _ in 0..=PAGE_SLOTS {
+            last = Some(heap.alloc(Object::Tuple { items: vec![] }));
+        }
+        let reference = last.expect("one object exists");
+        let expected = heap.jit_entry(reference.slot).expect("the slot exists");
+        let view = heap.jit_view();
+        assert_eq!(view.page_count, 2);
+        assert_eq!(view.slot_count, PAGE_SLOTS + 1);
+
+        // SAFETY: The view names two complete fixed side-record pages.
+        let pages = unsafe { std::slice::from_raw_parts(view.pages, view.page_count) };
+        let page = pages[reference.slot as usize >> JIT_PAGE_SHIFT] as *const JitObjectEntry;
+        // SAFETY: The masked slot stays inside one complete side-record page.
+        let actual = unsafe {
+            page.add(reference.slot as usize & JIT_PAGE_MASK as usize)
+                .read()
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn freeing_a_slot_updates_its_jit_generation() {
+        let mut heap = Heap::new(1 << 20);
+        let reference = heap.alloc(Object::Tuple { items: vec![] });
+        heap.free(reference);
+        let record = heap.jit_entry(reference.slot).expect("the slot remains");
+        assert_eq!(record.kind, JIT_OBJECT_DEAD);
+        assert_eq!(record.generation, reference.generation.wrapping_add(1));
+        assert_eq!(record.data, 0);
+    }
+
+    #[test]
     fn freeing_one_object_restores_the_earlier_counts() {
         let mut heap = Heap::new(1 << 20);
         let before_live = heap.live_count();
@@ -1071,8 +1388,12 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let stale = heap.alloc(str_obj("old"));
         heap.sweep(|_| false);
+        let swept = heap.jit_entry(stale.slot).expect("the slot remains");
+        assert_eq!(swept.kind, JIT_OBJECT_DEAD);
+        assert_ne!(swept.generation, stale.generation);
         heap.trim_free_pages();
         assert_eq!(heap.slot_count(), 0);
+        assert_eq!(heap.jit_view().page_count, 0);
         assert_eq!(heap.try_get(stale), None);
         let fresh = heap.alloc(str_obj("new"));
         assert_eq!(fresh.slot, stale.slot);
@@ -1097,6 +1418,9 @@ mod tests {
         assert_eq!(heap.slot_count(), 1);
         assert_eq!(heap.used_bytes(), bytes);
         assert_eq!(heap.get(root), &str_obj("live"));
+        let record = heap.jit_entry(root.slot).expect("the slot exists");
+        assert_eq!(record.generation, root.generation);
+        assert_eq!(record.kind, JIT_OBJECT_OPAQUE);
     }
 
     #[test]

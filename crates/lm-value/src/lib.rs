@@ -9,6 +9,7 @@
 /// `generation` must match the entry generation. A mismatch marks a
 /// stale reference to a collected slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct ObjRef {
     pub slot: u32,
     pub generation: u32,
@@ -16,6 +17,7 @@ pub struct ObjRef {
 
 /// A generation-checked reference to one machine callback slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct CallbackRef {
     pub slot: u32,
     pub generation: u32,
@@ -90,25 +92,51 @@ pub fn canonical_float_bits(bits: u64) -> u64 {
     }
 }
 
+/// Stable tags for the two-word runtime value ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum ValueTag {
+    Unit = 0,
+    Bool = 1,
+    Int = 2,
+    Float = 3,
+    Char = 4,
+    Obj = 5,
+    Op = 6,
+    Callback = 7,
+    EmptyCase = 8,
+    Uninit = 9,
+}
+
+/// Byte offset of the value tag.
+pub const VALUE_TAG_OFFSET: usize = 0;
+/// Byte offset of every value payload.
+pub const VALUE_PAYLOAD_OFFSET: usize = 8;
+/// Stable size of one runtime value.
+pub const VALUE_SIZE: usize = 16;
+/// Stable alignment of one runtime value.
+pub const VALUE_ALIGN: usize = 8;
+
 /// One runtime value. `Int` and `Float` keep their full 64-bit width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, u64)]
 pub enum Value {
-    Unit,
-    Bool(bool),
-    Int(i64),
+    Unit = 0,
+    Bool(bool) = 1,
+    Int(i64) = 2,
     /// One canonical IEEE 754 binary64 bit pattern.
-    Float(u64),
+    Float(u64) = 3,
     /// One Unicode scalar value.
-    Char(char),
+    Char(char) = 4,
     /// A reference to a heap object: string, instance, list, map,
     /// closure, builder, or native handle.
-    Obj(ObjRef),
+    Obj(ObjRef) = 5,
     /// A first-class operation value: the dense manifest slot of one
     /// exact operation. The identity-indexed type lives in the static
     /// type system, not in the value.
-    Op(u32),
+    Op(u32) = 6,
     /// A reference to one machine-local nonescaping callback.
-    Callback(CallbackRef),
+    Callback(CallbackRef) = 7,
     /// One nullary arm of a native one-payload enum.
     ///
     /// `ty` names the closed family type. `arm` names its source arm.
@@ -116,13 +144,35 @@ pub enum Value {
     EmptyCase {
         ty: u32,
         arm: u32,
-    },
+    } = 8,
     /// The marker for an object field without a first assignment.
     /// No instruction can produce or store this value.
-    Uninit,
+    Uninit = 9,
 }
 
+const _: () = assert!(std::mem::size_of::<Value>() == VALUE_SIZE);
+const _: () = assert!(std::mem::align_of::<Value>() == VALUE_ALIGN);
+const _: () = assert!(std::mem::size_of::<ValueTag>() == 8);
+const _: () = assert!(std::mem::offset_of!(ObjRef, slot) == 0);
+const _: () = assert!(std::mem::offset_of!(ObjRef, generation) == 4);
+
 impl Value {
+    /// Return the stable runtime ABI tag.
+    pub fn tag(self) -> ValueTag {
+        match self {
+            Value::Unit => ValueTag::Unit,
+            Value::Bool(_) => ValueTag::Bool,
+            Value::Int(_) => ValueTag::Int,
+            Value::Float(_) => ValueTag::Float,
+            Value::Char(_) => ValueTag::Char,
+            Value::Obj(_) => ValueTag::Obj,
+            Value::Op(_) => ValueTag::Op,
+            Value::Callback(_) => ValueTag::Callback,
+            Value::EmptyCase { .. } => ValueTag::EmptyCase,
+            Value::Uninit => ValueTag::Uninit,
+        }
+    }
+
     /// Return the object reference when the value holds one.
     pub fn as_obj(self) -> Option<ObjRef> {
         match self {
@@ -138,7 +188,8 @@ mod tests {
 
     #[test]
     fn value_is_16_bytes() {
-        assert_eq!(std::mem::size_of::<Value>(), 16);
+        assert_eq!(std::mem::size_of::<Value>(), VALUE_SIZE);
+        assert_eq!(std::mem::align_of::<Value>(), VALUE_ALIGN);
     }
 
     #[test]
@@ -172,6 +223,83 @@ mod tests {
         let value = Value::EmptyCase { ty: 7, arm: 1 };
         assert_eq!(value, Value::EmptyCase { ty: 7, arm: 1 });
         assert_eq!(std::mem::size_of::<Value>(), 16);
+    }
+
+    #[test]
+    fn every_value_uses_its_stable_tag_word() {
+        let values = [
+            Value::Unit,
+            Value::Bool(true),
+            Value::Int(-7),
+            Value::Float(1.5f64.to_bits()),
+            Value::Char('x'),
+            Value::Obj(ObjRef {
+                slot: 3,
+                generation: 4,
+            }),
+            Value::Op(5),
+            Value::Callback(CallbackRef {
+                slot: 6,
+                generation: 7,
+            }),
+            Value::EmptyCase { ty: 8, arm: 9 },
+            Value::Uninit,
+        ];
+        for value in values {
+            let address = std::ptr::from_ref(&value).cast::<u8>();
+            // SAFETY: The stable tag occupies the first aligned word.
+            let tag = unsafe { address.add(VALUE_TAG_OFFSET).cast::<u64>().read() };
+            assert_eq!(tag, value.tag() as u64);
+        }
+    }
+
+    #[test]
+    fn every_value_uses_its_stable_payload_offset() {
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct Pair {
+            first: u32,
+            second: u32,
+        }
+
+        fn payload<T: Copy>(value: &Value) -> T {
+            let address = std::ptr::from_ref(value).cast::<u8>();
+            // SAFETY: Each call uses the declared payload type of this value.
+            unsafe { address.add(VALUE_PAYLOAD_OFFSET).cast::<T>().read() }
+        }
+
+        assert!(payload::<bool>(&Value::Bool(true)));
+        assert_eq!(payload::<i64>(&Value::Int(-7)), -7);
+        assert_eq!(payload::<u64>(&Value::Float(11)), 11);
+        assert_eq!(payload::<char>(&Value::Char('猫')), '猫');
+        assert_eq!(
+            payload::<ObjRef>(&Value::Obj(ObjRef {
+                slot: 3,
+                generation: 4,
+            })),
+            ObjRef {
+                slot: 3,
+                generation: 4,
+            }
+        );
+        assert_eq!(payload::<u32>(&Value::Op(5)), 5);
+        assert_eq!(
+            payload::<CallbackRef>(&Value::Callback(CallbackRef {
+                slot: 6,
+                generation: 7,
+            })),
+            CallbackRef {
+                slot: 6,
+                generation: 7,
+            }
+        );
+        assert_eq!(
+            payload::<Pair>(&Value::EmptyCase { ty: 8, arm: 9 }),
+            Pair {
+                first: 8,
+                second: 9,
+            }
+        );
     }
 
     #[test]
