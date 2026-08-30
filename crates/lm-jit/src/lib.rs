@@ -31,6 +31,7 @@ const EXIT_UNREACHABLE: u32 = 18;
 const EXIT_TYPE_ENVIRONMENT: u32 = 19;
 
 mod activation;
+mod opcode;
 
 use activation::{
     allocate_instance, grow_list, reserve_list, NativeFunction, RawExit, RawNativeActivation,
@@ -41,6 +42,10 @@ pub use activation::{
     NativeActivation, NativeExecution, NativeFrameView, NativeLiteralView, NativePreparation,
     NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
     NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
+};
+pub use opcode::{
+    instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
+    TreatmentStatus,
 };
 
 /// One native compilation or execution failure.
@@ -617,118 +622,7 @@ pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
 
 /// Return true when one instruction has a dedicated JIT treatment.
 pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> bool {
-    use lm_bytecode::{Instr, NumericInstr};
-
-    matches!(
-        instruction,
-        Instr::ConstUnit
-            | Instr::ConstBool(_)
-            | Instr::ConstInt(_)
-            | Instr::ConstFloat(_)
-            | Instr::ConstChar(_)
-            | Instr::ConstStr(_)
-            | Instr::ConstBytes(_)
-            | Instr::LoadLocal(_)
-            | Instr::StoreLocal(_)
-            | Instr::Pop
-            | Instr::Add
-            | Instr::Sub
-            | Instr::Mul
-            | Instr::Div
-            | Instr::Rem
-            | Instr::Neg
-            | Instr::Not
-            | Instr::LtInt
-            | Instr::LeInt
-            | Instr::GtInt
-            | Instr::GeInt
-            | Instr::EqInt
-            | Instr::NeInt
-            | Instr::EqBool
-            | Instr::NeBool
-            | Instr::EqRef
-            | Instr::NeRef
-            | Instr::Call(_)
-            | Instr::CallG { .. }
-            | Instr::New(_)
-            | Instr::NewG { .. }
-            | Instr::LoadField(_)
-            | Instr::StoreField(_)
-            | Instr::TupleGet(_)
-            | Instr::IsType(_)
-            | Instr::CastType(_)
-            | Instr::ListLen
-            | Instr::ListAt
-            | Instr::ListPush
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListGet { .. })
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListCapacity)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListEpoch)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListIterLen)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListReserve)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::ListReorder)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::SealInstance)
-            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionSome { .. })
-            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionNone { .. })
-            | Instr::Extended(lm_bytecode::ExtendedInstr::OptionPayload { .. })
-            | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
-            | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
-            | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
-            | Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
-            | Instr::Native(lm_bytecode::NativeInstr::StrCharCount)
-            | Instr::Native(lm_bytecode::NativeInstr::HashCombine)
-            | Instr::Native(lm_bytecode::NativeInstr::HashUnorderedCombine)
-            | Instr::Jump(_)
-            | Instr::JumpIfFalse(_)
-            | Instr::JumpIfTrue(_)
-            | Instr::Return
-            | Instr::Unreachable
-            | Instr::Perform { .. }
-            | Instr::PerformValue { .. }
-            | Instr::OpConst(_)
-            | Instr::Native(
-                lm_bytecode::NativeInstr::CharCodepoint
-                    | lm_bytecode::NativeInstr::CharUtf8Len
-                    | lm_bytecode::NativeInstr::EqChar
-                    | lm_bytecode::NativeInstr::NeChar
-                    | lm_bytecode::NativeInstr::LtChar
-                    | lm_bytecode::NativeInstr::LeChar
-                    | lm_bytecode::NativeInstr::GtChar
-                    | lm_bytecode::NativeInstr::GeChar,
-            )
-            | Instr::Numeric(
-                NumericInstr::IntBitAnd
-                    | NumericInstr::IntBitOr
-                    | NumericInstr::IntBitXor
-                    | NumericInstr::IntBitNot
-                    | NumericInstr::IntShl
-                    | NumericInstr::IntShr
-                    | NumericInstr::IntUshr
-                    | NumericInstr::IntWrappingAdd
-                    | NumericInstr::IntWrappingSub
-                    | NumericInstr::IntWrappingMul
-                    | NumericInstr::IntRotateLeft
-                    | NumericInstr::IntRotateRight
-                    | NumericInstr::IntToFloat
-                    | NumericInstr::FloatNeg
-                    | NumericInstr::FloatAdd
-                    | NumericInstr::FloatSub
-                    | NumericInstr::FloatMul
-                    | NumericInstr::FloatDiv
-                    | NumericInstr::FloatEq
-                    | NumericInstr::FloatNe
-                    | NumericInstr::FloatLt
-                    | NumericInstr::FloatLe
-                    | NumericInstr::FloatGt
-                    | NumericInstr::FloatGe
-                    | NumericInstr::FloatIsNan
-                    | NumericInstr::FloatHash
-                    | NumericInstr::FloatBits
-                    | NumericInstr::FloatFromBits
-                    | NumericInstr::FloatToIntStatus
-                    | NumericInstr::FloatToIntValue
-            )
-    )
+    instruction_treatment(instruction).is_dedicated()
 }
 
 mod backend;

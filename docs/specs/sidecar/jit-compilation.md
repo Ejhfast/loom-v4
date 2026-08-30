@@ -274,6 +274,16 @@ Every instruction receives one permanent treatment:
 - E: one fixed typed runtime function;
 - F: an observable engine exit.
 
+One exhaustive opcode ledger records each class, implementation status, exit behavior, replay point, and fault stack shape.
+
+The Rust compiler rejects a new opcode until the ledger classifies it.
+
+The bytecode verifier supplies local initialization and operand shapes at every instruction boundary.
+
+The region planner does not duplicate bytecode stack effects.
+
+The backend contains one per-opcode lowering path.
+
 An unfinished treatment uses one temporary interpreter site.
 
 The site exits before the instruction retires.
@@ -760,6 +770,7 @@ Every report names the revision, host, profile, and measurement method.
 lm-jit owns:
 
 - verified region planning;
+- the exhaustive opcode treatment ledger;
 - Cranelift lowering;
 - native activation records;
 - executable memory;
@@ -1070,6 +1081,21 @@ Gate: `ListReserve` and `ListReorder` disappear from treatment gaps.
 
 Gate: A reserve operation with sufficient capacity calls no runtime function.
 
+### Stage F14: Exhaustive opcode organization
+
+- add one exhaustive opcode ledger;
+- request verified state at every instruction boundary;
+- derive fuel, replay, fault, and exit shapes from verified state;
+- remove the independent planner stack simulation;
+- remove the second inline-call emitter;
+- compare direct and scheduler-driven corpus results.
+
+Gate: A new opcode causes a compile error until the ledger classifies it.
+
+Gate: Both corpus paths match Interpreter state and host observations.
+
+Gate: The structural change preserves existing warm performance.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1379,6 +1405,28 @@ The list-sort profile contains no `ListReserve` or `ListReorder` gap.
 List-sort Auto performance changed from 0.915 times to 0.918 times.
 
 `CallInterface` now dominates the list-sort treatment gaps.
+
+The Stage F14 run centralized opcode treatments and verified program-point state.
+
+Direct and scheduled runs matched Interpreter results across 163 shipped programs.
+
+The complete debug workspace suite took 48.763 seconds.
+
+The release scalar results remained within the prior variance.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Integer loop | 33.235 ms | 1.124 ms | 29.56 times |
+| Factorial | 5.340 ms | 1.234 ms | 4.33 times |
+| Direct scalar call | 48.850 ms | 10.148 ms | 4.81 times |
+| Branch-bearing call | 53.276 ms | 10.523 ms | 5.06 times |
+| Scheduled integer loop | 35.718 ms | 3.999 ms | 8.93 times |
+
+JSON parse remained at 0.975 times in Auto mode.
+
+HTTP parse remained at 0.907 times in Auto mode.
+
+The representative-program performance gate remains open.
 
 ## 24. Rejected designs
 

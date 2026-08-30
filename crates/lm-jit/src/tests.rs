@@ -40,6 +40,35 @@ fn module(blocks: Vec<Vec<Instr>>) -> Module {
 }
 
 #[test]
+fn opcode_ledger_separates_class_status_and_exit() {
+    use lm_bytecode::{Instr, NumericInstr};
+
+    let field = instruction_treatment(&Instr::LoadField(0));
+    assert_eq!(field.class(), TreatmentClass::Guarded);
+    assert_eq!(field.status(), TreatmentStatus::Dedicated);
+    assert_eq!(field.exit(), ExitBehavior::Continue);
+
+    let call = instruction_treatment(&Instr::CallInterface {
+        site: 0,
+        recv_ty: 0,
+        app: lm_bytecode::NO_APP,
+    });
+    assert_eq!(call.class(), TreatmentClass::Call);
+    assert_eq!(call.status(), TreatmentStatus::Temporary);
+    assert_eq!(call.exit(), ExitBehavior::Call);
+
+    let helper = instruction_treatment(&Instr::Numeric(NumericInstr::BytesBitAnd));
+    assert_eq!(helper.class(), TreatmentClass::Helper);
+    assert_eq!(helper.status(), TreatmentStatus::Temporary);
+    assert_eq!(helper.exit(), ExitBehavior::Continue);
+
+    let fault = instruction_treatment(&Instr::RaiseFault);
+    assert_eq!(fault.class(), TreatmentClass::Exit);
+    assert_eq!(fault.status(), TreatmentStatus::Temporary);
+    assert_eq!(fault.exit(), ExitBehavior::Fault);
+}
+
+#[test]
 fn segments_split_conditional_fallthrough() {
     let module = module(vec![
         vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],

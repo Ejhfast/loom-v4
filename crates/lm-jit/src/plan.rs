@@ -1,7 +1,7 @@
 //! Verified bytecode analysis and immutable native region plans.
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
-use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr, NumericInstr};
+use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -463,12 +463,17 @@ struct SegmentAnalysis {
     call_contract: Option<CallContract>,
 }
 
+#[derive(Debug, Clone)]
+struct VerifiedPoint {
+    initialized: Vec<bool>,
+    stack: Vec<ScalarKind>,
+}
+
 struct SegmentAnalysisContext<'a> {
     func: &'a Func,
     source_func: &'a Func,
     module: &'a Module,
     locals: &'a [ScalarKind],
-    result: ScalarKind,
     calls: &'a HashMap<u32, CallSignature>,
     class_relocation: Option<&'a [u32]>,
 }
@@ -510,17 +515,15 @@ impl RegionPlan {
             return Err(UnsupportedReason::InvalidControlFlow);
         }
         let mut segments = split_segments(runtime)?;
-        let segment_points: Vec<(u32, u32)> = segments
-            .iter()
-            .map(|segment| (segment.block, segment.start))
-            .collect();
-        let interpreter_points: Vec<(u32, u32)> = segments
-            .iter()
-            .filter(|segment| matches!(segment.exit, SegmentExit::Interpreter { .. }))
-            .map(|segment| (segment.block, segment.end))
-            .collect();
-        let mut requested_points = segment_points.clone();
-        requested_points.extend(interpreter_points.iter().copied());
+        let mut requested_points = Vec::new();
+        for (block, instructions) in runtime.blocks.iter().enumerate() {
+            let block = u32::try_from(block).map_err(|_| UnsupportedReason::RegionLimit)?;
+            for instruction in 0..=instructions.len() {
+                let instruction =
+                    u32::try_from(instruction).map_err(|_| UnsupportedReason::RegionLimit)?;
+                requested_points.push((block, instruction));
+            }
+        }
         let metadata = lm_verify::verify_function_metadata_at_with_bundle(
             source,
             input.root.bundle,
@@ -528,22 +531,25 @@ impl RegionPlan {
             &requested_points,
         )
         .map_err(|_| UnsupportedReason::MissingSource)?;
-        let (segment_states, interpreter_states) = metadata.points().split_at(segments.len());
-        let interpreter_stacks: HashMap<(u32, u32), Vec<ScalarKind>> = interpreter_points
+        let verified_points: HashMap<(u32, u32), VerifiedPoint> = requested_points
             .into_iter()
-            .zip(interpreter_states.iter())
+            .zip(metadata.points())
+            .filter_map(|(point, state)| state.as_ref().map(|state| (point, state)))
             .map(|(point, state)| {
-                let state = state
-                    .as_ref()
-                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
                 let stack = state
                     .stack()
                     .iter()
                     .map(|ty| scalar_kind_in(source, metadata.types(), *ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok((point, stack))
+                Ok((
+                    point,
+                    VerifiedPoint {
+                        initialized: state.locals().iter().map(Option::is_some).collect(),
+                        stack,
+                    },
+                ))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, UnsupportedReason>>()?;
         let local_kinds = source_func
             .local_types
             .iter()
@@ -572,30 +578,16 @@ impl RegionPlan {
             source_func,
             module: source,
             locals: &local_kinds,
-            result: result_kind,
             calls: &call_contracts,
             class_relocation: input.root.class_relocation,
         };
         for (index, segment) in segments.iter_mut().enumerate() {
-            let state = segment_states
-                .get(index)
-                .and_then(Option::as_ref)
+            let state = verified_points
+                .get(&(segment.block, segment.start))
                 .ok_or(UnsupportedReason::InvalidControlFlow)?;
-            let entry_stack = state
-                .stack()
-                .iter()
-                .map(|ty| scalar_kind_in(source, metadata.types(), *ty))
-                .collect::<Result<Vec<_>, _>>()?;
+            let entry_stack = state.stack.clone();
             segment.entry_stack = entry_stack.clone();
-            let initialized: Vec<bool> = state.locals().iter().map(Option::is_some).collect();
-            let interpreter_stack = interpreter_stacks.get(&(segment.block, segment.end));
-            let analysis = analyze_segment(
-                &analysis_context,
-                segment,
-                &initialized,
-                &entry_stack,
-                interpreter_stack.map(Vec::as_slice),
-            )?;
+            let analysis = analyze_segment(&analysis_context, segment, &verified_points)?;
             segment.uses = analysis.uses;
             segment.definitions = analysis.definitions;
             segment.call_contract = analysis.call_contract;
@@ -861,49 +853,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
     for (block_index, block) in func.blocks.iter().enumerate() {
         let mut start = 0usize;
         for (instruction_index, instruction) in block.iter().enumerate() {
-            let exit = match instruction {
-                Instr::Jump(target) => Some(SegmentExit::Jump {
-                    target_block: *target,
-                }),
-                Instr::JumpIfFalse(target) => Some(SegmentExit::Conditional {
-                    target_block: *target,
-                    jump_on_true: false,
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::JumpIfTrue(target) => Some(SegmentExit::Conditional {
-                    target_block: *target,
-                    jump_on_true: true,
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::Call(target) => Some(SegmentExit::Call {
-                    target: *target,
-                    app: None,
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::CallG { func, app } => Some(SegmentExit::Call {
-                    target: *func,
-                    app: Some(*app),
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::New(_) | Instr::NewG { .. } => Some(SegmentExit::Allocation {
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::Perform { .. } | Instr::PerformValue { .. } => Some(SegmentExit::Effect {
-                    fallthrough_ip: instruction_index as u32 + 1,
-                }),
-                Instr::TupleNew { .. } | Instr::ListNew { .. } => Some(SegmentExit::Interpreter {
-                    fallthrough_ip: Some(instruction_index as u32 + 1),
-                }),
-                Instr::Return => Some(SegmentExit::Return),
-                Instr::Unreachable => Some(SegmentExit::Unreachable),
-                _ if !crate::instruction_has_dedicated_treatment(instruction) => {
-                    Some(SegmentExit::Interpreter {
-                        fallthrough_ip: (instruction_index + 1 < block.len())
-                            .then_some(instruction_index as u32 + 1),
-                    })
-                }
-                _ => None,
-            };
+            let exit = segment_exit(instruction, instruction_index, block.len())?;
             let Some(exit) = exit else { continue };
             segments.push(Segment {
                 block: block_index as u32,
@@ -933,6 +883,60 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
         }
     }
     Ok(segments)
+}
+
+fn segment_exit(
+    instruction: &Instr,
+    instruction_index: usize,
+    block_len: usize,
+) -> Result<Option<SegmentExit>, UnsupportedReason> {
+    let next = instruction_index as u32 + 1;
+    let treatment = crate::instruction_treatment(instruction);
+    if !treatment.is_dedicated() {
+        return Ok(Some(SegmentExit::Interpreter {
+            fallthrough_ip: (instruction_index + 1 < block_len).then_some(next),
+        }));
+    }
+    Ok(match treatment.exit() {
+        crate::ExitBehavior::Continue => None,
+        crate::ExitBehavior::Branch => Some(match instruction {
+            Instr::Jump(target) => SegmentExit::Jump {
+                target_block: *target,
+            },
+            Instr::JumpIfFalse(target) => SegmentExit::Conditional {
+                target_block: *target,
+                jump_on_true: false,
+                fallthrough_ip: next,
+            },
+            Instr::JumpIfTrue(target) => SegmentExit::Conditional {
+                target_block: *target,
+                jump_on_true: true,
+                fallthrough_ip: next,
+            },
+            _ => return Err(UnsupportedReason::InvalidControlFlow),
+        }),
+        crate::ExitBehavior::Call => Some(match instruction {
+            Instr::Call(target) => SegmentExit::Call {
+                target: *target,
+                app: None,
+                fallthrough_ip: next,
+            },
+            Instr::CallG { func, app } => SegmentExit::Call {
+                target: *func,
+                app: Some(*app),
+                fallthrough_ip: next,
+            },
+            _ => return Err(UnsupportedReason::InvalidControlFlow),
+        }),
+        crate::ExitBehavior::Allocation => Some(SegmentExit::Allocation {
+            fallthrough_ip: next,
+        }),
+        crate::ExitBehavior::Effect => Some(SegmentExit::Effect {
+            fallthrough_ip: next,
+        }),
+        crate::ExitBehavior::Return => Some(SegmentExit::Return),
+        crate::ExitBehavior::Fault => Some(SegmentExit::Unreachable),
+    })
 }
 
 fn resolve_successors(
@@ -985,13 +989,10 @@ fn entry(
 fn analyze_segment(
     context: &SegmentAnalysisContext<'_>,
     segment: &Segment,
-    initialized: &[bool],
-    entry_stack: &[ScalarKind],
-    interpreter_exit_stack: Option<&[ScalarKind]>,
+    verified_points: &HashMap<(u32, u32), VerifiedPoint>,
 ) -> Result<SegmentAnalysis, UnsupportedReason> {
-    let mut stack = entry_stack.to_vec();
-    let mut max_stack = stack.len();
-    let mut max_stack_values = stack.len();
+    let mut max_stack = 0;
+    let mut max_stack_values = 0;
     let mut boundary_stack = Vec::new();
     let mut heap_accesses = Vec::new();
     let mut option_accesses = Vec::new();
@@ -1007,115 +1008,101 @@ fn analyze_segment(
         .iter()
         .enumerate()
     {
-        fuel_stacks.push((segment.start + offset as u32, stack.clone()));
+        let position = segment
+            .start
+            .checked_add(u32::try_from(offset).map_err(|_| UnsupportedReason::RegionLimit)?)
+            .ok_or(UnsupportedReason::RegionLimit)?;
+        let next = position
+            .checked_add(1)
+            .ok_or(UnsupportedReason::RegionLimit)?;
+        let before = verified_points
+            .get(&(segment.block, position))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        let after = verified_points
+            .get(&(segment.block, next))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        fuel_stacks.push((position, before.stack.clone()));
+
+        let treatment = crate::instruction_treatment(instruction);
+        if treatment.replays() {
+            replay_stacks.push((position, before.stack.clone()));
+        }
+        match treatment.fault_stack() {
+            crate::FaultStack::None => {}
+            crate::FaultStack::Before => {
+                fault_stacks.push((next, before.stack.clone()));
+            }
+            crate::FaultStack::Pop(count) => {
+                let length = before
+                    .stack
+                    .len()
+                    .checked_sub(usize::from(count))
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                fault_stacks.push((next, before.stack[..length].to_vec()));
+            }
+        }
+
         let source_instruction = context
             .source_func
             .blocks
             .get(segment.block as usize)
-            .and_then(|block| block.get(segment.start as usize + offset))
+            .and_then(|block| block.get(position as usize))
             .copied()
             .ok_or(UnsupportedReason::InvalidControlFlow)?;
         match *instruction {
-            Instr::ConstUnit => stack.push(ScalarKind::Unit),
-            Instr::ConstBool(_) => stack.push(ScalarKind::Bool),
-            Instr::ConstInt(_) => stack.push(ScalarKind::Int),
-            Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
-            Instr::ConstChar(_) => stack.push(ScalarKind::Char),
-            Instr::ConstStr(_) => stack.push(ScalarKind::Object(lm_verify::TY_STR)),
-            Instr::ConstBytes(_) => {
-                let ty = context
-                    .module
-                    .types
-                    .iter()
-                    .position(|ty| matches!(ty, BcType::Bytes))
-                    .and_then(|index| u32::try_from(index).ok())
-                    .ok_or(UnsupportedReason::InvalidStack)?;
-                stack.push(ScalarKind::Object(ty));
-            }
-            Instr::OpConst(_) => stack.push(ScalarKind::Operation),
             Instr::LoadLocal(slot) => {
                 let at = slot as usize;
-                let Some(kind) = context.locals.get(at).copied() else {
+                if context.locals.get(at).is_none() {
                     return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                if !initialized.get(at).copied().unwrap_or(false)
-                    && !definitions.get(at).copied().unwrap_or(false)
-                {
+                }
+                if !before.initialized.get(at).copied().unwrap_or(false) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 if !definitions[at] {
                     uses[at] = true;
                 }
-                stack.push(kind);
             }
             Instr::StoreLocal(slot) => {
                 let at = slot as usize;
-                let kind = context
+                context
                     .locals
                     .get(at)
-                    .copied()
                     .ok_or(UnsupportedReason::InvalidControlFlow)?;
-                expect(&mut stack, kind)?;
                 definitions[at] = true;
             }
-            Instr::Pop => {
-                stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-            }
             Instr::LoadField(field) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 let (receiver_class, value) = field_contract(context, receiver, field)?;
-                let kind = value.kind;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::LoadField {
                         receiver_class,
                         value,
                     },
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(kind);
             }
             Instr::StoreField(field) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let value = stack_from_end(&before.stack, 0)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 let (receiver_class, contract) = field_contract(context, receiver, field)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::StoreField {
                         receiver_class,
                         value: contract,
                     },
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
             }
             Instr::TupleGet(index) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 let value = tuple_element_contract(context, receiver, index)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::TupleGet { value },
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(value.kind);
-            }
-            Instr::Extended(ExtendedInstr::OptionSome { .. }) => {
-                let Instr::Extended(ExtendedInstr::OptionSome { ty: source_ty }) =
-                    source_instruction
-                else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                let payload = option_argument_type(context.module, source_ty)?;
-                expect(&mut stack, scalar_kind(context.module, payload)?)?;
-                stack.push(ScalarKind::Tagged(source_ty));
             }
             Instr::Extended(ExtendedInstr::OptionNone { ty }) => {
                 let Instr::Extended(ExtendedInstr::OptionNone { ty: source_ty }) =
@@ -1125,11 +1112,10 @@ fn analyze_segment(
                 };
                 option_argument_type(context.module, source_ty)?;
                 option_accesses.push(OptionAccess {
-                    instruction: segment.start + offset as u32,
+                    instruction: position,
                     family_type: ty,
                     kind: OptionAccessKind::None,
                 });
-                stack.push(ScalarKind::Tagged(source_ty));
             }
             Instr::Extended(ExtendedInstr::OptionPayload { ty }) => {
                 let Instr::Extended(ExtendedInstr::OptionPayload { ty: source_ty }) =
@@ -1137,29 +1123,20 @@ fn analyze_segment(
                 else {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
-                let instruction = segment.start + offset as u32;
-                let replay_stack = stack.clone();
-                expect(&mut stack, ScalarKind::Tagged(source_ty))?;
                 let payload = option_argument_type(context.module, source_ty)?;
                 let value = value_contract(context, payload)?;
                 option_accesses.push(OptionAccess {
-                    instruction,
+                    instruction: position,
                     family_type: ty,
                     kind: OptionAccessKind::Payload { value },
                 });
-                replay_stacks.push((instruction, replay_stack.clone()));
-                fault_stacks.push((instruction + 1, replay_stack));
-                stack.push(value.kind);
             }
             Instr::Extended(ExtendedInstr::ListGet { ty }) => {
                 let Instr::Extended(ExtendedInstr::ListGet { ty: source_ty }) = source_instruction
                 else {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
-                let instruction = segment.start + offset as u32;
-                let replay_stack = stack.clone();
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 let element = list_element_type(context.module, receiver)?;
                 let option_element = option_argument_type(context.module, source_ty)?;
                 let value = value_contract(context, element)?;
@@ -1170,18 +1147,13 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 option_accesses.push(OptionAccess {
-                    instruction,
+                    instruction: position,
                     family_type: ty,
                     kind: OptionAccessKind::ListGet { value },
                 });
-                replay_stacks.push((instruction, replay_stack));
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Tagged(source_ty));
             }
             Instr::IsType(_) | Instr::CastType(_) => {
-                let instruction_index = segment.start + offset as u32;
-                replay_stacks.push((instruction_index, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 let source_ty = match source_instruction {
                     Instr::IsType(ty) | Instr::CastType(ty) => ty,
                     _ => return Err(UnsupportedReason::InvalidControlFlow),
@@ -1200,7 +1172,7 @@ fn analyze_segment(
                         _ => return Err(UnsupportedReason::InvalidControlFlow),
                     };
                     option_accesses.push(OptionAccess {
-                        instruction: instruction_index,
+                        instruction: position,
                         family_type: *family_type,
                         kind,
                     });
@@ -1215,123 +1187,83 @@ fn analyze_segment(
                         HeapAccessKind::CastType { target_class }
                     };
                     heap_accesses.push(HeapAccess {
-                        instruction: instruction_index,
+                        instruction: position,
                         kind,
                     });
                 }
-                if matches!(instruction, Instr::IsType(_)) {
-                    stack.push(ScalarKind::Bool);
-                } else {
-                    stack.push(scalar_kind(context.module, source_ty)?);
-                }
             }
             Instr::ListLen => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListLen,
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Int);
             }
             Instr::ListAt => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 let element = list_element_type(context.module, receiver)?;
                 let value = value_contract(context, element)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListAt { value },
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(value.kind);
             }
             Instr::Extended(ExtendedInstr::ListSet) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let value = stack_from_end(&before.stack, 0)?;
+                let receiver = stack_from_end(&before.stack, 2)?;
                 let element = list_element_type(context.module, receiver)?;
                 let contract = value_contract(context, element)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListSet { value: contract },
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Unit);
             }
             Instr::Extended(ExtendedInstr::ListCapacity) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListCapacity,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Extended(ExtendedInstr::ListReserve) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListReserve,
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Unit);
             }
             Instr::Extended(ExtendedInstr::ListReorder) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListReorder,
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Unit);
             }
             Instr::Extended(ExtendedInstr::ListEpoch) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListEpoch,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Extended(ExtendedInstr::ListIterLen) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 list_element_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListIterLen,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Extended(ExtendedInstr::SealInstance) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 let ScalarKind::Object(ty) = receiver else {
                     return Err(UnsupportedReason::InvalidStack);
                 };
@@ -1340,50 +1272,36 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidStack);
                 };
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::SealInstance { class },
                 });
-                stack.push(receiver);
             }
             Instr::Native(NativeInstr::BytesLen) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 bytes_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::BytesLen,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Native(NativeInstr::BytesAt) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 bytes_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::BytesAt,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Native(NativeInstr::BytesGet) => {
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
-                expect(&mut stack, ScalarKind::Int)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 bytes_type(context.module, receiver)?;
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::BytesGet,
                 });
-                stack.push(ScalarKind::Int);
             }
             Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
-                let position = segment.start + offset as u32;
-                replay_stacks.push((position, stack.clone()));
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack_from_end(&before.stack, 0)?;
                 text_type(context, receiver)?;
                 let kind = if matches!(*instruction, Instr::Native(NativeInstr::StrByteLen)) {
                     HeapAccessKind::TextByteLen
@@ -1394,164 +1312,41 @@ fn analyze_segment(
                     instruction: position,
                     kind,
                 });
-                stack.push(ScalarKind::Int);
-            }
-            Instr::TupleNew { count, .. } => {
-                let Instr::TupleNew {
-                    ty: source_ty,
-                    count: source_count,
-                } = source_instruction
-                else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                if count != source_count {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                }
-                let Some(BcType::Tuple(elements)) = context.module.types.get(source_ty as usize)
-                else {
-                    return Err(UnsupportedReason::InvalidStack);
-                };
-                if elements.len() != count as usize {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                }
-                boundary_stack = stack.clone();
-                for element in elements.iter().rev().copied() {
-                    expect(&mut stack, scalar_kind(context.module, element)?)?;
-                }
-                stack.push(ScalarKind::Object(source_ty));
-            }
-            Instr::ListNew { count, .. } => {
-                let Instr::ListNew {
-                    ty: source_ty,
-                    count: source_count,
-                } = source_instruction
-                else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                if count != source_count {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                }
-                let element = match context.module.types.get(source_ty as usize) {
-                    Some(BcType::List(element)) => *element,
-                    _ => return Err(UnsupportedReason::InvalidStack),
-                };
-                let element = scalar_kind(context.module, element)?;
-                boundary_stack = stack.clone();
-                for _ in 0..count {
-                    expect(&mut stack, element)?;
-                }
-                stack.push(ScalarKind::Object(source_ty));
             }
             Instr::ListPush => {
-                let instruction = segment.start + offset as u32;
-                let replay_stack = stack.clone();
-                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let value = stack_from_end(&before.stack, 0)?;
+                let receiver = stack_from_end(&before.stack, 1)?;
                 let element = list_element_type(context.module, receiver)?;
                 let contract = value_contract(context, element)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
                 heap_accesses.push(HeapAccess {
-                    instruction,
+                    instruction: position,
                     kind: HeapAccessKind::ListPush { value: contract },
                 });
-                replay_stacks.push((instruction, replay_stack));
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Unit);
             }
             Instr::New(_) | Instr::NewG { .. } => {
-                let ty = match source_instruction {
-                    Instr::New(class) => context
-                        .module
-                        .types
-                        .iter()
-                        .position(|ty| matches!(ty, BcType::Class(found) if *found == class)),
-                    Instr::NewG { class, app } => {
-                        let application = context
-                            .module
-                            .apps
-                            .get(app as usize)
-                            .ok_or(UnsupportedReason::InvalidControlFlow)?;
-                        context.module.types.iter().position(|ty| {
-                            matches!(
-                                ty,
-                                BcType::Inst(found, arguments)
-                                    if *found == class && arguments == &application.types
-                            )
-                        })
-                    }
-                    _ => return Err(UnsupportedReason::InvalidControlFlow),
-                }
-                .and_then(|index| u32::try_from(index).ok())
-                .ok_or(UnsupportedReason::NonScalarType)?;
-                let instruction = segment.start + offset as u32;
-                replay_stacks.push((instruction, stack.clone()));
                 allocations.push(AllocationSite {
-                    instruction,
-                    stack: stack.clone(),
+                    instruction: position,
+                    stack: before.stack.clone(),
                 });
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Object(ty));
             }
-            Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem => {
-                let instruction = segment.start + offset as u32;
-                expect(&mut stack, ScalarKind::Int)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Int);
-            }
-            Instr::Neg => {
-                let instruction = segment.start + offset as u32;
-                expect(&mut stack, ScalarKind::Int)?;
-                fault_stacks.push((instruction + 1, stack.clone()));
-                stack.push(ScalarKind::Int);
-            }
-            Instr::Not => {
-                expect(&mut stack, ScalarKind::Bool)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::LtInt
-            | Instr::LeInt
-            | Instr::GtInt
-            | Instr::GeInt
-            | Instr::EqInt
-            | Instr::NeInt => {
-                expect(&mut stack, ScalarKind::Int)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::EqBool | Instr::NeBool => {
-                expect(&mut stack, ScalarKind::Bool)?;
-                expect(&mut stack, ScalarKind::Bool)?;
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::Native(NativeInstr::HashCombine | NativeInstr::HashUnorderedCombine) => {
-                expect(&mut stack, ScalarKind::Int)?;
-                expect(&mut stack, ScalarKind::Int)?;
-                stack.push(ScalarKind::Int);
-            }
-            Instr::EqRef | Instr::NeRef => {
-                let right = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let left = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                if !matches!(left, ScalarKind::Object(_)) || !matches!(right, ScalarKind::Object(_))
-                {
-                    return Err(UnsupportedReason::InvalidStack);
-                }
-                stack.push(ScalarKind::Bool);
-            }
-            Instr::Native(operation) if char_operation(operation, &mut stack)? => {}
             Instr::Call(target) => {
                 let signature = context
                     .calls
                     .get(&target)
                     .ok_or(UnsupportedReason::MissingSource)?;
                 let contract = instantiate_call(signature, context.module, None)?;
-                boundary_stack = stack.clone();
-                for parameter in contract.params.iter().rev().copied() {
-                    expect(&mut stack, parameter)?;
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                if !uses_equal_representation(result, contract.result) {
+                    return Err(UnsupportedReason::InvalidStack);
                 }
-                stack.push(contract.result);
+                boundary_stack = before.stack.clone();
                 call_contract = Some(contract);
             }
             Instr::CallG { func: target, .. } => {
@@ -1563,83 +1358,41 @@ fn analyze_segment(
                     .get(&target)
                     .ok_or(UnsupportedReason::MissingSource)?;
                 let contract = instantiate_call(signature, context.module, Some(app))?;
-                boundary_stack = stack.clone();
-                for parameter in contract.params.iter().rev().copied() {
-                    expect(&mut stack, parameter)?;
-                }
-                stack.push(contract.result);
-                call_contract = Some(contract);
-            }
-            Instr::Perform { argc, .. } => {
-                let Instr::Perform {
-                    reply_ty: source_reply,
-                    ..
-                } = source_instruction
-                else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                boundary_stack = stack.clone();
-                let arguments = usize::try_from(argc)
-                    .ok()
-                    .and_then(|count| stack.len().checked_sub(count))
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
                     .ok_or(UnsupportedReason::InvalidStack)?;
-                stack.truncate(arguments);
-                stack.push(scalar_kind(context.module, source_reply)?);
-            }
-            Instr::PerformValue { argc, .. } => {
-                let Instr::PerformValue {
-                    reply_ty: source_reply,
-                    ..
-                } = source_instruction
-                else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                boundary_stack = stack.clone();
-                let operation = usize::try_from(argc)
-                    .ok()
-                    .and_then(|count| stack.len().checked_sub(count))
-                    .ok_or(UnsupportedReason::InvalidStack)?;
-                stack.truncate(operation);
-                expect(&mut stack, ScalarKind::Operation)?;
-                stack.push(scalar_kind(context.module, source_reply)?);
-            }
-            Instr::Numeric(operation) if numeric_operation_replays(operation) => {
-                replay_stacks.push((segment.start + offset as u32, stack.clone()));
-                if !scalar_numeric_operation(operation, &mut stack)? {
-                    return Err(UnsupportedReason::UnsupportedInstruction);
-                }
-            }
-            Instr::Numeric(operation) if scalar_numeric_operation(operation, &mut stack)? => {}
-            Instr::Jump(_) => {}
-            Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
-                expect(&mut stack, ScalarKind::Bool)?;
-            }
-            Instr::Return => {
-                expect(&mut stack, context.result)?;
-                if !stack.is_empty() {
+                if !uses_equal_representation(result, contract.result) {
                     return Err(UnsupportedReason::InvalidStack);
                 }
+                boundary_stack = before.stack.clone();
+                call_contract = Some(contract);
             }
-            Instr::Unreachable => {
-                fault_stacks.push((segment.start + offset as u32 + 1, stack.clone()));
+            Instr::Perform { .. } | Instr::PerformValue { .. } => {
+                boundary_stack = before.stack.clone();
             }
             _ if matches!(segment.exit, SegmentExit::Interpreter { .. })
                 && offset + 1 == (segment.end - segment.start) as usize =>
             {
-                boundary_stack = stack.clone();
-                stack = interpreter_exit_stack
-                    .ok_or(UnsupportedReason::InvalidControlFlow)?
-                    .to_vec();
+                boundary_stack = before.stack.clone();
             }
-            _ => return Err(UnsupportedReason::UnsupportedInstruction),
+            _ => {}
         }
-        max_stack = max_stack.max(stack.len());
-        max_stack_values = max_stack_values.max(stack.len());
+        max_stack = max_stack.max(before.stack.len()).max(after.stack.len());
+        max_stack_values = max_stack_values
+            .max(before.stack.len())
+            .max(after.stack.len());
     }
+    let exit_stack = verified_points
+        .get(&(segment.block, segment.end))
+        .ok_or(UnsupportedReason::InvalidControlFlow)?
+        .stack
+        .clone();
     Ok(SegmentAnalysis {
         uses,
         definitions,
-        exit_stack: stack,
+        exit_stack,
         max_stack,
         max_stack_values,
         boundary_stack,
@@ -1653,16 +1406,15 @@ fn analyze_segment(
     })
 }
 
-fn numeric_operation_replays(operation: NumericInstr) -> bool {
-    matches!(
-        operation,
-        NumericInstr::IntShl
-            | NumericInstr::IntShr
-            | NumericInstr::IntUshr
-            | NumericInstr::IntRotateLeft
-            | NumericInstr::IntRotateRight
-            | NumericInstr::FloatToIntValue
-    )
+fn stack_from_end(stack: &[ScalarKind], offset: usize) -> Result<ScalarKind, UnsupportedReason> {
+    let index = offset
+        .checked_add(1)
+        .and_then(|count| stack.len().checked_sub(count))
+        .ok_or(UnsupportedReason::InvalidStack)?;
+    stack
+        .get(index)
+        .copied()
+        .ok_or(UnsupportedReason::InvalidStack)
 }
 
 fn field_contract(
@@ -1823,13 +1575,6 @@ fn relocate_class(class: u32, relocation: Option<&[u32]>) -> Result<u32, Unsuppo
     }
 }
 
-fn expect(stack: &mut Vec<ScalarKind>, expected: ScalarKind) -> Result<(), UnsupportedReason> {
-    match stack.pop() {
-        Some(found) if uses_equal_representation(found, expected) => Ok(()),
-        _ => Err(UnsupportedReason::InvalidStack),
-    }
-}
-
 fn stacks_use_equal_representations(left: &[ScalarKind], right: &[ScalarKind]) -> bool {
     left.len() == right.len()
         && left
@@ -1846,100 +1591,6 @@ fn uses_equal_representation(left: ScalarKind, right: ScalarKind) -> bool {
             (ScalarKind::Object(_), ScalarKind::Object(_))
                 | (ScalarKind::Tagged(_), ScalarKind::Tagged(_))
         )
-}
-
-fn scalar_numeric_operation(
-    operation: NumericInstr,
-    stack: &mut Vec<ScalarKind>,
-) -> Result<bool, UnsupportedReason> {
-    match operation {
-        NumericInstr::IntBitAnd
-        | NumericInstr::IntBitOr
-        | NumericInstr::IntBitXor
-        | NumericInstr::IntShl
-        | NumericInstr::IntShr
-        | NumericInstr::IntUshr
-        | NumericInstr::IntWrappingAdd
-        | NumericInstr::IntWrappingSub
-        | NumericInstr::IntWrappingMul
-        | NumericInstr::IntRotateLeft
-        | NumericInstr::IntRotateRight => {
-            expect(stack, ScalarKind::Int)?;
-            expect(stack, ScalarKind::Int)?;
-            stack.push(ScalarKind::Int);
-        }
-        NumericInstr::IntBitNot => {
-            expect(stack, ScalarKind::Int)?;
-            stack.push(ScalarKind::Int);
-        }
-        NumericInstr::IntToFloat => {
-            expect(stack, ScalarKind::Int)?;
-            stack.push(ScalarKind::Float);
-        }
-        NumericInstr::FloatNeg => {
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Float);
-        }
-        NumericInstr::FloatAdd
-        | NumericInstr::FloatSub
-        | NumericInstr::FloatMul
-        | NumericInstr::FloatDiv => {
-            expect(stack, ScalarKind::Float)?;
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Float);
-        }
-        NumericInstr::FloatEq
-        | NumericInstr::FloatNe
-        | NumericInstr::FloatLt
-        | NumericInstr::FloatLe
-        | NumericInstr::FloatGt
-        | NumericInstr::FloatGe => {
-            expect(stack, ScalarKind::Float)?;
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Bool);
-        }
-        NumericInstr::FloatIsNan => {
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Bool);
-        }
-        NumericInstr::FloatHash
-        | NumericInstr::FloatBits
-        | NumericInstr::FloatToIntStatus
-        | NumericInstr::FloatToIntValue => {
-            expect(stack, ScalarKind::Float)?;
-            stack.push(ScalarKind::Int);
-        }
-        NumericInstr::FloatFromBits => {
-            expect(stack, ScalarKind::Int)?;
-            stack.push(ScalarKind::Float);
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
-fn char_operation(
-    operation: NativeInstr,
-    stack: &mut Vec<ScalarKind>,
-) -> Result<bool, UnsupportedReason> {
-    match operation {
-        NativeInstr::CharCodepoint | NativeInstr::CharUtf8Len => {
-            expect(stack, ScalarKind::Char)?;
-            stack.push(ScalarKind::Int);
-        }
-        NativeInstr::EqChar
-        | NativeInstr::NeChar
-        | NativeInstr::LtChar
-        | NativeInstr::LeChar
-        | NativeInstr::GtChar
-        | NativeInstr::GeChar => {
-            expect(stack, ScalarKind::Char)?;
-            expect(stack, ScalarKind::Char)?;
-            stack.push(ScalarKind::Bool);
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
 }
 
 pub(super) fn compute_liveness(segments: &mut [Segment], locals: usize) {
