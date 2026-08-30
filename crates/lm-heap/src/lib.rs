@@ -247,6 +247,9 @@ pub const JIT_INSTANCE_FIELDS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
 /// Byte offset of a list item array.
 pub const JIT_LIST_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ListLayout, items);
+/// Byte offset of a list structural epoch.
+pub const JIT_LIST_EPOCH_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(ListLayout, epoch);
 /// Byte offset of a tuple item array.
 pub const JIT_TUPLE_ITEMS_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + std::mem::offset_of!(TupleLayout, items);
@@ -1234,12 +1237,16 @@ mod tests {
         }
         let entry = heap.entry(reference.slot);
         let base = std::ptr::from_ref(entry) as usize;
-        let Object::List { items, .. } = heap.get(reference) else {
+        let Object::List { items, epoch } = heap.get(reference) else {
             panic!("the object remains a list");
         };
         assert_eq!(
             std::ptr::from_ref(items) as usize - base,
             JIT_LIST_ITEMS_OFFSET
+        );
+        assert_eq!(
+            std::ptr::from_ref(epoch) as usize - base,
+            JIT_LIST_EPOCH_OFFSET
         );
         assert_eq!(items.as_slice(), [Value::Int(1), Value::Int(2)]);
     }

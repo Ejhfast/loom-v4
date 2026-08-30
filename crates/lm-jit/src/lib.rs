@@ -598,8 +598,13 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::ListLen
             | Instr::ListAt
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListCapacity)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListEpoch)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListIterLen)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::SealInstance)
             | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
             | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
+            | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)

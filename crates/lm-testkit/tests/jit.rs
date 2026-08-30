@@ -877,6 +877,75 @@ fn direct_heap_access_matches_each_fuel_boundary() {
 }
 
 #[test]
+fn direct_collection_metadata_matches_selected_fuel_boundaries() {
+    let source = concat!(
+        "items = [1, 2, 3]\n",
+        "capacity = items.capacity()\n",
+        "sum = 0\n",
+        "for item in items\n",
+        "  sum = sum + item\n",
+        "end\n",
+        "if capacity < 3 then -1000 else sum end\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-collection-metadata.lm", source)
+        .expect("the collection metadata case compiles");
+    for fuel in [0, 1, 2, 3, 4, 5, 8, 13, 21, 34, 55, 89] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(6)));
+    assert!(metrics.compiled_heap_read_sites >= 3, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 1, "{metrics:?}");
+}
+
+#[test]
+fn native_list_iteration_detects_structural_changes() {
+    let source = concat!(
+        "items = [1, 2, 3]\n",
+        "alias = items\n",
+        "for item in items\n",
+        "  alias.push(item)\n",
+        "end\n",
+        "0\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::CollectionModified));
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn frozen_instance_sealing_stays_native() {
+    let source = concat!(
+        "frozen class Token\n",
+        "  value: Int\n",
+        "  def init(mut self, value: Int)\n",
+        "    self.value = value\n",
+        "  end\n",
+        "end\n",
+        "i = 0\nsum = 0\n",
+        "while i < 1000\n",
+        "  token = Token(i)\n",
+        "  sum = sum + token.value\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(499_500)));
+    assert!(metrics.native_allocations >= 1000, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
+}
+
+#[test]
 fn native_class_initialization_releases_each_call_frame() {
     let source = concat!(
         "class Point\n  x: Int = 0\n  y: Int = 0\n",

@@ -1,7 +1,7 @@
 use super::*;
 use crate::plan::{compute_liveness, split_segments, Segment};
-use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NO_PARENT};
-use lm_heap::{Heap, Object};
+use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
+use lm_heap::{Heap, Object, SharedBytes};
 use lm_value::{Value, Witness};
 
 fn module(blocks: Vec<Vec<Instr>>) -> Module {
@@ -168,6 +168,36 @@ fn field_store_module() -> Module {
     module
 }
 
+fn bytes_get_module() -> Module {
+    let mut module = module(vec![vec![
+        Instr::LoadLocal(0),
+        Instr::LoadLocal(1),
+        Instr::Native(NativeInstr::BytesGet),
+        Instr::Return,
+    ]]);
+    module.types.push(BcType::Bytes);
+    module.funcs[0].param_names = vec!["bytes".to_string(), "index".to_string()];
+    module.funcs[0].params = vec![4, 2];
+    module.funcs[0].param_muts = vec![false, false];
+    module.funcs[0].local_types = vec![4, 2];
+    module.funcs.push(Func {
+        name: "main".to_string(),
+        param_names: vec![],
+        type_params: 0,
+        effect_params: 0,
+        params: vec![],
+        param_muts: vec![],
+        ret: 2,
+        row: vec![],
+        captures: vec![],
+        local_types: vec![],
+        blocks: vec![vec![Instr::ConstInt(0), Instr::Return]],
+    });
+    module.func_bounds.push(vec![]);
+    module.entry = 1;
+    module
+}
+
 struct TestRuntime {
     heap: Heap,
 }
@@ -181,6 +211,69 @@ impl AllocationRuntime for TestRuntime {
         _allow_collection: bool,
     ) -> AllocationResult {
         AllocationResult::Interpreter
+    }
+}
+
+#[test]
+fn native_safe_byte_reads_return_a_byte_or_minus_one() {
+    let module = bytes_get_module();
+    let bundle = lm_abi::standard_bundle();
+    lm_verify::verify_module_with_bundle(&module, &bundle).expect("the safe byte read verifies");
+    let region = JitEngine::default()
+        .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
+        .expect("the safe byte read compiles");
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime
+        .heap
+        .alloc(Object::Bytes(SharedBytes::from(&[3, 5, 8])));
+    let reference = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
+
+    for (index, expected) in [(1, 5), (-1, -1), (3, -1)] {
+        let mut activation = NativeActivation::default();
+        activation
+            .prepare_root(NativePreparation {
+                function: 0,
+                block: 0,
+                instruction: 0,
+                local_count: 2,
+                max_stack: region.max_stack(),
+                operand_len: 0,
+                scalar_limit: 4_096,
+                frame_limit: 256,
+            })
+            .expect("the safe byte root prepares");
+        let (locals, states, _) = activation.root_buffers_mut();
+        locals[0] = reference;
+        locals[1] = index as u64;
+        states[0] = LOCAL_INITIALIZED;
+        states[1] = LOCAL_INITIALIZED;
+        let mut roots = vec![0; region.max_roots().max(1)];
+        let mut root_states = vec![0; region.max_roots().max(1)];
+        let heap = runtime.heap.jit_view();
+        let exit = region
+            .execute(
+                &mut runtime,
+                &mut activation,
+                NativeExecution {
+                    entry: 0,
+                    entries: &[],
+                    base_stack_values: 0,
+                    max_stack_values: 4_096,
+                    base_frames: 0,
+                    max_frames: 256,
+                    roots: &mut roots,
+                    root_states: &mut root_states,
+                    fuel: 4,
+                    heap,
+                    class_parents: &[],
+                },
+            )
+            .expect("the safe byte read executes");
+        assert_eq!(exit.kind(), ExitKind::Return);
+        assert_eq!(exit.retired(), 4);
+        assert_eq!(exit.result() as i64, expected);
     }
 }
 

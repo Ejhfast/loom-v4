@@ -1623,6 +1623,20 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_list_iteration",
+        concat!(
+            "items = [1, 2, 3, 4, 5, 6, 7, 8]\n",
+            "round = 0\ntotal = 0\n",
+            "while round < 100000\n",
+            "  total = total + items.capacity()\n",
+            "  for item in items\n",
+            "    total = total + item\n",
+            "  end\n",
+            "  round = round + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_bytes_read",
         concat!(
             "def scan(bytes: Bytes): Int\n",

@@ -910,6 +910,20 @@ Gate: Native calls carry each supported object kind across short scheduler quant
 
 Gate: Representative functions fail only at instructions without a dedicated treatment.
 
+### Stage F6: Direct collection metadata
+
+- compile list capacity reads;
+- compile list epoch observation and validation;
+- compile safe byte reads without an out-of-range memory load;
+- compile frozen-instance sealing;
+- replay invalid handles and changed collections through one uncommon exit.
+
+Gate: Scheduled list traversal improves by more than five times.
+
+Gate: A changed collection produces the exact interpreter fault and state.
+
+Gate: Safe byte reads return the byte or minus one without a runtime helper.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1043,6 +1057,20 @@ Both representative programs became native candidates without type-based rejecti
 | HTTP parse | 43.927 ms | 44.681 ms | 63.361 ms | 0.98 times | 46.88% |
 
 Frequent instruction exits still make forced Native mode slower.
+
+The representative-program performance gate remains open.
+
+The Stage F6 run added direct collection metadata and safe byte reads.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| List traversal | 60.124 ms | 6.679 ms | 6.257 ms | 9.00 times | 9.61 times |
+
+Both modes reached complete measured coverage after one setup exit per round.
+
+JSON remained within three percent in Auto mode.
+
+HTTP improved by one percent in Auto mode.
 
 The representative-program performance gate remains open.
 

@@ -341,8 +341,15 @@ pub(super) enum HeapAccessKind {
     ListSet {
         value: ValueContract,
     },
+    ListCapacity,
+    ListEpoch,
+    ListIterLen,
+    SealInstance {
+        class: u32,
+    },
     BytesLen,
     BytesAt,
+    BytesGet,
 }
 
 #[derive(Debug, Clone)]
@@ -564,7 +571,10 @@ impl RegionPlan {
             segment.fuel_stacks = analysis.fuel_stacks;
             for access in &segment.heap_accesses {
                 match access.kind {
-                    HeapAccessKind::StoreField { .. } | HeapAccessKind::ListSet { .. } => {
+                    HeapAccessKind::StoreField { .. }
+                    | HeapAccessKind::ListSet { .. }
+                    | HeapAccessKind::ListEpoch
+                    | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
                     }
                     _ => heap_read_sites += 1,
@@ -770,6 +780,10 @@ fn inline_function_plan(
                     | Instr::ListLen
                     | Instr::ListAt
                     | Instr::Extended(ExtendedInstr::ListSet)
+                    | Instr::Extended(ExtendedInstr::ListCapacity)
+                    | Instr::Extended(ExtendedInstr::ListEpoch)
+                    | Instr::Extended(ExtendedInstr::ListIterLen)
+                    | Instr::Extended(ExtendedInstr::SealInstance)
                     | Instr::TupleNew { .. }
                     | Instr::ListNew { .. }
                     | Instr::ListPush
@@ -1179,6 +1193,57 @@ fn analyze_segment(
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(ScalarKind::Unit);
             }
+            Instr::Extended(ExtendedInstr::ListCapacity) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListCapacity,
+                });
+                stack.push(ScalarKind::Int);
+            }
+            Instr::Extended(ExtendedInstr::ListEpoch) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListEpoch,
+                });
+                stack.push(ScalarKind::Int);
+            }
+            Instr::Extended(ExtendedInstr::ListIterLen) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListIterLen,
+                });
+                stack.push(ScalarKind::Int);
+            }
+            Instr::Extended(ExtendedInstr::SealInstance) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let ScalarKind::Object(ty) = receiver else {
+                    return Err(UnsupportedReason::InvalidStack);
+                };
+                let contract = value_contract(context, ty)?;
+                let Some(ObjectContract::Instance(class)) = contract.object else {
+                    return Err(UnsupportedReason::InvalidStack);
+                };
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::SealInstance { class },
+                });
+                stack.push(receiver);
+            }
             Instr::Native(NativeInstr::BytesLen) => {
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
@@ -1199,6 +1264,18 @@ fn analyze_segment(
                 heap_accesses.push(HeapAccess {
                     instruction,
                     kind: HeapAccessKind::BytesAt,
+                });
+                stack.push(ScalarKind::Int);
+            }
+            Instr::Native(NativeInstr::BytesGet) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                bytes_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::BytesGet,
                 });
                 stack.push(ScalarKind::Int);
             }

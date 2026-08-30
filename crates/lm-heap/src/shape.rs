@@ -26,6 +26,7 @@ pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST + 8;
 
 /// One collection epoch. Mutation history does not change value equality.
 #[derive(Debug, Clone, Copy, Default, Eq)]
+#[repr(transparent)]
 pub struct StructuralEpoch(pub u32);
 
 /// One compact execution coordinate retained by a fault.
