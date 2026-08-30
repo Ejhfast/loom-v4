@@ -475,6 +475,38 @@ impl NativeRuntime for MachineRuntime<'_> {
         }
     }
 
+    fn list_contains(
+        &mut self,
+        reference: u64,
+        value_bits: u64,
+        value_tag: u64,
+    ) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let Some(value) = tagged_value(value_tag, value_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Some(crate::Object::List { items, .. }) = self.machine.vm.heap.try_get(reference)
+        else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        for item in items.iter().copied() {
+            match self.machine.values_equal(self.module, item, value) {
+                Ok(true) => {
+                    return RuntimeValueResult::Value {
+                        bits: 1,
+                        tag: ValueTag::Bool as u64,
+                    };
+                }
+                Ok(false) => {}
+                Err(fault) => return RuntimeValueResult::Fault(fault),
+            }
+        }
+        RuntimeValueResult::Value {
+            bits: 0,
+            tag: ValueTag::Bool as u64,
+        }
+    }
+
     fn map_at(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult {
         let reference = object_reference(reference);
         if !matches!(
@@ -820,4 +852,88 @@ impl NativeRuntime for MachineRuntime<'_> {
             heap: self.machine.vm.heap.jit_view(),
         }
     }
+
+    fn values_equal(
+        &mut self,
+        left_bits: u64,
+        left_tag: u64,
+        right_bits: u64,
+        right_tag: u64,
+    ) -> RuntimeValueResult {
+        let Some(left) = tagged_value(left_tag, left_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Some(right) = tagged_value(right_tag, right_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        match self.machine.values_equal(self.module, left, right) {
+            Ok(equal) => RuntimeValueResult::Value {
+                bits: u64::from(equal),
+                tag: ValueTag::Bool as u64,
+            },
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn compare_text(&mut self, left: u64, right: u64) -> RuntimeValueResult {
+        let left = object_reference(left);
+        let right = object_reference(right);
+        let (left, right) = match (
+            self.machine.vm.heap.try_get(left),
+            self.machine.vm.heap.try_get(right),
+        ) {
+            (
+                Some(crate::Object::Str(left) | crate::Object::Substring(left)),
+                Some(crate::Object::Str(right) | crate::Object::Substring(right)),
+            ) => (left, right),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        runtime_ordering(left.as_str().cmp(right.as_str()))
+    }
+
+    fn compare_bytes(&mut self, left: u64, right: u64) -> RuntimeValueResult {
+        let left = object_reference(left);
+        let right = object_reference(right);
+        let (left, right) = match (
+            self.machine.vm.heap.try_get(left),
+            self.machine.vm.heap.try_get(right),
+        ) {
+            (Some(crate::Object::Bytes(left)), Some(crate::Object::Bytes(right))) => (left, right),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        runtime_ordering(left.as_slice().cmp(right.as_slice()))
+    }
+
+    fn hash_text(&mut self, reference: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let hash = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Str(text) | crate::Object::Substring(text)) => text.semantic_hash(),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        runtime_int(hash as i64)
+    }
+
+    fn hash_bytes(&mut self, reference: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let hash = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Bytes(bytes)) => bytes.semantic_hash(),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        runtime_int(hash as i64)
+    }
+}
+
+fn runtime_int(value: i64) -> RuntimeValueResult {
+    RuntimeValueResult::Value {
+        bits: value as u64,
+        tag: ValueTag::Int as u64,
+    }
+}
+
+fn runtime_ordering(ordering: std::cmp::Ordering) -> RuntimeValueResult {
+    runtime_int(match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
 }

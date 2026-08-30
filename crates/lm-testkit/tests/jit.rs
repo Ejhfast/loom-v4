@@ -1153,6 +1153,110 @@ fn reference_equality_stays_native() {
 }
 
 #[test]
+fn structural_value_equality_uses_one_typed_helper() {
+    let source = concat!(
+        "enum Pair\n  Value(left: Int, right: (Int, String))\nend\n",
+        "left: Pair = Value(1, (2, \"loom\"))\n",
+        "same: Pair = Value(1, (2, \"loom\"))\n",
+        "different: Pair = Value(1, (3, \"loom\"))\n",
+        "i = 0\nequal = false\n",
+        "while i < 10000\n",
+        "  equal = left == same and left != different\n",
+        "  i = i + 1\n",
+        "end\nequal\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+}
+
+#[test]
+fn structural_value_equality_matches_each_fuel_boundary() {
+    let source = concat!(
+        "enum Pair\n  Value(left: Int, right: Int)\nend\n",
+        "left: Pair = Value(1, 2)\nright: Pair = Value(1, 2)\n",
+        "left == right\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-value-equality-fuel.lm", source)
+        .expect("the value equality fuel case compiles");
+    for fuel in 0..=24 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn list_contains_uses_structural_value_equality() {
+    let source = concat!(
+        "enum Pair\n  Value(left: Int, right: Int)\nend\n",
+        "items: [Pair] = [Value(1, 2), Value(3, 4)]\n",
+        "needle: Pair = Value(3, 4)\nmissing: Pair = Value(5, 6)\n",
+        "i = 0\nfound = false\n",
+        "while i < 10000\n",
+        "  found = items.contains(needle) and not items.contains(missing)\n",
+        "  i = i + 1\n",
+        "end\nfound\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+}
+
+#[test]
+fn text_and_byte_comparison_helpers_stay_native() {
+    let source = concat!(
+        "text = \"alpha\"\nsame_text = \"alpha\"\nlater_text = \"omega\"\n",
+        "bytes = b\"alpha\"\nsame_bytes = b\"alpha\"\nlater_bytes = b\"omega\"\n",
+        "i = 0\nvalid = false\nhash = 0\n",
+        "while i < 10000\n",
+        "  valid = text == same_text and text != later_text\n",
+        "  valid = valid and text < later_text and text <= same_text\n",
+        "  valid = valid and later_text > text and later_text >= text\n",
+        "  valid = valid and bytes == same_bytes and bytes != later_bytes\n",
+        "  valid = valid and bytes < later_bytes and bytes <= same_bytes\n",
+        "  valid = valid and later_bytes > bytes and later_bytes >= bytes\n",
+        "  hash = hash_of(text) ^ hash_of(bytes)\n",
+        "  i = i + 1\n",
+        "end\n(valid, hash)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(native_dump.contains("(true,"), "{native_dump}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 300_000, "{metrics:?}");
+}
+
+#[test]
+fn text_and_byte_comparisons_match_each_fuel_boundary() {
+    let source = concat!(
+        "text = \"alpha\"\nbytes = b\"alpha\"\n",
+        "(text == \"alpha\", text < \"omega\", bytes == b\"alpha\", hash_of(bytes))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-value-comparison-fuel.lm", source)
+        .expect("the comparison fuel case compiles");
+    for fuel in 0..=40 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
 fn class_tests_and_casts_use_the_runtime_parent_table() {
     let source = concat!(
         "class Shape\nend\n",

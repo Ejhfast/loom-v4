@@ -330,6 +330,10 @@ pub(super) type RawAllocateValues =
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 pub(super) type RawMapLookup = unsafe extern "C" fn(*mut c_void, u64, u64, u64, *mut u64) -> u32;
+pub(super) type RawValueEqual =
+    unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, *mut u64) -> u32;
+pub(super) type RawObjectBinary = unsafe extern "C" fn(*mut c_void, u64, u64, *mut u64) -> u32;
+pub(super) type RawObjectUnary = unsafe extern "C" fn(*mut c_void, u64, *mut u64) -> u32;
 pub(super) type RawMapPutCommit =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32) -> u32;
 pub(super) type RawMapPutDiscard =
@@ -346,11 +350,17 @@ pub(super) struct RawNativeFunctions {
     pub(super) allocate_map: RawAllocateValues,
     pub(super) grow_list: RawGrowList,
     pub(super) reserve_list: RawReserveList,
+    pub(super) list_contains: RawMapLookup,
     pub(super) map_has: RawMapLookup,
     pub(super) map_at: RawMapLookup,
     pub(super) map_put_discard: RawMapPutDiscard,
     pub(super) map_put_probe: RawMapLookup,
     pub(super) map_put_commit: RawMapPutCommit,
+    pub(super) value_equal: RawValueEqual,
+    pub(super) text_compare: RawObjectBinary,
+    pub(super) bytes_compare: RawObjectBinary,
+    pub(super) text_hash: RawObjectUnary,
+    pub(super) bytes_hash: RawObjectUnary,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1166,6 +1176,14 @@ pub trait NativeRuntime {
     /// Reserve additional capacity for one list.
     fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult;
 
+    /// Test one list item with structural value equality.
+    fn list_contains(
+        &mut self,
+        reference: u64,
+        value_bits: u64,
+        value_tag: u64,
+    ) -> RuntimeValueResult;
+
     /// Test one map key with the native map index.
     fn map_has(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
 
@@ -1180,6 +1198,27 @@ pub trait NativeRuntime {
 
     /// Commit one previously probed map insertion.
     fn map_put_commit(&mut self, request: MapPutCommitRequest<'_>) -> RuntimeUnitResult;
+
+    /// Compare two canonical values with structural value equality.
+    fn values_equal(
+        &mut self,
+        left_bits: u64,
+        left_tag: u64,
+        right_bits: u64,
+        right_tag: u64,
+    ) -> RuntimeValueResult;
+
+    /// Compare two text values and return their signed ordering.
+    fn compare_text(&mut self, left: u64, right: u64) -> RuntimeValueResult;
+
+    /// Compare two byte values and return their signed ordering.
+    fn compare_bytes(&mut self, left: u64, right: u64) -> RuntimeValueResult;
+
+    /// Compute one stable text hash.
+    fn hash_text(&mut self, reference: u64) -> RuntimeValueResult;
+
+    /// Compute one stable byte hash.
+    fn hash_bytes(&mut self, reference: u64) -> RuntimeValueResult;
 }
 
 /// One checked list-growth result.
@@ -1670,6 +1709,26 @@ pub(super) unsafe extern "C" fn map_has<R: NativeRuntime>(
     unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_has) }
 }
 
+pub(super) unsafe extern "C" fn list_contains<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    value_bits: u64,
+    value_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe {
+        map_lookup(
+            context,
+            reference,
+            value_bits,
+            value_tag,
+            result,
+            R::list_contains,
+        )
+    }
+}
+
 pub(super) unsafe extern "C" fn map_at<R: NativeRuntime>(
     context: *mut c_void,
     reference: u64,
@@ -1702,6 +1761,135 @@ unsafe fn map_lookup<R: NativeRuntime>(
     match lookup(runtime, reference, key_bits, key_tag) {
         RuntimeValueResult::Value { bits, tag } => {
             // SAFETY: The caller provides two writable result words.
+            unsafe {
+                result.write(bits);
+                result.add(1).write(tag);
+            }
+            RUNTIME_OK
+        }
+        RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn values_equal<R: NativeRuntime>(
+    context: *mut c_void,
+    left_bits: u64,
+    left_tag: u64,
+    right_bits: u64,
+    right_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.values_equal(left_bits, left_tag, right_bits, right_tag) {
+        RuntimeValueResult::Value { bits, tag } => {
+            // SAFETY: The caller provides two writable result words.
+            unsafe {
+                result.write(bits);
+                result.add(1).write(tag);
+            }
+            RUNTIME_OK
+        }
+        RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn text_compare<R: NativeRuntime>(
+    context: *mut c_void,
+    left: u64,
+    right: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, left, right, result, R::compare_text) }
+}
+
+pub(super) unsafe extern "C" fn bytes_compare<R: NativeRuntime>(
+    context: *mut c_void,
+    left: u64,
+    right: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, left, right, result, R::compare_bytes) }
+}
+
+unsafe fn object_binary<R: NativeRuntime>(
+    context: *mut c_void,
+    left: u64,
+    right: u64,
+    result: *mut u64,
+    operation: fn(&mut R, u64, u64) -> RuntimeValueResult,
+) -> u32 {
+    let Some(runtime) = (unsafe { runtime_pointer::<R>(context, result) }) else {
+        return RUNTIME_INTERPRETER;
+    };
+    // SAFETY: The checked context retains one live runtime during this call.
+    let runtime = unsafe { &mut *runtime };
+    write_runtime_value(operation(runtime, left, right), result)
+}
+
+pub(super) unsafe extern "C" fn text_hash<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_unary(context, reference, result, R::hash_text) }
+}
+
+pub(super) unsafe extern "C" fn bytes_hash<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_unary(context, reference, result, R::hash_bytes) }
+}
+
+unsafe fn object_unary<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    result: *mut u64,
+    operation: fn(&mut R, u64) -> RuntimeValueResult,
+) -> u32 {
+    let Some(runtime) = (unsafe { runtime_pointer::<R>(context, result) }) else {
+        return RUNTIME_INTERPRETER;
+    };
+    // SAFETY: The checked context retains one live runtime during this call.
+    let runtime = unsafe { &mut *runtime };
+    write_runtime_value(operation(runtime, reference), result)
+}
+
+unsafe fn runtime_pointer<R: NativeRuntime>(
+    context: *mut c_void,
+    result: *mut u64,
+) -> Option<*mut R> {
+    if context.is_null() || result.is_null() {
+        return None;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() {
+        return None;
+    }
+    Some(context.runtime)
+}
+
+fn write_runtime_value(value: RuntimeValueResult, result: *mut u64) -> u32 {
+    match value {
+        RuntimeValueResult::Value { bits, tag } => {
+            // SAFETY: The checked caller provides two writable result words.
             unsafe {
                 result.write(bits);
                 result.add(1).write(tag);

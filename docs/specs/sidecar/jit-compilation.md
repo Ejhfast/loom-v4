@@ -1785,6 +1785,49 @@ The representative gate remains open.
 | HTTP parse | 43.538 ms | 48.323 ms | 73.675 ms | 0.90 times | 0.59 times | 48.23 percent |
 | HTTP serialize | 22.852 ms | 26.204 ms | 26.467 ms | 0.87 times | 0.86 times | 41.78 percent |
 
+### Stage F25: Value comparison and hashing
+
+- inline unequal tags, scalar equality, and identical object references;
+- call one fixed typed helper for recursive structural equality;
+- use the interpreter's structural equality implementation;
+- keep the native frame active during each equality walk;
+- use one separate fixed helper for `ListContains`;
+- compare text through one fixed typed ordering helper;
+- compare bytes through one fixed typed ordering helper;
+- hash text and bytes through fixed typed helpers;
+- preserve exact fuel, fault, and scheduler state.
+
+Gate: Structural enum and tuple equality uses no temporary interpreter site.
+
+Gate: List containment uses the same structural equality rule.
+
+Gate: All text and byte comparisons use no temporary interpreter site.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 116 tests.
+
+The direct and scheduled corpus gate took 12.03 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Structural equality | 19.775 ms | 20.451 ms | 10.099 ms | 1.96 times |
+| Text and byte comparison | 20.242 ms | 25.622 ms | 7.421 ms | 2.73 times |
+
+The batch completed 17 opcode treatments.
+
+The ledger now has 118 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 1.01 times | 31.20 percent |
+| JSON parse | 0.97 times | 6.38 percent |
+| JSON stringify | 0.98 times | 52.07 percent |
+| HTTP parse | 0.90 times | 48.23 percent |
+| HTTP serialize | 0.87 times | 41.78 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -39,8 +39,9 @@ mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, grow_list, map_at, map_has, map_put_commit, map_put_discard, map_put_probe,
-    reserve_list, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
+    allocate_tuple, bytes_compare, bytes_hash, grow_list, list_contains, map_at, map_has,
+    map_put_commit, map_put_discard, map_put_probe, reserve_list, text_compare, text_hash,
+    values_equal, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
     RawRuntimeContext,
 };
 pub use activation::{
@@ -667,11 +668,17 @@ impl CompiledRegion {
             allocate_map: allocate_map::<R>,
             grow_list: grow_list::<R>,
             reserve_list: reserve_list::<R>,
+            list_contains: list_contains::<R>,
             map_has: map_has::<R>,
             map_at: map_at::<R>,
             map_put_discard: map_put_discard::<R>,
             map_put_probe: map_put_probe::<R>,
             map_put_commit: map_put_commit::<R>,
+            value_equal: values_equal::<R>,
+            text_compare: text_compare::<R>,
+            bytes_compare: bytes_compare::<R>,
+            text_hash: text_hash::<R>,
+            bytes_hash: bytes_hash::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {

@@ -309,6 +309,9 @@ struct NativeValues<'a> {
     map_lookup_signature: ir::SigRef,
     map_put_discard_signature: ir::SigRef,
     map_put_commit_signature: ir::SigRef,
+    value_equal_signature: ir::SigRef,
+    object_binary_signature: ir::SigRef,
+    object_unary_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -578,6 +581,51 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let map_put_commit_signature = builder.import_signature(map_put_commit_signature);
+    let mut value_equal_signature = ir::Signature::new(host_call_conv);
+    value_equal_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..4 {
+        value_equal_signature.params.push(AbiParam::new(types::I64));
+    }
+    value_equal_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    value_equal_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let value_equal_signature = builder.import_signature(value_equal_signature);
+    let mut object_binary_signature = ir::Signature::new(host_call_conv);
+    object_binary_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    object_binary_signature
+        .params
+        .push(AbiParam::new(types::I64));
+    object_binary_signature
+        .params
+        .push(AbiParam::new(types::I64));
+    object_binary_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    object_binary_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let object_binary_signature = builder.import_signature(object_binary_signature);
+    let mut object_unary_signature = ir::Signature::new(host_call_conv);
+    object_unary_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    object_unary_signature
+        .params
+        .push(AbiParam::new(types::I64));
+    object_unary_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    object_unary_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let object_unary_signature = builder.import_signature(object_unary_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -709,6 +757,9 @@ fn emit_region(
         map_lookup_signature,
         map_put_discard_signature,
         map_put_commit_signature,
+        value_equal_signature,
+        object_binary_signature,
+        object_unary_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -1490,6 +1541,28 @@ fn emit_segment(
                         block: segment.block,
                         instruction: instruction_index,
                         prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::ListContains) => {
+                let deopt_stack = stack.clone();
+                let needle = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let result = emit_runtime_value_lookup(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, list_contains),
+                    reference,
+                    needle,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
                     },
                 )?;
                 stack.push(result);
@@ -2435,6 +2508,114 @@ fn emit_segment(
                 let compared = builder.ins().icmp(condition, left, right);
                 let result = builder.ins().uextend(types::I64, compared);
                 push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+            }
+            Instr::EqValue | Instr::NeValue => {
+                let deopt_stack = stack.clone();
+                let right = pop_value(&mut stack)?;
+                let left = pop_value(&mut stack)?;
+                let equal = emit_value_equal(
+                    builder,
+                    values,
+                    left,
+                    right,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                let result = if matches!(instruction, Instr::EqValue) {
+                    equal
+                } else {
+                    builder.ins().bxor_imm(equal, 1)
+                };
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+            }
+            Instr::Native(
+                operation @ (NativeInstr::EqStr
+                | NativeInstr::NeStr
+                | NativeInstr::TextLt
+                | NativeInstr::TextLe
+                | NativeInstr::TextGt
+                | NativeInstr::TextGe
+                | NativeInstr::EqBytes
+                | NativeInstr::NeBytes
+                | NativeInstr::LtBytes
+                | NativeInstr::LeBytes
+                | NativeInstr::GtBytes
+                | NativeInstr::GeBytes),
+            ) => {
+                let deopt_stack = stack.clone();
+                let right = pop_native(&mut stack)?;
+                let left = pop_native(&mut stack)?;
+                let function_offset = match operation {
+                    NativeInstr::EqStr
+                    | NativeInstr::NeStr
+                    | NativeInstr::TextLt
+                    | NativeInstr::TextLe
+                    | NativeInstr::TextGt
+                    | NativeInstr::TextGe => {
+                        mem::offset_of!(RawNativeFunctions, text_compare)
+                    }
+                    _ => mem::offset_of!(RawNativeFunctions, bytes_compare),
+                };
+                let ordering = emit_typed_object_binary(
+                    builder,
+                    values,
+                    function_offset,
+                    left,
+                    right,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                let condition = match operation {
+                    NativeInstr::EqStr | NativeInstr::EqBytes => IntCC::Equal,
+                    NativeInstr::NeStr | NativeInstr::NeBytes => IntCC::NotEqual,
+                    NativeInstr::TextLt | NativeInstr::LtBytes => IntCC::SignedLessThan,
+                    NativeInstr::TextLe | NativeInstr::LeBytes => IntCC::SignedLessThanOrEqual,
+                    NativeInstr::TextGt | NativeInstr::GtBytes => IntCC::SignedGreaterThan,
+                    NativeInstr::TextGe | NativeInstr::GeBytes => IntCC::SignedGreaterThanOrEqual,
+                    _ => return Err(CompileError::Backend),
+                };
+                let compared = builder.ins().icmp_imm(condition, ordering, 0);
+                let result = builder.ins().uextend(types::I64, compared);
+                push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+            }
+            Instr::Native(operation @ (NativeInstr::TextHash | NativeInstr::BytesHash)) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let function_offset = if matches!(operation, NativeInstr::TextHash) {
+                    mem::offset_of!(RawNativeFunctions, text_hash)
+                } else {
+                    mem::offset_of!(RawNativeFunctions, bytes_hash)
+                };
+                let result = emit_typed_object_unary(
+                    builder,
+                    values,
+                    function_offset,
+                    reference,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::EqRef | Instr::NeRef => {
                 let right = pop_native(&mut stack)?;
@@ -6431,6 +6612,24 @@ fn emit_map_lookup(
     } else {
         mem::offset_of!(RawNativeFunctions, map_has)
     };
+    emit_runtime_value_lookup(
+        builder,
+        values,
+        function_offset,
+        emission.reference,
+        emission.key,
+        emission.exit,
+    )
+}
+
+fn emit_runtime_value_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    argument: NativeValue,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
     let lookup = load_value(
         builder,
         values.pointer_type,
@@ -6442,9 +6641,9 @@ fn emit_map_lookup(
         lookup,
         &[
             values.runtime_context,
-            emission.reference,
-            emission.key.bits,
-            emission.key.tag,
+            reference,
+            argument.bits,
+            argument.tag,
             values.allocation_result_pointer,
         ],
     );
@@ -6453,9 +6652,9 @@ fn emit_map_lookup(
         builder,
         values,
         status,
-        emission.exit.point,
-        emission.exit.fault_stack,
-        emission.exit.deopt_stack,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
     )?;
     let bits = builder.ins().load(
         types::I64,
@@ -6470,6 +6669,171 @@ fn emit_map_lookup(
         8,
     );
     Ok(NativeValue { bits, tag })
+}
+
+fn emit_value_equal(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    left: NativeValue,
+    right: NativeValue,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let matching_tags = builder.create_block();
+    let slow = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    let same_tag = builder.ins().icmp(IntCC::Equal, left.tag, right.tag);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .brif(same_tag, matching_tags, &[], done, &[zero.into()]);
+
+    builder.switch_to_block(matching_tags);
+    let is_object = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, left.tag, ValueTag::Obj as u64 as i64);
+    let mut is_simple =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, left.tag, ValueTag::Unit as u64 as i64);
+    for tag in [
+        ValueTag::Bool,
+        ValueTag::Int,
+        ValueTag::Char,
+        ValueTag::Op,
+        ValueTag::EmptyCase,
+    ] {
+        let matches = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, left.tag, tag as u64 as i64);
+        is_simple = builder.ins().bor(is_simple, matches);
+    }
+    let same_bits = builder.ins().icmp(IntCC::Equal, left.bits, right.bits);
+    let same_object = builder.ins().band(is_object, same_bits);
+    let fast = builder.ins().bor(same_object, is_simple);
+    let fast_result = builder.ins().uextend(types::I64, same_bits);
+    builder
+        .ins()
+        .brif(fast, done, &[fast_result.into()], slow, &[]);
+
+    builder.switch_to_block(slow);
+    let equal = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, value_equal),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.value_equal_signature,
+        equal,
+        &[
+            values.runtime_context,
+            left.bits,
+            left.tag,
+            right.bits,
+            right.tag,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    let result = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    );
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_typed_object_binary(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    left: ir::Value,
+    right: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.object_binary_signature,
+        function,
+        &[
+            values.runtime_context,
+            left,
+            right,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
+}
+
+fn emit_typed_object_unary(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.object_unary_signature,
+        function,
+        &[
+            values.runtime_context,
+            reference,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1318,6 +1318,34 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_value_eq",
+        concat!(
+            "enum Pair\n  Value(left: Int, right: (Int, String))\nend\n",
+            "left: Pair = Value(1, (2, \"loom\"))\n",
+            "right: Pair = Value(1, (2, \"loom\"))\n",
+            "i = 0\nsame = false\n",
+            "while i < 200000\n",
+            "  same = left == right\n",
+            "  i = i + 1\n",
+            "end\nsame\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_text_bytes_compare",
+        concat!(
+            "text = \"alpha\"\nlater = \"omega\"\n",
+            "bytes = b\"alpha\"\nlater_bytes = b\"omega\"\n",
+            "i = 0\nvalid = false\nhash = 0\n",
+            "while i < 100000\n",
+            "  valid = text < later and bytes < later_bytes\n",
+            "  hash = hash_of(text) ^ hash_of(bytes)\n",
+            "  i = i + 1\n",
+            "end\n(valid, hash)\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_expression_stack",
         concat!(
             "i = 0\ns = 0\n",

@@ -201,7 +201,10 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::MapPut { .. } => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
-        Instr::Freeze | Instr::Digest { .. } | Instr::EqValue | Instr::NeValue => temporary(Helper),
+        Instr::EqValue | Instr::NeValue => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        Instr::Freeze | Instr::Digest { .. } => temporary(Helper),
         Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
             InstructionTreatment::dedicated(Inline, ExitBehavior::Branch)
@@ -319,7 +322,9 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::ListReorder => dedicated(FastPath)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
-        ExtendedInstr::ListContains => temporary(Helper),
+        ExtendedInstr::ListContains => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::CallSlot { .. } => InstructionTreatment::temporary(Call, ExitBehavior::Call),
         ExtendedInstr::NewSlot { .. } => {
             InstructionTreatment::temporary(Call, ExitBehavior::Allocation)
@@ -373,6 +378,23 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::GeChar
         | NativeInstr::HashCombine
         | NativeInstr::HashUnorderedCombine => dedicated(Inline),
+        NativeInstr::EqStr
+        | NativeInstr::NeStr
+        | NativeInstr::TextLt
+        | NativeInstr::TextLe
+        | NativeInstr::TextGt
+        | NativeInstr::TextGe
+        | NativeInstr::EqBytes
+        | NativeInstr::NeBytes
+        | NativeInstr::LtBytes
+        | NativeInstr::LeBytes
+        | NativeInstr::GtBytes
+        | NativeInstr::GeBytes => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NativeInstr::TextHash | NativeInstr::BytesHash => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
         NativeInstr::SbNew
         | NativeInstr::SbAppendStr
         | NativeInstr::SbAppendInt
@@ -396,9 +418,7 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         NativeInstr::SbByteLen | NativeInstr::SbLen | NativeInstr::BbLen | NativeInstr::BbAt => {
             temporary(Guarded)
         }
-        NativeInstr::EqStr
-        | NativeInstr::NeStr
-        | NativeInstr::StrConcat
+        NativeInstr::StrConcat
         | NativeInstr::StrStartsWith
         | NativeInstr::StrEndsWith
         | NativeInstr::StrContains
@@ -421,24 +441,12 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::TextSlice
         | NativeInstr::TextSliceBytes
         | NativeInstr::TextBytes
-        | NativeInstr::TextLt
-        | NativeInstr::TextLe
-        | NativeInstr::TextGt
-        | NativeInstr::TextGe
         | NativeInstr::TextToString
         | NativeInstr::BytesText
         | NativeInstr::BbFindFrom
         | NativeInstr::BytesStartsWith
         | NativeInstr::BytesFindIndex
         | NativeInstr::BytesHex
-        | NativeInstr::BytesIsUtf8
-        | NativeInstr::EqBytes
-        | NativeInstr::NeBytes
-        | NativeInstr::LtBytes
-        | NativeInstr::LeBytes
-        | NativeInstr::GtBytes
-        | NativeInstr::GeBytes
-        | NativeInstr::TextHash
-        | NativeInstr::BytesHash => temporary(Helper),
+        | NativeInstr::BytesIsUtf8 => temporary(Helper),
     }
 }

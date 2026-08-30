@@ -6434,7 +6434,7 @@ impl Machine {
     /// pays for the size of that loop, and this comparison runs on
     /// one instruction alone.
     #[inline(never)]
-    fn values_equal(
+    pub(crate) fn values_equal(
         &self,
         module: &NamespaceRuntime,
         a: Value,

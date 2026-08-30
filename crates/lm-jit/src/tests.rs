@@ -327,6 +327,15 @@ impl NativeRuntime for TestRuntime {
         ListReserveResult::Interpreter
     }
 
+    fn list_contains(
+        &mut self,
+        _reference: u64,
+        _value_bits: u64,
+        _value_tag: u64,
+    ) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
     fn map_has(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
         RuntimeValueResult::Interpreter
     }
@@ -350,6 +359,32 @@ impl NativeRuntime for TestRuntime {
 
     fn map_put_commit(&mut self, _request: MapPutCommitRequest<'_>) -> RuntimeUnitResult {
         RuntimeUnitResult::Interpreter
+    }
+
+    fn values_equal(
+        &mut self,
+        _left_bits: u64,
+        _left_tag: u64,
+        _right_bits: u64,
+        _right_tag: u64,
+    ) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn compare_text(&mut self, _left: u64, _right: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn compare_bytes(&mut self, _left: u64, _right: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn hash_text(&mut self, _reference: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn hash_bytes(&mut self, _reference: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
     }
 }
 
