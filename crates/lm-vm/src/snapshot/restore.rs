@@ -1041,10 +1041,9 @@ fn restore_state(
     let mut literals = try_vec(source.literals.len())?;
     if code_is_identity {
         literals.extend(
-            source
-                .literals
-                .iter()
-                .map(|slot| slot.map(|ordinal| refs[ordinal as usize])),
+            source.literals.iter().map(|slot| {
+                slot.map_or(Value::Uninit, |ordinal| Value::Obj(refs[ordinal as usize]))
+            }),
         );
     } else {
         let (source_string_count, source_byte_count, target_string_count) =
@@ -1081,9 +1080,9 @@ fn restore_state(
                 literals
                     .try_reserve_exact(needed - literals.len())
                     .map_err(|_| RestoreFail::LimitExceeded)?;
-                literals.resize(needed, None);
+                literals.resize(needed, Value::Uninit);
             }
-            literals[target_index] = Some(refs[*ordinal as usize]);
+            literals[target_index] = Value::Obj(refs[*ordinal as usize]);
         }
     }
     let pending = match &source.pending {

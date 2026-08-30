@@ -1431,11 +1431,13 @@ impl World {
             literals: m
                 .literals
                 .iter()
-                .map(|slot| {
-                    slot.map(|r| match map_value(Value::Obj(r)) {
-                        Value::Obj(r) => r.slot,
-                        _ => unreachable!("a literal maps to an object"),
-                    })
+                .map(|value| {
+                    value
+                        .as_obj()
+                        .map(|reference| match map_value(Value::Obj(reference)) {
+                            Value::Obj(r) => r.slot,
+                            _ => unreachable!("a literal maps to an object"),
+                        })
                 })
                 .collect(),
             start_body: record.start_body.map(|r| match map_value(Value::Obj(r)) {

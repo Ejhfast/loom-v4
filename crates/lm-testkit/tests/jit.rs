@@ -442,6 +442,33 @@ fn canonical_option_values_stay_native() {
 }
 
 #[test]
+fn cached_string_and_byte_literals_stay_native() {
+    let source = concat!(
+        "i = 0\ntext = \"\"\nbytes = b\"\"\n",
+        "while i < 10000\n",
+        "  text = \"hello\"\n",
+        "  bytes = b\"\\x01\\x02\"\n",
+        "  i = i + 1\n",
+        "end\n",
+        "if text.byte_len() == 5 and bytes.len() == 2 then i else 0 end\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-literals.lm", source).expect("the literal case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(10_000)));
+    assert!(metrics.native_retired_instructions > 50_000, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 4, "{metrics:?}");
+}
+
+#[test]
 fn integer_overflow_matches_the_interpreter() {
     let source = "value = 9223372036854775807\nvalue + 1\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);

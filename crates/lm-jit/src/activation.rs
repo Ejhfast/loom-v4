@@ -2,6 +2,7 @@
 
 use crate::Failure;
 use lm_heap::JitHeapView;
+use lm_value::Value;
 use std::ffi::c_void;
 
 pub(super) const ALLOCATION_OK: u32 = 0;
@@ -66,6 +67,8 @@ pub(super) struct RawNativeActivation {
     pub(super) class_count: usize,
     pub(super) option_families: *const u32,
     pub(super) option_family_count: usize,
+    pub(super) literal_values: *const Value,
+    pub(super) literal_count: usize,
 }
 
 pub(super) type RawAllocateInstance =
@@ -128,6 +131,31 @@ pub struct NativeExecution<'a> {
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
     pub option_families: &'a [u32],
+    pub literals: NativeLiteralView,
+}
+
+/// One native view of a machine's canonical literal table.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeLiteralView {
+    pub(super) values: *const Value,
+    pub(super) count: usize,
+}
+
+impl NativeLiteralView {
+    /// One empty literal table.
+    pub const EMPTY: NativeLiteralView = NativeLiteralView {
+        values: std::ptr::null(),
+        count: 0,
+    };
+
+    /// Create a view over storage that stays fixed during native execution.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep every value live and unchanged during native execution.
+    pub unsafe fn from_raw_parts(values: *const Value, count: usize) -> NativeLiteralView {
+        NativeLiteralView { values, count }
+    }
 }
 
 /// Mutable canonical buffers for one native root frame.

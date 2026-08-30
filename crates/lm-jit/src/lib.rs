@@ -26,6 +26,8 @@ const EXIT_STACK_LIMIT: u32 = 13;
 const EXIT_GROW_ACTIVATION: u32 = 14;
 const EXIT_TYPE_RESOLUTION: u32 = 15;
 const EXIT_REPLAY: u32 = 16;
+const EXIT_LITERAL: u32 = 17;
+const EXIT_UNREACHABLE: u32 = 18;
 
 mod activation;
 
@@ -34,7 +36,8 @@ use activation::{
 };
 pub use activation::{
     AllocationResult, AllocationRuntime, NativeActivation, NativeExecution, NativeFrameView,
-    NativePreparation, NativeRootBuffers, NativeRootBuffersMut, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeLiteralView, NativePreparation, NativeRootBuffers, NativeRootBuffersMut, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
 };
 
 /// One native compilation or execution failure.
@@ -351,6 +354,7 @@ impl CompiledRegion {
             heap,
             class_parents,
             option_families,
+            literals,
         } = input;
         let top_index = activation
             .frame_len
@@ -406,6 +410,8 @@ impl CompiledRegion {
             class_count: class_parents.len(),
             option_families: option_families.as_ptr(),
             option_family_count: option_families.len(),
+            literal_values: literals.values,
+            literal_count: literals.count,
         };
         let mut exit = RawExit::default();
         let mut allocation_result = 0u64;
@@ -490,6 +496,8 @@ impl CompiledRegion {
             EXIT_GROW_ACTIVATION => ExitKind::GrowActivation,
             EXIT_TYPE_RESOLUTION => ExitKind::TypeResolution,
             EXIT_REPLAY => ExitKind::Replay,
+            EXIT_LITERAL => ExitKind::Literal,
+            EXIT_UNREACHABLE => ExitKind::Unreachable,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
@@ -600,6 +608,8 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::ConstInt(_)
             | Instr::ConstFloat(_)
             | Instr::ConstChar(_)
+            | Instr::ConstStr(_)
+            | Instr::ConstBytes(_)
             | Instr::LoadLocal(_)
             | Instr::StoreLocal(_)
             | Instr::Pop
@@ -648,6 +658,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
             | Instr::Return
+            | Instr::Unreachable
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::OpConst(_)

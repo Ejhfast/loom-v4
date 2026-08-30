@@ -709,7 +709,7 @@ pub struct VmState {
     /// string pool. A literal interns on its first load, stays frozen
     /// from birth, and stays rooted for the machine lifetime, so a
     /// repeated `ConstStr` reuses one object.
-    pub literals: Vec<Option<ObjRef>>,
+    pub literals: Vec<Value>,
 }
 
 /// One machine with compact state, callback state, and host state.
@@ -1580,7 +1580,7 @@ impl Machine {
             roots.push(r);
         }
         // Interned literals stay alive for the machine lifetime.
-        roots.extend(self.vm.literals.iter().flatten().copied());
+        roots.extend(self.vm.literals.iter().filter_map(|value| value.as_obj()));
     }
 
     /// The canonical snapshot roots of this machine, in canonical
@@ -1636,7 +1636,7 @@ impl Machine {
         if let Some(r) = self.start_body {
             roots.push(r);
         }
-        roots.extend(self.vm.literals.iter().flatten().copied());
+        roots.extend(self.vm.literals.iter().filter_map(|value| value.as_obj()));
         roots
     }
 
@@ -4888,38 +4888,36 @@ impl Machine {
                 // reuses it. Literals are collection roots.
                 let idx = idx as usize;
                 if self.vm.literals.len() <= idx {
-                    self.vm.literals.resize(idx + 1, None);
+                    self.vm.literals.resize(idx + 1, Value::Uninit);
                 }
                 let value = match self.vm.literals[idx] {
-                    Some(r) => Value::Obj(r),
-                    None => {
+                    Value::Obj(reference) => Value::Obj(reference),
+                    Value::Uninit => {
                         let text = module.strings[idx].clone();
                         let value = self.alloc(Object::Str(text.into()))?;
-                        if let Value::Obj(r) = value {
-                            self.vm.literals[idx] = Some(r);
-                        }
+                        self.vm.literals[idx] = value;
                         value
                     }
+                    _ => return Err(BAD_STATE),
                 };
                 self.push(value)?;
             }
             Instr::ConstBytes(idx) => {
                 let cache = module.strings.len() + idx as usize;
                 if self.vm.literals.len() <= cache {
-                    self.vm.literals.resize(cache + 1, None);
+                    self.vm.literals.resize(cache + 1, Value::Uninit);
                 }
                 let value = match self.vm.literals[cache] {
-                    Some(reference) => Value::Obj(reference),
-                    None => {
+                    Value::Obj(reference) => Value::Obj(reference),
+                    Value::Uninit => {
                         let bytes = module.bytes.get(idx as usize).ok_or(BAD_STATE)?;
                         let bytes =
                             SharedBytes::try_from_slice(bytes).map_err(|_| FaultCode::HeapLimit)?;
                         let value = self.alloc(Object::Bytes(bytes))?;
-                        if let Value::Obj(reference) = value {
-                            self.vm.literals[cache] = Some(reference);
-                        }
+                        self.vm.literals[cache] = value;
                         value
                     }
+                    _ => return Err(BAD_STATE),
                 };
                 self.push(value)?;
             }

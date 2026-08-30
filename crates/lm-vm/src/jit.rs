@@ -299,6 +299,7 @@ impl JitEngine {
                 context.module.bundle(),
                 local,
             );
+            input.set_runtime_string_count(context.module.strings.len());
             let relocation = context
                 .module
                 .code_namespace()
@@ -560,6 +561,13 @@ impl JitEngine {
         let base_frames = root_frame;
         metrics.note_native_entry();
         scratch.activation.begin_execution();
+        // SAFETY: Native execution cannot change the literal table.
+        let literals = unsafe {
+            lm_jit::NativeLiteralView::from_raw_parts(
+                machine.vm.literals.as_ptr(),
+                machine.vm.literals.len(),
+            )
+        };
         let (exit, allocations) = {
             let mut runtime = MachineRuntime {
                 machine,
@@ -600,6 +608,7 @@ impl JitEngine {
                         heap,
                         class_parents: native.class_parents(),
                         option_families: &scratch.option_families,
+                        literals,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -844,12 +853,16 @@ impl JitEngine {
             ExitKind::Fuel
             | ExitKind::Interpreter
             | ExitKind::Replay
+            | ExitKind::Literal
             | ExitKind::Call
             | ExitKind::GrowActivation
             | ExitKind::TypeResolution
             | ExitKind::Allocation
             | ExitKind::Effect => {
-                let interpreter = matches!(exit.kind(), ExitKind::Interpreter | ExitKind::Replay);
+                let interpreter = matches!(
+                    exit.kind(),
+                    ExitKind::Interpreter | ExitKind::Replay | ExitKind::Literal
+                );
                 if matches!(exit.kind(), ExitKind::Call | ExitKind::GrowActivation) {
                     if retired == instruction_limit {
                         return NativeAttempt::Complete {
@@ -932,6 +945,7 @@ impl JitEngine {
             | ExitKind::TypeMismatch
             | ExitKind::UninitializedField
             | ExitKind::HeapLimit
+            | ExitKind::Unreachable
             | ExitKind::StackLimit => {
                 metrics.note_native_fault_exit();
                 let fault = match exit.kind() {
@@ -940,6 +954,7 @@ impl JitEngine {
                     ExitKind::TypeMismatch => crate::FaultCode::TypeMismatch,
                     ExitKind::UninitializedField => crate::FaultCode::UninitializedField,
                     ExitKind::HeapLimit => crate::FaultCode::HeapLimit,
+                    ExitKind::Unreachable => crate::FaultCode::UnreachableCode,
                     ExitKind::StackLimit => crate::FaultCode::StackLimit,
                     _ => unreachable!(),
                 };
@@ -1058,7 +1073,8 @@ fn frame_operand_kinds<'a>(
             | ExitKind::DivideByZero
             | ExitKind::TypeMismatch
             | ExitKind::UninitializedField
-            | ExitKind::HeapLimit,
+            | ExitKind::HeapLimit
+            | ExitKind::Unreachable,
         ) => region.fault_operand_kinds(frame.block(), frame.instruction()),
         Some(ExitKind::StackLimit) => frame
             .instruction()

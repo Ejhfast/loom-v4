@@ -957,6 +957,23 @@ Gate: An `Option` loop uses no temporary interpreter site.
 
 Gate: Every tested fuel boundary matches the interpreter.
 
+### Stage F9: Canonical literal loads
+
+- store cached literals as canonical `Value` entries;
+- expose the fixed table only during one native execution;
+- load cached String and Bytes references directly;
+- exit before an uncached literal and interpret that instruction once;
+- compile `Unreachable` as its exact native fault exit;
+- preserve literal roots and snapshot encoding.
+
+No generated literal load calls a runtime helper.
+
+Native execution cannot change the literal table.
+
+Gate: Cached literal loops improve by more than five times.
+
+Gate: Literal and `Unreachable` gaps disappear from parser profiles.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1177,6 +1194,24 @@ External invalid payloads replay through the interpreter and preserve `TypeMisma
 JSON and HTTP remain within five percent in Auto mode.
 
 The representative-program gate remains open.
+
+The Stage F9 run added direct cached literals and the terminal fault exit.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Literal loads | 39.812 ms | 4.543 ms | 4.550 ms | 8.76 times | 100.00% |
+| JSON parse | 45.423 ms | 46.615 ms | 72.063 ms | 0.97 times | 5.23% |
+| HTTP parse | 42.364 ms | 45.511 ms | 65.743 ms | 0.93 times | 47.30% |
+
+Each machine uses one slow exit for each first literal load.
+
+Later loads read the canonical literal table directly.
+
+The parser profiles contain no literal or `Unreachable` gap.
+
+`CallG` is now the largest gap in both parsers.
+
+The HTTP Auto row does not pass the five-percent gate.
 
 ## 24. Rejected designs
 

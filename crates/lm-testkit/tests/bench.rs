@@ -1593,6 +1593,18 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_literal_loads",
+        concat!(
+            "i = 0\ntext = \"\"\nbytes = b\"\"\n",
+            "while i < 1000000\n",
+            "  text = \"hello\"\n",
+            "  bytes = b\"\\x01\\x02\"\n",
+            "  i = i + 1\n",
+            "end\n",
+            "if text.byte_len() == 5 and bytes.len() == 2 then i else 0 end\n",
+        ),
+    );
+    report_jit_representative(
         "jit_interpreter_site",
         concat!(
             "items: [Int] = []\ni = 0\n",

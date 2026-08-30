@@ -1,7 +1,7 @@
 use super::*;
 use crate::plan::{compute_liveness, split_segments, Segment};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
-use lm_heap::{Heap, Object, SharedBytes};
+use lm_heap::{Heap, JitHeapView, Object, SharedBytes};
 use lm_value::{Value, ValueTag, Witness};
 
 fn module(blocks: Vec<Vec<Instr>>) -> Module {
@@ -93,18 +93,59 @@ fn liveness_ignores_a_local_replaced_before_use() {
 }
 
 #[test]
-fn an_instruction_without_a_dedicated_treatment_splits_the_region() {
+fn unreachable_code_uses_one_native_fault_exit() {
     let module = module(vec![vec![Instr::Unreachable]]);
     let bundle = lm_abi::standard_bundle();
     lm_verify::verify_module_with_bundle(&module, &bundle).expect("the function verifies");
-    let input = FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0);
-    RegionPlan::for_function(&input).expect("the mixed function plans");
-    let engine = JitEngine::default();
-    let region = engine
+    let region = JitEngine::default()
         .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
-        .expect("the mixed function compiles");
-    assert_eq!(region.plan.interpreter_sites, 1);
+        .expect("the terminal function compiles");
+    assert_eq!(region.plan.interpreter_sites, 0);
     assert_eq!(region.plan.segments.len(), 1);
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let mut activation = NativeActivation::default();
+    activation
+        .prepare_root(NativePreparation {
+            function: 0,
+            block: 0,
+            instruction: 0,
+            local_count: 2,
+            max_stack: region.max_stack(),
+            operand_len: 0,
+            scalar_limit: 4_096,
+            frame_limit: 256,
+        })
+        .expect("the terminal root prepares");
+    let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
+    let mut root_states = vec![0; region.max_roots().max(1)];
+    let exit = region
+        .execute(
+            &mut runtime,
+            &mut activation,
+            NativeExecution {
+                entry: 0,
+                entries: &[],
+                base_stack_values: 0,
+                max_stack_values: 4_096,
+                base_frames: 0,
+                max_frames: 256,
+                roots: &mut roots,
+                root_tags: &mut root_tags,
+                root_states: &mut root_states,
+                fuel: 1,
+                heap: JitHeapView::EMPTY,
+                class_parents: &[],
+                option_families: &[],
+                literals: NativeLiteralView::EMPTY,
+            },
+        )
+        .expect("the terminal function executes");
+    assert_eq!(exit.kind(), ExitKind::Unreachable);
+    assert_eq!(exit.retired(), 1);
+    assert_eq!((exit.block(), exit.instruction()), (0, 1));
 }
 
 fn field_module() -> Module {
@@ -275,6 +316,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     heap,
                     class_parents: &[],
                     option_families: &[],
+                    literals: NativeLiteralView::EMPTY,
                 },
             )
             .expect("the safe byte read executes");
@@ -341,6 +383,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 heap,
                 class_parents: &[],
                 option_families: &[],
+                literals: NativeLiteralView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -405,6 +448,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 heap,
                 class_parents: &[],
                 option_families: &[],
+                literals: NativeLiteralView::EMPTY,
             },
         )
         .expect("the field fault executes");
@@ -470,6 +514,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 heap,
                 class_parents: &[],
                 option_families: &[],
+                literals: NativeLiteralView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -536,6 +581,7 @@ fn native_field_store_writes_the_canonical_value() {
                 heap,
                 class_parents: &[],
                 option_families: &[],
+                literals: NativeLiteralView::EMPTY,
             },
         )
         .expect("the field store executes");
@@ -606,6 +652,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 heap,
                 class_parents: &[],
                 option_families: &[],
+                literals: NativeLiteralView::EMPTY,
             },
         )
         .expect("the field store executes");

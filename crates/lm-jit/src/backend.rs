@@ -12,9 +12,9 @@ use crate::plan::{
 use crate::{
     CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
-    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_REPLAY, EXIT_RETURN,
-    EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
-    LOCAL_DIRTY, LOCAL_INITIALIZED,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
+    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
+    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -714,6 +714,40 @@ fn emit_segment(
             Instr::ConstChar(value) => {
                 let value = builder.ins().iconst(types::I64, i64::from(value));
                 push_static(builder, &mut stack, ScalarKind::Char, value)?;
+            }
+            Instr::ConstStr(index) => {
+                let instruction = segment.start + within as u32;
+                let value = emit_literal_load(
+                    builder,
+                    values,
+                    index as usize,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &stack,
+                )?;
+                stack.push(value);
+            }
+            Instr::ConstBytes(index) => {
+                let literal = input
+                    .runtime_string_count()
+                    .checked_add(index as usize)
+                    .ok_or(CompileError::Backend)?;
+                let instruction = segment.start + within as u32;
+                let value = emit_literal_load(
+                    builder,
+                    values,
+                    literal,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &stack,
+                )?;
+                stack.push(value);
             }
             Instr::OpConst(operation) => {
                 let value = builder.ins().iconst(types::I64, i64::from(operation));
@@ -1496,6 +1530,7 @@ fn emit_segment(
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
+            | Instr::Unreachable
             | Instr::Return => {}
             _ if deferred_boundary && matches!(segment.exit, SegmentExit::Interpreter { .. }) => {}
             _ => {
@@ -1620,6 +1655,28 @@ fn emit_segment(
         return Ok(());
     }
 
+    if matches!(segment.exit, SegmentExit::Unreachable) {
+        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        let retired = builder.use_var(values.retired);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_UNREACHABLE,
+                block: segment.block,
+                instruction: segment.end,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
+            },
+            &stack,
+        )?;
+        return Ok(());
+    }
+
     emit_segment_charge(builder, values, segment.cost, exact_fuel);
     match segment.exit {
         SegmentExit::Jump { .. } => {
@@ -1645,6 +1702,7 @@ fn emit_segment(
         }
         SegmentExit::Effect { .. } => unreachable!(),
         SegmentExit::Interpreter { .. } => unreachable!(),
+        SegmentExit::Unreachable => unreachable!(),
         SegmentExit::Return => {
             let result = pop_value(&mut stack)?;
             emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
@@ -3150,6 +3208,64 @@ fn emit_option_family(
     Ok(builder.ins().uextend(types::I64, family))
 }
 
+fn emit_literal_load(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    literal: usize,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<NativeValue, CompileError> {
+    let load = builder.create_block();
+    let missing = builder.create_block();
+    let ready = builder.create_block();
+    let index = builder.ins().iconst(
+        values.pointer_type,
+        i64::try_from(literal).map_err(|_| CompileError::Backend)?,
+    );
+    let count = load_activation_pointer(builder, values, RawActivationField::LiteralCount)?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, count);
+    builder.ins().brif(outside, missing, &[], load, &[]);
+
+    builder.switch_to_block(load);
+    let literals = load_activation_pointer(builder, values, RawActivationField::LiteralValues)?;
+    let offset = builder.ins().imul_imm(
+        index,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let address = builder.ins().iadd(literals, offset);
+    let tag = load_value(builder, types::I64, address, VALUE_TAG_OFFSET)?;
+    let invalid = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, tag, ValueTag::Obj as u64 as i64);
+    builder.ins().brif(invalid, missing, &[], ready, &[]);
+
+    builder.switch_to_block(missing);
+    let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_LITERAL,
+            block: point.block,
+            instruction: point.instruction,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
+        },
+        stack,
+    )?;
+
+    builder.switch_to_block(ready);
+    let bits = load_value(builder, types::I64, address, VALUE_PAYLOAD_OFFSET)?;
+    Ok(NativeValue { bits, tag })
+}
+
 fn emit_exact_option_none(
     builder: &mut FunctionBuilder<'_>,
     value: NativeValue,
@@ -4366,6 +4482,8 @@ enum RawActivationField {
     MaxFrames,
     OptionFamilies,
     OptionFamilyCount,
+    LiteralValues,
+    LiteralCount,
 }
 
 impl RawActivationField {
@@ -4400,6 +4518,12 @@ impl RawActivationField {
             }
             RawActivationField::OptionFamilyCount => {
                 mem::offset_of!(RawNativeActivation, option_family_count)
+            }
+            RawActivationField::LiteralValues => {
+                mem::offset_of!(RawNativeActivation, literal_values)
+            }
+            RawActivationField::LiteralCount => {
+                mem::offset_of!(RawNativeActivation, literal_count)
             }
         }
     }

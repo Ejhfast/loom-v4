@@ -34,6 +34,7 @@ pub(super) struct FunctionDefinition<'a> {
 pub struct FunctionInput<'a> {
     pub(super) root: FunctionDefinition<'a>,
     direct_callees: Vec<FunctionDefinition<'a>>,
+    runtime_string_count: usize,
 }
 
 impl<'a> FunctionInput<'a> {
@@ -56,7 +57,13 @@ impl<'a> FunctionInput<'a> {
                 class_relocation: None,
             },
             direct_callees: Vec::new(),
+            runtime_string_count: source.strings.len(),
         }
+    }
+
+    /// Supply the relocated string-table size for byte literal slots.
+    pub fn set_runtime_string_count(&mut self, count: usize) {
+        self.runtime_string_count = count;
     }
 
     /// Supply the source-to-runtime class relocation for this unit.
@@ -121,6 +128,10 @@ impl<'a> FunctionInput<'a> {
                 .copied()
         }
     }
+
+    pub(super) fn runtime_string_count(&self) -> usize {
+        self.runtime_string_count
+    }
 }
 
 /// Clock-free native compilation counters.
@@ -181,6 +192,8 @@ pub enum ExitKind {
     StackLimit,
     Interpreter,
     Replay,
+    Literal,
+    Unreachable,
     GrowActivation,
     TypeResolution,
 }
@@ -279,6 +292,7 @@ pub(super) enum SegmentExit {
     Interpreter {
         fallthrough_ip: Option<u32>,
     },
+    Unreachable,
     Return,
 }
 
@@ -993,6 +1007,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                     })
                 }
                 Instr::Return => Some(SegmentExit::Return),
+                Instr::Unreachable => Some(SegmentExit::Unreachable),
                 _ if !crate::instruction_has_dedicated_treatment(instruction) => {
                     Some(SegmentExit::Interpreter {
                         fallthrough_ip: (instruction_index + 1 < block.len())
@@ -1061,7 +1076,7 @@ fn resolve_successors(
             SegmentExit::Interpreter {
                 fallthrough_ip: None,
             } => Vec::new(),
-            SegmentExit::Return => Vec::new(),
+            SegmentExit::Return | SegmentExit::Unreachable => Vec::new(),
         };
     }
     Ok(())
@@ -1116,6 +1131,17 @@ fn analyze_segment(
             Instr::ConstInt(_) => stack.push(ScalarKind::Int),
             Instr::ConstFloat(_) => stack.push(ScalarKind::Float),
             Instr::ConstChar(_) => stack.push(ScalarKind::Char),
+            Instr::ConstStr(_) => stack.push(ScalarKind::Object(lm_verify::TY_STR)),
+            Instr::ConstBytes(_) => {
+                let ty = context
+                    .module
+                    .types
+                    .iter()
+                    .position(|ty| matches!(ty, BcType::Bytes))
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                stack.push(ScalarKind::Object(ty));
+            }
             Instr::OpConst(_) => stack.push(ScalarKind::Operation),
             Instr::LoadLocal(slot) => {
                 let at = slot as usize;
@@ -1628,6 +1654,9 @@ fn analyze_segment(
                 if !stack.is_empty() {
                     return Err(UnsupportedReason::InvalidStack);
                 }
+            }
+            Instr::Unreachable => {
+                fault_stacks.push((segment.start + offset as u32 + 1, stack.clone()));
             }
             _ if matches!(segment.exit, SegmentExit::Interpreter { .. })
                 && offset + 1 == (segment.end - segment.start) as usize =>
