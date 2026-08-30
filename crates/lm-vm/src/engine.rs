@@ -1,6 +1,6 @@
 //! Host-selected execution policy and clock-free engine counters.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 /// The host-selected machine execution policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -54,6 +54,32 @@ pub struct EngineMetrics {
     pub unsupported_region_fallbacks: u64,
     pub missing_entry_fallbacks: u64,
     pub backend_unavailable_fallbacks: u64,
+}
+
+/// One weighted reason that prevents native compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitProfileRejection {
+    pub reason: String,
+    pub estimated_instructions: u64,
+}
+
+/// One sampled function and its native eligibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitFunctionProfile {
+    pub function: u32,
+    pub name: String,
+    pub estimated_instructions: u64,
+    pub candidate: bool,
+    pub rejections: Vec<String>,
+}
+
+/// A sampled native-eligibility profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JitProfile {
+    pub estimated_instructions: u64,
+    pub candidate_instructions: u64,
+    pub rejections: Vec<JitProfileRejection>,
+    pub hot_functions: Vec<JitFunctionProfile>,
 }
 
 #[derive(Debug, Default)]
@@ -289,6 +315,7 @@ impl Drop for EngineTurnMetrics<'_> {
 #[derive(Debug)]
 pub struct Engine {
     mode: AtomicU8,
+    jit_profiling: AtomicBool,
     counters: EngineCounters,
     jit: crate::jit::JitEngine,
 }
@@ -298,6 +325,7 @@ impl Engine {
     pub fn new(mode: EngineMode) -> Engine {
         Engine {
             mode: AtomicU8::new(mode as u8),
+            jit_profiling: AtomicBool::new(false),
             counters: EngineCounters::default(),
             jit: crate::jit::JitEngine::default(),
         }
@@ -311,6 +339,21 @@ impl Engine {
     /// Select the execution policy for later turns.
     pub fn set_mode(&self, mode: EngineMode) {
         self.mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// Enable sampled native-eligibility profiling.
+    pub fn set_jit_profiling(&self, enabled: bool) {
+        self.jit_profiling.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Return the current sampled native-eligibility profile.
+    pub fn jit_profile(&self) -> JitProfile {
+        self.jit.profile()
+    }
+
+    /// Clear all sampled native-eligibility work.
+    pub fn reset_jit_profile(&self) {
+        self.jit.reset_profile();
     }
 
     /// Return the current clock-free counters.
@@ -330,6 +373,10 @@ impl Engine {
             values: EngineMetrics::default(),
             sample_productivity: self.mode() == EngineMode::Auto,
         }
+    }
+
+    pub(crate) fn jit_profiling(&self) -> bool {
+        self.jit_profiling.load(Ordering::Relaxed)
     }
 
     pub(crate) fn execute_native(

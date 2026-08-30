@@ -646,6 +646,7 @@ fn run_interpreter_turn(
         EngineMode::Auto => crate::machine::NativeResume::Tiered {
             state: context.native,
             resume_depth: resume_native_depth,
+            profile: context.engine.jit_profiling(),
         },
         EngineMode::Native => crate::machine::NativeResume::EveryDirectCall,
     };

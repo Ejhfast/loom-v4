@@ -9,6 +9,7 @@
 //! ```
 //!
 //! Set `LOOM_BENCH_FILTER` to one case name for a focused run.
+//! Set `LOOM_JIT_PROFILE=1` to print sampled native rejections.
 //!
 //! Method. Each case compiles and loads once outside the timed
 //! region, then times the run alone. The reported cost subtracts an
@@ -587,6 +588,49 @@ fn report_jit_representative(name: &str, source: &str) {
         auto_metrics.unsupported_region_fallbacks,
         native_metrics.unsupported_region_fallbacks,
     );
+    if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
+        report_jit_profile(name, source);
+    }
+}
+
+fn report_jit_profile(name: &str, source: &str) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|error| panic!("the profile source must compile:\n{error}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the profile artifact must load");
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    engine.set_jit_profiling(true);
+    let mut world = lm_vm::World::new_with_engine(
+        arena,
+        namespace,
+        config(),
+        Box::new(lm_vm::NullHost),
+        Arc::clone(&engine),
+    );
+    let outcome = lm_proc::Scheduler::default()
+        .run(&mut world)
+        .expect("the profile program must run");
+    assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+    let profile = engine.jit_profile();
+    println!(
+        "LOOM_JIT_PROFILE\t{name}\ttotal\t{}\tcandidate\t{}",
+        profile.estimated_instructions, profile.candidate_instructions
+    );
+    for rejection in profile.rejections.iter().take(20) {
+        println!(
+            "LOOM_JIT_REJECTION\t{name}\t{}\t{}",
+            rejection.reason, rejection.estimated_instructions
+        );
+    }
+    for function in profile.hot_functions.iter().take(20) {
+        println!(
+            "LOOM_JIT_FUNCTION\t{name}\t{}\t{}\t{}\t{}",
+            function.name,
+            function.estimated_instructions,
+            function.candidate,
+            function.rejections.join(",")
+        );
+    }
 }
 
 fn guard_source(extra_locals: usize) -> String {
@@ -1337,6 +1381,16 @@ fn bench_jit_scalar_regions() {
         ),
         1,
     );
+    report_jit(
+        "jit_call_branch",
+        concat!(
+            "def add1(value: Int): Int\n",
+            "  if value < 0 then value - 1 else value + 1 end\n",
+            "end\n",
+            "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
+        ),
+        1,
+    );
     report_jit_after_setup(
         "jit_field_read",
         concat!(
@@ -1472,6 +1526,15 @@ fn bench_jit_representative_programs() {
             "while i < 1000\n",
             "  s = s + down(1000)\n  i = i + 1\n",
             "end\ns\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_call_branch",
+        concat!(
+            "def add1(value: Int): Int\n",
+            "  if value < 0 then value - 1 else value + 1 end\n",
+            "end\n",
+            "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
         ),
     );
     report_jit_representative(

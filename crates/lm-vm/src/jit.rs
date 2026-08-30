@@ -174,6 +174,53 @@ impl JitEngine {
         self.compiler.reset_metrics();
     }
 
+    pub(crate) fn profile(&self) -> crate::JitProfile {
+        let layouts = self
+            .layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut profile = crate::JitProfile::default();
+        let mut totals = std::collections::BTreeMap::new();
+        for (tables, state) in layouts.values() {
+            let Some(tables) = tables.upgrade() else {
+                continue;
+            };
+            state.append_profile(&tables, &mut profile, &mut totals);
+        }
+        profile.hot_functions.sort_by(|left, right| {
+            right
+                .estimated_instructions
+                .cmp(&left.estimated_instructions)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        profile.rejections = totals
+            .into_iter()
+            .map(
+                |(reason, estimated_instructions)| crate::JitProfileRejection {
+                    reason,
+                    estimated_instructions,
+                },
+            )
+            .collect();
+        profile.rejections.sort_by(|left, right| {
+            right
+                .estimated_instructions
+                .cmp(&left.estimated_instructions)
+                .then_with(|| left.reason.cmp(&right.reason))
+        });
+        profile
+    }
+
+    pub(crate) fn reset_profile(&self) {
+        let layouts = self
+            .layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, state) in layouts.values() {
+            state.reset_profile();
+        }
+    }
+
     pub(crate) fn execute(
         &self,
         machine: &mut Machine,

@@ -21,7 +21,9 @@ pub mod snapshot;
 mod typecheck;
 mod world;
 
-pub use engine::{Engine, EngineMetrics, EngineMode};
+pub use engine::{
+    Engine, EngineMetrics, EngineMode, JitFunctionProfile, JitProfile, JitProfileRejection,
+};
 pub use executor::{execute, execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,

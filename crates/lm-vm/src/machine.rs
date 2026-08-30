@@ -598,6 +598,7 @@ pub(crate) enum NativeResume<'a> {
     Tiered {
         state: &'a crate::jit::NativeCodeState,
         resume_depth: Option<usize>,
+        profile: bool,
     },
 }
 
@@ -628,14 +629,18 @@ impl<'a> InterpreterNative<'a> {
         match self.policy {
             NativeResume::Disabled => false,
             NativeResume::EveryDirectCall => true,
-            NativeResume::Tiered { state, .. } => {
+            NativeResume::Tiered { state, profile, .. } => {
                 let sampled = sample_tier_event(&mut self.sample);
                 if self.check_native_calls {
                     state
-                        .enter_frame(target, if sampled { TIER_SAMPLE_INTERVAL } else { 0 })
+                        .enter_frame(
+                            target,
+                            if sampled { TIER_SAMPLE_INTERVAL } else { 0 },
+                            profile,
+                        )
                         .enter_native
                 } else {
-                    sampled && state.note_event(target, TIER_SAMPLE_INTERVAL)
+                    sampled && state.note_event(target, TIER_SAMPLE_INTERVAL, profile)
                 }
             }
         }
@@ -653,8 +658,8 @@ impl<'a> InterpreterNative<'a> {
     #[inline(always)]
     fn after_backedge(&mut self, function: u32) -> bool {
         match self.policy {
-            NativeResume::Tiered { state, .. } if sample_tier_event(&mut self.sample) => {
-                state.note_event(function, TIER_SAMPLE_INTERVAL)
+            NativeResume::Tiered { state, profile, .. } if sample_tier_event(&mut self.sample) => {
+                state.note_event(function, TIER_SAMPLE_INTERVAL, profile)
             }
             _ => false,
         }

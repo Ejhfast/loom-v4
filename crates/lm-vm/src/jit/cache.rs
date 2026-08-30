@@ -1,6 +1,8 @@
 //! Native region cache for one arena layout.
 
 use lm_jit::{Failure, FunctionInput};
+use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -66,25 +68,32 @@ impl NativeCodeState {
         self.0.compiled.as_ref()
     }
 
-    pub(crate) fn enter_frame(&self, function: u32, work_scale: u32) -> TierDecision {
+    pub(crate) fn enter_frame(
+        &self,
+        function: u32,
+        work_scale: u32,
+        profile: bool,
+    ) -> TierDecision {
+        let Some(slot) = self.slot(function) else {
+            return TierDecision {
+                enter_native: false,
+            };
+        };
+        slot.note_profile(work_scale, profile);
         if !self.is_candidate(function) {
             return TierDecision {
                 enter_native: false,
             };
         }
-        self.slot(function).map_or(
-            TierDecision {
-                enter_native: false,
-            },
-            |slot| slot.enter_frame(work_scale),
-        )
+        slot.enter_frame(work_scale)
     }
 
-    pub(crate) fn note_event(&self, function: u32, work_scale: u32) -> bool {
-        self.is_candidate(function)
-            && self
-                .slot(function)
-                .is_some_and(|slot| slot.note_event(work_scale))
+    pub(crate) fn note_event(&self, function: u32, work_scale: u32, profile: bool) -> bool {
+        let Some(slot) = self.slot(function) else {
+            return false;
+        };
+        slot.note_profile(work_scale, profile);
+        self.is_candidate(function) && slot.note_event(work_scale)
     }
 
     pub(crate) fn is_candidate(&self, function: u32) -> bool {
@@ -115,6 +124,57 @@ impl NativeCodeState {
     pub(crate) fn call_target_is_denied(&self, function: u32) -> bool {
         self.slot(function).is_none_or(|slot| slot.is_denied())
     }
+
+    pub(super) fn append_profile(
+        &self,
+        tables: &lm_bytecode::CodeTables,
+        profile: &mut crate::JitProfile,
+        totals: &mut BTreeMap<String, u64>,
+    ) {
+        for function in 0..self.0.slots.len() {
+            let Some(slot) = self.0.slots.get(function) else {
+                continue;
+            };
+            let estimated = slot.profile_work.load(Ordering::Relaxed);
+            if estimated == 0 {
+                continue;
+            }
+            let Some(definition) = tables.funcs.get(function) else {
+                continue;
+            };
+            let candidate = self.is_candidate(function as u32);
+            profile.estimated_instructions =
+                profile.estimated_instructions.saturating_add(estimated);
+            if candidate {
+                profile.candidate_instructions =
+                    profile.candidate_instructions.saturating_add(estimated);
+            }
+            let rejections = function_rejections(tables, definition, candidate);
+            let unit = estimated / u64::from(slot.event_weight.max(1));
+            for (reason, count) in &rejections {
+                let weight = unit.saturating_mul(u64::from(*count));
+                totals
+                    .entry(reason.clone())
+                    .and_modify(|current| *current = current.saturating_add(weight))
+                    .or_insert(weight);
+            }
+            profile.hot_functions.push(crate::JitFunctionProfile {
+                function: function as u32,
+                name: definition.name.clone(),
+                estimated_instructions: estimated,
+                candidate,
+                rejections: rejections.into_iter().map(|(reason, _)| reason).collect(),
+            });
+        }
+    }
+
+    pub(super) fn reset_profile(&self) {
+        for function in 0..self.0.slots.len() {
+            if let Some(slot) = self.0.slots.get(function) {
+                slot.profile_work.store(0, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 impl NativeCodeRevision {
@@ -141,26 +201,24 @@ pub(super) struct NativeSlot {
     event_weight: u32,
     tier: AtomicU64,
     productivity: AtomicU32,
+    profile_work: AtomicU64,
 }
 
 impl NativeSlot {
     fn new(function: &lm_bytecode::Func, candidate: bool) -> NativeSlot {
-        let event_weight = if candidate {
-            function
-                .blocks
-                .iter()
-                .map(Vec::len)
-                .sum::<usize>()
-                .clamp(1, u32::MAX as usize) as u32
-        } else {
-            0
-        };
+        let event_weight = function
+            .blocks
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .clamp(1, u32::MAX as usize) as u32;
         NativeSlot {
             verdict: OnceLock::new(),
             entry: Arc::new(lm_jit::NativeEntryCell::default()),
             event_weight,
             tier: AtomicU64::new(if candidate { 0 } else { TIER_DENIED }),
             productivity: AtomicU32::new(0),
+            profile_work: AtomicU64::new(0),
         }
     }
 
@@ -264,6 +322,14 @@ impl NativeSlot {
         self.tier.load(Ordering::Acquire) == TIER_DENIED
     }
 
+    fn note_profile(&self, work_scale: u32, enabled: bool) {
+        if !enabled || work_scale == 0 {
+            return;
+        }
+        let work = u64::from(self.event_weight).saturating_mul(u64::from(work_scale));
+        self.profile_work.fetch_add(work, Ordering::Relaxed);
+    }
+
     fn add_work(&self, work_scale: u32) -> u64 {
         if self.event_weight == 0 {
             return TIER_DENIED;
@@ -331,4 +397,97 @@ fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
                 | lm_bytecode::BcType::Op(_, _)
         )
     )
+}
+
+fn table_type_is_candidate(tables: &lm_bytecode::CodeTables, ty: u32) -> bool {
+    matches!(
+        tables.types.get(ty as usize),
+        Some(
+            lm_bytecode::BcType::Unit
+                | lm_bytecode::BcType::Bool
+                | lm_bytecode::BcType::Int
+                | lm_bytecode::BcType::Float
+                | lm_bytecode::BcType::Class(_)
+                | lm_bytecode::BcType::Inst(_, _)
+                | lm_bytecode::BcType::List(_)
+                | lm_bytecode::BcType::Tuple(_)
+                | lm_bytecode::BcType::Op(_, _)
+        )
+    )
+}
+
+fn function_rejections(
+    tables: &lm_bytecode::CodeTables,
+    function: &lm_bytecode::Func,
+    candidate: bool,
+) -> Vec<(String, u32)> {
+    if candidate {
+        return Vec::new();
+    }
+    let mut reasons = BTreeMap::<String, u32>::new();
+    if function.type_params != 0 || function.effect_params != 0 {
+        add_reason(&mut reasons, "generic function".to_string());
+    }
+    if !function.captures.is_empty() {
+        add_reason(&mut reasons, "captured function".to_string());
+    }
+    if !function
+        .local_types
+        .iter()
+        .chain(std::iter::once(&function.ret))
+        .all(|ty| table_type_is_candidate(tables, *ty))
+    {
+        add_reason(&mut reasons, "non-native value type".to_string());
+    }
+    for instruction in function.blocks.iter().flatten() {
+        if !lm_jit::instruction_is_supported(instruction) {
+            add_reason(&mut reasons, instruction_rejection(instruction));
+        }
+        if let lm_bytecode::Instr::Call(target) = instruction {
+            let boundary_supported = tables.funcs.get(*target as usize).is_some_and(|callee| {
+                callee
+                    .params
+                    .iter()
+                    .chain(std::iter::once(&callee.ret))
+                    .all(|ty| table_type_is_candidate(tables, *ty))
+            });
+            if !boundary_supported {
+                add_reason(&mut reasons, "direct call boundary type".to_string());
+            }
+        }
+    }
+    if reasons.is_empty() {
+        add_reason(&mut reasons, "region shape".to_string());
+    }
+    reasons.into_iter().collect()
+}
+
+fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {
+    reasons
+        .entry(reason)
+        .and_modify(|count| *count = count.saturating_add(1))
+        .or_insert(1);
+}
+
+fn instruction_rejection(instruction: &lm_bytecode::Instr) -> String {
+    match instruction {
+        lm_bytecode::Instr::Native(operation) => {
+            format!("Native::{}", variant_name(operation))
+        }
+        lm_bytecode::Instr::Numeric(operation) => {
+            format!("Numeric::{}", variant_name(operation))
+        }
+        lm_bytecode::Instr::Extended(operation) => {
+            format!("Extended::{}", variant_name(operation))
+        }
+        _ => variant_name(instruction),
+    }
+}
+
+fn variant_name(value: &impl Debug) -> String {
+    let text = format!("{value:?}");
+    text.split([' ', '(', '{'])
+        .next()
+        .unwrap_or(text.as_str())
+        .to_string()
 }
