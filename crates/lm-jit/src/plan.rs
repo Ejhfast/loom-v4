@@ -193,6 +193,7 @@ pub enum ExitKind {
     GrowActivation,
     TypeResolution,
     TypeEnvironment,
+    InterfaceCall,
 }
 
 /// One validated native exit record.
@@ -282,6 +283,13 @@ pub(super) enum SegmentExit {
     },
     VirtualCall {
         selector: u32,
+        fallthrough_ip: u32,
+    },
+    InterfaceCall {
+        interface: u32,
+        method: u32,
+        recv_ty: u32,
+        app: u32,
         fallthrough_ip: u32,
     },
     Allocation {
@@ -661,7 +669,9 @@ impl RegionPlan {
             segment.cost = segment.end - segment.start;
             if matches!(
                 segment.exit,
-                SegmentExit::Call { .. } | SegmentExit::VirtualCall { .. }
+                SegmentExit::Call { .. }
+                    | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::InterfaceCall { .. }
             ) {
                 call_sites += 1;
                 segment.cost = segment.cost.saturating_sub(1);
@@ -970,6 +980,16 @@ fn segment_exit(
                 selector: *selector,
                 fallthrough_ip: next,
             },
+            Instr::CallInterface { site, recv_ty, app } => {
+                let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+                SegmentExit::InterfaceCall {
+                    interface,
+                    method,
+                    recv_ty: *recv_ty,
+                    app: *app,
+                    fallthrough_ip: next,
+                }
+            }
             _ => return Err(UnsupportedReason::InvalidControlFlow),
         }),
         crate::ExitBehavior::Allocation => Some(SegmentExit::Allocation {
@@ -1002,6 +1022,9 @@ fn resolve_successors(
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::VirtualCall { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
+            SegmentExit::InterfaceCall { fallthrough_ip, .. } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::Allocation { fallthrough_ip } => {
@@ -1500,6 +1523,37 @@ fn analyze_segment(
                     local_count: None,
                     result,
                     receiver: Some(virtual_receiver(context, receiver)?),
+                });
+            }
+            Instr::CallInterface { .. } => {
+                let Instr::CallInterface { site, .. } = source_instruction else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let (interface, method) = lm_bytecode::unpack_interface_call_site(site);
+                let parameter_count = context
+                    .module
+                    .interfaces
+                    .get(interface as usize)
+                    .and_then(|contract| contract.methods.get(method as usize))
+                    .and_then(|requirement| requirement.params.len().checked_add(1))
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                let parameter_start = before
+                    .stack
+                    .len()
+                    .checked_sub(parameter_count)
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let params = before.stack[parameter_start..].to_vec();
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                boundary_stack = before.stack.clone();
+                call_contract = Some(CallContract {
+                    params,
+                    local_count: None,
+                    result,
+                    receiver: None,
                 });
             }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {

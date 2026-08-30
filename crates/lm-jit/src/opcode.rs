@@ -161,10 +161,11 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::Neg => dedicated(Inline).with_fault_stack(FaultStack::Pop(1)),
         Instr::Native(operation) => native_treatment(*operation),
         Instr::Numeric(operation) => numeric_treatment(*operation),
-        Instr::Call(_) | Instr::CallG { .. } | Instr::CallVirtual { .. } => {
-            InstructionTreatment::dedicated(Call, ExitBehavior::Call)
-        }
-        Instr::CallVirtualG { .. } | Instr::CallValue { .. } | Instr::CallInterface { .. } => {
+        Instr::Call(_)
+        | Instr::CallG { .. }
+        | Instr::CallVirtual { .. }
+        | Instr::CallInterface { .. } => InstructionTreatment::dedicated(Call, ExitBehavior::Call),
+        Instr::CallVirtualG { .. } | Instr::CallValue { .. } => {
             InstructionTreatment::temporary(Call, ExitBehavior::Call)
         }
         Instr::MakeClosure { .. } => temporary(FastPath),

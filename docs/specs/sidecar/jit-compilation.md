@@ -1140,6 +1140,21 @@ Gate: Direct and scheduled corpus results match Interpreter results.
 
 Gate: Scalar text traversal improves in Auto and Native modes.
 
+### Stage F18: Interface dispatch caches
+
+- derive one stable receiver key from the value ABI;
+- cache targets by call site, parent environment, and receiver key;
+- keep each cache in the machine that owns its native continuation;
+- resolve a cold miss before the call retires;
+- resume the same native instruction after cache publication;
+- use the existing native calling convention after each cache hit.
+
+Gate: One polymorphic interface loop uses no interpreter exit.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Cold misses preserve exact scheduler retirement counts.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1533,6 +1548,30 @@ The scheduled corpus comparison includes exact retired instruction counts.
 The representative-program performance gate remains open.
 
 `CallInterface` remains the largest call-family gap.
+
+The Stage F18 run added machine-local polymorphic interface caches.
+
+Each key includes the call site, parent environment, and receiver shape.
+
+A cold miss resolves through the verified interface witness.
+
+The miss does not retire the interface call.
+
+Native execution resumes the same instruction after cache publication.
+
+The focused JIT suite passed 90 tests.
+
+Direct and scheduled corpus runs matched Interpreter results across 163 shipped programs.
+
+The scheduled corpus comparison includes exact retired instruction counts.
+
+The warm debug workspace suite took 46.05 seconds.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Polymorphic interface calls | 141.171 ms | 26.417 ms | 26.078 ms | 5.34 times | 100.00 percent |
+
+The representative-program performance gate remains open.
 
 ## 24. Rejected designs
 

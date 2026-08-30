@@ -54,7 +54,7 @@ fn opcode_ledger_separates_class_status_and_exit() {
         app: lm_bytecode::NO_APP,
     });
     assert_eq!(call.class(), TreatmentClass::Call);
-    assert_eq!(call.status(), TreatmentStatus::Temporary);
+    assert_eq!(call.status(), TreatmentStatus::Dedicated);
     assert_eq!(call.exit(), ExitBehavior::Call);
 
     let helper = instruction_treatment(&Instr::Numeric(NumericInstr::BytesBitAnd));
@@ -174,6 +174,7 @@ fn unreachable_code_uses_one_native_fault_exit() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the terminal function executes");
@@ -364,6 +365,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     literals: NativeLiteralView::EMPTY,
                     type_store_id: 1,
                     type_environments: NativeTypeEnvironmentView::EMPTY,
+                    interface_calls: NativeInterfaceCallView::EMPTY,
                 },
             )
             .expect("the safe byte read executes");
@@ -435,6 +437,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -504,6 +507,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the field fault executes");
@@ -574,6 +578,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -645,6 +650,7 @@ fn native_field_store_writes_the_canonical_value() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the field store executes");
@@ -720,6 +726,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 literals: NativeLiteralView::EMPTY,
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
+                interface_calls: NativeInterfaceCallView::EMPTY,
             },
         )
         .expect("the field store executes");

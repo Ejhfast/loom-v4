@@ -1618,6 +1618,25 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_interface_call",
+        concat!(
+            "interface Valued\n",
+            "  def value(self): Int\n    7\n  end\n",
+            "end\n",
+            "final class DefaultValue implements Valued\nend\n",
+            "final class OverrideValue implements Valued\n",
+            "  def value(self): Int\n    11\n  end\n",
+            "end\n",
+            "def read[T: Valued](value: T): Int\n  value.value()\nend\n",
+            "left = DefaultValue()\nright = OverrideValue()\n",
+            "index = 0\ntotal = 0\n",
+            "while index < 500000\n",
+            "  total = total + read(left) + read(right)\n",
+            "  index = index + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_generic_call",
         concat!(
             "def identity[T](value: T): T\n  value\nend\n",

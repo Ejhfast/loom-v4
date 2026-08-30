@@ -808,6 +808,10 @@ pub struct Machine {
     ///
     /// Snapshots exclude this process-local cache.
     pub(crate) native_type_environments: lm_jit::NativeTypeEnvironmentCache,
+    /// Resolved interface targets used only by native execution.
+    ///
+    /// Snapshots exclude this process-local cache.
+    pub(crate) native_interface_calls: lm_jit::NativeInterfaceCallCache,
 }
 
 /// Clock-free execution counters for one machine.
@@ -1237,6 +1241,7 @@ impl Machine {
             execution_metrics: MachineExecutionMetrics::default(),
             native_continuation: None,
             native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
+            native_interface_calls: lm_jit::NativeInterfaceCallCache::default(),
         }
     }
 
@@ -2170,15 +2175,46 @@ impl Machine {
             .get(call.interface as usize)
             .and_then(|contract| contract.methods.get(call.method as usize))
             .ok_or(BAD_STATE)?;
-        let selector = requirement.selector;
         let argc = u32::try_from(requirement.params.len()).map_err(|_| BAD_STATE)?;
-        let default = requirement.default;
         let argc = argc as usize;
         let recv = self.peek(argc)?;
         let parent = self.frame_env();
-        let receiver = envs
-            .close(module, call.recv_ty, parent)
-            .map_err(env_fault)?;
+        let (target, env) = self.resolve_interface_target(
+            module,
+            dispatch,
+            envs,
+            parent,
+            call.interface,
+            call.method,
+            call.recv_ty,
+            call.app,
+            recv,
+        )?;
+        self.push_frame(module, target, argc + 1, None, env)
+    }
+
+    /// Resolve one verified interface call without changing its frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_interface_target(
+        &self,
+        module: &NamespaceRuntime,
+        dispatch: &lm_bytecode::CodeTable<crate::DispatchRow>,
+        envs: &mut TypeEnvs,
+        parent: TypeEnvId,
+        interface: u32,
+        method: u32,
+        recv_ty: u32,
+        app: u32,
+        recv: Value,
+    ) -> Result<(u32, TypeEnvId), FaultCode> {
+        let requirement = module
+            .interfaces
+            .get(interface as usize)
+            .and_then(|contract| contract.methods.get(method as usize))
+            .ok_or(BAD_STATE)?;
+        let selector = requirement.selector;
+        let default = requirement.default;
+        let receiver = envs.close(module, recv_ty, parent).map_err(env_fault)?;
         let option = module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
         let static_class = match envs.ty(receiver) {
             Some(ClosedType::Class(class) | ClosedType::Inst(class, _)) => Some(*class),
@@ -2189,14 +2225,14 @@ impl Machine {
             (Some(class), Value::EmptyCase { .. }) => class,
             _ => self.virtual_class(module, recv)?,
         };
-        let own = if call.app == lm_bytecode::NO_APP {
+        let own = if app == lm_bytecode::NO_APP {
             TypeEnvId::EMPTY
         } else {
-            envs.derive(module, parent, call.app).map_err(env_fault)?
+            envs.derive(module, parent, app).map_err(env_fault)?
         };
         let witness = dispatch
             .get(class as usize)
-            .and_then(|row| row.interface_witness(call.interface, call.method));
+            .and_then(|row| row.interface_witness(interface, method));
         let selected = if default == lm_bytecode::NO_FUNC {
             true
         } else {
@@ -2223,7 +2259,7 @@ impl Machine {
                 .ok_or(BAD_TYPE)?;
             (default, env)
         };
-        self.push_frame(module, target, argc + 1, None, env)
+        Ok((target, env))
     }
 
     /// Allocate one instance of a generic class.

@@ -556,9 +556,11 @@ impl JitEngine {
         };
         let (exit, allocations) = {
             let type_environments = std::mem::take(&mut machine.native_type_environments);
+            let interface_calls = std::mem::take(&mut machine.native_interface_calls);
             let mut runtime = MachineRuntime {
                 machine,
                 type_environments,
+                interface_calls,
                 module,
                 base_local: base,
                 base_operand: operand_base,
@@ -579,6 +581,10 @@ impl JitEngine {
                     break Err(Failure::BackendUnavailable);
                 };
                 let type_environments = match runtime.type_environments.view() {
+                    Ok(view) => view,
+                    Err(error) => break Err(error),
+                };
+                let interface_calls = match runtime.interface_calls.view() {
                     Ok(view) => view,
                     Err(error) => break Err(error),
                 };
@@ -604,6 +610,7 @@ impl JitEngine {
                         literals,
                         type_store_id: context.envs.canonical_store_id(),
                         type_environments,
+                        interface_calls,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -747,6 +754,81 @@ impl JitEngine {
                             continue;
                         }
                         metrics.note_native_type_environment_fallback();
+                    }
+                }
+                if exit.kind() == ExitKind::InterfaceCall {
+                    let Some(frame) = scratch.activation.frames().last() else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(resolve_region) = native
+                        .slot(frame.function())
+                        .and_then(|slot| slot.compiled())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(site) =
+                        resolve_region.interface_call_site(exit.block(), exit.instruction())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    if site.function() != frame.function() || site.parameter_count() == 0 {
+                        break Err(Failure::BackendUnavailable);
+                    }
+                    let Some(receiver_index) =
+                        frame.operands().len().checked_sub(site.parameter_count())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some((&receiver_bits, &receiver_tag)) = frame
+                        .operands()
+                        .get(receiver_index)
+                        .zip(frame.operand_tags().get(receiver_index))
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(receiver) =
+                        parts_value(site.receiver_kind(), receiver_tag, receiver_bits)
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let parent = TypeEnvId(frame.environment());
+                    let dispatch = module.dispatch_store();
+                    let resolved = runtime.machine.resolve_interface_target(
+                        module,
+                        dispatch.as_ref(),
+                        context.envs,
+                        parent,
+                        site.interface(),
+                        site.method(),
+                        site.receiver_type(),
+                        site.application(),
+                        receiver,
+                    );
+                    if let Ok((target, environment)) = resolved {
+                        let cached = runtime.interface_calls.cache_call_site(
+                            context.envs.canonical_store_id(),
+                            site.function(),
+                            site.block(),
+                            site.instruction(),
+                            parent.0,
+                            exit.result(),
+                            target,
+                            environment.0,
+                        );
+                        let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                            break Err(Failure::BackendUnavailable);
+                        };
+                        let resume = resolve_region
+                            .resume_plan(exit.block(), exit.instruction())
+                            .map(|entry| entry.index());
+                        if cached {
+                            if let Some(resume) = resume {
+                                prior_retired = next_retired;
+                                active_region = resolve_region;
+                                active_entry = resume;
+                                continue;
+                            }
+                        }
                     }
                 }
                 if exit.kind() != ExitKind::Return || scratch.activation.frame_count() <= 1 {
@@ -917,6 +999,7 @@ impl JitEngine {
             | ExitKind::GrowActivation
             | ExitKind::TypeResolution
             | ExitKind::TypeEnvironment
+            | ExitKind::InterfaceCall
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(
@@ -966,6 +1049,7 @@ impl JitEngine {
                         | ExitKind::Effect
                         | ExitKind::TypeResolution
                         | ExitKind::TypeEnvironment
+                        | ExitKind::InterfaceCall
                 ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();

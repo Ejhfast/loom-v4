@@ -221,6 +221,81 @@ fn virtual_calls_preserve_scheduler_retirement_counts() {
 }
 
 #[test]
+fn interface_calls_use_one_polymorphic_native_cache() {
+    let source = concat!(
+        "interface Valued\n",
+        "  def value(self): Int\n    7\n  end\n",
+        "end\n",
+        "final class DefaultValue implements Valued\nend\n",
+        "final class OverrideValue implements Valued\n",
+        "  def value(self): Int\n    11\n  end\n",
+        "end\n",
+        "def read[T: Valued](value: T): Int\n  value.value()\nend\n",
+        "left = DefaultValue()\nright = OverrideValue()\n",
+        "index = 0\ntotal = 0\n",
+        "while index < 1000\n",
+        "  total = total + read(left) + read(right)\n",
+        "  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-interface-call.lm", source)
+        .expect("the interface call case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(18_000)));
+    assert!(metrics.compiled_call_sites >= 3, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn interface_calls_preserve_scheduler_retirement_counts() {
+    let source = concat!(
+        "interface Valued\n",
+        "  def value(self): Int\n    7\n  end\n",
+        "end\n",
+        "final class Token implements Valued\nend\n",
+        "def read[T: Valued](value: T): Int\n  value.value()\nend\n",
+        "token = Token()\nindex = 0\ntotal = 0\n",
+        "while index < 10000\n",
+        "  total = total + read(token)\n",
+        "  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-interface-retired.lm", source)
+        .expect("the interface retirement case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the interface retirement case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the interface retirement case runs");
+        (outcome, world.metrics().retired_instructions)
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    let cold = run(Arc::clone(&engine));
+    let warm = run(Arc::clone(&engine));
+    assert_eq!(cold, interpreted);
+    assert_eq!(warm, interpreted);
+    assert!(
+        engine.metrics().native_retired_instructions > 0,
+        "{:?}",
+        engine.metrics()
+    );
+}
+
+#[test]
 fn byte_index_faults_match_the_interpreter() {
     for index in [-1, 4] {
         let source = format!(

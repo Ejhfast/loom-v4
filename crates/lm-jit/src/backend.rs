@@ -1,20 +1,21 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
-    RawNativeFunctions, RawTypeEnvironmentCacheEntry, RUNTIME_HEAP_LIMIT, RUNTIME_OK,
-    TYPE_ENVIRONMENT_CACHE_WAYS,
+    NativeDispatchRow, NativeFunction, RawExit, RawInterfaceCallCacheEntry, RawNativeActivation,
+    RawNativeFrame, RawNativeFunctions, RawTypeEnvironmentCacheEntry, INTERFACE_CALL_CACHE_WAYS,
+    RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
     Segment, SegmentExit, UnsupportedReason, ValueContract, VirtualReceiver,
 };
 use crate::{
-    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL,
-    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
-    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
-    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
-    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    CompiledRegion, FunctionInput, InterfaceCallSite, NativeEntryCell, ScalarKind,
+    TypeEnvironmentSite, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL,
+    EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
+    EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
+    EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
+    EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -80,6 +81,34 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
                 })
             })
             .collect();
+    let interface_call_sites: Vec<InterfaceCallSite> = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let SegmentExit::InterfaceCall {
+                interface,
+                method,
+                recv_ty,
+                app,
+                ..
+            } = segment.exit
+            else {
+                return None;
+            };
+            let contract = segment.call_contract.as_ref()?;
+            Some(InterfaceCallSite {
+                function: input.root.function,
+                block: segment.block,
+                instruction: segment.end.checked_sub(1)?,
+                interface,
+                method,
+                receiver_type: recv_ty,
+                application: app,
+                receiver_kind: *contract.params.first()?,
+                parameter_count: contract.params.len(),
+            })
+        })
+        .collect();
 
     let mut flags = settings::builder();
     flags
@@ -153,6 +182,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         entry,
         call_entry,
         type_environment_sites,
+        interface_call_sites,
         module: Mutex::new(Some(module)),
     })
 }
@@ -654,6 +684,7 @@ fn emit_segment(
                 segment.exit,
                 SegmentExit::Call { .. }
                     | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::InterfaceCall { .. }
                     | SegmentExit::Effect { .. }
                     | SegmentExit::Interpreter { .. }
             );
@@ -1947,6 +1978,7 @@ fn emit_segment(
             Instr::Call(_)
             | Instr::CallG { .. }
             | Instr::CallVirtual { .. }
+            | Instr::CallInterface { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::TupleNew { .. }
@@ -1978,7 +2010,9 @@ fn emit_segment(
 
     if matches!(
         segment.exit,
-        SegmentExit::Call { .. } | SegmentExit::VirtualCall { .. }
+        SegmentExit::Call { .. }
+            | SegmentExit::VirtualCall { .. }
+            | SegmentExit::InterfaceCall { .. }
     ) {
         let call_instruction = segment.end - 1;
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
@@ -2047,6 +2081,33 @@ fn emit_segment(
                     &stack,
                 )?;
                 (target, builder.ins().iconst(types::I32, 0))
+            }
+            SegmentExit::InterfaceCall { .. } => {
+                let receiver_value = stack
+                    .get(
+                        stack
+                            .len()
+                            .checked_sub(contract.params.len())
+                            .ok_or(CompileError::Backend)?,
+                    )
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: call_instruction,
+                    prefix: 0,
+                };
+                let receiver =
+                    emit_interface_receiver_key(builder, values, receiver_value, point, &stack)?;
+                emit_interface_call_lookup(
+                    builder,
+                    values,
+                    input.root.function,
+                    point,
+                    receiver,
+                    receiver_value,
+                    &stack,
+                )?
             }
             _ => return Err(CompileError::Backend),
         };
@@ -2156,6 +2217,7 @@ fn emit_segment(
         }
         SegmentExit::Call { .. } => unreachable!(),
         SegmentExit::VirtualCall { .. } => unreachable!(),
+        SegmentExit::InterfaceCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
             define_stack(builder, values, &stack)?;
             builder.ins().jump(blocks[segment.successors[0]], &[]);
@@ -2186,6 +2248,242 @@ fn emit_type_environment_lookup(
         TypeCacheRequest::Environment,
         stack,
     )
+}
+
+fn emit_interface_receiver_key(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    receiver: NativeValue,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let object = builder.create_block();
+    let immediate = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    let is_object = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, receiver.tag, ValueTag::Obj as u64 as i64);
+    builder.ins().brif(is_object, object, &[], immediate, &[]);
+
+    builder.switch_to_block(immediate);
+    builder.ins().jump(done, &[receiver.tag.into()]);
+
+    builder.switch_to_block(object);
+    let guard_point = FaultPoint {
+        block: point.block,
+        instruction: point.instruction.saturating_add(1),
+        prefix: point.prefix.saturating_add(1),
+    };
+    let entry = emit_heap_entry(
+        builder,
+        values,
+        receiver.bits,
+        guard_point,
+        ObjectGuard::Replay(stack),
+    )?;
+    let object_tag = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let object_key = builder.ins().uextend(types::I64, object_tag);
+    let object_key = builder.ins().bor_imm(object_key, 1_i64 << 62);
+    let instance = builder.create_block();
+    let other_object = builder.create_block();
+    let is_instance =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, object_tag, i64::from(JIT_OBJECT_INSTANCE));
+    builder
+        .ins()
+        .brif(is_instance, instance, &[], other_object, &[]);
+
+    builder.switch_to_block(instance);
+    let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let class_key = builder.ins().uextend(types::I64, class);
+    let class_key = builder.ins().bor_imm(class_key, i64::MIN);
+    builder.ins().jump(done, &[class_key.into()]);
+
+    builder.switch_to_block(other_object);
+    builder.ins().jump(done, &[object_key.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_interface_call_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function: u32,
+    point: FaultPoint,
+    receiver_key: ir::Value,
+    receiver: NativeValue,
+    stack: &[NativeValue],
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let hit = builder.create_block();
+    let miss = builder.create_block();
+    builder.append_block_param(hit, types::I32);
+    builder.append_block_param(hit, types::I32);
+    let store = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, type_store_id),
+    )?;
+    let frame = emit_current_frame_pointer(builder, values)?;
+    let parent = load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, environment))?;
+    let cache = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, interface_calls),
+    )?;
+    let mask = load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, interface_call_mask),
+    )?;
+    let shifted_parent = builder.ins().ushr_imm(parent, 16);
+    let parent_hash = builder.ins().bxor(parent, shifted_parent);
+    let shifted_receiver = builder.ins().ushr_imm(receiver_key, 32);
+    let receiver_hash = builder.ins().bxor(receiver_key, shifted_receiver);
+    let receiver_hash = builder.ins().ireduce(types::I32, receiver_hash);
+    let rotated_receiver = builder.ins().rotl_imm(receiver_hash, 7);
+    let receiver_hash = builder.ins().bxor(receiver_hash, rotated_receiver);
+    let site_hash =
+        crate::activation::type_environment_site_hash(function, point.block, point.instruction);
+    let site_hash = builder.ins().iconst(types::I32, i64::from(site_hash));
+    let set = builder.ins().bxor(site_hash, parent_hash);
+    let set = builder.ins().bxor(set, receiver_hash);
+    let set = builder.ins().band(set, mask);
+    let set = builder.ins().uextend(values.pointer_type, set);
+    let first = builder.ins().imul_imm(
+        set,
+        (INTERFACE_CALL_CACHE_WAYS * mem::size_of::<RawInterfaceCallCacheEntry>()) as i64,
+    );
+    let first = builder.ins().iadd(cache, first);
+    for index in 0..INTERFACE_CALL_CACHE_WAYS {
+        let next = builder.create_block();
+        let entry_offset = index
+            .checked_mul(mem::size_of::<RawInterfaceCallCacheEntry>())
+            .ok_or(CompileError::Backend)?;
+        let entry_offset = i64::try_from(entry_offset).map_err(|_| CompileError::Backend)?;
+        let entry = builder.ins().iadd_imm(first, entry_offset);
+        let cached_store = atomic_load_field(
+            builder,
+            entry,
+            types::I64,
+            mem::offset_of!(RawInterfaceCallCacheEntry, store),
+        )?;
+        let cached_function = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, function),
+        )?;
+        let cached_block = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, block),
+        )?;
+        let cached_instruction = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, instruction),
+        )?;
+        let cached_parent = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, parent),
+        )?;
+        let cached_receiver = atomic_load_field(
+            builder,
+            entry,
+            types::I64,
+            mem::offset_of!(RawInterfaceCallCacheEntry, receiver),
+        )?;
+        let target = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, target),
+        )?;
+        let environment = atomic_load_field(
+            builder,
+            entry,
+            types::I32,
+            mem::offset_of!(RawInterfaceCallCacheEntry, environment),
+        )?;
+        let same_store = builder.ins().icmp(IntCC::Equal, cached_store, store);
+        let same_function =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, cached_function, i64::from(function));
+        let same_block = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, cached_block, i64::from(point.block));
+        let same_instruction = builder.ins().icmp_imm(
+            IntCC::Equal,
+            cached_instruction,
+            i64::from(point.instruction),
+        );
+        let same_parent = builder.ins().icmp(IntCC::Equal, cached_parent, parent);
+        let same_receiver = builder
+            .ins()
+            .icmp(IntCC::Equal, cached_receiver, receiver_key);
+        let matched = builder.ins().band(same_store, same_function);
+        let matched = builder.ins().band(matched, same_block);
+        let matched = builder.ins().band(matched, same_instruction);
+        let matched = builder.ins().band(matched, same_parent);
+        let matched = builder.ins().band(matched, same_receiver);
+        builder.ins().brif(
+            matched,
+            hit,
+            &[target.into(), environment.into()],
+            next,
+            &[],
+        );
+        builder.switch_to_block(next);
+    }
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_INTERFACE_CALL,
+            block: point.block,
+            instruction: point.instruction,
+            result: NativeValue {
+                bits: receiver_key,
+                tag: receiver.tag,
+            },
+        },
+        stack,
+    )?;
+
+    builder.switch_to_block(hit);
+    let values = builder.block_params(hit);
+    Ok((values[0], values[1]))
+}
+
+fn atomic_load_field(
+    builder: &mut FunctionBuilder<'_>,
+    base: ir::Value,
+    ty: ir::Type,
+    offset: usize,
+) -> Result<ir::Value, CompileError> {
+    let address = builder.ins().iadd_imm(
+        base,
+        i64::try_from(offset).map_err(|_| CompileError::Backend)?,
+    );
+    Ok(builder.ins().atomic_load(ty, MemFlags::new(), address))
 }
 
 #[derive(Clone, Copy)]
