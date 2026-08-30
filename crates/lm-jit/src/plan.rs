@@ -176,6 +176,7 @@ pub enum ExitKind {
     Effect,
     StackLimit,
     Interpreter,
+    GrowActivation,
 }
 
 /// One validated native exit record.

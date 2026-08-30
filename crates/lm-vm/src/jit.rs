@@ -17,7 +17,6 @@ pub(crate) struct NativeScratch {
     roots: Vec<u64>,
     root_states: Vec<u8>,
     continuation_regions: Vec<Arc<lm_jit::CompiledRegion>>,
-    continuation_roots: Vec<ObjRef>,
 }
 
 /// One native activation retained at an ordinary scheduler quantum.
@@ -30,6 +29,7 @@ pub(crate) struct NativeContinuation {
     exit: lm_jit::ExecutionExit,
 }
 
+#[derive(Default)]
 struct CanonicalStack {
     frames: Vec<Frame>,
     locals: Vec<Value>,
@@ -72,7 +72,12 @@ impl NativeContinuation {
                 roots.push(*reference);
             }
         }
-        roots.extend_from_slice(&self.scratch.continuation_roots);
+        extend_native_roots(
+            &self.scratch.activation,
+            &self.scratch.continuation_regions,
+            self.exit,
+            roots,
+        );
     }
 
     pub(crate) fn execution_trace(&self, next_top: bool) -> Vec<lm_heap::FaultSite> {
@@ -277,43 +282,37 @@ impl JitEngine {
         metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> NativeAttempt {
-        let continuation = machine.take_native_continuation();
+        let mut continuation = machine.take_native_continuation();
         let resumed = continuation.is_some();
         let (root_region, active_region, entry_index, root_frame, base, operand_base) =
-            if let Some(continuation) = continuation {
-                let continuation = *continuation;
-                let Some(top) = continuation.scratch.activation.frames().last() else {
-                    return reject_native_continuation(machine, native, continuation, metrics);
+            if let Some(mut held) = continuation.take() {
+                let Some(top) = held.scratch.activation.frames().last() else {
+                    return reject_native_continuation(machine, native, *held, metrics);
                 };
                 let top_block = top.block();
                 let top_instruction = top.instruction();
-                let Some(active_region) = continuation.scratch.continuation_regions.last().cloned()
-                else {
-                    return reject_native_continuation(machine, native, continuation, metrics);
+                let Some(active_region) = held.scratch.continuation_regions.last().cloned() else {
+                    return reject_native_continuation(machine, native, *held, metrics);
                 };
-                let Some(root_region) = continuation.scratch.continuation_regions.first().cloned()
-                else {
-                    return reject_native_continuation(machine, native, continuation, metrics);
+                let Some(root_region) = held.scratch.continuation_regions.first().cloned() else {
+                    return reject_native_continuation(machine, native, *held, metrics);
                 };
-                if continuation.scratch.continuation_regions.len()
-                    != continuation.scratch.activation.frame_count()
+                if held.scratch.continuation_regions.len() != held.scratch.activation.frame_count()
                 {
-                    return reject_native_continuation(machine, native, continuation, metrics);
+                    return reject_native_continuation(machine, native, *held, metrics);
                 }
                 let Some(entry) = active_region.resume_plan(top_block, top_instruction) else {
-                    return reject_native_continuation(machine, native, continuation, metrics);
+                    return reject_native_continuation(machine, native, *held, metrics);
                 };
                 let entry_index = entry.index();
-                let NativeContinuation {
-                    scratch: continuation_scratch,
-                    canonical,
-                    root_frame,
-                    root_local,
-                    root_operand,
-                    ..
-                } = continuation;
+                let continuation_scratch = std::mem::take(&mut held.scratch);
+                let canonical = std::mem::take(&mut held.canonical);
+                let root_frame = held.root_frame;
+                let root_local = held.root_local;
+                let root_operand = held.root_operand;
                 canonical.restore(machine);
                 *scratch = continuation_scratch;
+                continuation = Some(held);
                 metrics.note_native_continuation_resume();
                 (
                     root_region,
@@ -389,6 +388,7 @@ impl JitEngine {
                     metrics.note_guard_failure(0);
                     return NativeAttempt::Fallback;
                 }
+                scratch.continuation_regions.clear();
                 if scratch
                     .activation
                     .prepare_root(NativePreparation {
@@ -461,7 +461,8 @@ impl JitEngine {
         let max_frames = machine.config.max_frames as usize;
         let base_frames = root_frame;
         metrics.note_native_entry();
-        let (exit, exit_region, allocations) = {
+        scratch.activation.begin_execution();
+        let (exit, allocations) = {
             let mut runtime = MachineRuntime {
                 machine,
                 module,
@@ -501,10 +502,43 @@ impl JitEngine {
                     Ok(exit) => exit,
                     Err(error) => break Err(error),
                 };
+                if exit.kind() == ExitKind::GrowActivation {
+                    let required_scalars = (exit.result() >> 32) as usize;
+                    let Some(required_frames) = scratch.activation.frame_count().checked_add(1)
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let grow_region = scratch
+                        .activation
+                        .frames()
+                        .last()
+                        .and_then(|frame| native.slot(frame.function()))
+                        .and_then(|slot| slot.compiled());
+                    let resume = grow_region
+                        .as_deref()
+                        .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
+                        .map(|entry| entry.index());
+                    if let (Some(grow_region), Some(resume)) = (grow_region, resume) {
+                        let grew = scratch.activation.grow(
+                            required_scalars,
+                            required_frames,
+                            max_stack_values,
+                            max_frames,
+                        );
+                        if matches!(grew, Ok(true)) {
+                            prior_retired = next_retired;
+                            active_region = grow_region;
+                            active_entry = resume;
+                            metrics.note_native_activation_grow();
+                            continue;
+                        }
+                    }
+                }
                 if exit.kind() != ExitKind::Return || scratch.activation.frame_count() <= 1 {
-                    break exit
-                        .add_prior_retired(prior_retired)
-                        .map(|exit| (exit, active_region));
+                    break exit.add_prior_retired(prior_retired);
                 }
                 let parent = {
                     let parent_index = scratch.activation.frame_count().saturating_sub(2);
@@ -535,10 +569,7 @@ impl JitEngine {
                 active_region = parent_region;
                 active_entry = parent_entry;
             };
-            match result {
-                Ok((exit, region)) => (Ok(exit), Some(region), runtime.allocations),
-                Err(error) => (Err(error), None, runtime.allocations),
-            }
+            (result, runtime.allocations)
         };
         metrics.note_native_allocations(allocations);
         let exit = match exit {
@@ -569,19 +600,39 @@ impl JitEngine {
                 instruction_limit,
             );
         }
+        if metrics.sample_productivity() {
+            let sample = match exit.kind() {
+                ExitKind::Fuel
+                | ExitKind::Return
+                | ExitKind::Interpreter
+                | ExitKind::Allocation
+                | ExitKind::Effect => true,
+                ExitKind::Call => u32::try_from(exit.result())
+                    .ok()
+                    .is_some_and(|target| native.call_target_is_denied(target)),
+                _ => false,
+            };
+            if sample {
+                let demoted =
+                    scratch.activation.frames().next().is_some_and(|frame| {
+                        native.note_native_exit(frame.function(), exit.retired())
+                    });
+                if demoted {
+                    metrics.note_unproductive_native_demotion();
+                }
+            }
+        }
         machine.vm.fuel -= exit.retired();
         let retain_continuation = exit.kind() == ExitKind::Fuel
             && exit.retired() == batch_fuel
             && batch_fuel == u64::from(instruction_limit)
             && u64::from(instruction_limit) <= original_fuel;
         if retain_continuation {
-            let Ok(()) = continuation_metadata(
+            let Ok(()) = continuation_regions(
                 native,
-                Arc::clone(&root_region),
+                &root_region,
                 &scratch.activation,
-                exit,
                 &mut scratch.continuation_regions,
-                &mut scratch.continuation_roots,
             ) else {
                 metrics.note_backend_unavailable();
                 metrics.note_native_fault_exit();
@@ -592,15 +643,21 @@ impl JitEngine {
                     instruction_limit,
                 );
             };
-            let canonical = CanonicalStack::take(machine);
-            machine.set_native_continuation(NativeContinuation {
+            let state = NativeContinuation {
                 scratch: std::mem::take(scratch),
-                canonical,
+                canonical: CanonicalStack::take(machine),
                 root_frame,
                 root_local: base,
                 root_operand: operand_base,
                 exit,
-            });
+            };
+            let held = if let Some(mut held) = continuation {
+                *held = state;
+                held
+            } else {
+                Box::new(state)
+            };
+            machine.set_native_continuation(held);
             metrics.note_native_retired(retired as u64);
             metrics.note_native_continuation_suspend();
             return NativeAttempt::Complete {
@@ -610,7 +667,7 @@ impl JitEngine {
         }
         if continuation_regions(
             native,
-            Arc::clone(&root_region),
+            &root_region,
             &scratch.activation,
             &mut scratch.continuation_regions,
         )
@@ -630,10 +687,9 @@ impl JitEngine {
             Ok(region) => region,
             Err(()) => return malformed_native_exit(retired),
         };
-        let top_region = top_child
-            .as_deref()
-            .or(exit_region.as_deref())
-            .unwrap_or(root_region.as_ref());
+        let Some(top_region) = scratch.continuation_regions.last() else {
+            return malformed_native_exit(retired);
+        };
         metrics.note_native_retired(retired as u64);
         metrics.note_materialization();
         if resumed {
@@ -644,10 +700,11 @@ impl JitEngine {
             ExitKind::Fuel
             | ExitKind::Interpreter
             | ExitKind::Call
+            | ExitKind::GrowActivation
             | ExitKind::Allocation
             | ExitKind::Effect => {
                 let interpreter = matches!(exit.kind(), ExitKind::Interpreter);
-                if matches!(exit.kind(), ExitKind::Call) {
+                if matches!(exit.kind(), ExitKind::Call | ExitKind::GrowActivation) {
                     if retired == instruction_limit {
                         return NativeAttempt::Complete {
                             outcome: Ok(None),
@@ -660,7 +717,8 @@ impl JitEngine {
                             retired,
                         };
                     }
-                    let Ok(target) = u32::try_from(exit.result()) else {
+                    let target = exit.result() & u64::from(u32::MAX);
+                    let Ok(target) = u32::try_from(target) else {
                         return malformed_native_exit(retired);
                     };
                     machine.vm.fuel -= 1;
@@ -742,7 +800,7 @@ impl JitEngine {
 
 fn continuation_regions(
     native: &NativeCodeState,
-    root: Arc<lm_jit::CompiledRegion>,
+    root: &Arc<lm_jit::CompiledRegion>,
     activation: &lm_jit::NativeActivation,
     regions: &mut Vec<Arc<lm_jit::CompiledRegion>>,
 ) -> Result<(), ()> {
@@ -750,10 +808,25 @@ fn continuation_regions(
     if frame_count == 0 {
         return Err(());
     }
-    regions.clear();
-    regions.try_reserve(frame_count).map_err(|_| ())?;
-    regions.push(root);
-    for frame in activation.frames().skip(1) {
+    let retained = activation
+        .changed_from()
+        .min(frame_count)
+        .min(regions.len());
+    regions.truncate(retained);
+    regions
+        .try_reserve(frame_count.saturating_sub(regions.len()))
+        .map_err(|_| ())?;
+    if regions.is_empty() {
+        if activation
+            .frames()
+            .next()
+            .is_none_or(|frame| frame.function() != root.function())
+        {
+            return Err(());
+        }
+        regions.push(Arc::clone(root));
+    }
+    for frame in activation.frames().skip(regions.len()) {
         if !frame.native_created() {
             return Err(());
         }
@@ -766,22 +839,18 @@ fn continuation_regions(
     Ok(())
 }
 
-fn continuation_metadata(
-    native: &NativeCodeState,
-    root: Arc<lm_jit::CompiledRegion>,
+fn extend_native_roots(
     activation: &lm_jit::NativeActivation,
+    regions: &[Arc<lm_jit::CompiledRegion>],
     exit: lm_jit::ExecutionExit,
-    regions: &mut Vec<Arc<lm_jit::CompiledRegion>>,
     roots: &mut Vec<ObjRef>,
-) -> Result<(), ()> {
-    continuation_regions(native, root, activation, regions)?;
+) {
     let frame_count = activation.frame_count();
-    roots.clear();
     for (index, (frame, region)) in activation.frames().zip(regions.iter()).enumerate() {
         if frame.locals().len() != region.local_kinds().len()
             || frame.states().len() != region.local_kinds().len()
         {
-            return Err(());
+            return;
         }
         for ((kind, bits), state) in region
             .local_kinds()
@@ -797,9 +866,11 @@ fn continuation_metadata(
             }
         }
         let top = index + 1 == frame_count;
-        let kinds = frame_operand_kinds(region, &frame, top.then_some(exit))?;
+        let Some(kinds) = frame_operand_kinds(region, &frame, top.then_some(exit)).ok() else {
+            return;
+        };
         if kinds.len() != frame.operands().len() {
-            return Err(());
+            return;
         }
         for (kind, bits) in kinds.iter().copied().zip(frame.operands().iter().copied()) {
             if let Value::Obj(reference) = bits_value(kind, bits) {
@@ -807,7 +878,6 @@ fn continuation_metadata(
             }
         }
     }
-    Ok(())
 }
 
 fn frame_operand_kinds<'a>(

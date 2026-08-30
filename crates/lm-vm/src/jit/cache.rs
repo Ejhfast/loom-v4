@@ -1,13 +1,17 @@
 //! Native region cache for one arena layout.
 
 use lm_jit::{Failure, FunctionInput};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const MAX_COMPILED_REGIONS: usize = 256;
 const AUTO_COMPILE_WORK: u64 = 100_000;
 const TIER_COMPILED: u64 = u64::MAX - 1;
 const TIER_DENIED: u64 = u64::MAX;
+const ENTRY_SAMPLE_COUNT: u32 = 8;
+const MIN_ENTRY_RETIRED: u64 = 32;
+const PRODUCTIVITY_PROVEN: u32 = u32::MAX - 1;
+const PRODUCTIVITY_DENIED: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TierDecision {
@@ -102,6 +106,15 @@ impl NativeCodeState {
                 .slot(function)
                 .is_some_and(|slot| slot.ready_for_auto())
     }
+
+    pub(crate) fn note_native_exit(&self, function: u32, retired: u64) -> bool {
+        self.slot(function)
+            .is_some_and(|slot| slot.note_native_exit(retired))
+    }
+
+    pub(crate) fn call_target_is_denied(&self, function: u32) -> bool {
+        self.slot(function).is_none_or(|slot| slot.is_denied())
+    }
 }
 
 impl NativeCodeRevision {
@@ -127,6 +140,7 @@ pub(super) struct NativeSlot {
     entry: Arc<lm_jit::NativeEntryCell>,
     event_weight: u32,
     tier: AtomicU64,
+    productivity: AtomicU32,
 }
 
 impl NativeSlot {
@@ -146,6 +160,7 @@ impl NativeSlot {
             entry: Arc::new(lm_jit::NativeEntryCell::default()),
             event_weight,
             tier: AtomicU64::new(if candidate { 0 } else { TIER_DENIED }),
+            productivity: AtomicU32::new(0),
         }
     }
 
@@ -191,10 +206,11 @@ impl NativeSlot {
     }
 
     pub(super) fn ready_for_auto(&self) -> bool {
-        matches!(
-            self.tier.load(Ordering::Acquire),
-            AUTO_COMPILE_WORK | TIER_COMPILED
-        )
+        self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
+            && matches!(
+                self.tier.load(Ordering::Acquire),
+                AUTO_COMPILE_WORK | TIER_COMPILED
+            )
     }
 
     fn enter_frame(&self, work_scale: u32) -> TierDecision {
@@ -204,12 +220,48 @@ impl NativeSlot {
             self.tier.load(Ordering::Acquire)
         };
         TierDecision {
-            enter_native: matches!(state, AUTO_COMPILE_WORK | TIER_COMPILED),
+            enter_native: self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
+                && matches!(state, AUTO_COMPILE_WORK | TIER_COMPILED),
         }
     }
 
     fn note_event(&self, work_scale: u32) -> bool {
-        matches!(self.add_work(work_scale), AUTO_COMPILE_WORK | TIER_COMPILED)
+        self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
+            && matches!(self.add_work(work_scale), AUTO_COMPILE_WORK | TIER_COMPILED)
+    }
+
+    fn note_native_exit(&self, retired: u64) -> bool {
+        let mut state = self.productivity.load(Ordering::Relaxed);
+        loop {
+            if matches!(state, PRODUCTIVITY_PROVEN | PRODUCTIVITY_DENIED) {
+                return false;
+            }
+            let next = if retired >= MIN_ENTRY_RETIRED {
+                PRODUCTIVITY_PROVEN
+            } else if state + 1 >= ENTRY_SAMPLE_COUNT {
+                PRODUCTIVITY_DENIED
+            } else {
+                state + 1
+            };
+            match self.productivity.compare_exchange_weak(
+                state,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    if next == PRODUCTIVITY_DENIED {
+                        return true;
+                    }
+                    return false;
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    fn is_denied(&self) -> bool {
+        self.tier.load(Ordering::Acquire) == TIER_DENIED
     }
 
     fn add_work(&self, work_scale: u32) -> u64 {

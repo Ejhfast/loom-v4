@@ -123,6 +123,31 @@ fn auto_mode_compiles_only_after_interpreted_work() {
 }
 
 #[test]
+fn auto_mode_demotes_repeated_quick_native_exits() {
+    let source = concat!(
+        "def append_one(mut items: [Int]): Int\n",
+        "  items.push(1)\n",
+        "  items.len()\n",
+        "end\n",
+        "items: [Int] = []\n",
+        "i = 0\n",
+        "while i < 50000\n",
+        "  append_one(items)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "items.len()\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
+    assert_eq!(automatic, interpreted);
+    assert_eq!(automatic_dump, interpreted_dump);
+    assert_eq!(automatic, Outcome::Done(lm_value::Value::Int(50_000)));
+    assert!(metrics.compiled_regions >= 1, "{metrics:?}");
+    assert!(metrics.unproductive_native_demotions >= 1, "{metrics:?}");
+    assert!(metrics.native_entries < 64, "{metrics:?}");
+}
+
+#[test]
 fn native_cache_is_scoped_to_one_arena_layout() {
     let engine = Arc::new(Engine::new(EngineMode::Native));
     let first = concat!("class P\nend\n", "def make(): P\n  P()\nend\n", "make()\n",);
@@ -150,8 +175,11 @@ fn scalar_loop_fuel_matches_the_interpreter() {
     for fuel in 0..=64 {
         let (interpreted, _, interpreted_dump) =
             run_artifact(&artifact, EngineMode::Interpreter, fuel);
-        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
-        assert_eq!(native, interpreted, "fuel {fuel}");
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(
+            native, interpreted,
+            "fuel {fuel}: {metrics:?}\n{native_dump}"
+        );
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
 }
@@ -244,8 +272,11 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
     for fuel in 0..=32 {
         let (interpreted, _, interpreted_dump) =
             run_artifact(&artifact, EngineMode::Interpreter, fuel);
-        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
-        assert_eq!(native, interpreted, "fuel {fuel}");
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(
+            native, interpreted,
+            "fuel {fuel}: {metrics:?}\n{native_dump}"
+        );
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
     let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
@@ -330,6 +361,25 @@ fn recursive_calls_stay_on_one_native_turn_stack() {
 }
 
 #[test]
+fn deep_recursion_grows_one_native_turn_stack() {
+    let source = concat!(
+        "def descend(value: Int): Int\n",
+        "  if value == 0 then 0 else descend(value - 1) + 1 end\n",
+        "end\n",
+        "descend(1000)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_000)));
+    assert!(metrics.native_activation_grows >= 2, "{metrics:?}");
+    assert!(metrics.native_entries <= 3, "{metrics:?}");
+    assert!(metrics.materializations <= 3, "{metrics:?}");
+    assert_eq!(metrics.backend_unavailable_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn mutual_recursion_stays_on_one_native_turn_stack() {
     let source = concat!(
         "def even(value: Int): Bool\n",
@@ -405,8 +455,11 @@ fn recursive_calls_match_each_fuel_boundary() {
     for fuel in fuels {
         let (interpreted, _, interpreted_dump) =
             run_artifact(&artifact, EngineMode::Interpreter, fuel);
-        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
-        assert_eq!(native, interpreted, "fuel {fuel}");
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(
+            native, interpreted,
+            "fuel {fuel}: {metrics:?}\n{native_dump}"
+        );
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
 }
@@ -628,6 +681,27 @@ fn direct_heap_access_matches_each_fuel_boundary() {
     assert!(metrics.compiled_heap_read_sites >= 5, "{metrics:?}");
     assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 100, "{metrics:?}");
+}
+
+#[test]
+fn native_class_initialization_releases_each_call_frame() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "i = 0\ns = 0\nwhile i < 50000\n",
+        "  p = Point(i, i)\n  s = s + p.x\n  i = i + 1\n",
+        "end\ns\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump);
+    let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
+    assert_eq!(automatic, interpreted, "{metrics:?}\n{automatic_dump}");
+    assert_eq!(automatic_dump, interpreted_dump);
+    assert!(metrics.native_allocations > 40_000, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 500_000, "{metrics:?}");
 }
 
 #[test]
@@ -1389,6 +1463,96 @@ fn a_native_call_stack_survives_a_quantum() {
     let metrics = engine.metrics();
     assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 900, "{metrics:?}");
+}
+
+#[test]
+fn object_results_survive_native_call_quanta() {
+    let source = concat!(
+        "class Box\n  value: Int\n",
+        "  def init(mut self, value: Int)\n    self.value = value\n  end\nend\n",
+        "def leaf(value: Int): Box\n  Box(value)\nend\n",
+        "def middle(value: Int): Box\n  leaf(value)\nend\n",
+        "def outer(value: Int): Box\n  middle(value)\nend\n",
+        "i = 0\nsum = 0\nwhile i < 1000\n",
+        "  box = outer(i)\n  sum = sum + box.value\n  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-object-quantum.lm", source)
+        .expect("the object result case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the object result case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        engine,
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    for _ in 0..100_000 {
+        match world.drive_slice(root, 7) {
+            Some(lm_vm::SliceExit::Yielded) => {}
+            Some(lm_vm::SliceExit::Terminal) => break,
+            other => panic!("the object result run stopped early: {other:?}"),
+        }
+    }
+    assert_eq!(
+        world.task_outcome(root),
+        Outcome::Done(lm_value::Value::Int(499_500))
+    );
+}
+
+#[test]
+fn result_objects_survive_native_call_quanta() {
+    let source = concat!(
+        "class Box\n  value: Int\n",
+        "  def init(mut self, value: Int)\n    self.value = value\n  end\nend\n",
+        "def leaf(value: Int): Result[Box, String]\n  Ok(Box(value))\nend\n",
+        "def outer(value: Int): Result[Box, String]\n  leaf(value)\nend\n",
+        "i = 0\nsum = 0\nwhile i < 32\n",
+        "  case outer(i)\n",
+        "  in Ok(box) then sum = sum + box.value\n",
+        "  in Err(_) then sum = sum - 10000\n",
+        "  end\n  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-result-quantum.lm", source)
+        .expect("the result object case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the result object case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    for quantum in 1..=32 {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        let root = lm_vm::TaskKey {
+            vm: 0,
+            generation: 0,
+        };
+        for _ in 0..100_000 {
+            match world.drive_slice(root, quantum) {
+                Some(lm_vm::SliceExit::Yielded) => {}
+                Some(lm_vm::SliceExit::Terminal) => break,
+                other => panic!("the result object run stopped early: {other:?}"),
+            }
+        }
+        let outcome = world.task_outcome(root);
+        assert_eq!(
+            outcome,
+            Outcome::Done(lm_value::Value::Int(496)),
+            "quantum {quantum}: {:?}\n{}",
+            engine.metrics(),
+            world.dump_live(&outcome)
+        );
+    }
 }
 
 #[test]

@@ -45,6 +45,8 @@ pub struct EngineMetrics {
     pub native_continuation_suspends: u64,
     pub native_continuation_resumes: u64,
     pub native_continuation_materializations: u64,
+    pub native_activation_grows: u64,
+    pub unproductive_native_demotions: u64,
     pub native_fault_exits: u64,
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
@@ -65,6 +67,8 @@ struct EngineCounters {
     native_continuation_suspends: AtomicU64,
     native_continuation_resumes: AtomicU64,
     native_continuation_materializations: AtomicU64,
+    native_activation_grows: AtomicU64,
+    unproductive_native_demotions: AtomicU64,
     native_fault_exits: AtomicU64,
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
@@ -95,6 +99,8 @@ impl EngineCounters {
             native_continuation_suspends: read(&self.native_continuation_suspends),
             native_continuation_resumes: read(&self.native_continuation_resumes),
             native_continuation_materializations: read(&self.native_continuation_materializations),
+            native_activation_grows: read(&self.native_activation_grows),
+            unproductive_native_demotions: read(&self.unproductive_native_demotions),
             native_fault_exits: read(&self.native_fault_exits),
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
@@ -116,6 +122,8 @@ impl EngineCounters {
         reset(&self.native_continuation_suspends);
         reset(&self.native_continuation_resumes);
         reset(&self.native_continuation_materializations);
+        reset(&self.native_activation_grows);
+        reset(&self.unproductive_native_demotions);
         reset(&self.native_fault_exits);
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
@@ -152,6 +160,14 @@ impl EngineCounters {
             &self.native_continuation_materializations,
             values.native_continuation_materializations,
         );
+        add(
+            &self.native_activation_grows,
+            values.native_activation_grows,
+        );
+        add(
+            &self.unproductive_native_demotions,
+            values.unproductive_native_demotions,
+        );
         add(&self.native_fault_exits, values.native_fault_exits);
         add(
             &self.native_allocation_exits,
@@ -178,9 +194,14 @@ impl EngineCounters {
 pub(crate) struct EngineTurnMetrics<'a> {
     counters: &'a EngineCounters,
     values: EngineMetrics,
+    sample_productivity: bool,
 }
 
 impl EngineTurnMetrics<'_> {
+    pub(crate) fn sample_productivity(&self) -> bool {
+        self.sample_productivity
+    }
+
     pub(crate) fn note_backend_unavailable(&mut self) {
         self.values.backend_unavailable_fallbacks += 1;
     }
@@ -223,6 +244,14 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_continuation_materialization(&mut self) {
         self.values.native_continuation_materializations += 1;
+    }
+
+    pub(crate) fn note_native_activation_grow(&mut self) {
+        self.values.native_activation_grows += 1;
+    }
+
+    pub(crate) fn note_unproductive_native_demotion(&mut self) {
+        self.values.unproductive_native_demotions += 1;
     }
 
     pub(crate) fn note_native_fault_exit(&mut self) {
@@ -299,6 +328,7 @@ impl Engine {
         EngineTurnMetrics {
             counters: &self.counters,
             values: EngineMetrics::default(),
+            sample_productivity: self.mode() == EngineMode::Auto,
         }
     }
 
@@ -311,7 +341,7 @@ impl Engine {
         metrics: &mut EngineTurnMetrics<'_>,
         instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
-        if self.mode() == EngineMode::Auto
+        if metrics.sample_productivity()
             && !machine.has_native_continuation()
             && machine
                 .vm

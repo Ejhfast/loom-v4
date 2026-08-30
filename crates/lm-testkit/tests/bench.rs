@@ -120,7 +120,11 @@ fn time_program_native_cold(source: &str) -> Duration {
         let mut vm = Vm::new_with_engine(arena.clone(), namespace, config(), engine);
         let outcome = vm.run();
         let elapsed = start.elapsed();
-        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        assert!(
+            matches!(outcome, lm_vm::Outcome::Done(_)),
+            "the cold benchmark faulted: {}",
+            vm.show_outcome(&outcome)
+        );
         if round > 0 {
             runs.push(elapsed);
         }
@@ -164,7 +168,11 @@ fn time_program_engine_after_setup(
         let start = Instant::now();
         let outcome = world.run_root();
         let elapsed = start.elapsed();
-        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        assert!(
+            matches!(outcome, lm_vm::Outcome::Done(_)),
+            "the setup benchmark faulted: {}",
+            world.show_outcome(&outcome)
+        );
         record_warm_round(
             &engine,
             elapsed,
@@ -208,7 +216,11 @@ fn time_program_native_cold_after_setup(source: &str, setup: u32) -> Duration {
         let start = Instant::now();
         let outcome = world.run_root();
         let elapsed = start.elapsed();
-        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        assert!(
+            matches!(outcome, lm_vm::Outcome::Done(_)),
+            "the cold setup benchmark faulted: {}",
+            world.show_outcome(&outcome)
+        );
         if round > 0 {
             runs.push(elapsed);
         }
@@ -294,7 +306,12 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
             .run(&mut world)
             .expect("the scheduled scalar benchmark must run");
         let elapsed = start.elapsed();
-        assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
+        assert!(
+            matches!(outcome, lm_vm::Outcome::Done(_)),
+            "the scheduled {mode:?} benchmark faulted: {}\n{:?}",
+            world.show_outcome(&outcome),
+            engine.metrics(),
+        );
         let retired = world.metrics().retired_instructions;
         if let Some(expected) = retired_instructions {
             assert_eq!(retired, expected);
@@ -559,13 +576,14 @@ fn report_jit_representative(name: &str, source: &str) {
         native_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64
     };
     println!(
-        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}",
+        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         automatic.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / automatic.as_secs_f64(),
         interpreted.as_secs_f64() / native.as_secs_f64(),
         auto_metrics.compilation_attempts,
+        auto_metrics.unproductive_native_demotions,
         auto_metrics.unsupported_region_fallbacks,
         native_metrics.unsupported_region_fallbacks,
     );
@@ -1277,6 +1295,19 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_deep_recursion",
+        concat!(
+            "def down(n: Int): Int\n",
+            "  if n <= 0 then 0 else down(n - 1) + 1 end\n",
+            "end\n",
+            "i = 0\ns = 0\n",
+            "while i < 1000\n",
+            "  s = s + down(1000)\n  i = i + 1\n",
+            "end\ns\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_int_div",
         concat!(
             "i = 1\nd = 3\ns = 0\n",
@@ -1429,7 +1460,56 @@ fn bench_jit_scalar_regions() {
 #[ignore]
 fn bench_jit_representative_programs() {
     println!(
-        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_unsupported\tnative_unsupported"
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported"
+    );
+    report_jit_representative(
+        "jit_deep_recursion",
+        concat!(
+            "def down(n: Int): Int\n",
+            "  if n <= 0 then 0 else down(n - 1) + 1 end\n",
+            "end\n",
+            "i = 0\ns = 0\n",
+            "while i < 1000\n",
+            "  s = s + down(1000)\n  i = i + 1\n",
+            "end\ns\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_quick_exit",
+        concat!(
+            "def append_one(mut items: [Int]): Int\n",
+            "  items.push(1)\n",
+            "  items.len()\n",
+            "end\n",
+            "items: [Int] = []\n",
+            "i = 0\n",
+            "while i < 50000\n",
+            "  append_one(items)\n",
+            "  i = i + 1\n",
+            "end\n",
+            "items.len()\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_class_init",
+        concat!(
+            "class Point\n  x: Int = 0\n  y: Int = 0\n",
+            "  def init(mut self, x: Int, y: Int)\n",
+            "    self.x = x\n    self.y = y\n  end\nend\n",
+            "i = 0\ns = 0\nwhile i < 500000\n",
+            "  p = Point(i, i)\n  s = s + p.x\n  i = i + 1\n",
+            "end\ns\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_list_sort",
+        concat!(
+            "source = [16, 7, 12, 3, 10, 1, 14, 5, 8, 15, 2, 11, 6, 13, 4, 9]\n",
+            "i = 0\nfirst = 0\nwhile i < 20000\n",
+            "  values = source.copy()\n  values.sort()\n",
+            "  first = values.at(0)\n  i = i + 1\n",
+            "end\nfirst\n",
+        ),
     );
     report_jit_representative(
         "jit_json_parse",

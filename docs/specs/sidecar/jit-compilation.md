@@ -1,10 +1,10 @@
 # JIT compilation
 
-Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and direct array access are implemented.
+Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and growable activations are implemented.
 
 Direct instance, tuple, and list access use the canonical heap layout.
 
-Native stack growth, productive-entry policy, and representative-program gains remain.
+Representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -171,6 +171,10 @@ A native return pops one native frame.
 
 Recursion uses the same calling convention.
 
+A resumed return tail-calls the saved parent entry.
+
+The final exit uses the active frame's result type.
+
 Frame and stack limits match the interpreter limits.
 
 Native storage starts small and grows geometrically.
@@ -193,7 +197,7 @@ The machine does not retain a second scalar-state copy.
 
 The continuation pins every active compiled region.
 
-It also stores all active object roots.
+Garbage collection derives active object roots when it needs them.
 
 A later worker can resume the same continuation.
 
@@ -775,6 +779,12 @@ Gate: Deep recursion does not cross an engine boundary for storage growth.
 
 Gate: The recursion benchmark improves in Auto and Native modes.
 
+Gate result: Deep recursion improved 1.27 times in Auto mode.
+
+Gate result: Deep recursion improved 1.28 times in Native mode.
+
+Gate result: Quick exits remained within three percent in Auto mode.
+
 ### Stage F: Representative programs
 
 - measure the complete corpus;
@@ -857,6 +867,24 @@ The first stable JSON parse run reached 0.91 percent native coverage.
 Auto took 52.272 ms, compared with 46.353 ms for the interpreter.
 
 This result does not pass the representative-program gate.
+
+The Stage E2 run used the deterministic scheduler and a 1,024-instruction quantum.
+
+It used nine stable warm rounds after all native compilation stopped.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain |
+| --- | ---: | ---: | ---: | ---: |
+| Deep recursion | 35.823 ms | 28.124 ms | 27.955 ms | 1.27 times |
+| Quick exits | 3.604 ms | 3.711 ms | 9.056 ms | 0.97 times |
+| Class initialization | 110.204 ms | 41.271 ms | 40.609 ms | 2.67 times |
+
+Forced Native mode exposes the expected quick-exit loss.
+
+Auto mode avoids that loss through its productive-entry policy.
+
+The HTTP parser now passes after native continuations return nested object results.
+
+It still gains only 1.01 times in Auto mode.
 
 ## 24. Rejected designs
 

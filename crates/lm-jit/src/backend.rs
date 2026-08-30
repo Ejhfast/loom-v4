@@ -10,14 +10,15 @@ use crate::plan::{
 };
 use crate::{
     CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
-    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW,
-    EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_MISMATCH,
-    EXIT_UNINITIALIZED_FIELD, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_RETURN, EXIT_STACK_LIMIT,
+    EXIT_TYPE_MISMATCH, EXIT_UNINITIALIZED_FIELD, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
     UserFuncName,
 };
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -62,55 +63,114 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
     flags
         .set("opt_level", "speed")
         .map_err(|_| CompileError::Backend)?;
+    flags
+        .set("preserve_frame_pointers", "true")
+        .map_err(|_| CompileError::Backend)?;
     let isa = cranelift_native::builder()
         .map_err(|_| CompileError::Backend)?
         .finish(settings::Flags::new(flags))
         .map_err(|_| CompileError::Backend)?;
     let pointer_type = isa.pointer_type();
     let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
-    let mut signature = module.make_signature();
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(types::I64));
-    signature.params.push(AbiParam::new(types::I32));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    let id = module
-        .declare_function("loom_scalar_region", Linkage::Local, &signature)
+    let mut entry_signature = module.make_signature();
+    append_native_parameters(&mut entry_signature, pointer_type);
+    let host_call_conv = entry_signature.call_conv;
+    let mut body_signature = entry_signature.clone();
+    body_signature.call_conv = CallConv::Tail;
+    body_signature.params.push(AbiParam::new(types::I64));
+    body_signature.params.push(AbiParam::new(types::I32));
+    let body_id = module
+        .declare_function("loom_native_body", Linkage::Local, &body_signature)
         .map_err(|_| CompileError::Backend)?;
-    let mut context = module.make_context();
-    context.func.signature = signature;
-    context.func.name = UserFuncName::user(0, id.as_u32());
+    let entry_id = module
+        .declare_function("loom_native_entry", Linkage::Local, &entry_signature)
+        .map_err(|_| CompileError::Backend)?;
+    let mut body_context = module.make_context();
+    body_context.func.signature = body_signature;
+    body_context.func.name = UserFuncName::user(0, body_id.as_u32());
     let mut frontend = FunctionBuilderContext::new();
     emit_region(
-        &mut context.func,
+        &mut body_context.func,
         &mut frontend,
         pointer_type,
+        host_call_conv,
         func,
         &plan,
         &input,
     )?;
     module
-        .define_function(id, &mut context)
+        .define_function(body_id, &mut body_context)
+        .map_err(|_| CompileError::Backend)?;
+    let mut entry_context = module.make_context();
+    entry_context.func.signature = entry_signature;
+    entry_context.func.name = UserFuncName::user(0, entry_id.as_u32());
+    let body_reference = module.declare_func_in_func(body_id, &mut entry_context.func);
+    let mut entry_frontend = FunctionBuilderContext::new();
+    emit_entry_wrapper(&mut entry_context.func, &mut entry_frontend, body_reference)?;
+    module
+        .define_function(entry_id, &mut entry_context)
         .map_err(|_| CompileError::Backend)?;
     module
         .finalize_definitions()
         .map_err(|_| CompileError::Backend)?;
-    let code = module.get_finalized_function(id);
+    let entry_code = module.get_finalized_function(entry_id);
+    let body_code = module.get_finalized_function(body_id);
     // SAFETY: The generated function uses the exact `NativeFunction` C ABI.
     // `CompiledRegion` retains the module that owns the executable memory.
-    let entry = unsafe { mem::transmute::<*const u8, NativeFunction>(code) };
+    let entry = unsafe { mem::transmute::<*const u8, NativeFunction>(entry_code) };
+    let call_entry = body_code as usize;
     Ok(CompiledRegion {
+        function: input.root.function,
         plan,
         entry,
+        call_entry,
         module: Mutex::new(Some(module)),
     })
+}
+
+fn append_native_parameters(signature: &mut ir::Signature, pointer_type: ir::Type) {
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(types::I64));
+    signature.params.push(AbiParam::new(types::I32));
+    for _ in 0..7 {
+        signature.params.push(AbiParam::new(pointer_type));
+    }
+}
+
+fn emit_entry_wrapper(
+    function: &mut ir::Function,
+    frontend: &mut FunctionBuilderContext,
+    body: ir::FuncRef,
+) -> Result<(), CompileError> {
+    let mut builder = FunctionBuilder::new(function, frontend);
+    let entry = builder.create_block();
+    builder.switch_to_block(entry);
+    builder.append_block_params_for_function_params(entry);
+    let mut arguments = builder.block_params(entry).to_vec();
+    let activation = *arguments.get(11).ok_or(CompileError::Backend)?;
+    let frame_len = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        activation,
+        i32::try_from(mem::offset_of!(RawNativeActivation, frame_len))
+            .map_err(|_| CompileError::Backend)?,
+    );
+    let detached = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, frame_len, 1);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let zero_i32 = builder.ins().iconst(types::I32, 0);
+    let one_i32 = builder.ins().iconst(types::I32, 1);
+    let detached = builder.ins().select(detached, one_i32, zero_i32);
+    arguments.push(zero_i64);
+    arguments.push(detached);
+    builder.ins().call(body, &arguments);
+    builder.ins().return_(&[]);
+    builder.seal_all_blocks();
+    builder.finalize();
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +192,7 @@ struct NativeValues<'a> {
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
+    detached_return: ir::Value,
     pointer_type: ir::Type,
 }
 
@@ -191,6 +252,7 @@ struct NativeCallEmission<'a> {
     contract: &'a CallContract,
     block: u32,
     instruction: u32,
+    successor_entry: u32,
     successor: ir::Block,
 }
 
@@ -209,13 +271,14 @@ fn emit_region(
     function: &mut ir::Function,
     frontend: &mut FunctionBuilderContext,
     pointer_type: ir::Type,
+    host_call_conv: CallConv,
     bytecode: &Func,
     plan: &RegionPlan,
     input: &FunctionInput<'_>,
 ) -> Result<(), CompileError> {
     let call_conv = function.signature.call_conv;
     let mut builder = FunctionBuilder::new(function, frontend);
-    let mut allocation_signature = ir::Signature::new(call_conv);
+    let mut allocation_signature = ir::Signature::new(host_call_conv);
     allocation_signature
         .params
         .push(AbiParam::new(pointer_type));
@@ -236,6 +299,8 @@ fn emit_region(
     for _ in 0..7 {
         native_signature.params.push(AbiParam::new(pointer_type));
     }
+    native_signature.params.push(AbiParam::new(types::I64));
+    native_signature.params.push(AbiParam::new(types::I32));
     let native_signature = builder.import_signature(native_signature);
     let entry_block = builder.create_block();
     let invalid_block = builder.create_block();
@@ -277,6 +342,8 @@ fn emit_region(
     let root_state_pointer = parameters[9];
     let exit_pointer = parameters[10];
     let activation_pointer = parameters[11];
+    let retired_base = parameters[12];
+    let detached_return = parameters[13];
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
     let mut local_states = Vec::with_capacity(plan.local_kinds.len());
@@ -315,7 +382,7 @@ fn emit_region(
     let retired = builder.declare_var(types::I64);
     builder.def_var(fuel, initial_fuel);
     let zero = builder.ins().iconst(types::I64, 0);
-    builder.def_var(retired, zero);
+    builder.def_var(retired, retired_base);
     let values = NativeValues {
         locals: &locals,
         local_states: &local_states,
@@ -334,6 +401,7 @@ fn emit_region(
         native_signature,
         exit_pointer,
         activation_pointer,
+        detached_return,
         pointer_type,
     };
 
@@ -975,6 +1043,8 @@ fn emit_segment(
                     contract,
                     block: segment.block,
                     instruction: call_instruction,
+                    successor_entry: u32::try_from(segment.successors[0])
+                        .map_err(|_| CompileError::Backend)?,
                     successor: blocks[segment.successors[0]],
                 },
             )?;
@@ -1049,19 +1119,7 @@ fn emit_segment(
         SegmentExit::Interpreter { .. } => unreachable!(),
         SegmentExit::Return => {
             let result = pop_native(&mut stack)?;
-            let retired = builder.use_var(values.retired);
-            emit_exit(
-                builder,
-                values,
-                ExitEmission {
-                    retired,
-                    kind: EXIT_RETURN,
-                    block: segment.block,
-                    instruction: segment.end,
-                    result,
-                },
-                &stack,
-            )?;
+            emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
         }
     }
     Ok(())
@@ -1078,6 +1136,7 @@ fn emit_native_call(
         contract,
         block,
         instruction,
+        successor_entry,
         successor,
     } = call;
     let argument_start = stack
@@ -1092,6 +1151,8 @@ fn emit_native_call(
     let fallback = builder.create_block();
     let stack_limit = builder.create_block();
     let capacity = builder.create_block();
+    let storage = builder.create_block();
+    let grow = builder.create_block();
     let invoke = builder.create_block();
     let returned = builder.create_block();
     let propagate = builder.create_block();
@@ -1172,10 +1233,33 @@ fn emit_native_call(
         .brif(frame_overflow, stack_limit, &[], stack_check, &[]);
 
     builder.switch_to_block(stack_check);
-    let stack_values = load_activation_u32(builder, values, RawActivationField::StackValues)?;
+    let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
+    let active_frame_index = builder.ins().iadd_imm(frame_len, -1);
+    let active_frame_index = builder
+        .ins()
+        .uextend(values.pointer_type, active_frame_index);
+    let active_frame_offset = builder
+        .ins()
+        .imul_imm(active_frame_index, mem::size_of::<RawNativeFrame>() as i64);
+    let active_frame = builder.ins().iadd(frames, active_frame_offset);
+    let caller_prefix = load_cell_u32(
+        builder,
+        active_frame,
+        mem::offset_of!(RawNativeFrame, caller_stack_values),
+    )?;
+    let active_local_count = load_cell_u32(
+        builder,
+        active_frame,
+        mem::offset_of!(RawNativeFrame, local_count),
+    )?;
+    let active_values = builder.ins().iadd(caller_prefix, active_local_count);
+    let active_values = builder.ins().iadd_imm(
+        active_values,
+        i64::try_from(boundary_stack.len()).map_err(|_| CompileError::Backend)?,
+    );
     let caller_values = builder
         .ins()
-        .iadd_imm(stack_values, -(contract.params.len() as i64));
+        .iadd_imm(active_values, -(contract.params.len() as i64));
     let local_count = load_cell_u32(builder, cell, mem::offset_of!(NativeEntryCell, local_count))?;
     let pushed_values = builder.ins().iadd(caller_values, local_count);
     let max_values = load_activation_u32(builder, values, RawActivationField::MaxStackValues)?;
@@ -1231,10 +1315,31 @@ fn emit_native_call(
         local_count,
         i64::try_from(contract.local_count).map_err(|_| CompileError::Backend)?,
     );
-    let fits = builder.ins().band(body_fits, frame_fits);
-    let fits = builder.ins().band(fits, scalars_fit);
-    let fits = builder.ins().band(fits, local_count_matches);
-    builder.ins().brif(fits, invoke, &[], fallback, &[]);
+    let compatible = builder.ins().band(body_fits, local_count_matches);
+    builder.ins().brif(compatible, storage, &[], fallback, &[]);
+
+    builder.switch_to_block(storage);
+    let storage_fits = builder.ins().band(frame_fits, scalars_fit);
+    builder.ins().brif(storage_fits, invoke, &[], grow, &[]);
+
+    builder.switch_to_block(grow);
+    let retired = builder.use_var(values.retired);
+    let target_value = builder.ins().iconst(types::I64, i64::from(target));
+    let required_scalars = builder.ins().uextend(types::I64, scalar_end);
+    let required_scalars = builder.ins().ishl_imm(required_scalars, 32);
+    let growth = builder.ins().bor(required_scalars, target_value);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_GROW_ACTIVATION,
+            block,
+            instruction,
+            result: growth,
+        },
+        &boundary_stack,
+    )?;
 
     builder.switch_to_block(fallback);
     let retired = builder.use_var(values.retired);
@@ -1254,10 +1359,29 @@ fn emit_native_call(
 
     builder.switch_to_block(invoke);
     emit_charge(builder, values, 1);
+    let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
+    let frame_is_earlier = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, frame_len, prior_changed);
+    let changed_from = builder
+        .ins()
+        .select(frame_is_earlier, frame_len, prior_changed);
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::ChangedFrom,
+        changed_from,
+    )?;
     emit_spill_frame(builder, values, block, instruction + 1, &caller_stack)?;
+    let caller_frame = emit_current_frame_pointer(builder, values)?;
+    store_i32_constant(
+        builder,
+        caller_frame,
+        mem::offset_of!(RawNativeFrame, resume_entry),
+        successor_entry,
+    )?;
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
-    let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
     let scalar_base = scalar_len;
     let scalar_base_pointer = builder.ins().uextend(values.pointer_type, scalar_base);
     let scalar_byte_offset = builder.ins().ishl_imm(scalar_base_pointer, 3);
@@ -1310,6 +1434,12 @@ fn emit_native_call(
         mem::offset_of!(RawNativeFrame, instruction),
         0,
     )?;
+    store_i32_constant(
+        builder,
+        child_frame,
+        mem::offset_of!(RawNativeFrame, resume_entry),
+        0,
+    )?;
     store_i32_value(
         builder,
         child_frame,
@@ -1354,14 +1484,9 @@ fn emit_native_call(
         RawActivationField::FrameLen,
         next_frame_len,
     )?;
-    store_activation_u32(
-        builder,
-        values,
-        RawActivationField::StackValues,
-        pushed_values,
-    )?;
     let child_fuel = builder.use_var(values.fuel);
     let zero_entry = builder.ins().iconst(types::I32, 0);
+    let zero_retired = builder.ins().iconst(types::I64, 0);
     builder.ins().call_indirect(
         values.native_signature,
         code,
@@ -1378,6 +1503,8 @@ fn emit_native_call(
             values.root_state_pointer,
             values.exit_pointer,
             values.activation_pointer,
+            zero_retired,
+            zero_entry,
         ],
     );
     let child_retired = load_value(
@@ -1423,12 +1550,11 @@ fn emit_native_call(
     )?;
     store_activation_u32(builder, values, RawActivationField::ScalarLen, scalar_base)?;
     store_activation_u32(builder, values, RawActivationField::FrameLen, frame_len)?;
-    let returned_stack_values = builder.ins().iadd_imm(caller_values, 1);
     store_activation_u32(
         builder,
         values,
-        RawActivationField::StackValues,
-        returned_stack_values,
+        RawActivationField::ChangedFrom,
+        prior_changed,
     )?;
     stack.truncate(argument_start);
     stack.push(result);
@@ -2530,6 +2656,187 @@ fn emit_exit(
     Ok(())
 }
 
+fn emit_function_return(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    block: u32,
+    instruction: u32,
+    result: ir::Value,
+    stack: &[ir::Value],
+) -> Result<(), CompileError> {
+    let normal = builder.create_block();
+    let lookup = builder.create_block();
+    let tail = builder.create_block();
+    let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
+    let has_parent = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, frame_len, 1);
+    let detached = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, values.detached_return, 0);
+    let tail_return = builder.ins().band(has_parent, detached);
+    builder.ins().brif(tail_return, lookup, &[], normal, &[]);
+
+    builder.switch_to_block(lookup);
+    let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
+    let parent_index = builder.ins().iadd_imm(frame_len, -2);
+    let parent_index = builder.ins().uextend(values.pointer_type, parent_index);
+    let parent_offset = builder
+        .ins()
+        .imul_imm(parent_index, mem::size_of::<RawNativeFrame>() as i64);
+    let parent = builder.ins().iadd(frames, parent_offset);
+    let parent_function =
+        load_cell_u32(builder, parent, mem::offset_of!(RawNativeFrame, function))?;
+    let entry_count = load_activation_u32(builder, values, RawActivationField::EntryCount)?;
+    let function_in_range =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, entry_count, parent_function);
+    let load_entry = builder.create_block();
+    builder
+        .ins()
+        .brif(function_in_range, load_entry, &[], normal, &[]);
+
+    builder.switch_to_block(load_entry);
+    let entries = load_activation_pointer(builder, values, RawActivationField::Entries)?;
+    let entry_index = builder.ins().uextend(values.pointer_type, parent_function);
+    let entry_offset = builder
+        .ins()
+        .imul_imm(entry_index, mem::size_of::<usize>() as i64);
+    let entry = builder.ins().iadd(entries, entry_offset);
+    let cell = builder
+        .ins()
+        .load(values.pointer_type, MemFlags::new(), entry, 0);
+    let code = builder
+        .ins()
+        .atomic_load(values.pointer_type, MemFlags::new(), cell);
+    let published = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
+    builder.ins().brif(published, tail, &[], normal, &[]);
+
+    builder.switch_to_block(tail);
+    let child_index = builder.ins().iadd_imm(frame_len, -1);
+    let child_index = builder.ins().uextend(values.pointer_type, child_index);
+    let child_offset = builder
+        .ins()
+        .imul_imm(child_index, mem::size_of::<RawNativeFrame>() as i64);
+    let child = builder.ins().iadd(frames, child_offset);
+    let child_scalar_base =
+        load_cell_u32(builder, child, mem::offset_of!(RawNativeFrame, scalar_base))?;
+    let parent_scalar_base = load_cell_u32(
+        builder,
+        parent,
+        mem::offset_of!(RawNativeFrame, scalar_base),
+    )?;
+    let parent_local_count = load_cell_u32(
+        builder,
+        parent,
+        mem::offset_of!(RawNativeFrame, local_count),
+    )?;
+    let parent_operand_len = load_cell_u32(
+        builder,
+        parent,
+        mem::offset_of!(RawNativeFrame, operand_len),
+    )?;
+    let parent_operand = builder.ins().iadd(parent_scalar_base, parent_local_count);
+    let parent_operand = builder.ins().iadd(parent_operand, parent_operand_len);
+    let parent_operand = builder.ins().uextend(values.pointer_type, parent_operand);
+    let parent_operand_offset = builder.ins().ishl_imm(parent_operand, 3);
+    let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
+    let result_pointer = builder.ins().iadd(scalars, parent_operand_offset);
+    builder
+        .ins()
+        .store(MemFlags::new(), result, result_pointer, 0);
+    let next_operand_len = builder.ins().iadd_imm(parent_operand_len, 1);
+    store_i32_value(
+        builder,
+        parent,
+        mem::offset_of!(RawNativeFrame, operand_len),
+        next_operand_len,
+    )?;
+    let next_frame_len = builder.ins().iadd_imm(frame_len, -1);
+    let changed_from = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
+    let frame_is_earlier =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, next_frame_len, changed_from);
+    let changed_from = builder
+        .ins()
+        .select(frame_is_earlier, next_frame_len, changed_from);
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::FrameLen,
+        next_frame_len,
+    )?;
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::ChangedFrom,
+        changed_from,
+    )?;
+    store_activation_u32(
+        builder,
+        values,
+        RawActivationField::ScalarLen,
+        child_scalar_base,
+    )?;
+    let parent_local_base = builder
+        .ins()
+        .uextend(values.pointer_type, parent_scalar_base);
+    let parent_local_offset = builder.ins().ishl_imm(parent_local_base, 3);
+    let parent_locals = builder.ins().iadd(scalars, parent_local_offset);
+    let states = load_activation_pointer(builder, values, RawActivationField::States)?;
+    let parent_states = builder.ins().iadd(states, parent_local_base);
+    let parent_local_count = builder
+        .ins()
+        .uextend(values.pointer_type, parent_local_count);
+    let parent_operand_offset = builder.ins().ishl_imm(parent_local_count, 3);
+    let parent_operands = builder.ins().iadd(parent_locals, parent_operand_offset);
+    let parent_entry = load_cell_u32(
+        builder,
+        parent,
+        mem::offset_of!(RawNativeFrame, resume_entry),
+    )?;
+    let fuel = builder.use_var(values.fuel);
+    let retired = builder.use_var(values.retired);
+    let detached = builder.ins().iconst(types::I32, 1);
+    builder.ins().return_call_indirect(
+        values.native_signature,
+        code,
+        &[
+            parent_locals,
+            parent_states,
+            parent_operands,
+            fuel,
+            parent_entry,
+            values.allocation_context,
+            values.allocate_instance,
+            values.allocation_result_pointer,
+            values.root_pointer,
+            values.root_state_pointer,
+            values.exit_pointer,
+            values.activation_pointer,
+            retired,
+            detached,
+        ],
+    );
+
+    builder.switch_to_block(normal);
+    let retired = builder.use_var(values.retired);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_RETURN,
+            block,
+            instruction,
+            result,
+        },
+        stack,
+    )
+}
+
 fn emit_spill_frame(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -2641,7 +2948,9 @@ enum RawActivationField {
     Frames,
     FrameLen,
     FrameCapacity,
-    StackValues,
+    ChangedFrom,
+    Entries,
+    EntryCount,
     MaxStackValues,
     BaseFrames,
     MaxFrames,
@@ -2661,9 +2970,11 @@ impl RawActivationField {
             RawActivationField::FrameCapacity => {
                 mem::offset_of!(RawNativeActivation, frame_capacity)
             }
-            RawActivationField::StackValues => {
-                mem::offset_of!(RawNativeActivation, stack_values)
+            RawActivationField::ChangedFrom => {
+                mem::offset_of!(RawNativeActivation, changed_from)
             }
+            RawActivationField::Entries => mem::offset_of!(RawNativeActivation, entries),
+            RawActivationField::EntryCount => mem::offset_of!(RawNativeActivation, entry_count),
             RawActivationField::MaxStackValues => {
                 mem::offset_of!(RawNativeActivation, max_stack_values)
             }

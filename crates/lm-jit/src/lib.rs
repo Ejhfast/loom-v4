@@ -23,6 +23,7 @@ const EXIT_ALLOCATION: u32 = 10;
 const EXIT_HEAP_LIMIT: u32 = 11;
 const EXIT_EFFECT: u32 = 12;
 const EXIT_STACK_LIMIT: u32 = 13;
+const EXIT_GROW_ACTIVATION: u32 = 14;
 
 mod activation;
 
@@ -64,8 +65,10 @@ impl fmt::Debug for JitEngine {
 
 /// One immutable compiled function region.
 pub struct CompiledRegion {
+    function: u32,
     plan: RegionPlan,
     entry: NativeFunction,
+    call_entry: usize,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
 }
@@ -102,7 +105,7 @@ impl NativeEntryCell {
         self.max_stack.store(max_stack, Ordering::Relaxed);
         self.max_stack_values
             .store(max_stack_values, Ordering::Relaxed);
-        self.code.store(region.entry as usize, Ordering::Release);
+        self.code.store(region.call_entry, Ordering::Release);
         Ok(())
     }
 }
@@ -146,6 +149,12 @@ impl Drop for CompiledRegion {
 }
 
 impl CompiledRegion {
+    /// Return the namespace function slot.
+    #[inline(always)]
+    pub fn function(&self) -> u32 {
+        self.function
+    }
+
     /// Return the local scalar representations.
     #[inline(always)]
     pub fn local_kinds(&self) -> &[ScalarKind] {
@@ -347,6 +356,10 @@ impl CompiledRegion {
             u32::try_from(activation.scalars.len()).map_err(|_| Failure::BackendUnavailable)?;
         let frame_capacity =
             u32::try_from(activation.frames.len()).map_err(|_| Failure::BackendUnavailable)?;
+        if activation.frames[top_index].native_created == 0 {
+            activation.frames[top_index].caller_stack_values =
+                u32::try_from(base_stack_values).map_err(|_| Failure::BackendUnavailable)?;
+        }
         let top = activation.frames[top_index];
         let mut raw_activation = RawNativeActivation {
             scalars: activation.scalars.as_mut_ptr(),
@@ -358,17 +371,10 @@ impl CompiledRegion {
             frame_len: u32::try_from(activation.frame_len)
                 .map_err(|_| Failure::BackendUnavailable)?,
             frame_capacity,
+            changed_from: u32::try_from(activation.changed_from)
+                .map_err(|_| Failure::BackendUnavailable)?,
             entries: entries.as_ptr(),
             entry_count: u32::try_from(entries.len()).map_err(|_| Failure::BackendUnavailable)?,
-            base_stack_values: u32::try_from(base_stack_values)
-                .map_err(|_| Failure::BackendUnavailable)?,
-            stack_values: u32::try_from(
-                base_stack_values
-                    .checked_add(top.local_count as usize)
-                    .and_then(|count| count.checked_add(top.operand_len as usize))
-                    .ok_or(Failure::BackendUnavailable)?,
-            )
-            .map_err(|_| Failure::BackendUnavailable)?,
             max_stack_values: u32::try_from(max_stack_values)
                 .map_err(|_| Failure::BackendUnavailable)?,
             base_frames: u32::try_from(base_frames).map_err(|_| Failure::BackendUnavailable)?,
@@ -419,21 +425,22 @@ impl CompiledRegion {
         if raw_activation.scalar_len > raw_activation.scalar_capacity
             || raw_activation.frame_len > raw_activation.frame_capacity
             || raw_activation.frame_len == 0
+            || raw_activation.changed_from > raw_activation.frame_len
         {
             return Err(Failure::BackendUnavailable);
         }
-        for frame in &activation.frames[..raw_activation.frame_len as usize] {
-            let end = (frame.scalar_base as usize)
-                .checked_add(frame.local_count as usize)
-                .and_then(|value| value.checked_add(frame.max_stack as usize));
-            if end.is_none_or(|value| value > raw_activation.scalar_len as usize)
-                || frame.operand_len > frame.max_stack
-            {
-                return Err(Failure::BackendUnavailable);
-            }
+        let top = activation.frames[raw_activation.frame_len as usize - 1];
+        let end = (top.scalar_base as usize)
+            .checked_add(top.local_count as usize)
+            .and_then(|value| value.checked_add(top.max_stack as usize));
+        if end.is_none_or(|value| value > raw_activation.scalar_len as usize)
+            || top.operand_len > top.max_stack
+        {
+            return Err(Failure::BackendUnavailable);
         }
         activation.scalar_len = raw_activation.scalar_len as usize;
         activation.frame_len = raw_activation.frame_len as usize;
+        activation.changed_from = raw_activation.changed_from as usize;
         let kind = match exit.kind {
             EXIT_FUEL => ExitKind::Fuel,
             EXIT_RETURN => ExitKind::Return,
@@ -447,6 +454,7 @@ impl CompiledRegion {
             EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
             EXIT_EFFECT => ExitKind::Effect,
             EXIT_STACK_LIMIT => ExitKind::StackLimit,
+            EXIT_GROW_ACTIVATION => ExitKind::GrowActivation,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };

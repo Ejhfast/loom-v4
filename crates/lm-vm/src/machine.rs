@@ -1236,12 +1236,15 @@ impl Machine {
         self.native_continuation.take()
     }
 
-    pub(crate) fn set_native_continuation(&mut self, continuation: crate::jit::NativeContinuation) {
+    pub(crate) fn set_native_continuation(
+        &mut self,
+        continuation: Box<crate::jit::NativeContinuation>,
+    ) {
         debug_assert!(self.native_continuation.is_none());
         debug_assert!(self.vm.frames.is_empty());
         debug_assert!(self.vm.locals.is_empty());
         debug_assert!(self.vm.operands.is_empty());
-        self.native_continuation = Some(Box::new(continuation));
+        self.native_continuation = Some(continuation);
     }
 
     pub(crate) fn has_native_continuation(&self) -> bool {

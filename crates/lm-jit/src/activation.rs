@@ -33,6 +33,7 @@ pub(super) struct RawNativeFrame {
     pub(super) function: u32,
     pub(super) block: u32,
     pub(super) instruction: u32,
+    pub(super) resume_entry: u32,
     pub(super) scalar_base: u32,
     pub(super) local_count: u32,
     pub(super) max_stack: u32,
@@ -50,10 +51,9 @@ pub(super) struct RawNativeActivation {
     pub(super) frames: *mut RawNativeFrame,
     pub(super) frame_len: u32,
     pub(super) frame_capacity: u32,
+    pub(super) changed_from: u32,
     pub(super) entries: *const usize,
     pub(super) entry_count: u32,
-    pub(super) base_stack_values: u32,
-    pub(super) stack_values: u32,
     pub(super) max_stack_values: u32,
     pub(super) base_frames: u32,
     pub(super) max_frames: u32,
@@ -88,6 +88,7 @@ pub struct NativeActivation {
     pub(super) frames: Vec<RawNativeFrame>,
     pub(super) scalar_len: usize,
     pub(super) frame_len: usize,
+    pub(super) changed_from: usize,
 }
 
 /// Root frame data and native scratch limits.
@@ -207,6 +208,7 @@ impl NativeActivation {
             function,
             block,
             instruction,
+            resume_entry: 0,
             scalar_base: 0,
             local_count: u32::try_from(local_count).map_err(|_| Failure::BackendUnavailable)?,
             max_stack: u32::try_from(max_stack).map_err(|_| Failure::BackendUnavailable)?,
@@ -216,6 +218,7 @@ impl NativeActivation {
         };
         self.scalar_len = window;
         self.frame_len = 1;
+        self.changed_from = 0;
         Ok(())
     }
 
@@ -260,6 +263,44 @@ impl NativeActivation {
         self.frame_len
     }
 
+    /// Start one native execution with no persistent frame change.
+    pub fn begin_execution(&mut self) {
+        self.changed_from = self.frame_len;
+    }
+
+    /// Return the first frame that changed during native execution.
+    pub fn changed_from(&self) -> usize {
+        self.changed_from
+    }
+
+    /// Grow native stack storage outside generated code.
+    pub fn grow(
+        &mut self,
+        required_scalars: usize,
+        required_frames: usize,
+        scalar_limit: usize,
+        frame_limit: usize,
+    ) -> Result<bool, Failure> {
+        let scalar_target = growth_target(self.scalars.len(), required_scalars, scalar_limit)?;
+        let frame_target = growth_target(self.frames.len(), required_frames, frame_limit)?;
+        if scalar_target == self.scalars.len() && frame_target == self.frames.len() {
+            return Ok(false);
+        }
+        self.scalars
+            .try_reserve(scalar_target.saturating_sub(self.scalars.len()))
+            .map_err(|_| Failure::BackendUnavailable)?;
+        self.states
+            .try_reserve(scalar_target.saturating_sub(self.states.len()))
+            .map_err(|_| Failure::BackendUnavailable)?;
+        self.frames
+            .try_reserve(frame_target.saturating_sub(self.frames.len()))
+            .map_err(|_| Failure::BackendUnavailable)?;
+        self.scalars.resize(scalar_target, 0);
+        self.states.resize(scalar_target, 0);
+        self.frames.resize(frame_target, RawNativeFrame::default());
+        Ok(true)
+    }
+
     /// Finish one detached native return inside this activation.
     pub fn finish_detached_return(&mut self, result: u64) -> Result<(), Failure> {
         if self.frame_len <= 1 {
@@ -281,8 +322,17 @@ impl NativeActivation {
         parent.operand_len += 1;
         self.frame_len -= 1;
         self.scalar_len = child.scalar_base as usize;
+        self.changed_from = self.changed_from.min(self.frame_len);
         Ok(())
     }
+}
+
+fn growth_target(current: usize, required: usize, limit: usize) -> Result<usize, Failure> {
+    if required > limit {
+        return Err(Failure::BackendUnavailable);
+    }
+    let doubled = current.saturating_mul(2).min(limit);
+    Ok(current.max(required).max(doubled))
 }
 
 pub(super) struct RawAllocationContext<R> {
