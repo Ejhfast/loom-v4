@@ -382,6 +382,7 @@ pub(super) enum HeapAccessKind {
     TextByteLen,
     TextScalarLen,
     TextAtByte,
+    TextAt,
     TextIsBoundary,
 }
 
@@ -1368,13 +1369,16 @@ fn analyze_segment(
                     kind,
                 });
             }
-            Instr::Native(NativeInstr::TextAtByte | NativeInstr::TextIsBoundary) => {
+            Instr::Native(
+                NativeInstr::TextAtByte | NativeInstr::TextAt | NativeInstr::TextIsBoundary,
+            ) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
                 text_type(context, receiver)?;
-                let kind = if matches!(*instruction, Instr::Native(NativeInstr::TextAtByte)) {
-                    HeapAccessKind::TextAtByte
-                } else {
-                    HeapAccessKind::TextIsBoundary
+                let kind = match instruction {
+                    Instr::Native(NativeInstr::TextAtByte) => HeapAccessKind::TextAtByte,
+                    Instr::Native(NativeInstr::TextAt) => HeapAccessKind::TextAt,
+                    Instr::Native(NativeInstr::TextIsBoundary) => HeapAccessKind::TextIsBoundary,
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
                 };
                 heap_accesses.push(HeapAccess {
                     instruction: position,

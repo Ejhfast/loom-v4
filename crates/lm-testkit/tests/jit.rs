@@ -235,6 +235,32 @@ fn utf8_byte_guards_match_the_interpreter() {
 }
 
 #[test]
+fn utf8_scalar_reads_stay_native() {
+    let source = concat!(
+        "text = \"aé猫z\"\n",
+        "round = 0\ntotal = 0\n",
+        "while round < 1000\n",
+        "  index = 0\n",
+        "  while index < text.len()\n",
+        "    total = total + text.at(index).expect(\"the scalar exists\").codepoint()\n",
+        "    index = index + 1\n",
+        "  end\n",
+        "  round = round + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-utf8-scalar.lm", source)
+        .expect("the scalar read case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(29_935_000)));
+    assert!(metrics.native_retired_instructions > 50_000, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+}
+
+#[test]
 fn guarded_callback_conversion_matches_the_interpreter() {
     let source = concat!(
         "def invoke(f: (Int) -> Int): Int\n",

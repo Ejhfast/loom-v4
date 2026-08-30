@@ -1727,6 +1727,34 @@ fn emit_segment(
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Char, value)?;
             }
+            Instr::Native(NativeInstr::TextAt) => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction_index = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::TextAt) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_text_at(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Char, value)?;
+            }
             Instr::Native(NativeInstr::TextIsBoundary) => {
                 let deopt_stack = stack.clone();
                 let index = pop_native(&mut stack)?;
@@ -3723,6 +3751,110 @@ fn emit_text_at_byte(
     let prefix = builder.ins().band_imm(first, 0xc0);
     let continuation = builder.ins().icmp_imm(IntCC::Equal, prefix, 0x80);
     emit_interpreter_replay(builder, values, continuation, point, deopt_stack)?;
+
+    emit_utf8_at_address(builder, address)
+}
+
+fn emit_text_at(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_text_entry(
+        builder,
+        values,
+        reference,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let scalar_len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_SCALAR_LEN_OFFSET,
+    )?;
+    let native_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, native_index, scalar_len);
+    let invalid = builder.ins().bor(negative, outside);
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+
+    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let byte_len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_BYTE_LEN_OFFSET,
+    )?;
+    let ascii = builder.ins().icmp(IntCC::Equal, byte_len, scalar_len);
+    let ascii_block = builder.create_block();
+    let scan = builder.create_block();
+    let advance = builder.create_block();
+    let found = builder.create_block();
+    builder.append_block_param(scan, values.pointer_type);
+    builder.append_block_param(scan, values.pointer_type);
+    builder.append_block_param(found, values.pointer_type);
+    builder.ins().brif(
+        ascii,
+        ascii_block,
+        &[],
+        scan,
+        &[native_index.into(), data.into()],
+    );
+
+    builder.switch_to_block(ascii_block);
+    let address = builder.ins().iadd(data, native_index);
+    builder.ins().jump(found, &[address.into()]);
+
+    builder.switch_to_block(scan);
+    let remaining = builder.block_params(scan)[0];
+    let address = builder.block_params(scan)[1];
+    let at_target = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
+    builder
+        .ins()
+        .brif(at_target, found, &[address.into()], advance, &[]);
+
+    builder.switch_to_block(advance);
+    let first = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
+    let one = builder.ins().iconst(values.pointer_type, 1);
+    let two = builder.ins().iconst(values.pointer_type, 2);
+    let three = builder.ins().iconst(values.pointer_type, 3);
+    let four = builder.ins().iconst(values.pointer_type, 4);
+    let is_ascii = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0x80);
+    let is_two = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0xe0);
+    let is_three = builder.ins().icmp_imm(IntCC::UnsignedLessThan, first, 0xf0);
+    let non_ascii_width = builder.ins().select(is_three, three, four);
+    let multibyte_width = builder.ins().select(is_two, two, non_ascii_width);
+    let width = builder.ins().select(is_ascii, one, multibyte_width);
+    let next_address = builder.ins().iadd(address, width);
+    let next_remaining = builder.ins().iadd_imm(remaining, -1);
+    builder
+        .ins()
+        .jump(scan, &[next_remaining.into(), next_address.into()]);
+
+    builder.switch_to_block(found);
+    let address = builder.block_params(found)[0];
+    emit_utf8_at_address(builder, address)
+}
+
+fn emit_utf8_at_address(
+    builder: &mut FunctionBuilder<'_>,
+    address: ir::Value,
+) -> Result<ir::Value, CompileError> {
+    let first = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
 
     let ascii = builder.create_block();
     let two = builder.create_block();

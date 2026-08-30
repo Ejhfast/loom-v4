@@ -347,8 +347,9 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::BytesLen
         | NativeInstr::BytesAt
         | NativeInstr::BytesGet => dedicated(Guarded).with_replay(),
-        NativeInstr::TextAtByte | NativeInstr::TextIsBoundary => dedicated(Guarded).with_replay(),
-        NativeInstr::TextAt => temporary(Guarded),
+        NativeInstr::TextAtByte | NativeInstr::TextAt | NativeInstr::TextIsBoundary => {
+            dedicated(Guarded).with_replay()
+        }
         NativeInstr::CharCodepoint
         | NativeInstr::CharUtf8Len
         | NativeInstr::EqChar

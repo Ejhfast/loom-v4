@@ -1110,6 +1110,19 @@ Gate: Direct and scheduler corpus results match Interpreter results.
 
 Gate: Representative Auto performance does not regress.
 
+### Stage F16: Direct scalar text access
+
+- compile scalar-index text access as guarded native code;
+- scan immutable UTF-8 data without a runtime function;
+- retain the exact replay exit for invalid indexes;
+- measure scalar traversal with its surrounding calls.
+
+Gate: `TextAt` has one dedicated guarded treatment.
+
+Gate: Direct and scheduler corpus results match Interpreter results.
+
+Gate: Auto mode demotes call-heavy scalar traversal without regression.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1465,6 +1478,22 @@ The focused JIT suite passed 85 tests.
 These treatments removed no dominant representative gap.
 
 The representative-program performance gate remains open.
+
+The Stage F16 run added direct scalar-index UTF-8 access.
+
+Direct and scheduled corpus runs matched Interpreter results across 163 shipped programs.
+
+The focused JIT suite passed 86 tests.
+
+Scalar traversal reached 98.32 percent Native coverage.
+
+Forced Native ran at 0.584 times Interpreter speed.
+
+Nine million temporary call-family exits dominated that result.
+
+Auto mode demoted the function and ran at 0.975 times Interpreter speed.
+
+This result makes call-family coverage the next structural stage.
 
 ## 24. Rejected designs
 

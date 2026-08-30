@@ -1746,6 +1746,21 @@ fn bench_jit_representative_programs() {
         ),
     );
     report_jit_representative(
+        "jit_text_scalar_read",
+        concat!(
+            "text = \"aé猫z\"\n",
+            "round = 0\ntotal = 0\n",
+            "while round < 250000\n",
+            "  index = 0\n",
+            "  while index < text.len()\n",
+            "    total = total + text.at(index).expect(\"the scalar exists\").codepoint()\n",
+            "    index = index + 1\n",
+            "  end\n",
+            "  round = round + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+    report_jit_representative(
         "jit_bytes_read",
         concat!(
             "def scan(bytes: Bytes): Int\n",
