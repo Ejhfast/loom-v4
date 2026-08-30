@@ -2,11 +2,12 @@
 
 use crate::machine::Machine;
 use crate::NamespaceRuntime;
+use lm_heap::{MapEntry, MapIndex, StructuralEpoch};
 use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
     ListReserveResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
-    ScalarKind, LOCAL_INITIALIZED,
+    ScalarKind, ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
 
@@ -262,6 +263,87 @@ impl NativeRuntime for MachineRuntime<'_> {
             Err(crate::FaultCode::StackLimit) => CallbackAllocationResult::StackLimit,
             Err(_) => CallbackAllocationResult::Interpreter,
         }
+    }
+
+    fn allocate_tuple(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        let items = match decode_captures(request.item_bits, request.item_tags) {
+            Ok(items) => items,
+            Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return AllocationResult::Interpreter,
+        };
+        self.allocate_object(
+            crate::Object::Tuple {
+                items: items.into(),
+            },
+            request.root_bits,
+            request.root_tags,
+            request.root_states,
+            request.allow_collection,
+        )
+    }
+
+    fn allocate_list(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        let items = match decode_captures(request.item_bits, request.item_tags) {
+            Ok(items) => items,
+            Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return AllocationResult::Interpreter,
+        };
+        self.allocate_object(
+            crate::Object::List {
+                items: items.into(),
+                epoch: StructuralEpoch::default(),
+            },
+            request.root_bits,
+            request.root_tags,
+            request.root_states,
+            request.allow_collection,
+        )
+    }
+
+    fn allocate_map(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        let flat = match decode_captures(request.item_bits, request.item_tags) {
+            Ok(flat) => flat,
+            Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return AllocationResult::Interpreter,
+        };
+        if flat.len() % 2 != 0 {
+            return AllocationResult::Interpreter;
+        }
+        let mut entries: Vec<MapEntry> = Vec::new();
+        let mut index = MapIndex::default();
+        if entries.try_reserve_exact(flat.len() / 2).is_err() {
+            return AllocationResult::HeapLimit;
+        }
+        for pair in flat.chunks_exact(2) {
+            let key = pair[0];
+            let value = pair[1];
+            let semantic = match self.machine.key_semantic_hash(key) {
+                Ok(semantic) => semantic,
+                Err(_) => return AllocationResult::Interpreter,
+            };
+            let hash = Machine::map_index_hash(semantic);
+            let hit = index
+                .candidates(hash)
+                .find(|position| self.machine.key_eq(entries[*position as usize].key, key));
+            match hit {
+                Some(position) => entries[position as usize].value = value,
+                None => {
+                    index.push_live(hash, entries.len() as u32);
+                    entries.push(MapEntry {
+                        key,
+                        value,
+                        semantic_hash: semantic,
+                    });
+                }
+            }
+        }
+        self.allocate_object(
+            crate::Object::Map { entries, index },
+            request.root_bits,
+            request.root_tags,
+            request.root_states,
+            request.allow_collection,
+        )
     }
 
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult {

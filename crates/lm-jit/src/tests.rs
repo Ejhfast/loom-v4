@@ -307,6 +307,18 @@ impl NativeRuntime for TestRuntime {
         CallbackAllocationResult::Interpreter
     }
 
+    fn allocate_tuple(&mut self, _request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        AllocationResult::Interpreter
+    }
+
+    fn allocate_list(&mut self, _request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        AllocationResult::Interpreter
+    }
+
+    fn allocate_map(&mut self, _request: ValueArrayAllocationRequest<'_>) -> AllocationResult {
+        AllocationResult::Interpreter
+    }
+
     fn grow_list(&mut self, _request: ListGrowthRequest<'_>) -> ListGrowthResult {
         ListGrowthResult::Interpreter
     }

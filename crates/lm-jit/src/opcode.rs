@@ -185,8 +185,11 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::IsType(_) | Instr::CastType(_) => dedicated(Guarded).with_replay(),
-        Instr::TupleNew { .. } | Instr::ListNew { .. } | Instr::MapNew { .. } => {
-            InstructionTreatment::temporary(FastPath, ExitBehavior::Allocation)
+        Instr::TupleNew { .. } | Instr::ListNew { .. } => {
+            InstructionTreatment::dedicated(FastPath, ExitBehavior::Allocation).with_replay()
+        }
+        Instr::MapNew { .. } => {
+            InstructionTreatment::dedicated(FastPath, ExitBehavior::Allocation).with_replay()
         }
         Instr::ListPush => dedicated(FastPath)
             .with_replay()

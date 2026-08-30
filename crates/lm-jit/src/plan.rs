@@ -1507,6 +1507,9 @@ fn analyze_segment(
             Instr::New(_)
             | Instr::NewG { .. }
             | Instr::MakeClosure { .. }
+            | Instr::TupleNew { .. }
+            | Instr::ListNew { .. }
+            | Instr::MapNew { .. }
             | Instr::Extended(ExtendedInstr::MakeCallback { .. }) => {
                 allocations.push(AllocationSite {
                     instruction: position,
@@ -1516,6 +1519,10 @@ fn analyze_segment(
                     Instr::MakeClosure { captures, .. }
                     | Instr::Extended(ExtendedInstr::MakeCallback { captures, .. }) => {
                         Some(*captures)
+                    }
+                    Instr::TupleNew { count, .. } | Instr::ListNew { count, .. } => Some(*count),
+                    Instr::MapNew { count, .. } => {
+                        Some(count.checked_mul(2).ok_or(UnsupportedReason::RegionLimit)?)
                     }
                     _ => None,
                 };

@@ -303,6 +303,7 @@ struct NativeValues<'a> {
     root_state_pointer: ir::Value,
     allocation_signature: ir::SigRef,
     capture_allocation_signature: ir::SigRef,
+    value_array_allocation_signature: ir::SigRef,
     list_growth_signature: ir::SigRef,
     list_reserve_signature: ir::SigRef,
     native_signature: ir::SigRef,
@@ -368,6 +369,23 @@ struct CaptureAllocationEmission<'a> {
     capture_count: usize,
     roots: &'a [NativeRoot],
     callback: bool,
+    point: FaultPoint,
+    replay_stack: &'a [NativeValue],
+    fault_stack: &'a [NativeValue],
+}
+
+#[derive(Clone, Copy)]
+enum ValueArrayAllocationKind {
+    Tuple,
+    List,
+    Map,
+}
+
+struct ValueArrayAllocationEmission<'a> {
+    kind: ValueArrayAllocationKind,
+    item_start: usize,
+    item_count: usize,
+    roots: &'a [NativeRoot],
     point: FaultPoint,
     replay_stack: &'a [NativeValue],
     fault_stack: &'a [NativeValue],
@@ -457,6 +475,23 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let capture_allocation_signature = builder.import_signature(capture_allocation_signature);
+    let mut value_array_allocation_signature = ir::Signature::new(host_call_conv);
+    value_array_allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..4 {
+        value_array_allocation_signature
+            .params
+            .push(AbiParam::new(types::I32));
+    }
+    value_array_allocation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    value_array_allocation_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let value_array_allocation_signature =
+        builder.import_signature(value_array_allocation_signature);
     let mut list_growth_signature = ir::Signature::new(host_call_conv);
     list_growth_signature
         .params
@@ -611,6 +646,7 @@ fn emit_region(
         root_state_pointer,
         allocation_signature,
         capture_allocation_signature,
+        value_array_allocation_signature,
         list_growth_signature,
         list_reserve_signature,
         native_signature,
@@ -891,6 +927,60 @@ fn emit_segment(
                     .ins()
                     .iconst(types::I64, ValueTag::Callback as u64 as i64);
                 stack.push(NativeValue { bits: result, tag });
+            }
+            Instr::TupleNew { count, .. }
+            | Instr::ListNew { count, .. }
+            | Instr::MapNew { count, .. } => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let item_count = usize::try_from(count).map_err(|_| CompileError::Backend)?;
+                let item_count = if matches!(instruction, Instr::MapNew { .. }) {
+                    item_count.checked_mul(2).ok_or(CompileError::Backend)?
+                } else {
+                    item_count
+                };
+                let stack_start = stack
+                    .len()
+                    .checked_sub(item_count)
+                    .ok_or(CompileError::Backend)?;
+                let post_stack = stack[..stack_start].to_vec();
+                let (roots, item_start) = collect_capture_allocation_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    &site.stack,
+                    &stack,
+                    item_count,
+                )?;
+                let kind = match instruction {
+                    Instr::TupleNew { .. } => ValueArrayAllocationKind::Tuple,
+                    Instr::ListNew { .. } => ValueArrayAllocationKind::List,
+                    Instr::MapNew { .. } => ValueArrayAllocationKind::Map,
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_value_array_allocation(
+                    builder,
+                    values,
+                    ValueArrayAllocationEmission {
+                        kind,
+                        item_start,
+                        item_count,
+                        roots: &roots,
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        replay_stack: &stack,
+                        fault_stack: &post_stack,
+                    },
+                )?;
+                stack.truncate(stack_start);
+                push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
             }
             Instr::New(class) | Instr::NewG { class, .. } => {
                 let position = segment.start + within as u32;
@@ -2200,8 +2290,6 @@ fn emit_segment(
             | Instr::CallValue { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
-            | Instr::TupleNew { .. }
-            | Instr::ListNew { .. }
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
@@ -5946,6 +6034,79 @@ fn emit_capture_allocation(
         EXIT_HEAP_LIMIT
     };
     emit_fault_check(builder, values, limit, limit_exit, point, fault_stack)?;
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, point, replay_stack)?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
+}
+
+fn emit_value_array_allocation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    emission: ValueArrayAllocationEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let ValueArrayAllocationEmission {
+        kind,
+        item_start,
+        item_count,
+        roots,
+        point,
+        replay_stack,
+        fault_stack,
+    } = emission;
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let collection = builder.ins().iconst(types::I32, 1);
+    let item_start = builder.ins().iconst(
+        types::I32,
+        i64::try_from(item_start).map_err(|_| CompileError::Backend)?,
+    );
+    let item_count = builder.ins().iconst(
+        types::I32,
+        i64::try_from(item_count).map_err(|_| CompileError::Backend)?,
+    );
+    let function_offset = match kind {
+        ValueArrayAllocationKind::Tuple => {
+            mem::offset_of!(RawNativeFunctions, allocate_tuple)
+        }
+        ValueArrayAllocationKind::List => mem::offset_of!(RawNativeFunctions, allocate_list),
+        ValueArrayAllocationKind::Map => mem::offset_of!(RawNativeFunctions, allocate_map),
+    };
+    let allocation = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.value_array_allocation_signature,
+        allocation,
+        &[
+            values.runtime_context,
+            collection,
+            item_start,
+            item_count,
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let heap_limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+    emit_fault_check(
+        builder,
+        values,
+        heap_limit,
+        EXIT_HEAP_LIMIT,
+        point,
+        fault_stack,
+    )?;
     let replay = builder
         .ins()
         .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));

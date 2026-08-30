@@ -1690,6 +1690,37 @@ The Auto closure performance gate remains open.
 
 JSON and HTTP remain below the representative gate.
 
+### Stage F22: Native collection literal allocation
+
+- allocate tuple values with one fixed typed helper;
+- allocate list values with one fixed typed helper;
+- allocate map values with one fixed typed helper;
+- stage items and complete collection roots in one bounded buffer;
+- preserve duplicate-key replacement during map construction;
+- replay nested collection before it changes state;
+- record each dynamic post-pop fault stack.
+
+Gate: Tuple, list, and map literals use no temporary interpreter site.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Fuel and heap-limit exits preserve exact canonical state.
+
+The focused JIT suite passed 104 tests.
+
+The fresh-engine corpus gate took 11.94 seconds after compilation.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| JSON parse | 45.585 ms | 46.890 ms | 79.711 ms | 0.97 times | 0.57 times | 6.38 percent |
+| JSON stringify | 20.592 ms | 20.920 ms | 41.663 ms | 0.98 times | 0.49 times | 52.07 percent |
+| HTTP parse | 42.541 ms | 46.845 ms | 72.561 ms | 0.91 times | 0.59 times | 48.23 percent |
+| HTTP serialize | 22.649 ms | 25.689 ms | 25.960 ms | 0.88 times | 0.87 times | 41.78 percent |
+
+This stage removed literal allocation exits.
+
+The representative gate remains open because hot operations still use temporary sites.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

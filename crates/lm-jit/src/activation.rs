@@ -323,6 +323,8 @@ pub(super) type RawAllocateInstance =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawAllocateCapture =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, u32, *mut u64) -> u32;
+pub(super) type RawAllocateValues =
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 
@@ -332,6 +334,9 @@ pub(super) struct RawNativeFunctions {
     pub(super) allocate_instance: RawAllocateInstance,
     pub(super) allocate_closure: RawAllocateCapture,
     pub(super) allocate_callback: RawAllocateCapture,
+    pub(super) allocate_tuple: RawAllocateValues,
+    pub(super) allocate_list: RawAllocateValues,
+    pub(super) allocate_map: RawAllocateValues,
     pub(super) grow_list: RawGrowList,
     pub(super) reserve_list: RawReserveList,
 }
@@ -1063,6 +1068,22 @@ pub struct CallbackAllocationRequest<'a> {
     pub owner_depth: u32,
 }
 
+/// One typed value-array allocation request.
+pub struct ValueArrayAllocationRequest<'a> {
+    /// Canonical item payloads.
+    pub item_bits: &'a [u64],
+    /// Canonical item tags.
+    pub item_tags: &'a [u64],
+    /// Active root payloads.
+    pub root_bits: &'a [u64],
+    /// Active root tags.
+    pub root_tags: &'a [u64],
+    /// Active root states.
+    pub root_states: &'a [u8],
+    /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
 /// Typed runtime slow paths for one native activation.
 pub trait NativeRuntime {
     /// Allocate one instance with its exact environment and active roots.
@@ -1084,6 +1105,15 @@ pub trait NativeRuntime {
         &mut self,
         request: CallbackAllocationRequest<'_>,
     ) -> CallbackAllocationResult;
+
+    /// Allocate one tuple with exact item values.
+    fn allocate_tuple(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult;
+
+    /// Allocate one list with exact item values.
+    fn allocate_list(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult;
+
+    /// Allocate one map with exact key and value pairs.
+    fn allocate_map(&mut self, request: ValueArrayAllocationRequest<'_>) -> AllocationResult;
 
     /// Grow one list and append one canonical value.
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult;
@@ -1289,6 +1319,122 @@ pub(super) unsafe extern "C" fn allocate_callback<R: NativeRuntime>(
         CallbackAllocationResult::StackLimit => RUNTIME_STACK_LIMIT,
         CallbackAllocationResult::Interpreter => RUNTIME_INTERPRETER,
     }
+}
+
+pub(super) unsafe extern "C" fn allocate_tuple<R: NativeRuntime>(
+    context: *mut c_void,
+    allow_collection: u32,
+    item_start: u32,
+    item_count: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked activation context.
+    unsafe {
+        allocate_values(
+            context,
+            allow_collection,
+            item_start,
+            item_count,
+            root_count,
+            result,
+            R::allocate_tuple,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn allocate_list<R: NativeRuntime>(
+    context: *mut c_void,
+    allow_collection: u32,
+    item_start: u32,
+    item_count: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked activation context.
+    unsafe {
+        allocate_values(
+            context,
+            allow_collection,
+            item_start,
+            item_count,
+            root_count,
+            result,
+            R::allocate_list,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn allocate_map<R: NativeRuntime>(
+    context: *mut c_void,
+    allow_collection: u32,
+    item_start: u32,
+    item_count: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked activation context.
+    unsafe {
+        allocate_values(
+            context,
+            allow_collection,
+            item_start,
+            item_count,
+            root_count,
+            result,
+            R::allocate_map,
+        )
+    }
+}
+
+unsafe fn allocate_values<R: NativeRuntime>(
+    context: *mut c_void,
+    allow_collection: u32,
+    item_start: u32,
+    item_count: u32,
+    root_count: u32,
+    result: *mut u64,
+    allocate: fn(&mut R, ValueArrayAllocationRequest<'_>) -> AllocationResult,
+) -> u32 {
+    if context.is_null() || result.is_null() || allow_collection > 1 {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    let item_start = item_start as usize;
+    let item_count = item_count as usize;
+    let Some(item_end) = item_start.checked_add(item_count) else {
+        return RUNTIME_INTERPRETER;
+    };
+    if root_count > context.root_capacity || item_end > root_count {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let nested = unsafe { (*context.activation).frame_len > 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    let response = allocate(
+        runtime,
+        ValueArrayAllocationRequest {
+            item_bits: &root_bits[item_start..item_end],
+            item_tags: &root_tags[item_start..item_end],
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection: allow_collection != 0 && !nested,
+        },
+    );
+    finish_object_allocation(context.activation, result, response)
 }
 
 fn finish_object_allocation(

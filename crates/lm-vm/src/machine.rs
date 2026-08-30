@@ -1770,7 +1770,7 @@ impl Machine {
 
     /// Compare two map keys. Scalars compare by value; strings by
     /// content.
-    fn key_eq(&self, a: Value, b: Value) -> bool {
+    pub(crate) fn key_eq(&self, a: Value, b: Value) -> bool {
         match (a, b) {
             (Value::Int(x), Value::Int(y)) => x == y,
             (Value::Float(x), Value::Float(y)) => float_eq(x, y),
@@ -1794,7 +1794,7 @@ impl Machine {
     }
 
     /// Get the stable semantic hash of one native map key.
-    fn key_semantic_hash(&self, key: Value) -> Result<i64, FaultCode> {
+    pub(crate) fn key_semantic_hash(&self, key: Value) -> Result<i64, FaultCode> {
         match key {
             Value::Bool(value) => Ok(i64::from(value)),
             Value::Int(value) => Ok(value),
@@ -1810,7 +1810,7 @@ impl Machine {
     }
 
     /// Mix one semantic hash with the private process hash key.
-    fn map_index_hash(hash: i64) -> u64 {
+    pub(crate) fn map_index_hash(hash: i64) -> u64 {
         process_lookup_hash(hash)
     }
 
