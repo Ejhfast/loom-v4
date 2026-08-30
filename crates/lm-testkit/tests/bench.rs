@@ -315,7 +315,7 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
         );
         let retired = world.metrics().retired_instructions;
         if let Some(expected) = retired_instructions {
-            assert_eq!(retired, expected);
+            assert_eq!(retired, expected, "{mode:?} round {round}");
         } else {
             retired_instructions = Some(retired);
         }
@@ -1596,6 +1596,25 @@ fn bench_jit_representative_programs() {
             "  if value < 0 then value - 1 else value + 1 end\n",
             "end\n",
             "i = 0\nwhile i < 1000000\n  i = add1(i)\nend\ni\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_virtual_call",
+        concat!(
+            "class Base\n",
+            "  def step(self, value: Int): Int\n    value + 1\n  end\n",
+            "end\n",
+            "class Child < Base\n",
+            "  def step(self, value: Int): Int\n    value + 2\n  end\n",
+            "end\n",
+            "def run(value: Base): Int\n",
+            "  index = 0\n  total = 0\n",
+            "  while index < 1000000\n",
+            "    total = total + value.step(index)\n",
+            "    index = index + 1\n",
+            "  end\n  total\n",
+            "end\n",
+            "run(Child())\n",
         ),
     );
     report_jit_representative(

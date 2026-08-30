@@ -301,6 +301,18 @@ pub struct DispatchRow {
 }
 
 impl DispatchRow {
+    /// Return the first selector stored in this row.
+    #[inline]
+    pub fn base(&self) -> u32 {
+        self.base
+    }
+
+    /// Return the dense method cells in this row.
+    #[inline]
+    pub fn cells(&self) -> &[u32] {
+        &self.table
+    }
+
     #[inline]
     pub fn method(&self, selector: u32) -> Option<u32> {
         let offset = selector.checked_sub(self.base)? as usize;

@@ -270,7 +270,7 @@ Every instruction receives one permanent treatment:
 - A: direct register code;
 - B: guarded memory access;
 - C: an inline fast path with one typed slow path;
-- D: a native call with an inline cache;
+- D: a native call through a fixed target, dispatch table, or inline cache;
 - E: one fixed typed runtime function;
 - F: an observable engine exit.
 
@@ -627,7 +627,9 @@ Ordinary interpreter instructions run the unchanged dispatch path.
 
 A compiled region enables direct-call entry checks for its namespace.
 
-A future virtual-call tier owns one atomic inline-cache cell per site.
+Virtual calls read immutable dispatch rows.
+
+A later monomorphic tier can add one atomic inline-cache cell per site.
 
 A classified site stops collecting observations.
 
@@ -1123,6 +1125,21 @@ Gate: Direct and scheduler corpus results match Interpreter results.
 
 Gate: Auto mode demotes call-heavy scalar traversal without regression.
 
+### Stage F17: Direct virtual dispatch
+
+- expose immutable class dispatch rows to native execution;
+- derive the receiver class through direct value guards;
+- resolve the selector from the class dispatch row;
+- use the existing native calling convention;
+- promote a complete missing dynamic callee through the Auto compile path;
+- preserve exact scheduler retirement counts.
+
+Gate: A polymorphic virtual-call loop uses no interpreter exit.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Scalar text traversal improves in Auto and Native modes.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1494,6 +1511,28 @@ Nine million temporary call-family exits dominated that result.
 Auto mode demoted the function and ran at 0.975 times Interpreter speed.
 
 This result makes call-family coverage the next structural stage.
+
+The Stage F17 run added direct virtual dispatch through immutable class rows.
+
+Auto promotes a complete missing dynamic callee after a compiled caller reaches it.
+
+The focused JIT suite passed 88 tests.
+
+Direct and scheduled corpus runs matched Interpreter results across 163 shipped programs.
+
+The scheduled corpus comparison includes exact retired instruction counts.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Virtual calls | 67.121 ms | 17.629 ms | 17.524 ms | 3.81 times | 100.00 percent |
+| Scalar text traversal | 311.182 ms | 64.348 ms | 64.599 ms | 4.84 times | 100.00 percent |
+| JSON stringify | 20.779 ms | 22.226 ms | 40.901 ms | 0.94 times | 51.94 percent |
+| HTTP parse | 43.924 ms | 47.325 ms | 73.023 ms | 0.93 times | 48.23 percent |
+| HTTP serialize | 23.044 ms | 25.563 ms | 25.839 ms | 0.90 times | 41.78 percent |
+
+The representative-program performance gate remains open.
+
+`CallInterface` remains the largest call-family gap.
 
 ## 24. Rejected designs
 

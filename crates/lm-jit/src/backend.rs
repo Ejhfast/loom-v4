@@ -1,12 +1,13 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeFunction, RawExit, RawNativeActivation, RawNativeFrame, RawNativeFunctions,
-    RawTypeEnvironmentCacheEntry, RUNTIME_HEAP_LIMIT, RUNTIME_OK, TYPE_ENVIRONMENT_CACHE_WAYS,
+    NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
+    RawNativeFunctions, RawTypeEnvironmentCacheEntry, RUNTIME_HEAP_LIMIT, RUNTIME_OK,
+    TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
-    Segment, SegmentExit, UnsupportedReason, ValueContract,
+    Segment, SegmentExit, UnsupportedReason, ValueContract, VirtualReceiver,
 };
 use crate::{
     CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL,
@@ -289,7 +290,7 @@ enum ObjectGuard<'a> {
 }
 
 struct NativeCallEmission<'a> {
-    target: u32,
+    target: ir::Value,
     environment: ir::Value,
     contract: &'a CallContract,
     block: u32,
@@ -652,6 +653,7 @@ fn emit_segment(
             && matches!(
                 segment.exit,
                 SegmentExit::Call { .. }
+                    | SegmentExit::VirtualCall { .. }
                     | SegmentExit::Effect { .. }
                     | SegmentExit::Interpreter { .. }
             );
@@ -1944,6 +1946,7 @@ fn emit_segment(
             }
             Instr::Call(_)
             | Instr::CallG { .. }
+            | Instr::CallVirtual { .. }
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
             | Instr::TupleNew { .. }
@@ -1973,15 +1976,19 @@ fn emit_segment(
         }
     }
 
-    if let SegmentExit::Call { target, .. } = segment.exit {
+    if matches!(
+        segment.exit,
+        SegmentExit::Call { .. } | SegmentExit::VirtualCall { .. }
+    ) {
         let call_instruction = segment.end - 1;
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
         let contract = segment
             .call_contract
             .as_ref()
             .ok_or(CompileError::Backend)?;
-        let environment = match segment.exit {
+        let (target, environment) = match segment.exit {
             SegmentExit::Call {
+                target,
                 app: Some(application),
                 ..
             } => {
@@ -1993,7 +2000,7 @@ fn emit_segment(
                             && site.application == application
                     })
                     .ok_or(CompileError::Backend)?;
-                emit_type_environment_lookup(
+                let environment = emit_type_environment_lookup(
                     builder,
                     values,
                     site,
@@ -2003,9 +2010,44 @@ fn emit_segment(
                         prefix: 0,
                     },
                     &stack,
-                )?
+                )?;
+                (
+                    builder.ins().iconst(types::I32, i64::from(target)),
+                    environment,
+                )
             }
-            SegmentExit::Call { app: None, .. } => builder.ins().iconst(types::I32, 0),
+            SegmentExit::Call {
+                target, app: None, ..
+            } => (
+                builder.ins().iconst(types::I32, i64::from(target)),
+                builder.ins().iconst(types::I32, 0),
+            ),
+            SegmentExit::VirtualCall { selector, .. } => {
+                let receiver = contract.receiver.ok_or(CompileError::Backend)?;
+                let receiver_value = stack
+                    .get(
+                        stack
+                            .len()
+                            .checked_sub(contract.params.len())
+                            .ok_or(CompileError::Backend)?,
+                    )
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let target = emit_virtual_target(
+                    builder,
+                    values,
+                    receiver_value,
+                    receiver,
+                    selector,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: call_instruction,
+                        prefix: 0,
+                    },
+                    &stack,
+                )?;
+                (target, builder.ins().iconst(types::I32, 0))
+            }
             _ => return Err(CompileError::Backend),
         };
         emit_native_call(
@@ -2113,6 +2155,7 @@ fn emit_segment(
             }
         }
         SegmentExit::Call { .. } => unreachable!(),
+        SegmentExit::VirtualCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
             define_stack(builder, values, &stack)?;
             builder.ins().jump(blocks[segment.successors[0]], &[]);
@@ -2371,10 +2414,9 @@ fn emit_native_call(
         values.activation_pointer,
         mem::offset_of!(RawNativeActivation, entry_count),
     )?;
-    let target_in_range =
-        builder
-            .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThan, entry_count, i64::from(target));
+    let target_in_range = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, entry_count, target);
     let have_target = builder.create_block();
     builder
         .ins()
@@ -2387,15 +2429,14 @@ fn emit_native_call(
         values.activation_pointer,
         mem::offset_of!(RawNativeActivation, entries),
     )?;
-    let entry_offset = i32::try_from(
-        (target as usize)
-            .checked_mul(mem::size_of::<usize>())
-            .ok_or(CompileError::Backend)?,
-    )
-    .map_err(|_| CompileError::Backend)?;
+    let target_index = builder.ins().uextend(values.pointer_type, target);
+    let entry_offset = builder
+        .ins()
+        .imul_imm(target_index, mem::size_of::<usize>() as i64);
+    let entry_address = builder.ins().iadd(entries, entry_offset);
     let cell = builder
         .ins()
-        .load(values.pointer_type, MemFlags::new(), entries, entry_offset);
+        .load(values.pointer_type, MemFlags::new(), entry_address, 0);
     let code = builder
         .ins()
         .atomic_load(values.pointer_type, MemFlags::new(), cell);
@@ -2498,12 +2539,17 @@ fn emit_native_call(
         builder
             .ins()
             .icmp(IntCC::UnsignedLessThanOrEqual, scalar_end, scalar_capacity);
-    let local_count_matches = builder.ins().icmp_imm(
-        IntCC::Equal,
-        local_count,
-        i64::try_from(contract.local_count).map_err(|_| CompileError::Backend)?,
-    );
-    let compatible = builder.ins().band(body_fits, local_count_matches);
+    let compatible = match contract.local_count {
+        Some(expected) => {
+            let local_count_matches = builder.ins().icmp_imm(
+                IntCC::Equal,
+                local_count,
+                i64::try_from(expected).map_err(|_| CompileError::Backend)?,
+            );
+            builder.ins().band(body_fits, local_count_matches)
+        }
+        None => body_fits,
+    };
     builder.ins().brif(compatible, storage, &[], fallback, &[]);
 
     builder.switch_to_block(storage);
@@ -2512,7 +2558,7 @@ fn emit_native_call(
 
     builder.switch_to_block(grow);
     let retired = builder.use_var(values.retired);
-    let target_value = builder.ins().iconst(types::I64, i64::from(target));
+    let target_value = builder.ins().uextend(types::I64, target);
     let required_scalars = builder.ins().uextend(types::I64, scalar_end);
     let required_scalars = builder.ins().ishl_imm(required_scalars, 32);
     let growth = builder.ins().bor(required_scalars, target_value);
@@ -2535,7 +2581,7 @@ fn emit_native_call(
 
     builder.switch_to_block(fallback);
     let retired = builder.use_var(values.retired);
-    let target_value = builder.ins().iconst(types::I64, i64::from(target));
+    let target_value = builder.ins().uextend(types::I64, target);
     let environment_tag = builder.ins().uextend(types::I64, environment);
     emit_exit(
         builder,
@@ -2571,11 +2617,16 @@ fn emit_native_call(
     let child_operands = builder.ins().iadd(child_locals, local_byte_offset);
     let child_operand_tags = builder.ins().iadd(child_tags, local_byte_offset);
     let zero_i8 = builder.ins().iconst(types::I8, 0);
-    for slot in 0..contract.local_count {
-        let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), zero_i8, child_states, offset);
+    match contract.local_count {
+        Some(local_count) => {
+            for slot in 0..local_count {
+                let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+                builder
+                    .ins()
+                    .store(MemFlags::new(), zero_i8, child_states, offset);
+            }
+        }
+        None => emit_clear_local_states(builder, child_states, local_count, zero_i8),
     }
     let initialized = builder
         .ins()
@@ -2599,7 +2650,7 @@ fn emit_native_call(
         .ins()
         .imul_imm(frame_index, mem::size_of::<RawNativeFrame>() as i64);
     let child_frame = builder.ins().iadd(frames, frame_offset);
-    store_i32_constant(
+    store_i32_value(
         builder,
         child_frame,
         mem::offset_of!(RawNativeFrame, function),
@@ -2788,6 +2839,175 @@ fn emit_native_call(
     define_stack(builder, values, stack)?;
     builder.ins().jump(successor, &[]);
     Ok(())
+}
+
+fn emit_clear_local_states(
+    builder: &mut FunctionBuilder<'_>,
+    states: ir::Value,
+    count: ir::Value,
+    zero: ir::Value,
+) {
+    let test = builder.create_block();
+    let clear = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(test, types::I32);
+    builder.append_block_param(clear, types::I32);
+    let first = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(test, &[first.into()]);
+
+    builder.switch_to_block(test);
+    let index = builder.block_params(test)[0];
+    let complete = builder.ins().icmp(IntCC::Equal, index, count);
+    builder
+        .ins()
+        .brif(complete, done, &[], clear, &[index.into()]);
+
+    builder.switch_to_block(clear);
+    let index = builder.block_params(clear)[0];
+    let pointer_type = builder.func.dfg.value_type(states);
+    let offset = builder.ins().uextend(pointer_type, index);
+    let address = builder.ins().iadd(states, offset);
+    builder.ins().store(MemFlags::new(), zero, address, 0);
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(test, &[next.into()]);
+
+    builder.switch_to_block(done);
+}
+
+fn emit_virtual_target(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    receiver: NativeValue,
+    contract: VirtualReceiver,
+    selector: u32,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let class = match contract {
+        VirtualReceiver::Immediate { class } => builder.ins().iconst(types::I32, i64::from(class)),
+        VirtualReceiver::Object { tag, class } => {
+            emit_object_entry(
+                builder,
+                values,
+                receiver.bits,
+                tag,
+                point,
+                ObjectGuard::Replay(deopt_stack),
+            )?;
+            builder.ins().iconst(types::I32, i64::from(class))
+        }
+        VirtualReceiver::Instance { class } => {
+            let entry = emit_object_entry(
+                builder,
+                values,
+                receiver.bits,
+                JIT_OBJECT_INSTANCE,
+                point,
+                ObjectGuard::Replay(deopt_stack),
+            )?;
+            let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+            let matches = emit_class_matches(builder, values, actual, class)?;
+            let invalid = builder.ins().bxor_imm(matches, 1);
+            emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+            actual
+        }
+        VirtualReceiver::Text { string, substring } => {
+            let entry = emit_text_entry(
+                builder,
+                values,
+                receiver.bits,
+                point,
+                ObjectGuard::Replay(deopt_stack),
+            )?;
+            let tag = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+            let is_string = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, i64::from(JIT_OBJECT_STR));
+            let string = builder.ins().iconst(types::I32, i64::from(string));
+            let substring = builder.ins().iconst(types::I32, i64::from(substring));
+            builder.ins().select(is_string, string, substring)
+        }
+    };
+
+    let class_index = builder.ins().uextend(values.pointer_type, class);
+    let row_count = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, dispatch_row_count),
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, class_index, row_count);
+    emit_interpreter_replay(builder, values, outside, point, deopt_stack)?;
+    let rows = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, dispatch_rows),
+    )?;
+    let row_offset = builder
+        .ins()
+        .imul_imm(class_index, mem::size_of::<NativeDispatchRow>() as i64);
+    let row = builder.ins().iadd(rows, row_offset);
+    let base = load_value(
+        builder,
+        types::I32,
+        row,
+        mem::offset_of!(NativeDispatchRow, base),
+    )?;
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        row,
+        mem::offset_of!(NativeDispatchRow, len),
+    )?;
+    let start = load_value(
+        builder,
+        values.pointer_type,
+        row,
+        mem::offset_of!(NativeDispatchRow, start),
+    )?;
+    let selector = builder.ins().iconst(types::I32, i64::from(selector));
+    let below = builder.ins().icmp(IntCC::UnsignedLessThan, selector, base);
+    emit_interpreter_replay(builder, values, below, point, deopt_stack)?;
+    let offset = builder.ins().isub(selector, base);
+    let offset = builder.ins().uextend(values.pointer_type, offset);
+    let past = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, offset, len);
+    emit_interpreter_replay(builder, values, past, point, deopt_stack)?;
+    let method_index = builder.ins().iadd(start, offset);
+    let method_count = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, dispatch_method_count),
+    )?;
+    let method_outside = builder.ins().icmp(
+        IntCC::UnsignedGreaterThanOrEqual,
+        method_index,
+        method_count,
+    );
+    emit_interpreter_replay(builder, values, method_outside, point, deopt_stack)?;
+    let methods = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, dispatch_methods),
+    )?;
+    let method_offset = builder
+        .ins()
+        .imul_imm(method_index, mem::size_of::<u32>() as i64);
+    let method_address = builder.ins().iadd(methods, method_offset);
+    let target = builder
+        .ins()
+        .load(types::I32, MemFlags::trusted(), method_address, 0);
+    let missing = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, target, u32::MAX as i64);
+    emit_interpreter_replay(builder, values, missing, point, deopt_stack)?;
+    Ok(target)
 }
 
 fn pop_value(stack: &mut Vec<NativeValue>) -> Result<NativeValue, CompileError> {

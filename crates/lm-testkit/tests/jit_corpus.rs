@@ -11,7 +11,7 @@ const GRANTS: &[&str] = &[
     "Proc", "Rand", "Reflect", "Signal", "Tcp", "Tls", "Tty", "Udp", "Vm", "Wait",
 ];
 
-type ObservedRun = (Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>);
+type ObservedRun = (Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>, u64);
 
 fn collect_programs(path: &Path, programs: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(path).expect("the corpus directory reads") {
@@ -53,6 +53,7 @@ fn run_scheduled(
     }
     let outcome = lm_proc::run_world(&mut world);
     let dump = world.dump_live(&outcome);
+    let retired = world.metrics().retired_instructions;
     let host = host.borrow();
     let observed = (
         outcome,
@@ -60,6 +61,7 @@ fn run_scheduled(
         host.written_bytes.clone(),
         host.written_error_bytes.clone(),
         host.operations.clone(),
+        retired,
     );
     (observed, engine.metrics().native_retired_instructions)
 }

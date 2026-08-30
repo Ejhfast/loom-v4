@@ -139,6 +139,88 @@ fn byte_reads_match_the_interpreter() {
 }
 
 #[test]
+fn virtual_calls_use_native_dispatch_rows() {
+    let source = concat!(
+        "class Base\n",
+        "  def step(self, value: Int): Int\n",
+        "    value + 1\n",
+        "  end\n",
+        "end\n",
+        "class Child < Base\n",
+        "  def step(self, value: Int): Int\n",
+        "    value + 2\n",
+        "  end\n",
+        "end\n",
+        "def sum_steps(value: Base): Int\n",
+        "  index = 0\n",
+        "  total = 0\n",
+        "  while index < 10000\n",
+        "    total = total + value.step(index)\n",
+        "    index = index + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "sum_steps(Child())\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(50_015_000)));
+    assert!(metrics.compiled_call_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn virtual_calls_preserve_scheduler_retirement_counts() {
+    let source = concat!(
+        "class Base\n",
+        "  def step(self, value: Int): Int\n    value + 1\n  end\n",
+        "end\n",
+        "class Child < Base\n",
+        "  def step(self, value: Int): Int\n    value + 2\n  end\n",
+        "end\n",
+        "def sum_steps(value: Base): Int\n",
+        "  index = 0\n  total = 0\n",
+        "  while index < 10000\n",
+        "    total = total + value.step(index)\n",
+        "    index = index + 1\n",
+        "  end\n  total\n",
+        "end\n",
+        "sum_steps(Child())\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-virtual-retired.lm", source)
+        .expect("the virtual retirement case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the virtual retirement case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the virtual retirement case runs");
+        (outcome, world.metrics().retired_instructions)
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    let cold = run(Arc::clone(&engine));
+    let warm = run(Arc::clone(&engine));
+    assert_eq!(cold, interpreted);
+    assert_eq!(warm, interpreted);
+    assert!(
+        engine.metrics().native_retired_instructions > 0,
+        "{:?}",
+        engine.metrics()
+    );
+}
+
+#[test]
 fn byte_index_faults_match_the_interpreter() {
     for index in [-1, 4] {
         let source = format!(
@@ -257,7 +339,8 @@ fn utf8_scalar_reads_stay_native() {
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(29_935_000)));
     assert!(metrics.native_retired_instructions > 50_000, "{metrics:?}");
-    assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
+    assert!(metrics.compiled_heap_read_sites >= 1, "{metrics:?}");
+    assert!(metrics.compiled_call_sites >= 2, "{metrics:?}");
 }
 
 #[test]

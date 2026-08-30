@@ -35,6 +35,7 @@ pub struct FunctionInput<'a> {
     pub(super) root: FunctionDefinition<'a>,
     direct_callees: Vec<FunctionDefinition<'a>>,
     runtime_string_count: usize,
+    runtime_core: lm_bytecode::corepin::CoreLayout,
 }
 
 impl<'a> FunctionInput<'a> {
@@ -58,12 +59,18 @@ impl<'a> FunctionInput<'a> {
             },
             direct_callees: Vec::new(),
             runtime_string_count: source.strings.len(),
+            runtime_core: lm_bytecode::corepin::declared_layout(source),
         }
     }
 
     /// Supply the relocated string-table size for byte literal slots.
     pub fn set_runtime_string_count(&mut self, count: usize) {
         self.runtime_string_count = count;
+    }
+
+    /// Supply the relocated core roles for runtime value dispatch.
+    pub fn set_runtime_core_roles(&mut self, roles: &[u32; lm_bytecode::CORE_ROLE_COUNT]) {
+        self.runtime_core = lm_bytecode::corepin::layout_from_roles(roles);
     }
 
     /// Supply the source-to-runtime class relocation for this unit.
@@ -273,6 +280,10 @@ pub(super) enum SegmentExit {
         app: Option<u32>,
         fallthrough_ip: u32,
     },
+    VirtualCall {
+        selector: u32,
+        fallthrough_ip: u32,
+    },
     Allocation {
         fallthrough_ip: u32,
     },
@@ -412,8 +423,17 @@ pub(super) enum OptionTarget {
 #[derive(Debug, Clone)]
 pub(super) struct CallContract {
     pub(super) params: Vec<ScalarKind>,
-    pub(super) local_count: usize,
+    pub(super) local_count: Option<usize>,
     pub(super) result: ScalarKind,
+    pub(super) receiver: Option<VirtualReceiver>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum VirtualReceiver {
+    Immediate { class: u32 },
+    Object { tag: u32, class: u32 },
+    Instance { class: u32 },
+    Text { string: u32, substring: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -485,6 +505,7 @@ struct SegmentAnalysisContext<'a> {
     locals: &'a [ScalarKind],
     calls: &'a HashMap<u32, CallSignature>,
     class_relocation: Option<&'a [u32]>,
+    runtime_core: lm_bytecode::corepin::CoreLayout,
 }
 
 #[derive(Debug, Clone)]
@@ -589,6 +610,7 @@ impl RegionPlan {
             locals: &local_kinds,
             calls: &call_contracts,
             class_relocation: input.root.class_relocation,
+            runtime_core: input.runtime_core,
         };
         for (index, segment) in segments.iter_mut().enumerate() {
             let state = verified_points
@@ -637,7 +659,10 @@ impl RegionPlan {
             segment.allocations = analysis.allocations;
             allocation_sites += segment.allocations.len();
             segment.cost = segment.end - segment.start;
-            if matches!(segment.exit, SegmentExit::Call { .. }) {
+            if matches!(
+                segment.exit,
+                SegmentExit::Call { .. } | SegmentExit::VirtualCall { .. }
+            ) {
                 call_sites += 1;
                 segment.cost = segment.cost.saturating_sub(1);
             }
@@ -799,8 +824,9 @@ fn instantiate_call(
             .copied()
             .map(instantiate)
             .collect::<Result<Vec<_>, _>>()?,
-        local_count: signature.local_count,
+        local_count: Some(signature.local_count),
         result: instantiate(signature.result)?,
+        receiver: None,
     })
 }
 
@@ -940,6 +966,10 @@ fn segment_exit(
                 app: Some(*app),
                 fallthrough_ip: next,
             },
+            Instr::CallVirtual { selector, .. } => SegmentExit::VirtualCall {
+                selector: *selector,
+                fallthrough_ip: next,
+            },
             _ => return Err(UnsupportedReason::InvalidControlFlow),
         }),
         crate::ExitBehavior::Allocation => Some(SegmentExit::Allocation {
@@ -969,6 +999,9 @@ fn resolve_successors(
                 entry(entries, segment.block, fallthrough_ip)?,
             ],
             SegmentExit::Call { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
+            SegmentExit::VirtualCall { fallthrough_ip, .. } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::Allocation { fallthrough_ip } => {
@@ -1441,6 +1474,34 @@ fn analyze_segment(
                 boundary_stack = before.stack.clone();
                 call_contract = Some(contract);
             }
+            Instr::CallVirtual { argc, .. } => {
+                let parameter_count = usize::try_from(argc)
+                    .ok()
+                    .and_then(|count| count.checked_add(1))
+                    .ok_or(UnsupportedReason::RegionLimit)?;
+                let parameter_start = before
+                    .stack
+                    .len()
+                    .checked_sub(parameter_count)
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let params = before.stack[parameter_start..].to_vec();
+                let receiver = params
+                    .first()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                boundary_stack = before.stack.clone();
+                call_contract = Some(CallContract {
+                    params,
+                    local_count: None,
+                    result,
+                    receiver: Some(virtual_receiver(context, receiver)?),
+                });
+            }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {
                 boundary_stack = before.stack.clone();
             }
@@ -1476,6 +1537,99 @@ fn analyze_segment(
         allocations,
         call_contract,
     })
+}
+
+fn virtual_receiver(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<VirtualReceiver, UnsupportedReason> {
+    let fixed = |class: Option<u32>| {
+        class
+            .map(|class| VirtualReceiver::Immediate { class })
+            .ok_or(UnsupportedReason::MissingSource)
+    };
+    match receiver {
+        ScalarKind::Unit => fixed(context.runtime_core.unit),
+        ScalarKind::Bool => fixed(context.runtime_core.boolean),
+        ScalarKind::Int => fixed(context.runtime_core.int),
+        ScalarKind::Float => fixed(context.runtime_core.float),
+        ScalarKind::Char => fixed(context.runtime_core.char_value),
+        ScalarKind::Object(ty) => {
+            let source_core = lm_bytecode::corepin::declared_layout(context.module);
+            let object = |tag, class: Option<u32>| {
+                class
+                    .map(|class| VirtualReceiver::Object { tag, class })
+                    .ok_or(UnsupportedReason::MissingSource)
+            };
+            match context.module.types.get(ty as usize) {
+                Some(BcType::Str) => object(lm_heap::JIT_OBJECT_STR, context.runtime_core.string),
+                Some(BcType::List(_)) => {
+                    object(lm_heap::JIT_OBJECT_LIST, context.runtime_core.list)
+                }
+                Some(BcType::Map(_, _)) => {
+                    object(lm_heap::JIT_OBJECT_MAP, context.runtime_core.map)
+                }
+                Some(BcType::Tuple(items)) => {
+                    let class = context
+                        .runtime_core
+                        .tuples
+                        .get(items.len())
+                        .copied()
+                        .flatten();
+                    object(lm_heap::JIT_OBJECT_TUPLE, class)
+                }
+                Some(BcType::Bytes) => {
+                    object(lm_heap::JIT_OBJECT_BYTES, context.runtime_core.bytes)
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.text == Some(*class) =>
+                {
+                    match (context.runtime_core.string, context.runtime_core.substring) {
+                        (Some(string), Some(substring)) => {
+                            Ok(VirtualReceiver::Text { string, substring })
+                        }
+                        _ => Err(UnsupportedReason::MissingSource),
+                    }
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.string == Some(*class) =>
+                {
+                    object(lm_heap::JIT_OBJECT_STR, context.runtime_core.string)
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.substring == Some(*class) =>
+                {
+                    object(
+                        lm_heap::JIT_OBJECT_SUBSTRING,
+                        context.runtime_core.substring,
+                    )
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.string_builder == Some(*class) =>
+                {
+                    object(
+                        lm_heap::JIT_OBJECT_STRING_BUILDER,
+                        context.runtime_core.string_builder,
+                    )
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.byte_buffer == Some(*class) =>
+                {
+                    object(
+                        lm_heap::JIT_OBJECT_BYTE_BUFFER,
+                        context.runtime_core.byte_buffer,
+                    )
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _)) => {
+                    Ok(VirtualReceiver::Instance {
+                        class: relocate_class(*class, context.class_relocation)?,
+                    })
+                }
+                _ => Err(UnsupportedReason::NonScalarType),
+            }
+        }
+        ScalarKind::Tagged(_) | ScalarKind::Operation => Err(UnsupportedReason::NonScalarType),
+    }
 }
 
 fn stack_from_end(stack: &[ScalarKind], offset: usize) -> Result<ScalarKind, UnsupportedReason> {

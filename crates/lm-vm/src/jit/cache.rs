@@ -1,6 +1,6 @@
 //! Native region cache for one arena layout.
 
-use lm_jit::{Failure, FunctionInput};
+use lm_jit::{Failure, FunctionInput, NativeDispatchRow};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -28,6 +28,8 @@ struct NativeCodeRevision {
     slots: lm_bytecode::CodeTable<Arc<NativeSlot>>,
     entries: Arc<Vec<usize>>,
     class_parents: Arc<Vec<u32>>,
+    dispatch_rows: Arc<Vec<NativeDispatchRow>>,
+    dispatch_methods: Arc<Vec<u32>>,
     candidates: Arc<Vec<u64>>,
     compiled: Arc<AtomicUsize>,
 }
@@ -38,6 +40,8 @@ impl NativeCodeState {
             slots: lm_bytecode::CodeTable::default(),
             entries: Arc::new(Vec::new()),
             class_parents: Arc::new(Vec::new()),
+            dispatch_rows: Arc::new(Vec::new()),
+            dispatch_methods: Arc::new(Vec::new()),
             candidates: Arc::new(Vec::new()),
             compiled: Arc::new(AtomicUsize::new(0)),
         };
@@ -45,12 +49,14 @@ impl NativeCodeState {
             revision.push_slot(module, revision.slots.len());
         }
         revision.extend_classes(module);
+        revision.extend_dispatch(module);
         NativeCodeState(Arc::new(revision))
     }
 
     pub(crate) fn extend(&mut self, module: &crate::NamespaceRuntime) {
         if self.0.slots.len() >= module.funcs.len()
             && self.0.class_parents.len() >= module.classes.len()
+            && self.0.dispatch_rows.len() >= module.dispatch.len()
         {
             return;
         }
@@ -59,6 +65,7 @@ impl NativeCodeState {
             revision.push_slot(module, revision.slots.len());
         }
         revision.extend_classes(module);
+        revision.extend_dispatch(module);
         self.0 = Arc::new(revision);
     }
 
@@ -72,6 +79,14 @@ impl NativeCodeState {
 
     pub(super) fn class_parents(&self) -> &[u32] {
         self.0.class_parents.as_slice()
+    }
+
+    pub(super) fn dispatch_rows(&self) -> &[NativeDispatchRow] {
+        self.0.dispatch_rows.as_slice()
+    }
+
+    pub(super) fn dispatch_methods(&self) -> &[u32] {
+        self.0.dispatch_methods.as_slice()
     }
 
     pub(super) fn compiled_count(&self) -> &AtomicUsize {
@@ -131,8 +146,17 @@ impl NativeCodeState {
             .is_some_and(|slot| slot.note_native_exit(retired))
     }
 
+    pub(crate) fn promote_call_target(&self, function: u32) {
+        if self.is_candidate(function) {
+            if let Some(slot) = self.slot(function) {
+                slot.promote();
+            }
+        }
+    }
+
     pub(crate) fn call_target_is_denied(&self, function: u32) -> bool {
-        self.slot(function).is_none_or(|slot| slot.is_denied())
+        self.slot(function)
+            .is_none_or(|slot| !slot.call_promotable || slot.is_denied())
     }
 
     pub(super) fn append_profile(
@@ -201,6 +225,18 @@ impl NativeCodeState {
 }
 
 impl NativeCodeRevision {
+    fn extend_dispatch(&mut self, module: &crate::NamespaceRuntime) {
+        let dispatch = module.dispatch_store();
+        let rows = Arc::make_mut(&mut self.dispatch_rows);
+        let methods = Arc::make_mut(&mut self.dispatch_methods);
+        while rows.len() < dispatch.len() {
+            let row = &dispatch[rows.len()];
+            let native = NativeDispatchRow::new(row.base(), row.cells().len(), methods.len());
+            methods.extend_from_slice(row.cells());
+            rows.push(native);
+        }
+    }
+
     fn extend_classes(&mut self, module: &crate::NamespaceRuntime) {
         let parents = Arc::make_mut(&mut self.class_parents);
         while parents.len() < module.classes.len() {
@@ -235,6 +271,7 @@ pub(super) struct NativeSlot {
     tier: AtomicU64,
     productivity: AtomicU32,
     profile_work: AtomicU64,
+    call_promotable: bool,
 }
 
 impl NativeSlot {
@@ -245,6 +282,11 @@ impl NativeSlot {
             .map(Vec::len)
             .sum::<usize>()
             .clamp(1, u32::MAX as usize) as u32;
+        let call_promotable = function
+            .blocks
+            .iter()
+            .flatten()
+            .all(lm_jit::instruction_has_dedicated_treatment);
         NativeSlot {
             verdict: OnceLock::new(),
             entry: Arc::new(lm_jit::NativeEntryCell::default()),
@@ -252,6 +294,7 @@ impl NativeSlot {
             tier: AtomicU64::new(if candidate { 0 } else { TIER_DENIED }),
             productivity: AtomicU32::new(0),
             profile_work: AtomicU64::new(0),
+            call_promotable,
         }
     }
 
@@ -349,6 +392,18 @@ impl NativeSlot {
                 Err(current) => state = current,
             }
         }
+    }
+
+    fn promote(&self) {
+        if !self.call_promotable || self.productivity.load(Ordering::Relaxed) == PRODUCTIVITY_DENIED
+        {
+            return;
+        }
+        let _ = self
+            .tier
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |state| {
+                (state < AUTO_COMPILE_WORK).then_some(AUTO_COMPILE_WORK)
+            });
     }
 
     fn is_denied(&self) -> bool {

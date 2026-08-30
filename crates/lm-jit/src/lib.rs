@@ -39,9 +39,9 @@ use activation::{
 };
 pub use activation::{
     AllocationResult, ListGrowthRequest, ListGrowthResult, ListReserveRequest, ListReserveResult,
-    NativeActivation, NativeExecution, NativeFrameView, NativeLiteralView, NativePreparation,
-    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView,
+    NativePreparation, NativeRootBuffers, NativeRootBuffersMut, NativeRuntime,
+    NativeTypeEnvironmentCache, NativeTypeEnvironmentView, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -274,6 +274,7 @@ impl CompiledRegion {
                     && matches!(
                         segment.exit,
                         SegmentExit::Call { .. }
+                            | SegmentExit::VirtualCall { .. }
                             | SegmentExit::Effect { .. }
                             | SegmentExit::Interpreter { .. }
                     )
@@ -326,8 +327,10 @@ impl CompiledRegion {
     /// Return operand representations for one suspended native caller.
     pub fn suspended_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
         self.plan.segments.iter().find_map(|segment| {
-            let SegmentExit::Call { fallthrough_ip, .. } = segment.exit else {
-                return None;
+            let fallthrough_ip = match segment.exit {
+                SegmentExit::Call { fallthrough_ip, .. }
+                | SegmentExit::VirtualCall { fallthrough_ip, .. } => fallthrough_ip,
+                _ => return None,
             };
             if segment.block != block || fallthrough_ip != instruction {
                 return None;
@@ -367,6 +370,8 @@ impl CompiledRegion {
             fuel,
             heap,
             class_parents,
+            dispatch_rows,
+            dispatch_methods,
             literals,
             type_store_id,
             type_environments,
@@ -428,6 +433,10 @@ impl CompiledRegion {
             heap_collection_threshold: heap.collection_threshold,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
+            dispatch_rows: dispatch_rows.as_ptr(),
+            dispatch_row_count: dispatch_rows.len(),
+            dispatch_methods: dispatch_methods.as_ptr(),
+            dispatch_method_count: dispatch_methods.len(),
             literal_values: literals.values,
             literal_count: literals.count,
             type_store_id,

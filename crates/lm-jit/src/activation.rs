@@ -73,11 +73,31 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_collection_threshold: usize,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
+    pub(super) dispatch_rows: *const NativeDispatchRow,
+    pub(super) dispatch_row_count: usize,
+    pub(super) dispatch_methods: *const u32,
+    pub(super) dispatch_method_count: usize,
     pub(super) literal_values: *const Value,
     pub(super) literal_count: usize,
     pub(super) type_store_id: u64,
     pub(super) type_environments: *const RawTypeEnvironmentCacheEntry,
     pub(super) type_environment_mask: u32,
+}
+
+/// One stable row in the native class dispatch table.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeDispatchRow {
+    pub(super) base: u32,
+    pub(super) len: usize,
+    pub(super) start: usize,
+}
+
+impl NativeDispatchRow {
+    /// Create one native dispatch row.
+    pub fn new(base: u32, len: usize, start: usize) -> NativeDispatchRow {
+        NativeDispatchRow { base, len, start }
+    }
 }
 
 #[repr(C)]
@@ -263,6 +283,8 @@ pub struct NativeExecution<'a> {
     pub fuel: u64,
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
+    pub dispatch_rows: &'a [NativeDispatchRow],
+    pub dispatch_methods: &'a [u32],
     pub literals: NativeLiteralView,
     pub type_store_id: u64,
     pub type_environments: NativeTypeEnvironmentView,

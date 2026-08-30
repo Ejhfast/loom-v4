@@ -298,6 +298,7 @@ impl JitEngine {
                 local,
             );
             input.set_runtime_string_count(context.module.strings.len());
+            input.set_runtime_core_roles(&context.module.core_roles);
             let relocation = context
                 .module
                 .code_namespace()
@@ -598,6 +599,8 @@ impl JitEngine {
                         fuel: remaining,
                         heap,
                         class_parents: native.class_parents(),
+                        dispatch_rows: native.dispatch_rows(),
+                        dispatch_methods: native.dispatch_methods(),
                         literals,
                         type_store_id: context.envs.canonical_store_id(),
                         type_environments,
@@ -940,6 +943,9 @@ impl JitEngine {
                     let Ok(environment) = u32::try_from(exit.result_tag()) else {
                         return malformed_native_exit(retired);
                     };
+                    if metrics.sample_productivity() {
+                        native.promote_call_target(target);
+                    }
                     machine.vm.fuel -= 1;
                     let retired = retired + 1;
                     metrics.note_native_retired(1);

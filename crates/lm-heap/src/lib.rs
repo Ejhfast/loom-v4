@@ -252,6 +252,10 @@ pub const JIT_OBJECT_MAP: u32 = 3;
 pub const JIT_OBJECT_TUPLE: u32 = 4;
 /// Stable tag of one closure.
 pub const JIT_OBJECT_CLOSURE: u32 = 5;
+/// Stable tag of one mutable string builder.
+pub const JIT_OBJECT_STRING_BUILDER: u32 = 6;
+/// Stable tag of one mutable byte buffer.
+pub const JIT_OBJECT_BYTE_BUFFER: u32 = 7;
 /// Stable tag of immutable binary data.
 pub const JIT_OBJECT_BYTES: u32 = 8;
 /// Stable tag of one immutable text view.
