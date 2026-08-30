@@ -685,6 +685,14 @@ Every supported test compares Interpreter and Native.
 
 Tests compare complete live machine state.
 
+The standalone corpus runs through direct turns and deterministic scheduler turns.
+
+Scheduler runs use 1,024-instruction quanta and one deterministic recording host.
+
+Corpus comparisons include outcomes, live state, output bytes, and host operation order.
+
+The generic Option regression must retire native instructions during its scheduler run.
+
 Fuel tests sweep every segment boundary.
 
 Tests alternate engines between bounded turns.

@@ -25,3 +25,19 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+# Keep Loom debug code debuggable. Optimize the native backend used by tests.
+[profile.dev.package]
+cranelift-assembler-x64 = { opt-level = 3 }
+cranelift-bforest = { opt-level = 3 }
+cranelift-bitset = { opt-level = 3 }
+cranelift-codegen = { opt-level = 3 }
+cranelift-codegen-shared = { opt-level = 3 }
+cranelift-control = { opt-level = 3 }
+cranelift-entity = { opt-level = 3 }
+cranelift-frontend = { opt-level = 3 }
+cranelift-isle = { opt-level = 3 }
+cranelift-jit = { opt-level = 3 }
+cranelift-module = { opt-level = 3 }
+cranelift-native = { opt-level = 3 }
+regalloc2 = { opt-level = 3 }

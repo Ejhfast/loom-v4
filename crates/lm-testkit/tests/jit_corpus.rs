@@ -1,8 +1,15 @@
 //! Forced-native differential coverage for shipped standalone programs.
 
-use lm_vm::{Engine, EngineMode, Outcome, Vm, VmConfig};
+use lm_vm::{Engine, EngineMode, Outcome, RecordingHost, Vm, VmConfig, World};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+
+const GRANTS: &[&str] = &[
+    "Args", "Choose", "Clock", "Compiler", "Dns", "Entropy", "Env", "Exec", "Fs", "Io", "Pipe",
+    "Proc", "Rand", "Reflect", "Signal", "Tcp", "Tls", "Tty", "Udp", "Vm", "Wait",
+];
 
 fn collect_programs(path: &Path, programs: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(path).expect("the corpus directory reads") {
@@ -15,7 +22,7 @@ fn collect_programs(path: &Path, programs: &mut Vec<PathBuf>) {
     }
 }
 
-fn run(artifact: lm_bytecode::artifact::Artifact, mode: EngineMode) -> (Outcome, String) {
+fn run_direct(artifact: lm_bytecode::artifact::Artifact, mode: EngineMode) -> (Outcome, String) {
     let (arena, namespace) =
         lm_testkit::publish_compiled_artifact(artifact).expect("the corpus artifact publishes");
     let engine = Arc::new(Engine::new(mode));
@@ -23,6 +30,37 @@ fn run(artifact: lm_bytecode::artifact::Artifact, mode: EngineMode) -> (Outcome,
     let outcome = vm.run();
     let dump = vm.dump_live(&outcome);
     (outcome, dump)
+}
+
+fn run_scheduled(
+    artifact: lm_bytecode::artifact::Artifact,
+    mode: EngineMode,
+) -> ((Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>), u64) {
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the corpus artifact publishes");
+    let engine = Arc::new(Engine::new(mode));
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(Rc::clone(&host)),
+        Arc::clone(&engine),
+    );
+    for grant in GRANTS {
+        world.allow(grant).expect("the corpus grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    let dump = world.dump_live(&outcome);
+    let host = host.borrow();
+    let observed = (
+        outcome,
+        dump,
+        host.written_bytes.clone(),
+        host.written_error_bytes.clone(),
+        host.operations.clone(),
+    );
+    (observed, engine.metrics().native_retired_instructions)
 }
 
 #[test]
@@ -57,11 +95,24 @@ fn forced_native_matches_the_standalone_program_corpus() {
                             std::fs::read_to_string(path).expect("the corpus program reads");
                         let artifact = lm_testkit::compile_text(&name, &source)
                             .unwrap_or_else(|error| panic!("{name} does not compile: {error}"));
-                        let interpreted = run(artifact.clone(), EngineMode::Interpreter);
-                        let native = run(artifact, EngineMode::Native);
+                        let interpreted = run_direct(artifact.clone(), EngineMode::Interpreter);
+                        let native = run_direct(artifact.clone(), EngineMode::Native);
                         if native != interpreted {
                             failures.push(format!(
-                                "{name}: interpreter {interpreted:?}, native {native:?}"
+                                "{name}: direct interpreter {interpreted:?}, native {native:?}"
+                            ));
+                        }
+                        let (interpreted, _) =
+                            run_scheduled(artifact.clone(), EngineMode::Interpreter);
+                        let (native, native_retired) = run_scheduled(artifact, EngineMode::Native);
+                        if native != interpreted {
+                            failures.push(format!(
+                                "{name}: scheduler interpreter {interpreted:?}, native {native:?}"
+                            ));
+                        }
+                        if name == "tests/run-fault/option-expect.lm" && native_retired == 0 {
+                            failures.push(format!(
+                                "{name}: the scheduler did not execute native instructions"
                             ));
                         }
                     }
