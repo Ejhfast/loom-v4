@@ -401,7 +401,8 @@ fn recursive_calls_match_each_fuel_boundary() {
     );
     let artifact = lm_testkit::compile_text("jit-recursive-fuel.lm", source)
         .expect("the recursive fuel case compiles");
-    for fuel in 0..=96 {
+    let fuels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 80, 96];
+    for fuel in fuels {
         let (interpreted, _, interpreted_dump) =
             run_artifact(&artifact, EngineMode::Interpreter, fuel);
         let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
@@ -590,6 +591,43 @@ fn native_field_reads_resume_from_interpreter_created_state() {
     assert!(metrics.native_retired_instructions > 50_000);
     assert_eq!(metrics.compiled_heap_read_sites, 1);
     assert_eq!(metrics.guard_failures, 0);
+}
+
+#[test]
+fn direct_heap_access_matches_each_fuel_boundary() {
+    let source = concat!(
+        "class Cell\n",
+        "  value: Int = 0\n",
+        "end\n",
+        "def bump(mut cell: Cell): Int\n",
+        "  cell.value = cell.value + 1\n",
+        "  cell.value\n",
+        "end\n",
+        "cell = Cell()\npair = (7, 8)\nitems = [1, 2, 3]\n",
+        "i = 0\nsum = 0\n",
+        "while i < 20\n",
+        "  bump(cell)\n",
+        "  index = i % 3\n",
+        "  items.set(index, pair[0] + i)\n",
+        "  sum = sum + items.at(index)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "sum + cell.value + pair[1] + items.len()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-direct-heap.lm", source)
+        .expect("the direct heap case compiles");
+    for fuel in 0..=96 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(361)));
+    assert!(metrics.compiled_heap_read_sites >= 5, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100, "{metrics:?}");
 }
 
 #[test]
@@ -1149,6 +1187,36 @@ fn a_wrong_external_field_value_replays_before_native_use() {
         })
         .expect("the snapshot holds the pair field");
     *field = lm_value::Value::Bool(false);
+    let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, &image);
+    assert!(
+        matches!(interpreted, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(
+        matches!(native, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+}
+
+#[test]
+fn a_wrong_external_list_value_replays_before_native_use() {
+    let source = concat!(
+        "items = [1, 2, 3]\ni = 0\nsum = 0\n",
+        "while i < 100\n",
+        "  sum = sum + items.at(i % 3)\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let (artifact, mut image) = captured_loop("jit-list-snapshot.lm", source);
+    let item = image.machines[0]
+        .objects
+        .iter_mut()
+        .find_map(|object| match &mut object.object {
+            lm_vm::Object::List { items, .. } => items.first_mut(),
+            _ => None,
+        })
+        .expect("the snapshot holds one list item");
+    *item = lm_value::Value::Bool(false);
     let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
     let (native, metrics) = restore_with_native(&artifact, &image);
     assert!(

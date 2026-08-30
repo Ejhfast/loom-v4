@@ -1,7 +1,7 @@
 //! Verified bytecode analysis and immutable native region plans.
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
-use lm_bytecode::{BcType, Func, Instr, Module, NumericInstr};
+use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NumericInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -128,6 +128,7 @@ pub struct CompilerMetrics {
     pub compiled_segments: u64,
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,
+    pub compiled_heap_write_sites: u64,
     pub compiled_allocation_sites: u64,
     pub compiled_effect_sites: u64,
 }
@@ -261,6 +262,9 @@ pub(super) enum SegmentExit {
     Effect {
         fallthrough_ip: u32,
     },
+    Interpreter {
+        fallthrough_ip: u32,
+    },
     Return,
 }
 
@@ -278,7 +282,7 @@ pub(super) struct Segment {
     pub(super) entry_stack: Vec<ScalarKind>,
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
-    pub(super) field_results: Vec<FieldResult>,
+    pub(super) heap_accesses: Vec<HeapAccess>,
     pub(super) fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     pub(super) fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -286,11 +290,44 @@ pub(super) struct Segment {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct FieldResult {
-    pub(super) instruction: u32,
-    pub(super) receiver_class: u32,
+pub(super) struct ValueContract {
     pub(super) kind: ScalarKind,
-    pub(super) result_class: Option<u32>,
+    pub(super) object: Option<ObjectContract>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ObjectContract {
+    Instance(u32),
+    List,
+    Tuple,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct HeapAccess {
+    pub(super) instruction: u32,
+    pub(super) kind: HeapAccessKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HeapAccessKind {
+    LoadField {
+        receiver_class: u32,
+        value: ValueContract,
+    },
+    StoreField {
+        receiver_class: u32,
+        value: ValueContract,
+    },
+    TupleGet {
+        value: ValueContract,
+    },
+    ListLen,
+    ListAt {
+        value: ValueContract,
+    },
+    ListSet {
+        value: ValueContract,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +363,7 @@ pub(super) struct RegionPlan {
     pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
     pub(super) call_sites: usize,
     pub(super) heap_read_sites: usize,
+    pub(super) heap_write_sites: usize,
     pub(super) allocation_sites: usize,
     pub(super) effect_sites: usize,
 }
@@ -343,7 +381,7 @@ struct SegmentAnalysis {
     max_stack: usize,
     max_stack_values: usize,
     boundary_stack: Vec<ScalarKind>,
-    field_results: Vec<FieldResult>,
+    heap_accesses: Vec<HeapAccess>,
     fuel_stacks: Vec<(u32, Vec<ScalarKind>)>,
     replay_stacks: Vec<(u32, Vec<ScalarKind>)>,
     fault_stacks: Vec<(u32, Vec<ScalarKind>)>,
@@ -429,6 +467,7 @@ impl RegionPlan {
         let mut additional_frames = 0;
         let mut call_sites = 0;
         let mut heap_read_sites = 0;
+        let mut heap_write_sites = 0;
         let mut allocation_sites = 0;
         let mut effect_sites = 0;
         let mut active_block = u32::MAX;
@@ -473,9 +512,16 @@ impl RegionPlan {
             segment.definitions = analysis.definitions;
             segment.exit_stack = analysis.exit_stack.clone();
             segment.boundary_stack = analysis.boundary_stack;
-            segment.field_results = analysis.field_results;
+            segment.heap_accesses = analysis.heap_accesses;
             segment.fuel_stacks = analysis.fuel_stacks;
-            heap_read_sites += segment.field_results.len();
+            for access in &segment.heap_accesses {
+                match access.kind {
+                    HeapAccessKind::StoreField { .. } | HeapAccessKind::ListSet { .. } => {
+                        heap_write_sites += 1;
+                    }
+                    _ => heap_read_sites += 1,
+                }
+            }
             segment.replay_stacks = analysis.replay_stacks;
             segment.fault_stacks = analysis.fault_stacks;
             segment.allocations = analysis.allocations;
@@ -496,6 +542,9 @@ impl RegionPlan {
             if matches!(segment.exit, SegmentExit::Effect { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
                 effect_sites += 1;
+            }
+            if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
+                segment.cost = segment.cost.saturating_sub(1);
             }
             block_stack = analysis.exit_stack;
             max_stack = max_stack.max(analysis.max_stack);
@@ -583,6 +632,7 @@ impl RegionPlan {
             inline_functions,
             call_sites,
             heap_read_sites,
+            heap_write_sites,
             allocation_sites,
             effect_sites,
         })
@@ -661,6 +711,15 @@ fn inline_function_plan(
                     | Instr::JumpIfFalse(_)
                     | Instr::JumpIfTrue(_)
                     | Instr::Call(_)
+                    | Instr::LoadField(_)
+                    | Instr::StoreField(_)
+                    | Instr::TupleGet(_)
+                    | Instr::ListLen
+                    | Instr::ListAt
+                    | Instr::Extended(ExtendedInstr::ListSet)
+                    | Instr::TupleNew { .. }
+                    | Instr::ListNew { .. }
+                    | Instr::ListPush
                     | Instr::Return
             )
         })
@@ -712,7 +771,7 @@ fn inline_function_plan(
         entry_stack: Vec::new(),
         exit_stack: Vec::new(),
         boundary_stack: Vec::new(),
-        field_results: Vec::new(),
+        heap_accesses: Vec::new(),
         fuel_stacks: Vec::new(),
         replay_stacks: Vec::new(),
         fault_stacks: Vec::new(),
@@ -746,7 +805,9 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(BcType::Class(_)) => Ok(ScalarKind::Object(ty)),
+        Some(BcType::Class(_) | BcType::Inst(_, _) | BcType::List(_) | BcType::Tuple(_)) => {
+            Ok(ScalarKind::Object(ty))
+        }
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
         _ => Err(UnsupportedReason::NonScalarType),
     }
@@ -781,6 +842,11 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 Instr::Perform { .. } | Instr::PerformValue { .. } => Some(SegmentExit::Effect {
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
+                Instr::TupleNew { .. } | Instr::ListNew { .. } | Instr::ListPush => {
+                    Some(SegmentExit::Interpreter {
+                        fallthrough_ip: instruction_index as u32 + 1,
+                    })
+                }
                 Instr::Return => Some(SegmentExit::Return),
                 _ => None,
             };
@@ -798,7 +864,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 entry_stack: Vec::new(),
                 exit_stack: Vec::new(),
                 boundary_stack: Vec::new(),
-                field_results: Vec::new(),
+                heap_accesses: Vec::new(),
                 fuel_stacks: Vec::new(),
                 replay_stacks: Vec::new(),
                 fault_stacks: Vec::new(),
@@ -837,6 +903,9 @@ fn resolve_successors(
             SegmentExit::Effect { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
+            SegmentExit::Interpreter { fallthrough_ip } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Return => Vec::new(),
         };
     }
@@ -864,7 +933,7 @@ fn analyze_segment(
     let mut max_stack = stack.len();
     let mut max_stack_values = stack.len();
     let mut boundary_stack = Vec::new();
-    let mut field_results = Vec::new();
+    let mut heap_accesses = Vec::new();
     let mut fuel_stacks = Vec::new();
     let mut replay_stacks = Vec::new();
     let mut fault_stacks = Vec::new();
@@ -922,11 +991,147 @@ fn analyze_segment(
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
                 let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
-                let field = field_result(context, receiver, field, instruction)?;
-                let kind = field.kind;
-                field_results.push(field);
+                let (receiver_class, value) = field_contract(context, receiver, field)?;
+                let kind = value.kind;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::LoadField {
+                        receiver_class,
+                        value,
+                    },
+                });
                 fault_stacks.push((instruction + 1, stack.clone()));
                 stack.push(kind);
+            }
+            Instr::StoreField(field) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let (receiver_class, contract) = field_contract(context, receiver, field)?;
+                if value != contract.kind {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::StoreField {
+                        receiver_class,
+                        value: contract,
+                    },
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+            }
+            Instr::TupleGet(index) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let value = tuple_element_contract(context, receiver, index)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::TupleGet { value },
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(value.kind);
+            }
+            Instr::ListLen => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListLen,
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Int);
+            }
+            Instr::ListAt => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let element = list_element_type(context.module, receiver)?;
+                let value = value_contract(context, element)?;
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListAt { value },
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(value.kind);
+            }
+            Instr::Extended(ExtendedInstr::ListSet) => {
+                let instruction = segment.start + offset as u32;
+                replay_stacks.push((instruction, stack.clone()));
+                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let element = list_element_type(context.module, receiver)?;
+                let contract = value_contract(context, element)?;
+                if value != contract.kind {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                heap_accesses.push(HeapAccess {
+                    instruction,
+                    kind: HeapAccessKind::ListSet { value: contract },
+                });
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Unit);
+            }
+            Instr::TupleNew { count, .. } => {
+                let Instr::TupleNew {
+                    ty: source_ty,
+                    count: source_count,
+                } = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                if count != source_count {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                }
+                let Some(BcType::Tuple(elements)) = context.module.types.get(source_ty as usize)
+                else {
+                    return Err(UnsupportedReason::InvalidStack);
+                };
+                if elements.len() != count as usize {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                }
+                boundary_stack = stack.clone();
+                for element in elements.iter().rev().copied() {
+                    expect(&mut stack, scalar_kind(context.module, element)?)?;
+                }
+                stack.push(ScalarKind::Object(source_ty));
+            }
+            Instr::ListNew { count, .. } => {
+                let Instr::ListNew {
+                    ty: source_ty,
+                    count: source_count,
+                } = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                if count != source_count {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                }
+                let element = match context.module.types.get(source_ty as usize) {
+                    Some(BcType::List(element)) => *element,
+                    _ => return Err(UnsupportedReason::InvalidStack),
+                };
+                let element = scalar_kind(context.module, element)?;
+                boundary_stack = stack.clone();
+                for _ in 0..count {
+                    expect(&mut stack, element)?;
+                }
+                stack.push(ScalarKind::Object(source_ty));
+            }
+            Instr::ListPush => {
+                boundary_stack = stack.clone();
+                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let element = list_element_type(context.module, receiver)?;
+                if value != scalar_kind(context.module, element)? {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                stack.push(ScalarKind::Unit);
             }
             Instr::New(_) => {
                 let Instr::New(class) = source_instruction else {
@@ -1064,7 +1269,7 @@ fn analyze_segment(
         max_stack,
         max_stack_values,
         boundary_stack,
-        field_results,
+        heap_accesses,
         fuel_stacks,
         replay_stacks,
         fault_stacks,
@@ -1072,12 +1277,11 @@ fn analyze_segment(
     })
 }
 
-fn field_result(
+fn field_contract(
     context: &SegmentAnalysisContext<'_>,
     receiver: ScalarKind,
     field: u32,
-    instruction: u32,
-) -> Result<FieldResult, UnsupportedReason> {
+) -> Result<(u32, ValueContract), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
@@ -1091,23 +1295,54 @@ fn field_result(
         .and_then(|class| class.fields.get(field as usize))
         .map(|(_, ty)| *ty)
         .ok_or(UnsupportedReason::InvalidControlFlow)?;
-    let kind = scalar_kind(context.module, field_type)?;
-    let result_class = match kind {
-        ScalarKind::Object(result_ty) => {
-            let Some(BcType::Class(result_class)) = context.module.types.get(result_ty as usize)
-            else {
-                return Err(UnsupportedReason::NonScalarType);
-            };
-            Some(relocate_class(*result_class, context.class_relocation)?)
-        }
+    Ok((
+        relocate_class(*class, context.class_relocation)?,
+        value_contract(context, field_type)?,
+    ))
+}
+
+fn tuple_element_contract(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+    index: u32,
+) -> Result<ValueContract, UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let Some(BcType::Tuple(elements)) = context.module.types.get(ty as usize) else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let element = elements
+        .get(index as usize)
+        .copied()
+        .ok_or(UnsupportedReason::InvalidControlFlow)?;
+    value_contract(context, element)
+}
+
+fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    match module.types.get(ty as usize) {
+        Some(BcType::List(element)) => Ok(*element),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
+fn value_contract(
+    context: &SegmentAnalysisContext<'_>,
+    ty: u32,
+) -> Result<ValueContract, UnsupportedReason> {
+    let kind = scalar_kind(context.module, ty)?;
+    let object = match context.module.types.get(ty as usize) {
+        Some(BcType::Class(class)) | Some(BcType::Inst(class, _)) => Some(
+            ObjectContract::Instance(relocate_class(*class, context.class_relocation)?),
+        ),
+        Some(BcType::List(_)) => Some(ObjectContract::List),
+        Some(BcType::Tuple(_)) => Some(ObjectContract::Tuple),
         _ => None,
     };
-    Ok(FieldResult {
-        instruction,
-        receiver_class: relocate_class(*class, context.class_relocation)?,
-        kind,
-        result_class,
-    })
+    Ok(ValueContract { kind, object })
 }
 
 fn relocate_class(class: u32, relocation: Option<&[u32]>) -> Result<u32, UnsupportedReason> {

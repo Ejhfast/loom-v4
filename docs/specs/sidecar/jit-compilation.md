@@ -1,10 +1,10 @@
 # JIT compilation
 
-Status: Native calls, the heap ABI, sampled tiering, and scheduler continuation are implemented.
+Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and direct array access are implemented.
 
-Direct instance reads use the canonical heap layout.
+Direct instance, tuple, and list access use the canonical heap layout.
 
-Corpus validation and broader direct heap access remain.
+Native stack growth, productive-entry policy, and representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
 
@@ -148,7 +148,7 @@ The activation contains:
 
 - one contiguous scalar area;
 - one scalar-state area;
-- one bounded frame table;
+- one growable frame table;
 - one stable function-entry table;
 - one fuel balance;
 - one final exit record.
@@ -173,6 +173,14 @@ Recursion uses the same calling convention.
 
 Frame and stack limits match the interpreter limits.
 
+Native storage starts small and grows geometrically.
+
+The native engine performs growth outside generated call code.
+
+Storage growth does not materialize VmState.
+
+Only the guest frame and stack limits bound native depth.
+
 No call materializes VmState.
 
 No call invokes a generic runtime dispatcher.
@@ -194,6 +202,10 @@ Worker identity does not enter the continuation.
 Recall materializes the continuation before it returns the lease.
 
 Snapshots materialize all selected machines before encoding.
+
+Snapshot code materializes only resident machines.
+
+Leased machines report state through their scoped barrier.
 
 Inspection and interpreter entry also materialize native state.
 
@@ -537,6 +549,16 @@ A cache lookup occurs before specialization work.
 
 A negative verdict stops later entry probes.
 
+A compiled function can also become an unproductive verdict.
+
+The engine samples retired work after native entry.
+
+Repeated quick exits disable later native entry for that function.
+
+A quick exit includes an interpreter boundary or an unsupported callee.
+
+Forced Native mode reports this decision without hiding it.
+
 Compilation uses an expected-retirement budget.
 
 The budget includes region size and observed hotness.
@@ -562,6 +584,8 @@ Clock-free counters include:
 - forced continuation materializations;
 - guard failures;
 - deoptimizations;
+- unproductive-entry demotions;
+- native frame-storage growth;
 - native fault exits.
 
 Native coverage counts instructions executed without runtime slow paths.
@@ -621,6 +645,8 @@ Representative rows include:
 - list indexing;
 - virtual calls;
 - recursion;
+- deep recursion;
+- quick native exits;
 - scheduler-sliced scalar loops.
 
 Auto cannot slow a large corpus program by more than five percent.
@@ -634,6 +660,12 @@ At least one HTTP row must improve by more than two times.
 Common field and list loops target the scalar-loop performance range.
 
 Cold and warm results remain separate.
+
+A warm measurement uses one stable arena and one engine.
+
+The harness discards timings after any later compilation.
+
+It records measured rounds only after the compiled set becomes stable.
 
 Every report names the revision, host, profile, and measurement method.
 
@@ -722,6 +754,7 @@ Gate: Common operations use zero slow calls per iteration.
 - sample calls and loop backedges;
 - add lock-free hotness counters;
 - add negative verdicts;
+- demote compiled functions that repeatedly retire little native work;
 - keep specialization behind cache hits;
 - add compilation budgets.
 
@@ -730,6 +763,17 @@ Gate: Unsupported large programs remain within five percent.
 Gate result: The four representative rows remain within two percent in Auto mode.
 
 Virtual-call inline caches remain part of Stage F surface expansion.
+
+### Stage E2: Growable native activations
+
+- grow frame and scalar storage outside generated code;
+- resume the pending native call after growth;
+- preserve exact fuel and stack-limit behavior;
+- test recursion beyond every initial capacity.
+
+Gate: Deep recursion does not cross an engine boundary for storage growth.
+
+Gate: The recursion benchmark improves in Auto and Native modes.
 
 ### Stage F: Representative programs
 
@@ -797,6 +841,22 @@ The first scheduler-continuation measurement used a 1,024-instruction quantum.
 | Scheduled integer loop | 41.617 ms | 3.843 ms | 10.83 times |
 
 The earlier native path gained 3.89 times on this row.
+
+The direct array-access pass produced these focused release rows.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Instance field read | 48.014 ms | 1.717 ms | 27.97 times |
+| Instance field write | 64.536 ms | 8.598 ms | 7.51 times |
+| Tuple read | 39.468 ms | 1.529 ms | 25.81 times |
+| List read | 45.300 ms | 1.920 ms | 23.60 times |
+| List replacement | 53.366 ms | 1.791 ms | 29.80 times |
+
+The first stable JSON parse run reached 0.91 percent native coverage.
+
+Auto took 52.272 ms, compared with 46.353 ms for the interpreter.
+
+This result does not pass the representative-program gate.
 
 ## 24. Rejected designs
 

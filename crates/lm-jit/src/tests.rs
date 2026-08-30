@@ -81,7 +81,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         entry_stack: vec![],
         exit_stack: vec![],
         boundary_stack: vec![],
-        field_results: vec![],
+        heap_accesses: vec![],
         fuel_stacks: vec![],
         replay_stacks: vec![],
         fault_stacks: vec![],
@@ -133,6 +133,23 @@ fn field_module() -> Module {
     });
     module.func_bounds.push(vec![]);
     module.entry = 1;
+    module
+}
+
+fn field_store_module() -> Module {
+    let mut module = field_module();
+    module.funcs[0].param_names = vec!["pair".to_string(), "value".to_string()];
+    module.funcs[0].params = vec![4, 2];
+    module.funcs[0].param_muts = vec![true, false];
+    module.funcs[0].ret = 0;
+    module.funcs[0].local_types = vec![4, 2];
+    module.funcs[0].blocks = vec![vec![
+        Instr::LoadLocal(0),
+        Instr::LoadLocal(1),
+        Instr::StoreField(0),
+        Instr::ConstUnit,
+        Instr::Return,
+    ]];
     module
 }
 
@@ -322,4 +339,130 @@ fn another_concrete_class_replays_the_field_instruction() {
         .expect("the field load executes");
     assert_eq!(exit.kind(), ExitKind::Interpreter);
     assert_eq!((exit.block(), exit.instruction()), (0, 1));
+}
+
+#[test]
+fn native_field_store_writes_the_canonical_value() {
+    let module = field_store_module();
+    let bundle = lm_abi::standard_bundle();
+    lm_verify::verify_module_with_bundle(&module, &bundle).expect("the field store verifies");
+    let region = JitEngine::default()
+        .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
+        .expect("the field store compiles");
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime.heap.alloc(Object::Instance {
+        class: 0,
+        fields: vec![Value::Int(1)].into(),
+        env: Witness::EMPTY,
+    });
+    let bits = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
+    let mut activation = NativeActivation::default();
+    activation
+        .prepare_root(NativePreparation {
+            function: 0,
+            block: 0,
+            instruction: 0,
+            local_count: 2,
+            max_stack: region.max_stack(),
+            operand_len: 0,
+            scalar_limit: 4_096,
+            frame_limit: 256,
+        })
+        .expect("the native root prepares");
+    let (locals, states, _) = activation.root_buffers_mut();
+    locals[0] = bits;
+    locals[1] = 42;
+    states[0] = LOCAL_INITIALIZED;
+    states[1] = LOCAL_INITIALIZED;
+    let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_states = vec![0; region.max_roots().max(1)];
+    let heap = runtime.heap.jit_view();
+    let exit = region
+        .execute(
+            &mut runtime,
+            &mut activation,
+            NativeExecution {
+                entry: 0,
+                entries: &[],
+                base_stack_values: 0,
+                max_stack_values: 4_096,
+                base_frames: 0,
+                max_frames: 256,
+                roots: &mut roots,
+                root_states: &mut root_states,
+                fuel: 5,
+                heap,
+            },
+        )
+        .expect("the field store executes");
+    assert_eq!(exit.kind(), ExitKind::Return);
+    assert_eq!(exit.retired(), 5);
+    let Object::Instance { fields, .. } = runtime.heap.get(reference) else {
+        panic!("the object remains an instance");
+    };
+    assert_eq!(fields[0], Value::Int(42));
+}
+
+#[test]
+fn native_field_store_replays_a_frozen_receiver() {
+    let module = field_store_module();
+    let bundle = lm_abi::standard_bundle();
+    let region = JitEngine::default()
+        .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
+        .expect("the field store compiles");
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let reference = runtime.heap.alloc(Object::Instance {
+        class: 0,
+        fields: vec![Value::Int(1)].into(),
+        env: Witness::EMPTY,
+    });
+    runtime.heap.set_frozen(reference);
+    let bits = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
+    let mut activation = NativeActivation::default();
+    activation
+        .prepare_root(NativePreparation {
+            function: 0,
+            block: 0,
+            instruction: 0,
+            local_count: 2,
+            max_stack: region.max_stack(),
+            operand_len: 0,
+            scalar_limit: 4_096,
+            frame_limit: 256,
+        })
+        .expect("the native root prepares");
+    let (locals, states, _) = activation.root_buffers_mut();
+    locals[0] = bits;
+    locals[1] = 42;
+    states[0] = LOCAL_INITIALIZED;
+    states[1] = LOCAL_INITIALIZED;
+    let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_states = vec![0; region.max_roots().max(1)];
+    let heap = runtime.heap.jit_view();
+    let exit = region
+        .execute(
+            &mut runtime,
+            &mut activation,
+            NativeExecution {
+                entry: 0,
+                entries: &[],
+                base_stack_values: 0,
+                max_stack_values: 4_096,
+                base_frames: 0,
+                max_frames: 256,
+                roots: &mut roots,
+                root_states: &mut root_states,
+                fuel: 5,
+                heap,
+            },
+        )
+        .expect("the field store executes");
+    assert_eq!(exit.kind(), ExitKind::Interpreter);
+    assert_eq!(exit.retired(), 2);
+    assert_eq!((exit.block(), exit.instruction()), (0, 2));
+    assert_eq!(exit.stack_len(), 2);
 }

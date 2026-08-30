@@ -51,6 +51,7 @@ pub struct JitEngine {
     compiled_segments: AtomicU64,
     compiled_call_sites: AtomicU64,
     compiled_heap_read_sites: AtomicU64,
+    compiled_heap_write_sites: AtomicU64,
     compiled_allocation_sites: AtomicU64,
     compiled_effect_sites: AtomicU64,
 }
@@ -178,7 +179,7 @@ impl CompiledRegion {
     /// Return true when this region reads the direct heap view.
     #[inline(always)]
     pub fn requires_heap_view(&self) -> bool {
-        self.plan.heap_read_sites != 0
+        self.plan.heap_read_sites != 0 || self.plan.heap_write_sites != 0
     }
 
     /// Return the largest complete stack use above the root locals.
@@ -247,7 +248,9 @@ impl CompiledRegion {
                     && segment.end.checked_sub(1) == Some(instruction)
                     && matches!(
                         segment.exit,
-                        SegmentExit::Call { .. } | SegmentExit::Effect { .. }
+                        SegmentExit::Call { .. }
+                            | SegmentExit::Effect { .. }
+                            | SegmentExit::Interpreter { .. }
                     )
             })
             .map(|segment| segment.boundary_stack.as_slice())
@@ -477,6 +480,8 @@ impl JitEngine {
                     .fetch_add(region.plan.call_sites as u64, Ordering::Relaxed);
                 self.compiled_heap_read_sites
                     .fetch_add(region.plan.heap_read_sites as u64, Ordering::Relaxed);
+                self.compiled_heap_write_sites
+                    .fetch_add(region.plan.heap_write_sites as u64, Ordering::Relaxed);
                 self.compiled_allocation_sites
                     .fetch_add(region.plan.allocation_sites as u64, Ordering::Relaxed);
                 self.compiled_effect_sites
@@ -496,6 +501,7 @@ impl JitEngine {
             compiled_segments: self.compiled_segments.load(Ordering::Relaxed),
             compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
             compiled_heap_read_sites: self.compiled_heap_read_sites.load(Ordering::Relaxed),
+            compiled_heap_write_sites: self.compiled_heap_write_sites.load(Ordering::Relaxed),
             compiled_allocation_sites: self.compiled_allocation_sites.load(Ordering::Relaxed),
             compiled_effect_sites: self.compiled_effect_sites.load(Ordering::Relaxed),
         }
@@ -508,6 +514,7 @@ impl JitEngine {
         self.compiled_segments.store(0, Ordering::Relaxed);
         self.compiled_call_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);
+        self.compiled_heap_write_sites.store(0, Ordering::Relaxed);
         self.compiled_allocation_sites.store(0, Ordering::Relaxed);
         self.compiled_effect_sites.store(0, Ordering::Relaxed);
     }
@@ -559,6 +566,14 @@ pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
                 | Instr::Call(_)
                 | Instr::New(_)
                 | Instr::LoadField(_)
+                | Instr::StoreField(_)
+                | Instr::TupleGet(_)
+                | Instr::ListLen
+                | Instr::ListAt
+                | Instr::TupleNew { .. }
+                | Instr::ListNew { .. }
+                | Instr::ListPush
+                | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
                 | Instr::Jump(_)
                 | Instr::JumpIfFalse(_)
                 | Instr::JumpIfTrue(_)

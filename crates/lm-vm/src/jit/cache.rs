@@ -273,6 +273,9 @@ fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
                 | lm_bytecode::BcType::Int
                 | lm_bytecode::BcType::Float
                 | lm_bytecode::BcType::Class(_)
+                | lm_bytecode::BcType::Inst(_, _)
+                | lm_bytecode::BcType::List(_)
+                | lm_bytecode::BcType::Tuple(_)
                 | lm_bytecode::BcType::Op(_, _)
         )
     )

@@ -13,9 +13,8 @@
 //! Method. Each case compiles and loads once outside the timed
 //! region, then times the run alone. The reported cost subtracts an
 //! empty-program baseline, so it excludes machine construction. Every
-//! case runs a warm-up round, then reports the median of the
-//! remaining rounds. A workload returns a value the program consumes,
-//! so no work is dead.
+//! JIT cases discard timings when later compilation occurs. They report
+//! nine stable rounds. A workload returns a consumed value.
 //! JIT rows report the complete timed interval for both engines.
 //!
 //! The output is one tab-separated row per case, so a reader can join
@@ -31,6 +30,8 @@ use std::time::{Duration, Instant};
 const ROUNDS: usize = 9;
 /// Measured rounds for message cases with high coordinator cost.
 const MESSAGE_ROUNDS: usize = 5;
+/// Maximum runs used to reach a stable native-code set.
+const MAX_WARM_RUNS: usize = 128;
 
 fn median(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
@@ -79,7 +80,9 @@ fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetri
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
-    for round in 0..=ROUNDS {
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
         let start = Instant::now();
         let mut vm = Vm::new_with_engine(arena.clone(), namespace, config(), Arc::clone(&engine));
         let outcome = vm.run();
@@ -89,12 +92,14 @@ fn time_program_engine(source: &str, mode: EngineMode) -> (Duration, EngineMetri
             "the benchmark faulted: {}",
             vm.show_outcome(&outcome)
         );
-        if round == 0 {
-            compiler_metrics = engine.metrics();
-            engine.reset_metrics();
-        } else {
-            runs.push(elapsed);
-        }
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
     }
     (
         median(runs),
@@ -140,7 +145,9 @@ fn time_program_engine_after_setup(
     };
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs = Vec::with_capacity(ROUNDS);
-    for round in 0..=ROUNDS {
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
         engine.set_mode(EngineMode::Interpreter);
         let mut world = lm_vm::World::new_with_engine(
             arena.clone(),
@@ -158,12 +165,14 @@ fn time_program_engine_after_setup(
         let outcome = world.run_root();
         let elapsed = start.elapsed();
         assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
-        if round == 0 {
-            compiler_metrics = engine.metrics();
-            engine.reset_metrics();
-        } else {
-            runs.push(elapsed);
-        }
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
     }
     (
         median(runs),
@@ -224,7 +233,9 @@ fn time_program_engine_sliced(
         generation: 0,
     };
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
-    for round in 0..=ROUNDS {
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
         let start = Instant::now();
         let mut world = lm_vm::World::new_with_engine(
             arena.clone(),
@@ -242,12 +253,14 @@ fn time_program_engine_sliced(
         }
         let elapsed = start.elapsed();
         assert!(matches!(world.task_outcome(root), lm_vm::Outcome::Done(_)));
-        if round == 0 {
-            compiler_metrics = engine.metrics();
-            engine.reset_metrics();
-        } else {
-            runs.push(elapsed);
-        }
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
     }
     (
         median(runs),
@@ -265,7 +278,9 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
     let mut retired_instructions = None;
-    for round in 0..=ROUNDS {
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
         let mut world = lm_vm::World::new_with_engine(
             arena.clone(),
             namespace,
@@ -286,18 +301,48 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
         } else {
             retired_instructions = Some(retired);
         }
-        if round == 0 {
-            compiler_metrics = engine.metrics();
-            engine.reset_metrics();
-        } else {
-            runs.push(elapsed);
-        }
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
     }
     (
         median(runs),
         with_compiler_metrics(engine.metrics(), compiler_metrics),
         retired_instructions.unwrap_or(0),
     )
+}
+
+fn record_warm_round(
+    engine: &Engine,
+    elapsed: Duration,
+    first: bool,
+    runs: &mut Vec<Duration>,
+    compiler: &mut EngineMetrics,
+) {
+    let metrics = engine.metrics();
+    if first || metrics.compilation_attempts != 0 {
+        add_compiler_metrics(compiler, metrics);
+        runs.clear();
+        engine.reset_metrics();
+        return;
+    }
+    runs.push(elapsed);
+}
+
+fn add_compiler_metrics(total: &mut EngineMetrics, sample: EngineMetrics) {
+    total.compilation_attempts += sample.compilation_attempts;
+    total.compiled_regions += sample.compiled_regions;
+    total.compiled_segments += sample.compiled_segments;
+    total.compiled_call_sites += sample.compiled_call_sites;
+    total.compiled_heap_read_sites += sample.compiled_heap_read_sites;
+    total.compiled_heap_write_sites += sample.compiled_heap_write_sites;
+    total.compiled_allocation_sites += sample.compiled_allocation_sites;
+    total.compiled_effect_sites += sample.compiled_effect_sites;
 }
 
 fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) -> EngineMetrics {
@@ -310,6 +355,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_segments = compiler.compiled_segments;
     runtime.compiled_call_sites = compiler.compiled_call_sites;
     runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
+    runtime.compiled_heap_write_sites = compiler.compiled_heap_write_sites;
     runtime.compiled_allocation_sites = compiler.compiled_allocation_sites;
     runtime.compiled_effect_sites = compiler.compiled_effect_sites;
     runtime
@@ -323,7 +369,9 @@ fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, Engi
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs = Vec::with_capacity(ROUNDS);
-    for round in 0..=ROUNDS {
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
         let mut world = lm_vm::World::new_with_engine(
             arena.clone(),
             namespace,
@@ -338,12 +386,14 @@ fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, Engi
         let outcome = world.run_root();
         let elapsed = start.elapsed();
         assert!(matches!(outcome, lm_vm::Outcome::Done(_)));
-        if round == 0 {
-            compiler_metrics = engine.metrics();
-            engine.reset_metrics();
-        } else {
-            runs.push(elapsed);
-        }
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
     }
     (
         median(runs),
@@ -1269,6 +1319,46 @@ fn bench_jit_scalar_regions() {
             "end\ns\n",
         ),
         32,
+    );
+    report_jit_after_setup(
+        "jit_field_write",
+        concat!(
+            "class Cell\n  value: Int = 0\nend\n",
+            "def step(mut cell: Cell)\n  cell.value = cell.value + 1\nend\n",
+            "cell = Cell()\ni = 0\n",
+            "while i < 1000000\n  step(cell)\n  i = i + 1\nend\n",
+            "cell.value\n",
+        ),
+        32,
+    );
+    report_jit_after_setup(
+        "jit_tuple_read",
+        concat!(
+            "pair = (7, 11)\ni = 0\nsum = 0\n",
+            "while i < 1000000\n  sum = sum + pair[0]\n  i = i + 1\nend\n",
+            "sum + pair[1]\n",
+        ),
+        32,
+    );
+    report_jit_after_setup(
+        "jit_list_read",
+        concat!(
+            "items = [0, 1, 2, 3, 4, 5, 6, 7]\ni = 0\nsum = 0\n",
+            "while i < 1000000\n",
+            "  sum = sum + items.at(i % 8)\n  i = i + 1\n",
+            "end\nsum + items.len()\n",
+        ),
+        48,
+    );
+    report_jit_after_setup(
+        "jit_list_replace",
+        concat!(
+            "items = [0, 1, 2, 3, 4, 5, 6, 7]\ni = 0\n",
+            "while i < 1000000\n",
+            "  items.set(i % 8, i)\n  i = i + 1\n",
+            "end\nitems.at(7)\n",
+        ),
+        48,
     );
     report_jit(
         "jit_allocation",

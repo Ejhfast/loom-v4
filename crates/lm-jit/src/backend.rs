@@ -5,8 +5,8 @@ use crate::activation::{
     ALLOCATION_OK,
 };
 use crate::plan::{
-    CallContract, FieldResult, FunctionDefinition, InlineFunctionPlan, RegionPlan, Segment,
-    SegmentExit, UnsupportedReason,
+    CallContract, FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract,
+    RegionPlan, Segment, SegmentExit, UnsupportedReason, ValueContract,
 };
 use crate::{
     CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, EXIT_ALLOCATION, EXIT_CALL,
@@ -22,11 +22,12 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
-use lm_bytecode::{Func, Instr, NumericInstr};
+use lm_bytecode::{ExtendedInstr, Func, Instr, NumericInstr};
 use lm_heap::{
-    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
-    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_FIELDS_OFFSET, JIT_OBJECT_INSTANCE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
+    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
+    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST,
+    JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_TUPLE_ITEMS_OFFSET,
     VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
@@ -166,10 +167,17 @@ struct InlineCallEmission<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct FieldExitEmission<'a> {
+struct HeapExitEmission<'a> {
     point: FaultPoint,
     fault_stack: &'a [ir::Value],
     deopt_stack: &'a [ir::Value],
+}
+
+struct StoreFieldEmission<'a> {
+    field: u32,
+    receiver_class: u32,
+    contract: ValueContract,
+    exit: HeapExitEmission<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -494,7 +502,9 @@ fn emit_segment(
         let deferred_boundary = within + 1 == code.len()
             && matches!(
                 segment.exit,
-                SegmentExit::Call { .. } | SegmentExit::Effect { .. }
+                SegmentExit::Call { .. }
+                    | SegmentExit::Effect { .. }
+                    | SegmentExit::Interpreter { .. }
             );
         if exact_fuel && !deferred_boundary {
             emit_exact_fuel_check(
@@ -583,19 +593,27 @@ fn emit_segment(
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
-                let field_result = segment
-                    .field_results
+                let access = segment
+                    .heap_accesses
                     .iter()
-                    .find(|result| result.instruction == instruction)
+                    .find(|access| access.instruction == instruction)
                     .copied()
                     .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::LoadField {
+                    receiver_class,
+                    value,
+                } = access.kind
+                else {
+                    return Err(CompileError::Backend);
+                };
                 let value = emit_load_field(
                     builder,
                     values,
                     reference,
                     field,
-                    field_result,
-                    FieldExitEmission {
+                    receiver_class,
+                    value,
+                    HeapExitEmission {
                         point: FaultPoint {
                             block: segment.block,
                             instruction: instruction + 1,
@@ -606,6 +624,171 @@ fn emit_segment(
                     },
                 )?;
                 stack.push(value);
+            }
+            Instr::StoreField(field) => {
+                let deopt_stack = stack.clone();
+                let stored = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::StoreField {
+                    receiver_class,
+                    value,
+                } = access.kind
+                else {
+                    return Err(CompileError::Backend);
+                };
+                emit_store_field(
+                    builder,
+                    values,
+                    reference,
+                    stored,
+                    StoreFieldEmission {
+                        field,
+                        receiver_class,
+                        contract: value,
+                        exit: HeapExitEmission {
+                            point: FaultPoint {
+                                block: segment.block,
+                                instruction: instruction + 1,
+                                prefix: fault_prefix,
+                            },
+                            fault_stack: &stack,
+                            deopt_stack: &deopt_stack,
+                        },
+                    },
+                )?;
+            }
+            Instr::TupleGet(index) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::TupleGet { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let value = emit_tuple_get(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(value);
+            }
+            Instr::ListLen => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::ListLen) {
+                    return Err(CompileError::Backend);
+                }
+                let value = emit_list_len(
+                    builder,
+                    values,
+                    reference,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(value);
+            }
+            Instr::ListAt => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::ListAt { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let value = emit_list_at(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(value);
+            }
+            Instr::Extended(ExtendedInstr::ListSet) => {
+                let deopt_stack = stack.clone();
+                let stored = pop_native(&mut stack)?;
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let instruction = segment.start + within as u32;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::ListSet { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                emit_list_set(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    stored,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(builder.ins().iconst(types::I64, 0));
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -718,6 +901,9 @@ fn emit_segment(
             Instr::Call(_)
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
+            | Instr::TupleNew { .. }
+            | Instr::ListNew { .. }
+            | Instr::ListPush
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
@@ -816,6 +1002,26 @@ fn emit_segment(
         return Ok(());
     }
 
+    if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
+        let instruction = segment.end - 1;
+        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        let retired = builder.use_var(values.retired);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_INTERPRETER,
+                block: segment.block,
+                instruction,
+                result: zero,
+            },
+            &stack,
+        )?;
+        return Ok(());
+    }
+
     emit_segment_charge(builder, values, segment.cost, exact_fuel);
     match segment.exit {
         SegmentExit::Jump { .. } => {
@@ -840,6 +1046,7 @@ fn emit_segment(
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         }
         SegmentExit::Effect { .. } => unreachable!(),
+        SegmentExit::Interpreter { .. } => unreachable!(),
         SegmentExit::Return => {
             let result = pop_native(&mut stack)?;
             let retired = builder.use_var(values.retired);
@@ -1566,51 +1773,33 @@ fn emit_load_field(
     values: NativeValues<'_>,
     reference: ir::Value,
     field: u32,
-    result: FieldResult,
-    exit: FieldExitEmission<'_>,
+    receiver_class: u32,
+    result: ValueContract,
+    exit: HeapExitEmission<'_>,
 ) -> Result<ir::Value, CompileError> {
     let entry = emit_object_entry(
         builder,
         values,
         reference,
+        JIT_OBJECT_INSTANCE,
         exit.point,
         ObjectGuard::Fault(exit.fault_stack),
     )?;
     let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let other_class =
-        builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, class, i64::from(result.receiver_class));
-    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
-    let len = load_value(
-        builder,
-        values.pointer_type,
-        entry,
-        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
-    )?;
-    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
-    let outside = builder
+    let other_class = builder
         .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, field_index, len);
-    emit_fault_check(
+        .icmp_imm(IntCC::NotEqual, class, i64::from(receiver_class));
+    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
+    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
+    let value = emit_array_element(
         builder,
         values,
-        outside,
-        EXIT_TYPE_MISMATCH,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET,
+        field_index,
         exit.point,
         exit.fault_stack,
     )?;
-    let data = load_value(
-        builder,
-        values.pointer_type,
-        entry,
-        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
-    )?;
-    let byte_offset = builder.ins().imul_imm(
-        field_index,
-        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
-    );
-    let value = builder.ins().iadd(data, byte_offset);
     let tag = load_value(builder, types::I64, value, VALUE_TAG_OFFSET)?;
     let uninitialized = builder
         .ins()
@@ -1623,40 +1812,337 @@ fn emit_load_field(
         exit.point,
         exit.fault_stack,
     )?;
-    let expected_tag = value_tag(result.kind);
-    let replay = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
-    emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
-    let payload = emit_value_payload(
+    emit_loaded_value(builder, values, value, result, exit.point, exit.deopt_stack)
+}
+
+fn emit_store_field(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    stored: ir::Value,
+    emission: StoreFieldEmission<'_>,
+) -> Result<(), CompileError> {
+    let StoreFieldEmission {
+        field,
+        receiver_class,
+        contract,
+        exit,
+    } = emission;
+    emit_value_contract(
         builder,
         values,
-        value,
-        result.kind,
+        stored,
+        contract,
         exit.point,
         exit.deopt_stack,
     )?;
-    if let Some(class) = result.result_class {
-        let loaded = emit_object_entry(
-            builder,
-            values,
-            payload,
-            exit.point,
-            ObjectGuard::Replay(exit.deopt_stack),
-        )?;
-        let actual = load_value(builder, types::I32, loaded, JIT_INSTANCE_CLASS_OFFSET)?;
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_INSTANCE,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let other_class = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, class, i64::from(receiver_class));
+    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
+    let address = emit_array_element(
+        builder,
+        values,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET,
+        field_index,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    emit_store_value(builder, address, stored, contract.kind)
+}
+
+fn emit_tuple_get(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: u32,
+    result: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_TUPLE,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let index = builder.ins().iconst(values.pointer_type, i64::from(index));
+    let address = emit_array_element(
+        builder,
+        values,
+        entry,
+        JIT_TUPLE_ITEMS_OFFSET,
+        index,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    emit_loaded_value(
+        builder,
+        values,
+        address,
+        result,
+        exit.point,
+        exit.deopt_stack,
+    )
+}
+
+fn emit_list_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    Ok(if values.pointer_type == types::I64 {
+        len
+    } else {
+        builder.ins().uextend(types::I64, len)
+    })
+}
+
+fn emit_list_at(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    result: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let index = emit_checked_list_index(builder, values, entry, index, exit)?;
+    let address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, index)?;
+    emit_loaded_value(
+        builder,
+        values,
+        address,
+        result,
+        exit.point,
+        exit.deopt_stack,
+    )
+}
+
+fn emit_list_set(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    stored: ir::Value,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    emit_value_contract(
+        builder,
+        values,
+        stored,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    let index = emit_checked_list_index(builder, values, entry, index, exit)?;
+    let address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, index)?;
+    emit_store_value(builder, address, stored, contract.kind)
+}
+
+fn emit_mutable_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let frozen = load_value(builder, types::I8, entry, JIT_ENTRY_FROZEN_OFFSET)?;
+    let frozen = builder.ins().icmp_imm(IntCC::NotEqual, frozen, 0);
+    emit_interpreter_replay(builder, values, frozen, exit.point, exit.deopt_stack)
+}
+
+fn emit_checked_list_index(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    index: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+    let invalid = builder.ins().bor(negative, outside);
+    emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+    Ok(index)
+}
+
+fn emit_array_element(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    array_offset: usize,
+    index: ir::Value,
+    point: FaultPoint,
+    fault_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        array_offset + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+    emit_fault_check(
+        builder,
+        values,
+        outside,
+        EXIT_TYPE_MISMATCH,
+        point,
+        fault_stack,
+    )?;
+    emit_array_address(builder, values, entry, array_offset, index)
+}
+
+fn emit_array_address(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    array_offset: usize,
+    index: ir::Value,
+) -> Result<ir::Value, CompileError> {
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        array_offset + VALUE_ARRAY_DATA_OFFSET,
+    )?;
+    let byte_offset = builder.ins().imul_imm(
+        index,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    Ok(builder.ins().iadd(data, byte_offset))
+}
+
+fn emit_loaded_value(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    address: ir::Value,
+    contract: ValueContract,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let tag = load_value(builder, types::I64, address, VALUE_TAG_OFFSET)?;
+    let expected_tag = value_tag(contract.kind);
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, tag, expected_tag as u64 as i64);
+    emit_interpreter_replay(builder, values, replay, point, deopt_stack)?;
+    let payload = emit_value_payload(builder, values, address, contract.kind, point, deopt_stack)?;
+    emit_value_contract(builder, values, payload, contract, point, deopt_stack)?;
+    Ok(payload)
+}
+
+fn emit_value_contract(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    payload: ir::Value,
+    contract: ValueContract,
+    point: FaultPoint,
+    deopt_stack: &[ir::Value],
+) -> Result<(), CompileError> {
+    let Some(object) = contract.object else {
+        return Ok(());
+    };
+    let tag = match object {
+        ObjectContract::Instance(_) => JIT_OBJECT_INSTANCE,
+        ObjectContract::List => JIT_OBJECT_LIST,
+        ObjectContract::Tuple => JIT_OBJECT_TUPLE,
+    };
+    let entry = emit_object_entry(
+        builder,
+        values,
+        payload,
+        tag,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    if let ObjectContract::Instance(class) = object {
+        let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
         let mismatch = builder
             .ins()
             .icmp_imm(IntCC::NotEqual, actual, i64::from(class));
-        emit_interpreter_replay(builder, values, mismatch, exit.point, exit.deopt_stack)?;
+        emit_interpreter_replay(builder, values, mismatch, point, deopt_stack)?;
     }
-    Ok(payload)
+    Ok(())
+}
+
+fn emit_store_value(
+    builder: &mut FunctionBuilder<'_>,
+    address: ir::Value,
+    payload: ir::Value,
+    kind: ScalarKind,
+) -> Result<(), CompileError> {
+    let tag = builder
+        .ins()
+        .iconst(types::I64, value_tag(kind) as u64 as i64);
+    store_i64(builder, address, VALUE_TAG_OFFSET, tag)?;
+    store_i64(builder, address, VALUE_PAYLOAD_OFFSET, payload)
 }
 
 fn emit_object_entry(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,
+    object_tag: u32,
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
@@ -1711,7 +2197,7 @@ fn emit_object_entry(
     let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
     let wrong_kind = builder
         .ins()
-        .icmp_imm(IntCC::NotEqual, kind, i64::from(JIT_OBJECT_INSTANCE));
+        .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
     emit_object_guard(builder, values, wrong_kind, point, guard)?;
     Ok(entry)
 }

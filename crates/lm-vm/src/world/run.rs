@@ -857,7 +857,7 @@ impl World {
 
     pub(crate) fn materialize_native_machines(&mut self) -> Result<(), FaultCode> {
         for vm in 0..self.machines.len() {
-            if self.machines[vm].has_native_continuation() {
+            if self.machines[vm].is_resident() && self.machines[vm].has_native_continuation() {
                 self.materialize_native_machine(vm as VmId)?;
             }
         }
