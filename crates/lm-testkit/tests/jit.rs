@@ -690,7 +690,8 @@ fn an_unsupported_caller_enters_a_supported_hot_callee() {
         "  end\ns\n",
         "end\n",
         "text = \"loom\"\n",
-        "hot(10000) + text.len()\n",
+        "run = do ||: Int hot(10000) + text.len() end\n",
+        "run()\n",
     );
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
     let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
@@ -1174,7 +1175,7 @@ fn native_float_results_use_the_canonical_nan() {
 
 #[test]
 fn auto_mode_does_not_compile_cold_unsupported_code() {
-    let source = "text = \"loom\"\ntext\n";
+    let source = "seed = 1\nrun = do ||: Int seed end\nrun()\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
     assert_eq!(automatic, interpreted);
@@ -1187,10 +1188,13 @@ fn auto_mode_does_not_compile_cold_unsupported_code() {
 #[test]
 fn auto_mode_does_not_probe_hot_unsupported_code() {
     let source = concat!(
-        "text = \"loom\"\n",
-        "i = 0\n",
-        "while i < 100000\n  i = i + 1\nend\n",
-        "i\n",
+        "seed = 1\n",
+        "run = do ||: Int\n",
+        "  i = 0\n",
+        "  while i < 100000\n    i = i + 1\n  end\n",
+        "  i + seed\n",
+        "end\n",
+        "run()\n",
     );
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
     let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
@@ -1696,6 +1700,60 @@ fn object_results_survive_native_call_quanta() {
         world.task_outcome(root),
         Outcome::Done(lm_value::Value::Int(499_500))
     );
+}
+
+#[test]
+fn native_calls_carry_each_supported_object_reference() {
+    let source = concat!(
+        "def keep_text(value: String, first: Bool): String\n",
+        "  if first then value else \"other\" end\nend\n",
+        "def keep_map(value: Map[String, Int], first: Bool): Map[String, Int]\n",
+        "  if first then value else {} end\nend\n",
+        "def keep_task(escaping value: () -> Int, first: Bool): () -> Int\n",
+        "  if first then value else do ||: Int 8 end end\nend\n",
+        "text = \"loom\"\n",
+        "table: Map[String, Int] = {\"loom\": 1}\n",
+        "task = do ||: Int 7 end\n",
+        "i = 0\nwhile i < 1000\n",
+        "  text = keep_text(text, true)\n",
+        "  table = keep_map(table, true)\n",
+        "  task = keep_task(task, true)\n",
+        "  i = i + 1\n",
+        "end\ni\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-object-calls.lm", source)
+        .expect("the object call case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the object call case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    for _ in 0..100_000 {
+        match world.drive_slice(root, 17) {
+            Some(lm_vm::SliceExit::Yielded) => {}
+            Some(lm_vm::SliceExit::Terminal) => break,
+            other => panic!("the object call run stopped early: {other:?}"),
+        }
+    }
+    let native = world.task_outcome(root);
+    let native_dump = world.dump_live(&native);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
+    let metrics = engine.metrics();
+    assert!(metrics.compiled_call_sites >= 3, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
 }
 
 #[test]

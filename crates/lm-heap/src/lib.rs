@@ -222,12 +222,18 @@ pub const JIT_ENTRY_FROZEN_OFFSET: usize = std::mem::offset_of!(Entry, state)
 pub const JIT_ENTRY_OBJECT_TAG_OFFSET: usize = std::mem::offset_of!(Entry, state)
     + ENTRY_STATE_PAYLOAD_OFFSET
     + std::mem::offset_of!(LiveEntry, object);
+/// Stable tag of immutable String data.
+pub const JIT_OBJECT_STR: u32 = 0;
 /// Stable tag of one class instance.
 pub const JIT_OBJECT_INSTANCE: u32 = 1;
 /// Stable tag of one list.
 pub const JIT_OBJECT_LIST: u32 = 2;
+/// Stable tag of one map.
+pub const JIT_OBJECT_MAP: u32 = 3;
 /// Stable tag of one tuple.
 pub const JIT_OBJECT_TUPLE: u32 = 4;
+/// Stable tag of one closure.
+pub const JIT_OBJECT_CLOSURE: u32 = 5;
 /// Stable tag of immutable binary data.
 pub const JIT_OBJECT_BYTES: u32 = 8;
 /// Byte offset of an instance class.

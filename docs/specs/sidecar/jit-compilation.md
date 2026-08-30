@@ -899,6 +899,17 @@ Gate: A subclass passes a guard for its parent without an interpreter exit.
 
 Gate: The scheduled class-guard loop improves by more than five times.
 
+### Stage F5: Canonical object values
+
+- represent String, Map, and function values as canonical object references;
+- validate each object kind at native entry and interpreter reentry;
+- carry these values through native calls and scheduler continuations;
+- keep one representation for every object reference.
+
+Gate: Native calls carry each supported object kind across short scheduler quanta.
+
+Gate: Representative functions fail only at instructions without a dedicated treatment.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1021,6 +1032,19 @@ The Stage F4 run added direct class guards and subtype-compatible object values.
 | Class guard | 110.816 ms | 16.512 ms | 17.474 ms | 6.71 times | 6.34 times |
 
 Both native modes reached complete coverage. Neither mode used an interpreter exit.
+
+The Stage F5 run added String, Map, and function object representations.
+
+Both representative programs became native candidates without type-based rejection.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| JSON parse | 46.028 ms | 47.437 ms | 67.736 ms | 0.97 times | 5.23% |
+| HTTP parse | 43.927 ms | 44.681 ms | 63.361 ms | 0.98 times | 46.88% |
+
+Frequent instruction exits still make forced Native mode slower.
+
+The representative-program performance gate remains open.
 
 The Stage F2 run used nine stable scheduler rounds.
 

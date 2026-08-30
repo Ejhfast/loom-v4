@@ -300,9 +300,12 @@ pub(super) struct ValueContract {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ObjectContract {
+    Str,
     Instance(u32),
     List,
+    Map,
     Tuple,
+    Closure,
     Bytes,
 }
 
@@ -855,6 +858,9 @@ fn scalar_kind(module: &lm_bytecode::Module, ty: u32) -> Result<ScalarKind, Unsu
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
+        Some(BcType::Str | BcType::Map(_, _) | BcType::Fn(_, _, _, _)) => {
+            Ok(ScalarKind::Object(ty))
+        }
         Some(BcType::Class(class)) => {
             let core = lm_bytecode::corepin::declared_layout(module);
             if core.char_value == Some(*class) {
@@ -1497,11 +1503,19 @@ fn value_contract(
 ) -> Result<ValueContract, UnsupportedReason> {
     let kind = scalar_kind(context.module, ty)?;
     let object = match context.module.types.get(ty as usize) {
-        Some(BcType::Class(class)) | Some(BcType::Inst(class, _)) => Some(
-            ObjectContract::Instance(relocate_class(*class, context.class_relocation)?),
-        ),
+        Some(BcType::Str) => Some(ObjectContract::Str),
+        Some(BcType::Class(class) | BcType::Inst(class, _))
+            if matches!(kind, ScalarKind::Object(_)) =>
+        {
+            Some(ObjectContract::Instance(relocate_class(
+                *class,
+                context.class_relocation,
+            )?))
+        }
         Some(BcType::List(_)) => Some(ObjectContract::List),
+        Some(BcType::Map(_, _)) => Some(ObjectContract::Map),
         Some(BcType::Tuple(_)) => Some(ObjectContract::Tuple),
+        Some(BcType::Fn(_, _, _, _)) => Some(ObjectContract::Closure),
         Some(BcType::Bytes) => Some(ObjectContract::Bytes),
         _ => None,
     };

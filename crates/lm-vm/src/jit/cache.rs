@@ -423,10 +423,13 @@ fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
                 | lm_bytecode::BcType::Bool
                 | lm_bytecode::BcType::Int
                 | lm_bytecode::BcType::Float
+                | lm_bytecode::BcType::Str
                 | lm_bytecode::BcType::Class(_)
                 | lm_bytecode::BcType::Inst(_, _)
                 | lm_bytecode::BcType::List(_)
+                | lm_bytecode::BcType::Map(_, _)
                 | lm_bytecode::BcType::Tuple(_)
+                | lm_bytecode::BcType::Fn(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
         )
@@ -441,10 +444,13 @@ fn table_type_is_candidate(tables: &lm_bytecode::CodeTables, ty: u32) -> bool {
                 | lm_bytecode::BcType::Bool
                 | lm_bytecode::BcType::Int
                 | lm_bytecode::BcType::Float
+                | lm_bytecode::BcType::Str
                 | lm_bytecode::BcType::Class(_)
                 | lm_bytecode::BcType::Inst(_, _)
                 | lm_bytecode::BcType::List(_)
+                | lm_bytecode::BcType::Map(_, _)
                 | lm_bytecode::BcType::Tuple(_)
+                | lm_bytecode::BcType::Fn(_, _, _, _)
                 | lm_bytecode::BcType::Bytes
                 | lm_bytecode::BcType::Op(_, _)
         )
