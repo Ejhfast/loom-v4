@@ -1643,6 +1643,10 @@ Direct and scheduled closure tests matched Interpreter state.
 
 Stack-limit exits preserved the exact callable and argument state.
 
+The direct and scheduled corpus paths now use separate fresh engines.
+
+The fresh-engine debug corpus gate took 11.75 seconds after compilation.
+
 | Workload | Interpreter | Auto warm | Native warm | Auto gain | Native coverage |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Captured closure calls | 65.887 ms | 67.699 ms | 17.247 ms | 0.97 times | 100.00 percent |

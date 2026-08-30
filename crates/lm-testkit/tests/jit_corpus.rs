@@ -105,9 +105,11 @@ fn forced_native_matches_the_standalone_program_corpus() {
                             namespace,
                             Arc::new(Engine::new(EngineMode::Interpreter)),
                         );
-                        let native_engine = Arc::new(Engine::new(EngineMode::Native));
-                        let native =
-                            run_direct(arena.clone(), namespace, Arc::clone(&native_engine));
+                        let native = run_direct(
+                            arena.clone(),
+                            namespace,
+                            Arc::new(Engine::new(EngineMode::Native)),
+                        );
                         if native != interpreted {
                             failures.push(format!(
                                 "{name}: direct interpreter {interpreted:?}, native {native:?}"
@@ -118,9 +120,11 @@ fn forced_native_matches_the_standalone_program_corpus() {
                             namespace,
                             Arc::new(Engine::new(EngineMode::Interpreter)),
                         );
-                        native_engine.reset_metrics();
-                        let (native, native_retired) =
-                            run_scheduled(arena, namespace, native_engine);
+                        let (native, native_retired) = run_scheduled(
+                            arena,
+                            namespace,
+                            Arc::new(Engine::new(EngineMode::Native)),
+                        );
                         if native != interpreted {
                             failures.push(format!(
                                 "{name}: scheduler interpreter {interpreted:?}, native {native:?}"
