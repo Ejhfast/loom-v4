@@ -645,6 +645,61 @@ fn generic_environment_cache_survives_interpreter_exits() {
 }
 
 #[test]
+fn generic_allocation_preserves_each_exact_type_environment() {
+    let source = concat!(
+        "class Token[T]\nend\n",
+        "def make[T](): Token[T]\n  Token[T]()\nend\n",
+        "i = 0\nwhile i < 1000\n",
+        "  number = make[Int]()\n",
+        "  text = make[String]()\n",
+        "  i = i + 1\n",
+        "end\ni\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-generic-allocation.lm", source)
+        .expect("the generic allocation case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_000)));
+    assert!(metrics.native_allocations >= 2_000, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert!(metrics.native_type_environment_exits <= 8, "{metrics:?}");
+    assert_eq!(metrics.native_type_environment_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn optional_list_reads_stay_native() {
+    let source = concat!(
+        "items = [10, 20, 30]\ni = 0\ntotal = 0\n",
+        "while i < 1000\n",
+        "  case items.get(i % 5)\n",
+        "  in Some(value) then total = total + value\n",
+        "  in None then total = total + 1\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-list-get.lm", source)
+        .expect("the optional list read case compiles");
+    for fuel in 0..=48 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(12_400)));
+    assert!(metrics.native_retired_instructions > 15_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 1, "{metrics:?}");
+}
+
+#[test]
 fn a_faulting_inline_deopt_can_enter_the_native_callee() {
     let cases = [
         (

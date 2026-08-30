@@ -76,12 +76,12 @@ pub struct CompiledRegion {
     plan: RegionPlan,
     entry: NativeFunction,
     call_entry: usize,
-    generic_calls: Vec<GenericCallSite>,
+    type_environment_sites: Vec<TypeEnvironmentSite>,
     // The module owns the executable memory behind `entry`.
     module: Mutex<Option<JITModule>>,
 }
 
-struct GenericCallSite {
+struct TypeEnvironmentSite {
     function: u32,
     block: u32,
     instruction: u32,
@@ -337,9 +337,9 @@ impl CompiledRegion {
         })
     }
 
-    /// Return the type application of one generic call site.
-    pub fn generic_call_application(&self, block: u32, instruction: u32) -> Option<u32> {
-        self.generic_calls
+    /// Return the type application of one environment site.
+    pub fn type_environment_application(&self, block: u32, instruction: u32) -> Option<u32> {
+        self.type_environment_sites
             .iter()
             .find(|site| site.block == block && site.instruction == instruction)
             .map(|site| site.application)
@@ -387,7 +387,7 @@ impl CompiledRegion {
             || roots.len() < self.plan.max_roots.max(1)
             || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
-            || (!self.generic_calls.is_empty()
+            || (!self.type_environment_sites.is_empty()
                 && (type_store_id == 0 || type_environments.entries.is_null()))
         {
             return Err(Failure::BackendUnavailable);
@@ -650,6 +650,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::Call(_)
             | Instr::CallG { .. }
             | Instr::New(_)
+            | Instr::NewG { .. }
             | Instr::LoadField(_)
             | Instr::StoreField(_)
             | Instr::TupleGet(_)
@@ -658,6 +659,7 @@ pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> 
             | Instr::ListLen
             | Instr::ListAt
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListSet)
+            | Instr::Extended(lm_bytecode::ExtendedInstr::ListGet { .. })
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListCapacity)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListEpoch)
             | Instr::Extended(lm_bytecode::ExtendedInstr::ListIterLen)

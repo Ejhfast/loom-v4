@@ -1460,12 +1460,37 @@ fn bench_jit_scalar_regions() {
         ),
         48,
     );
+    report_jit_after_setup(
+        "jit_list_get",
+        concat!(
+            "items = [0, 1, 2, 3, 4, 5, 6, 7]\ni = 0\nsum = 0\n",
+            "while i < 1000000\n",
+            "  case items.get(i % 10)\n",
+            "  in Some(value) then sum = sum + value\n",
+            "  in None then sum = sum + 1\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\nsum\n",
+        ),
+        64,
+    );
     report_jit(
         "jit_allocation",
         concat!(
             "class Token\nend\n",
             "i = 0\nwhile i < 100000\n",
             "  token = Token()\n  i = i + 1\n",
+            "end\ni\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_generic_allocation",
+        concat!(
+            "class Token[T]\nend\n",
+            "def make[T](): Token[T]\n  Token[T]()\nend\n",
+            "i = 0\nwhile i < 100000\n",
+            "  token = make[Int]()\n  i = i + 1\n",
             "end\ni\n",
         ),
         0,

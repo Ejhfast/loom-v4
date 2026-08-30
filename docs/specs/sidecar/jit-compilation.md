@@ -1007,6 +1007,22 @@ Gate: Repeated generic direct calls improve by more than two times.
 
 Gate: `CallG` disappears from representative treatment gaps.
 
+### Stage F11: Generic allocation and optional list access
+
+- use one environment-site mechanism for `CallG` and `NewG`;
+- cache each exact allocation environment on the machine;
+- pass the environment through the typed allocation path;
+- store the exact witness in each generic instance;
+- compile `ListGet` as one guarded array read;
+- create canonical `Option.None` values on missing indexes;
+- preserve exact state at every tested fuel boundary.
+
+Gate: Repeated generic allocation improves by more than two times.
+
+Gate: Repeated optional list reads improve by more than five times.
+
+Gate: `NewG` and `ListGet` disappear from representative treatment gaps.
+
 Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
@@ -1267,6 +1283,25 @@ The parser profiles contain no `CallG` gap.
 Builder, collection, text, and virtual-call operations now dominate the gaps.
 
 The representative-program performance gate remains open.
+
+The Stage F11 run added generic allocation and optional list reads.
+
+| Workload | Interpreter | Native warm | Warm gain |
+| --- | ---: | ---: | ---: |
+| Optional list reads | 188.287 ms | 4.614 ms | 40.81 times |
+| Generic allocation | 9.668 ms | 4.536 ms | 2.13 times |
+
+Generic allocation used one typed allocation path.
+
+Each allocated generic instance kept its exact `TypeEnvId` witness.
+
+Optional list reads used no runtime helper.
+
+The representative profiles contain no `NewG` or `ListGet` gap.
+
+Representative timing did not improve because other operations dominate these programs.
+
+HTTP Auto performance still does not pass the five-percent gate.
 
 ## 24. Rejected designs
 

@@ -394,6 +394,7 @@ pub(super) struct OptionAccess {
 pub(super) enum OptionAccessKind {
     None,
     Payload { value: ValueContract },
+    ListGet { value: ValueContract },
     IsType { target: OptionTarget },
     CastType { target: OptionTarget },
 }
@@ -628,6 +629,11 @@ impl RegionPlan {
             segment.boundary_stack = analysis.boundary_stack;
             segment.heap_accesses = analysis.heap_accesses;
             segment.option_accesses = analysis.option_accesses;
+            heap_read_sites += segment
+                .option_accesses
+                .iter()
+                .filter(|access| matches!(access.kind, OptionAccessKind::ListGet { .. }))
+                .count();
             segment.fuel_stacks = analysis.fuel_stacks;
             for access in &segment.heap_accesses {
                 match access.kind {
@@ -1078,7 +1084,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                     app: Some(*app),
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
-                Instr::New(_) => Some(SegmentExit::Allocation {
+                Instr::New(_) | Instr::NewG { .. } => Some(SegmentExit::Allocation {
                     fallthrough_ip: instruction_index as u32 + 1,
                 }),
                 Instr::Perform { .. } | Instr::PerformValue { .. } => Some(SegmentExit::Effect {
@@ -1346,6 +1352,33 @@ fn analyze_segment(
                 fault_stacks.push((instruction + 1, replay_stack));
                 stack.push(value.kind);
             }
+            Instr::Extended(ExtendedInstr::ListGet { ty }) => {
+                let Instr::Extended(ExtendedInstr::ListGet { ty: source_ty }) = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let instruction = segment.start + offset as u32;
+                let replay_stack = stack.clone();
+                expect(&mut stack, ScalarKind::Int)?;
+                let receiver = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let element = list_element_type(context.module, receiver)?;
+                let option_element = option_argument_type(context.module, source_ty)?;
+                let value = value_contract(context, element)?;
+                if !uses_equal_representation(
+                    value.kind,
+                    scalar_kind(context.module, option_element)?,
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction,
+                    family_type: ty,
+                    kind: OptionAccessKind::ListGet { value },
+                });
+                replay_stacks.push((instruction, replay_stack));
+                fault_stacks.push((instruction + 1, stack.clone()));
+                stack.push(ScalarKind::Tagged(source_ty));
+            }
             Instr::IsType(_) | Instr::CastType(_) => {
                 let instruction_index = segment.start + offset as u32;
                 replay_stacks.push((instruction_index, stack.clone()));
@@ -1595,17 +1628,31 @@ fn analyze_segment(
                 }
                 stack.push(ScalarKind::Unit);
             }
-            Instr::New(_) => {
-                let Instr::New(class) = source_instruction else {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                };
-                let ty = context
-                    .module
-                    .types
-                    .iter()
-                    .position(|ty| matches!(ty, BcType::Class(found) if *found == class))
-                    .and_then(|index| u32::try_from(index).ok())
-                    .ok_or(UnsupportedReason::NonScalarType)?;
+            Instr::New(_) | Instr::NewG { .. } => {
+                let ty = match source_instruction {
+                    Instr::New(class) => context
+                        .module
+                        .types
+                        .iter()
+                        .position(|ty| matches!(ty, BcType::Class(found) if *found == class)),
+                    Instr::NewG { class, app } => {
+                        let application = context
+                            .module
+                            .apps
+                            .get(app as usize)
+                            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                        context.module.types.iter().position(|ty| {
+                            matches!(
+                                ty,
+                                BcType::Inst(found, arguments)
+                                    if *found == class && arguments == &application.types
+                            )
+                        })
+                    }
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                }
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or(UnsupportedReason::NonScalarType)?;
                 let instruction = segment.start + offset as u32;
                 replay_stacks.push((instruction, stack.clone()));
                 let mut initialized_now = initialized.to_vec();

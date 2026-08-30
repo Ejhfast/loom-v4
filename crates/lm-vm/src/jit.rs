@@ -718,8 +718,8 @@ impl JitEngine {
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    let Some(application) =
-                        resolve_region.generic_call_application(exit.block(), exit.instruction())
+                    let Some(application) = resolve_region
+                        .type_environment_application(exit.block(), exit.instruction())
                     else {
                         break Err(Failure::BackendUnavailable);
                     };

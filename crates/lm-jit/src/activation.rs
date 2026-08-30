@@ -173,7 +173,7 @@ fn type_environment_cache_set(
 }
 
 pub(super) type RawAllocateInstance =
-    unsafe extern "C" fn(*mut c_void, u32, u32, u32, *mut u64) -> u32;
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
     *mut u64,
@@ -682,10 +682,11 @@ pub enum AllocationResult {
 
 /// The typed allocation slow path of one native activation.
 pub trait AllocationRuntime {
-    /// Allocate one plain instance with the supplied active roots.
+    /// Allocate one instance with its exact environment and active roots.
     fn allocate_instance(
         &mut self,
         class: u32,
+        environment: u32,
         root_bits: &[u64],
         root_tags: &[u64],
         root_states: &[u8],
@@ -696,6 +697,7 @@ pub trait AllocationRuntime {
 pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     context: *mut c_void,
     class: u32,
+    environment: u32,
     allow_collection: u32,
     root_count: u32,
     result: *mut u64,
@@ -727,6 +729,7 @@ pub(super) unsafe extern "C" fn allocate_instance<R: AllocationRuntime>(
     let nested = unsafe { (*context.activation).frame_len > 1 };
     let response = runtime.allocate_instance(
         class,
+        environment,
         root_bits,
         root_tags,
         root_states,

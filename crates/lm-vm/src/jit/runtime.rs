@@ -109,6 +109,7 @@ impl AllocationRuntime for MachineRuntime<'_> {
     fn allocate_instance(
         &mut self,
         class: u32,
+        environment: u32,
         root_bits: &[u64],
         root_tags: &[u64],
         root_states: &[u8],
@@ -123,7 +124,7 @@ impl AllocationRuntime for MachineRuntime<'_> {
         let object = crate::Object::Instance {
             class,
             fields: vec![Value::Uninit; class_entry.fields.len()].into(),
-            env: lm_value::Witness::EMPTY,
+            env: lm_value::Witness(lm_value::TypeEnvId(environment)),
         };
         let cost = self.machine.vm.heap.allocation_cost(&object);
         if !self.machine.vm.heap.collection_due(cost) {

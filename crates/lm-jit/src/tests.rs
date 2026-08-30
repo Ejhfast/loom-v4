@@ -252,6 +252,7 @@ impl AllocationRuntime for TestRuntime {
     fn allocate_instance(
         &mut self,
         _class: u32,
+        _environment: u32,
         _root_bits: &[u64],
         _root_tags: &[u64],
         _root_states: &[u8],

@@ -10,11 +10,12 @@ use crate::plan::{
     ValueContract,
 };
 use crate::{
-    CompiledRegion, FunctionInput, GenericCallSite, NativeEntryCell, ScalarKind, EXIT_ALLOCATION,
-    EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION, EXIT_HEAP_LIMIT,
-    EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
-    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
-    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    CompiledRegion, FunctionInput, NativeEntryCell, ScalarKind, TypeEnvironmentSite,
+    EXIT_ALLOCATION, EXIT_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GROW_ACTIVATION,
+    EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL,
+    EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH,
+    EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY,
+    LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
@@ -56,25 +57,29 @@ impl From<UnsupportedReason> for CompileError {
 
 pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileError> {
     let plan = RegionPlan::for_function(&input)?;
-    let generic_calls: Vec<GenericCallSite> = plan
-        .segments
-        .iter()
-        .filter_map(|segment| {
-            let SegmentExit::Call {
-                app: Some(application),
-                ..
-            } = segment.exit
-            else {
-                return None;
-            };
-            Some(GenericCallSite {
-                function: input.root.function,
-                block: segment.block,
-                instruction: segment.end.checked_sub(1)?,
-                application,
+    let type_environment_sites: Vec<TypeEnvironmentSite> =
+        plan.segments
+            .iter()
+            .filter_map(|segment| {
+                let instruction = input
+                    .root
+                    .runtime
+                    .blocks
+                    .get(segment.block as usize)?
+                    .get(segment.end.checked_sub(1)? as usize)?;
+                let application = match instruction {
+                    lm_bytecode::Instr::CallG { app, .. }
+                    | lm_bytecode::Instr::NewG { app, .. } => *app,
+                    _ => return None,
+                };
+                Some(TypeEnvironmentSite {
+                    function: input.root.function,
+                    block: segment.block,
+                    instruction: segment.end.checked_sub(1)?,
+                    application,
+                })
             })
-        })
-        .collect();
+            .collect();
 
     let mut flags = settings::builder();
     flags
@@ -119,7 +124,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         host_call_conv,
         &plan,
         &input,
-        &generic_calls,
+        &type_environment_sites,
     )?;
     module
         .define_function(body_id, &mut body_context)
@@ -147,7 +152,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         plan,
         entry,
         call_entry,
-        generic_calls,
+        type_environment_sites,
         module: Mutex::new(Some(module)),
     })
 }
@@ -308,7 +313,7 @@ struct SegmentEmission<'a, 'b> {
     values: NativeValues<'a>,
     plan: &'a RegionPlan,
     input: &'a FunctionInput<'b>,
-    generic_calls: &'a [GenericCallSite],
+    type_environment_sites: &'a [TypeEnvironmentSite],
     exact_fuel: bool,
     resume_blocks: Option<&'a [ir::Block]>,
 }
@@ -320,7 +325,7 @@ fn emit_region(
     host_call_conv: CallConv,
     plan: &RegionPlan,
     input: &FunctionInput<'_>,
-    generic_calls: &[GenericCallSite],
+    type_environment_sites: &[TypeEnvironmentSite],
 ) -> Result<(), CompileError> {
     let bytecode = input.root.runtime;
     let call_conv = function.signature.call_conv;
@@ -329,6 +334,7 @@ fn emit_region(
     allocation_signature
         .params
         .push(AbiParam::new(pointer_type));
+    allocation_signature.params.push(AbiParam::new(types::I32));
     allocation_signature.params.push(AbiParam::new(types::I32));
     allocation_signature.params.push(AbiParam::new(types::I32));
     allocation_signature.params.push(AbiParam::new(types::I32));
@@ -574,7 +580,7 @@ fn emit_region(
                     values,
                     plan,
                     input,
-                    generic_calls,
+                    type_environment_sites,
                     exact_fuel: true,
                     resume_blocks: Some(&exact_blocks[index]),
                 },
@@ -591,7 +597,7 @@ fn emit_region(
                 values,
                 plan,
                 input,
-                generic_calls,
+                type_environment_sites,
                 exact_fuel: false,
                 resume_blocks: None,
             },
@@ -614,7 +620,7 @@ fn emit_segment(
         values,
         plan,
         input,
-        generic_calls,
+        type_environment_sites,
         exact_fuel,
         resume_blocks,
     } = emission;
@@ -684,12 +690,12 @@ fn emit_segment(
                 let value = builder.ins().iconst(types::I64, 0);
                 push_static(builder, &mut stack, ScalarKind::Unit, value)?;
             }
-            Instr::New(class) => {
-                let instruction = segment.start + within as u32;
+            Instr::New(class) | Instr::NewG { class, .. } => {
+                let position = segment.start + within as u32;
                 let site = segment
                     .allocations
                     .iter()
-                    .find(|site| site.instruction == instruction)
+                    .find(|site| site.instruction == position)
                     .ok_or(CompileError::Backend)?;
                 let mut roots = Vec::new();
                 for (slot, (kind, variable)) in plan
@@ -708,14 +714,34 @@ fn emit_segment(
                     }
                 }
                 extend_stack_roots(&mut roots, &site.stack, &stack)?;
+                let environment = if matches!(instruction, Instr::NewG { .. }) {
+                    let site = type_environment_sites
+                        .iter()
+                        .find(|site| site.block == segment.block && site.instruction == position)
+                        .ok_or(CompileError::Backend)?;
+                    emit_type_environment_lookup(
+                        builder,
+                        values,
+                        site,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: position,
+                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        },
+                        &stack,
+                    )?
+                } else {
+                    builder.ins().iconst(types::I32, 0)
+                };
                 let value = emit_allocate_instance(
                     builder,
                     values,
                     class,
+                    environment,
                     &roots,
                     FaultPoint {
                         block: segment.block,
-                        instruction: instruction + 1,
+                        instruction: position + 1,
                         prefix: fault_prefix,
                     },
                     &stack,
@@ -985,6 +1011,44 @@ fn emit_segment(
                     &deopt_stack,
                 )?;
                 stack.push(value);
+            }
+            Instr::Extended(ExtendedInstr::ListGet { .. }) => {
+                let instruction_index = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction_index)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let OptionAccessKind::ListGet { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let result = emit_list_get(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    value,
+                    access.family_type,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction_index + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction_index,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                )?;
+                stack.push(result);
             }
             Instr::IsType(_) | Instr::CastType(_) => {
                 let deopt_stack = stack.clone();
@@ -1622,7 +1686,7 @@ fn emit_segment(
                     app: Some(application),
                     ..
                 } => {
-                    let site = generic_calls
+                    let site = type_environment_sites
                         .iter()
                         .find(|site| {
                             site.block == segment.block
@@ -1634,8 +1698,11 @@ fn emit_segment(
                         builder,
                         values,
                         site,
-                        segment.block,
-                        call_instruction,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: call_instruction,
+                            prefix: 0,
+                        },
                         &stack,
                     )?
                 }
@@ -1766,9 +1833,8 @@ fn emit_segment(
 fn emit_type_environment_lookup(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    site: &GenericCallSite,
-    block: u32,
-    instruction: u32,
+    site: &TypeEnvironmentSite,
+    point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
     let hit = builder.create_block();
@@ -1889,6 +1955,7 @@ fn emit_type_environment_lookup(
 
     builder.switch_to_block(miss);
     let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
     let parent_bits = builder.ins().uextend(types::I64, parent);
     emit_exit(
         builder,
@@ -1896,8 +1963,8 @@ fn emit_type_environment_lookup(
         ExitEmission {
             retired,
             kind: EXIT_TYPE_ENVIRONMENT,
-            block,
-            instruction,
+            block: point.block,
+            instruction: point.instruction,
             result: NativeValue {
                 bits: parent_bits,
                 tag: parent_bits,
@@ -2502,7 +2569,9 @@ fn emit_inline_call(
                     }
                 }
                 extend_stack_roots(&mut roots, &site.stack, &stack)?;
-                let (status, value) = emit_allocation_call(builder, values, class, &roots, false)?;
+                let environment = builder.ins().iconst(types::I32, 0);
+                let (status, value) =
+                    emit_allocation_call(builder, values, class, environment, &roots, false)?;
                 let replay =
                     builder
                         .ins()
@@ -3108,6 +3177,78 @@ fn emit_list_at(
         exit.point,
         exit.deopt_stack,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_list_get(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    result: ValueContract,
+    family_type: u32,
+    exit: HeapExitEmission<'_>,
+    resolve: FaultPoint,
+) -> Result<NativeValue, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let present = builder.create_block();
+    let missing = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, types::I64);
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let array_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, array_index, len);
+    let absent = builder.ins().bor(negative, outside);
+    builder.ins().brif(absent, missing, &[], present, &[]);
+
+    builder.switch_to_block(present);
+    let address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, array_index)?;
+    let value = emit_loaded_value(
+        builder,
+        values,
+        address,
+        result,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    builder
+        .ins()
+        .jump(done, &[value.bits.into(), value.tag.into()]);
+
+    builder.switch_to_block(missing);
+    let family = emit_option_family(builder, values, family_type, resolve, exit.deopt_stack)?;
+    let arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+    let payload = builder.ins().bor(family, arm);
+    let tag = builder
+        .ins()
+        .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+    builder.ins().jump(done, &[payload.into(), tag.into()]);
+
+    builder.switch_to_block(done);
+    Ok(NativeValue {
+        bits: builder.block_params(done)[0],
+        tag: builder.block_params(done)[1],
+    })
 }
 
 fn emit_list_set(
@@ -3870,11 +4011,12 @@ fn emit_allocate_instance(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     class: u32,
+    environment: ir::Value,
     roots: &[NativeRoot],
     point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
-    let (status, result) = emit_allocation_call(builder, values, class, roots, true)?;
+    let (status, result) = emit_allocation_call(builder, values, class, environment, roots, true)?;
     let heap_limit = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, i64::from(ALLOCATION_HEAP_LIMIT));
@@ -3890,6 +4032,7 @@ fn emit_allocation_call(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     class: u32,
+    environment: ir::Value,
     roots: &[NativeRoot],
     allow_collection: bool,
 ) -> Result<(ir::Value, ir::Value), CompileError> {
@@ -3935,6 +4078,7 @@ fn emit_allocation_call(
         &[
             values.allocation_context,
             class,
+            environment,
             collection,
             root_count,
             values.allocation_result_pointer,
