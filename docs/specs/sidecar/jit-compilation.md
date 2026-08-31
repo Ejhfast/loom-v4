@@ -1889,6 +1889,49 @@ The batch completed five opcode treatments.
 
 The ledger now has 111 temporary treatments across 260 concrete operations.
 
+### Stage F28: Map mutation and iteration
+
+- run map hashing and probes through fixed typed helpers;
+- keep successful map operations inside the native activation;
+- validate raw probe tokens with the interpreter rules;
+- compile `MapProbeFound` as integer tests;
+- compile `MapWriteGuard` as a direct object guard;
+- preserve map order, epochs, tombstones, and compaction;
+- pass complete native roots to operations that can collect;
+- preserve exact option values, faults, and fuel state.
+
+No helper dispatches on an opcode number.
+
+Gate: All 15 map mutation and iteration operations use dedicated treatments.
+
+Gate: Native and Interpreter results match for native and user-defined map keys.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 121 tests.
+
+The direct and scheduled corpus gate took 12.43 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Map mutations | 170.771 ms | 716.662 ms | 123.860 ms | 1.38 times |
+
+Cold compilation covered 18 regions in this broad generic-map workload.
+
+The batch completed 15 opcode treatments.
+
+The ledger now has 96 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 1.02 times | 31.20 percent |
+| JSON parse | 0.98 times | 6.38 percent |
+| JSON stringify | 0.98 times | 52.07 percent |
+| HTTP parse | 0.89 times | 48.23 percent |
+| HTTP serialize | 0.86 times | 41.78 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

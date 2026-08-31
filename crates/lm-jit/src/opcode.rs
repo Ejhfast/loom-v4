@@ -293,21 +293,38 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::ListGet { .. } => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        ExtendedInstr::MapGet { .. }
-        | ExtendedInstr::MapNextIndex
-        | ExtendedInstr::MapKeyAt
+        ExtendedInstr::MapGet { .. } => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapNextIndex | ExtendedInstr::MapProbe => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::MapKeyAt
         | ExtendedInstr::MapValueAt
         | ExtendedInstr::MapRemove { .. }
-        | ExtendedInstr::MapClear
-        | ExtendedInstr::MapReserve
-        | ExtendedInstr::MapProbe
-        | ExtendedInstr::MapProbeFound
         | ExtendedInstr::MapProbeKey
         | ExtendedInstr::MapProbeValue
-        | ExtendedInstr::MapProbeSetValue
-        | ExtendedInstr::MapProbeRemove
-        | ExtendedInstr::MapInsertHashed
-        | ExtendedInstr::MapWriteGuard => temporary(Helper),
+        | ExtendedInstr::MapProbeRemove => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapClear => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        ExtendedInstr::MapReserve => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapProbeFound => dedicated(Inline)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        ExtendedInstr::MapProbeSetValue => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::MapInsertHashed => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(5)),
+        ExtendedInstr::MapWriteGuard => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::SealInstance

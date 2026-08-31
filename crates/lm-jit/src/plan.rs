@@ -415,7 +415,36 @@ pub(super) enum HeapAccessKind {
     MapAt {
         value: ValueContract,
     },
+    MapGet,
     MapPut,
+    MapNextIndex,
+    MapKeyAt {
+        value: ValueContract,
+    },
+    MapValueAt {
+        value: ValueContract,
+    },
+    MapRemove,
+    MapClear,
+    MapReserve,
+    MapProbe,
+    MapProbeKey {
+        value: ValueContract,
+    },
+    MapProbeValue {
+        value: ValueContract,
+    },
+    MapProbeSetValue {
+        value: ValueContract,
+    },
+    MapProbeRemove {
+        value: ValueContract,
+    },
+    MapInsertHashed {
+        key: ValueContract,
+        value: ValueContract,
+    },
+    MapWriteGuard,
     MapEpoch,
     MapIterLen,
     DigestCompare,
@@ -446,6 +475,8 @@ pub(super) enum OptionAccessKind {
     Payload { value: ValueContract },
     ListGet { value: ValueContract },
     ListPop { value: ValueContract },
+    MapGet { value: ValueContract },
+    MapRemove { value: ValueContract },
     MapPut { value: ValueContract, discard: bool },
     IsType { target: OptionTarget },
     CastType { target: OptionTarget },
@@ -676,7 +707,12 @@ impl RegionPlan {
             heap_read_sites += segment
                 .option_accesses
                 .iter()
-                .filter(|access| matches!(access.kind, OptionAccessKind::ListGet { .. }))
+                .filter(|access| {
+                    matches!(
+                        access.kind,
+                        OptionAccessKind::ListGet { .. } | OptionAccessKind::MapGet { .. }
+                    )
+                })
                 .count();
             segment.fuel_stacks = analysis.fuel_stacks;
             for access in &segment.heap_accesses {
@@ -692,6 +728,13 @@ impl RegionPlan {
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::MapEpoch
                     | HeapAccessKind::MapPut
+                    | HeapAccessKind::MapRemove
+                    | HeapAccessKind::MapClear
+                    | HeapAccessKind::MapReserve
+                    | HeapAccessKind::MapProbeSetValue { .. }
+                    | HeapAccessKind::MapProbeRemove { .. }
+                    | HeapAccessKind::MapInsertHashed { .. }
+                    | HeapAccessKind::MapWriteGuard
                     | HeapAccessKind::SealInstance { .. } => {
                         heap_write_sites += 1;
                         if matches!(
@@ -699,6 +742,8 @@ impl RegionPlan {
                             HeapAccessKind::ListPush { .. }
                                 | HeapAccessKind::ListInsert { .. }
                                 | HeapAccessKind::ListReserve
+                                | HeapAccessKind::MapReserve
+                                | HeapAccessKind::MapInsertHashed { .. }
                         ) {
                             collection_sites += 1;
                         }
@@ -1407,6 +1452,31 @@ fn analyze_segment(
                     },
                 });
             }
+            Instr::Extended(ExtendedInstr::MapGet { ty }) => {
+                let Instr::Extended(ExtendedInstr::MapGet { ty: source_ty }) = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value_type) = map_type(context.module, receiver)?;
+                let option_value = option_argument_type(context.module, source_ty)?;
+                let value = value_contract(context, value_type)?;
+                if !uses_equal_representation(
+                    value.kind,
+                    scalar_kind(context.module, option_value)?,
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: OptionAccessKind::MapGet { value },
+                });
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapGet,
+                });
+            }
             Instr::MapPut { ty, discard } => {
                 let receiver = stack_from_end(&before.stack, 2)?;
                 let (_, value_type) = map_type(context.module, receiver)?;
@@ -1542,6 +1612,153 @@ fn analyze_segment(
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapIterLen,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapNextIndex) => {
+                let receiver = stack_from_end(&before.stack, 2)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapNextIndex,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapKeyAt) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (key, _) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapKeyAt {
+                        value: value_contract(context, key)?,
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapValueAt) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapValueAt {
+                        value: value_contract(context, value)?,
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapRemove { ty }) => {
+                let Instr::Extended(ExtendedInstr::MapRemove { ty: source_ty }) =
+                    source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value_type) = map_type(context.module, receiver)?;
+                let option_value = option_argument_type(context.module, source_ty)?;
+                let value = value_contract(context, value_type)?;
+                if !uses_equal_representation(
+                    value.kind,
+                    scalar_kind(context.module, option_value)?,
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: OptionAccessKind::MapRemove { value },
+                });
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapRemove,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapClear) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapClear,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapReserve) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapReserve,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapProbe) => {
+                let receiver = stack_from_end(&before.stack, 2)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapProbe,
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapProbeFound) => {}
+            Instr::Extended(ExtendedInstr::MapProbeKey) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (key, _) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapProbeKey {
+                        value: value_contract(context, key)?,
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapProbeValue) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapProbeValue {
+                        value: value_contract(context, value)?,
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapProbeSetValue) => {
+                let stored = stack_from_end(&before.stack, 0)?;
+                let receiver = stack_from_end(&before.stack, 2)?;
+                let (_, value_type) = map_type(context.module, receiver)?;
+                let value = value_contract(context, value_type)?;
+                if !uses_equal_representation(stored, value.kind) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapProbeSetValue { value },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapProbeRemove) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let (_, value) = map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapProbeRemove {
+                        value: value_contract(context, value)?,
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapInsertHashed) => {
+                let stored_key = stack_from_end(&before.stack, 3)?;
+                let stored_value = stack_from_end(&before.stack, 2)?;
+                let receiver = stack_from_end(&before.stack, 4)?;
+                let (key_type, value_type) = map_type(context.module, receiver)?;
+                let key = value_contract(context, key_type)?;
+                let value = value_contract(context, value_type)?;
+                if !uses_equal_representation(stored_key, key.kind)
+                    || !uses_equal_representation(stored_value, value.kind)
+                {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapInsertHashed { key, value },
+                });
+            }
+            Instr::Extended(ExtendedInstr::MapWriteGuard) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                map_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::MapWriteGuard,
                 });
             }
             Instr::Extended(ExtendedInstr::SealInstance) => {

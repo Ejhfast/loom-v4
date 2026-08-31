@@ -1,14 +1,14 @@
 //! Typed native runtime slow paths.
 
-use crate::machine::Machine;
+use crate::machine::{map_probe_parts, map_probe_token, Machine};
 use crate::NamespaceRuntime;
 use lm_heap::{MapEntry, MapIndex, StructuralEpoch};
 use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
-    ClosureAllocationRequest, DigestRequest, ListGrowthRequest, ListGrowthResult,
-    ListInsertRequest, ListReserveRequest, ListReserveResult, MapPutCommitRequest,
-    MapPutDiscardRequest, MapPutProbeResult, NativeResolvedCallCache, NativeRuntime,
-    NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
+    ClosureAllocationRequest, CollectionReserveRequest, CollectionReserveResult, DigestRequest,
+    ListGrowthRequest, ListGrowthResult, ListInsertRequest, MapInsertHashedRequest,
+    MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult, NativeResolvedCallCache,
+    NativeRuntime, NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
     ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, ValueTag};
@@ -307,6 +307,45 @@ impl MachineRuntime<'_> {
         self.machine.vm.heap.recharge_local(reference);
         RuntimeUnitResult::Done
     }
+
+    fn map_entry_value(&self, reference: u64, index: u64, load_value: bool) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let index = index as i64;
+        let entry = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) if index >= 0 => entries
+                .get(index as usize)
+                .filter(|entry| entry.is_live())
+                .copied(),
+            Some(crate::Object::Map { .. }) => None,
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        let Some(entry) = entry else {
+            return RuntimeValueResult::Fault(crate::FaultCode::IndexOutOfBounds);
+        };
+        runtime_value(if load_value { entry.value } else { entry.key })
+    }
+
+    fn map_probe_entry_value(
+        &self,
+        reference: u64,
+        token: u64,
+        load_value: bool,
+    ) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let entry = match self.machine.map_token_entry(reference, token as i64) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return RuntimeValueResult::Fault(crate::FaultCode::MissingKey),
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        let pair = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => entries.get(entry).copied(),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        let Some(pair) = pair else {
+            return RuntimeValueResult::Fault(crate::FaultCode::MalformedState);
+        };
+        runtime_value(if load_value { pair.value } else { pair.key })
+    }
 }
 
 impl NativeRuntime for MachineRuntime<'_> {
@@ -535,6 +574,291 @@ impl NativeRuntime for MachineRuntime<'_> {
             _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
         };
         runtime_value(value)
+    }
+
+    fn map_get(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        let Some(key) = tagged_value(key_tag, key_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let position = match self.machine.map_lookup(reference, key) {
+            Ok(Some(position)) => position,
+            Ok(None) => return RuntimeValueResult::Missing,
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        let value = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => {
+                let Some(entry) = entries.get(position).filter(|entry| entry.is_live()) else {
+                    return RuntimeValueResult::Fault(crate::FaultCode::MalformedState);
+                };
+                entry.value
+            }
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        runtime_value(value)
+    }
+
+    fn map_next_index(&mut self, reference: u64, cursor: u64, expected: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        let cursor = cursor as i64;
+        let expected = expected as i64;
+        let crate::Object::Map { entries, index } = self.machine.vm.heap.get(reference) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        if expected < 0 || index.epoch.0 != expected as u32 {
+            return RuntimeValueResult::Fault(crate::FaultCode::CollectionModified);
+        }
+        let Ok(cursor) = usize::try_from(cursor) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::IndexOutOfBounds);
+        };
+        let next = entries
+            .get(cursor..)
+            .and_then(|tail| tail.iter().position(MapEntry::is_live))
+            .map(|offset| cursor + offset)
+            .map_or(-1, |position| position as i64);
+        runtime_int(next)
+    }
+
+    fn map_key_at(&mut self, reference: u64, index: u64) -> RuntimeValueResult {
+        self.map_entry_value(reference, index, false)
+    }
+
+    fn map_value_at(&mut self, reference: u64, index: u64) -> RuntimeValueResult {
+        self.map_entry_value(reference, index, true)
+    }
+
+    fn map_remove(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeValueResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(key) = tagged_value(key_tag, key_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let position = match self.machine.map_lookup(reference, key) {
+            Ok(Some(position)) => position,
+            Ok(None) => return RuntimeValueResult::Missing,
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        match self.machine.remove_map_entry(reference, position) {
+            Ok(value) => runtime_value(value),
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn map_clear(&mut self, reference: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeValueResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let changed = match self.machine.vm.heap.get_mut(reference) {
+            crate::Object::Map { entries, index } if index.live_len() > 0 => {
+                if let Err(fault) = index.epoch.bump() {
+                    return RuntimeValueResult::Fault(fault);
+                }
+                entries.clear();
+                index.reset();
+                true
+            }
+            crate::Object::Map { .. } => false,
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        if changed {
+            self.machine.vm.heap.recharge_local(reference);
+        }
+        runtime_value(Value::Unit)
+    }
+
+    fn map_probe(&mut self, reference: u64, semantic: u64, prior: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if let Err(fault) = self.machine.ensure_map_index(reference) {
+            return RuntimeValueResult::Fault(fault);
+        }
+        let semantic = semantic as i64;
+        let prior = prior as i64;
+        let (epoch, mut prior_slot) = if prior == 0 {
+            let epoch = match self.machine.vm.heap.get_mut(reference) {
+                crate::Object::Map { index, .. } => index.epoch.observe(),
+                _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            (epoch, None)
+        } else {
+            let (epoch, slot) = match map_probe_parts(prior) {
+                Ok(parts) => parts,
+                Err(fault) => return RuntimeValueResult::Fault(fault),
+            };
+            let current = match self.machine.vm.heap.get(reference) {
+                crate::Object::Map { index, .. } => index.epoch.0,
+                _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            if current != epoch {
+                return RuntimeValueResult::Fault(crate::FaultCode::CollectionModified);
+            }
+            if slot.is_none() {
+                return runtime_int(prior);
+            }
+            (epoch, slot)
+        };
+        let hash = Machine::map_index_hash(semantic);
+        let slot = loop {
+            let found = match self.machine.vm.heap.get(reference) {
+                crate::Object::Map { index, .. } => index.probe(hash, prior_slot),
+                _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            let Some((slot, entry)) = found else {
+                break None;
+            };
+            let live = match self.machine.vm.heap.get(reference) {
+                crate::Object::Map { entries, .. } => {
+                    entries.get(entry as usize).is_some_and(MapEntry::is_live)
+                }
+                _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+            };
+            if live {
+                break Some(slot);
+            }
+            prior_slot = Some(slot);
+        };
+        match map_probe_token(epoch, slot) {
+            Ok(token) => runtime_int(token),
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn map_probe_key(&mut self, reference: u64, token: u64) -> RuntimeValueResult {
+        self.map_probe_entry_value(reference, token, false)
+    }
+
+    fn map_probe_value(&mut self, reference: u64, token: u64) -> RuntimeValueResult {
+        self.map_probe_entry_value(reference, token, true)
+    }
+
+    fn map_probe_set_value(
+        &mut self,
+        reference: u64,
+        token: u64,
+        value_bits: u64,
+        value_tag: u64,
+    ) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeValueResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(value) = tagged_value(value_tag, value_bits) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let entry = match self.machine.map_token_entry(reference, token as i64) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return RuntimeValueResult::Fault(crate::FaultCode::MalformedState),
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        let replaced = match self.machine.vm.heap.get_mut(reference) {
+            crate::Object::Map { entries, .. } => entries.get_mut(entry).map(|entry| {
+                entry.value = value;
+            }),
+            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        if replaced.is_none() {
+            return RuntimeValueResult::Fault(crate::FaultCode::MalformedState);
+        }
+        runtime_value(Value::Unit)
+    }
+
+    fn map_probe_remove(&mut self, reference: u64, token: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeValueResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let entry = match self.machine.map_token_entry(reference, token as i64) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return RuntimeValueResult::Fault(crate::FaultCode::MalformedState),
+            Err(fault) => return RuntimeValueResult::Fault(fault),
+        };
+        match self.machine.remove_map_entry(reference, entry) {
+            Ok(value) => runtime_value(value),
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn map_insert_hashed(&mut self, request: MapInsertHashedRequest<'_>) -> RuntimeUnitResult {
+        let reference = object_reference(request.reference);
+        if !matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Map { .. })
+        ) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(reference) {
+            return RuntimeUnitResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let Some(key) = tagged_value(request.key_tag, request.key_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        let Some(value) = tagged_value(request.value_tag, request.value_bits) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch);
+        };
+        match self.machine.map_token_entry(reference, request.token) {
+            Ok(None) => {}
+            Ok(Some(_)) => return RuntimeUnitResult::Fault(crate::FaultCode::MalformedState),
+            Err(fault) => return RuntimeUnitResult::Fault(fault),
+        }
+        if let Value::Obj(key_reference) = key {
+            if let Err(fault) = lm_graph::verify_frozen(
+                &mut self.machine.vm.heap,
+                key_reference,
+                &self.machine.config.graph,
+            ) {
+                return RuntimeUnitResult::Fault(match fault {
+                    crate::FaultCode::UnsendableValue => crate::FaultCode::MutableMapKey,
+                    other => other,
+                });
+            }
+        }
+        let entry_count = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Map { entries, .. }) => entries.len(),
+            _ => return RuntimeUnitResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        self.insert_map_entry(MapInsertRequest {
+            reference,
+            key,
+            value,
+            semantic_hash: request.semantic_hash,
+            entry_count,
+            root_bits: request.root_bits,
+            root_tags: request.root_tags,
+            root_states: request.root_states,
+            allow_collection: request.allow_collection,
+        })
     }
 
     fn map_put_probe(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> MapPutProbeResult {
@@ -843,8 +1167,8 @@ impl NativeRuntime for MachineRuntime<'_> {
         }
     }
 
-    fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult {
-        let ListReserveRequest {
+    fn reserve_list(&mut self, request: CollectionReserveRequest<'_>) -> CollectionReserveResult {
+        let CollectionReserveRequest {
             reference,
             additional,
             root_bits,
@@ -853,36 +1177,36 @@ impl NativeRuntime for MachineRuntime<'_> {
             allow_collection,
         } = request;
         if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         }
         let Ok(additional) = usize::try_from(additional) else {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         };
         let reference = object_reference(reference);
         let Some(crate::Object::List { items, epoch }) = self.machine.vm.heap.try_get(reference)
         else {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         };
         if self.machine.vm.heap.is_frozen(reference) {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         }
         if additional <= items.capacity().saturating_sub(items.len()) {
-            return ListReserveResult::Done {
+            return CollectionReserveResult::Done {
                 heap: self.machine.vm.heap.jit_view(),
             };
         }
         if epoch.ensure_bumpable().is_err() {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         }
         let Some(growth) = additional.checked_mul(std::mem::size_of::<Value>()) else {
-            return ListReserveResult::HeapLimit;
+            return CollectionReserveResult::HeapLimit;
         };
         if self.machine.vm.heap.collection_due(growth) && !allow_collection {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         }
         let mut roots = Vec::new();
         if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return ListReserveResult::HeapLimit;
+            return CollectionReserveResult::HeapLimit;
         }
         roots.extend(
             root_bits
@@ -900,22 +1224,89 @@ impl NativeRuntime for MachineRuntime<'_> {
                 .reserve_native(growth, self.base_local, self.base_operand, &roots)
         {
             return if fault == crate::FaultCode::HeapLimit {
-                ListReserveResult::HeapLimit
+                CollectionReserveResult::HeapLimit
             } else {
-                ListReserveResult::Interpreter
+                CollectionReserveResult::Interpreter
             };
         }
         let crate::Object::List { items, epoch } = self.machine.vm.heap.get_mut(reference) else {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         };
         let before = items.capacity();
         if items.try_reserve(additional).is_err() {
-            return ListReserveResult::HeapLimit;
+            return CollectionReserveResult::HeapLimit;
         }
         if items.capacity() != before && epoch.bump().is_err() {
-            return ListReserveResult::Interpreter;
+            return CollectionReserveResult::Interpreter;
         }
-        ListReserveResult::Done {
+        CollectionReserveResult::Done {
+            heap: self.machine.vm.heap.jit_view(),
+        }
+    }
+
+    fn reserve_map(&mut self, request: CollectionReserveRequest<'_>) -> CollectionReserveResult {
+        let CollectionReserveRequest {
+            reference,
+            additional,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        } = request;
+        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
+            return CollectionReserveResult::Interpreter;
+        }
+        let Ok(additional) = usize::try_from(additional) else {
+            return CollectionReserveResult::Interpreter;
+        };
+        let reference = object_reference(reference);
+        let Some(crate::Object::Map { entries, index }) = self.machine.vm.heap.try_get(reference)
+        else {
+            return CollectionReserveResult::Interpreter;
+        };
+        if self.machine.vm.heap.is_frozen(reference) {
+            return CollectionReserveResult::Interpreter;
+        }
+        if additional <= entries.capacity().saturating_sub(entries.len()) {
+            return CollectionReserveResult::Done {
+                heap: self.machine.vm.heap.jit_view(),
+            };
+        }
+        if index.epoch.ensure_bumpable().is_err() {
+            return CollectionReserveResult::Interpreter;
+        }
+        let Some(growth) = additional.checked_mul(40) else {
+            return CollectionReserveResult::HeapLimit;
+        };
+        if self.machine.vm.heap.collection_due(growth) && !allow_collection {
+            return CollectionReserveResult::Interpreter;
+        }
+        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return CollectionReserveResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return CollectionReserveResult::Interpreter,
+        };
+        if let Err(fault) =
+            self.machine
+                .reserve_native(growth, self.base_local, self.base_operand, &roots)
+        {
+            return if fault == crate::FaultCode::HeapLimit {
+                CollectionReserveResult::HeapLimit
+            } else {
+                CollectionReserveResult::Interpreter
+            };
+        }
+        let crate::Object::Map { entries, index } = self.machine.vm.heap.get_mut(reference) else {
+            return CollectionReserveResult::Interpreter;
+        };
+        let before = entries.capacity();
+        if entries.try_reserve(additional).is_err() {
+            return CollectionReserveResult::HeapLimit;
+        }
+        if entries.capacity() != before && index.epoch.bump().is_err() {
+            return CollectionReserveResult::Interpreter;
+        }
+        CollectionReserveResult::Done {
             heap: self.machine.vm.heap.jit_view(),
         }
     }

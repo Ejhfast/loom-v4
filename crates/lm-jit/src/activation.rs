@@ -341,6 +341,8 @@ pub(super) type RawMapPutCommit =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32) -> u32;
 pub(super) type RawMapPutDiscard =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u32) -> u32;
+pub(super) type RawMapInsertHashed =
+    unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, i64, i64, u32) -> u32;
 
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
@@ -357,6 +359,19 @@ pub(super) struct RawNativeFunctions {
     pub(super) list_contains: RawMapLookup,
     pub(super) map_has: RawMapLookup,
     pub(super) map_at: RawMapLookup,
+    pub(super) map_get: RawMapLookup,
+    pub(super) map_next_index: RawMapLookup,
+    pub(super) map_key_at: RawObjectBinary,
+    pub(super) map_value_at: RawObjectBinary,
+    pub(super) map_remove: RawMapLookup,
+    pub(super) map_clear: RawObjectUnary,
+    pub(super) map_reserve: RawReserveList,
+    pub(super) map_probe: RawMapLookup,
+    pub(super) map_probe_key: RawObjectBinary,
+    pub(super) map_probe_value: RawObjectBinary,
+    pub(super) map_probe_set_value: RawValueEqual,
+    pub(super) map_probe_remove: RawObjectBinary,
+    pub(super) map_insert_hashed: RawMapInsertHashed,
     pub(super) map_put_discard: RawMapPutDiscard,
     pub(super) map_put_probe: RawMapLookup,
     pub(super) map_put_commit: RawMapPutCommit,
@@ -1071,6 +1086,7 @@ pub enum AllocationResult {
 #[derive(Debug, Clone, Copy)]
 pub enum RuntimeValueResult {
     Value { bits: u64, tag: u64 },
+    Missing,
     Fault(lm_abi::FaultCode),
     Interpreter,
 }
@@ -1201,7 +1217,10 @@ pub trait NativeRuntime {
     fn insert_list(&mut self, request: ListInsertRequest<'_>) -> ListGrowthResult;
 
     /// Reserve additional capacity for one list.
-    fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult;
+    fn reserve_list(&mut self, request: CollectionReserveRequest<'_>) -> CollectionReserveResult;
+
+    /// Reserve additional capacity for one map.
+    fn reserve_map(&mut self, request: CollectionReserveRequest<'_>) -> CollectionReserveResult;
 
     /// Test one list item with structural value equality.
     fn list_contains(
@@ -1216,6 +1235,48 @@ pub trait NativeRuntime {
 
     /// Load one map value with the native map index.
     fn map_at(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
+
+    /// Load one optional map value with the native map index.
+    fn map_get(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
+
+    /// Find the next live map entry for one iterator.
+    fn map_next_index(&mut self, reference: u64, cursor: u64, expected: u64) -> RuntimeValueResult;
+
+    /// Load one map key by its stable entry index.
+    fn map_key_at(&mut self, reference: u64, index: u64) -> RuntimeValueResult;
+
+    /// Load one map value by its stable entry index.
+    fn map_value_at(&mut self, reference: u64, index: u64) -> RuntimeValueResult;
+
+    /// Remove one optional map value by key.
+    fn map_remove(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> RuntimeValueResult;
+
+    /// Remove all map entries.
+    fn map_clear(&mut self, reference: u64) -> RuntimeValueResult;
+
+    /// Continue one raw map-index probe.
+    fn map_probe(&mut self, reference: u64, semantic: u64, prior: u64) -> RuntimeValueResult;
+
+    /// Load one key from a raw map probe.
+    fn map_probe_key(&mut self, reference: u64, token: u64) -> RuntimeValueResult;
+
+    /// Load one value from a raw map probe.
+    fn map_probe_value(&mut self, reference: u64, token: u64) -> RuntimeValueResult;
+
+    /// Replace one value through a raw map probe.
+    fn map_probe_set_value(
+        &mut self,
+        reference: u64,
+        token: u64,
+        value_bits: u64,
+        value_tag: u64,
+    ) -> RuntimeValueResult;
+
+    /// Remove one value through a raw map probe.
+    fn map_probe_remove(&mut self, reference: u64, token: u64) -> RuntimeValueResult;
+
+    /// Insert one entry through a raw vacant probe.
+    fn map_insert_hashed(&mut self, request: MapInsertHashedRequest<'_>) -> RuntimeUnitResult;
 
     /// Probe one map insertion without semantic mutation.
     fn map_put_probe(&mut self, reference: u64, key_bits: u64, key_tag: u64) -> MapPutProbeResult;
@@ -1302,14 +1363,14 @@ pub struct ListInsertRequest<'a> {
 
 /// One checked list-reserve result.
 #[derive(Debug, Clone, Copy)]
-pub enum ListReserveResult {
+pub enum CollectionReserveResult {
     Done { heap: JitHeapView },
     HeapLimit,
     Interpreter,
 }
 
 /// One typed request to reserve additional list capacity.
-pub struct ListReserveRequest<'a> {
+pub struct CollectionReserveRequest<'a> {
     /// Canonical list reference bits.
     pub reference: u64,
     /// Requested additional capacity.
@@ -1347,6 +1408,21 @@ pub struct MapPutDiscardRequest<'a> {
     pub key_tag: u64,
     pub value_bits: u64,
     pub value_tag: u64,
+    pub root_bits: &'a [u64],
+    pub root_tags: &'a [u64],
+    pub root_states: &'a [u8],
+    pub allow_collection: bool,
+}
+
+/// One raw hashed map insertion request.
+pub struct MapInsertHashedRequest<'a> {
+    pub reference: u64,
+    pub key_bits: u64,
+    pub key_tag: u64,
+    pub value_bits: u64,
+    pub value_tag: u64,
+    pub semantic_hash: i64,
+    pub token: i64,
     pub root_bits: &'a [u64],
     pub root_tags: &'a [u64],
     pub root_states: &'a [u8],
@@ -1804,6 +1880,27 @@ pub(super) unsafe extern "C" fn reserve_list<R: NativeRuntime>(
     additional: i64,
     root_count: u32,
 ) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { reserve_collection(context, reference, additional, root_count, R::reserve_list) }
+}
+
+pub(super) unsafe extern "C" fn reserve_map<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    additional: i64,
+    root_count: u32,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { reserve_collection(context, reference, additional, root_count, R::reserve_map) }
+}
+
+unsafe fn reserve_collection<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    additional: i64,
+    root_count: u32,
+    operation: for<'a> fn(&mut R, CollectionReserveRequest<'a>) -> CollectionReserveResult,
+) -> u32 {
     if context.is_null() {
         return RUNTIME_INTERPRETER;
     }
@@ -1826,15 +1923,18 @@ pub(super) unsafe extern "C" fn reserve_list<R: NativeRuntime>(
     let runtime = unsafe { &mut *context.runtime };
     // SAFETY: The activation remains live during this call.
     let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
-    match runtime.reserve_list(ListReserveRequest {
-        reference,
-        additional,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
-    }) {
-        ListReserveResult::Done { heap } => {
+    match operation(
+        runtime,
+        CollectionReserveRequest {
+            reference,
+            additional,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        },
+    ) {
+        CollectionReserveResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
             unsafe {
                 (*context.activation).heap_pages = heap.pages;
@@ -1845,8 +1945,8 @@ pub(super) unsafe extern "C" fn reserve_list<R: NativeRuntime>(
             }
             RUNTIME_OK
         }
-        ListReserveResult::HeapLimit => RUNTIME_HEAP_LIMIT,
-        ListReserveResult::Interpreter => RUNTIME_INTERPRETER,
+        CollectionReserveResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        CollectionReserveResult::Interpreter => RUNTIME_INTERPRETER,
     }
 }
 
@@ -1892,6 +1992,170 @@ pub(super) unsafe extern "C" fn map_at<R: NativeRuntime>(
     unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_at) }
 }
 
+pub(super) unsafe extern "C" fn map_get<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_get) }
+}
+
+pub(super) unsafe extern "C" fn map_next_index<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    cursor: u64,
+    expected: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe {
+        map_lookup(
+            context,
+            reference,
+            cursor,
+            expected,
+            result,
+            R::map_next_index,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn map_remove<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { map_lookup(context, reference, key_bits, key_tag, result, R::map_remove) }
+}
+
+pub(super) unsafe extern "C" fn map_probe<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    semantic: u64,
+    prior: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { map_lookup(context, reference, semantic, prior, result, R::map_probe) }
+}
+
+pub(super) unsafe extern "C" fn map_key_at<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    index: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, reference, index, result, R::map_key_at) }
+}
+
+pub(super) unsafe extern "C" fn map_value_at<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    index: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, reference, index, result, R::map_value_at) }
+}
+
+pub(super) unsafe extern "C" fn map_probe_key<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    token: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, reference, token, result, R::map_probe_key) }
+}
+
+pub(super) unsafe extern "C" fn map_probe_value<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    token: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, reference, token, result, R::map_probe_value) }
+}
+
+pub(super) unsafe extern "C" fn map_probe_remove<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    token: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_binary(context, reference, token, result, R::map_probe_remove) }
+}
+
+pub(super) unsafe extern "C" fn map_clear<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_unary(context, reference, result, R::map_clear) }
+}
+
+pub(super) unsafe extern "C" fn map_insert_hashed<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    key_bits: u64,
+    key_tag: u64,
+    value_bits: u64,
+    value_tag: u64,
+    semantic_hash: i64,
+    token: i64,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    match runtime.map_insert_hashed(MapInsertHashedRequest {
+        reference,
+        key_bits,
+        key_tag,
+        value_bits,
+        value_tag,
+        semantic_hash,
+        token,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        RuntimeUnitResult::Done => RUNTIME_OK,
+        RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
+        RuntimeUnitResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
 unsafe fn map_lookup<R: NativeRuntime>(
     context: *mut c_void,
     reference: u64,
@@ -1919,6 +2183,7 @@ unsafe fn map_lookup<R: NativeRuntime>(
             }
             RUNTIME_OK
         }
+        RuntimeValueResult::Missing => RUNTIME_MAP_VACANT,
         RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
         RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
     }
@@ -1932,6 +2197,51 @@ pub(super) unsafe extern "C" fn values_equal<R: NativeRuntime>(
     right_tag: u64,
     result: *mut u64,
 ) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe {
+        value_quaternary(
+            context,
+            left_bits,
+            left_tag,
+            right_bits,
+            right_tag,
+            result,
+            R::values_equal,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn map_probe_set_value<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    token: u64,
+    value_bits: u64,
+    value_tag: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe {
+        value_quaternary(
+            context,
+            reference,
+            token,
+            value_bits,
+            value_tag,
+            result,
+            R::map_probe_set_value,
+        )
+    }
+}
+
+unsafe fn value_quaternary<R: NativeRuntime>(
+    context: *mut c_void,
+    first: u64,
+    second: u64,
+    third: u64,
+    fourth: u64,
+    result: *mut u64,
+    operation: fn(&mut R, u64, u64, u64, u64) -> RuntimeValueResult,
+) -> u32 {
     if context.is_null() || result.is_null() {
         return RUNTIME_INTERPRETER;
     }
@@ -1942,18 +2252,7 @@ pub(super) unsafe extern "C" fn values_equal<R: NativeRuntime>(
     }
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
-    match runtime.values_equal(left_bits, left_tag, right_bits, right_tag) {
-        RuntimeValueResult::Value { bits, tag } => {
-            // SAFETY: The caller provides two writable result words.
-            unsafe {
-                result.write(bits);
-                result.add(1).write(tag);
-            }
-            RUNTIME_OK
-        }
-        RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
-        RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
-    }
+    write_runtime_value(operation(runtime, first, second, third, fourth), result)
 }
 
 pub(super) unsafe extern "C" fn text_compare<R: NativeRuntime>(
@@ -2057,6 +2356,7 @@ fn write_runtime_value(value: RuntimeValueResult, result: *mut u64) -> u32 {
             }
             RUNTIME_OK
         }
+        RuntimeValueResult::Missing => RUNTIME_MAP_VACANT,
         RuntimeValueResult::Fault(fault) => runtime_fault_status(fault),
         RuntimeValueResult::Interpreter => RUNTIME_INTERPRETER,
     }

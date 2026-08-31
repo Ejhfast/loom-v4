@@ -915,6 +915,82 @@ fn map_insertions_preserve_heap_limit_and_frozen_faults() {
     assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::FrozenWrite));
 }
 
+const MAP_MUTATION_SURFACE: &str = r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value % 2
+  end
+end
+
+first = Key(1).freeze()
+same = Key(1).freeze()
+collision = Key(3).freeze()
+raw = Map[Key, Int]()
+raw.reserve(4)
+raw.put(first, 1)
+raw.put(collision, 3)
+replaced = raw.put(same, 2)
+found = raw.get(same)
+removed = raw.remove(collision)
+raw_sum = 0
+for _, value in raw
+  raw_sum = raw_sum + value
+end
+
+table = {"a": 4, "b": 5}
+table.reserve(8)
+direct = table.get("a")
+removed_text = table.remove("b")
+missing = table.get("b")
+direct_sum = 0
+for _, value in table
+  direct_sum = direct_sum + value
+end
+table.clear()
+(found, replaced, removed, raw_sum, direct, removed_text, missing, direct_sum, table.len())
+"#;
+
+#[test]
+fn map_mutation_and_probe_operations_have_dedicated_treatments() {
+    let artifact = lm_testkit::compile_text("jit-map-mutations.lm", MAP_MUTATION_SURFACE)
+        .expect("the map mutation case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert!(
+        native_dump.contains("(Some(2), Some(1), Some(3), 2, Some(4), Some(5), None, 4, 0)"),
+        "{native_dump}"
+    );
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 8, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 100, "{metrics:?}");
+}
+
+#[test]
+fn map_mutation_and_probe_operations_match_fuel_boundaries() {
+    let artifact = lm_testkit::compile_text("jit-map-mutation-fuel.lm", MAP_MUTATION_SURFACE)
+        .expect("the map mutation fuel case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
 #[test]
 fn missing_native_map_key_preserves_the_fault_state() {
     let source = concat!(

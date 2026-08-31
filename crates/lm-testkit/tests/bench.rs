@@ -1539,6 +1539,26 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_map_mutations",
+        concat!(
+            "final class Key implements Hashable\n  value: Int\n",
+            "  def init(mut self, value: Int)\n    self.value = value\n  end\n",
+            "  def __eq__(self, other: Key): Bool\n    self.value == other.value\n  end\n",
+            "  def __hash__(self): Int\n    self.value % 2\n  end\nend\n",
+            "first = Key(1).freeze()\nsame = Key(1).freeze()\n",
+            "collision = Key(3).freeze()\nraw = Map[Key, Int]()\n",
+            "raw.put(first, 1)\nraw.put(collision, 3)\n",
+            "direct = {\"a\": 1, \"b\": 2}\ni = 0\ntotal = 0\n",
+            "while i < 100000\n",
+            "  raw.put(same, i)\n  total = total + raw.at(same)\n",
+            "  raw.remove(collision)\n  raw.put(collision, i + 1)\n",
+            "  direct.put(\"a\", i)\n  total = total + direct.at(\"a\")\n",
+            "  direct.remove(\"b\")\n  direct.put(\"b\", i + 1)\n",
+            "  i = i + 1\nend\ntotal\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_list_push",
         concat!(
             "items: [Int] = []\ni = 0\n",

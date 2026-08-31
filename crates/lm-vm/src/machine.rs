@@ -70,7 +70,7 @@ struct InterfaceCallSite {
 }
 
 /// Encode one map epoch and optional index slot as an opaque `Int`.
-fn map_probe_token(epoch: u32, slot: Option<u32>) -> Result<i64, FaultCode> {
+pub(crate) fn map_probe_token(epoch: u32, slot: Option<u32>) -> Result<i64, FaultCode> {
     let low = match slot {
         Some(slot) => slot.checked_add(1).ok_or(BAD_STATE)?,
         None => 0,
@@ -79,7 +79,7 @@ fn map_probe_token(epoch: u32, slot: Option<u32>) -> Result<i64, FaultCode> {
 }
 
 /// Decode one map probe token.
-fn map_probe_parts(token: i64) -> Result<(u32, Option<u32>), FaultCode> {
+pub(crate) fn map_probe_parts(token: i64) -> Result<(u32, Option<u32>), FaultCode> {
     if token == 0 {
         return Err(BAD_STATE);
     }
@@ -1841,7 +1841,7 @@ impl Machine {
     }
 
     /// Extend one map index through every stored entry.
-    fn ensure_map_index(&mut self, r: ObjRef) -> Result<(), FaultCode> {
+    pub(crate) fn ensure_map_index(&mut self, r: ObjRef) -> Result<(), FaultCode> {
         let (built, len) = match self.vm.heap.get(r) {
             Object::Map { entries, index } => (index.built as usize, entries.len()),
             _ => return Err(BAD_TYPE),
@@ -1914,7 +1914,11 @@ impl Machine {
     }
 
     /// Resolve one live probe token to its map entry.
-    fn map_token_entry(&self, r: ObjRef, token: i64) -> Result<Option<usize>, FaultCode> {
+    pub(crate) fn map_token_entry(
+        &self,
+        r: ObjRef,
+        token: i64,
+    ) -> Result<Option<usize>, FaultCode> {
         let (epoch, slot) = map_probe_parts(token)?;
         let Object::Map { entries, index, .. } = self.vm.heap.get(r) else {
             return Err(BAD_TYPE);
@@ -1933,7 +1937,7 @@ impl Machine {
     }
 
     /// Remove one map entry and compact excess tombstones.
-    fn remove_map_entry(&mut self, r: ObjRef, entry: usize) -> Result<Value, FaultCode> {
+    pub(crate) fn remove_map_entry(&mut self, r: ObjRef, entry: usize) -> Result<Value, FaultCode> {
         let value = match self.vm.heap.get_mut(r) {
             Object::Map { entries, index } => {
                 index.epoch.bump()?;

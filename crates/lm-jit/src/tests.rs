@@ -327,8 +327,12 @@ impl NativeRuntime for TestRuntime {
         ListGrowthResult::Interpreter
     }
 
-    fn reserve_list(&mut self, _request: ListReserveRequest<'_>) -> ListReserveResult {
-        ListReserveResult::Interpreter
+    fn reserve_list(&mut self, _request: CollectionReserveRequest<'_>) -> CollectionReserveResult {
+        CollectionReserveResult::Interpreter
+    }
+
+    fn reserve_map(&mut self, _request: CollectionReserveRequest<'_>) -> CollectionReserveResult {
+        CollectionReserveResult::Interpreter
     }
 
     fn list_contains(
@@ -346,6 +350,65 @@ impl NativeRuntime for TestRuntime {
 
     fn map_at(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
         RuntimeValueResult::Interpreter
+    }
+
+    fn map_get(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_next_index(
+        &mut self,
+        _reference: u64,
+        _cursor: u64,
+        _expected: u64,
+    ) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_key_at(&mut self, _reference: u64, _index: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_value_at(&mut self, _reference: u64, _index: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_remove(&mut self, _reference: u64, _key_bits: u64, _key_tag: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_clear(&mut self, _reference: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_probe(&mut self, _reference: u64, _semantic: u64, _prior: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_probe_key(&mut self, _reference: u64, _token: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_probe_value(&mut self, _reference: u64, _token: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_probe_set_value(
+        &mut self,
+        _reference: u64,
+        _token: u64,
+        _value_bits: u64,
+        _value_tag: u64,
+    ) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_probe_remove(&mut self, _reference: u64, _token: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn map_insert_hashed(&mut self, _request: MapInsertHashedRequest<'_>) -> RuntimeUnitResult {
+        RuntimeUnitResult::Interpreter
     }
 
     fn map_put_probe(

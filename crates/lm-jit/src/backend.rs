@@ -315,6 +315,7 @@ struct NativeValues<'a> {
     map_lookup_signature: ir::SigRef,
     map_put_discard_signature: ir::SigRef,
     map_put_commit_signature: ir::SigRef,
+    map_insert_hashed_signature: ir::SigRef,
     value_equal_signature: ir::SigRef,
     object_binary_signature: ir::SigRef,
     object_unary_signature: ir::SigRef,
@@ -635,6 +636,22 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let map_put_commit_signature = builder.import_signature(map_put_commit_signature);
+    let mut map_insert_hashed_signature = ir::Signature::new(host_call_conv);
+    map_insert_hashed_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..7 {
+        map_insert_hashed_signature
+            .params
+            .push(AbiParam::new(types::I64));
+    }
+    map_insert_hashed_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_insert_hashed_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let map_insert_hashed_signature = builder.import_signature(map_insert_hashed_signature);
     let mut value_equal_signature = ir::Signature::new(host_call_conv);
     value_equal_signature
         .params
@@ -821,6 +838,7 @@ fn emit_region(
         map_lookup_signature,
         map_put_discard_signature,
         map_put_commit_signature,
+        map_insert_hashed_signature,
         value_equal_signature,
         object_binary_signature,
         object_unary_signature,
@@ -1862,6 +1880,61 @@ fn emit_segment(
                 }
                 stack.push(result);
             }
+            Instr::Extended(ExtendedInstr::MapGet { .. }) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let key = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let heap_access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(heap_access.kind, HeapAccessKind::MapGet) {
+                    return Err(CompileError::Backend);
+                }
+                let option_access = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let OptionAccessKind::MapGet { value } = option_access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let family = emit_option_family(
+                    builder,
+                    values,
+                    input.root.function,
+                    option_access.family_type,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &deopt_stack,
+                )?;
+                let result = emit_optional_map_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_get),
+                    reference,
+                    key,
+                    family,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
             Instr::MapPut { discard, .. } => {
                 let deopt_stack = stack.clone();
                 let stored = pop_value(&mut stack)?;
@@ -2389,6 +2462,561 @@ fn emit_segment(
                     &deopt_stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, value)?;
+            }
+            Instr::Extended(ExtendedInstr::MapNextIndex) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let expected = pop_native(&mut stack)?;
+                let cursor = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapNextIndex) {
+                    return Err(CompileError::Backend);
+                }
+                let result = emit_map_runtime_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_next_index),
+                    reference,
+                    cursor,
+                    expected,
+                    ValueContract {
+                        kind: ScalarKind::Int,
+                        object: None,
+                    },
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(operation @ (ExtendedInstr::MapKeyAt | ExtendedInstr::MapValueAt)) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let (function_offset, contract) = match (operation, access.kind) {
+                    (ExtendedInstr::MapKeyAt, HeapAccessKind::MapKeyAt { value }) => {
+                        (mem::offset_of!(RawNativeFunctions, map_key_at), value)
+                    }
+                    (ExtendedInstr::MapValueAt, HeapAccessKind::MapValueAt { value }) => {
+                        (mem::offset_of!(RawNativeFunctions, map_value_at), value)
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_object_binary_runtime_value(
+                    builder,
+                    values,
+                    function_offset,
+                    reference,
+                    index,
+                    contract,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::MapRemove { .. }) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let key = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let heap_access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(heap_access.kind, HeapAccessKind::MapRemove) {
+                    return Err(CompileError::Backend);
+                }
+                let option_access = segment
+                    .option_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let OptionAccessKind::MapRemove { value } = option_access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let family = emit_option_family(
+                    builder,
+                    values,
+                    input.root.function,
+                    option_access.family_type,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction,
+                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                    },
+                    &deopt_stack,
+                )?;
+                let result = emit_optional_map_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_remove),
+                    reference,
+                    key,
+                    family,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::MapClear) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapClear) {
+                    return Err(CompileError::Backend);
+                }
+                emit_object_unary_runtime_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_clear),
+                    reference,
+                    ValueContract {
+                        kind: ScalarKind::Unit,
+                        object: None,
+                    },
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
+            }
+            Instr::Extended(ExtendedInstr::MapReserve) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let additional = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapReserve) {
+                    return Err(CompileError::Backend);
+                }
+                let root_kinds = segment
+                    .replay_stacks
+                    .iter()
+                    .find(|(position, _)| *position == instruction)
+                    .map(|(_, stack)| stack.as_slice())
+                    .ok_or(CompileError::Backend)?;
+                let roots = collect_native_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    root_kinds,
+                    &deopt_stack,
+                )?;
+                let status = emit_map_reserve_call(builder, values, reference, additional, &roots)?;
+                emit_runtime_status(
+                    builder,
+                    values,
+                    status,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &stack,
+                    &deopt_stack,
+                )?;
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
+            }
+            Instr::Extended(ExtendedInstr::MapProbe) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let prior = pop_native(&mut stack)?;
+                let semantic = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapProbe) {
+                    return Err(CompileError::Backend);
+                }
+                let result = emit_map_runtime_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_probe),
+                    reference,
+                    semantic,
+                    prior,
+                    ValueContract {
+                        kind: ScalarKind::Int,
+                        object: None,
+                    },
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::MapProbeFound) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let token = pop_native(&mut stack)?;
+                let epoch = builder.ins().ushr_imm(token, 32);
+                let invalid = builder.ins().icmp_imm(IntCC::Equal, epoch, 0);
+                emit_interpreter_replay(
+                    builder,
+                    values,
+                    invalid,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                let low = builder.ins().ireduce(types::I32, token);
+                let found = builder.ins().icmp_imm(IntCC::NotEqual, low, 0);
+                let found = builder.ins().uextend(types::I64, found);
+                push_static(builder, &mut stack, ScalarKind::Bool, found)?;
+            }
+            Instr::Extended(
+                operation @ (ExtendedInstr::MapProbeKey | ExtendedInstr::MapProbeValue),
+            ) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let token = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let (function_offset, contract) = match (operation, access.kind) {
+                    (ExtendedInstr::MapProbeKey, HeapAccessKind::MapProbeKey { value }) => {
+                        (mem::offset_of!(RawNativeFunctions, map_probe_key), value)
+                    }
+                    (ExtendedInstr::MapProbeValue, HeapAccessKind::MapProbeValue { value }) => {
+                        (mem::offset_of!(RawNativeFunctions, map_probe_value), value)
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_object_binary_runtime_value(
+                    builder,
+                    values,
+                    function_offset,
+                    reference,
+                    token,
+                    contract,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::MapProbeSetValue) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let stored = pop_value(&mut stack)?;
+                let token = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::MapProbeSetValue { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                emit_native_value_contract(
+                    builder,
+                    values,
+                    stored,
+                    value,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                let function = load_value(
+                    builder,
+                    values.pointer_type,
+                    values.runtime_functions,
+                    mem::offset_of!(RawNativeFunctions, map_probe_set_value),
+                )?;
+                let call = builder.ins().call_indirect(
+                    values.value_equal_signature,
+                    function,
+                    &[
+                        values.runtime_context,
+                        reference,
+                        token,
+                        stored.bits,
+                        stored.tag,
+                        values.allocation_result_pointer,
+                    ],
+                );
+                let status = builder.inst_results(call)[0];
+                emit_runtime_status(
+                    builder,
+                    values,
+                    status,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &stack,
+                    &deopt_stack,
+                )?;
+                let unit = NativeValue {
+                    bits: builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        values.allocation_result_pointer,
+                        0,
+                    ),
+                    tag: builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        values.allocation_result_pointer,
+                        8,
+                    ),
+                };
+                emit_native_value_contract(
+                    builder,
+                    values,
+                    unit,
+                    ValueContract {
+                        kind: ScalarKind::Unit,
+                        object: None,
+                    },
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                let zero = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, zero)?;
+            }
+            Instr::Extended(ExtendedInstr::MapProbeRemove) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let token = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::MapProbeRemove { value } = access.kind else {
+                    return Err(CompileError::Backend);
+                };
+                let result = emit_object_binary_runtime_value(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, map_probe_remove),
+                    reference,
+                    token,
+                    value,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: instruction + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(result);
+            }
+            Instr::Extended(ExtendedInstr::MapInsertHashed) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let token = pop_native(&mut stack)?;
+                let semantic = pop_native(&mut stack)?;
+                let stored = pop_value(&mut stack)?;
+                let key = pop_value(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                let HeapAccessKind::MapInsertHashed {
+                    key: key_contract,
+                    value: value_contract,
+                } = access.kind
+                else {
+                    return Err(CompileError::Backend);
+                };
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: instruction + 1,
+                    prefix: fault_prefix,
+                };
+                emit_native_value_contract(
+                    builder,
+                    values,
+                    key,
+                    key_contract,
+                    point,
+                    &deopt_stack,
+                )?;
+                emit_native_value_contract(
+                    builder,
+                    values,
+                    stored,
+                    value_contract,
+                    point,
+                    &deopt_stack,
+                )?;
+                let root_kinds = segment
+                    .replay_stacks
+                    .iter()
+                    .find(|(position, _)| *position == instruction)
+                    .map(|(_, stack)| stack.as_slice())
+                    .ok_or(CompileError::Backend)?;
+                let roots = collect_native_roots(
+                    builder,
+                    values,
+                    &plan.local_kinds,
+                    root_kinds,
+                    &deopt_stack,
+                )?;
+                let root_count = emit_runtime_roots(builder, values, &roots)?;
+                let function = load_value(
+                    builder,
+                    values.pointer_type,
+                    values.runtime_functions,
+                    mem::offset_of!(RawNativeFunctions, map_insert_hashed),
+                )?;
+                let call = builder.ins().call_indirect(
+                    values.map_insert_hashed_signature,
+                    function,
+                    &[
+                        values.runtime_context,
+                        reference,
+                        key.bits,
+                        key.tag,
+                        stored.bits,
+                        stored.tag,
+                        semantic,
+                        token,
+                        root_count,
+                    ],
+                );
+                let status = builder.inst_results(call)[0];
+                emit_runtime_status(builder, values, status, point, &stack, &deopt_stack)?;
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
+            }
+            Instr::Extended(ExtendedInstr::MapWriteGuard) => {
+                let instruction = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let access = segment
+                    .heap_accesses
+                    .iter()
+                    .find(|access| access.instruction == instruction)
+                    .copied()
+                    .ok_or(CompileError::Backend)?;
+                if !matches!(access.kind, HeapAccessKind::MapWriteGuard) {
+                    return Err(CompileError::Backend);
+                }
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: instruction + 1,
+                    prefix: fault_prefix,
+                };
+                let entry = emit_object_entry(
+                    builder,
+                    values,
+                    reference,
+                    JIT_OBJECT_MAP,
+                    point,
+                    ObjectGuard::Replay(&deopt_stack),
+                )?;
+                emit_mutable_guard(
+                    builder,
+                    values,
+                    entry,
+                    HeapExitEmission {
+                        point,
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                let unit = builder.ins().iconst(types::I64, 0);
+                push_static(builder, &mut stack, ScalarKind::Unit, unit)?;
             }
             Instr::Extended(ExtendedInstr::SealInstance) => {
                 let deopt_stack = stack.clone();
@@ -7353,6 +7981,284 @@ fn emit_list_reserve_call(
         &[values.runtime_context, reference, additional, root_count],
     );
     Ok(builder.inst_results(call)[0])
+}
+
+fn emit_map_reserve_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    additional: ir::Value,
+    roots: &[NativeRoot],
+) -> Result<ir::Value, CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let reserve_map = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, map_reserve),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.list_reserve_signature,
+        reserve_map,
+        &[values.runtime_context, reference, additional, root_count],
+    );
+    Ok(builder.inst_results(call)[0])
+}
+
+fn emit_raw_map_value_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    first: ir::Value,
+    second: ir::Value,
+) -> Result<(ir::Value, NativeValue), CompileError> {
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.map_lookup_signature,
+        function,
+        &[
+            values.runtime_context,
+            reference,
+            first,
+            second,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let bits = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    );
+    let tag = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        8,
+    );
+    Ok((status, NativeValue { bits, tag }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_optional_map_value(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    key: NativeValue,
+    family: ir::Value,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let (status, found_value) = emit_raw_map_value_call(
+        builder,
+        values,
+        function_offset,
+        reference,
+        key.bits,
+        key.tag,
+    )?;
+    emit_runtime_fault_status(builder, values, status, exit.point, exit.fault_stack)?;
+    let found = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_OK));
+    let missing = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_MAP_VACANT));
+    let valid = builder.ins().bor(found, missing);
+    let invalid = builder.ins().bxor_imm(valid, 1);
+    emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+
+    let found_block = builder.create_block();
+    let missing_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, types::I64);
+    builder
+        .ins()
+        .brif(found, found_block, &[], missing_block, &[]);
+
+    builder.switch_to_block(found_block);
+    emit_native_value_contract(
+        builder,
+        values,
+        found_value,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    builder
+        .ins()
+        .jump(done, &[found_value.bits.into(), found_value.tag.into()]);
+
+    builder.switch_to_block(missing_block);
+    let arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+    let bits = builder.ins().bor(family, arm);
+    let tag = builder
+        .ins()
+        .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+    builder.ins().jump(done, &[bits.into(), tag.into()]);
+
+    builder.switch_to_block(done);
+    Ok(NativeValue {
+        bits: builder.block_params(done)[0],
+        tag: builder.block_params(done)[1],
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_map_runtime_value(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    first: ir::Value,
+    second: ir::Value,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let (status, result) =
+        emit_raw_map_value_call(builder, values, function_offset, reference, first, second)?;
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    emit_native_value_contract(
+        builder,
+        values,
+        result,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    Ok(result)
+}
+
+fn emit_object_binary_runtime_value(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    argument: ir::Value,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.object_binary_signature,
+        function,
+        &[
+            values.runtime_context,
+            reference,
+            argument,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    let result = NativeValue {
+        bits: builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            0,
+        ),
+        tag: builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            8,
+        ),
+    };
+    emit_native_value_contract(
+        builder,
+        values,
+        result,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    Ok(result)
+}
+
+fn emit_object_unary_runtime_value(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    reference: ir::Value,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.object_unary_signature,
+        function,
+        &[
+            values.runtime_context,
+            reference,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    let result = NativeValue {
+        bits: builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            0,
+        ),
+        tag: builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            8,
+        ),
+    };
+    emit_native_value_contract(
+        builder,
+        values,
+        result,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    Ok(result)
 }
 
 fn emit_map_lookup(
