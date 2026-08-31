@@ -24,6 +24,12 @@ const INITIAL_RESOLVED_CALL_CACHE_SETS: usize = 16;
 const MAX_RESOLVED_CALL_CACHE_SETS: usize = 1_024;
 const RESOLVED_CALL_CACHE_CLAIMED: u64 = u64::MAX;
 
+pub(super) const IMAGE_SLOT_EMPTY: u32 = 0;
+pub(super) const IMAGE_SLOT_FUNCTION: u32 = 1;
+pub(super) const IMAGE_SLOT_CLASS: u32 = 2;
+const IMAGE_SLOT_VALUE: u32 = 3;
+const IMAGE_SLOT_PROCESS: u32 = 4;
+
 /// The native local changed during this activation.
 pub const LOCAL_DIRTY: u8 = 1;
 /// The native local contains an initialized value.
@@ -96,6 +102,64 @@ pub(super) struct RawNativeActivation {
     pub(super) type_environment_mask: u32,
     pub(super) resolved_calls: *const RawResolvedCallCacheEntry,
     pub(super) resolved_call_mask: u32,
+    pub(super) image_slots: *const NativeImageSlot,
+    pub(super) image_slot_count: usize,
+}
+
+/// One compact native view of an image slot target.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeImageSlot {
+    pub(super) kind: u32,
+    pub(super) first: u32,
+    pub(super) second: u32,
+}
+
+impl NativeImageSlot {
+    /// Create one empty image slot.
+    pub const fn empty() -> NativeImageSlot {
+        NativeImageSlot {
+            kind: IMAGE_SLOT_EMPTY,
+            first: 0,
+            second: 0,
+        }
+    }
+
+    /// Create one function image slot.
+    pub const fn function(function: u32) -> NativeImageSlot {
+        NativeImageSlot {
+            kind: IMAGE_SLOT_FUNCTION,
+            first: function,
+            second: 0,
+        }
+    }
+
+    /// Create one class image slot.
+    pub const fn class(class: u32, constructor: u32) -> NativeImageSlot {
+        NativeImageSlot {
+            kind: IMAGE_SLOT_CLASS,
+            first: class,
+            second: constructor,
+        }
+    }
+
+    /// Create one value image slot marker.
+    pub const fn value() -> NativeImageSlot {
+        NativeImageSlot {
+            kind: IMAGE_SLOT_VALUE,
+            first: 0,
+            second: 0,
+        }
+    }
+
+    /// Create one process image slot marker.
+    pub const fn process() -> NativeImageSlot {
+        NativeImageSlot {
+            kind: IMAGE_SLOT_PROCESS,
+            first: 0,
+            second: 0,
+        }
+    }
 }
 
 /// One stable row in the native class dispatch table.
@@ -385,6 +449,8 @@ pub(super) struct RawNativeFunctions {
     pub(super) bytes_hash: RawObjectUnary,
     pub(super) freeze_graph: RawObjectUnary,
     pub(super) digest_value: RawDigest,
+    pub(super) fault_code: RawHeapOperation,
+    pub(super) fault_denied: RawHeapOperation,
     pub(super) string_builder_new: RawHeapOperation,
     pub(super) string_builder_append_text: RawHeapOperation,
     pub(super) string_builder_append_int: RawHeapOperation,
@@ -552,6 +618,34 @@ pub struct NativeExecution<'a> {
     pub type_store_id: u64,
     pub type_environments: NativeTypeEnvironmentView,
     pub resolved_calls: NativeResolvedCallView,
+    pub image_slots: NativeImageSlotView,
+}
+
+/// One fixed native view of image slot targets.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeImageSlotView {
+    pub(super) entries: *const NativeImageSlot,
+    pub(super) count: usize,
+}
+
+impl NativeImageSlotView {
+    /// One empty image slot view.
+    pub const EMPTY: NativeImageSlotView = NativeImageSlotView {
+        entries: std::ptr::null(),
+        count: 0,
+    };
+
+    /// Create a view over fixed slot storage.
+    ///
+    /// # Safety
+    ///
+    /// The caller must retain the storage during native execution.
+    pub unsafe fn from_raw_parts(
+        entries: *const NativeImageSlot,
+        count: usize,
+    ) -> NativeImageSlotView {
+        NativeImageSlotView { entries, count }
+    }
 }
 
 /// One native view of a machine's canonical literal table.
@@ -1395,6 +1489,12 @@ pub trait NativeRuntime {
 
     /// Compute one typed graph digest and allocate its result.
     fn digest_value(&mut self, request: DigestRequest<'_>) -> AllocationResult;
+
+    /// Convert one fault code to text.
+    fn fault_code(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one policy-denied fault.
+    fn fault_denied(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 
     /// Allocate one string builder.
     fn string_builder_new(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
@@ -2623,6 +2723,8 @@ macro_rules! heap_operation_entry {
     };
 }
 
+heap_operation_entry!(fault_code, fault_code);
+heap_operation_entry!(fault_denied, fault_denied);
 heap_operation_entry!(string_builder_new, string_builder_new);
 heap_operation_entry!(string_builder_append_text, string_builder_append_text);
 heap_operation_entry!(string_builder_append_int, string_builder_append_int);

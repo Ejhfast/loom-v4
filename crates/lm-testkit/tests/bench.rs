@@ -21,6 +21,8 @@
 //! The output is one tab-separated row per case, so a reader can join
 //! it with the CPython table from `benchmarks/ops.py`.
 
+use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
+use lm_source::SourceFile;
 use lm_vm::{Engine, EngineMetrics, EngineMode, Vm, VmConfig};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -287,6 +289,15 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
         .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
     let (arena, namespace) =
         lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+    time_published_engine_scheduled(arena, namespace, mode)
+}
+
+/// Time one published program through the deterministic scheduler.
+fn time_published_engine_scheduled(
+    arena: lm_link::CodeArena,
+    namespace: lm_link::NamespaceId,
+    mode: EngineMode,
+) -> (Duration, EngineMetrics, u64) {
     let engine = Arc::new(Engine::new(mode));
     let mut compiler_metrics = EngineMetrics::default();
     let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
@@ -333,6 +344,56 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
         with_compiler_metrics(engine.metrics(), compiler_metrics),
         retired_instructions.unwrap_or(0),
     )
+}
+
+fn report_jit_slot_calls(name: &str, source: &str) {
+    if !selected(name) {
+        return;
+    }
+    let compiled = compile_module_with_options(
+        "jit-slot-bench",
+        &SourceFile::new("jit-slot-bench.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new()
+            .late_function("identity")
+            .late_class("Box"),
+    )
+    .expect("the slot benchmark must compile");
+    let artifact =
+        lm_testkit::artifact_from_compiled(compiled).expect("the slot benchmark artifact builds");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the slot benchmark artifact publishes");
+    let (interpreted, _, retired) =
+        time_published_engine_scheduled(arena.clone(), namespace, EngineMode::Interpreter);
+    let (automatic, auto_metrics, auto_retired) =
+        time_published_engine_scheduled(arena.clone(), namespace, EngineMode::Auto);
+    let (native, native_metrics, native_retired) =
+        time_published_engine_scheduled(arena, namespace, EngineMode::Native);
+    assert_eq!(auto_retired, retired);
+    assert_eq!(native_retired, retired);
+    assert_eq!(native_metrics.compiled_interpreter_sites, 0);
+    let auto_coverage =
+        auto_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64;
+    let native_coverage =
+        native_metrics.native_retired_instructions as f64 / (retired * ROUNDS as u64) as f64;
+    println!(
+        "LOOM_JIT_PROGRAM\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{auto_coverage:.4}\t{native_coverage:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        automatic.as_secs_f64() * 1e3,
+        native.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / automatic.as_secs_f64(),
+        interpreted.as_secs_f64() / native.as_secs_f64(),
+        auto_metrics.compilation_attempts,
+        auto_metrics.unproductive_native_demotions,
+        auto_metrics.unsupported_region_fallbacks,
+        native_metrics.unsupported_region_fallbacks,
+        auto_metrics.native_interpreter_exits,
+        native_metrics.native_interpreter_exits,
+        auto_metrics.native_type_environment_exits,
+        native_metrics.native_type_environment_exits,
+        native_metrics.native_type_environment_fallbacks,
+    );
 }
 
 fn record_warm_round(
@@ -1779,6 +1840,19 @@ fn bench_jit_text_and_conversion_operations() {
 fn bench_jit_representative_programs() {
     println!(
         "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits\tauto_env_exits\tnative_env_exits\tnative_env_fallbacks"
+    );
+    report_jit_slot_calls(
+        "jit_slot_call",
+        concat!(
+            "final class Box\n  value: Int = 3\nend\n",
+            "def identity[T](value: T): T\n  value\nend\n",
+            "index = 0\ntotal = 0\n",
+            "while index < 1000000\n",
+            "  box = Box()\n",
+            "  total = total + identity(box.value)\n",
+            "  index = index + 1\n",
+            "end\ntotal\n",
+        ),
     );
     report_jit_representative(
         "jit_deep_recursion",

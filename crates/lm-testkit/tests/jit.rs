@@ -1,3 +1,5 @@
+use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
+use lm_source::SourceFile;
 use lm_vm::{Engine, EngineMode, Outcome, RecordingHost, RootEvent, Vm, VmConfig, World};
 use std::sync::Arc;
 
@@ -1858,6 +1860,103 @@ fn generic_calls_preserve_each_exact_type_environment() {
     assert!(metrics.native_retired_instructions > 15_000, "{metrics:?}");
     assert!(metrics.native_type_environment_exits <= 4, "{metrics:?}");
     assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
+fn image_slot_calls_keep_native_state_across_scheduler_turns() {
+    let source = concat!(
+        "final class Box\n  value: Int = 3\nend\n",
+        "def identity[T](value: T): T\n  value\nend\n",
+        "index = 0\ntotal = 0\n",
+        "while index < 20000\n",
+        "  box = Box()\n",
+        "  total = total + identity(box.value)\n",
+        "  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let compiled = compile_module_with_options(
+        "jit-slot-calls",
+        &SourceFile::new("jit-slot-calls.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new()
+            .late_function("identity")
+            .late_class("Box"),
+    )
+    .expect("the image slot case compiles");
+    assert!(compiled
+        .module
+        .funcs
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flatten()
+        .any(|instruction| matches!(
+            instruction,
+            lm_bytecode::Instr::Extended(
+                lm_bytecode::ExtendedInstr::CallSlot { .. }
+                    | lm_bytecode::ExtendedInstr::NewSlot { .. }
+            )
+        )));
+    let artifact =
+        lm_testkit::artifact_from_compiled(compiled).expect("the image slot artifact builds");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the image slot artifact publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        let outcome = lm_proc::Scheduler::default()
+            .run(&mut world)
+            .expect("the image slot case runs");
+        (outcome, world.dump_live(&outcome), engine.metrics())
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let native = run(Arc::new(Engine::new(EngineMode::Native)));
+    assert_eq!(native.0, interpreted.0, "{:?}", native.2);
+    assert_eq!(native.1, interpreted.1);
+    assert_eq!(native.0, Outcome::Done(lm_value::Value::Int(60_000)));
+    assert_eq!(native.2.compiled_interpreter_sites, 0, "{:?}", native.2);
+    assert!(native.2.compiled_call_sites >= 2, "{:?}", native.2);
+    assert!(native.2.native_continuation_resumes > 0, "{:?}", native.2);
+}
+
+#[test]
+fn fault_value_operations_use_typed_allocation_helpers() {
+    let source = concat!(
+        "index = 0\nvalid = true\n",
+        "while index < 2000\n",
+        "  fault = Fault.denied(\"blocked\")\n",
+        "  valid = valid and fault.code() == \"PolicyDenied\"\n",
+        "  index = index + 1\n",
+        "end\nvalid\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_allocations >= 3_900, "{metrics:?}");
+}
+
+#[test]
+fn fault_value_operations_match_each_fuel_boundary() {
+    let artifact = lm_testkit::compile_text(
+        "jit-fault-value-fuel.lm",
+        "Fault.denied(\"blocked\").code()\n",
+    )
+    .expect("the fault value case compiles");
+    for fuel in 0..=16 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
 }
 
 #[test]

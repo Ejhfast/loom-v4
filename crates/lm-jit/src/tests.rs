@@ -64,8 +64,37 @@ fn opcode_ledger_separates_class_status_and_exit() {
 
     let fault = instruction_treatment(&Instr::RaiseFault);
     assert_eq!(fault.class(), TreatmentClass::Exit);
-    assert_eq!(fault.status(), TreatmentStatus::Temporary);
+    assert_eq!(fault.status(), TreatmentStatus::Dedicated);
     assert_eq!(fault.exit(), ExitBehavior::Fault);
+}
+
+#[test]
+fn dynamic_boundary_batch_has_only_dedicated_treatments() {
+    use lm_bytecode::ExtendedInstr;
+
+    let operations = [
+        Instr::TableEdit {
+            action: 0,
+            kind: 0,
+            slot: 0,
+        },
+        Instr::RequestOp,
+        Instr::AsCall { op: 0, ty: 0 },
+        Instr::CallArgs,
+        Instr::FaultCode,
+        Instr::FaultDenied,
+        Instr::RaiseUserPanic,
+        Instr::RaiseAssertionFailed,
+        Instr::RaiseFault,
+        Instr::Extended(ExtendedInstr::CallSlot { slot: 0, app: 0 }),
+        Instr::Extended(ExtendedInstr::NewSlot { slot: 0, app: 0 }),
+        Instr::Extended(ExtendedInstr::LoadSlot { slot: 0 }),
+        Instr::Extended(ExtendedInstr::SendSlot { slot: 0 }),
+        Instr::Extended(ExtendedInstr::prepare_wait(0, 0, 0).expect("the wait instruction fits")),
+    ];
+    assert!(operations
+        .iter()
+        .all(|operation| instruction_treatment(operation).is_dedicated()));
 }
 
 #[test]
@@ -179,6 +208,7 @@ fn unreachable_code_uses_one_native_fault_exit() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the terminal function executes");
@@ -439,6 +469,8 @@ impl NativeRuntime for TestRuntime {
     }
 
     interpreter_heap_operations!(
+        fault_code,
+        fault_denied,
         string_builder_new,
         string_builder_append_text,
         string_builder_append_int,
@@ -601,6 +633,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     type_store_id: 1,
                     type_environments: NativeTypeEnvironmentView::EMPTY,
                     resolved_calls: NativeResolvedCallView::EMPTY,
+                    image_slots: NativeImageSlotView::EMPTY,
                 },
             )
             .expect("the safe byte read executes");
@@ -677,6 +710,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -751,6 +785,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the field fault executes");
@@ -826,6 +861,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the field load executes");
@@ -902,6 +938,7 @@ fn native_field_store_writes_the_canonical_value() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the field store executes");
@@ -982,6 +1019,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 type_store_id: 1,
                 type_environments: NativeTypeEnvironmentView::EMPTY,
                 resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
             },
         )
         .expect("the field store executes");

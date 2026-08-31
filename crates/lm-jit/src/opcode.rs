@@ -36,6 +36,7 @@ pub enum ExitBehavior {
     Call,
     Allocation,
     Effect,
+    Boundary,
     Return,
     Fault,
 }
@@ -218,13 +219,16 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::Perform { .. } | Instr::PerformValue { .. } => {
             InstructionTreatment::dedicated(Exit, ExitBehavior::Effect)
         }
-        Instr::TableEdit { .. } | Instr::RequestOp => {
-            InstructionTreatment::temporary(Exit, ExitBehavior::Effect)
+        Instr::TableEdit { .. } | Instr::RequestOp | Instr::AsCall { .. } | Instr::CallArgs => {
+            InstructionTreatment::dedicated(Exit, ExitBehavior::Boundary)
         }
-        Instr::AsCall { .. } | Instr::CallArgs | Instr::FaultCode => temporary(Helper),
-        Instr::FaultDenied => temporary(FastPath),
+        Instr::FaultCode | Instr::FaultDenied => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
         Instr::RaiseUserPanic | Instr::RaiseAssertionFailed | Instr::RaiseFault => {
-            InstructionTreatment::temporary(Exit, ExitBehavior::Fault)
+            InstructionTreatment::dedicated(Exit, ExitBehavior::Fault)
         }
         Instr::Unreachable => InstructionTreatment::dedicated(Exit, ExitBehavior::Fault)
             .with_fault_stack(FaultStack::Before),
@@ -367,13 +371,14 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::ListContains => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        ExtendedInstr::CallSlot { .. } => InstructionTreatment::temporary(Call, ExitBehavior::Call),
-        ExtendedInstr::NewSlot { .. } => {
-            InstructionTreatment::temporary(Call, ExitBehavior::Allocation)
+        ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. } => {
+            InstructionTreatment::dedicated(Call, ExitBehavior::Call)
         }
-        ExtendedInstr::LoadSlot { .. } => temporary(Guarded),
+        ExtendedInstr::LoadSlot { .. } => {
+            InstructionTreatment::dedicated(Exit, ExitBehavior::Boundary)
+        }
         ExtendedInstr::SendSlot { .. } | ExtendedInstr::PrepareWait { .. } => {
-            InstructionTreatment::temporary(Exit, ExitBehavior::Effect)
+            InstructionTreatment::dedicated(Exit, ExitBehavior::Effect)
         }
         ExtendedInstr::SyntaxKind
         | ExtendedInstr::SyntaxCategory

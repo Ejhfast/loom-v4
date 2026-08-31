@@ -1,7 +1,7 @@
 //! Canonical machine-state adapter for native execution.
 
 use crate::engine::EngineTurnMetrics;
-use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, Machine};
+use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, ImageSlotTarget, Machine};
 use crate::NamespaceRuntime;
 use lm_heap::Object;
 use lm_jit::{
@@ -19,12 +19,14 @@ pub(crate) struct NativeScratch {
     root_tags: Vec<u64>,
     root_states: Vec<u8>,
     continuation_regions: Vec<Arc<lm_jit::CompiledRegion>>,
+    image_slots: Vec<lm_jit::NativeImageSlot>,
 }
 
 /// Mutable runtime data used during one native entry attempt.
 pub(crate) struct NativeExecutionContext<'a> {
     pub(crate) module: &'a NamespaceRuntime,
     pub(crate) envs: &'a mut lm_bytecode::closed::TypeEnvs,
+    pub(crate) slots: Option<&'a [ImageSlotTarget]>,
 }
 
 /// One native activation retained at an ordinary scheduler quantum.
@@ -582,6 +584,26 @@ impl JitEngine {
                     operand_base,
                 )
             };
+        scratch.image_slots.clear();
+        if let Some(slots) = context.slots {
+            if scratch.image_slots.try_reserve_exact(slots.len()).is_err() {
+                metrics.note_backend_unavailable();
+                return NativeAttempt::Fallback;
+            }
+            scratch
+                .image_slots
+                .extend(slots.iter().map(|slot| match slot {
+                    ImageSlotTarget::Empty => lm_jit::NativeImageSlot::empty(),
+                    ImageSlotTarget::Function(function) => {
+                        lm_jit::NativeImageSlot::function(*function)
+                    }
+                    ImageSlotTarget::Class { class, constructor } => {
+                        lm_jit::NativeImageSlot::class(*class, *constructor)
+                    }
+                    ImageSlotTarget::Value(_) => lm_jit::NativeImageSlot::value(),
+                    ImageSlotTarget::Process { .. } => lm_jit::NativeImageSlot::process(),
+                }));
+        }
         let original_fuel = machine.vm.fuel;
         let batch_fuel = original_fuel.min(u64::from(instruction_limit));
         let max_stack_values = machine.config.max_stack_values as usize;
@@ -594,6 +616,13 @@ impl JitEngine {
             lm_jit::NativeLiteralView::from_raw_parts(
                 machine.vm.literals.as_ptr(),
                 machine.vm.literals.len(),
+            )
+        };
+        // SAFETY: The scratch slot array stays fixed during this native turn.
+        let image_slots = unsafe {
+            lm_jit::NativeImageSlotView::from_raw_parts(
+                scratch.image_slots.as_ptr(),
+                scratch.image_slots.len(),
             )
         };
         let (exit, allocations) = {
@@ -660,6 +689,7 @@ impl JitEngine {
                         type_store_id,
                         type_environments,
                         resolved_calls,
+                        image_slots,
                     },
                 ) {
                     Ok(exit) => exit,
@@ -1104,7 +1134,8 @@ impl JitEngine {
                 | ExitKind::Interpreter
                 | ExitKind::Replay
                 | ExitKind::Allocation
-                | ExitKind::Effect => true,
+                | ExitKind::Effect
+                | ExitKind::Boundary => true,
                 ExitKind::Call => u32::try_from(exit.result())
                     .ok()
                     .is_some_and(|target| native.call_target_is_denied(target)),
@@ -1206,7 +1237,8 @@ impl JitEngine {
             | ExitKind::GenericVirtualCall
             | ExitKind::CallbackCall
             | ExitKind::Allocation
-            | ExitKind::Effect => {
+            | ExitKind::Effect
+            | ExitKind::Boundary => {
                 let interpreter = matches!(
                     exit.kind(),
                     ExitKind::Interpreter | ExitKind::Replay | ExitKind::Literal
@@ -1265,6 +1297,7 @@ impl JitEngine {
                         | ExitKind::InterfaceCall
                         | ExitKind::GenericVirtualCall
                         | ExitKind::CallbackCall
+                        | ExitKind::Boundary
                 ) {
                     if matches!(exit.kind(), ExitKind::Allocation) {
                         metrics.note_native_allocation_exit();

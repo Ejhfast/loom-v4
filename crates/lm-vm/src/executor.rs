@@ -553,6 +553,7 @@ fn run_engine_turn(
         let mut native_context = crate::jit::NativeExecutionContext {
             module: context.module,
             envs: &mut *context.envs,
+            slots: context.slots,
         };
         match context.engine.execute_native(
             machine,

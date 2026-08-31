@@ -1,10 +1,11 @@
 //! Cranelift emission for one immutable native region plan.
 
 use crate::activation::{
-    NativeDispatchRow, NativeFunction, RawExit, RawNativeActivation, RawNativeFrame,
-    RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
-    RESOLVED_CALL_CACHE_WAYS, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT,
-    RUNTIME_OK, RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
+    NativeDispatchRow, NativeFunction, NativeImageSlot, RawExit, RawNativeActivation,
+    RawNativeFrame, RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
+    IMAGE_SLOT_CLASS, IMAGE_SLOT_EMPTY, IMAGE_SLOT_FUNCTION, RESOLVED_CALL_CACHE_WAYS,
+    RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
+    TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
@@ -12,7 +13,7 @@ use crate::plan::{
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
-    NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_CALLBACK_CALL,
+    NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_BOUNDARY, EXIT_CALL, EXIT_CALLBACK_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
     EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
     EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
@@ -67,29 +68,33 @@ impl From<UnsupportedReason> for CompileError {
 
 pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileError> {
     let plan = RegionPlan::for_function(&input)?;
-    let type_environment_sites: Vec<TypeEnvironmentSite> =
-        plan.segments
-            .iter()
-            .filter_map(|segment| {
-                let instruction = input
-                    .root
-                    .runtime
-                    .blocks
-                    .get(segment.block as usize)?
-                    .get(segment.end.checked_sub(1)? as usize)?;
-                let application = match instruction {
-                    lm_bytecode::Instr::CallG { app, .. }
-                    | lm_bytecode::Instr::NewG { app, .. } => *app,
-                    _ => return None,
-                };
-                Some(TypeEnvironmentSite {
-                    function: input.root.function,
-                    block: segment.block,
-                    instruction: segment.end.checked_sub(1)?,
-                    application,
-                })
+    let type_environment_sites: Vec<TypeEnvironmentSite> = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let instruction = input
+                .root
+                .runtime
+                .blocks
+                .get(segment.block as usize)?
+                .get(segment.end.checked_sub(1)? as usize)?;
+            let application = match instruction {
+                lm_bytecode::Instr::CallG { app, .. }
+                | lm_bytecode::Instr::NewG { app, .. }
+                | lm_bytecode::Instr::Extended(
+                    lm_bytecode::ExtendedInstr::CallSlot { app, .. }
+                    | lm_bytecode::ExtendedInstr::NewSlot { app, .. },
+                ) if *app != lm_bytecode::NO_APP => *app,
+                _ => return None,
+            };
+            Some(TypeEnvironmentSite {
+                function: input.root.function,
+                block: segment.block,
+                instruction: segment.end.checked_sub(1)?,
+                application,
             })
-            .collect();
+        })
+        .collect();
     let interface_call_sites: Vec<InterfaceCallSite> = plan
         .segments
         .iter()
@@ -465,6 +470,7 @@ struct NativeCallTarget {
     environment: ir::Value,
     capture_data: ir::Value,
     capture_len: ir::Value,
+    fault: Option<ir::Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -1036,7 +1042,9 @@ fn emit_segment(
                     | SegmentExit::ValueCall { .. }
                     | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
+                    | SegmentExit::SlotCall { .. }
                     | SegmentExit::Effect { .. }
+                    | SegmentExit::Boundary { .. }
                     | SegmentExit::Interpreter { .. }
             );
         if exact_fuel && !deferred_boundary {
@@ -3177,7 +3185,9 @@ fn emit_segment(
                 };
                 push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
             }
-            Instr::Native(
+            Instr::FaultCode
+            | Instr::FaultDenied
+            | Instr::Native(
                 NativeInstr::SbNew
                 | NativeInstr::SbAppendInt
                 | NativeInstr::SbBuild
@@ -3210,6 +3220,20 @@ fn emit_segment(
                     collect_native_roots(builder, values, &plan.local_kinds, &site.stack, &stack)?;
                 let zero = builder.ins().iconst(types::I64, 0);
                 let (arguments, function_offset) = match instruction {
+                    Instr::FaultCode => {
+                        let fault = pop_native(&mut stack)?;
+                        (
+                            [fault, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, fault_code),
+                        )
+                    }
+                    Instr::FaultDenied => {
+                        let reason = pop_native(&mut stack)?;
+                        (
+                            [reason, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, fault_denied),
+                        )
+                    }
                     Instr::Native(NativeInstr::SbNew) => (
                         [zero, zero, zero],
                         mem::offset_of!(RawNativeFunctions, string_builder_new),
@@ -4304,8 +4328,19 @@ fn emit_segment(
             | Instr::CallVirtualG { .. }
             | Instr::CallInterface { .. }
             | Instr::CallValue { .. }
+            | Instr::Extended(ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. })
             | Instr::Perform { .. }
             | Instr::PerformValue { .. }
+            | Instr::TableEdit { .. }
+            | Instr::AsCall { .. }
+            | Instr::CallArgs
+            | Instr::RequestOp
+            | Instr::RaiseUserPanic
+            | Instr::RaiseAssertionFailed
+            | Instr::RaiseFault
+            | Instr::Extended(ExtendedInstr::LoadSlot { .. })
+            | Instr::Extended(ExtendedInstr::SendSlot { .. })
+            | Instr::Extended(ExtendedInstr::PrepareWait { .. })
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
@@ -4338,6 +4373,7 @@ fn emit_segment(
             | SegmentExit::ValueCall { .. }
             | SegmentExit::GenericVirtualCall { .. }
             | SegmentExit::InterfaceCall { .. }
+            | SegmentExit::SlotCall { .. }
     ) {
         let call_instruction = segment.end - 1;
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
@@ -4392,6 +4428,7 @@ fn emit_segment(
                     environment,
                     capture_data: builder.ins().iconst(values.pointer_type, 0),
                     capture_len: builder.ins().iconst(values.pointer_type, 0),
+                    fault: None,
                 }
             }
             SegmentExit::Call {
@@ -4401,6 +4438,7 @@ fn emit_segment(
                 environment: builder.ins().iconst(types::I32, 0),
                 capture_data: builder.ins().iconst(values.pointer_type, 0),
                 capture_len: builder.ins().iconst(values.pointer_type, 0),
+                fault: None,
             },
             SegmentExit::VirtualCall { selector, .. } => {
                 let receiver = contract.receiver.ok_or(CompileError::Backend)?;
@@ -4431,6 +4469,7 @@ fn emit_segment(
                     environment: builder.ins().iconst(types::I32, 0),
                     capture_data: builder.ins().iconst(values.pointer_type, 0),
                     capture_len: builder.ins().iconst(values.pointer_type, 0),
+                    fault: None,
                 }
             }
             SegmentExit::ValueCall { .. } => emit_call_value_target(
@@ -4509,6 +4548,40 @@ fn emit_segment(
                     &stack,
                 )?
             }
+            SegmentExit::SlotCall {
+                slot,
+                application,
+                constructor,
+                ..
+            } => {
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: call_instruction,
+                    prefix: 0,
+                };
+                let (function, fault) =
+                    emit_image_slot_call_target(builder, values, slot, constructor)?;
+                let environment = if let Some(application) = application {
+                    let site = type_environment_sites
+                        .iter()
+                        .find(|site| {
+                            site.block == segment.block
+                                && site.instruction == call_instruction
+                                && site.application == application
+                        })
+                        .ok_or(CompileError::Backend)?;
+                    emit_type_environment_lookup(builder, values, site, point, &stack)?
+                } else {
+                    builder.ins().iconst(types::I32, 0)
+                };
+                NativeCallTarget {
+                    function,
+                    environment,
+                    capture_data: builder.ins().iconst(values.pointer_type, 0),
+                    capture_len: builder.ins().iconst(values.pointer_type, 0),
+                    fault: Some(fault),
+                }
+            }
             _ => return Err(CompileError::Backend),
         };
         emit_native_call(
@@ -4547,6 +4620,29 @@ fn emit_segment(
                 kind: EXIT_EFFECT,
                 block: segment.block,
                 instruction: effect_instruction,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
+            },
+            &stack,
+        )?;
+        return Ok(());
+    }
+
+    if matches!(segment.exit, SegmentExit::Boundary { .. }) {
+        let instruction = segment.end - 1;
+        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        let retired = builder.use_var(values.retired);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_BOUNDARY,
+                block: segment.block,
+                instruction,
                 result: NativeValue {
                     bits: zero,
                     tag: zero,
@@ -4625,11 +4721,13 @@ fn emit_segment(
         SegmentExit::ValueCall { .. } => unreachable!(),
         SegmentExit::GenericVirtualCall { .. } => unreachable!(),
         SegmentExit::InterfaceCall { .. } => unreachable!(),
+        SegmentExit::SlotCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
             define_stack(builder, values, &stack)?;
             builder.ins().jump(blocks[segment.successors[0]], &[]);
         }
         SegmentExit::Effect { .. } => unreachable!(),
+        SegmentExit::Boundary { .. } => unreachable!(),
         SegmentExit::Interpreter { .. } => unreachable!(),
         SegmentExit::Unreachable => unreachable!(),
         SegmentExit::Return => {
@@ -4715,6 +4813,93 @@ fn emit_interface_receiver_key(
     Ok(builder.block_params(done)[0])
 }
 
+fn emit_image_slot_call_target(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    slot: u32,
+    constructor: bool,
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let present = builder.create_block();
+    let missing = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.append_block_param(done, types::I32);
+
+    let count = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, image_slot_count),
+    )?;
+    let slot_index = builder.ins().iconst(values.pointer_type, i64::from(slot));
+    let in_range = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, count, slot_index);
+    let zero = builder.ins().iconst(types::I32, 0);
+    let invalid = builder.ins().iconst(
+        types::I32,
+        i64::from(abi_fault_index(lm_abi::FaultCode::InvalidVmState)? + 1),
+    );
+    builder.ins().brif(in_range, present, &[], missing, &[]);
+
+    builder.switch_to_block(missing);
+    builder.ins().jump(done, &[zero.into(), invalid.into()]);
+
+    builder.switch_to_block(present);
+    let slots = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, image_slots),
+    )?;
+    let offset = builder.ins().imul_imm(
+        slot_index,
+        i64::try_from(mem::size_of::<NativeImageSlot>()).map_err(|_| CompileError::Backend)?,
+    );
+    let address = builder.ins().iadd(slots, offset);
+    let kind = load_value(
+        builder,
+        types::I32,
+        address,
+        mem::offset_of!(NativeImageSlot, kind),
+    )?;
+    let target_offset = if constructor {
+        mem::offset_of!(NativeImageSlot, second)
+    } else {
+        mem::offset_of!(NativeImageSlot, first)
+    };
+    let target = load_value(builder, types::I32, address, target_offset)?;
+    let expected_kind = if constructor {
+        IMAGE_SLOT_CLASS
+    } else {
+        IMAGE_SLOT_FUNCTION
+    };
+    let valid = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, kind, i64::from(expected_kind));
+    let empty = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, kind, i64::from(IMAGE_SLOT_EMPTY));
+    let malformed = builder.ins().iconst(
+        types::I32,
+        i64::from(abi_fault_index(lm_abi::FaultCode::MalformedState)? + 1),
+    );
+    let fault = builder.ins().select(empty, invalid, malformed);
+    let fault = builder.ins().select(valid, zero, fault);
+    builder.ins().jump(done, &[target.into(), fault.into()]);
+
+    builder.switch_to_block(done);
+    Ok((builder.block_params(done)[0], builder.block_params(done)[1]))
+}
+
+fn abi_fault_index(fault: lm_abi::FaultCode) -> Result<u32, CompileError> {
+    lm_abi::FAULT_CODES
+        .iter()
+        .position(|candidate| *candidate == fault)
+        .and_then(|index| u32::try_from(index).ok())
+        .ok_or(CompileError::Backend)
+}
+
 fn emit_generic_virtual_receiver_key(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -4798,6 +4983,7 @@ fn emit_call_value_target(
                 environment,
                 capture_data,
                 capture_len,
+                fault: None,
             })
         }
         ValueCallTarget::Callback => {
@@ -4908,6 +5094,7 @@ fn emit_call_value_target(
                 environment: values[1],
                 capture_data: values[2],
                 capture_len: values[3],
+                fault: None,
             })
         }
     }
@@ -5100,6 +5287,7 @@ fn emit_resolved_call_lookup(
         environment: values[1],
         capture_data: values[2],
         capture_len: values[3],
+        fault: None,
     })
 }
 
@@ -5298,6 +5486,7 @@ fn emit_native_call(
         environment,
         capture_data,
         capture_len,
+        fault,
     } = target;
     let argument_start = stack
         .len()
@@ -5357,6 +5546,38 @@ fn emit_native_call(
     )?;
 
     builder.switch_to_block(lookup);
+    if let Some(fault) = fault {
+        let invalid = builder.ins().icmp_imm(IntCC::NotEqual, fault, 0);
+        let fault_block = builder.create_block();
+        let valid_block = builder.create_block();
+        builder
+            .ins()
+            .brif(invalid, fault_block, &[], valid_block, &[]);
+
+        builder.switch_to_block(fault_block);
+        emit_charge(builder, values, 1);
+        let retired = builder.use_var(values.retired);
+        let code = builder.ins().iadd_imm(fault, -1);
+        let code = builder.ins().uextend(types::I64, code);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_GUEST_FAULT,
+                block,
+                instruction: instruction + 1,
+                result: NativeValue {
+                    bits: code,
+                    tag: zero,
+                },
+            },
+            &boundary_stack,
+        )?;
+
+        builder.switch_to_block(valid_block);
+    }
     let entry_count = load_value(
         builder,
         types::I32,

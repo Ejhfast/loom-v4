@@ -2012,6 +2012,45 @@ The representative gate remains open.
 | HTTP parse | 0.89 times | 48.94 percent |
 | HTTP serialize | 0.86 times | 41.81 percent |
 
+### Stage F31: Dynamic calls and observable boundaries
+
+- call current function and constructor slots through the native call convention;
+- read slot targets from one compact machine view;
+- create and inspect faults through fixed typed helpers;
+- materialize state before world, effect, and fault boundaries;
+- execute each boundary instruction once in the interpreter;
+- preserve exact fuel, fault, and scheduler state.
+
+The boundary exit is a permanent class F treatment.
+
+It is not a temporary interpreter site.
+
+Gate: All 14 dynamic call, slot, effect, and fault operations use dedicated treatments.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 132 tests.
+
+The direct and scheduled corpus gate took 12.87 seconds after compilation.
+
+| Workload | Interpreter | Auto warm | Native warm | Auto gain | Native gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Late-bound slot call | 156.854 ms | 83.028 ms | 82.892 ms | 1.89 times | 1.89 times | 100.00 percent |
+
+The batch completed 14 opcode treatments.
+
+The ledger now has 20 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 0.97 times | 31.20 percent |
+| JSON parse | 0.98 times | 6.92 percent |
+| JSON stringify | 1.08 times | 56.72 percent |
+| HTTP parse | 0.87 times | 48.94 percent |
+| HTTP serialize | 0.81 times | 41.81 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

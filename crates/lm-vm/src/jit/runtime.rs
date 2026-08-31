@@ -1639,6 +1639,32 @@ impl NativeRuntime for MachineRuntime<'_> {
         }
     }
 
+    fn fault_code(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        let reference = object_reference(request.first);
+        let code = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::NativeFault { code, .. }) => *code,
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        self.allocate_heap_object(crate::Object::Str(code.to_string().into()), &request)
+    }
+
+    fn fault_denied(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        let reference = object_reference(request.first);
+        let reason = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Str(text)) => text.to_string(),
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        self.allocate_heap_object(
+            crate::Object::NativeFault {
+                code: crate::FaultCode::PolicyDenied,
+                message: reason,
+                op: None,
+                trace: Box::default(),
+            },
+            &request,
+        )
+    }
+
     fn string_builder_new(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
         self.allocate_heap_object(
             crate::Object::StrBuilder(NativeStringBuilder::new()),

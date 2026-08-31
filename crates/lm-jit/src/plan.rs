@@ -200,6 +200,7 @@ pub enum ExitKind {
     CallbackCall,
     GuestFault,
     GrowRoots,
+    Boundary,
 }
 
 /// One validated native exit record.
@@ -305,11 +306,20 @@ pub(super) enum SegmentExit {
         app: u32,
         fallthrough_ip: u32,
     },
+    SlotCall {
+        slot: u32,
+        application: Option<u32>,
+        constructor: bool,
+        fallthrough_ip: u32,
+    },
     Allocation {
         fallthrough_ip: u32,
     },
     Effect {
         fallthrough_ip: u32,
+    },
+    Boundary {
+        fallthrough_ip: Option<u32>,
     },
     Interpreter {
         fallthrough_ip: Option<u32>,
@@ -766,6 +776,7 @@ impl RegionPlan {
                     | SegmentExit::ValueCall { .. }
                     | SegmentExit::GenericVirtualCall { .. }
                     | SegmentExit::InterfaceCall { .. }
+                    | SegmentExit::SlotCall { .. }
             ) {
                 call_sites += 1;
                 segment.cost = segment.cost.saturating_sub(1);
@@ -773,6 +784,9 @@ impl RegionPlan {
             if matches!(segment.exit, SegmentExit::Effect { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
                 effect_sites += 1;
+            }
+            if matches!(segment.exit, SegmentExit::Boundary { .. }) {
+                segment.cost = segment.cost.saturating_sub(1);
             }
             if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
@@ -949,9 +963,13 @@ fn scalar_kind_in(
         Some(BcType::Bool) => Ok(ScalarKind::Bool),
         Some(BcType::Int) => Ok(ScalarKind::Int),
         Some(BcType::Float) => Ok(ScalarKind::Float),
-        Some(BcType::Str | BcType::Map(_, _) | BcType::Fn(_, _, _, _) | BcType::Digest) => {
-            Ok(ScalarKind::Object(ty))
-        }
+        Some(
+            BcType::Str
+            | BcType::Map(_, _)
+            | BcType::Fn(_, _, _, _)
+            | BcType::Digest
+            | BcType::Fault,
+        ) => Ok(ScalarKind::Object(ty)),
         Some(BcType::Callback(_, _, _, _)) => Ok(ScalarKind::Callback(ty)),
         Some(BcType::Class(class)) => {
             let core = lm_bytecode::corepin::declared_layout(module);
@@ -1090,6 +1108,18 @@ fn segment_exit(
                     fallthrough_ip: next,
                 }
             }
+            Instr::Extended(ExtendedInstr::CallSlot { slot, app }) => SegmentExit::SlotCall {
+                slot: *slot,
+                application: (*app != lm_bytecode::NO_APP).then_some(*app),
+                constructor: false,
+                fallthrough_ip: next,
+            },
+            Instr::Extended(ExtendedInstr::NewSlot { slot, app }) => SegmentExit::SlotCall {
+                slot: *slot,
+                application: (*app != lm_bytecode::NO_APP).then_some(*app),
+                constructor: true,
+                fallthrough_ip: next,
+            },
             _ => return Err(UnsupportedReason::InvalidControlFlow),
         }),
         crate::ExitBehavior::Allocation => Some(SegmentExit::Allocation {
@@ -1098,8 +1128,16 @@ fn segment_exit(
         crate::ExitBehavior::Effect => Some(SegmentExit::Effect {
             fallthrough_ip: next,
         }),
+        crate::ExitBehavior::Boundary => Some(SegmentExit::Boundary {
+            fallthrough_ip: (instruction_index + 1 < block_len).then_some(next),
+        }),
         crate::ExitBehavior::Return => Some(SegmentExit::Return),
-        crate::ExitBehavior::Fault => Some(SegmentExit::Unreachable),
+        crate::ExitBehavior::Fault => Some(match instruction {
+            Instr::Unreachable => SegmentExit::Unreachable,
+            _ => SegmentExit::Boundary {
+                fallthrough_ip: None,
+            },
+        }),
     })
 }
 
@@ -1133,12 +1171,21 @@ fn resolve_successors(
             SegmentExit::InterfaceCall { fallthrough_ip, .. } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
+            SegmentExit::SlotCall { fallthrough_ip, .. } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Allocation { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
             SegmentExit::Effect { fallthrough_ip } => {
                 vec![entry(entries, segment.block, fallthrough_ip)?]
             }
+            SegmentExit::Boundary {
+                fallthrough_ip: Some(fallthrough_ip),
+            } => vec![entry(entries, segment.block, fallthrough_ip)?],
+            SegmentExit::Boundary {
+                fallthrough_ip: None,
+            } => Vec::new(),
             SegmentExit::Interpreter {
                 fallthrough_ip: Some(fallthrough_ip),
             } => vec![entry(entries, segment.block, fallthrough_ip)?],
@@ -2021,6 +2068,12 @@ fn analyze_segment(
                     fault_stacks.push((next, before.stack[..length].to_vec()));
                 }
             }
+            Instr::FaultCode | Instr::FaultDenied => {
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
             Instr::Call(target) => {
                 let signature = context
                     .calls
@@ -2168,7 +2221,60 @@ fn analyze_segment(
                     value_target: None,
                 });
             }
+            Instr::Extended(ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. }) => {
+                let (slot, constructor) = match source_instruction {
+                    Instr::Extended(ExtendedInstr::CallSlot { slot, .. }) => (slot, false),
+                    Instr::Extended(ExtendedInstr::NewSlot { slot, .. }) => (slot, true),
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                let spec = context
+                    .module
+                    .slots
+                    .get(slot as usize)
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                let parameter_count = match (&spec.contract, constructor) {
+                    (
+                        lm_bytecode::SlotContract::Function(contract)
+                        | lm_bytecode::SlotContract::Method(contract),
+                        false,
+                    ) => contract.params.len(),
+                    (lm_bytecode::SlotContract::Class { constructor, .. }, true) => {
+                        constructor.params.len()
+                    }
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                let parameter_start = before
+                    .stack
+                    .len()
+                    .checked_sub(parameter_count)
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                let result = after
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidStack)?;
+                boundary_stack = before.stack.clone();
+                call_contract = Some(CallContract {
+                    params: before.stack[parameter_start..].to_vec(),
+                    local_count: None,
+                    result,
+                    receiver: None,
+                    value_target: None,
+                });
+            }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {
+                boundary_stack = before.stack.clone();
+            }
+            Instr::TableEdit { .. }
+            | Instr::AsCall { .. }
+            | Instr::CallArgs
+            | Instr::RequestOp
+            | Instr::RaiseUserPanic
+            | Instr::RaiseAssertionFailed
+            | Instr::RaiseFault
+            | Instr::Extended(ExtendedInstr::LoadSlot { .. })
+            | Instr::Extended(ExtendedInstr::SendSlot { .. })
+            | Instr::Extended(ExtendedInstr::PrepareWait { .. }) => {
                 boundary_stack = before.stack.clone();
             }
             _ if matches!(segment.exit, SegmentExit::Interpreter { .. })

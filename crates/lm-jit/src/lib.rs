@@ -34,6 +34,7 @@ const EXIT_GENERIC_VIRTUAL_CALL: u32 = 21;
 const EXIT_CALLBACK_CALL: u32 = 22;
 const EXIT_GUEST_FAULT: u32 = 23;
 const EXIT_GROW_ROOTS: u32 = 24;
+const EXIT_BOUNDARY: u32 = 25;
 
 mod activation;
 mod opcode;
@@ -45,18 +46,19 @@ use activation::{
     bytes_bit_not, bytes_bit_or, bytes_bit_xor, bytes_compact, bytes_compare, bytes_concat,
     bytes_contains, bytes_ends_with, bytes_find_index, bytes_from_text, bytes_hash, bytes_hex,
     bytes_is_utf8, bytes_slice, bytes_starts_with, bytes_text, bytes_text_view, digest_value,
-    float_fixed, freeze_graph, grow_list, insert_list, list_contains, map_at, map_clear, map_get,
-    map_has, map_insert_hashed, map_key_at, map_next_index, map_probe, map_probe_key,
-    map_probe_remove, map_probe_set_value, map_probe_value, map_put_commit, map_put_discard,
-    map_put_probe, map_remove, map_value_at, reserve_list, reserve_map, string_builder_append_bool,
-    string_builder_append_char, string_builder_append_float, string_builder_append_int,
-    string_builder_append_text, string_builder_build, string_builder_finish, string_builder_new,
-    text_bytes, text_compare, text_concat, text_contains, text_ends_with, text_find_byte,
-    text_find_scalar, text_hash, text_lines, text_lower_ascii, text_pad_end, text_pad_start,
-    text_parse_float_status, text_parse_float_value, text_parse_int_status, text_parse_int_value,
-    text_replace, text_slice, text_slice_bytes, text_split, text_starts_with, text_to_string,
-    text_trim, text_trim_end, text_trim_start, text_upper_ascii, values_equal, NativeFunction,
-    RawExit, RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
+    fault_code, fault_denied, float_fixed, freeze_graph, grow_list, insert_list, list_contains,
+    map_at, map_clear, map_get, map_has, map_insert_hashed, map_key_at, map_next_index, map_probe,
+    map_probe_key, map_probe_remove, map_probe_set_value, map_probe_value, map_put_commit,
+    map_put_discard, map_put_probe, map_remove, map_value_at, reserve_list, reserve_map,
+    string_builder_append_bool, string_builder_append_char, string_builder_append_float,
+    string_builder_append_int, string_builder_append_text, string_builder_build,
+    string_builder_finish, string_builder_new, text_bytes, text_compare, text_concat,
+    text_contains, text_ends_with, text_find_byte, text_find_scalar, text_hash, text_lines,
+    text_lower_ascii, text_pad_end, text_pad_start, text_parse_float_status,
+    text_parse_float_value, text_parse_int_status, text_parse_int_value, text_replace, text_slice,
+    text_slice_bytes, text_split, text_starts_with, text_to_string, text_trim, text_trim_end,
+    text_trim_start, text_upper_ascii, values_equal, NativeFunction, RawExit, RawNativeActivation,
+    RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
@@ -64,10 +66,10 @@ pub use activation::{
     HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
     ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
     MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
-    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
-    LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeImageSlot, NativeImageSlotView, NativeLiteralView, NativePreparation,
+    NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut,
+    NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView, RuntimeUnitResult,
+    RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -459,7 +461,9 @@ impl CompiledRegion {
                             | SegmentExit::ValueCall { .. }
                             | SegmentExit::GenericVirtualCall { .. }
                             | SegmentExit::InterfaceCall { .. }
+                            | SegmentExit::SlotCall { .. }
                             | SegmentExit::Effect { .. }
+                            | SegmentExit::Boundary { .. }
                             | SegmentExit::Interpreter { .. }
                     )
             })
@@ -516,7 +520,8 @@ impl CompiledRegion {
                 | SegmentExit::VirtualCall { fallthrough_ip, .. }
                 | SegmentExit::ValueCall { fallthrough_ip }
                 | SegmentExit::GenericVirtualCall { fallthrough_ip, .. }
-                | SegmentExit::InterfaceCall { fallthrough_ip, .. } => fallthrough_ip,
+                | SegmentExit::InterfaceCall { fallthrough_ip, .. }
+                | SegmentExit::SlotCall { fallthrough_ip, .. } => fallthrough_ip,
                 _ => return None,
             };
             if segment.block != block || fallthrough_ip != instruction {
@@ -595,6 +600,7 @@ impl CompiledRegion {
             type_store_id,
             type_environments,
             resolved_calls,
+            image_slots,
         } = input;
         let top_index = activation
             .frame_len
@@ -619,6 +625,7 @@ impl CompiledRegion {
                 || !self.generic_virtual_call_sites.is_empty()
                 || self.call_value_sites.iter().any(|site| site.callback))
                 && (type_store_id == 0 || resolved_calls.entries.is_null()))
+            || (image_slots.count != 0 && image_slots.entries.is_null())
         {
             return Err(Failure::BackendUnavailable);
         }
@@ -672,6 +679,8 @@ impl CompiledRegion {
             type_environment_mask: type_environments.mask,
             resolved_calls: resolved_calls.entries,
             resolved_call_mask: resolved_calls.mask,
+            image_slots: image_slots.entries,
+            image_slot_count: image_slots.count,
         };
         let mut exit = RawExit::default();
         let mut runtime_result = [0u64; 4];
@@ -719,6 +728,8 @@ impl CompiledRegion {
             bytes_hash: bytes_hash::<R>,
             freeze_graph: freeze_graph::<R>,
             digest_value: digest_value::<R>,
+            fault_code: fault_code::<R>,
+            fault_denied: fault_denied::<R>,
             string_builder_new: string_builder_new::<R>,
             string_builder_append_text: string_builder_append_text::<R>,
             string_builder_append_int: string_builder_append_int::<R>,
@@ -857,6 +868,7 @@ impl CompiledRegion {
             EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
             EXIT_GUEST_FAULT => ExitKind::GuestFault,
             EXIT_GROW_ROOTS => ExitKind::GrowRoots,
+            EXIT_BOUNDARY => ExitKind::Boundary,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
