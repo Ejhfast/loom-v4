@@ -569,6 +569,8 @@ struct CallSignature {
 #[derive(Debug, Clone)]
 pub(super) struct RegionPlan {
     pub(super) local_kinds: Vec<ScalarKind>,
+    /// Locals whose list data stays fixed for this native call.
+    pub(super) cached_list_data: Vec<bool>,
     /// Parameters whose list data stays fixed for this native call.
     pub(super) preloaded_list_data: Vec<bool>,
     pub(super) result_kind: ScalarKind,
@@ -849,16 +851,24 @@ impl RegionPlan {
         }
         compute_liveness(&mut segments, local_kinds.len());
         let stable_list_data = call_sites == 0 && list_growth_sites == 0;
-        let preloaded_list_data = source_func
+        let cached_list_data: Vec<bool> = source_func
             .local_types
             .iter()
             .copied()
             .enumerate()
             .map(|(slot, ty)| {
                 stable_list_data
-                    && slot < source_func.params.len()
                     && matches!(source.types.get(ty as usize), Some(BcType::List(_)))
                     && segments.iter().any(|segment| segment.uses[slot])
+            })
+            .collect();
+        let preloaded_list_data = cached_list_data
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, cached)| {
+                cached
+                    && slot < source_func.params.len()
                     && segments.iter().all(|segment| !segment.definitions[slot])
             })
             .collect();
@@ -893,6 +903,7 @@ impl RegionPlan {
         }
         Ok(RegionPlan {
             local_kinds,
+            cached_list_data,
             preloaded_list_data,
             result_kind,
             max_stack,

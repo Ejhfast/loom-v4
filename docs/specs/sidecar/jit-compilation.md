@@ -4,7 +4,7 @@ Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
-Stable list parameters retain their canonical data pointer across safe loop backedges.
+Stable list parameters and locals retain their canonical data pointer across safe loop backedges.
 
 One reserved acyclic path can charge several segments with one fuel update.
 
@@ -2636,6 +2636,35 @@ The release comparison used commit `79d4f33` as its exact parent baseline.
 | Float addition | 2.350 ms | 2.294 ms | 2.4 percent faster |
 
 These gains do not define a completion threshold.
+
+### Stage F49: Retain stable local list data
+
+- identify list locals in functions with no guest call or list growth;
+- cache the canonical data pointer after the first checked list access;
+- carry the pointer across safe native loop backedges;
+- clear the entry, kind, and data proofs after each local assignment;
+- keep parameter entry preloads as the branch-free case;
+- keep exact-fuel accesses on the checked path;
+- preserve external-state checks and exact fuel behavior.
+
+This stage extends payload-address persistence beyond parameters.
+
+The focused JIT suite passed 149 tests.
+
+The direct and scheduled corpus differential passed in 53.35 seconds.
+
+The release comparison used commit `8470fe2` as its exact parent baseline.
+
+| Local list loop | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Native warm | 1.390 ms | 1.278 ms | 8.1 percent faster |
+| Native cold | 6.258 ms | 6.097 ms | 2.6 percent faster |
+
+The local cache still tests its proof before each access.
+
+Loop versioning can remove that branch for a proved hot loop.
+
+These measurements do not define a completion threshold.
 
 ## 24. Rejected designs
 

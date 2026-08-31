@@ -2933,6 +2933,31 @@ fn heap_proofs_end_when_a_local_changes() {
 }
 
 #[test]
+fn cached_list_data_ends_when_a_local_changes() {
+    let source = concat!(
+        "left = [1]\nright = [2]\ncurrent = left\n",
+        "i = 0\nsum = 0\n",
+        "while i < 100\n",
+        "  sum = sum + current.at(0)\n",
+        "  if i == 49 then current = right end\n",
+        "  i = i + 1\n",
+        "end\nsum\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-list-data-local.lm", source)
+        .expect("the list data case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(150)));
+    assert!(metrics.native_retired_instructions > 500, "{metrics:?}");
+}
+
+#[test]
 fn direct_collection_metadata_matches_selected_fuel_boundaries() {
     let source = concat!(
         "items = [1, 2, 3]\n",

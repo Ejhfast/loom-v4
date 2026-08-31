@@ -374,13 +374,14 @@ struct LocalHeapCache {
     class: Variable,
     actual_class: Variable,
     list_data: Option<Variable>,
+    preloaded_list_data: bool,
 }
 
 /// This compile-time map associates emitted references with their source local.
 #[derive(Default)]
 struct HeapTranslationCache {
     locals: Vec<(ir::Value, usize)>,
-    use_preloaded_list_data: bool,
+    use_cached_list_data: bool,
 }
 
 impl HeapTranslationCache {
@@ -388,8 +389,8 @@ impl HeapTranslationCache {
         self.locals.clear();
     }
 
-    fn set_preloaded_list_data(&mut self, enabled: bool) {
-        self.use_preloaded_list_data = enabled;
+    fn set_cached_list_data(&mut self, enabled: bool) {
+        self.use_cached_list_data = enabled;
     }
 
     fn record_local(&mut self, reference: ir::Value, slot: usize) {
@@ -996,8 +997,8 @@ fn emit_region(
                 object_kind: builder.declare_var(types::I64),
                 class: builder.declare_var(types::I64),
                 actual_class: builder.declare_var(types::I32),
-                list_data: plan.preloaded_list_data[slot]
-                    .then(|| builder.declare_var(pointer_type)),
+                list_data: plan.cached_list_data[slot].then(|| builder.declare_var(pointer_type)),
+                preloaded_list_data: plan.preloaded_list_data[slot],
             };
             builder.def_var(cache.entry, zero_pointer);
             builder.def_var(cache.object_kind, zero_i64);
@@ -1363,7 +1364,7 @@ fn emit_segment(
     {
         let mut translations = values.heap_translations.borrow_mut();
         translations.clear();
-        translations.set_preloaded_list_data(!exact_fuel);
+        translations.set_cached_list_data(!exact_fuel);
     }
     let reserved_prefix_cost = if exact_fuel {
         0
@@ -10060,9 +10061,9 @@ fn emit_array_address(
     array_offset: usize,
     index: ir::Value,
 ) -> Result<ir::Value, CompileError> {
-    let preloaded = array_offset == JIT_LIST_ITEMS_OFFSET
-        && values.heap_translations.borrow().use_preloaded_list_data;
-    let data = if preloaded {
+    let cached = array_offset == JIT_LIST_ITEMS_OFFSET
+        && values.heap_translations.borrow().use_cached_list_data;
+    let data = if cached {
         local_heap_cache(values, entry)
             .and_then(|cache| cache.list_data)
             .map(|data| builder.use_var(data))
@@ -10417,8 +10418,8 @@ fn emit_object_entry(
         .copied()
         .flatten();
     let preloaded = object_tag == JIT_OBJECT_LIST
-        && values.heap_translations.borrow().use_preloaded_list_data
-        && local_cache.is_some_and(|cache| cache.list_data.is_some());
+        && values.heap_translations.borrow().use_cached_list_data
+        && local_cache.is_some_and(|cache| cache.preloaded_list_data);
     if preloaded {
         let cache = local_cache.ok_or(CompileError::Backend)?;
         let entry = builder.use_var(cache.entry);
@@ -10451,6 +10452,17 @@ fn emit_object_entry(
             .ins()
             .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
         emit_object_guard(builder, values, wrong_kind, point, guard)?;
+        if object_tag == JIT_OBJECT_LIST {
+            if let Some(list_data) = cache.list_data {
+                let data = load_immutable_heap_value(
+                    builder,
+                    values.pointer_type,
+                    entry,
+                    JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+                )?;
+                builder.def_var(list_data, data);
+            }
+        }
         let expected = builder.ins().iconst(types::I64, expected);
         builder.def_var(cache.object_kind, expected);
         builder.ins().jump(done, &[entry.into()]);
