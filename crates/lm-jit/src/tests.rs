@@ -59,8 +59,8 @@ fn opcode_ledger_separates_class_status_and_exit() {
 
     let helper = instruction_treatment(&Instr::Numeric(NumericInstr::BytesBitAnd));
     assert_eq!(helper.class(), TreatmentClass::Helper);
-    assert_eq!(helper.status(), TreatmentStatus::Temporary);
-    assert_eq!(helper.exit(), ExitBehavior::Continue);
+    assert_eq!(helper.status(), TreatmentStatus::Dedicated);
+    assert_eq!(helper.exit(), ExitBehavior::Allocation);
 
     let fault = instruction_treatment(&Instr::RaiseFault);
     assert_eq!(fault.class(), TreatmentClass::Exit);
@@ -283,6 +283,16 @@ struct TestRuntime {
     heap: Heap,
 }
 
+macro_rules! interpreter_heap_operations {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            fn $name(&mut self, _request: HeapOperationRequest<'_>) -> HeapOperationResult {
+                HeapOperationResult::Interpreter
+            }
+        )+
+    };
+}
+
 impl NativeRuntime for TestRuntime {
     fn allocate_instance(
         &mut self,
@@ -427,6 +437,32 @@ impl NativeRuntime for TestRuntime {
     fn map_put_commit(&mut self, _request: MapPutCommitRequest<'_>) -> RuntimeUnitResult {
         RuntimeUnitResult::Interpreter
     }
+
+    interpreter_heap_operations!(
+        string_builder_new,
+        string_builder_append_text,
+        string_builder_append_int,
+        string_builder_append_bool,
+        string_builder_append_char,
+        string_builder_append_float,
+        string_builder_build,
+        string_builder_finish,
+        byte_buffer_new,
+        byte_buffer_append,
+        byte_buffer_build,
+        byte_buffer_extend,
+        byte_buffer_reserve,
+        byte_buffer_finish,
+        bytes_from_text,
+        bytes_slice,
+        bytes_concat,
+        bytes_compact,
+        bytes_text_view,
+        bytes_bit_and,
+        bytes_bit_or,
+        bytes_bit_xor,
+        bytes_bit_not,
+    );
 
     fn values_equal(
         &mut self,

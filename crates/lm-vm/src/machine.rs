@@ -6557,7 +6557,7 @@ impl Machine {
     }
 }
 
-fn integer_text_len(value: i64) -> usize {
+pub(crate) fn integer_text_len(value: i64) -> usize {
     let mut magnitude = value.unsigned_abs();
     let mut len = usize::from(value < 0) + 1;
     while magnitude >= 10 {
@@ -6594,7 +6594,7 @@ fn float_fits_int(value: f64) -> bool {
     value >= i64::MIN as f64 && value < 9_223_372_036_854_775_808.0
 }
 
-fn float_text(value: f64) -> String {
+pub(crate) fn float_text(value: f64) -> String {
     value.to_string()
 }
 

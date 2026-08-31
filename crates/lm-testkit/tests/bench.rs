@@ -1672,6 +1672,48 @@ fn bench_jit_scalar_regions() {
     report_auto_mixed();
 }
 
+#[test]
+#[ignore]
+fn bench_jit_builder_construction() {
+    println!(
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"
+    );
+    report_jit(
+        "jit_string_builder",
+        concat!(
+            "builder = StringBuilder()\ni = 0\n",
+            "while i < 200000\n",
+            "  builder.append(\"x\")\n  i = i + 1\n",
+            "end\nbuilder.build().len()\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_byte_buffer",
+        concat!(
+            "buffer = ByteBuffer()\ni = 0\n",
+            "while i < 200000\n",
+            "  buffer.append(i % 256)\n  i = i + 1\n",
+            "end\nbuffer.build().len()\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_byte_construction",
+        concat!(
+            "left = b\"\\x0f\\xf0\"\nright = b\"\\x33\\x55\"\n",
+            "i = 0\ntotal = 0\n",
+            "while i < 20000\n",
+            "  joined = left + right\n",
+            "  total = total + (left & right).len() + (left | right).len()\n",
+            "  total = total + (left ^ right).len() + (~joined).len()\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+        0,
+    );
+}
+
 // ---------------------------------------------------------------
 // Group 1: representative JIT programs.
 // ---------------------------------------------------------------

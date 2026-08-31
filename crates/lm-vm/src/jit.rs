@@ -613,7 +613,12 @@ impl JitEngine {
             let mut active_entry = entry_index;
             let mut prior_retired = 0u64;
             let result = loop {
-                let root_capacity = active_region.max_roots().max(1);
+                let root_capacity = active_region
+                    .max_roots()
+                    .max(scratch.roots.len())
+                    .max(scratch.root_tags.len())
+                    .max(scratch.root_states.len())
+                    .max(1);
                 scratch.roots.resize(root_capacity, 0);
                 scratch.roots.fill(0);
                 scratch.root_tags.resize(root_capacity, 0);
@@ -660,6 +665,40 @@ impl JitEngine {
                     Ok(exit) => exit,
                     Err(error) => break Err(error),
                 };
+                if exit.kind() == ExitKind::GrowRoots {
+                    let Ok(required) = usize::try_from(exit.result()) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let grow_region = scratch
+                        .activation
+                        .frames()
+                        .last()
+                        .and_then(|frame| native.slot(frame.function()))
+                        .and_then(|slot| slot.compiled());
+                    let resume = grow_region
+                        .as_deref()
+                        .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
+                        .map(|entry| entry.index());
+                    let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let growth = required.saturating_sub(scratch.roots.len());
+                    let grew = required <= max_stack_values
+                        && scratch.roots.try_reserve(growth).is_ok()
+                        && scratch.root_tags.try_reserve(growth).is_ok()
+                        && scratch.root_states.try_reserve(growth).is_ok();
+                    if let (true, Some(grow_region), Some(resume)) = (grew, grow_region, resume) {
+                        scratch.roots.resize(required.max(1), 0);
+                        scratch.root_tags.resize(required.max(1), 0);
+                        scratch.root_states.resize(required.max(1), 0);
+                        prior_retired = next_retired;
+                        active_region = grow_region;
+                        active_entry = resume;
+                        metrics.note_native_activation_grow();
+                        continue;
+                    }
+                    break Err(Failure::BackendUnavailable);
+                }
                 if exit.kind() == ExitKind::GrowActivation {
                     let required_scalars = (exit.result() >> 32) as usize;
                     let Some(required_frames) = scratch.activation.frame_count().checked_add(1)
@@ -1302,6 +1341,7 @@ impl JitEngine {
                     retired,
                 }
             }
+            ExitKind::GrowRoots => malformed_native_exit(retired),
         }
     }
 }

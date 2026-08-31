@@ -1932,6 +1932,46 @@ The representative gate remains open.
 | HTTP parse | 0.89 times | 48.23 percent |
 | HTTP serialize | 0.86 times | 41.78 percent |
 
+### Stage F29: Builders and byte construction
+
+- give mutable byte arrays one stable heap layout;
+- compile builder metadata and clear operations as guarded memory access;
+- compile bounded appends through direct fast paths;
+- use fixed typed helpers for growth and complex construction;
+- preserve UTF-8 metadata, heap charges, faults, and finished states;
+- grow shared root buffers before a native callee can exceed them;
+- preserve exact fuel and scheduler state.
+
+No helper dispatches on an opcode number.
+
+Gate: All 29 builder and byte-construction operations use dedicated treatments.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 126 tests.
+
+The direct and scheduled corpus gate took 13.00 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| String builder | 10.255 ms | 7.800 ms | 0.902 ms | 11.37 times |
+| Byte buffer | 8.871 ms | 10.758 ms | 8.961 ms | 0.99 times |
+| Byte construction | 10.157 ms | 20.132 ms | 9.990 ms | 1.02 times |
+
+The batch completed 29 opcode treatments.
+
+The ledger now has 67 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 0.96 times | 31.20 percent |
+| JSON parse | 0.96 times | 6.57 percent |
+| JSON stringify | 1.00 times | 56.54 percent |
+| HTTP parse | 0.89 times | 48.53 percent |
+| HTTP serialize | 0.87 times | 41.81 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

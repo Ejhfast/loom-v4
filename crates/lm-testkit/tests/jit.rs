@@ -1496,6 +1496,164 @@ fn cached_string_and_byte_literals_stay_native() {
 }
 
 #[test]
+fn builders_and_byte_construction_use_dedicated_paths() {
+    let source = concat!(
+        "builder = StringBuilder()\n",
+        "builder.append(\"A\").append_int(-12).append_bool(true)\n",
+        "builder.append_float(1.5).push_char('é')\n",
+        "built_text = builder.build()\n",
+        "text_size = builder.len() + builder.byte_len()\n",
+        "builder.clear().append(\"done\")\n",
+        "finished_text = builder.finish()\n",
+        "buffer = ByteBuffer()\n",
+        "buffer.reserve(8).append(1).append(2).extend(Bytes(\"AB\"))\n",
+        "byte = buffer.at_or(1, 0)\n",
+        "built_bytes = buffer.build()\n",
+        "byte_size = buffer.len()\n",
+        "buffer.clear().extend(Bytes(\"done\"))\n",
+        "finished_bytes = buffer.finish()\n",
+        "slice_size = case built_bytes.slice(1, 2)\n",
+        "in Ok(value) then value.len()\n",
+        "in Err(_) then 0\n",
+        "end\n",
+        "joined = built_bytes + Bytes(\"!\")\n",
+        "compact = joined.compact()\n",
+        "view_size = case Bytes(\"loom\").utf8_view()\n",
+        "in Ok(value) then value.byte_len()\n",
+        "in Err(_) then 0\n",
+        "end\n",
+        "left = b\"\\x0f\\xf0\"\n",
+        "right = b\"\\x33\\x55\"\n",
+        "bits = (left & right).len() + (left | right).len()\n",
+        "bits = bits + (left ^ right).len() + (~left).len()\n",
+        "(built_text.byte_len(), text_size, finished_text.byte_len(), byte, ",
+        "byte_size, finished_bytes.len(), slice_size, compact.len(), view_size, bits)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-builders.lm", source)
+        .expect("the builder construction case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(matches!(native, Outcome::Done(_)));
+    assert_eq!(metrics.compiled_interpreter_sites, 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn builder_construction_matches_each_fuel_boundary() {
+    let source = concat!(
+        "builder = StringBuilder()\n",
+        "text = builder.append(\"loom\").append_bool(false).build()\n",
+        "buffer = ByteBuffer()\n",
+        "bytes = buffer.reserve(8).append(1).extend(Bytes(text)).build()\n",
+        "(text, bytes)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-builder-fuel.lm", source)
+        .expect("the builder fuel case compiles");
+    for fuel in 0..=48 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn builder_faults_match_the_interpreter() {
+    let cases = [
+        (
+            "buffer = ByteBuffer()\nbuffer.append(256)\n",
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            "buffer = ByteBuffer()\nbuffer.reserve(-1)\n",
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            "builder = StringBuilder()\nbuilder.finish()\nbuilder.len()\n",
+            lm_vm::FaultCode::InvalidVmState,
+        ),
+        (
+            "buffer = ByteBuffer()\nbuffer.finish()\nbuffer.len()\n",
+            lm_vm::FaultCode::InvalidVmState,
+        ),
+    ];
+    for (source, expected) in cases {
+        let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted, "{metrics:?}");
+        assert_eq!(native_dump, interpreted_dump);
+        assert_eq!(native, Outcome::Fault(expected));
+    }
+}
+
+#[test]
+fn builder_growth_preserves_the_heap_limit() {
+    let source = concat!(
+        "builder = StringBuilder()\n",
+        "i = 0\n",
+        "while i < 10000\n",
+        "  builder.append(\"abcdefgh\")\n",
+        "  i = i + 1\n",
+        "end\n",
+        "builder.len()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-builder-limit.lm", source)
+        .expect("the builder limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1024,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+}
+
+#[test]
+fn a_native_callee_grows_shared_root_storage() {
+    let source = concat!(
+        "def wide(seed: String): Int\n",
+        "  a = seed\n  b = seed\n  c = seed\n  d = seed\n",
+        "  e = seed\n  f = seed\n  g = seed\n  h = seed\n",
+        "  i = seed\n  j = seed\n  k = seed\n  l = seed\n",
+        "  builder = StringBuilder()\n",
+        "  builder.append(a).append(b).append(c).append(d)\n",
+        "  builder.append(e).append(f).append(g).append(h)\n",
+        "  builder.append(i).append(j).append(k).append(l)\n",
+        "  builder.len()\nend\n",
+        "wide(\"x\")\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-root-growth.lm", source)
+        .expect("the root growth case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the root growth case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let run = || {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        lm_proc::run_world(&mut world)
+    };
+    assert_eq!(run(), Outcome::Done(lm_value::Value::Int(12)));
+    engine.reset_metrics();
+    assert_eq!(run(), Outcome::Done(lm_value::Value::Int(12)));
+    let metrics = engine.metrics();
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    assert_eq!(metrics.backend_unavailable_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn integer_overflow_matches_the_interpreter() {
     let source = "value = 9223372036854775807\nvalue + 1\n";
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);

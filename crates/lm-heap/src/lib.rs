@@ -11,6 +11,7 @@
 //! verification, inspection, and snapshot traversal all run there over
 //! one traversal engine.
 
+mod byte_array;
 pub mod shape;
 mod shared;
 mod value_array;
@@ -27,8 +28,11 @@ pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
 use shared::{
-    SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET, SHARED_TEXT_BYTE_LEN_OFFSET,
-    SHARED_TEXT_DATA_OFFSET, SHARED_TEXT_SCALAR_LEN_OFFSET,
+    BYTE_BUFFER_ACTIVE_OFFSET, BYTE_BUFFER_CAPACITY_OFFSET, BYTE_BUFFER_DATA_OFFSET,
+    BYTE_BUFFER_LEN_OFFSET, SHARED_BYTES_DATA_OFFSET, SHARED_BYTES_LEN_OFFSET,
+    SHARED_TEXT_BYTE_LEN_OFFSET, SHARED_TEXT_DATA_OFFSET, SHARED_TEXT_SCALAR_LEN_OFFSET,
+    STRING_BUILDER_ACTIVE_OFFSET, STRING_BUILDER_ASCII_OFFSET, STRING_BUILDER_BYTE_LEN_OFFSET,
+    STRING_BUILDER_CAPACITY_OFFSET, STRING_BUILDER_DATA_OFFSET, STRING_BUILDER_SCALAR_LEN_OFFSET,
 };
 use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
@@ -269,6 +273,36 @@ pub const JIT_OBJECT_BYTES: u32 = 8;
 pub const JIT_OBJECT_SUBSTRING: u32 = 9;
 /// Stable tag of one graph digest.
 pub const JIT_OBJECT_DIGEST: u32 = 20;
+/// Byte offset of the string-builder data pointer.
+pub const JIT_STRING_BUILDER_DATA_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_DATA_OFFSET;
+/// Byte offset of the string-builder byte length.
+pub const JIT_STRING_BUILDER_BYTE_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_BYTE_LEN_OFFSET;
+/// Byte offset of the string-builder capacity.
+pub const JIT_STRING_BUILDER_CAPACITY_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_CAPACITY_OFFSET;
+/// Byte offset of the string-builder scalar length.
+pub const JIT_STRING_BUILDER_SCALAR_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_SCALAR_LEN_OFFSET;
+/// Byte offset of the string-builder ASCII flag.
+pub const JIT_STRING_BUILDER_ASCII_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_ASCII_OFFSET;
+/// Byte offset of the string-builder active flag.
+pub const JIT_STRING_BUILDER_ACTIVE_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_ACTIVE_OFFSET;
+/// Byte offset of the byte-buffer data pointer.
+pub const JIT_BYTE_BUFFER_DATA_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + BYTE_BUFFER_DATA_OFFSET;
+/// Byte offset of the byte-buffer length.
+pub const JIT_BYTE_BUFFER_LEN_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + BYTE_BUFFER_LEN_OFFSET;
+/// Byte offset of the byte-buffer capacity.
+pub const JIT_BYTE_BUFFER_CAPACITY_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + BYTE_BUFFER_CAPACITY_OFFSET;
+/// Byte offset of the byte-buffer active flag.
+pub const JIT_BYTE_BUFFER_ACTIVE_OFFSET: usize =
+    JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + BYTE_BUFFER_ACTIVE_OFFSET;
 /// Byte offset of an instance class.
 pub const JIT_INSTANCE_CLASS_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET

@@ -1,7 +1,7 @@
 //! Verified bytecode analysis and immutable native region plans.
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
-use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr};
+use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr, NumericInstr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -199,6 +199,7 @@ pub enum ExitKind {
     GenericVirtualCall,
     CallbackCall,
     GuestFault,
+    GrowRoots,
 }
 
 /// One validated native exit record.
@@ -357,6 +358,8 @@ pub(super) enum ObjectContract {
     Closure,
     Bytes,
     Digest,
+    StringBuilder,
+    ByteBuffer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1828,6 +1831,125 @@ fn analyze_segment(
                     kind,
                 });
             }
+            Instr::Native(NativeInstr::SbNew | NativeInstr::BbNew) => {
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::SbBuild | NativeInstr::SbFinish | NativeInstr::BytesNew) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                if matches!(*instruction, Instr::Native(NativeInstr::BytesNew)) {
+                    let ScalarKind::Object(ty) = receiver else {
+                        return Err(UnsupportedReason::InvalidStack);
+                    };
+                    if !matches!(
+                        value_contract(context, ty)?.object,
+                        Some(ObjectContract::Str)
+                    ) {
+                        return Err(UnsupportedReason::InvalidStack);
+                    }
+                } else {
+                    string_builder_type(context, receiver)?;
+                }
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(
+                NativeInstr::BbBuild
+                | NativeInstr::BbFinish
+                | NativeInstr::BytesCompact
+                | NativeInstr::BytesTextView,
+            )
+            | Instr::Numeric(NumericInstr::BytesBitNot) => {
+                let receiver = stack_from_end(&before.stack, 0)?;
+                if matches!(
+                    *instruction,
+                    Instr::Native(NativeInstr::BbBuild | NativeInstr::BbFinish)
+                ) {
+                    byte_buffer_type(context, receiver)?;
+                } else {
+                    bytes_type(context.module, receiver)?;
+                }
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::SbAppendStr) => {
+                string_builder_type(context, stack_from_end(&before.stack, 1)?)?;
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::SbAppendInt)
+            | Instr::Native(NativeInstr::SbAppendBool)
+            | Instr::Native(NativeInstr::SbAppendChar)
+            | Instr::Numeric(NumericInstr::SbAppendFloat) => {
+                string_builder_type(context, stack_from_end(&before.stack, 1)?)?;
+                let expected = match instruction {
+                    Instr::Native(NativeInstr::SbAppendInt) => ScalarKind::Int,
+                    Instr::Native(NativeInstr::SbAppendBool) => ScalarKind::Bool,
+                    Instr::Native(NativeInstr::SbAppendChar) => ScalarKind::Char,
+                    Instr::Numeric(NumericInstr::SbAppendFloat) => ScalarKind::Float,
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                expect_scalar(stack_from_end(&before.stack, 0)?, expected)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::SbLen | NativeInstr::SbByteLen | NativeInstr::SbClear) => {
+                string_builder_type(context, stack_from_end(&before.stack, 0)?)?;
+            }
+            Instr::Native(NativeInstr::BbAppend | NativeInstr::BbReserve) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::BbExtend) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
+                bytes_type(context.module, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::BbLen | NativeInstr::BbClear) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 0)?)?;
+            }
+            Instr::Native(NativeInstr::BbAt) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+            }
+            Instr::Native(NativeInstr::BytesSlice) => {
+                bytes_type(context.module, stack_from_end(&before.stack, 2)?)?;
+                expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::BytesConcat)
+            | Instr::Numeric(
+                NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor,
+            ) => {
+                bytes_type(context.module, stack_from_end(&before.stack, 1)?)?;
+                bytes_type(context.module, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
             Instr::ListPush => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 1)?;
@@ -2283,6 +2405,42 @@ fn text_type(
     }
 }
 
+fn string_builder_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let contract = value_contract(context, ty)?;
+    match contract.object {
+        Some(ObjectContract::StringBuilder) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
+fn byte_buffer_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    let contract = value_contract(context, ty)?;
+    match contract.object {
+        Some(ObjectContract::ByteBuffer) => Ok(()),
+        _ => Err(UnsupportedReason::InvalidStack),
+    }
+}
+
+fn expect_scalar(receiver: ScalarKind, expected: ScalarKind) -> Result<(), UnsupportedReason> {
+    if receiver == expected {
+        Ok(())
+    } else {
+        Err(UnsupportedReason::InvalidStack)
+    }
+}
+
 fn class_test_target(
     context: &SegmentAnalysisContext<'_>,
     ty: u32,
@@ -2323,6 +2481,14 @@ fn value_contract(
             if [core.text, core.substring].contains(&Some(*class)) =>
         {
             Some(ObjectContract::Text)
+        }
+        Some(BcType::Class(class) | BcType::Inst(class, _))
+            if core.string_builder == Some(*class) =>
+        {
+            Some(ObjectContract::StringBuilder)
+        }
+        Some(BcType::Class(class) | BcType::Inst(class, _)) if core.byte_buffer == Some(*class) => {
+            Some(ObjectContract::ByteBuffer)
         }
         Some(BcType::Class(class) | BcType::Inst(class, _))
             if matches!(kind, ScalarKind::Object(_)) =>

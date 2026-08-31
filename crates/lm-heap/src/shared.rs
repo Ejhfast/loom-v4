@@ -1,5 +1,8 @@
 //! Shared byte storage for immutable text and binary values.
 
+use crate::byte_array::{
+    ByteArray, BYTE_ARRAY_CAPACITY_OFFSET, BYTE_ARRAY_DATA_OFFSET, BYTE_ARRAY_LEN_OFFSET,
+};
 use std::collections::hash_map::RandomState;
 use std::collections::TryReserveError;
 use std::fmt;
@@ -1034,129 +1037,176 @@ impl Hash for SharedBytes {
 
 /// A unique mutable UTF-8 buffer with an explicit finished state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(C)]
 pub struct NativeStringBuilder {
-    buffer: Option<String>,
+    buffer: ByteArray,
     scalar_len: usize,
-    ascii: bool,
+    ascii: u8,
+    active: u8,
+    reserved: [u8; 6],
 }
+
+pub(crate) const STRING_BUILDER_DATA_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, buffer) + BYTE_ARRAY_DATA_OFFSET;
+pub(crate) const STRING_BUILDER_BYTE_LEN_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, buffer) + BYTE_ARRAY_LEN_OFFSET;
+pub(crate) const STRING_BUILDER_CAPACITY_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, buffer) + BYTE_ARRAY_CAPACITY_OFFSET;
+pub(crate) const STRING_BUILDER_SCALAR_LEN_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, scalar_len);
+pub(crate) const STRING_BUILDER_ASCII_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, ascii);
+pub(crate) const STRING_BUILDER_ACTIVE_OFFSET: usize =
+    std::mem::offset_of!(NativeStringBuilder, active);
 
 impl NativeStringBuilder {
     /// Make an empty active builder.
     pub fn new() -> NativeStringBuilder {
         NativeStringBuilder {
-            buffer: Some(String::new()),
+            buffer: ByteArray::new(),
             scalar_len: 0,
-            ascii: true,
+            ascii: 1,
+            active: 1,
+            reserved: [0; 6],
         }
     }
 
     /// Get the active buffer.
-    pub fn buffer(&self) -> Option<&String> {
-        self.buffer.as_ref()
+    pub fn buffer(&self) -> Option<&str> {
+        if self.active == 0 {
+            return None;
+        }
+        // SAFETY: All builder operations preserve valid UTF-8.
+        Some(unsafe { std::str::from_utf8_unchecked(&self.buffer) })
     }
 
     /// Reserve more active buffer capacity.
     pub fn try_reserve(&mut self, additional: usize) -> Result<bool, TryReserveError> {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 {
             return Ok(false);
-        };
-        buffer.try_reserve(additional)?;
+        }
+        self.buffer.try_reserve(additional)?;
         Ok(true)
     }
 
     /// Get the maximum amortized capacity increase for one reserve.
     pub fn reserve_growth(&self, additional: usize) -> Option<usize> {
-        self.buffer
-            .as_ref()
-            .map(|buffer| amortized_growth(buffer.len(), buffer.capacity(), additional))
+        (self.active != 0)
+            .then(|| amortized_growth(self.buffer.len(), self.buffer.capacity(), additional))
     }
 
     /// Get the Unicode scalar length.
     pub fn scalar_len(&self) -> Option<usize> {
-        self.buffer.as_ref().map(|_| self.scalar_len)
+        (self.active != 0).then_some(self.scalar_len)
     }
 
     /// Get the UTF-8 byte length.
     pub fn byte_len(&self) -> Option<usize> {
-        self.buffer.as_ref().map(String::len)
+        (self.active != 0).then_some(self.buffer.len())
     }
 
     /// Get the active buffer ASCII state.
     pub fn is_ascii(&self) -> Option<bool> {
-        self.buffer.as_ref().map(|_| self.ascii)
+        (self.active != 0).then_some(self.ascii != 0)
     }
 
     /// Append validated text.
     pub fn append(&mut self, text: &SharedText) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 || self.buffer.try_reserve(text.len()).is_err() {
             return false;
-        };
-        buffer.push_str(text.as_str());
+        }
+        self.buffer.extend_from_slice(text.as_str().as_bytes());
         self.scalar_len = self.scalar_len.saturating_add(text.char_count());
-        self.ascii &= text.is_ascii();
+        self.ascii &= u8::from(text.is_ascii());
         true
     }
 
     /// Append validated UTF-8 text.
     pub fn append_str(&mut self, text: &str) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 || self.buffer.try_reserve(text.len()).is_err() {
             return false;
-        };
-        buffer.push_str(text);
+        }
+        self.buffer.extend_from_slice(text.as_bytes());
         self.scalar_len = self.scalar_len.saturating_add(text.chars().count());
-        self.ascii &= text.is_ascii();
+        self.ascii &= u8::from(text.is_ascii());
         true
     }
 
     /// Append one integer in decimal form.
     pub fn append_int(&mut self, value: i64) -> bool {
-        use std::fmt::Write as _;
-
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 {
             return false;
-        };
-        let old_len = buffer.len();
-        write!(buffer, "{value}").expect("writing to String cannot fail");
-        self.scalar_len = self.scalar_len.saturating_add(buffer.len() - old_len);
+        }
+        let mut digits = [0u8; 20];
+        let mut cursor = digits.len();
+        let negative = value < 0;
+        let mut magnitude = value.unsigned_abs();
+        loop {
+            cursor -= 1;
+            digits[cursor] = b'0' + (magnitude % 10) as u8;
+            magnitude /= 10;
+            if magnitude == 0 {
+                break;
+            }
+        }
+        if negative {
+            cursor -= 1;
+            digits[cursor] = b'-';
+        }
+        let text = &digits[cursor..];
+        if self.buffer.try_reserve(text.len()).is_err() {
+            return false;
+        }
+        self.buffer.extend_from_slice(text);
+        self.scalar_len = self.scalar_len.saturating_add(text.len());
         true
     }
 
     /// Append one Unicode scalar.
     pub fn push(&mut self, value: char) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 || self.buffer.try_reserve(value.len_utf8()).is_err() {
             return false;
-        };
-        buffer.push(value);
+        }
+        let mut bytes = [0u8; 4];
+        let text = value.encode_utf8(&mut bytes);
+        self.buffer.extend_from_slice(text.as_bytes());
         self.scalar_len = self.scalar_len.saturating_add(1);
-        self.ascii &= value.is_ascii();
+        self.ascii &= u8::from(value.is_ascii());
         true
     }
 
     /// Clear the active buffer.
     pub fn clear(&mut self) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 {
             return false;
-        };
-        buffer.clear();
+        }
+        self.buffer.clear();
         self.scalar_len = 0;
-        self.ascii = true;
+        self.ascii = 1;
         true
     }
 
     /// Move the buffer and its metadata out, then finish this builder.
     pub fn finish(&mut self) -> Option<(String, usize, bool)> {
-        let buffer = self.buffer.take()?;
+        if self.active == 0 {
+            return None;
+        }
+        self.active = 0;
+        let bytes = std::mem::take(&mut self.buffer).into_vec();
+        // SAFETY: All builder operations preserve valid UTF-8.
+        let buffer = unsafe { String::from_utf8_unchecked(bytes) };
         let scalar_len = std::mem::take(&mut self.scalar_len);
-        let ascii = std::mem::replace(&mut self.ascii, true);
+        let ascii = std::mem::replace(&mut self.ascii, 1) != 0;
         Some((buffer, scalar_len, ascii))
     }
 
     /// Get the retained mutable capacity.
     pub fn retained_capacity(&self) -> usize {
-        self.buffer
-            .as_ref()
-            .map(|value| value.capacity())
-            .unwrap_or(0)
+        if self.active == 0 {
+            0
+        } else {
+            self.buffer.capacity()
+        }
     }
 
     /// Restore an active builder from snapshot text.
@@ -1168,33 +1218,39 @@ impl NativeStringBuilder {
             buffer.chars().count()
         };
         NativeStringBuilder {
-            buffer: Some(buffer),
+            buffer: buffer.into_bytes().into(),
             scalar_len,
-            ascii,
+            ascii: u8::from(ascii),
+            active: 1,
+            reserved: [0; 6],
         }
     }
 
     /// Restore a finished builder.
     pub fn finished() -> NativeStringBuilder {
         NativeStringBuilder {
-            buffer: None,
+            buffer: ByteArray::new(),
             scalar_len: 0,
-            ascii: true,
+            ascii: 1,
+            active: 0,
+            reserved: [0; 6],
         }
     }
 
     /// Copy this builder with a fallible buffer allocation.
     pub fn try_clone_buffer(&self) -> Result<NativeStringBuilder, TryReserveError> {
-        let Some(source) = self.buffer.as_ref() else {
+        let Some(source) = self.buffer() else {
             return Ok(NativeStringBuilder::finished());
         };
         let mut buffer = String::new();
         buffer.try_reserve_exact(source.len())?;
         buffer.push_str(source);
         Ok(NativeStringBuilder {
-            buffer: Some(buffer),
+            buffer: buffer.into_bytes().into(),
             scalar_len: self.scalar_len,
             ascii: self.ascii,
+            active: 1,
+            reserved: [0; 6],
         })
     }
 }
@@ -1205,77 +1261,105 @@ impl Default for NativeStringBuilder {
     }
 }
 
+#[cfg(test)]
+mod native_builder_tests {
+    use super::NativeStringBuilder;
+
+    #[test]
+    fn one_exact_growth_preserves_builder_ownership() {
+        let mut builder = NativeStringBuilder::from_string("123456789".to_string());
+        assert!(builder.try_reserve(28).expect("the exact reserve succeeds"));
+        assert!(builder.append_str("1234567890123456789012345678"));
+        assert_eq!(
+            builder.buffer(),
+            Some("1234567891234567890123456789012345678")
+        );
+    }
+}
+
 /// A unique mutable byte buffer with an explicit finished state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(C)]
 pub struct NativeByteBuffer {
-    buffer: Option<Vec<u8>>,
+    buffer: ByteArray,
+    active: u8,
+    reserved: [u8; 7],
 }
+
+pub(crate) const BYTE_BUFFER_DATA_OFFSET: usize =
+    std::mem::offset_of!(NativeByteBuffer, buffer) + BYTE_ARRAY_DATA_OFFSET;
+pub(crate) const BYTE_BUFFER_LEN_OFFSET: usize =
+    std::mem::offset_of!(NativeByteBuffer, buffer) + BYTE_ARRAY_LEN_OFFSET;
+pub(crate) const BYTE_BUFFER_CAPACITY_OFFSET: usize =
+    std::mem::offset_of!(NativeByteBuffer, buffer) + BYTE_ARRAY_CAPACITY_OFFSET;
+pub(crate) const BYTE_BUFFER_ACTIVE_OFFSET: usize = std::mem::offset_of!(NativeByteBuffer, active);
 
 impl NativeByteBuffer {
     /// Make an empty active buffer.
     pub fn new() -> NativeByteBuffer {
         NativeByteBuffer {
-            buffer: Some(Vec::new()),
+            buffer: ByteArray::new(),
+            active: 1,
+            reserved: [0; 7],
         }
     }
 
     /// Get the active bytes.
-    pub fn buffer(&self) -> Option<&Vec<u8>> {
-        self.buffer.as_ref()
+    pub fn buffer(&self) -> Option<&[u8]> {
+        (self.active != 0).then_some(self.buffer.as_ref())
     }
 
     /// Reserve more active buffer capacity.
     pub fn try_reserve(&mut self, additional: usize) -> Result<bool, TryReserveError> {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 {
             return Ok(false);
-        };
-        buffer.try_reserve(additional)?;
+        }
+        self.buffer.try_reserve(additional)?;
         Ok(true)
     }
 
     /// Get the maximum amortized capacity increase for one reserve.
     pub fn reserve_growth(&self, additional: usize) -> Option<usize> {
-        self.buffer
-            .as_ref()
-            .map(|buffer| amortized_growth(buffer.len(), buffer.capacity(), additional))
+        (self.active != 0)
+            .then(|| amortized_growth(self.buffer.len(), self.buffer.capacity(), additional))
     }
 
     /// Append one byte to the active buffer.
     pub fn push(&mut self, byte: u8) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 || self.buffer.try_reserve(1).is_err() {
             return false;
-        };
-        buffer.push(byte);
+        }
+        self.buffer.push(byte);
         true
     }
 
     /// Append immutable bytes to the active buffer.
     pub fn extend(&mut self, bytes: &SharedBytes) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 || self.buffer.try_reserve(bytes.len()).is_err() {
             return false;
-        };
-        buffer.extend_from_slice(bytes.as_slice());
+        }
+        self.buffer.extend_from_slice(bytes.as_slice());
         true
     }
 
     /// Get the active byte length.
     pub fn len(&self) -> Option<usize> {
-        self.buffer.as_ref().map(Vec::len)
+        (self.active != 0).then_some(self.buffer.len())
     }
 
     /// Test whether the active buffer is empty.
     pub fn is_empty(&self) -> Option<bool> {
-        self.buffer.as_ref().map(Vec::is_empty)
+        (self.active != 0).then_some(self.buffer.is_empty())
     }
 
     /// Read one byte from an active buffer.
     pub fn at(&self, index: usize) -> Option<u8> {
-        self.buffer.as_ref()?.get(index).copied()
+        self.buffer()?.get(index).copied()
     }
 
     /// Find immutable bytes at or after one active-buffer position.
     pub fn find_from(&self, needle: &SharedBytes, start: usize) -> Option<usize> {
-        let bytes = self.buffer.as_ref()?;
+        let bytes = self.buffer()?;
         let tail = bytes.get(start..)?;
         if needle.is_empty() {
             return Some(start);
@@ -1287,41 +1371,52 @@ impl NativeByteBuffer {
 
     /// Clear the active buffer.
     pub fn clear(&mut self) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        if self.active == 0 {
             return false;
-        };
-        buffer.clear();
+        }
+        self.buffer.clear();
         true
     }
 
     /// Move the bytes out and mark this buffer as finished.
     pub fn finish(&mut self) -> Option<Vec<u8>> {
-        self.buffer.take()
+        if self.active == 0 {
+            return None;
+        }
+        self.active = 0;
+        Some(std::mem::take(&mut self.buffer).into_vec())
     }
 
     /// Get the retained mutable capacity.
     pub fn retained_capacity(&self) -> usize {
-        self.buffer
-            .as_ref()
-            .map(|value| value.capacity())
-            .unwrap_or(0)
+        if self.active == 0 {
+            0
+        } else {
+            self.buffer.capacity()
+        }
     }
 
     /// Restore an active buffer from snapshot bytes.
     pub fn from_vec(buffer: Vec<u8>) -> NativeByteBuffer {
         NativeByteBuffer {
-            buffer: Some(buffer),
+            buffer: buffer.into(),
+            active: 1,
+            reserved: [0; 7],
         }
     }
 
     /// Restore a finished buffer.
     pub fn finished() -> NativeByteBuffer {
-        NativeByteBuffer { buffer: None }
+        NativeByteBuffer {
+            buffer: ByteArray::new(),
+            active: 0,
+            reserved: [0; 7],
+        }
     }
 
     /// Copy this buffer with a fallible allocation.
     pub fn try_clone_buffer(&self) -> Result<NativeByteBuffer, TryReserveError> {
-        let Some(source) = self.buffer.as_ref() else {
+        let Some(source) = self.buffer() else {
             return Ok(NativeByteBuffer::finished());
         };
         let mut buffer = Vec::new();

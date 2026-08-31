@@ -14,7 +14,7 @@ use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
     NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_CALL, EXIT_CALLBACK_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
-    EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
+    EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
     EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
     EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
     EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
@@ -30,17 +30,22 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET,
-    JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET,
-    JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET,
-    JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE,
-    JIT_INSTANCE_CLASS_OFFSET, JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET,
-    JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET,
-    JIT_OBJECT_BYTES, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST,
-    JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK,
-    JIT_PAGE_SHIFT, JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET,
-    JIT_TUPLE_ITEMS_OFFSET, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET,
-    VALUE_ARRAY_LEN_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+    JIT_BYTE_BUFFER_CAPACITY_OFFSET, JIT_BYTE_BUFFER_DATA_OFFSET, JIT_BYTE_BUFFER_LEN_OFFSET,
+    JIT_CLOSURE_CAPTURES_OFFSET, JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET,
+    JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
+    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
+    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
+    JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES,
+    JIT_OBJECT_BYTE_BUFFER, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE,
+    JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_STRING_BUILDER,
+    JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
+    JIT_STRING_BUILDER_ACTIVE_OFFSET, JIT_STRING_BUILDER_ASCII_OFFSET,
+    JIT_STRING_BUILDER_BYTE_LEN_OFFSET, JIT_STRING_BUILDER_CAPACITY_OFFSET,
+    JIT_STRING_BUILDER_DATA_OFFSET, JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET,
+    JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
+    VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
@@ -320,6 +325,7 @@ struct NativeValues<'a> {
     object_binary_signature: ir::SigRef,
     object_unary_signature: ir::SigRef,
     digest_signature: ir::SigRef,
+    heap_operation_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -706,6 +712,25 @@ fn emit_region(
     digest_signature.params.push(AbiParam::new(pointer_type));
     digest_signature.returns.push(AbiParam::new(types::I32));
     let digest_signature = builder.import_signature(digest_signature);
+    let mut heap_operation_signature = ir::Signature::new(host_call_conv);
+    heap_operation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..3 {
+        heap_operation_signature
+            .params
+            .push(AbiParam::new(types::I64));
+    }
+    heap_operation_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    heap_operation_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    heap_operation_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let heap_operation_signature = builder.import_signature(heap_operation_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -843,6 +868,7 @@ fn emit_region(
         object_binary_signature,
         object_unary_signature,
         digest_signature,
+        heap_operation_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -3045,6 +3071,371 @@ fn emit_segment(
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Object(0), reference)?;
             }
+            Instr::Native(
+                NativeInstr::SbAppendStr
+                | NativeInstr::SbAppendBool
+                | NativeInstr::BbAppend
+                | NativeInstr::BbExtend
+                | NativeInstr::BbReserve,
+            ) => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let deopt_stack = stack.clone();
+                let roots =
+                    collect_native_roots(builder, values, &plan.local_kinds, &site.stack, &stack)?;
+                let point = FaultPoint {
+                    block: segment.block,
+                    instruction: position + 1,
+                    prefix: fault_prefix,
+                };
+                let result = match instruction {
+                    Instr::Native(NativeInstr::SbAppendStr) => {
+                        let source = pop_native(&mut stack)?;
+                        let target = pop_native(&mut stack)?;
+                        emit_string_builder_append_text(
+                            builder,
+                            values,
+                            target,
+                            source,
+                            &roots,
+                            HeapExitEmission {
+                                point,
+                                fault_stack: &stack,
+                                deopt_stack: &deopt_stack,
+                            },
+                        )?
+                    }
+                    Instr::Native(NativeInstr::SbAppendBool) => {
+                        let value = pop_native(&mut stack)?;
+                        let target = pop_native(&mut stack)?;
+                        emit_string_builder_append_bool(
+                            builder,
+                            values,
+                            target,
+                            value,
+                            &roots,
+                            HeapExitEmission {
+                                point,
+                                fault_stack: &stack,
+                                deopt_stack: &deopt_stack,
+                            },
+                        )?
+                    }
+                    Instr::Native(NativeInstr::BbAppend) => {
+                        let value = pop_native(&mut stack)?;
+                        let target = pop_native(&mut stack)?;
+                        emit_byte_buffer_append(
+                            builder,
+                            values,
+                            target,
+                            value,
+                            &roots,
+                            HeapExitEmission {
+                                point,
+                                fault_stack: &stack,
+                                deopt_stack: &deopt_stack,
+                            },
+                        )?
+                    }
+                    Instr::Native(NativeInstr::BbExtend) => {
+                        let source = pop_native(&mut stack)?;
+                        let target = pop_native(&mut stack)?;
+                        emit_byte_buffer_extend(
+                            builder,
+                            values,
+                            target,
+                            source,
+                            &roots,
+                            HeapExitEmission {
+                                point,
+                                fault_stack: &stack,
+                                deopt_stack: &deopt_stack,
+                            },
+                        )?
+                    }
+                    Instr::Native(NativeInstr::BbReserve) => {
+                        let additional = pop_native(&mut stack)?;
+                        let target = pop_native(&mut stack)?;
+                        emit_byte_buffer_reserve(
+                            builder,
+                            values,
+                            target,
+                            additional,
+                            &roots,
+                            HeapExitEmission {
+                                point,
+                                fault_stack: &stack,
+                                deopt_stack: &deopt_stack,
+                            },
+                        )?
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
+            }
+            Instr::Native(
+                NativeInstr::SbNew
+                | NativeInstr::SbAppendInt
+                | NativeInstr::SbBuild
+                | NativeInstr::SbAppendChar
+                | NativeInstr::SbFinish
+                | NativeInstr::BbNew
+                | NativeInstr::BbBuild
+                | NativeInstr::BbFinish
+                | NativeInstr::BytesNew
+                | NativeInstr::BytesSlice
+                | NativeInstr::BytesConcat
+                | NativeInstr::BytesCompact
+                | NativeInstr::BytesTextView,
+            )
+            | Instr::Numeric(
+                NumericInstr::SbAppendFloat
+                | NumericInstr::BytesBitAnd
+                | NumericInstr::BytesBitOr
+                | NumericInstr::BytesBitXor
+                | NumericInstr::BytesBitNot,
+            ) => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let deopt_stack = stack.clone();
+                let roots =
+                    collect_native_roots(builder, values, &plan.local_kinds, &site.stack, &stack)?;
+                let zero = builder.ins().iconst(types::I64, 0);
+                let (arguments, function_offset) = match instruction {
+                    Instr::Native(NativeInstr::SbNew) => (
+                        [zero, zero, zero],
+                        mem::offset_of!(RawNativeFunctions, string_builder_new),
+                    ),
+                    Instr::Native(NativeInstr::BbNew) => (
+                        [zero, zero, zero],
+                        mem::offset_of!(RawNativeFunctions, byte_buffer_new),
+                    ),
+                    Instr::Native(NativeInstr::SbAppendInt) => {
+                        let value = pop_native(&mut stack)?;
+                        let builder_value = pop_native(&mut stack)?;
+                        (
+                            [builder_value, value, zero],
+                            mem::offset_of!(RawNativeFunctions, string_builder_append_int),
+                        )
+                    }
+                    Instr::Native(NativeInstr::SbAppendChar) => {
+                        let value = pop_native(&mut stack)?;
+                        let builder_value = pop_native(&mut stack)?;
+                        (
+                            [builder_value, value, zero],
+                            mem::offset_of!(RawNativeFunctions, string_builder_append_char),
+                        )
+                    }
+                    Instr::Numeric(NumericInstr::SbAppendFloat) => {
+                        let value = pop_native(&mut stack)?;
+                        let builder_value = pop_native(&mut stack)?;
+                        (
+                            [builder_value, value, zero],
+                            mem::offset_of!(RawNativeFunctions, string_builder_append_float),
+                        )
+                    }
+                    Instr::Native(NativeInstr::SbBuild) => {
+                        let builder_value = pop_native(&mut stack)?;
+                        (
+                            [builder_value, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, string_builder_build),
+                        )
+                    }
+                    Instr::Native(NativeInstr::SbFinish) => {
+                        let builder_value = pop_native(&mut stack)?;
+                        (
+                            [builder_value, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, string_builder_finish),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BbBuild) => {
+                        let buffer = pop_native(&mut stack)?;
+                        (
+                            [buffer, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, byte_buffer_build),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BbFinish) => {
+                        let buffer = pop_native(&mut stack)?;
+                        (
+                            [buffer, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, byte_buffer_finish),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesNew) => {
+                        let source = pop_native(&mut stack)?;
+                        (
+                            [source, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_from_text),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesSlice) => {
+                        let length = pop_native(&mut stack)?;
+                        let start = pop_native(&mut stack)?;
+                        let source = pop_native(&mut stack)?;
+                        (
+                            [source, start, length],
+                            mem::offset_of!(RawNativeFunctions, bytes_slice),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesConcat) => {
+                        let right = pop_native(&mut stack)?;
+                        let left = pop_native(&mut stack)?;
+                        (
+                            [left, right, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_concat),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesCompact) => {
+                        let source = pop_native(&mut stack)?;
+                        (
+                            [source, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_compact),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesTextView) => {
+                        let source = pop_native(&mut stack)?;
+                        (
+                            [source, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_text_view),
+                        )
+                    }
+                    Instr::Numeric(NumericInstr::BytesBitAnd) => {
+                        let right = pop_native(&mut stack)?;
+                        let left = pop_native(&mut stack)?;
+                        (
+                            [left, right, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_bit_and),
+                        )
+                    }
+                    Instr::Numeric(NumericInstr::BytesBitOr) => {
+                        let right = pop_native(&mut stack)?;
+                        let left = pop_native(&mut stack)?;
+                        (
+                            [left, right, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_bit_or),
+                        )
+                    }
+                    Instr::Numeric(NumericInstr::BytesBitXor) => {
+                        let right = pop_native(&mut stack)?;
+                        let left = pop_native(&mut stack)?;
+                        (
+                            [left, right, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_bit_xor),
+                        )
+                    }
+                    Instr::Numeric(NumericInstr::BytesBitNot) => {
+                        let source = pop_native(&mut stack)?;
+                        (
+                            [source, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_bit_not),
+                        )
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_heap_operation(
+                    builder,
+                    values,
+                    function_offset,
+                    arguments,
+                    &roots,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
+            }
+            Instr::Native(NativeInstr::SbLen | NativeInstr::SbByteLen | NativeInstr::BbLen) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let position = segment.start + within as u32;
+                let (tag, active, length) = match instruction {
+                    Instr::Native(NativeInstr::SbLen) => (
+                        JIT_OBJECT_STRING_BUILDER,
+                        JIT_STRING_BUILDER_ACTIVE_OFFSET,
+                        JIT_STRING_BUILDER_SCALAR_LEN_OFFSET,
+                    ),
+                    Instr::Native(NativeInstr::SbByteLen) => (
+                        JIT_OBJECT_STRING_BUILDER,
+                        JIT_STRING_BUILDER_ACTIVE_OFFSET,
+                        JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+                    ),
+                    Instr::Native(NativeInstr::BbLen) => (
+                        JIT_OBJECT_BYTE_BUFFER,
+                        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+                        JIT_BYTE_BUFFER_LEN_OFFSET,
+                    ),
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_builder_len(
+                    builder,
+                    values,
+                    reference,
+                    tag,
+                    (active, length),
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: position + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
+            }
+            Instr::Native(NativeInstr::SbClear | NativeInstr::BbClear) => {
+                let deopt_stack = stack.clone();
+                let reference = pop_native(&mut stack)?;
+                let position = segment.start + within as u32;
+                emit_builder_clear(
+                    builder,
+                    values,
+                    reference,
+                    matches!(instruction, Instr::Native(NativeInstr::SbClear)),
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Object(0), reference)?;
+            }
+            Instr::Native(NativeInstr::BbAt) => {
+                let deopt_stack = stack.clone();
+                let index = pop_native(&mut stack)?;
+                let reference = pop_native(&mut stack)?;
+                let position = segment.start + within as u32;
+                let result = emit_byte_buffer_at(
+                    builder,
+                    values,
+                    reference,
+                    index,
+                    FaultPoint {
+                        block: segment.block,
+                        instruction: position + 1,
+                        prefix: fault_prefix,
+                    },
+                    &deopt_stack,
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Int, result)?;
+            }
             Instr::Native(NativeInstr::BytesLen) => {
                 let deopt_stack = stack.clone();
                 let reference = pop_native(&mut stack)?;
@@ -4585,6 +4976,8 @@ fn emit_native_call(
     let fuel_exit = builder.create_block();
     let lookup = builder.create_block();
     let fallback = builder.create_block();
+    let root_check = builder.create_block();
+    let grow_roots = builder.create_block();
     let stack_limit = builder.create_block();
     let capacity = builder.create_block();
     let storage = builder.create_block();
@@ -4653,7 +5046,39 @@ fn emit_native_call(
         .atomic_load(values.pointer_type, MemFlags::new(), cell);
     let published = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
     let limits = builder.create_block();
-    builder.ins().brif(published, limits, &[], fallback, &[]);
+    builder
+        .ins()
+        .brif(published, root_check, &[], fallback, &[]);
+
+    builder.switch_to_block(root_check);
+    let required_roots = load_cell_u32(builder, cell, mem::offset_of!(NativeEntryCell, max_roots))?;
+    let root_capacity = load_activation_u32(builder, values, RawActivationField::RootCapacity)?;
+    let roots_fit = builder.ins().icmp(
+        IntCC::UnsignedLessThanOrEqual,
+        required_roots,
+        root_capacity,
+    );
+    builder.ins().brif(roots_fit, limits, &[], grow_roots, &[]);
+
+    builder.switch_to_block(grow_roots);
+    let retired = builder.use_var(values.retired);
+    let required_roots = builder.ins().uextend(types::I64, required_roots);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_GROW_ROOTS,
+            block,
+            instruction,
+            result: NativeValue {
+                bits: required_roots,
+                tag: zero,
+            },
+        },
+        &boundary_stack,
+    )?;
 
     builder.switch_to_block(limits);
     let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
@@ -6998,6 +7423,761 @@ fn emit_bytes_get(
     Ok(builder.block_params(done)[0])
 }
 
+fn emit_string_builder_append_text(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    target: ir::Value,
+    source: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let target_entry = emit_object_entry(
+        builder,
+        values,
+        target,
+        JIT_OBJECT_STRING_BUILDER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, target_entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        target_entry,
+        JIT_STRING_BUILDER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let source_entry = emit_text_entry(
+        builder,
+        values,
+        source,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let target_len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_CAPACITY_OFFSET,
+    )?;
+    let invalid_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, capacity, target_len);
+    emit_interpreter_replay(
+        builder,
+        values,
+        invalid_capacity,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let source_len = load_value(
+        builder,
+        values.pointer_type,
+        source_entry,
+        JIT_TEXT_BYTE_LEN_OFFSET,
+    )?;
+    let next_len = builder.ins().iadd(target_len, source_len);
+    let overflow = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, next_len, target_len);
+    let within_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, next_len, capacity);
+    let no_overflow = builder.ins().bxor_imm(overflow, 1);
+    let fast = builder.ins().band(no_overflow, within_capacity);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let copy_block = builder.create_block();
+    let copied_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let nonempty = builder.ins().icmp_imm(IntCC::NotEqual, source_len, 0);
+    builder
+        .ins()
+        .brif(nonempty, copy_block, &[], copied_block, &[]);
+
+    builder.switch_to_block(copy_block);
+    let target_data = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_DATA_OFFSET,
+    )?;
+    let destination = builder.ins().iadd(target_data, target_len);
+    let source_data = load_value(
+        builder,
+        values.pointer_type,
+        source_entry,
+        JIT_TEXT_DATA_OFFSET,
+    )?;
+    builder.call_memmove(values.frontend_config, destination, source_data, source_len);
+    builder.ins().jump(copied_block, &[]);
+
+    builder.switch_to_block(copied_block);
+    store_native_value(
+        builder,
+        target_entry,
+        JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+        next_len,
+    )?;
+    let target_scalars = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_SCALAR_LEN_OFFSET,
+    )?;
+    let source_scalars = load_value(
+        builder,
+        values.pointer_type,
+        source_entry,
+        JIT_TEXT_SCALAR_LEN_OFFSET,
+    )?;
+    let next_scalars = builder.ins().iadd(target_scalars, source_scalars);
+    store_native_value(
+        builder,
+        target_entry,
+        JIT_STRING_BUILDER_SCALAR_LEN_OFFSET,
+        next_scalars,
+    )?;
+    let target_ascii = load_value(
+        builder,
+        types::I8,
+        target_entry,
+        JIT_STRING_BUILDER_ASCII_OFFSET,
+    )?;
+    let source_ascii = builder.ins().icmp(IntCC::Equal, source_len, source_scalars);
+    let next_ascii = builder.ins().band(target_ascii, source_ascii);
+    store_i8_value(
+        builder,
+        target_entry,
+        JIT_STRING_BUILDER_ASCII_OFFSET,
+        next_ascii,
+    )?;
+    builder.ins().jump(done, &[target.into()]);
+
+    builder.switch_to_block(slow_block);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let result = emit_heap_operation(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, string_builder_append_text),
+        [target, source, zero],
+        roots,
+        exit,
+    )?;
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_string_builder_append_bool(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    target: ir::Value,
+    value: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let target_entry = emit_object_entry(
+        builder,
+        values,
+        target,
+        JIT_OBJECT_STRING_BUILDER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, target_entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        target_entry,
+        JIT_STRING_BUILDER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let target_len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_CAPACITY_OFFSET,
+    )?;
+    let invalid_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, capacity, target_len);
+    emit_interpreter_replay(
+        builder,
+        values,
+        invalid_capacity,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let truth = builder.ins().icmp_imm(IntCC::NotEqual, value, 0);
+    let true_len = builder.ins().iconst(values.pointer_type, 4);
+    let false_len = builder.ins().iconst(values.pointer_type, 5);
+    let added = builder.ins().select(truth, true_len, false_len);
+    let next_len = builder.ins().iadd(target_len, added);
+    let overflow = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, next_len, target_len);
+    let within_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, next_len, capacity);
+    let no_overflow = builder.ins().bxor_imm(overflow, 1);
+    let fast = builder.ins().band(no_overflow, within_capacity);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let true_block = builder.create_block();
+    let false_block = builder.create_block();
+    let written_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_DATA_OFFSET,
+    )?;
+    let destination = builder.ins().iadd(data, target_len);
+    builder.ins().brif(truth, true_block, &[], false_block, &[]);
+
+    builder.switch_to_block(true_block);
+    for (offset, byte) in b"true".iter().copied().enumerate() {
+        let value = builder.ins().iconst(types::I8, i64::from(byte));
+        store_i8_value(builder, destination, offset, value)?;
+    }
+    builder.ins().jump(written_block, &[]);
+
+    builder.switch_to_block(false_block);
+    for (offset, byte) in b"false".iter().copied().enumerate() {
+        let value = builder.ins().iconst(types::I8, i64::from(byte));
+        store_i8_value(builder, destination, offset, value)?;
+    }
+    builder.ins().jump(written_block, &[]);
+
+    builder.switch_to_block(written_block);
+    store_native_value(
+        builder,
+        target_entry,
+        JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+        next_len,
+    )?;
+    let scalar_len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_STRING_BUILDER_SCALAR_LEN_OFFSET,
+    )?;
+    let scalar_len = builder.ins().iadd(scalar_len, added);
+    store_native_value(
+        builder,
+        target_entry,
+        JIT_STRING_BUILDER_SCALAR_LEN_OFFSET,
+        scalar_len,
+    )?;
+    builder.ins().jump(done, &[target.into()]);
+
+    builder.switch_to_block(slow_block);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let result = emit_heap_operation(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, string_builder_append_bool),
+        [target, value, zero],
+        roots,
+        exit,
+    )?;
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_byte_buffer_append(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    target: ir::Value,
+    value: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let target_entry = emit_object_entry(
+        builder,
+        values,
+        target,
+        JIT_OBJECT_BYTE_BUFFER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, target_entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        target_entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value, 0);
+    let too_large = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, value, i64::from(u8::MAX));
+    let invalid = builder.ins().bor(negative, too_large);
+    emit_fault_check(
+        builder,
+        values,
+        invalid,
+        EXIT_INTEGER_OVERFLOW,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_CAPACITY_OFFSET,
+    )?;
+    let fast = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_DATA_OFFSET,
+    )?;
+    let destination = builder.ins().iadd(data, len);
+    let byte = builder.ins().ireduce(types::I8, value);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), byte, destination, 0);
+    let next_len = builder.ins().iadd_imm(len, 1);
+    store_native_value(builder, target_entry, JIT_BYTE_BUFFER_LEN_OFFSET, next_len)?;
+    builder.ins().jump(done, &[target.into()]);
+
+    builder.switch_to_block(slow_block);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let result = emit_heap_operation(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, byte_buffer_append),
+        [target, value, zero],
+        roots,
+        exit,
+    )?;
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_byte_buffer_extend(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    target: ir::Value,
+    source: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let target_entry = emit_object_entry(
+        builder,
+        values,
+        target,
+        JIT_OBJECT_BYTE_BUFFER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, target_entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        target_entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let source_entry = emit_object_entry(
+        builder,
+        values,
+        source,
+        JIT_OBJECT_BYTES,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    let target_len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_CAPACITY_OFFSET,
+    )?;
+    let invalid_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, capacity, target_len);
+    emit_interpreter_replay(
+        builder,
+        values,
+        invalid_capacity,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let source_len = load_value(
+        builder,
+        values.pointer_type,
+        source_entry,
+        JIT_BYTES_LEN_OFFSET,
+    )?;
+    let next_len = builder.ins().iadd(target_len, source_len);
+    let overflow = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, next_len, target_len);
+    let within_capacity = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, next_len, capacity);
+    let no_overflow = builder.ins().bxor_imm(overflow, 1);
+    let fast = builder.ins().band(no_overflow, within_capacity);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let copy_block = builder.create_block();
+    let copied_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let nonempty = builder.ins().icmp_imm(IntCC::NotEqual, source_len, 0);
+    builder
+        .ins()
+        .brif(nonempty, copy_block, &[], copied_block, &[]);
+
+    builder.switch_to_block(copy_block);
+    let target_data = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_DATA_OFFSET,
+    )?;
+    let destination = builder.ins().iadd(target_data, target_len);
+    let source_data = load_value(
+        builder,
+        values.pointer_type,
+        source_entry,
+        JIT_BYTES_DATA_OFFSET,
+    )?;
+    builder.call_memmove(values.frontend_config, destination, source_data, source_len);
+    builder.ins().jump(copied_block, &[]);
+
+    builder.switch_to_block(copied_block);
+    store_native_value(builder, target_entry, JIT_BYTE_BUFFER_LEN_OFFSET, next_len)?;
+    builder.ins().jump(done, &[target.into()]);
+
+    builder.switch_to_block(slow_block);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let result = emit_heap_operation(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, byte_buffer_extend),
+        [target, source, zero],
+        roots,
+        exit,
+    )?;
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_byte_buffer_reserve(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    target: ir::Value,
+    additional: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let runtime_additional = additional;
+    let target_entry = emit_object_entry(
+        builder,
+        values,
+        target,
+        JIT_OBJECT_BYTE_BUFFER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, target_entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        target_entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, additional, 0);
+    emit_fault_check(
+        builder,
+        values,
+        negative,
+        EXIT_INTEGER_OVERFLOW,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    let additional = if values.pointer_type == types::I64 {
+        additional
+    } else {
+        let too_large =
+            builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, additional, i64::from(u32::MAX));
+        emit_fault_check(
+            builder,
+            values,
+            too_large,
+            EXIT_INTEGER_OVERFLOW,
+            exit.point,
+            exit.fault_stack,
+        )?;
+        builder.ins().ireduce(values.pointer_type, additional)
+    };
+    let len = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let capacity = load_value(
+        builder,
+        values.pointer_type,
+        target_entry,
+        JIT_BYTE_BUFFER_CAPACITY_OFFSET,
+    )?;
+    let invalid_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, capacity, len);
+    emit_interpreter_replay(
+        builder,
+        values,
+        invalid_capacity,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let spare = builder.ins().isub(capacity, len);
+    let fast = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, additional, spare);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    builder.ins().jump(done, &[target.into()]);
+
+    builder.switch_to_block(slow_block);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let result = emit_heap_operation(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, byte_buffer_reserve),
+        [target, runtime_additional, zero],
+        roots,
+        exit,
+    )?;
+    builder.ins().jump(done, &[result.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_builder_len(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    object_tag: u32,
+    offsets: (usize, usize),
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let (active_offset, length_offset) = offsets;
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        object_tag,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    emit_active_guard(builder, values, entry, active_offset, point, deopt_stack)?;
+    let length = load_value(builder, values.pointer_type, entry, length_offset)?;
+    Ok(if values.pointer_type == types::I64 {
+        length
+    } else {
+        builder.ins().uextend(types::I64, length)
+    })
+}
+
+fn emit_builder_clear(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    string_builder: bool,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let (object_tag, active_offset, length_offset) = if string_builder {
+        (
+            JIT_OBJECT_STRING_BUILDER,
+            JIT_STRING_BUILDER_ACTIVE_OFFSET,
+            JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+        )
+    } else {
+        (
+            JIT_OBJECT_BYTE_BUFFER,
+            JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+            JIT_BYTE_BUFFER_LEN_OFFSET,
+        )
+    };
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        object_tag,
+        exit.point,
+        ObjectGuard::Replay(exit.deopt_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        entry,
+        active_offset,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let zero = builder.ins().iconst(values.pointer_type, 0);
+    store_native_value(builder, entry, length_offset, zero)?;
+    if string_builder {
+        store_native_value(builder, entry, JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, zero)?;
+        let ascii = builder.ins().iconst(types::I8, 1);
+        store_i8_value(builder, entry, JIT_STRING_BUILDER_ASCII_OFFSET, ascii)?;
+    }
+    Ok(())
+}
+
+fn emit_byte_buffer_at(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTE_BUFFER,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    emit_active_guard(
+        builder,
+        values,
+        entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        point,
+        deopt_stack,
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let native_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let length = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, native_index, length);
+    let missing = builder.ins().bor(negative, outside);
+    let load = builder.create_block();
+    let absent = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(missing, absent, &[], load, &[]);
+
+    builder.switch_to_block(load);
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_BYTE_BUFFER_DATA_OFFSET,
+    )?;
+    let address = builder.ins().iadd(data, native_index);
+    let byte = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), address, 0);
+    let byte = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done, &[byte.into()]);
+
+    builder.switch_to_block(absent);
+    let missing = builder.ins().iconst(types::I64, -1);
+    builder.ins().jump(done, &[missing.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
+}
+
+fn emit_active_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    offset: usize,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let active = load_value(builder, types::I8, entry, offset)?;
+    let inactive = builder.ins().icmp_imm(IntCC::Equal, active, 0);
+    emit_interpreter_replay(builder, values, inactive, point, deopt_stack)
+}
+
 fn emit_mutable_guard(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -7274,6 +8454,8 @@ fn emit_value_contract(
         ObjectContract::Closure => JIT_OBJECT_CLOSURE,
         ObjectContract::Bytes => JIT_OBJECT_BYTES,
         ObjectContract::Digest => JIT_OBJECT_DIGEST,
+        ObjectContract::StringBuilder => JIT_OBJECT_STRING_BUILDER,
+        ObjectContract::ByteBuffer => JIT_OBJECT_BYTE_BUFFER,
     };
     let entry = emit_object_entry(
         builder,
@@ -7895,6 +9077,61 @@ fn emit_graph_digest(
         .ins()
         .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
     emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
+}
+
+fn emit_heap_operation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    function_offset: usize,
+    arguments: [ir::Value; 3],
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        function_offset,
+    )?;
+    let call = builder.ins().call_indirect(
+        values.heap_operation_signature,
+        function,
+        &[
+            values.runtime_context,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let heap_limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+    emit_fault_check(
+        builder,
+        values,
+        heap_limit,
+        EXIT_HEAP_LIMIT,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
     Ok(builder.ins().load(
         types::I64,
         MemFlags::new(),
@@ -9503,6 +10740,7 @@ enum RawActivationField {
     MaxStackValues,
     BaseFrames,
     MaxFrames,
+    RootCapacity,
     LiteralValues,
     LiteralCount,
 }
@@ -9534,6 +10772,9 @@ impl RawActivationField {
                 mem::offset_of!(RawNativeActivation, base_frames)
             }
             RawActivationField::MaxFrames => mem::offset_of!(RawNativeActivation, max_frames),
+            RawActivationField::RootCapacity => {
+                mem::offset_of!(RawNativeActivation, root_capacity)
+            }
             RawActivationField::LiteralValues => {
                 mem::offset_of!(RawNativeActivation, literal_values)
             }
@@ -9599,6 +10840,17 @@ fn store_i32_value(
 }
 
 fn store_i8_value(
+    builder: &mut FunctionBuilder<'_>,
+    pointer: ir::Value,
+    offset: usize,
+    value: ir::Value,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
+    builder.ins().store(MemFlags::new(), value, pointer, offset);
+    Ok(())
+}
+
+fn store_native_value(
     builder: &mut FunctionBuilder<'_>,
     pointer: ir::Value,
     offset: usize,

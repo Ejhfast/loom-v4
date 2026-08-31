@@ -77,6 +77,7 @@ pub(super) struct RawNativeActivation {
     pub(super) max_stack_values: u32,
     pub(super) base_frames: u32,
     pub(super) max_frames: u32,
+    pub(super) root_capacity: u32,
     pub(super) heap_pages: *const usize,
     pub(super) heap_page_count: usize,
     pub(super) heap_slot_count: usize,
@@ -337,6 +338,8 @@ pub(super) type RawObjectBinary = unsafe extern "C" fn(*mut c_void, u64, u64, *m
 pub(super) type RawObjectUnary = unsafe extern "C" fn(*mut c_void, u64, *mut u64) -> u32;
 pub(super) type RawDigest =
     unsafe extern "C" fn(*mut c_void, u64, u32, u32, u32, u32, *mut u64) -> u32;
+pub(super) type RawHeapOperation =
+    unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32, *mut u64) -> u32;
 pub(super) type RawMapPutCommit =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32) -> u32;
 pub(super) type RawMapPutDiscard =
@@ -382,6 +385,29 @@ pub(super) struct RawNativeFunctions {
     pub(super) bytes_hash: RawObjectUnary,
     pub(super) freeze_graph: RawObjectUnary,
     pub(super) digest_value: RawDigest,
+    pub(super) string_builder_new: RawHeapOperation,
+    pub(super) string_builder_append_text: RawHeapOperation,
+    pub(super) string_builder_append_int: RawHeapOperation,
+    pub(super) string_builder_append_bool: RawHeapOperation,
+    pub(super) string_builder_append_char: RawHeapOperation,
+    pub(super) string_builder_append_float: RawHeapOperation,
+    pub(super) string_builder_build: RawHeapOperation,
+    pub(super) string_builder_finish: RawHeapOperation,
+    pub(super) byte_buffer_new: RawHeapOperation,
+    pub(super) byte_buffer_append: RawHeapOperation,
+    pub(super) byte_buffer_build: RawHeapOperation,
+    pub(super) byte_buffer_extend: RawHeapOperation,
+    pub(super) byte_buffer_reserve: RawHeapOperation,
+    pub(super) byte_buffer_finish: RawHeapOperation,
+    pub(super) bytes_from_text: RawHeapOperation,
+    pub(super) bytes_slice: RawHeapOperation,
+    pub(super) bytes_concat: RawHeapOperation,
+    pub(super) bytes_compact: RawHeapOperation,
+    pub(super) bytes_text_view: RawHeapOperation,
+    pub(super) bytes_bit_and: RawHeapOperation,
+    pub(super) bytes_bit_or: RawHeapOperation,
+    pub(super) bytes_bit_xor: RawHeapOperation,
+    pub(super) bytes_bit_not: RawHeapOperation,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1116,6 +1142,29 @@ pub enum RuntimeUnitResult {
     Interpreter,
 }
 
+/// One checked heap operation result.
+#[derive(Debug, Clone, Copy)]
+pub enum HeapOperationResult {
+    Value {
+        bits: u64,
+        heap: Option<JitHeapView>,
+    },
+    Fault(lm_abi::FaultCode),
+    HeapLimit,
+    Interpreter,
+}
+
+/// One fixed heap operation request.
+pub struct HeapOperationRequest<'a> {
+    pub first: u64,
+    pub second: u64,
+    pub third: u64,
+    pub root_bits: &'a [u64],
+    pub root_tags: &'a [u64],
+    pub root_states: &'a [u8],
+    pub allow_collection: bool,
+}
+
 /// One checked callback-allocation result.
 #[derive(Debug, Clone, Copy)]
 pub enum CallbackAllocationResult {
@@ -1313,6 +1362,90 @@ pub trait NativeRuntime {
 
     /// Compute one typed graph digest and allocate its result.
     fn digest_value(&mut self, request: DigestRequest<'_>) -> AllocationResult;
+
+    /// Allocate one string builder.
+    fn string_builder_new(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Append text to one string builder.
+    fn string_builder_append_text(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult;
+
+    /// Append one integer to one string builder.
+    fn string_builder_append_int(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult;
+
+    /// Append one Boolean value to one string builder.
+    fn string_builder_append_bool(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult;
+
+    /// Append one character to one string builder.
+    fn string_builder_append_char(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult;
+
+    /// Append one float to one string builder.
+    fn string_builder_append_float(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult;
+
+    /// Copy one string builder into immutable text.
+    fn string_builder_build(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Finish one string builder.
+    fn string_builder_finish(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Allocate one byte buffer.
+    fn byte_buffer_new(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Append one byte to one byte buffer.
+    fn byte_buffer_append(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Copy one byte buffer into immutable bytes.
+    fn byte_buffer_build(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Append immutable bytes to one byte buffer.
+    fn byte_buffer_extend(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Reserve capacity in one byte buffer.
+    fn byte_buffer_reserve(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Finish one byte buffer.
+    fn byte_buffer_finish(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Share immutable text as bytes.
+    fn bytes_from_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one immutable byte slice.
+    fn bytes_slice(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Concatenate two immutable byte values.
+    fn bytes_concat(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Compact one immutable byte value.
+    fn bytes_compact(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one text view over immutable bytes.
+    fn bytes_text_view(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Apply bitwise AND to two byte values.
+    fn bytes_bit_and(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Apply bitwise OR to two byte values.
+    fn bytes_bit_or(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Apply bitwise XOR to two byte values.
+    fn bytes_bit_xor(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Invert one immutable byte value.
+    fn bytes_bit_not(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 }
 
 /// One checked list-growth result.
@@ -2329,6 +2462,131 @@ unsafe fn object_unary<R: NativeRuntime>(
     // SAFETY: The checked context retains one live runtime during this call.
     let runtime = unsafe { &mut *runtime };
     write_runtime_value(operation(runtime, reference), result)
+}
+
+macro_rules! heap_operation_entry {
+    ($entry:ident, $method:ident) => {
+        pub(super) unsafe extern "C" fn $entry<R: NativeRuntime>(
+            context: *mut c_void,
+            first: u64,
+            second: u64,
+            third: u64,
+            root_count: u32,
+            result: *mut u64,
+        ) -> u32 {
+            // SAFETY: The native caller provides one checked activation context.
+            unsafe {
+                heap_operation(
+                    context,
+                    first,
+                    second,
+                    third,
+                    root_count,
+                    result,
+                    R::$method,
+                )
+            }
+        }
+    };
+}
+
+heap_operation_entry!(string_builder_new, string_builder_new);
+heap_operation_entry!(string_builder_append_text, string_builder_append_text);
+heap_operation_entry!(string_builder_append_int, string_builder_append_int);
+heap_operation_entry!(string_builder_append_bool, string_builder_append_bool);
+heap_operation_entry!(string_builder_append_char, string_builder_append_char);
+heap_operation_entry!(string_builder_append_float, string_builder_append_float);
+heap_operation_entry!(string_builder_build, string_builder_build);
+heap_operation_entry!(string_builder_finish, string_builder_finish);
+heap_operation_entry!(byte_buffer_new, byte_buffer_new);
+heap_operation_entry!(byte_buffer_append, byte_buffer_append);
+heap_operation_entry!(byte_buffer_build, byte_buffer_build);
+heap_operation_entry!(byte_buffer_extend, byte_buffer_extend);
+heap_operation_entry!(byte_buffer_reserve, byte_buffer_reserve);
+heap_operation_entry!(byte_buffer_finish, byte_buffer_finish);
+heap_operation_entry!(bytes_from_text, bytes_from_text);
+heap_operation_entry!(bytes_slice, bytes_slice);
+heap_operation_entry!(bytes_concat, bytes_concat);
+heap_operation_entry!(bytes_compact, bytes_compact);
+heap_operation_entry!(bytes_text_view, bytes_text_view);
+heap_operation_entry!(bytes_bit_and, bytes_bit_and);
+heap_operation_entry!(bytes_bit_or, bytes_bit_or);
+heap_operation_entry!(bytes_bit_xor, bytes_bit_xor);
+heap_operation_entry!(bytes_bit_not, bytes_bit_not);
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn heap_operation<R: NativeRuntime>(
+    context: *mut c_void,
+    first: u64,
+    second: u64,
+    third: u64,
+    root_count: u32,
+    result: *mut u64,
+    operation: fn(&mut R, HeapOperationRequest<'_>) -> HeapOperationResult,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Every root has one canonical state slot.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    let response = operation(
+        runtime,
+        HeapOperationRequest {
+            first,
+            second,
+            third,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        },
+    );
+    finish_heap_operation(context.activation, result, response)
+}
+
+fn finish_heap_operation(
+    activation: *mut RawNativeActivation,
+    result: *mut u64,
+    response: HeapOperationResult,
+) -> u32 {
+    match response {
+        HeapOperationResult::Value { bits, heap } => {
+            let slot_count = (bits as u32 as usize).saturating_add(1);
+            // SAFETY: The checked caller provides one writable result word.
+            unsafe {
+                result.write(bits);
+                (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
+                if let Some(heap) = heap {
+                    (*activation).heap_pages = heap.pages;
+                    (*activation).heap_page_count = heap.page_count;
+                    (*activation).heap_slot_count = heap.slot_count;
+                    (*activation).heap_used_bytes = heap.used_bytes;
+                    (*activation).heap_collection_threshold = heap.collection_threshold;
+                }
+            }
+            RUNTIME_OK
+        }
+        HeapOperationResult::Fault(fault) => runtime_fault_status(fault),
+        HeapOperationResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        HeapOperationResult::Interpreter => RUNTIME_INTERPRETER,
+    }
 }
 
 unsafe fn runtime_pointer<R: NativeRuntime>(

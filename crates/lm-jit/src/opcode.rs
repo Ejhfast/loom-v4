@@ -233,7 +233,7 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
 }
 
 fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
-    use TreatmentClass::{FastPath, Helper, Inline};
+    use TreatmentClass::{Helper, Inline};
 
     match operation {
         NumericInstr::IntBitAnd
@@ -266,12 +266,20 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::IntRotateLeft
         | NumericInstr::IntRotateRight
         | NumericInstr::FloatToIntValue => dedicated(Inline).with_replay(),
-        NumericInstr::SbAppendFloat => temporary(FastPath),
-        NumericInstr::BytesBitAnd
-        | NumericInstr::BytesBitOr
-        | NumericInstr::BytesBitXor
-        | NumericInstr::BytesBitNot
-        | NumericInstr::TextParseFloatStatus
+        NumericInstr::SbAppendFloat => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
+        NumericInstr::BytesBitNot => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
+        NumericInstr::TextParseFloatStatus
         | NumericInstr::TextParseFloatValue
         | NumericInstr::FloatFixed => temporary(Helper),
     }
@@ -424,29 +432,51 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         NativeInstr::TextHash | NativeInstr::BytesHash => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
-        NativeInstr::SbNew
-        | NativeInstr::SbAppendStr
-        | NativeInstr::SbAppendInt
-        | NativeInstr::SbAppendBool
-        | NativeInstr::SbBuild
-        | NativeInstr::SbAppendChar
+        NativeInstr::SbNew | NativeInstr::BbNew => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Before)
+        }
+        NativeInstr::SbBuild
         | NativeInstr::SbFinish
-        | NativeInstr::BbNew
-        | NativeInstr::BbAppend
         | NativeInstr::BbBuild
         | NativeInstr::BbFinish
         | NativeInstr::BytesNew
-        | NativeInstr::SbClear
-        | NativeInstr::BbExtend
-        | NativeInstr::BbReserve
-        | NativeInstr::BbClear
-        | NativeInstr::BytesSlice
-        | NativeInstr::BytesConcat
         | NativeInstr::BytesCompact
-        | NativeInstr::BytesTextView => temporary(FastPath),
-        NativeInstr::SbByteLen | NativeInstr::SbLen | NativeInstr::BbLen | NativeInstr::BbAt => {
-            temporary(Guarded)
+        | NativeInstr::BytesTextView => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
         }
+        NativeInstr::BytesSlice => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(3))
+        }
+        NativeInstr::BytesConcat => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
+        NativeInstr::SbAppendStr
+        | NativeInstr::SbAppendBool
+        | NativeInstr::BbAppend
+        | NativeInstr::BbExtend
+        | NativeInstr::BbReserve => dedicated(FastPath)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NativeInstr::SbAppendInt | NativeInstr::SbAppendChar => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NativeInstr::SbClear | NativeInstr::BbClear => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        NativeInstr::SbByteLen | NativeInstr::SbLen | NativeInstr::BbLen => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        NativeInstr::BbAt => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
         NativeInstr::StrConcat
         | NativeInstr::StrStartsWith
         | NativeInstr::StrEndsWith

@@ -33,28 +33,36 @@ const EXIT_INTERFACE_CALL: u32 = 20;
 const EXIT_GENERIC_VIRTUAL_CALL: u32 = 21;
 const EXIT_CALLBACK_CALL: u32 = 22;
 const EXIT_GUEST_FAULT: u32 = 23;
+const EXIT_GROW_ROOTS: u32 = 24;
 
 mod activation;
 mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, bytes_compare, bytes_hash, digest_value, freeze_graph, grow_list, insert_list,
+    allocate_tuple, byte_buffer_append, byte_buffer_build, byte_buffer_extend, byte_buffer_finish,
+    byte_buffer_new, byte_buffer_reserve, bytes_bit_and, bytes_bit_not, bytes_bit_or,
+    bytes_bit_xor, bytes_compact, bytes_compare, bytes_concat, bytes_from_text, bytes_hash,
+    bytes_slice, bytes_text_view, digest_value, freeze_graph, grow_list, insert_list,
     list_contains, map_at, map_clear, map_get, map_has, map_insert_hashed, map_key_at,
     map_next_index, map_probe, map_probe_key, map_probe_remove, map_probe_set_value,
     map_probe_value, map_put_commit, map_put_discard, map_put_probe, map_remove, map_value_at,
-    reserve_list, reserve_map, text_compare, text_hash, values_equal, NativeFunction, RawExit,
-    RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
+    reserve_list, reserve_map, string_builder_append_bool, string_builder_append_char,
+    string_builder_append_float, string_builder_append_int, string_builder_append_text,
+    string_builder_build, string_builder_finish, string_builder_new, text_compare, text_hash,
+    values_equal, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
+    RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, CollectionReserveRequest, CollectionReserveResult, DigestRequest,
-    ListGrowthRequest, ListGrowthResult, ListInsertRequest, MapInsertHashedRequest,
-    MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult, NativeActivation,
-    NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView, NativePreparation,
-    NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut,
-    NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView, RuntimeUnitResult,
-    RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
+    ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
+    MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
+    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
+    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
+    NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
+    LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -265,6 +273,7 @@ pub struct NativeEntryCell {
     local_count: AtomicU32,
     max_stack: AtomicU32,
     max_stack_values: AtomicU32,
+    max_roots: AtomicU32,
 }
 
 impl NativeEntryCell {
@@ -275,6 +284,7 @@ impl NativeEntryCell {
             local_count: AtomicU32::new(0),
             max_stack: AtomicU32::new(0),
             max_stack_values: AtomicU32::new(0),
+            max_roots: AtomicU32::new(0),
         }
     }
 
@@ -286,10 +296,13 @@ impl NativeEntryCell {
             u32::try_from(region.plan.max_stack).map_err(|_| Failure::BackendUnavailable)?;
         let max_stack_values =
             u32::try_from(region.plan.max_stack_values).map_err(|_| Failure::BackendUnavailable)?;
+        let max_roots =
+            u32::try_from(region.plan.max_roots).map_err(|_| Failure::BackendUnavailable)?;
         self.local_count.store(local_count, Ordering::Relaxed);
         self.max_stack.store(max_stack, Ordering::Relaxed);
         self.max_stack_values
             .store(max_stack_values, Ordering::Relaxed);
+        self.max_roots.store(max_roots, Ordering::Relaxed);
         self.code.store(region.call_entry, Ordering::Release);
         Ok(())
     }
@@ -608,6 +621,9 @@ impl CompiledRegion {
             u32::try_from(activation.scalars.len()).map_err(|_| Failure::BackendUnavailable)?;
         let frame_capacity =
             u32::try_from(activation.frames.len()).map_err(|_| Failure::BackendUnavailable)?;
+        let root_capacity = roots.len().min(root_tags.len()).min(root_states.len());
+        let root_capacity =
+            u32::try_from(root_capacity).map_err(|_| Failure::BackendUnavailable)?;
         if activation.frames[top_index].native_created == 0 {
             activation.frames[top_index].caller_stack_values =
                 u32::try_from(base_stack_values).map_err(|_| Failure::BackendUnavailable)?;
@@ -632,6 +648,7 @@ impl CompiledRegion {
                 .map_err(|_| Failure::BackendUnavailable)?,
             base_frames: u32::try_from(base_frames).map_err(|_| Failure::BackendUnavailable)?,
             max_frames: u32::try_from(max_frames).map_err(|_| Failure::BackendUnavailable)?,
+            root_capacity,
             heap_pages: heap.pages,
             heap_page_count: heap.page_count,
             heap_slot_count: heap.slot_count,
@@ -659,7 +676,7 @@ impl CompiledRegion {
             roots: roots.as_ptr(),
             root_tags: root_tags.as_ptr(),
             root_states: root_states.as_ptr(),
-            root_capacity: self.plan.max_roots,
+            root_capacity: root_capacity as usize,
         };
         let runtime_functions = RawNativeFunctions {
             allocate_instance: allocate_instance::<R>,
@@ -697,6 +714,29 @@ impl CompiledRegion {
             bytes_hash: bytes_hash::<R>,
             freeze_graph: freeze_graph::<R>,
             digest_value: digest_value::<R>,
+            string_builder_new: string_builder_new::<R>,
+            string_builder_append_text: string_builder_append_text::<R>,
+            string_builder_append_int: string_builder_append_int::<R>,
+            string_builder_append_bool: string_builder_append_bool::<R>,
+            string_builder_append_char: string_builder_append_char::<R>,
+            string_builder_append_float: string_builder_append_float::<R>,
+            string_builder_build: string_builder_build::<R>,
+            string_builder_finish: string_builder_finish::<R>,
+            byte_buffer_new: byte_buffer_new::<R>,
+            byte_buffer_append: byte_buffer_append::<R>,
+            byte_buffer_build: byte_buffer_build::<R>,
+            byte_buffer_extend: byte_buffer_extend::<R>,
+            byte_buffer_reserve: byte_buffer_reserve::<R>,
+            byte_buffer_finish: byte_buffer_finish::<R>,
+            bytes_from_text: bytes_from_text::<R>,
+            bytes_slice: bytes_slice::<R>,
+            bytes_concat: bytes_concat::<R>,
+            bytes_compact: bytes_compact::<R>,
+            bytes_text_view: bytes_text_view::<R>,
+            bytes_bit_and: bytes_bit_and::<R>,
+            bytes_bit_or: bytes_bit_or::<R>,
+            bytes_bit_xor: bytes_bit_xor::<R>,
+            bytes_bit_not: bytes_bit_not::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {
@@ -778,6 +818,7 @@ impl CompiledRegion {
             EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
             EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
             EXIT_GUEST_FAULT => ExitKind::GuestFault,
+            EXIT_GROW_ROOTS => ExitKind::GrowRoots,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };
