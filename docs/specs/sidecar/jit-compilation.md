@@ -2,6 +2,8 @@
 
 Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and growable activations are implemented.
 
+Pure uncontended tasks use a larger coordinator quantum.
+
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
 Stable list parameters and locals retain their canonical data pointer across safe loop backedges.
@@ -263,6 +265,10 @@ No call invokes a generic runtime dispatcher.
 
 An ordinary scheduler quantum can retain the native activation.
 
+Resume reads the top native frame in constant time.
+
+Continuation region lookup visits only frames that changed during the turn.
+
 The machine moves its canonical stack storage into that continuation.
 
 The machine does not retain a second scalar-state copy.
@@ -270,6 +276,10 @@ The machine does not retain a second scalar-state copy.
 The continuation pins every active compiled region.
 
 Garbage collection derives active object roots when it needs them.
+
+Each suspended frame stores canonical tags for every scanned slot.
+
+A reused scalar window cannot retain an old object tag.
 
 A later worker can resume the same continuation.
 
@@ -2784,6 +2794,62 @@ The cold integer region now contains 5,916 machine-code bytes.
 Exact-fuel lowering still duplicates each instruction in the same function.
 
 The next code-density stage must isolate that cold path without an interpreter transition.
+
+### Stage F53: Preserve roots and reduce uncontended turns
+
+- store canonical tags for every suspended native frame slot;
+- preserve root payloads for each root-capable slot;
+- add one direct JSON collection regression test;
+- read top and indexed native frames without a depth scan;
+- retain the 1,024-instruction fairness quantum;
+- use a larger quantum only for one pure task;
+- keep effectful and competing tasks on the fairness quantum;
+- keep the fixed-quantum corpus differential.
+
+The direct JSON test uses a 32 KiB heap.
+
+The test forces native collection during parsing and encoding.
+
+The test preserved every live native object across collection.
+
+The default uncontended quantum is 1,048,576 guest instructions.
+
+The verified root effect row proves that the task cannot create scheduler work.
+
+An explicit scheduler quantum disables this extension by default.
+
+The fixed-quantum corpus gate continues to test native continuation state.
+
+The focused JIT suite passed 153 tests.
+
+The direct and fixed-quantum corpus differential passed in 39.61 seconds.
+
+The full workspace suite passed in 90.56 seconds.
+
+| Warm row | Before | Current | Change |
+| --- | ---: | ---: | ---: |
+| Scheduled integer loop | 3.861 ms | 0.542 ms | 86.0 percent faster |
+| Scheduled deep recursion | not recorded | 12.502 ms | direct parity |
+| Direct deep recursion | 12.452 ms | 12.408 ms | within variance |
+
+The scheduled integer gain rose from 10.88 times to 63.03 times.
+
+Scheduled deep recursion gained 2.77 times.
+
+Direct deep recursion gained 2.79 times.
+
+| Representative row | Interpreter | Auto | Native | Auto gain |
+| --- | ---: | ---: | ---: | ---: |
+| JSON parse | 43.657 ms | 18.189 ms | 18.371 ms | 2.400 times |
+| JSON encode | 20.123 ms | 8.674 ms | 8.759 ms | 2.320 times |
+| HTTP parse | 40.695 ms | 17.638 ms | 17.868 ms | 2.307 times |
+| HTTP encode | 21.510 ms | 5.719 ms | 5.820 ms | 3.761 times |
+
+Each representative native row reached complete instruction coverage.
+
+These measurements used one stable arena and one shared engine.
+
+They do not close the remaining allocation, helper, inlining, or code-density work.
 
 ## 24. Rejected designs
 

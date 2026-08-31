@@ -29,6 +29,13 @@ end
 i
 "#;
 
+fn fixed_scheduler() -> lm_proc::Scheduler {
+    lm_proc::Scheduler::new_with_quantum(
+        lm_proc::SchedulerMode::Deterministic,
+        lm_proc::DEFAULT_QUANTUM,
+    )
+}
+
 fn run(source: &str, mode: EngineMode, fuel: u64) -> (Outcome, lm_vm::EngineMetrics, String) {
     let artifact = lm_testkit::compile_text("jit.lm", source).expect("the JIT case compiles");
     run_artifact(&artifact, mode, fuel)
@@ -268,7 +275,7 @@ fn virtual_calls_preserve_scheduler_retirement_counts() {
             Box::new(RecordingHost::new(1)),
             engine,
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the virtual retirement case runs");
         (outcome, world.metrics().retired_instructions)
@@ -284,6 +291,77 @@ fn virtual_calls_preserve_scheduler_retirement_counts() {
         "{:?}",
         engine.metrics()
     );
+}
+
+#[test]
+fn the_default_scheduler_extends_only_a_pure_uncontended_task() {
+    let pure = concat!(
+        "index = 0\ntotal = 0\n",
+        "while index < 100000\n",
+        "  total = total + index\n  index = index + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-uncontended-pure.lm", pure).expect("the pure case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the pure case publishes");
+    let run_pure = |mut scheduler: lm_proc::Scheduler| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig {
+                fuel: u64::MAX,
+                ..VmConfig::default()
+            },
+            Box::new(RecordingHost::new(1)),
+            Arc::new(Engine::new(EngineMode::Interpreter)),
+        );
+        let outcome = scheduler.run(&mut world).expect("the pure case runs");
+        assert!(matches!(outcome, Outcome::Done(_)));
+        scheduler.stats().root_slices
+    };
+    let fixed = run_pure(lm_proc::Scheduler::new_with_quantum(
+        lm_proc::SchedulerMode::Deterministic,
+        lm_proc::DEFAULT_QUANTUM,
+    ));
+    let extended = run_pure(lm_proc::Scheduler::default());
+    assert!(fixed > extended.saturating_mul(100), "{fixed} {extended}");
+    let parallel = run_pure(lm_proc::Scheduler::from_config(
+        lm_proc::SchedulerConfig::parallel(1),
+    ));
+    assert_eq!(parallel, extended);
+
+    let effectful = concat!(
+        "def run(): Int with Clock.Now\n",
+        "  index = 0\n  while index < 100000\n    index = index + 1\n  end\n",
+        "  sys.clock.now()\n  index\nend\nrun()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-uncontended-effect.lm", effectful)
+        .expect("the effectful case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the effectful case publishes");
+    let run_effectful = |mut scheduler: lm_proc::Scheduler| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig {
+                fuel: u64::MAX,
+                ..VmConfig::default()
+            },
+            Box::new(RecordingHost::new(1)),
+            Arc::new(Engine::new(EngineMode::Interpreter)),
+        );
+        world.allow("Clock.Now").expect("the clock grant exists");
+        let outcome = scheduler.run(&mut world).expect("the effectful case runs");
+        assert!(matches!(outcome, Outcome::Done(_)));
+        scheduler.stats().root_slices
+    };
+    let fixed = run_effectful(lm_proc::Scheduler::new_with_quantum(
+        lm_proc::SchedulerMode::Deterministic,
+        lm_proc::DEFAULT_QUANTUM,
+    ));
+    let default = run_effectful(lm_proc::Scheduler::default());
+    assert_eq!(default, fixed);
 }
 
 #[test]
@@ -343,7 +421,7 @@ fn interface_calls_preserve_scheduler_retirement_counts() {
             Box::new(RecordingHost::new(1)),
             engine,
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the interface retirement case runs");
         (outcome, world.metrics().retired_instructions)
@@ -427,7 +505,7 @@ fn generic_virtual_calls_preserve_scheduler_retirement_counts() {
             Box::new(RecordingHost::new(1)),
             engine,
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the generic virtual retirement case runs");
         (outcome, world.metrics().retired_instructions)
@@ -732,7 +810,7 @@ fn callback_creation_preserves_scheduler_quanta() {
             Box::new(RecordingHost::new(1)),
             engine,
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the scheduler callback case runs");
         let retired = world.metrics().retired_instructions;
@@ -1335,7 +1413,7 @@ fn captured_closure_calls_preserve_scheduler_quanta() {
             Box::new(RecordingHost::new(1)),
             engine,
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the scheduler closure case runs");
         let retired = world.metrics().retired_instructions;
@@ -2359,7 +2437,7 @@ fn image_slot_calls_keep_native_state_across_scheduler_turns() {
             Box::new(RecordingHost::new(1)),
             Arc::clone(&engine),
         );
-        let outcome = lm_proc::Scheduler::default()
+        let outcome = fixed_scheduler()
             .run(&mut world)
             .expect("the image slot case runs");
         (outcome, world.dump_live(&outcome), engine.metrics())

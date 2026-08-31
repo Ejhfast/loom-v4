@@ -64,7 +64,12 @@ fn run_scheduled(
     for grant in GRANTS {
         world.allow(grant).expect("the corpus grant exists");
     }
-    let outcome = lm_proc::run_world(&mut world);
+    let outcome = lm_proc::Scheduler::new_with_quantum(
+        lm_proc::SchedulerMode::Deterministic,
+        lm_proc::DEFAULT_QUANTUM,
+    )
+    .run(&mut world)
+    .expect("the corpus scheduler runs");
     let dump = world.dump_live(&outcome);
     let retired = world.metrics().retired_instructions;
     let host = host.borrow();

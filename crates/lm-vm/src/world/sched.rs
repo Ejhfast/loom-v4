@@ -6,6 +6,26 @@
 use super::*;
 
 impl World {
+    /// True when one task can perform no world operation.
+    pub fn task_has_empty_effect_row(&self, task: TaskKey) -> bool {
+        if self.task_key(task.vm) != Some(task) {
+            return false;
+        }
+        let machine = &self.machines[task.vm as usize];
+        let Some(function) = machine.root_function() else {
+            return false;
+        };
+        let code = self.code_of(task.vm);
+        [Some(function), machine.body_func]
+            .into_iter()
+            .flatten()
+            .all(|function| {
+                code.funcs
+                    .get(function as usize)
+                    .is_some_and(|body| body.row.is_empty())
+            })
+    }
+
     /// Set one wake callback for asynchronous host readiness.
     pub fn set_scheduler_wake(&mut self, wake: Option<crate::HostWake>) {
         self.host.set_scheduler_wake(wake);

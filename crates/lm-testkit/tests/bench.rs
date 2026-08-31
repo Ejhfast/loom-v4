@@ -1551,19 +1551,16 @@ fn bench_jit_scalar_regions() {
         ),
         0,
     );
-    report_jit(
-        "jit_deep_recursion",
-        concat!(
-            "def down(n: Int): Int\n",
-            "  if n <= 0 then 0 else down(n - 1) + 1 end\n",
-            "end\n",
-            "i = 0\ns = 0\n",
-            "while i < 1000\n",
-            "  s = s + down(1000)\n  i = i + 1\n",
-            "end\ns\n",
-        ),
-        0,
+    const DEEP_RECURSION: &str = concat!(
+        "def down(n: Int): Int\n",
+        "  if n <= 0 then 0 else down(n - 1) + 1 end\n",
+        "end\n",
+        "i = 0\ns = 0\n",
+        "while i < 1000\n",
+        "  s = s + down(1000)\n  i = i + 1\n",
+        "end\ns\n",
     );
+    report_jit("jit_deep_recursion", DEEP_RECURSION, 0);
     report_jit(
         "jit_int_div",
         concat!(
@@ -1913,6 +1910,7 @@ fn bench_jit_scalar_regions() {
         "jit_int_loop_scheduled",
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
     );
+    report_jit_scheduled("jit_deep_recursion_scheduled", DEEP_RECURSION);
     report_guard_upper_bound();
     report_auto_mixed();
 }

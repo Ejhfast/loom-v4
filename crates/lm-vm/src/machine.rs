@@ -1266,6 +1266,13 @@ impl Machine {
         self.native_continuation.is_some()
     }
 
+    pub(crate) fn root_function(&self) -> Option<FunctionVersionId> {
+        self.native_continuation
+            .as_deref()
+            .and_then(crate::jit::NativeContinuation::root_function)
+            .or_else(|| self.vm.frames.first().map(|frame| frame.func))
+    }
+
     /// The current clock-free execution counters.
     pub fn execution_metrics(&self) -> MachineExecutionMetrics {
         self.execution_metrics

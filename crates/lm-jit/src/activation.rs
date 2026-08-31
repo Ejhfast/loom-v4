@@ -1035,6 +1035,29 @@ impl NativeActivation {
         })
     }
 
+    /// Return one live native frame by call depth.
+    pub fn frame(&self, index: usize) -> Option<NativeFrameView<'_>> {
+        let frame = *self.frames.get(index).filter(|_| index < self.frame_len)?;
+        let base = frame.scalar_base as usize;
+        let locals = frame.local_count as usize;
+        let operands = frame.operand_len as usize;
+        let operand_base = base.checked_add(locals)?;
+        let operand_end = operand_base.checked_add(operands)?;
+        Some(NativeFrameView {
+            frame,
+            locals: self.scalars.get(base..operand_base)?,
+            local_tags: self.tags.get(base..operand_base)?,
+            states: self.states.get(base..operand_base)?,
+            operands: self.scalars.get(operand_base..operand_end)?,
+            operand_tags: self.tags.get(operand_base..operand_end)?,
+        })
+    }
+
+    /// Return the top live native frame.
+    pub fn top_frame(&self) -> Option<NativeFrameView<'_>> {
+        self.frame(self.frame_len.checked_sub(1)?)
+    }
+
     /// Return the live native frame count.
     pub fn frame_count(&self) -> usize {
         self.frame_len

@@ -103,6 +103,10 @@ impl CanonicalStack {
 }
 
 impl NativeContinuation {
+    pub(crate) fn root_function(&self) -> Option<u32> {
+        self.canonical.frames.first().map(|frame| frame.func)
+    }
+
     pub(crate) fn extend_gc_roots(&self, roots: &mut Vec<ObjRef>) {
         for frame in &self.canonical.frames {
             if let Some(crate::machine::FrameCapture::Closure(reference)) = frame.closure {
@@ -461,7 +465,7 @@ impl JitEngine {
         let resumed = continuation.is_some();
         let (root_region, active_region, entry_index, root_frame, base, operand_base) =
             if let Some(mut held) = continuation.take() {
-                let Some(top) = held.scratch.activation.frames().last() else {
+                let Some(top) = held.scratch.activation.top_frame() else {
                     return reject_native_continuation(machine, native, *held, metrics);
                 };
                 let top_block = top.block();
@@ -745,8 +749,7 @@ impl JitEngine {
                     };
                     let grow_region = scratch
                         .activation
-                        .frames()
-                        .last()
+                        .top_frame()
                         .and_then(|frame| native.slot(frame.function()))
                         .and_then(|slot| slot.compiled());
                     let resume = grow_region
@@ -784,8 +787,7 @@ impl JitEngine {
                     };
                     let grow_region = scratch
                         .activation
-                        .frames()
-                        .last()
+                        .top_frame()
                         .and_then(|frame| native.slot(frame.function()))
                         .and_then(|slot| slot.compiled());
                     let resume = grow_region
@@ -815,8 +817,7 @@ impl JitEngine {
                     };
                     let Some((function, environment)) = scratch
                         .activation
-                        .frames()
-                        .last()
+                        .top_frame()
                         .map(|frame| (frame.function(), TypeEnvId(frame.environment())))
                     else {
                         break Err(Failure::BackendUnavailable);
@@ -836,8 +837,7 @@ impl JitEngine {
                         };
                         let resolve_region = scratch
                             .activation
-                            .frames()
-                            .last()
+                            .top_frame()
                             .and_then(|frame| native.slot(frame.function()))
                             .and_then(|slot| slot.compiled());
                         let resume = resolve_region
@@ -921,7 +921,7 @@ impl JitEngine {
                         Interface(lm_jit::InterfaceCallSite),
                         GenericVirtual(lm_jit::GenericVirtualCallSite),
                     }
-                    let Some(frame) = scratch.activation.frames().last() else {
+                    let Some(frame) = scratch.activation.top_frame() else {
                         break Err(Failure::BackendUnavailable);
                     };
                     let Some(resolve_region) = native
@@ -1030,7 +1030,7 @@ impl JitEngine {
                     }
                 }
                 if exit.kind() == ExitKind::CallbackCall {
-                    let Some(frame) = scratch.activation.frames().last() else {
+                    let Some(frame) = scratch.activation.top_frame() else {
                         break Err(Failure::BackendUnavailable);
                     };
                     let Some(resolve_region) = native
@@ -1113,7 +1113,7 @@ impl JitEngine {
                 }
                 let parent = {
                     let parent_index = scratch.activation.frame_count().saturating_sub(2);
-                    let Some(parent) = scratch.activation.frames().nth(parent_index) else {
+                    let Some(parent) = scratch.activation.frame(parent_index) else {
                         break Err(Failure::BackendUnavailable);
                     };
                     (parent.function(), parent.block(), parent.instruction())
@@ -1436,7 +1436,7 @@ impl JitEngine {
         scratch: &NativeScratch,
         exit: lm_jit::ExecutionExit,
     ) {
-        let Some(frame) = scratch.activation.frames().last() else {
+        let Some(frame) = scratch.activation.top_frame() else {
             return;
         };
         let Some(function) = module.funcs.get(frame.function() as usize) else {

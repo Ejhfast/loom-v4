@@ -1,6 +1,6 @@
 # Multi-threaded Scheduler
 
-Status: Stages 0 through 7 are complete. The reified-VM cleanup is accepted. Stage 8 remains planned.
+Status: Stages 0 through 8 are complete. The reified-VM cleanup is accepted.
 
 This sidecar refines language specification sections 17, 18, 22.12, and 23.9.
 
@@ -20,7 +20,13 @@ A boundary, trip, fault, lease limit, or recall returns the machine.
 
 The coordinator applies sends, host requests, control operations, and terminal publication.
 
-The deterministic scheduler keeps the current FIFO policy and fixed quantum.
+The deterministic scheduler keeps the current FIFO policy and fairness quantum.
+
+A pure task can use a larger quantum when no other task exists.
+
+Its verified effect row proves that it cannot create scheduler work.
+
+The parallel root-only coordinator uses the same rule.
 
 It executes machine slices inline and creates no worker pool.
 
@@ -42,7 +48,7 @@ This design has these goals:
 - Keep snapshots canonical and independent of scheduler mode.
 - Keep pause, resume, and code replacement safe.
 - Keep root-only programs on a low-cost inline path.
-- Give a future JIT the same safepoint contract.
+- Give the native engine the same safepoint contract.
 - Keep `lm-vm` independent from threads and operating-system services.
 
 ## 3. Non-goals
@@ -197,11 +203,21 @@ The public runtime has two scheduler modes.
 
 ### 7.1 Deterministic mode
 
-`Deterministic` keeps the current ready queue and quantum.
+`Deterministic` keeps the current ready queue and fairness quantum.
 
 It runs one machine slice at a time on the coordinator thread.
 
-It preserves current task ordering, trace ordering, and counter behavior.
+It preserves task ordering and trace ordering.
+
+An effectful task always uses the fairness quantum.
+
+A task also uses the fairness quantum while any other task exists.
+
+One pure task can use the configured uncontended quantum.
+
+The default uncontended quantum is 1,048,576 guest instructions.
+
+An explicit quantum also sets the uncontended quantum to the same value.
 
 It creates no worker channels and pays no parallel scheduling cost.
 
@@ -251,7 +267,7 @@ A worker rotates its current lease when another lease waits.
 
 This local rotation does not commit world state.
 
-The deterministic quantum remains 1,024 guest instructions.
+The deterministic fairness quantum remains 1,024 guest instructions.
 
 The local turn keeps bounded fairness and stop delay.
 
@@ -1093,7 +1109,7 @@ Worker shutdown never depends on guest cleanup.
 
 ## 21. JIT contract
 
-The executor boundary is also the future JIT boundary.
+The executor boundary is also the JIT boundary.
 
 The interpreter and JIT implement the same logical operation:
 
@@ -1377,11 +1393,13 @@ Add transfer packets only when resident waits miss their gate.
 
 ### Stage 8: Freeze the JIT boundary
 
+Complete.
+
 Document the final executor interface.
 
-Test interpreter safepoints against the future JIT contract.
+Test interpreter safepoints against the JIT contract.
 
-Do not implement Cranelift in this initiative.
+This scheduler initiative does not implement Cranelift.
 
 ## 25. Correctness gates
 
