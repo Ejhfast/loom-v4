@@ -657,6 +657,8 @@ fn report_jit_representative(name: &str, source: &str) {
         native_metrics.native_type_environment_fallbacks,
     );
     if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
+        println!("LOOM_JIT_METRICS\t{name}\tauto\t{auto_metrics:?}");
+        println!("LOOM_JIT_METRICS\t{name}\tnative\t{native_metrics:?}");
         report_jit_profile(name, source);
     }
 }
@@ -669,7 +671,7 @@ fn report_jit_profile(name: &str, source: &str) {
     let engine = Arc::new(Engine::new(EngineMode::Auto));
     engine.set_jit_profiling(true);
     let mut world = lm_vm::World::new_with_engine(
-        arena,
+        arena.clone(),
         namespace,
         config(),
         Box::new(lm_vm::NullHost),
@@ -695,6 +697,37 @@ fn report_jit_profile(name: &str, source: &str) {
             "LOOM_JIT_TREATMENT_GAP\t{name}\t{}\t{}",
             gap.instruction, gap.estimated_instructions
         );
+    }
+    for site in profile.runtime_exits.iter().take(20) {
+        println!(
+            "LOOM_JIT_RUNTIME_EXIT\t{name}\t{}\t{}\t{}\t{}",
+            site.function, site.instruction, site.exit, site.count
+        );
+    }
+    let code = arena
+        .namespace(namespace)
+        .expect("the profile namespace exists");
+    let mut boundaries = std::collections::BTreeMap::<String, u64>::new();
+    for function in &profile.hot_functions {
+        let Some(definition) = code.tables().funcs.get(function.function as usize) else {
+            continue;
+        };
+        let instruction_count = definition.blocks.iter().map(Vec::len).sum::<usize>().max(1);
+        let unit = function.estimated_instructions / instruction_count as u64;
+        for instruction in definition.blocks.iter().flatten() {
+            if lm_jit::instruction_treatment(instruction).class() == lm_jit::TreatmentClass::Exit {
+                let name = format!("{instruction:?}");
+                boundaries
+                    .entry(name)
+                    .and_modify(|weight| *weight = weight.saturating_add(unit))
+                    .or_insert(unit);
+            }
+        }
+    }
+    let mut boundaries: Vec<_> = boundaries.into_iter().collect();
+    boundaries.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
+    for (instruction, weight) in boundaries.into_iter().take(20) {
+        println!("LOOM_JIT_BOUNDARY\t{name}\t{instruction}\t{weight}");
     }
     for function in profile.hot_functions.iter().take(20) {
         println!(

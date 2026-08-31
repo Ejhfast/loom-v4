@@ -554,6 +554,8 @@ fn run_engine_turn(
             module: context.module,
             envs: &mut *context.envs,
             slots: context.slots,
+            profile: context.engine.jit_profiling(),
+            instruction_limit: remaining,
         };
         match context.engine.execute_native(
             machine,
@@ -561,7 +563,6 @@ fn run_engine_turn(
             context.native,
             &mut native_scratch,
             &mut native_metrics,
-            remaining,
         ) {
             crate::jit::NativeAttempt::Complete { outcome, retired } => {
                 retired_total += retired;

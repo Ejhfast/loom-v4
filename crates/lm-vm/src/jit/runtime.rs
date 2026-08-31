@@ -13,9 +13,9 @@ use lm_jit::{
     ClosureAllocationRequest, CollectionReserveRequest, CollectionReserveResult, DigestRequest,
     HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
     ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
-    MapPutProbeResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
-    RuntimeUnitResult, RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest,
-    LOCAL_INITIALIZED,
+    MapPutProbeResult, NativeResolvedCallCache, NativeRootError, NativeRoots, NativeRuntime,
+    NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
+    ValueArrayAllocationRequest,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, ValueTag, Witness};
 use std::fmt::Write;
@@ -156,28 +156,13 @@ fn runtime_value(value: Value) -> RuntimeValueResult {
     }
 }
 
-fn decode_root_objects(
-    bits: &[u64],
-    tags: &[u64],
-    states: &[u8],
-) -> Result<Vec<ObjRef>, CaptureDecodeFailure> {
-    if bits.len() != tags.len() || bits.len() != states.len() {
-        return Err(CaptureDecodeFailure::Invalid);
-    }
+fn decode_root_objects(view: NativeRoots<'_>) -> Result<Vec<ObjRef>, CaptureDecodeFailure> {
     let mut roots = Vec::new();
-    roots
-        .try_reserve_exact(bits.len())
-        .map_err(|_| CaptureDecodeFailure::Limit)?;
-    roots.extend(
-        bits.iter()
-            .copied()
-            .zip(tags.iter().copied())
-            .zip(states.iter().copied())
-            .filter(|((_, tag), state)| {
-                *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
-            })
-            .map(|((bits, _), _)| object_reference(bits)),
-    );
+    view.extend_objects(&mut roots)
+        .map_err(|failure| match failure {
+            NativeRootError::Invalid => CaptureDecodeFailure::Invalid,
+            NativeRootError::Limit => CaptureDecodeFailure::Limit,
+        })?;
     Ok(roots)
 }
 
@@ -187,9 +172,7 @@ struct MapInsertRequest<'a> {
     value: Value,
     semantic_hash: i64,
     entry_count: usize,
-    root_bits: &'a [u64],
-    root_tags: &'a [u64],
-    root_states: &'a [u8],
+    roots: NativeRoots<'a>,
     allow_collection: bool,
 }
 
@@ -212,14 +195,9 @@ impl MachineRuntime<'_> {
     fn allocate_object(
         &mut self,
         object: crate::Object,
-        root_bits: &[u64],
-        root_tags: &[u64],
-        root_states: &[u8],
+        roots: NativeRoots<'_>,
         allow_collection: bool,
     ) -> AllocationResult {
-        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
-            return AllocationResult::Interpreter;
-        }
         let cost = self.machine.vm.heap.allocation_cost(&object);
         if !self.machine.vm.heap.collection_due(cost) {
             let reference = self.machine.vm.heap.alloc(object);
@@ -237,21 +215,11 @@ impl MachineRuntime<'_> {
         if !allow_collection {
             return AllocationResult::Interpreter;
         }
-        let mut roots = Vec::new();
-        if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return AllocationResult::HeapLimit;
-        }
-        roots.extend(
-            root_bits
-                .iter()
-                .copied()
-                .zip(root_tags.iter().copied())
-                .zip(root_states.iter().copied())
-                .filter(|((_, tag), state)| {
-                    *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
-                })
-                .map(|((bits, _), _)| object_reference(bits)),
-        );
+        let roots = match decode_root_objects(roots) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return AllocationResult::Interpreter,
+        };
         match self
             .machine
             .alloc_native(object, self.base_local, self.base_operand, &roots)
@@ -274,13 +242,7 @@ impl MachineRuntime<'_> {
         object: crate::Object,
         request: &HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        match self.allocate_object(
-            object,
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
-            request.allow_collection,
-        ) {
+        match self.allocate_object(object, request.roots, request.allow_collection) {
             AllocationResult::Value { bits, heap } => HeapOperationResult::Value { bits, heap },
             AllocationResult::HeapLimit => HeapOperationResult::HeapLimit,
             AllocationResult::Interpreter => HeapOperationResult::Interpreter,
@@ -293,11 +255,6 @@ impl MachineRuntime<'_> {
         request: &HeapOperationRequest<'_>,
         extra_roots: &[ObjRef],
     ) -> Result<ObjRef, HeapOperationResult> {
-        if request.root_bits.len() != request.root_tags.len()
-            || request.root_bits.len() != request.root_states.len()
-        {
-            return Err(HeapOperationResult::Interpreter);
-        }
         let cost = self.machine.vm.heap.allocation_cost(&object);
         if !self.machine.vm.heap.collection_due(cost) {
             let reference = self.machine.vm.heap.alloc(object);
@@ -307,14 +264,13 @@ impl MachineRuntime<'_> {
         if !request.allow_collection {
             return Err(HeapOperationResult::Interpreter);
         }
-        let mut roots =
-            match decode_root_objects(request.root_bits, request.root_tags, request.root_states) {
-                Ok(roots) => roots,
-                Err(CaptureDecodeFailure::Limit) => return Err(HeapOperationResult::HeapLimit),
-                Err(CaptureDecodeFailure::Invalid) => {
-                    return Err(HeapOperationResult::Interpreter);
-                }
-            };
+        let mut roots = match decode_root_objects(request.roots) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return Err(HeapOperationResult::HeapLimit),
+            Err(CaptureDecodeFailure::Invalid) => {
+                return Err(HeapOperationResult::Interpreter);
+            }
+        };
         if roots.try_reserve_exact(extra_roots.len()).is_err() {
             return Err(HeapOperationResult::HeapLimit);
         }
@@ -344,14 +300,13 @@ impl MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(growth) && !request.allow_collection {
             return Err(HeapOperationResult::Interpreter);
         }
-        let roots =
-            match decode_root_objects(request.root_bits, request.root_tags, request.root_states) {
-                Ok(roots) => roots,
-                Err(CaptureDecodeFailure::Limit) => return Err(HeapOperationResult::HeapLimit),
-                Err(CaptureDecodeFailure::Invalid) => {
-                    return Err(HeapOperationResult::Interpreter);
-                }
-            };
+        let roots = match decode_root_objects(request.roots) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return Err(HeapOperationResult::HeapLimit),
+            Err(CaptureDecodeFailure::Invalid) => {
+                return Err(HeapOperationResult::Interpreter);
+            }
+        };
         match self
             .machine
             .reserve_native(growth, self.base_local, self.base_operand, &roots)
@@ -482,9 +437,7 @@ impl MachineRuntime<'_> {
             value,
             semantic_hash,
             entry_count,
-            root_bits,
-            root_tags,
-            root_states,
+            roots,
             allow_collection,
         } = request;
         let can_grow = match self.machine.vm.heap.try_get(reference) {
@@ -500,7 +453,7 @@ impl MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(40) && !allow_collection {
             return RuntimeUnitResult::Interpreter;
         }
-        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+        let roots = match decode_root_objects(roots) {
             Ok(roots) => roots,
             Err(CaptureDecodeFailure::Limit) => {
                 return RuntimeUnitResult::Fault(crate::FaultCode::HeapLimit);
@@ -787,9 +740,7 @@ impl NativeRuntime for MachineRuntime<'_> {
         &mut self,
         class: u32,
         environment: u32,
-        root_bits: &[u64],
-        root_tags: &[u64],
-        root_states: &[u8],
+        roots: NativeRoots<'_>,
         allow_collection: bool,
     ) -> AllocationResult {
         let Some(class_entry) = self.module.classes.get(class as usize) else {
@@ -800,7 +751,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             fields: vec![Value::Uninit; class_entry.fields.len()].into(),
             env: lm_value::Witness(lm_value::TypeEnvId(environment)),
         };
-        self.allocate_object(object, root_bits, root_tags, root_states, allow_collection)
+        self.allocate_object(object, roots, allow_collection)
     }
 
     fn allocate_closure(&mut self, request: ClosureAllocationRequest<'_>) -> AllocationResult {
@@ -814,13 +765,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             captures: captures.into(),
             env: lm_value::Witness(lm_value::TypeEnvId(request.environment)),
         };
-        self.allocate_object(
-            object,
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
-            request.allow_collection,
-        )
+        self.allocate_object(object, request.roots, request.allow_collection)
     }
 
     fn allocate_callback(
@@ -859,9 +804,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             crate::Object::Tuple {
                 items: items.into(),
             },
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
+            request.roots,
             request.allow_collection,
         )
     }
@@ -877,9 +820,7 @@ impl NativeRuntime for MachineRuntime<'_> {
                 items: items.into(),
                 epoch: StructuralEpoch::default(),
             },
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
+            request.roots,
             request.allow_collection,
         )
     }
@@ -923,9 +864,7 @@ impl NativeRuntime for MachineRuntime<'_> {
         }
         self.allocate_object(
             crate::Object::Map { entries, index },
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
+            request.roots,
             request.allow_collection,
         )
     }
@@ -1288,9 +1227,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             value,
             semantic_hash: request.semantic_hash,
             entry_count,
-            root_bits: request.root_bits,
-            root_tags: request.root_tags,
-            root_states: request.root_states,
+            roots: request.roots,
             allow_collection: request.allow_collection,
         })
     }
@@ -1405,9 +1342,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             value,
             semantic_hash,
             entry_count,
-            root_bits: request.root_bits,
-            root_tags: request.root_tags,
-            root_states: request.root_states,
+            roots: request.roots,
             allow_collection: request.allow_collection,
         })
     }
@@ -1461,9 +1396,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             value,
             semantic_hash: request.token as i64,
             entry_count,
-            root_bits: request.root_bits,
-            root_tags: request.root_tags,
-            root_states: request.root_states,
+            roots: request.roots,
             allow_collection: request.allow_collection,
         })
     }
@@ -1473,14 +1406,9 @@ impl NativeRuntime for MachineRuntime<'_> {
             reference,
             value_bits,
             value_tag,
-            root_bits,
-            root_tags,
-            root_states,
+            roots,
             allow_collection,
         } = request;
-        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
-            return ListGrowthResult::Interpreter;
-        }
         let reference = object_reference(reference);
         let Some(value) = tagged_value(value_tag, value_bits) else {
             return ListGrowthResult::Interpreter;
@@ -1495,21 +1423,11 @@ impl NativeRuntime for MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(16) && !allow_collection {
             return ListGrowthResult::Interpreter;
         }
-        let mut roots = Vec::new();
-        if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return ListGrowthResult::HeapLimit;
-        }
-        roots.extend(
-            root_bits
-                .iter()
-                .copied()
-                .zip(root_tags.iter().copied())
-                .zip(root_states.iter().copied())
-                .filter(|((_, tag), state)| {
-                    *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
-                })
-                .map(|((bits, _), _)| object_reference(bits)),
-        );
+        let roots = match decode_root_objects(roots) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return ListGrowthResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return ListGrowthResult::Interpreter,
+        };
         if let Err(fault) =
             self.machine
                 .reserve_native(16, self.base_local, self.base_operand, &roots)
@@ -1542,9 +1460,7 @@ impl NativeRuntime for MachineRuntime<'_> {
             index,
             value_bits,
             value_tag,
-            root_bits,
-            root_tags,
-            root_states,
+            roots,
             allow_collection,
         } = request;
         let Ok(index) = usize::try_from(index) else {
@@ -1567,7 +1483,7 @@ impl NativeRuntime for MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(16) && !allow_collection {
             return ListGrowthResult::Interpreter;
         }
-        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+        let roots = match decode_root_objects(roots) {
             Ok(roots) => roots,
             Err(CaptureDecodeFailure::Limit) => return ListGrowthResult::HeapLimit,
             Err(CaptureDecodeFailure::Invalid) => return ListGrowthResult::Interpreter,
@@ -1605,14 +1521,9 @@ impl NativeRuntime for MachineRuntime<'_> {
         let CollectionReserveRequest {
             reference,
             additional,
-            root_bits,
-            root_tags,
-            root_states,
+            roots,
             allow_collection,
         } = request;
-        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
-            return CollectionReserveResult::Interpreter;
-        }
         let Ok(additional) = usize::try_from(additional) else {
             return CollectionReserveResult::Interpreter;
         };
@@ -1638,21 +1549,11 @@ impl NativeRuntime for MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(growth) && !allow_collection {
             return CollectionReserveResult::Interpreter;
         }
-        let mut roots = Vec::new();
-        if roots.try_reserve_exact(root_bits.len()).is_err() {
-            return CollectionReserveResult::HeapLimit;
-        }
-        roots.extend(
-            root_bits
-                .iter()
-                .copied()
-                .zip(root_tags.iter().copied())
-                .zip(root_states.iter().copied())
-                .filter(|((_, tag), state)| {
-                    *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
-                })
-                .map(|((bits, _), _)| object_reference(bits)),
-        );
+        let roots = match decode_root_objects(roots) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return CollectionReserveResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return CollectionReserveResult::Interpreter,
+        };
         if let Err(fault) =
             self.machine
                 .reserve_native(growth, self.base_local, self.base_operand, &roots)
@@ -1682,14 +1583,9 @@ impl NativeRuntime for MachineRuntime<'_> {
         let CollectionReserveRequest {
             reference,
             additional,
-            root_bits,
-            root_tags,
-            root_states,
+            roots,
             allow_collection,
         } = request;
-        if root_bits.len() != root_tags.len() || root_bits.len() != root_states.len() {
-            return CollectionReserveResult::Interpreter;
-        }
         let Ok(additional) = usize::try_from(additional) else {
             return CollectionReserveResult::Interpreter;
         };
@@ -1715,7 +1611,7 @@ impl NativeRuntime for MachineRuntime<'_> {
         if self.machine.vm.heap.collection_due(growth) && !allow_collection {
             return CollectionReserveResult::Interpreter;
         }
-        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+        let roots = match decode_root_objects(roots) {
             Ok(roots) => roots,
             Err(CaptureDecodeFailure::Limit) => return CollectionReserveResult::HeapLimit,
             Err(CaptureDecodeFailure::Invalid) => return CollectionReserveResult::Interpreter,
@@ -1848,9 +1744,7 @@ impl NativeRuntime for MachineRuntime<'_> {
         };
         match self.allocate_object(
             crate::Object::NativeDigest(bytes),
-            request.root_bits,
-            request.root_tags,
-            request.root_states,
+            request.roots,
             request.allow_collection,
         ) {
             value @ AllocationResult::Value { .. } => value,
@@ -2478,9 +2372,6 @@ impl NativeRuntime for MachineRuntime<'_> {
     }
 
     fn string_builder_finish(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        if !request.allow_collection {
-            return HeapOperationResult::Interpreter;
-        }
         let builder = object_reference(request.first);
         if self.machine.vm.heap.is_frozen(builder) {
             return HeapOperationResult::Fault(crate::FaultCode::FrozenWrite);
@@ -2628,9 +2519,6 @@ impl NativeRuntime for MachineRuntime<'_> {
     }
 
     fn byte_buffer_finish(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        if !request.allow_collection {
-            return HeapOperationResult::Interpreter;
-        }
         let buffer = object_reference(request.first);
         if self.machine.vm.heap.is_frozen(buffer) {
             return HeapOperationResult::Fault(crate::FaultCode::FrozenWrite);

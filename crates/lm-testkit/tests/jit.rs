@@ -57,9 +57,15 @@ fn run_artifact_with_config(
     let (arena, namespace) =
         lm_testkit::publish_compiled_artifact(artifact.clone()).expect("the JIT case publishes");
     let engine = Arc::new(Engine::new(mode));
+    if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
+        engine.set_jit_profiling(true);
+    }
     let mut vm = Vm::new_with_engine(arena, namespace, config, Arc::clone(&engine));
     let outcome = vm.run();
     let dump = vm.dump_live(&outcome);
+    if std::env::var_os("LOOM_JIT_PROFILE").is_some() {
+        eprintln!("{:#?}", engine.jit_profile());
+    }
     (outcome, engine.metrics(), dump)
 }
 
@@ -1602,6 +1608,73 @@ fn builders_and_byte_construction_use_dedicated_paths() {
 }
 
 #[test]
+fn nested_builder_finishes_stay_native() {
+    let source = concat!(
+        "def finish_text(value: String): String\n",
+        "  builder = StringBuilder()\n",
+        "  builder.append(value)\n",
+        "  builder.finish()\n",
+        "end\n",
+        "def finish_bytes(value: Bytes): Bytes\n",
+        "  buffer = ByteBuffer()\n",
+        "  buffer.extend(value)\n",
+        "  buffer.finish()\n",
+        "end\n",
+        "i = 0\ntotal = 0\n",
+        "while i < 1000\n",
+        "  total = total + finish_text(\"loom\").byte_len()\n",
+        "  total = total + finish_bytes(Bytes(\"loom\")).len()\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(8000)));
+    assert_eq!(metrics.native_replay_exits, 0, "{metrics:?}");
+    assert!(metrics.native_allocations >= 4000, "{metrics:?}");
+}
+
+#[test]
+fn nested_collection_preserves_suspended_caller_roots() {
+    let source = concat!(
+        "def churn(): Int\n",
+        "  i = 0\n  total = 0\n",
+        "  while i < 1000\n",
+        "    buffer = ByteBuffer()\n",
+        "    buffer.append(65)\n",
+        "    total = total + buffer.finish().len()\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "def outer(): Int\n",
+        "  kept = [41]\n",
+        "  made = churn()\n",
+        "  kept.at(0) + made\n",
+        "end\n",
+        "outer()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-nested-roots.lm", source)
+        .expect("the nested root case compiles");
+    let config = VmConfig {
+        heap_bytes: 4096,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1041)));
+    assert_eq!(metrics.native_replay_exits, 0, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+    assert!(metrics.native_allocations >= 2000, "{metrics:?}");
+}
+
+#[test]
 fn builder_construction_matches_each_fuel_boundary() {
     let source = concat!(
         "builder = StringBuilder()\n",
@@ -2793,7 +2866,7 @@ fn native_allocation_preserves_collection_roots() {
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
     assert!(metrics.native_allocations >= 900, "{metrics:?}");
-    assert!(metrics.native_interpreter_exits > 0, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
 }
 
 #[test]

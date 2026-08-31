@@ -362,9 +362,7 @@ impl NativeRuntime for TestRuntime {
         &mut self,
         _class: u32,
         _environment: u32,
-        _root_bits: &[u64],
-        _root_tags: &[u64],
-        _root_states: &[u8],
+        _roots: NativeRoots<'_>,
         _allow_collection: bool,
     ) -> AllocationResult {
         AllocationResult::Interpreter

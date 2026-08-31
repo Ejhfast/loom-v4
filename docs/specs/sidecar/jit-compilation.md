@@ -2130,6 +2130,53 @@ Gate: At least one JSON row improves by more than two times.
 
 Gate: At least one HTTP row improves by more than two times.
 
+Checkpoint: Native collection can inspect roots from every suspended native frame.
+
+Nested builder completion and collection stay native.
+
+The planner reads temporary generic types from the verified type table.
+
+One immutable helper table serves each native runtime implementation.
+
+The focused JIT suite passed 136 tests.
+
+The corpus gate passed in 64.50 seconds in the debug workspace profile.
+
+It compiled every unique verified corpus function.
+
+Direct and scheduled forced-native runs matched Interpreter results.
+
+No corpus run reported an unsupported fallback.
+
+All representative forced-native rows reached complete native coverage.
+
+| Workload | Auto gain | Native gain |
+| --- | ---: | ---: |
+| Slot call | 1.91 times | 1.92 times |
+| Deep recursion | 1.07 times | 1.07 times |
+| Call with branch | 3.67 times | 3.66 times |
+| Virtual call | 3.62 times | 3.69 times |
+| Interface call | 5.03 times | 5.07 times |
+| Generic call | 3.66 times | 3.65 times |
+| Closure call | 0.97 times | 3.82 times |
+| Numeric surface | 10.31 times | 10.55 times |
+| Option values | 7.89 times | 7.94 times |
+| List sort | 2.81 times | 2.84 times |
+| JSON parse | 1.74 times | 1.73 times |
+| JSON stringify | 1.75 times | 1.75 times |
+| HTTP parse | 1.48 times | 1.48 times |
+| HTTP serialize | 2.46 times | 2.48 times |
+
+No representative Auto row slowed by more than five percent.
+
+The HTTP gate passed through serialization.
+
+The JSON gate remains open.
+
+Auto did not promote the closure row.
+
+Deep recursion remains close to Interpreter performance under scheduler slices.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -8,8 +8,9 @@ use crate::activation::{
     TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
-    CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget, RegionPlan,
-    Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
+    is_root_kind, CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget,
+    RegionPlan, Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract,
+    VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -458,6 +459,8 @@ struct NativeCallEmission<'a> {
     capture: Option<NativeValue>,
     fallback: NativeCallFallback,
     contract: &'a CallContract,
+    local_kinds: &'a [ScalarKind],
+    boundary_kinds: &'a [ScalarKind],
     block: u32,
     instruction: u32,
     successor_entry: u32,
@@ -1225,7 +1228,7 @@ fn emit_segment(
                     .zip(values.locals.iter().copied())
                     .enumerate()
                 {
-                    if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+                    if is_root_kind(kind) {
                         roots.push(NativeRoot {
                             bits: builder.use_var(variable),
                             tag: builder.use_var(values.local_tags[slot]),
@@ -4749,6 +4752,8 @@ fn emit_segment(
                     NativeCallFallback::Direct
                 },
                 contract,
+                local_kinds: &plan.local_kinds,
+                boundary_kinds: &segment.boundary_stack,
                 block: segment.block,
                 instruction: call_instruction,
                 successor_entry: u32::try_from(segment.successors[0])
@@ -5604,6 +5609,8 @@ fn emit_native_call(
         capture,
         fallback: fallback_kind,
         contract,
+        local_kinds,
+        boundary_kinds,
         block,
         instruction,
         successor_entry,
@@ -5625,6 +5632,10 @@ fn emit_native_call(
         .ok_or(CompileError::Backend)?;
     let boundary_stack = stack.clone();
     let caller_stack = stack[..caller_end].to_vec();
+    if boundary_kinds.len() != boundary_stack.len() {
+        return Err(CompileError::Backend);
+    }
+    let caller_stack_kinds = &boundary_kinds[..caller_end];
     let arguments = stack[argument_start..].to_vec();
     let stack_limit_stack = if capture.is_some() {
         caller_stack
@@ -5959,6 +5970,14 @@ fn emit_native_call(
     emit_charge(builder, values, 1);
     let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
     let caller_frame = emit_current_frame_pointer(builder, values)?;
+    emit_spill_frame_roots(
+        builder,
+        values,
+        caller_frame,
+        local_kinds,
+        caller_stack_kinds,
+        &caller_stack,
+    )?;
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
     let tags = load_activation_pointer(builder, values, RawActivationField::Tags)?;
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
@@ -9519,7 +9538,7 @@ fn extend_stack_roots(
         return Err(CompileError::Backend);
     }
     for (kind, value) in kinds.iter().copied().zip(values.iter().copied()) {
-        if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+        if is_root_kind(kind) {
             roots.push(NativeRoot {
                 bits: value.bits,
                 tag: value.tag,
@@ -9544,7 +9563,7 @@ fn collect_native_roots(
         .zip(values.locals.iter().copied())
         .enumerate()
     {
-        if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+        if is_root_kind(kind) {
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
                 tag: builder.use_var(values.local_tags[slot]),
@@ -9574,7 +9593,7 @@ fn collect_capture_allocation_roots(
         .zip(values.locals.iter().copied())
         .enumerate()
     {
-        if matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_)) {
+        if is_root_kind(kind) {
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
                 tag: builder.use_var(values.local_tags[slot]),
@@ -11373,6 +11392,66 @@ fn emit_spill_frame(
 ) -> Result<(), CompileError> {
     let frame = emit_current_frame_pointer(builder, values)?;
     emit_spill_frame_to(builder, values, frame, block, instruction, stack)
+}
+
+fn emit_spill_frame_roots(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    frame: ir::Value,
+    local_kinds: &[ScalarKind],
+    stack_kinds: &[ScalarKind],
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    if local_kinds.len() != values.locals.len() || stack_kinds.len() != stack.len() {
+        return Err(CompileError::Backend);
+    }
+    for (slot, kind) in local_kinds.iter().copied().enumerate() {
+        if !is_root_kind(kind) {
+            continue;
+        }
+        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        let bits = builder.use_var(values.locals[slot]);
+        let tag = builder.use_var(values.local_tags[slot]);
+        let state = builder.use_var(values.local_states[slot]);
+        builder
+            .ins()
+            .store(MemFlags::new(), bits, values.local_pointer, offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), tag, values.local_tag_pointer, offset);
+        builder.ins().store(
+            MemFlags::new(),
+            state,
+            values.local_state_pointer,
+            state_offset,
+        );
+    }
+    for (slot, (kind, value)) in stack_kinds
+        .iter()
+        .copied()
+        .zip(stack.iter().copied())
+        .enumerate()
+    {
+        if !is_root_kind(kind) {
+            continue;
+        }
+        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        builder
+            .ins()
+            .store(MemFlags::new(), value.bits, values.stack_pointer, offset);
+        builder
+            .ins()
+            .store(MemFlags::new(), value.tag, values.stack_tag_pointer, offset);
+    }
+    store_i32_constant(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, operand_len),
+        u32::try_from(stack.len()).map_err(|_| CompileError::Backend)?,
+    )
 }
 
 fn emit_spill_frame_to(

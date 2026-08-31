@@ -2,7 +2,7 @@
 
 use crate::Failure;
 use lm_heap::JitHeapView;
-use lm_value::Value;
+use lm_value::{ObjRef, Value, ValueTag};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -520,6 +520,120 @@ pub(super) struct RawNativeFunctions {
     pub(super) text_parse_float_status: RawHeapOperation,
     pub(super) text_parse_float_value: RawHeapOperation,
     pub(super) float_fixed: RawHeapOperation,
+}
+
+/// One immutable helper table for one runtime implementation.
+pub(super) struct NativeRuntimeFunctions<R>(std::marker::PhantomData<fn(&mut R)>);
+
+impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
+    pub(super) const TABLE: RawNativeFunctions = RawNativeFunctions {
+        allocate_instance: allocate_instance::<R>,
+        allocate_closure: allocate_closure::<R>,
+        allocate_callback: allocate_callback::<R>,
+        allocate_tuple: allocate_tuple::<R>,
+        allocate_list: allocate_list::<R>,
+        allocate_map: allocate_map::<R>,
+        grow_list: grow_list::<R>,
+        insert_list: insert_list::<R>,
+        reserve_list: reserve_list::<R>,
+        list_contains: list_contains::<R>,
+        map_has: map_has::<R>,
+        map_at: map_at::<R>,
+        map_get: map_get::<R>,
+        map_next_index: map_next_index::<R>,
+        map_key_at: map_key_at::<R>,
+        map_value_at: map_value_at::<R>,
+        map_remove: map_remove::<R>,
+        map_clear: map_clear::<R>,
+        map_reserve: reserve_map::<R>,
+        map_probe: map_probe::<R>,
+        map_probe_key: map_probe_key::<R>,
+        map_probe_value: map_probe_value::<R>,
+        map_probe_set_value: map_probe_set_value::<R>,
+        map_probe_remove: map_probe_remove::<R>,
+        map_insert_hashed: map_insert_hashed::<R>,
+        map_put_discard: map_put_discard::<R>,
+        map_put_probe: map_put_probe::<R>,
+        map_put_commit: map_put_commit::<R>,
+        value_equal: values_equal::<R>,
+        text_compare: text_compare::<R>,
+        bytes_compare: bytes_compare::<R>,
+        text_hash: text_hash::<R>,
+        bytes_hash: bytes_hash::<R>,
+        freeze_graph: freeze_graph::<R>,
+        digest_value: digest_value::<R>,
+        fault_code: fault_code::<R>,
+        fault_denied: fault_denied::<R>,
+        dyn_pack: dyn_pack::<R>,
+        syntax_tree_root: syntax_tree_root::<R>,
+        syntax_kind: syntax_kind::<R>,
+        syntax_category: syntax_category::<R>,
+        syntax_range_start: syntax_range_start::<R>,
+        syntax_range_end: syntax_range_end::<R>,
+        syntax_text: syntax_text::<R>,
+        syntax_children: syntax_children::<R>,
+        syntax_detach: syntax_detach::<R>,
+        syntax_build_token: syntax_build_token::<R>,
+        syntax_build_trivia: syntax_build_trivia::<R>,
+        syntax_build_node: syntax_build_node::<R>,
+        syntax_to_tree: syntax_to_tree::<R>,
+        string_builder_new: string_builder_new::<R>,
+        string_builder_append_text: string_builder_append_text::<R>,
+        string_builder_append_int: string_builder_append_int::<R>,
+        string_builder_append_bool: string_builder_append_bool::<R>,
+        string_builder_append_char: string_builder_append_char::<R>,
+        string_builder_append_float: string_builder_append_float::<R>,
+        string_builder_build: string_builder_build::<R>,
+        string_builder_finish: string_builder_finish::<R>,
+        byte_buffer_new: byte_buffer_new::<R>,
+        byte_buffer_append: byte_buffer_append::<R>,
+        byte_buffer_build: byte_buffer_build::<R>,
+        byte_buffer_extend: byte_buffer_extend::<R>,
+        byte_buffer_reserve: byte_buffer_reserve::<R>,
+        byte_buffer_finish: byte_buffer_finish::<R>,
+        bytes_from_text: bytes_from_text::<R>,
+        bytes_slice: bytes_slice::<R>,
+        bytes_concat: bytes_concat::<R>,
+        bytes_compact: bytes_compact::<R>,
+        bytes_text_view: bytes_text_view::<R>,
+        bytes_bit_and: bytes_bit_and::<R>,
+        bytes_bit_or: bytes_bit_or::<R>,
+        bytes_bit_xor: bytes_bit_xor::<R>,
+        bytes_bit_not: bytes_bit_not::<R>,
+        text_concat: text_concat::<R>,
+        text_starts_with: text_starts_with::<R>,
+        text_ends_with: text_ends_with::<R>,
+        text_contains: text_contains::<R>,
+        text_find_scalar: text_find_scalar::<R>,
+        text_find_byte: text_find_byte::<R>,
+        text_trim: text_trim::<R>,
+        text_trim_start: text_trim_start::<R>,
+        text_trim_end: text_trim_end::<R>,
+        text_lower_ascii: text_lower_ascii::<R>,
+        text_upper_ascii: text_upper_ascii::<R>,
+        text_replace: text_replace::<R>,
+        text_parse_int_status: text_parse_int_status::<R>,
+        text_parse_int_value: text_parse_int_value::<R>,
+        text_pad_start: text_pad_start::<R>,
+        text_pad_end: text_pad_end::<R>,
+        bytes_ends_with: bytes_ends_with::<R>,
+        bytes_contains: bytes_contains::<R>,
+        text_split: text_split::<R>,
+        text_lines: text_lines::<R>,
+        text_slice: text_slice::<R>,
+        text_slice_bytes: text_slice_bytes::<R>,
+        text_bytes: text_bytes::<R>,
+        text_to_string: text_to_string::<R>,
+        bytes_text: bytes_text::<R>,
+        byte_buffer_find_from: byte_buffer_find_from::<R>,
+        bytes_starts_with: bytes_starts_with::<R>,
+        bytes_find_index: bytes_find_index::<R>,
+        bytes_hex: bytes_hex::<R>,
+        bytes_is_utf8: bytes_is_utf8::<R>,
+        text_parse_float_status: text_parse_float_status::<R>,
+        text_parse_float_value: text_parse_float_value::<R>,
+        float_fixed: float_fixed::<R>,
+    };
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1237,6 +1351,167 @@ pub(super) struct RawRuntimeContext<R> {
     pub(super) root_capacity: usize,
 }
 
+/// One complete root view for a native runtime operation.
+#[derive(Clone, Copy)]
+pub struct NativeRoots<'a> {
+    bits: &'a [u64],
+    tags: &'a [u64],
+    states: &'a [u8],
+    activation: &'a RawNativeActivation,
+}
+
+/// One failure while reading native roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRootError {
+    /// Native activation metadata is invalid.
+    Invalid,
+    /// Root storage cannot grow.
+    Limit,
+}
+
+impl NativeRoots<'_> {
+    /// Return the current-frame root payloads.
+    pub fn bits(&self) -> &[u64] {
+        self.bits
+    }
+
+    /// Return the current-frame root tags.
+    pub fn tags(&self) -> &[u64] {
+        self.tags
+    }
+
+    /// Return the current-frame root states.
+    pub fn states(&self) -> &[u8] {
+        self.states
+    }
+
+    /// Add every live object root from this native activation.
+    pub fn extend_objects(&self, roots: &mut Vec<ObjRef>) -> Result<(), NativeRootError> {
+        if self.bits.len() != self.tags.len() || self.bits.len() != self.states.len() {
+            return Err(NativeRootError::Invalid);
+        }
+        let activation = self.activation;
+        let frame_len = activation.frame_len as usize;
+        let scalar_len = activation.scalar_len as usize;
+        if frame_len == 0
+            || frame_len > activation.frame_capacity as usize
+            || scalar_len > activation.scalar_capacity as usize
+            || activation.frames.is_null()
+            || activation.scalars.is_null()
+            || activation.tags.is_null()
+            || activation.states.is_null()
+        {
+            return Err(NativeRootError::Invalid);
+        }
+        let reserve = self
+            .bits
+            .len()
+            .checked_add(scalar_len)
+            .and_then(|count| count.checked_add(frame_len))
+            .ok_or(NativeRootError::Limit)?;
+        roots
+            .try_reserve(reserve)
+            .map_err(|_| NativeRootError::Limit)?;
+        extend_object_roots(roots, self.bits, self.tags, self.states);
+
+        // SAFETY: The checks above bound every raw activation slice.
+        let frames = unsafe { std::slice::from_raw_parts(activation.frames, frame_len) };
+        // SAFETY: The checks above bound every raw activation slice.
+        let scalars = unsafe { std::slice::from_raw_parts(activation.scalars, scalar_len) };
+        // SAFETY: The checks above bound every raw activation slice.
+        let tags = unsafe { std::slice::from_raw_parts(activation.tags, scalar_len) };
+        // SAFETY: The checks above bound every raw activation slice.
+        let states = unsafe { std::slice::from_raw_parts(activation.states, scalar_len) };
+        for (index, frame) in frames.iter().enumerate() {
+            if frame.capture_tag == ValueTag::Obj as u64 {
+                roots.push(object_reference(frame.capture_bits));
+            }
+            if index + 1 == frame_len {
+                continue;
+            }
+            let base = frame.scalar_base as usize;
+            let local_count = frame.local_count as usize;
+            let max_stack = frame.max_stack as usize;
+            let operand_len = frame.operand_len as usize;
+            let local_end = base
+                .checked_add(local_count)
+                .ok_or(NativeRootError::Invalid)?;
+            let window_end = local_end
+                .checked_add(max_stack)
+                .ok_or(NativeRootError::Invalid)?;
+            let operand_end = local_end
+                .checked_add(operand_len)
+                .ok_or(NativeRootError::Invalid)?;
+            if operand_len > max_stack || window_end > scalar_len || operand_end > scalar_len {
+                return Err(NativeRootError::Invalid);
+            }
+            extend_object_roots(
+                roots,
+                &scalars[base..local_end],
+                &tags[base..local_end],
+                &states[base..local_end],
+            );
+            for (&bits, &tag) in scalars[local_end..operand_end]
+                .iter()
+                .zip(&tags[local_end..operand_end])
+            {
+                if tag == ValueTag::Obj as u64 {
+                    roots.push(object_reference(bits));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn extend_object_roots(roots: &mut Vec<ObjRef>, bits: &[u64], tags: &[u64], states: &[u8]) {
+    roots.extend(
+        bits.iter()
+            .copied()
+            .zip(tags.iter().copied())
+            .zip(states.iter().copied())
+            .filter(|((_, tag), state)| {
+                *tag == ValueTag::Obj as u64 && state & LOCAL_INITIALIZED != 0
+            })
+            .map(|((bits, _), _)| object_reference(bits)),
+    );
+}
+
+fn object_reference(bits: u64) -> ObjRef {
+    ObjRef {
+        slot: bits as u32,
+        generation: (bits >> 32) as u32,
+    }
+}
+
+unsafe fn runtime_roots<'a, R>(
+    context: *const RawRuntimeContext<R>,
+    count: usize,
+) -> Option<NativeRoots<'a>> {
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: The native caller retains one live runtime context.
+    let context = unsafe { &*context };
+    if count > context.root_capacity || context.activation.is_null() {
+        return None;
+    }
+    // SAFETY: The caller checked the shared root-buffer capacity.
+    let bits = unsafe { std::slice::from_raw_parts(context.roots, count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let tags = unsafe { std::slice::from_raw_parts(context.root_tags, count) };
+    // SAFETY: Every root has one canonical state slot.
+    let states = unsafe { std::slice::from_raw_parts(context.root_states, count) };
+    // SAFETY: Native execution retains the activation during this call.
+    let activation = unsafe { &*context.activation };
+    Some(NativeRoots {
+        bits,
+        tags,
+        states,
+        activation,
+    })
+}
+
 /// One checked instance-allocation result.
 #[derive(Debug, Clone, Copy)]
 pub enum AllocationResult {
@@ -1299,9 +1574,7 @@ pub struct HeapOperationRequest<'a> {
     pub first: u64,
     pub second: u64,
     pub third: u64,
-    pub root_bits: &'a [u64],
-    pub root_tags: &'a [u64],
-    pub root_states: &'a [u8],
+    pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
 
@@ -1319,9 +1592,7 @@ pub struct ClosureAllocationRequest<'a> {
     pub environment: u32,
     pub capture_bits: &'a [u64],
     pub capture_tags: &'a [u64],
-    pub root_bits: &'a [u64],
-    pub root_tags: &'a [u64],
-    pub root_states: &'a [u8],
+    pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
 
@@ -1340,12 +1611,8 @@ pub struct ValueArrayAllocationRequest<'a> {
     pub item_bits: &'a [u64],
     /// Canonical item tags.
     pub item_tags: &'a [u64],
-    /// Active root payloads.
-    pub root_bits: &'a [u64],
-    /// Active root tags.
-    pub root_tags: &'a [u64],
-    /// Active root states.
-    pub root_states: &'a [u8],
+    /// Complete native roots.
+    pub roots: NativeRoots<'a>,
     /// True when this frame can collect.
     pub allow_collection: bool,
 }
@@ -1358,12 +1625,8 @@ pub struct DigestRequest<'a> {
     pub ty: u32,
     /// Current closed type environment.
     pub environment: u32,
-    /// Active root payloads.
-    pub root_bits: &'a [u64],
-    /// Active root tags.
-    pub root_tags: &'a [u64],
-    /// Active root states.
-    pub root_states: &'a [u8],
+    /// Complete native roots.
+    pub roots: NativeRoots<'a>,
     /// True when this frame can collect.
     pub allow_collection: bool,
 }
@@ -1375,9 +1638,7 @@ pub trait NativeRuntime {
         &mut self,
         class: u32,
         environment: u32,
-        root_bits: &[u64],
-        root_tags: &[u64],
-        root_states: &[u8],
+        roots: NativeRoots<'_>,
         allow_collection: bool,
     ) -> AllocationResult;
 
@@ -1749,12 +2010,8 @@ pub struct ListGrowthRequest<'a> {
     pub value_bits: u64,
     /// Canonical appended value tag.
     pub value_tag: u64,
-    /// Active root payloads.
-    pub root_bits: &'a [u64],
-    /// Active root tags.
-    pub root_tags: &'a [u64],
-    /// Active root states.
-    pub root_states: &'a [u8],
+    /// Complete native roots.
+    pub roots: NativeRoots<'a>,
     /// True when this frame can collect.
     pub allow_collection: bool,
 }
@@ -1769,12 +2026,8 @@ pub struct ListInsertRequest<'a> {
     pub value_bits: u64,
     /// Canonical inserted value tag.
     pub value_tag: u64,
-    /// Active root payloads.
-    pub root_bits: &'a [u64],
-    /// Active root tags.
-    pub root_tags: &'a [u64],
-    /// Active root states.
-    pub root_states: &'a [u8],
+    /// Complete native roots.
+    pub roots: NativeRoots<'a>,
     /// True when this frame can collect.
     pub allow_collection: bool,
 }
@@ -1793,12 +2046,8 @@ pub struct CollectionReserveRequest<'a> {
     pub reference: u64,
     /// Requested additional capacity.
     pub additional: i64,
-    /// Active root payloads.
-    pub root_bits: &'a [u64],
-    /// Active root tags.
-    pub root_tags: &'a [u64],
-    /// Active root states.
-    pub root_states: &'a [u8],
+    /// Complete native roots.
+    pub roots: NativeRoots<'a>,
     /// True when this frame can collect.
     pub allow_collection: bool,
 }
@@ -1813,9 +2062,7 @@ pub struct MapPutCommitRequest<'a> {
     pub token: u64,
     pub entry_count: u64,
     pub vacant: bool,
-    pub root_bits: &'a [u64],
-    pub root_tags: &'a [u64],
-    pub root_states: &'a [u8],
+    pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
 
@@ -1826,9 +2073,7 @@ pub struct MapPutDiscardRequest<'a> {
     pub key_tag: u64,
     pub value_bits: u64,
     pub value_tag: u64,
-    pub root_bits: &'a [u64],
-    pub root_tags: &'a [u64],
-    pub root_states: &'a [u8],
+    pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
 
@@ -1841,9 +2086,7 @@ pub struct MapInsertHashedRequest<'a> {
     pub value_tag: u64,
     pub semantic_hash: i64,
     pub token: i64,
-    pub root_bits: &'a [u64],
-    pub root_tags: &'a [u64],
-    pub root_states: &'a [u8],
+    pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
 
@@ -1868,26 +2111,12 @@ pub(super) unsafe extern "C" fn allocate_instance<R: NativeRuntime>(
     if allow_collection > 1 || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside the activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let nested = unsafe { (*context.activation).frame_len > 1 };
-    let response = runtime.allocate_instance(
-        class,
-        environment,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection != 0 && !nested,
-    );
+    };
+    let response = runtime.allocate_instance(class, environment, roots, allow_collection != 0);
     finish_object_allocation(context.activation, result, response)
 }
 
@@ -1908,28 +2137,19 @@ pub(super) unsafe extern "C" fn digest_value<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Every root has one canonical state slot.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let nested = unsafe { (*context.activation).frame_len > 1 };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     let response = runtime.digest_value(DigestRequest {
         reference,
         ty,
         environment,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection: allow_collection != 0 && !nested,
+        roots,
+        allow_collection: allow_collection != 0,
     });
     finish_object_allocation(context.activation, result, response)
 }
@@ -1958,28 +2178,22 @@ pub(super) unsafe extern "C" fn allocate_closure<R: NativeRuntime>(
     let Some(capture_end) = capture_start.checked_add(capture_count) else {
         return RUNTIME_INTERPRETER;
     };
-    if root_count > context.root_capacity || capture_end > root_count {
+    if capture_end > root_count {
         return RUNTIME_INTERPRETER;
     }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let nested = unsafe { (*context.activation).frame_len > 1 };
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count) }) else {
+        return RUNTIME_INTERPRETER;
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     let response = runtime.allocate_closure(ClosureAllocationRequest {
         function,
         environment,
-        capture_bits: &root_bits[capture_start..capture_end],
-        capture_tags: &root_tags[capture_start..capture_end],
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection: allow_collection != 0 && !nested,
+        capture_bits: &roots.bits()[capture_start..capture_end],
+        capture_tags: &roots.tags()[capture_start..capture_end],
+        roots,
+        allow_collection: allow_collection != 0,
     });
     finish_object_allocation(context.activation, result, response)
 }
@@ -2008,13 +2222,13 @@ pub(super) unsafe extern "C" fn allocate_callback<R: NativeRuntime>(
     let Some(capture_end) = capture_start.checked_add(capture_count) else {
         return RUNTIME_INTERPRETER;
     };
-    if root_count > context.root_capacity || capture_end > root_count {
+    if capture_end > root_count {
         return RUNTIME_INTERPRETER;
     }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count) }) else {
+        return RUNTIME_INTERPRETER;
+    };
     // SAFETY: The activation remains live during this call.
     let activation = unsafe { &*context.activation };
     let Some(owner_depth) = activation.base_frames.checked_add(activation.frame_len) else {
@@ -2025,8 +2239,8 @@ pub(super) unsafe extern "C" fn allocate_callback<R: NativeRuntime>(
     match runtime.allocate_callback(CallbackAllocationRequest {
         function,
         environment,
-        capture_bits: &root_bits[capture_start..capture_end],
-        capture_tags: &root_tags[capture_start..capture_end],
+        capture_bits: &roots.bits()[capture_start..capture_end],
+        capture_tags: &roots.tags()[capture_start..capture_end],
         owner_depth,
     }) {
         CallbackAllocationResult::Value { bits } => {
@@ -2128,28 +2342,22 @@ unsafe fn allocate_values<R: NativeRuntime>(
     let Some(item_end) = item_start.checked_add(item_count) else {
         return RUNTIME_INTERPRETER;
     };
-    if root_count > context.root_capacity || item_end > root_count {
+    if item_end > root_count {
         return RUNTIME_INTERPRETER;
     }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let nested = unsafe { (*context.activation).frame_len > 1 };
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count) }) else {
+        return RUNTIME_INTERPRETER;
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     let response = allocate(
         runtime,
         ValueArrayAllocationRequest {
-            item_bits: &root_bits[item_start..item_end],
-            item_tags: &root_tags[item_start..item_end],
-            root_bits,
-            root_tags,
-            root_states,
-            allow_collection: allow_collection != 0 && !nested,
+            item_bits: &roots.bits()[item_start..item_end],
+            item_tags: &roots.tags()[item_start..item_end],
+            roots,
+            allow_collection: allow_collection != 0,
         },
     );
     finish_object_allocation(context.activation, result, response)
@@ -2197,28 +2405,19 @@ pub(super) unsafe extern "C" fn grow_list<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside the activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
     match runtime.grow_list(ListGrowthRequest {
         reference,
         value_bits,
         value_tag,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
+        roots,
+        allow_collection: true,
     }) {
         ListGrowthResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
@@ -2252,29 +2451,20 @@ pub(super) unsafe extern "C" fn insert_list<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside the activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
     match runtime.insert_list(ListInsertRequest {
         reference,
         index,
         value_bits,
         value_tag,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
+        roots,
+        allow_collection: true,
     }) {
         ListGrowthResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
@@ -2327,29 +2517,20 @@ unsafe fn reserve_collection<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside the activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
     match operation(
         runtime,
         CollectionReserveRequest {
             reference,
             additional,
-            root_bits,
-            root_tags,
-            root_states,
-            allow_collection,
+            roots,
+            allow_collection: true,
         },
     ) {
         CollectionReserveResult::Done { heap } => {
@@ -2541,18 +2722,11 @@ pub(super) unsafe extern "C" fn map_insert_hashed<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     match runtime.map_insert_hashed(MapInsertHashedRequest {
@@ -2563,10 +2737,8 @@ pub(super) unsafe extern "C" fn map_insert_hashed<R: NativeRuntime>(
         value_tag,
         semantic_hash,
         token,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
+        roots,
+        allow_collection: true,
     }) {
         RuntimeUnitResult::Done => RUNTIME_OK,
         RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
@@ -2865,18 +3037,11 @@ unsafe fn heap_operation<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside each root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Every root has one canonical state slot.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     let response = operation(
@@ -2885,10 +3050,8 @@ unsafe fn heap_operation<R: NativeRuntime>(
             first,
             second,
             third,
-            root_bits,
-            root_tags,
-            root_states,
-            allow_collection,
+            roots,
+            allow_collection: true,
         },
     );
     finish_heap_operation(context.activation, result, response)
@@ -3032,18 +3195,11 @@ pub(super) unsafe extern "C" fn map_put_commit<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     match runtime.map_put_commit(MapPutCommitRequest {
@@ -3055,10 +3211,8 @@ pub(super) unsafe extern "C" fn map_put_commit<R: NativeRuntime>(
         token,
         entry_count,
         vacant: vacant != 0,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
+        roots,
+        allow_collection: true,
     }) {
         RuntimeUnitResult::Done => RUNTIME_OK,
         RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
@@ -3083,18 +3237,11 @@ pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
     if context.runtime.is_null() || context.activation.is_null() {
         return RUNTIME_INTERPRETER;
     }
-    let root_count = root_count as usize;
-    if root_count > context.root_capacity {
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
         return RUNTIME_INTERPRETER;
-    }
-    // SAFETY: The checked count stays inside each activation root buffer.
-    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
-    // SAFETY: Every root has one canonical tag slot.
-    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
-    // SAFETY: Both root buffers have the same checked capacity.
-    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
-    // SAFETY: The activation remains live during this call.
-    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    };
     // SAFETY: The context retains one live runtime during this call.
     let runtime = unsafe { &mut *context.runtime };
     match runtime.map_put_discard(MapPutDiscardRequest {
@@ -3103,10 +3250,8 @@ pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
         key_tag,
         value_bits,
         value_tag,
-        root_bits,
-        root_tags,
-        root_states,
-        allow_collection,
+        roots,
+        allow_collection: true,
     }) {
         RuntimeUnitResult::Done => RUNTIME_OK,
         RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),

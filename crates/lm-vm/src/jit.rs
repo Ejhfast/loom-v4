@@ -27,6 +27,8 @@ pub(crate) struct NativeExecutionContext<'a> {
     pub(crate) module: &'a NamespaceRuntime,
     pub(crate) envs: &'a mut lm_bytecode::closed::TypeEnvs,
     pub(crate) slots: Option<&'a [ImageSlotTarget]>,
+    pub(crate) profile: bool,
+    pub(crate) instruction_limit: u32,
 }
 
 /// One native activation retained at an ordinary scheduler quantum.
@@ -175,6 +177,7 @@ pub(crate) struct JitEngine {
     compiler: lm_jit::JitEngine,
     layouts:
         Mutex<std::collections::HashMap<usize, (Weak<lm_bytecode::CodeTables>, NativeCodeState)>>,
+    runtime_exits: Mutex<std::collections::BTreeMap<(String, String, String), u64>>,
 }
 
 impl std::fmt::Debug for JitEngine {
@@ -274,6 +277,28 @@ impl JitEngine {
                 .cmp(&left.estimated_instructions)
                 .then_with(|| left.instruction.cmp(&right.instruction))
         });
+        let runtime_exits = self
+            .runtime_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        profile.runtime_exits = runtime_exits
+            .iter()
+            .map(
+                |((function, instruction, exit), count)| crate::JitProfileRuntimeExit {
+                    function: function.clone(),
+                    instruction: instruction.clone(),
+                    exit: exit.clone(),
+                    count: *count,
+                },
+            )
+            .collect();
+        profile.runtime_exits.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.function.cmp(&right.function))
+                .then_with(|| left.instruction.cmp(&right.instruction))
+        });
         profile
     }
 
@@ -285,6 +310,10 @@ impl JitEngine {
         for (_, state) in layouts.values() {
             state.reset_profile();
         }
+        self.runtime_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     pub(crate) fn execute(
@@ -294,18 +323,9 @@ impl JitEngine {
         native: &NativeCodeState,
         scratch: &mut NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
-        instruction_limit: u32,
     ) -> NativeAttempt {
         if machine.has_native_continuation() {
-            return Self::execute_region(
-                machine,
-                context,
-                native,
-                None,
-                scratch,
-                metrics,
-                instruction_limit,
-            );
+            return self.execute_region(machine, context, native, None, scratch, metrics);
         }
         let Some(frame) = machine.vm.frames.last() else {
             metrics.note_missing_entry_fallback();
@@ -400,27 +420,20 @@ impl JitEngine {
                 return NativeAttempt::Fallback;
             }
         };
-        Self::execute_region(
-            machine,
-            context,
-            native,
-            Some(region),
-            scratch,
-            metrics,
-            instruction_limit,
-        )
+        self.execute_region(machine, context, native, Some(region), scratch, metrics)
     }
 
     fn execute_region(
+        &self,
         machine: &mut Machine,
         context: &mut NativeExecutionContext<'_>,
         native: &NativeCodeState,
         region: Option<Arc<lm_jit::CompiledRegion>>,
         scratch: &mut NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
-        instruction_limit: u32,
     ) -> NativeAttempt {
         let module = context.module;
+        let instruction_limit = context.instruction_limit;
         let mut continuation = machine.take_native_continuation();
         let resumed = continuation.is_some();
         let (root_region, active_region, entry_index, root_frame, base, operand_base) =
@@ -659,11 +672,8 @@ impl JitEngine {
                     .max(scratch.root_states.len())
                     .max(1);
                 scratch.roots.resize(root_capacity, 0);
-                scratch.roots.fill(0);
                 scratch.root_tags.resize(root_capacity, 0);
-                scratch.root_tags.fill(0);
                 scratch.root_states.resize(root_capacity, 0);
-                scratch.root_states.fill(0);
                 let Some(remaining) = batch_fuel.checked_sub(prior_retired) else {
                     break Err(Failure::BackendUnavailable);
                 };
@@ -1137,6 +1147,14 @@ impl JitEngine {
                 instruction_limit,
             );
         }
+        if context.profile
+            && matches!(
+                exit.kind(),
+                ExitKind::Replay | ExitKind::Literal | ExitKind::Boundary
+            )
+        {
+            self.record_runtime_exit(module, scratch, exit);
+        }
         if metrics.sample_productivity() {
             let sample = match exit.kind() {
                 ExitKind::Fuel
@@ -1253,7 +1271,7 @@ impl JitEngine {
                         .call_value_site(exit.block(), exit.instruction())
                         .is_some();
                 if grow_value_call {
-                    metrics.note_native_interpreter_exit();
+                    metrics.note_native_call_value_exit();
                     return NativeAttempt::InterpretOne { retired };
                 }
                 if matches!(exit.kind(), ExitKind::Call | ExitKind::GrowActivation) {
@@ -1312,7 +1330,11 @@ impl JitEngine {
                     }
                     NativeAttempt::InterpretOne { retired }
                 } else if interpreter {
-                    metrics.note_native_interpreter_exit();
+                    match exit.kind() {
+                        ExitKind::Replay => metrics.note_native_replay_exit(),
+                        ExitKind::Literal => metrics.note_native_literal_exit(),
+                        _ => unreachable!(),
+                    }
                     NativeAttempt::InterpretOne { retired }
                 } else if exit.retired() == batch_fuel {
                     let outcome = if u64::from(instruction_limit) <= original_fuel {
@@ -1381,6 +1403,38 @@ impl JitEngine {
             }
             ExitKind::GrowRoots => malformed_native_exit(retired),
         }
+    }
+
+    fn record_runtime_exit(
+        &self,
+        module: &NamespaceRuntime,
+        scratch: &NativeScratch,
+        exit: lm_jit::ExecutionExit,
+    ) {
+        let Some(frame) = scratch.activation.frames().last() else {
+            return;
+        };
+        let Some(function) = module.funcs.get(frame.function() as usize) else {
+            return;
+        };
+        let instruction = function
+            .blocks
+            .get(exit.block() as usize)
+            .and_then(|block| block.get(exit.instruction() as usize))
+            .map_or_else(|| "<missing>".to_string(), |value| format!("{value:?}"));
+        let key = (
+            function.name.clone(),
+            instruction,
+            format!("{:?}", exit.kind()),
+        );
+        let mut exits = self
+            .runtime_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        exits
+            .entry(key)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
     }
 }
 

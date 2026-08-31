@@ -1063,8 +1063,11 @@ fn is_option_class(module: &Module, class: u32) -> bool {
         .any(|parent| parent == class)
 }
 
-fn is_root_kind(kind: ScalarKind) -> bool {
-    matches!(kind, ScalarKind::Object(_) | ScalarKind::Tagged(_))
+pub(super) fn is_root_kind(kind: ScalarKind) -> bool {
+    matches!(
+        kind,
+        ScalarKind::Object(_) | ScalarKind::Tagged(_) | ScalarKind::Callback(_)
+    )
 }
 
 pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
@@ -1392,8 +1395,8 @@ fn analyze_segment(
             Instr::EqDigest | Instr::NeDigest => {
                 let right = stack_from_end(&before.stack, 0)?;
                 let left = stack_from_end(&before.stack, 1)?;
-                digest_type(context.module, left)?;
-                digest_type(context.module, right)?;
+                digest_type(context, left)?;
+                digest_type(context, right)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::DigestCompare,
@@ -1401,7 +1404,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::AsCallback) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                function_type(context.module, receiver)?;
+                function_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::AsCallback,
@@ -1413,7 +1416,7 @@ fn analyze_segment(
                 else {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
-                option_argument_type(context.module, source_ty)?;
+                option_argument_type(context, source_ty)?;
                 option_accesses.push(OptionAccess {
                     instruction: position,
                     family_type: ty,
@@ -1426,7 +1429,7 @@ fn analyze_segment(
                 else {
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
-                let payload = option_argument_type(context.module, source_ty)?;
+                let payload = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, payload)?;
                 option_accesses.push(OptionAccess {
                     instruction: position,
@@ -1440,8 +1443,8 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let element = list_element_type(context.module, receiver)?;
-                let option_element = option_argument_type(context.module, source_ty)?;
+                let element = list_element_type(context, receiver)?;
+                let option_element = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, element)?;
                 if !uses_equal_representation(
                     value.kind,
@@ -1461,8 +1464,8 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 0)?;
-                let element = list_element_type(context.module, receiver)?;
-                let option_element = option_argument_type(context.module, source_ty)?;
+                let element = list_element_type(context, receiver)?;
+                let option_element = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, element)?;
                 if !uses_equal_representation(
                     value.kind,
@@ -1518,7 +1521,7 @@ fn analyze_segment(
             }
             Instr::ListLen => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListLen,
@@ -1526,7 +1529,7 @@ fn analyze_segment(
             }
             Instr::MapLen => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapLen,
@@ -1534,7 +1537,7 @@ fn analyze_segment(
             }
             Instr::MapHas => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapHas,
@@ -1542,7 +1545,7 @@ fn analyze_segment(
             }
             Instr::MapAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value) = map_type(context.module, receiver)?;
+                let (_, value) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapAt {
@@ -1556,8 +1559,8 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value_type) = map_type(context.module, receiver)?;
-                let option_value = option_argument_type(context.module, source_ty)?;
+                let (_, value_type) = map_type(context, receiver)?;
+                let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(
                     value.kind,
@@ -1577,13 +1580,13 @@ fn analyze_segment(
             }
             Instr::MapPut { ty, discard } => {
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let (_, value_type) = map_type(context.module, receiver)?;
+                let (_, value_type) = map_type(context, receiver)?;
                 let value = value_contract(context, value_type)?;
                 let source_type = match source_instruction {
                     Instr::MapPut { ty, .. } => ty,
                     _ => return Err(UnsupportedReason::InvalidControlFlow),
                 };
-                let option_value = option_argument_type(context.module, source_type)?;
+                let option_value = option_argument_type(context, source_type)?;
                 if !uses_equal_representation(
                     value.kind,
                     scalar_kind(context.module, option_value)?,
@@ -1602,7 +1605,7 @@ fn analyze_segment(
             }
             Instr::ListAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let element = list_element_type(context.module, receiver)?;
+                let element = list_element_type(context, receiver)?;
                 let value = value_contract(context, element)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
@@ -1612,7 +1615,7 @@ fn analyze_segment(
             Instr::Extended(ExtendedInstr::ListSet) => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let element = list_element_type(context.module, receiver)?;
+                let element = list_element_type(context, receiver)?;
                 let contract = value_contract(context, element)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
@@ -1625,7 +1628,7 @@ fn analyze_segment(
             Instr::Extended(ExtendedInstr::ListInsert) => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let element = list_element_type(context.module, receiver)?;
+                let element = list_element_type(context, receiver)?;
                 let contract = value_contract(context, element)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
@@ -1639,7 +1642,7 @@ fn analyze_segment(
                 operation @ (ExtendedInstr::ListRemove | ExtendedInstr::ListSwapRemove),
             ) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let element = list_element_type(context.module, receiver)?;
+                let element = list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListRemove {
@@ -1650,7 +1653,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListTruncate) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListTruncate,
@@ -1658,7 +1661,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListCapacity) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListCapacity,
@@ -1666,7 +1669,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListReserve) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListReserve,
@@ -1674,7 +1677,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListReorder) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListReorder,
@@ -1682,7 +1685,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListEpoch) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListEpoch,
@@ -1690,7 +1693,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::ListIterLen) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                list_element_type(context.module, receiver)?;
+                list_element_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListIterLen,
@@ -1698,7 +1701,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapEpoch) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapEpoch,
@@ -1706,7 +1709,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapIterLen) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapIterLen,
@@ -1714,7 +1717,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapNextIndex) => {
                 let receiver = stack_from_end(&before.stack, 2)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapNextIndex,
@@ -1722,7 +1725,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapKeyAt) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key, _) = map_type(context.module, receiver)?;
+                let (key, _) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapKeyAt {
@@ -1732,7 +1735,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapValueAt) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value) = map_type(context.module, receiver)?;
+                let (_, value) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapValueAt {
@@ -1747,8 +1750,8 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value_type) = map_type(context.module, receiver)?;
-                let option_value = option_argument_type(context.module, source_ty)?;
+                let (_, value_type) = map_type(context, receiver)?;
+                let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(
                     value.kind,
@@ -1768,7 +1771,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapClear) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapClear,
@@ -1776,7 +1779,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapReserve) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapReserve,
@@ -1784,7 +1787,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapProbe) => {
                 let receiver = stack_from_end(&before.stack, 2)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapProbe,
@@ -1793,7 +1796,7 @@ fn analyze_segment(
             Instr::Extended(ExtendedInstr::MapProbeFound) => {}
             Instr::Extended(ExtendedInstr::MapProbeKey) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key, _) = map_type(context.module, receiver)?;
+                let (key, _) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapProbeKey {
@@ -1803,7 +1806,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapProbeValue) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value) = map_type(context.module, receiver)?;
+                let (_, value) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapProbeValue {
@@ -1814,7 +1817,7 @@ fn analyze_segment(
             Instr::Extended(ExtendedInstr::MapProbeSetValue) => {
                 let stored = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let (_, value_type) = map_type(context.module, receiver)?;
+                let (_, value_type) = map_type(context, receiver)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(stored, value.kind) {
                     return Err(UnsupportedReason::InvalidStack);
@@ -1826,7 +1829,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapProbeRemove) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value) = map_type(context.module, receiver)?;
+                let (_, value) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapProbeRemove {
@@ -1838,7 +1841,7 @@ fn analyze_segment(
                 let stored_key = stack_from_end(&before.stack, 3)?;
                 let stored_value = stack_from_end(&before.stack, 2)?;
                 let receiver = stack_from_end(&before.stack, 4)?;
-                let (key_type, value_type) = map_type(context.module, receiver)?;
+                let (key_type, value_type) = map_type(context, receiver)?;
                 let key = value_contract(context, key_type)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(stored_key, key.kind)
@@ -1853,7 +1856,7 @@ fn analyze_segment(
             }
             Instr::Extended(ExtendedInstr::MapWriteGuard) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                map_type(context.module, receiver)?;
+                map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapWriteGuard,
@@ -1875,7 +1878,7 @@ fn analyze_segment(
             }
             Instr::Native(NativeInstr::BytesLen) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
-                bytes_type(context.module, receiver)?;
+                bytes_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::BytesLen,
@@ -1883,7 +1886,7 @@ fn analyze_segment(
             }
             Instr::Native(NativeInstr::BytesAt) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                bytes_type(context.module, receiver)?;
+                bytes_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::BytesAt,
@@ -1891,7 +1894,7 @@ fn analyze_segment(
             }
             Instr::Native(NativeInstr::BytesGet) => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                bytes_type(context.module, receiver)?;
+                bytes_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::BytesGet,
@@ -1966,7 +1969,7 @@ fn analyze_segment(
                 ) {
                     byte_buffer_type(context, receiver)?;
                 } else {
-                    bytes_type(context.module, receiver)?;
+                    bytes_type(context, receiver)?;
                 }
                 allocations.push(AllocationSite {
                     instruction: position,
@@ -2012,7 +2015,7 @@ fn analyze_segment(
             }
             Instr::Native(NativeInstr::BbExtend) => {
                 byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
-                bytes_type(context.module, stack_from_end(&before.stack, 0)?)?;
+                bytes_type(context, stack_from_end(&before.stack, 0)?)?;
                 allocations.push(AllocationSite {
                     instruction: position,
                     stack: before.stack.clone(),
@@ -2026,7 +2029,7 @@ fn analyze_segment(
                 expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
             }
             Instr::Native(NativeInstr::BytesSlice) => {
-                bytes_type(context.module, stack_from_end(&before.stack, 2)?)?;
+                bytes_type(context, stack_from_end(&before.stack, 2)?)?;
                 expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
                 expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
                 allocations.push(AllocationSite {
@@ -2038,8 +2041,8 @@ fn analyze_segment(
             | Instr::Numeric(
                 NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor,
             ) => {
-                bytes_type(context.module, stack_from_end(&before.stack, 1)?)?;
-                bytes_type(context.module, stack_from_end(&before.stack, 0)?)?;
+                bytes_type(context, stack_from_end(&before.stack, 1)?)?;
+                bytes_type(context, stack_from_end(&before.stack, 0)?)?;
                 allocations.push(AllocationSite {
                     instruction: position,
                     stack: before.stack.clone(),
@@ -2073,7 +2076,7 @@ fn analyze_segment(
             Instr::ListPush => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let element = list_element_type(context.module, receiver)?;
+                let element = list_element_type(context, receiver)?;
                 let contract = value_contract(context, element)?;
                 if !uses_equal_representation(value, contract.kind) {
                     return Err(UnsupportedReason::InvalidStack);
@@ -2404,7 +2407,7 @@ fn virtual_receiver(
                     .map(|class| VirtualReceiver::Object { tag, class })
                     .ok_or(UnsupportedReason::MissingSource)
             };
-            match context.module.types.get(ty as usize) {
+            match context.verified_types.get(ty as usize) {
                 Some(BcType::Str) => object(lm_heap::JIT_OBJECT_STR, context.runtime_core.string),
                 Some(BcType::List(_)) => {
                     object(lm_heap::JIT_OBJECT_LIST, context.runtime_core.list)
@@ -2496,7 +2499,8 @@ fn field_contract(
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    let Some(BcType::Class(class) | BcType::Inst(class, _)) = context.module.types.get(ty as usize)
+    let Some(BcType::Class(class) | BcType::Inst(class, _)) =
+        context.verified_types.get(ty as usize)
     else {
         return Err(UnsupportedReason::NonScalarType);
     };
@@ -2521,7 +2525,7 @@ fn tuple_element_contract(
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    let Some(BcType::Tuple(elements)) = context.module.types.get(ty as usize) else {
+    let Some(BcType::Tuple(elements)) = context.verified_types.get(ty as usize) else {
         return Err(UnsupportedReason::InvalidStack);
     };
     let element = elements
@@ -2531,51 +2535,66 @@ fn tuple_element_contract(
     value_contract(context, element)
 }
 
-fn list_element_type(module: &Module, receiver: ScalarKind) -> Result<u32, UnsupportedReason> {
+fn list_element_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<u32, UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    match module.types.get(ty as usize) {
+    match context.verified_types.get(ty as usize) {
         Some(BcType::List(element)) => Ok(*element),
         _ => Err(UnsupportedReason::InvalidStack),
     }
 }
 
-fn map_type(module: &Module, receiver: ScalarKind) -> Result<(u32, u32), UnsupportedReason> {
+fn map_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(u32, u32), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    match module.types.get(ty as usize) {
+    match context.verified_types.get(ty as usize) {
         Some(BcType::Map(key, value)) => Ok((*key, *value)),
         _ => Err(UnsupportedReason::InvalidStack),
     }
 }
 
-fn digest_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+fn digest_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    match module.types.get(ty as usize) {
+    match context.verified_types.get(ty as usize) {
         Some(BcType::Digest) => Ok(()),
         _ => Err(UnsupportedReason::InvalidStack),
     }
 }
 
-fn function_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+fn function_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    match module.types.get(ty as usize) {
+    match context.verified_types.get(ty as usize) {
         Some(BcType::Fn(_, _, _, _)) => Ok(()),
         _ => Err(UnsupportedReason::InvalidStack),
     }
 }
 
-fn option_argument_type(module: &Module, ty: u32) -> Result<u32, UnsupportedReason> {
-    let Some(BcType::Inst(class, arguments)) = module.types.get(ty as usize) else {
+fn option_argument_type(
+    context: &SegmentAnalysisContext<'_>,
+    ty: u32,
+) -> Result<u32, UnsupportedReason> {
+    let Some(BcType::Inst(class, arguments)) = context.verified_types.get(ty as usize) else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    let core = lm_bytecode::corepin::declared_layout(module);
+    let core = lm_bytecode::corepin::declared_layout(context.module);
     if ![core.option, core.option_some, core.option_none].contains(&Some(*class))
         || arguments.len() != 1
     {
@@ -2584,11 +2603,14 @@ fn option_argument_type(module: &Module, ty: u32) -> Result<u32, UnsupportedReas
     Ok(arguments[0])
 }
 
-fn bytes_type(module: &Module, receiver: ScalarKind) -> Result<(), UnsupportedReason> {
+fn bytes_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    match module.types.get(ty as usize) {
+    match context.verified_types.get(ty as usize) {
         Some(BcType::Bytes) => Ok(()),
         _ => Err(UnsupportedReason::InvalidStack),
     }
@@ -2676,9 +2698,9 @@ fn value_contract(
     context: &SegmentAnalysisContext<'_>,
     ty: u32,
 ) -> Result<ValueContract, UnsupportedReason> {
-    let kind = scalar_kind(context.module, ty)?;
+    let kind = scalar_kind_in(context.module, context.verified_types, ty)?;
     let core = lm_bytecode::corepin::declared_layout(context.module);
-    let object = match context.module.types.get(ty as usize) {
+    let object = match context.verified_types.get(ty as usize) {
         Some(BcType::Str) => Some(ObjectContract::Str),
         Some(BcType::Class(class) | BcType::Inst(class, _))
             if [core.text, core.substring].contains(&Some(*class)) =>

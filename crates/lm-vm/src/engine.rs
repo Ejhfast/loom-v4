@@ -55,6 +55,9 @@ pub struct EngineMetrics {
     pub native_type_environment_exits: u64,
     pub native_type_environment_fallbacks: u64,
     pub native_interpreter_exits: u64,
+    pub native_replay_exits: u64,
+    pub native_literal_exits: u64,
+    pub native_call_value_exits: u64,
     pub unsupported_region_fallbacks: u64,
     pub unsupported_missing_source: u64,
     pub unsupported_value_representation: u64,
@@ -80,6 +83,15 @@ pub struct JitProfileTreatmentGap {
     pub estimated_instructions: u64,
 }
 
+/// One sampled native exit site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitProfileRuntimeExit {
+    pub function: String,
+    pub instruction: String,
+    pub exit: String,
+    pub count: u64,
+}
+
 /// One sampled function and its native eligibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitFunctionProfile {
@@ -98,6 +110,7 @@ pub struct JitProfile {
     pub candidate_instructions: u64,
     pub rejections: Vec<JitProfileRejection>,
     pub treatment_gaps: Vec<JitProfileTreatmentGap>,
+    pub runtime_exits: Vec<JitProfileRuntimeExit>,
     pub hot_functions: Vec<JitFunctionProfile>,
 }
 
@@ -121,6 +134,9 @@ struct EngineCounters {
     native_type_environment_exits: AtomicU64,
     native_type_environment_fallbacks: AtomicU64,
     native_interpreter_exits: AtomicU64,
+    native_replay_exits: AtomicU64,
+    native_literal_exits: AtomicU64,
+    native_call_value_exits: AtomicU64,
     unsupported_region_fallbacks: AtomicU64,
     unsupported_missing_source: AtomicU64,
     unsupported_value_representation: AtomicU64,
@@ -163,6 +179,9 @@ impl EngineCounters {
             native_type_environment_exits: read(&self.native_type_environment_exits),
             native_type_environment_fallbacks: read(&self.native_type_environment_fallbacks),
             native_interpreter_exits: read(&self.native_interpreter_exits),
+            native_replay_exits: read(&self.native_replay_exits),
+            native_literal_exits: read(&self.native_literal_exits),
+            native_call_value_exits: read(&self.native_call_value_exits),
             unsupported_region_fallbacks: read(&self.unsupported_region_fallbacks),
             unsupported_missing_source: read(&self.unsupported_missing_source),
             unsupported_value_representation: read(&self.unsupported_value_representation),
@@ -195,6 +214,9 @@ impl EngineCounters {
         reset(&self.native_type_environment_exits);
         reset(&self.native_type_environment_fallbacks);
         reset(&self.native_interpreter_exits);
+        reset(&self.native_replay_exits);
+        reset(&self.native_literal_exits);
+        reset(&self.native_call_value_exits);
         reset(&self.unsupported_region_fallbacks);
         reset(&self.unsupported_missing_source);
         reset(&self.unsupported_value_representation);
@@ -259,6 +281,12 @@ impl EngineCounters {
         add(
             &self.native_interpreter_exits,
             values.native_interpreter_exits,
+        );
+        add(&self.native_replay_exits, values.native_replay_exits);
+        add(&self.native_literal_exits, values.native_literal_exits);
+        add(
+            &self.native_call_value_exits,
+            values.native_call_value_exits,
         );
         add(
             &self.unsupported_region_fallbacks,
@@ -387,8 +415,23 @@ impl EngineTurnMetrics<'_> {
         self.values.native_type_environment_fallbacks += 1;
     }
 
-    pub(crate) fn note_native_interpreter_exit(&mut self) {
+    fn note_native_interpreter_exit(&mut self) {
         self.values.native_interpreter_exits += 1;
+    }
+
+    pub(crate) fn note_native_replay_exit(&mut self) {
+        self.note_native_interpreter_exit();
+        self.values.native_replay_exits += 1;
+    }
+
+    pub(crate) fn note_native_literal_exit(&mut self) {
+        self.note_native_interpreter_exit();
+        self.values.native_literal_exits += 1;
+    }
+
+    pub(crate) fn note_native_call_value_exit(&mut self) {
+        self.note_native_interpreter_exit();
+        self.values.native_call_value_exits += 1;
     }
 
     pub(crate) fn note_unsupported_region_fallback(&mut self, reason: lm_jit::UnsupportedReason) {
@@ -496,7 +539,6 @@ impl Engine {
         native: &crate::jit::NativeCodeState,
         scratch: &mut crate::jit::NativeScratch,
         metrics: &mut EngineTurnMetrics<'_>,
-        instruction_limit: u32,
     ) -> crate::jit::NativeAttempt {
         if metrics.sample_productivity()
             && !machine.has_native_continuation()
@@ -508,14 +550,7 @@ impl Engine {
         {
             return crate::jit::NativeAttempt::Fallback;
         }
-        self.jit.execute(
-            machine,
-            context,
-            native,
-            scratch,
-            metrics,
-            instruction_limit,
-        )
+        self.jit.execute(machine, context, native, scratch, metrics)
     }
 
     pub(crate) fn native_code(
