@@ -312,6 +312,7 @@ struct NativeValues<'a> {
     value_equal_signature: ir::SigRef,
     object_binary_signature: ir::SigRef,
     object_unary_signature: ir::SigRef,
+    digest_signature: ir::SigRef,
     native_signature: ir::SigRef,
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
@@ -357,6 +358,12 @@ struct HeapExitEmission<'a> {
 
 #[derive(Clone, Copy)]
 struct NumericExitEmission<'a> {
+    point: FaultPoint,
+    deopt_stack: &'a [NativeValue],
+}
+
+#[derive(Clone, Copy)]
+struct ReplayEmission<'a> {
     point: FaultPoint,
     deopt_stack: &'a [NativeValue],
 }
@@ -626,6 +633,15 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let object_unary_signature = builder.import_signature(object_unary_signature);
+    let mut digest_signature = ir::Signature::new(host_call_conv);
+    digest_signature.params.push(AbiParam::new(pointer_type));
+    digest_signature.params.push(AbiParam::new(types::I64));
+    for _ in 0..4 {
+        digest_signature.params.push(AbiParam::new(types::I32));
+    }
+    digest_signature.params.push(AbiParam::new(pointer_type));
+    digest_signature.returns.push(AbiParam::new(types::I32));
+    let digest_signature = builder.import_signature(digest_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(pointer_type));
@@ -760,6 +776,7 @@ fn emit_region(
         value_equal_signature,
         object_binary_signature,
         object_unary_signature,
+        digest_signature,
         native_signature,
         exit_pointer,
         activation_pointer,
@@ -2534,6 +2551,61 @@ fn emit_segment(
                     builder.ins().bxor_imm(equal, 1)
                 };
                 push_static(builder, &mut stack, ScalarKind::Bool, result)?;
+            }
+            Instr::Freeze => {
+                let deopt_stack = stack.clone();
+                let value = pop_value(&mut stack)?;
+                let result = emit_typed_object_unary(
+                    builder,
+                    values,
+                    mem::offset_of!(RawNativeFunctions, freeze_graph),
+                    value.bits,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                stack.push(NativeValue {
+                    bits: result,
+                    tag: value.tag,
+                });
+            }
+            Instr::Digest { ty } => {
+                let position = segment.start + within as u32;
+                let site = segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                    .ok_or(CompileError::Backend)?;
+                let deopt_stack = stack.clone();
+                let roots =
+                    collect_native_roots(builder, values, &plan.local_kinds, &site.stack, &stack)?;
+                let reference = pop_native(&mut stack)?;
+                let frame = emit_current_frame_pointer(builder, values)?;
+                let environment =
+                    load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, environment))?;
+                let result = emit_graph_digest(
+                    builder,
+                    values,
+                    reference,
+                    ty,
+                    environment,
+                    &roots,
+                    ReplayEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, ScalarKind::Object(0), result)?;
             }
             Instr::Native(
                 operation @ (NativeInstr::EqStr
@@ -6550,6 +6622,50 @@ fn emit_allocation_call(
         0,
     );
     Ok((status, result))
+}
+
+fn emit_graph_digest(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    ty: u32,
+    environment: ir::Value,
+    roots: &[NativeRoot],
+    exit: ReplayEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let ty = builder.ins().iconst(types::I32, i64::from(ty));
+    let collection = builder.ins().iconst(types::I32, 1);
+    let digest = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, digest_value),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.digest_signature,
+        digest,
+        &[
+            values.runtime_context,
+            reference,
+            ty,
+            environment,
+            collection,
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let replay = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
+    emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
 }
 
 fn emit_list_growth_call(

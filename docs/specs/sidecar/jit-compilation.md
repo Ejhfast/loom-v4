@@ -1828,6 +1828,42 @@ The representative gate remains open.
 | HTTP parse | 0.90 times | 48.23 percent |
 | HTTP serialize | 0.87 times | 41.78 percent |
 
+### Stage F26: Graph freeze and digest
+
+- freeze object graphs through one fixed typed helper;
+- digest typed graphs through one separate fixed helper;
+- keep the native activation active during successful graph walks;
+- pass all native object roots to digest allocation;
+- reuse the world type and identity implementation;
+- replay failed graph operations before mutation;
+- preserve graph limits and exact fault messages.
+
+Gate: Freeze and Digest use no temporary interpreter site.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 118 tests.
+
+The direct and scheduled corpus gate took 11.99 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Freeze and Digest | 3.442 ms | 17.205 ms | 1.879 ms | 1.83 times |
+
+The batch completed two opcode treatments.
+
+The ledger now has 116 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 1.01 times | 31.20 percent |
+| JSON parse | 0.97 times | 6.38 percent |
+| JSON stringify | 0.99 times | 52.07 percent |
+| HTTP parse | 0.86 times | 48.23 percent |
+| HTTP serialize | 0.83 times | 41.78 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

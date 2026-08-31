@@ -39,20 +39,20 @@ mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, bytes_compare, bytes_hash, grow_list, list_contains, map_at, map_has,
-    map_put_commit, map_put_discard, map_put_probe, reserve_list, text_compare, text_hash,
-    values_equal, NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions,
-    RawRuntimeContext,
+    allocate_tuple, bytes_compare, bytes_hash, digest_value, freeze_graph, grow_list,
+    list_contains, map_at, map_has, map_put_commit, map_put_discard, map_put_probe, reserve_list,
+    text_compare, text_hash, values_equal, NativeFunction, RawExit, RawNativeActivation,
+    RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
-    ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
-    ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult,
-    NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView, NativeLiteralView,
-    NativePreparation, NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers,
-    NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache, NativeTypeEnvironmentView,
-    RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest, LOCAL_DIRTY,
-    LOCAL_INITIALIZED,
+    ClosureAllocationRequest, DigestRequest, ListGrowthRequest, ListGrowthResult,
+    ListReserveRequest, ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest,
+    MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
+    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
+    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
+    NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
+    LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -679,6 +679,8 @@ impl CompiledRegion {
             bytes_compare: bytes_compare::<R>,
             text_hash: text_hash::<R>,
             bytes_hash: bytes_hash::<R>,
+            freeze_graph: freeze_graph::<R>,
+            digest_value: digest_value::<R>,
         };
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {

@@ -1561,6 +1561,7 @@ fn analyze_segment(
             | Instr::TupleNew { .. }
             | Instr::ListNew { .. }
             | Instr::MapNew { .. }
+            | Instr::Digest { .. }
             | Instr::Extended(ExtendedInstr::MakeCallback { .. }) => {
                 allocations.push(AllocationSite {
                     instruction: position,
@@ -1575,6 +1576,7 @@ fn analyze_segment(
                     Instr::MapNew { count, .. } => {
                         Some(count.checked_mul(2).ok_or(UnsupportedReason::RegionLimit)?)
                     }
+                    Instr::Digest { .. } => Some(1),
                     _ => None,
                 };
                 if let Some(captures) = captures {

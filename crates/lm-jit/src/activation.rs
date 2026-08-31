@@ -334,6 +334,8 @@ pub(super) type RawValueEqual =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, *mut u64) -> u32;
 pub(super) type RawObjectBinary = unsafe extern "C" fn(*mut c_void, u64, u64, *mut u64) -> u32;
 pub(super) type RawObjectUnary = unsafe extern "C" fn(*mut c_void, u64, *mut u64) -> u32;
+pub(super) type RawDigest =
+    unsafe extern "C" fn(*mut c_void, u64, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawMapPutCommit =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32) -> u32;
 pub(super) type RawMapPutDiscard =
@@ -361,6 +363,8 @@ pub(super) struct RawNativeFunctions {
     pub(super) bytes_compare: RawObjectBinary,
     pub(super) text_hash: RawObjectUnary,
     pub(super) bytes_hash: RawObjectUnary,
+    pub(super) freeze_graph: RawObjectUnary,
+    pub(super) digest_value: RawDigest,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1139,6 +1143,24 @@ pub struct ValueArrayAllocationRequest<'a> {
     pub allow_collection: bool,
 }
 
+/// One typed graph-digest request.
+pub struct DigestRequest<'a> {
+    /// Canonical source object reference bits.
+    pub reference: u64,
+    /// Source module type index.
+    pub ty: u32,
+    /// Current closed type environment.
+    pub environment: u32,
+    /// Active root payloads.
+    pub root_bits: &'a [u64],
+    /// Active root tags.
+    pub root_tags: &'a [u64],
+    /// Active root states.
+    pub root_states: &'a [u8],
+    /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
 /// Typed runtime slow paths for one native activation.
 pub trait NativeRuntime {
     /// Allocate one instance with its exact environment and active roots.
@@ -1219,6 +1241,12 @@ pub trait NativeRuntime {
 
     /// Compute one stable byte hash.
     fn hash_bytes(&mut self, reference: u64) -> RuntimeValueResult;
+
+    /// Freeze one complete reachable graph.
+    fn freeze_graph(&mut self, reference: u64) -> RuntimeValueResult;
+
+    /// Compute one typed graph digest and allocate its result.
+    fn digest_value(&mut self, request: DigestRequest<'_>) -> AllocationResult;
 }
 
 /// One checked list-growth result.
@@ -1341,6 +1369,49 @@ pub(super) unsafe extern "C" fn allocate_instance<R: NativeRuntime>(
         root_states,
         allow_collection != 0 && !nested,
     );
+    finish_object_allocation(context.activation, result, response)
+}
+
+pub(super) unsafe extern "C" fn digest_value<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    ty: u32,
+    environment: u32,
+    allow_collection: u32,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() || allow_collection > 1 {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside each activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Every root has one canonical state slot.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The activation remains live during this call.
+    let nested = unsafe { (*context.activation).frame_len > 1 };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    let response = runtime.digest_value(DigestRequest {
+        reference,
+        ty,
+        environment,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection: allow_collection != 0 && !nested,
+    });
     finish_object_allocation(context.activation, result, response)
 }
 
@@ -1855,6 +1926,15 @@ pub(super) unsafe extern "C" fn bytes_hash<R: NativeRuntime>(
 ) -> u32 {
     // SAFETY: The native caller provides one checked runtime context.
     unsafe { object_unary(context, reference, result, R::hash_bytes) }
+}
+
+pub(super) unsafe extern "C" fn freeze_graph<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    result: *mut u64,
+) -> u32 {
+    // SAFETY: The native caller provides one checked runtime context.
+    unsafe { object_unary(context, reference, result, R::freeze_graph) }
 }
 
 unsafe fn object_unary<R: NativeRuntime>(

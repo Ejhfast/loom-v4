@@ -548,6 +548,30 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
     }
 }
 
+/// Compute one typed digest with the namespace's canonical identities.
+pub(crate) fn digest_typed_value(
+    code: &NamespaceRuntime,
+    envs: &mut lm_bytecode::closed::TypeEnvs,
+    heap: &mut Heap,
+    value: ObjRef,
+    ty: u32,
+    env: TypeEnvId,
+    limits: &lm_graph::GraphLimits,
+) -> Result<[u8; 32], FaultCode> {
+    let identity = code.identity()?;
+    let expected = envs
+        .close(code, ty, env)
+        .map_err(|_| FaultCode::BoundaryLimit)?;
+    let mut codes = ModuleCodes {
+        identity,
+        bundle: code.bundle(),
+        module: code,
+        envs,
+        core: code.core_layout(),
+    };
+    lm_graph::digest_typed_value(heap, Value::Obj(value), expected, &mut codes, limits)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LeasedMachineMetadata {
     generation: u32,

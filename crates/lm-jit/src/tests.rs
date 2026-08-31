@@ -386,6 +386,14 @@ impl NativeRuntime for TestRuntime {
     fn hash_bytes(&mut self, _reference: u64) -> RuntimeValueResult {
         RuntimeValueResult::Interpreter
     }
+
+    fn freeze_graph(&mut self, _reference: u64) -> RuntimeValueResult {
+        RuntimeValueResult::Interpreter
+    }
+
+    fn digest_value(&mut self, _request: DigestRequest<'_>) -> AllocationResult {
+        AllocationResult::Interpreter
+    }
 }
 
 #[test]

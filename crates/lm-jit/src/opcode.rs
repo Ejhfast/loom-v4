@@ -204,7 +204,12 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::EqValue | Instr::NeValue => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        Instr::Freeze | Instr::Digest { .. } => temporary(Helper),
+        Instr::Freeze => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        Instr::Digest { .. } => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
         Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
             InstructionTreatment::dedicated(Inline, ExitBehavior::Branch)

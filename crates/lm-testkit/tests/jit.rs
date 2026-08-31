@@ -453,9 +453,60 @@ fn map_metadata_and_digest_comparison_stay_native() {
     assert_eq!(native, interpreted);
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(3_000)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
     assert!(metrics.compiled_heap_read_sites >= 2, "{metrics:?}");
-    assert!(metrics.native_interpreter_exits <= 8, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn graph_operations_match_each_fuel_boundary() {
+    let source = concat!(
+        "left = [1, 2, 3]\n",
+        "right = left.freeze()\n",
+        "first = right.digest()\n",
+        "second = right.digest()\n",
+        "first == second\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-graph-fuel.lm", source)
+        .expect("the graph fuel case compiles");
+    for fuel in 0..=32 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn graph_helpers_preserve_limit_and_digest_faults() {
+    let freeze_source = "items = [[1], [2]]\nitems.freeze()\n";
+    let artifact = lm_testkit::compile_text("jit-freeze-limit.lm", freeze_source)
+        .expect("the freeze limit case compiles");
+    let config = VmConfig {
+        graph: lm_vm::GraphLimits {
+            max_objects: 1,
+            ..lm_vm::GraphLimits::default()
+        },
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::BoundaryLimit));
+
+    let digest_source = "items = [1, 2]\nitems.digest()\n";
+    let (interpreted, _, interpreted_dump) = run(digest_source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(digest_source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::UnsendableValue));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 1, "{metrics:?}");
 }
 
 #[test]
@@ -1059,7 +1110,7 @@ fn scalar_loop_fuel_matches_the_interpreter() {
 }
 
 #[test]
-fn one_interpreter_instruction_does_not_reject_the_function() {
+fn completed_freeze_does_not_use_an_interpreter_site() {
     let source = concat!(
         "i = 0\nsum = 0\n",
         "while i < 1000\n",
@@ -1080,8 +1131,8 @@ fn one_interpreter_instruction_does_not_reject_the_function() {
     }
     let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_000)));
-    assert!(metrics.compiled_interpreter_sites >= 1, "{metrics:?}");
-    assert!(metrics.native_interpreter_exits >= 1_000, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 1, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
     assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
 }
@@ -1547,7 +1598,7 @@ fn generic_environment_cache_does_not_enter_shared_code() {
 }
 
 #[test]
-fn generic_environment_cache_survives_interpreter_exits() {
+fn generic_environment_cache_survives_graph_helpers() {
     let source = concat!(
         "def identity[T](value: T): T\n  value\nend\n",
         "i = 0\nwhile i < 1000\n",
@@ -1559,7 +1610,7 @@ fn generic_environment_cache_survives_interpreter_exits() {
     );
     let (outcome, metrics, _) = run(source, EngineMode::Native, u64::MAX);
     assert_eq!(outcome, Outcome::Done(lm_value::Value::Int(1_000)));
-    assert!(metrics.native_interpreter_exits > 100, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 1, "{metrics:?}");
     assert!(metrics.native_type_environment_exits <= 2, "{metrics:?}");
     assert_eq!(metrics.native_type_environment_fallbacks, 0, "{metrics:?}");
 }

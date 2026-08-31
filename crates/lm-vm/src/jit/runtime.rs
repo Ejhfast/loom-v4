@@ -5,12 +5,13 @@ use crate::NamespaceRuntime;
 use lm_heap::{MapEntry, MapIndex, StructuralEpoch};
 use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
-    ClosureAllocationRequest, ListGrowthRequest, ListGrowthResult, ListReserveRequest,
-    ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest, MapPutProbeResult,
-    NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache, RuntimeUnitResult,
-    RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest, LOCAL_INITIALIZED,
+    ClosureAllocationRequest, DigestRequest, ListGrowthRequest, ListGrowthResult,
+    ListReserveRequest, ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest,
+    MapPutProbeResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
+    RuntimeUnitResult, RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest,
+    LOCAL_INITIALIZED,
 };
-use lm_value::{canonical_float_bits, CallbackRef, ObjRef, Value, ValueTag};
+use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, ValueTag};
 
 pub(super) fn scalar_parts(kind: ScalarKind, value: Value) -> Option<(u64, u64)> {
     let expected = match kind {
@@ -103,6 +104,7 @@ fn callback_reference(bits: u64) -> CallbackRef {
 
 pub(super) struct MachineRuntime<'a> {
     pub(super) machine: &'a mut Machine,
+    pub(super) envs: &'a mut lm_bytecode::closed::TypeEnvs,
     pub(super) type_environments: NativeTypeEnvironmentCache,
     pub(super) resolved_calls: NativeResolvedCallCache,
     pub(super) module: &'a NamespaceRuntime,
@@ -920,6 +922,52 @@ impl NativeRuntime for MachineRuntime<'_> {
             _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
         };
         runtime_int(hash as i64)
+    }
+
+    fn freeze_graph(&mut self, reference: u64) -> RuntimeValueResult {
+        let reference = object_reference(reference);
+        if self.machine.vm.heap.try_get(reference).is_none() {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        match lm_graph::freeze(
+            &mut self.machine.vm.heap,
+            reference,
+            &self.machine.config.graph,
+        ) {
+            Ok(()) => runtime_value(Value::Obj(reference)),
+            Err(fault) => RuntimeValueResult::Fault(fault),
+        }
+    }
+
+    fn digest_value(&mut self, request: DigestRequest<'_>) -> AllocationResult {
+        let reference = object_reference(request.reference);
+        if self.machine.vm.heap.try_get(reference).is_none() {
+            return AllocationResult::Interpreter;
+        }
+        let bytes = crate::world::digest_typed_value(
+            self.module,
+            self.envs,
+            &mut self.machine.vm.heap,
+            reference,
+            request.ty,
+            TypeEnvId(request.environment),
+            &self.machine.config.graph,
+        );
+        let Ok(bytes) = bytes else {
+            return AllocationResult::Interpreter;
+        };
+        match self.allocate_object(
+            crate::Object::NativeDigest(bytes),
+            request.root_bits,
+            request.root_tags,
+            request.root_states,
+            request.allow_collection,
+        ) {
+            value @ AllocationResult::Value { .. } => value,
+            AllocationResult::HeapLimit | AllocationResult::Interpreter => {
+                AllocationResult::Interpreter
+            }
+        }
     }
 }
 

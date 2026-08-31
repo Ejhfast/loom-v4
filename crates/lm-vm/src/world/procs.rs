@@ -1052,32 +1052,15 @@ impl World {
         // The machine that asks for the digest pays for the walk.
         let limits = self.machines[vm as usize].config.graph;
         let code = self.code_of(vm).clone();
-        let built = match code.identity() {
-            Ok(identity) => {
-                let expected = self
-                    .envs
-                    .close(code.as_ref(), ty, env)
-                    .map_err(|_| FaultCode::BoundaryLimit);
-                let mut codes = ModuleCodes {
-                    identity,
-                    bundle: code.bundle(),
-                    module: code.as_ref(),
-                    envs: &mut self.envs,
-                    core: code.core_layout(),
-                };
-                let heap = &mut self.machines[vm as usize].vm.heap;
-                expected.and_then(|expected| {
-                    lm_graph::digest_typed_value(
-                        heap,
-                        Value::Obj(value),
-                        expected,
-                        &mut codes,
-                        &limits,
-                    )
-                })
-            }
-            Err(code) => Err(code),
-        };
+        let built = digest_typed_value(
+            code.as_ref(),
+            &mut self.envs,
+            &mut self.machines[vm as usize].vm.heap,
+            value,
+            ty,
+            env,
+            &limits,
+        );
         let pushed = built
             .and_then(|bytes| self.machines[vm as usize].alloc(Object::NativeDigest(bytes)))
             .and_then(|value| self.machines[vm as usize].push(value));

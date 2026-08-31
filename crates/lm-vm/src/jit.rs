@@ -601,6 +601,7 @@ impl JitEngine {
             let resolved_calls = std::mem::take(&mut machine.native_resolved_calls);
             let mut runtime = MachineRuntime {
                 machine,
+                envs: context.envs,
                 type_environments,
                 resolved_calls,
                 module,
@@ -630,6 +631,7 @@ impl JitEngine {
                     Ok(view) => view,
                     Err(error) => break Err(error),
                 };
+                let type_store_id = runtime.envs.canonical_store_id();
                 let heap = runtime.machine.vm.heap.jit_view();
                 let exit = match active_region.execute(
                     &mut runtime,
@@ -650,7 +652,7 @@ impl JitEngine {
                         dispatch_rows: native.dispatch_rows(),
                         dispatch_methods: native.dispatch_methods(),
                         literals,
-                        type_store_id: context.envs.canonical_store_id(),
+                        type_store_id,
                         type_environments,
                         resolved_calls,
                     },
@@ -711,7 +713,7 @@ impl JitEngine {
                     }
                     let family = runtime.machine.close_option_family_at(
                         module,
-                        context.envs,
+                        runtime.envs,
                         type_index,
                         environment,
                     );
@@ -731,7 +733,7 @@ impl JitEngine {
                             .map(|entry| entry.index());
                         if let (Some(resolve_region), Some(resume)) = (resolve_region, resume) {
                             let cached = runtime.type_environments.cache_type_site(
-                                context.envs.canonical_store_id(),
+                                runtime.envs.canonical_store_id(),
                                 function,
                                 exit.block(),
                                 exit.instruction(),
@@ -770,9 +772,9 @@ impl JitEngine {
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    if let Ok(child) = context.envs.derive(module, parent, application) {
+                    if let Ok(child) = runtime.envs.derive(module, parent, application) {
                         let cached = runtime.type_environments.cache_type_site(
-                            context.envs.canonical_store_id(),
+                            runtime.envs.canonical_store_id(),
                             function,
                             exit.block(),
                             exit.instruction(),
@@ -864,7 +866,7 @@ impl JitEngine {
                             runtime.machine.resolve_interface_target(
                                 module,
                                 dispatch.as_ref(),
-                                context.envs,
+                                runtime.envs,
                                 parent,
                                 site.interface(),
                                 site.method(),
@@ -877,7 +879,7 @@ impl JitEngine {
                             runtime.machine.resolve_virtual_generic_target(
                                 module,
                                 dispatch.as_ref(),
-                                context.envs,
+                                runtime.envs,
                                 parent,
                                 site.selector(),
                                 site.application(),
@@ -887,7 +889,7 @@ impl JitEngine {
                     };
                     if let Ok((target, environment)) = resolved {
                         let cached = runtime.resolved_calls.cache_call_site(
-                            context.envs.canonical_store_id(),
+                            runtime.envs.canonical_store_id(),
                             function,
                             exit.block(),
                             exit.instruction(),
@@ -967,7 +969,7 @@ impl JitEngine {
                     let capture_len = descriptor.captures.len();
                     let parent = frame.environment();
                     let cached = runtime.resolved_calls.cache_call_site(
-                        context.envs.canonical_store_id(),
+                        runtime.envs.canonical_store_id(),
                         frame.function(),
                         exit.block(),
                         exit.instruction(),

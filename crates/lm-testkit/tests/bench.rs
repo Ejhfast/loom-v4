@@ -1346,6 +1346,19 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_graph_operations",
+        concat!(
+            "items = list_repeated[Int](7, 32)\nitems.freeze()\n",
+            "expected = items.digest()\ni = 0\nsame = false\n",
+            "while i < 20000\n",
+            "  items.freeze()\n",
+            "  same = expected == items.digest()\n",
+            "  i = i + 1\n",
+            "end\nsame\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_expression_stack",
         concat!(
             "i = 0\ns = 0\n",
