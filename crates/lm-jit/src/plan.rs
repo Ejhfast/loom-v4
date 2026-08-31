@@ -444,8 +444,12 @@ pub(super) enum HeapAccessKind {
         key: ValueContract,
         value: ValueContract,
     },
-    MapGet,
-    MapPut,
+    MapGet {
+        key: ValueContract,
+    },
+    MapPut {
+        key: ValueContract,
+    },
     MapNextIndex,
     MapKeyAt {
         value: ValueContract,
@@ -757,7 +761,7 @@ impl RegionPlan {
                     | HeapAccessKind::ListReorder
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::MapEpoch
-                    | HeapAccessKind::MapPut
+                    | HeapAccessKind::MapPut { .. }
                     | HeapAccessKind::MapRemove
                     | HeapAccessKind::MapClear
                     | HeapAccessKind::MapReserve
@@ -1595,7 +1599,7 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value_type) = map_type(context, receiver)?;
+                let (key_type, value_type) = map_type(context, receiver)?;
                 let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(
@@ -1611,12 +1615,14 @@ fn analyze_segment(
                 });
                 heap_accesses.push(HeapAccess {
                     instruction: position,
-                    kind: HeapAccessKind::MapGet,
+                    kind: HeapAccessKind::MapGet {
+                        key: value_contract(context, key_type)?,
+                    },
                 });
             }
             Instr::MapPut { ty, discard } => {
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let (_, value_type) = map_type(context, receiver)?;
+                let (key_type, value_type) = map_type(context, receiver)?;
                 let value = value_contract(context, value_type)?;
                 let source_type = match source_instruction {
                     Instr::MapPut { ty, .. } => ty,
@@ -1636,7 +1642,9 @@ fn analyze_segment(
                 });
                 heap_accesses.push(HeapAccess {
                     instruction: position,
-                    kind: HeapAccessKind::MapPut,
+                    kind: HeapAccessKind::MapPut {
+                        key: value_contract(context, key_type)?,
+                    },
                 });
             }
             Instr::ListAt => {

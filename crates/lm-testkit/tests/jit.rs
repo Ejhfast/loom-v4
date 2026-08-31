@@ -991,7 +991,7 @@ fn scalar_map_hits_match_each_fuel_boundary() {
 }
 
 #[test]
-fn map_insertions_use_typed_probe_and_commit_helpers() {
+fn map_put_uses_direct_replacement_and_typed_insertion() {
     let source = concat!(
         "table: {String: Int} = {}\ni = 0\nsum = 0\n",
         "while i < 1000\n",
@@ -1015,6 +1015,26 @@ fn map_insertions_use_typed_probe_and_commit_helpers() {
     assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
     assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 25_000, "{metrics:?}");
+}
+
+#[test]
+fn optional_map_reads_use_direct_scalar_text_and_byte_hits() {
+    let source = concat!(
+        "ints: {Int: Int} = {3: 5}\n",
+        "text: {Text: Int} = {\"key\": 7}\n",
+        "view = \"_key_\".slice(1, 3).expect(\"the view exists\")\n",
+        "stored = Bytes(\"bytes\")\nlookup = Bytes(\"bytes\")\n",
+        "bytes: {Bytes: Int} = {stored: 11}\n",
+        "(ints.get(3), ints.get(4), text.get(view), bytes.get(lookup))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-get-direct.lm", source)
+        .expect("the direct map-get case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
 }
 
 #[test]

@@ -505,8 +505,18 @@ struct MapLookupEmission<'a> {
     reference: ir::Value,
     key: NativeValue,
     key_contract: ValueContract,
-    load_value: bool,
+    result: MapLookupResult,
     exit: HeapExitEmission<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum MapLookupResult {
+    Has,
+    At,
+    Get {
+        family: ir::Value,
+        value: ValueContract,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -2058,7 +2068,11 @@ fn emit_segment(
                         reference,
                         key,
                         key_contract,
-                        load_value: matches!(instruction, Instr::MapAt),
+                        result: if matches!(instruction, Instr::MapAt) {
+                            MapLookupResult::At
+                        } else {
+                            MapLookupResult::Has
+                        },
                         exit: HeapExitEmission {
                             point,
                             fault_stack: &stack,
@@ -2089,9 +2103,9 @@ fn emit_segment(
                     .find(|access| access.instruction == instruction)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                if !matches!(heap_access.kind, HeapAccessKind::MapGet) {
+                let HeapAccessKind::MapGet { key: key_contract } = heap_access.kind else {
                     return Err(CompileError::Backend);
-                }
+                };
                 let option_access = segment
                     .option_accesses
                     .iter()
@@ -2113,22 +2127,23 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                let result = emit_optional_map_value(
+                let result = emit_map_lookup(
                     builder,
                     values,
-                    mem::offset_of!(RawNativeFunctions, map_get),
-                    reference,
-                    key,
-                    family,
-                    value,
-                    HeapExitEmission {
-                        point: FaultPoint {
-                            block: segment.block,
-                            instruction: instruction + 1,
-                            prefix: fault_prefix,
+                    MapLookupEmission {
+                        reference,
+                        key,
+                        key_contract,
+                        result: MapLookupResult::Get { family, value },
+                        exit: HeapExitEmission {
+                            point: FaultPoint {
+                                block: segment.block,
+                                instruction: instruction + 1,
+                                prefix: fault_prefix,
+                            },
+                            fault_stack: &stack,
+                            deopt_stack: &deopt_stack,
                         },
-                        fault_stack: &stack,
-                        deopt_stack: &deopt_stack,
                     },
                 )?;
                 stack.push(result);
@@ -2145,9 +2160,9 @@ fn emit_segment(
                     .find(|access| access.instruction == instruction_index)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                if !matches!(heap_access.kind, HeapAccessKind::MapPut) {
+                let HeapAccessKind::MapPut { key: key_contract } = heap_access.kind else {
                     return Err(CompileError::Backend);
-                }
+                };
                 let option_access = segment
                     .option_accesses
                     .iter()
@@ -2198,6 +2213,7 @@ fn emit_segment(
                     values,
                     reference,
                     key,
+                    key_contract,
                     stored,
                     family,
                     previous_contract,
@@ -11183,19 +11199,48 @@ fn emit_map_lookup(
         key,
         emission.exit,
     )?;
-    if emission.load_value {
-        let hit = builder.create_block();
-        builder.ins().brif(probe.found, hit, &[], slow, &[]);
-        builder.switch_to_block(hit);
-        builder
-            .ins()
-            .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
-    } else {
-        let found = builder.ins().uextend(types::I64, probe.found);
-        let tag = builder
-            .ins()
-            .iconst(types::I64, ValueTag::Bool as u64 as i64);
-        builder.ins().jump(done, &[found.into(), tag.into()]);
+    match emission.result {
+        MapLookupResult::Has => {
+            let found = builder.ins().uextend(types::I64, probe.found);
+            let tag = builder
+                .ins()
+                .iconst(types::I64, ValueTag::Bool as u64 as i64);
+            builder.ins().jump(done, &[found.into(), tag.into()]);
+        }
+        MapLookupResult::At => {
+            let hit = builder.create_block();
+            builder.ins().brif(probe.found, hit, &[], slow, &[]);
+            builder.switch_to_block(hit);
+            builder
+                .ins()
+                .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+        }
+        MapLookupResult::Get { family, value } => {
+            let hit = builder.create_block();
+            let missing = builder.create_block();
+            builder.ins().brif(probe.found, hit, &[], missing, &[]);
+
+            builder.switch_to_block(hit);
+            emit_native_value_contract(
+                builder,
+                values,
+                probe.value,
+                value,
+                emission.exit.point,
+                emission.exit.deopt_stack,
+            )?;
+            builder
+                .ins()
+                .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+
+            builder.switch_to_block(missing);
+            let arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+            let bits = builder.ins().bor(family, arm);
+            let tag = builder
+                .ins()
+                .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+            builder.ins().jump(done, &[bits.into(), tag.into()]);
+        }
     }
 
     builder.switch_to_block(slow);
@@ -11216,25 +11261,41 @@ fn emit_map_lookup_slow(
     values: NativeValues<'_>,
     emission: MapLookupEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
-    let function_offset = if emission.load_value {
-        mem::offset_of!(RawNativeFunctions, map_at)
-    } else {
-        mem::offset_of!(RawNativeFunctions, map_has)
-    };
-    emit_runtime_value_lookup(
-        builder,
-        values,
-        function_offset,
-        emission.reference,
-        emission.key,
-        emission.exit,
-    )
+    match emission.result {
+        MapLookupResult::Has => emit_runtime_value_lookup(
+            builder,
+            values,
+            mem::offset_of!(RawNativeFunctions, map_has),
+            emission.reference,
+            emission.key,
+            emission.exit,
+        ),
+        MapLookupResult::At => emit_runtime_value_lookup(
+            builder,
+            values,
+            mem::offset_of!(RawNativeFunctions, map_at),
+            emission.reference,
+            emission.key,
+            emission.exit,
+        ),
+        MapLookupResult::Get { family, value } => emit_optional_map_value(
+            builder,
+            values,
+            mem::offset_of!(RawNativeFunctions, map_get),
+            emission.reference,
+            emission.key,
+            family,
+            value,
+            emission.exit,
+        ),
+    }
 }
 
 #[derive(Clone, Copy)]
 struct DirectMapProbe {
     found: ir::Value,
     value: NativeValue,
+    entry: ir::Value,
 }
 
 #[derive(Clone, Copy)]
@@ -11375,6 +11436,7 @@ fn emit_direct_map_probe(
     builder.append_block_param(done, types::I8);
     builder.append_block_param(done, types::I64);
     builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, values.pointer_type);
 
     let has_slots = builder.ins().icmp_imm(IntCC::NotEqual, slot_count, 0);
     builder.ins().brif(has_slots, start, &[], empty, &[]);
@@ -11382,9 +11444,16 @@ fn emit_direct_map_probe(
     builder.switch_to_block(empty);
     let zero_i8 = builder.ins().iconst(types::I8, 0);
     let zero_i64 = builder.ins().iconst(types::I64, 0);
-    builder
-        .ins()
-        .jump(done, &[zero_i8.into(), zero_i64.into(), zero_i64.into()]);
+    let zero_pointer = builder.ins().iconst(values.pointer_type, 0);
+    builder.ins().jump(
+        done,
+        &[
+            zero_i8.into(),
+            zero_i64.into(),
+            zero_i64.into(),
+            zero_pointer.into(),
+        ],
+    );
 
     builder.switch_to_block(start);
     let right = builder.ins().rotr_imm(lookup_hash, 25);
@@ -11485,9 +11554,15 @@ fn emit_direct_map_probe(
         )?,
     };
     let one = builder.ins().iconst(types::I8, 1);
-    builder
-        .ins()
-        .jump(done, &[one.into(), value.bits.into(), value.tag.into()]);
+    builder.ins().jump(
+        done,
+        &[
+            one.into(),
+            value.bits.into(),
+            value.tag.into(),
+            entry.into(),
+        ],
+    );
 
     builder.switch_to_block(advance);
     let slot = builder.block_params(advance)[0];
@@ -11511,6 +11586,7 @@ fn emit_direct_map_probe(
             bits: builder.block_params(done)[1],
             tag: builder.block_params(done)[2],
         },
+        entry: builder.block_params(done)[3],
     })
 }
 
@@ -11921,6 +11997,128 @@ fn emit_typed_object_unary(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_map_put(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    key: NativeValue,
+    key_contract: ValueContract,
+    stored: NativeValue,
+    option_family: Option<ir::Value>,
+    previous_contract: ValueContract,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<Option<NativeValue>, CompileError> {
+    let Some(key_kind) = direct_map_key_kind(key_contract) else {
+        return emit_map_put_slow(
+            builder,
+            values,
+            reference,
+            key,
+            stored,
+            option_family,
+            previous_contract,
+            roots,
+            exit,
+        );
+    };
+    let map_entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        exit.point,
+        ObjectGuard::Replay(exit.deopt_stack),
+    )?;
+    let entry_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_LEN_OFFSET,
+    )?;
+    let built = load_heap_value(builder, types::I32, map_entry, JIT_MAP_INDEX_BUILT_OFFSET)?;
+    let built = builder.ins().uextend(values.pointer_type, built);
+    let index_ready = builder.ins().icmp(IntCC::Equal, built, entry_count);
+    let direct = builder.create_block();
+    let slow = builder.create_block();
+    let done = builder.create_block();
+    if option_family.is_some() {
+        builder.append_block_param(done, types::I64);
+        builder.append_block_param(done, types::I64);
+    }
+    builder.ins().brif(index_ready, direct, &[], slow, &[]);
+
+    builder.switch_to_block(direct);
+    let direct_key = emit_direct_map_key(builder, values, key, key_kind, exit)?;
+    let probe_start = builder.create_block();
+    builder
+        .ins()
+        .brif(direct_key.ready, probe_start, &[], slow, &[]);
+
+    builder.switch_to_block(probe_start);
+    let probe = emit_direct_map_probe(
+        builder,
+        values,
+        map_entry,
+        entry_count,
+        key,
+        direct_key,
+        exit,
+    )?;
+    let replace = builder.create_block();
+    builder.ins().brif(probe.found, replace, &[], slow, &[]);
+
+    builder.switch_to_block(replace);
+    emit_mutable_guard(builder, values, map_entry, exit)?;
+    emit_native_value_contract(
+        builder,
+        values,
+        probe.value,
+        previous_contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let value_address = builder.ins().iadd_imm(
+        probe.entry,
+        i64::try_from(MAP_ENTRY_VALUE_OFFSET).map_err(|_| CompileError::Backend)?,
+    );
+    emit_store_value(builder, value_address, stored, previous_contract.kind)?;
+    if option_family.is_some() {
+        builder
+            .ins()
+            .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+    } else {
+        builder.ins().jump(done, &[]);
+    }
+
+    builder.switch_to_block(slow);
+    let result = emit_map_put_slow(
+        builder,
+        values,
+        reference,
+        key,
+        stored,
+        option_family,
+        previous_contract,
+        roots,
+        exit,
+    )?;
+    if let Some(result) = result {
+        builder
+            .ins()
+            .jump(done, &[result.bits.into(), result.tag.into()]);
+    } else {
+        builder.ins().jump(done, &[]);
+    }
+
+    builder.switch_to_block(done);
+    Ok(option_family.map(|_| NativeValue {
+        bits: builder.block_params(done)[0],
+        tag: builder.block_params(done)[1],
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_map_put_slow(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,

@@ -2456,6 +2456,27 @@ The direct path uses the canonical map arrays and immutable shared data.
 
 `MapGet` and existing-value `MapPut` still use typed slow paths.
 
+### Stage F43: Inline optional map reads and replacements
+
+- route `MapGet` through the direct canonical probe;
+- construct the canonical `None` value after a direct miss;
+- return the stored value directly after a hit;
+- replace an existing entry value in canonical storage;
+- preserve the prior value for result-producing `MapPut`;
+- keep insertions, index rebuilding, and complex keys on typed slow paths;
+- replay frozen writes through the interpreter fault path.
+
+The same-session comparison used commit `95afc5d` as its parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Optional integer map read | 23.568 ms | 11.617 ms | 50.7 percent faster |
+| Existing integer map replacement | 35.075 ms | 13.135 ms | 62.6 percent faster |
+
+These paths preserve exact fuel, fault, and external-state behavior.
+
+New-key insertion remains on its typed allocation slow path.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
