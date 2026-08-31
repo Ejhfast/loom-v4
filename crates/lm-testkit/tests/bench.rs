@@ -1648,6 +1648,19 @@ fn bench_jit_scalar_regions() {
         ),
         48,
     );
+    report_jit(
+        "jit_list_parameter_read",
+        concat!(
+            "def sum_items(items: [Int], count: Int): Int\n",
+            "  index = 0\n  total = 0\n",
+            "  while index < count\n",
+            "    total = total + items.at(index % 8)\n",
+            "    index = index + 1\n",
+            "  end\n  total\nend\n",
+            "sum_items([0, 1, 2, 3, 4, 5, 6, 7], 1000000)\n",
+        ),
+        1,
+    );
     report_jit_after_setup(
         "jit_list_replace",
         concat!(

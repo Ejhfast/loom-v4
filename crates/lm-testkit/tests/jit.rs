@@ -3653,6 +3653,46 @@ fn a_wrong_external_list_value_replays_before_native_use() {
 }
 
 #[test]
+fn a_wrong_external_list_parameter_uses_a_checked_pointer_boundary() {
+    let source = concat!(
+        "def sum_items(items: [Int], keep: (Int, Int)): Int\n",
+        "  index = 0\n  total = 0\n",
+        "  while index < 100\n",
+        "    total = total + items.at(index % 3)\n",
+        "    index = index + 1\n",
+        "  end\n  total + keep[0] - keep[0]\nend\n",
+        "items = [1, 2, 3]\nkeep = (7, 8)\n",
+        "sum_items(items, keep)\n",
+    );
+    let (artifact, mut image) = captured_loop("jit-list-parameter-snapshot.lm", source);
+    let tuple = image.machines[0]
+        .objects
+        .iter()
+        .position(|object| matches!(object.object, lm_vm::Object::Tuple { .. }))
+        .expect("the snapshot holds the tuple");
+    let frame = image.machines[0]
+        .frames
+        .last()
+        .expect("the list function is active");
+    let parameter = frame.base_local as usize;
+    image.machines[0].locals[parameter] = lm_value::Value::Obj(lm_value::ObjRef {
+        slot: tuple as u32,
+        generation: 0,
+    });
+    let (interpreted, _) = restore_with_engine(&artifact, &image, EngineMode::Interpreter);
+    let (native, metrics) = restore_with_native(&artifact, &image);
+    assert!(
+        matches!(interpreted, RootEvent::Fault(record) if record.code == lm_vm::FaultCode::TypeMismatch)
+    );
+    assert!(
+        matches!(native, RootEvent::Fault(ref record) if record.code == lm_vm::FaultCode::TypeMismatch),
+        "{native:?} {metrics:?}"
+    );
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert!(metrics.materializations > 0, "{metrics:?}");
+}
+
+#[test]
 fn a_wrong_external_map_value_replays_before_native_mutation() {
     let source = concat!(
         "table = {\"value\": 1}\ni = 0\ntotal = 0\n",

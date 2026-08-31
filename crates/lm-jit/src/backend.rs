@@ -373,17 +373,23 @@ struct LocalHeapCache {
     object_kind: Variable,
     class: Variable,
     actual_class: Variable,
+    list_data: Option<Variable>,
 }
 
 /// This compile-time map associates emitted references with their source local.
 #[derive(Default)]
 struct HeapTranslationCache {
     locals: Vec<(ir::Value, usize)>,
+    use_preloaded_list_data: bool,
 }
 
 impl HeapTranslationCache {
     fn clear(&mut self) {
         self.locals.clear();
+    }
+
+    fn set_preloaded_list_data(&mut self, enabled: bool) {
+        self.use_preloaded_list_data = enabled;
     }
 
     fn record_local(&mut self, reference: ir::Value, slot: usize) {
@@ -525,6 +531,7 @@ enum MapLookupResult {
 enum ObjectGuard<'a> {
     Fault(&'a [NativeValue]),
     Replay(&'a [NativeValue]),
+    Branch(ir::Block),
 }
 
 struct NativeCallEmission<'a> {
@@ -850,6 +857,25 @@ fn emit_region(
     let blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
         .collect();
+    let preloads_list_data = plan.preloaded_list_data.iter().any(|preload| *preload);
+    let preload_block = preloads_list_data.then(|| builder.create_block());
+    let preload_failure = preloads_list_data.then(|| builder.create_block());
+    let preload_entry_blocks: Vec<ir::Block> = if preloads_list_data {
+        plan.segments
+            .iter()
+            .map(|_| builder.create_block())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let preload_boundary_blocks: Vec<ir::Block> = if preloads_list_data {
+        plan.segments
+            .iter()
+            .map(|_| builder.create_block())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let body_blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
         .collect();
@@ -884,6 +910,12 @@ fn emit_region(
     }
     builder.set_cold_block(invalid_block);
     builder.set_cold_block(exact_fuel_exit.block);
+    if let Some(block) = preload_failure {
+        builder.set_cold_block(block);
+    }
+    for block in preload_boundary_blocks.iter().copied() {
+        builder.set_cold_block(block);
+    }
     for block in exact_blocks.iter().flatten().copied() {
         builder.set_cold_block(block);
     }
@@ -951,7 +983,8 @@ fn emit_region(
         .local_kinds
         .iter()
         .copied()
-        .map(|kind| {
+        .enumerate()
+        .map(|(slot, kind)| {
             if !matches!(
                 kind,
                 ScalarKind::Object(_) | ScalarKind::Tagged(_) | ScalarKind::Callback(_)
@@ -963,11 +996,16 @@ fn emit_region(
                 object_kind: builder.declare_var(types::I64),
                 class: builder.declare_var(types::I64),
                 actual_class: builder.declare_var(types::I32),
+                list_data: plan.preloaded_list_data[slot]
+                    .then(|| builder.declare_var(pointer_type)),
             };
             builder.def_var(cache.entry, zero_pointer);
             builder.def_var(cache.object_kind, zero_i64);
             builder.def_var(cache.class, zero_i64);
             builder.def_var(cache.actual_class, zero_i32);
+            if let Some(list_data) = cache.list_data {
+                builder.def_var(list_data, zero_pointer);
+            }
             Some(cache)
         })
         .collect();
@@ -1060,7 +1098,10 @@ fn emit_region(
 
     let mut dispatch = Switch::new();
     for (index, block) in blocks.iter().copied().enumerate() {
-        dispatch.set_entry(index as u128, block);
+        dispatch.set_entry(
+            index as u128,
+            preload_entry_blocks.get(index).copied().unwrap_or(block),
+        );
     }
     for (offset, target) in plan.resume_targets.iter().enumerate() {
         let index = plan
@@ -1095,6 +1136,36 @@ fn emit_region(
         &[],
     )?;
 
+    if let (Some(preload), Some(failure)) = (preload_block, preload_failure) {
+        builder.append_block_param(preload, types::I32);
+        for (index, block) in preload_entry_blocks.iter().copied().enumerate() {
+            builder.switch_to_block(block);
+            let target = builder.ins().iconst(types::I32, index as i64);
+            builder.ins().jump(preload, &[target.into()]);
+        }
+
+        builder.switch_to_block(preload);
+        emit_preloaded_list_data(&mut builder, values, plan, failure)?;
+        let target = builder.block_params(preload)[0];
+        let mut success = Switch::new();
+        for (index, block) in blocks.iter().copied().enumerate() {
+            success.set_entry(index as u128, block);
+        }
+        success.emit(&mut builder, target, invalid_block);
+
+        builder.switch_to_block(failure);
+        let mut failed = Switch::new();
+        for (index, block) in preload_boundary_blocks.iter().copied().enumerate() {
+            failed.set_entry(index as u128, block);
+        }
+        failed.emit(&mut builder, target, invalid_block);
+
+        for (index, segment) in plan.segments.iter().enumerate() {
+            builder.switch_to_block(preload_boundary_blocks[index]);
+            emit_preload_boundary(&mut builder, values, segment)?;
+        }
+    }
+
     for (index, segment) in plan.segments.iter().enumerate() {
         builder.switch_to_block(blocks[index]);
         let body = body_blocks[index];
@@ -1117,7 +1188,12 @@ fn emit_region(
         let exact_successors: Vec<ir::Block> = segment
             .successors
             .iter()
-            .map(|successor| blocks[*successor])
+            .map(|successor| {
+                preload_entry_blocks
+                    .get(*successor)
+                    .copied()
+                    .unwrap_or(blocks[*successor])
+            })
             .collect();
         emit_segment(
             &mut builder,
@@ -1171,6 +1247,95 @@ fn emit_region(
     Ok(())
 }
 
+fn emit_preloaded_list_data(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    plan: &RegionPlan,
+    failure: ir::Block,
+) -> Result<(), CompileError> {
+    let point = FaultPoint {
+        block: 0,
+        instruction: 0,
+        prefix: 0,
+    };
+    for (slot, preload) in plan.preloaded_list_data.iter().copied().enumerate() {
+        if !preload {
+            continue;
+        }
+        let reference = builder.use_var(values.locals[slot]);
+        let entry = emit_heap_entry_miss(
+            builder,
+            values,
+            reference,
+            point,
+            ObjectGuard::Branch(failure),
+        )?;
+        let kind = load_heap_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+        let wrong_kind = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, kind, i64::from(JIT_OBJECT_LIST));
+        emit_object_guard(
+            builder,
+            values,
+            wrong_kind,
+            point,
+            ObjectGuard::Branch(failure),
+        )?;
+        let data = load_immutable_heap_value(
+            builder,
+            values.pointer_type,
+            entry,
+            JIT_LIST_ITEMS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+        )?;
+        let cache = values.local_heap_caches[slot].ok_or(CompileError::Backend)?;
+        let list_data = cache.list_data.ok_or(CompileError::Backend)?;
+        let list_proof = builder
+            .ins()
+            .iconst(types::I64, i64::from(JIT_OBJECT_LIST) + 1);
+        builder.def_var(cache.entry, entry);
+        builder.def_var(cache.object_kind, list_proof);
+        builder.def_var(list_data, data);
+    }
+    Ok(())
+}
+
+fn emit_preload_boundary(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    segment: &Segment,
+) -> Result<(), CompileError> {
+    let stack = values
+        .stack
+        .iter()
+        .copied()
+        .zip(segment.entry_stack.iter().copied())
+        .enumerate()
+        .map(|(slot, (bits, kind))| {
+            Ok(NativeValue {
+                bits: builder.use_var(bits),
+                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let retired = emit_retired(builder, values);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_BOUNDARY,
+            block: segment.block,
+            instruction: segment.start,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
+        },
+        &stack,
+    )
+}
+
 fn emit_segment(
     builder: &mut FunctionBuilder<'_>,
     emission: SegmentEmission<'_, '_>,
@@ -1187,7 +1352,11 @@ fn emit_segment(
         exact_fuel_exit,
         resume_blocks,
     } = emission;
-    values.heap_translations.borrow_mut().clear();
+    {
+        let mut translations = values.heap_translations.borrow_mut();
+        translations.clear();
+        translations.set_preloaded_list_data(!exact_fuel);
+    }
     let mut stack: Vec<NativeValue> = if resume_blocks.is_some() {
         Vec::new()
     } else {
@@ -6713,6 +6882,9 @@ fn clear_local_heap_cache(
     builder.def_var(cache.object_kind, zero_i64);
     builder.def_var(cache.class, zero_i64);
     builder.def_var(cache.actual_class, zero_i32);
+    if let Some(list_data) = cache.list_data {
+        builder.def_var(list_data, zero_pointer);
+    }
 }
 
 fn push_static(
@@ -9817,7 +9989,18 @@ fn emit_array_address(
     array_offset: usize,
     index: ir::Value,
 ) -> Result<ir::Value, CompileError> {
-    let data = if matches!(
+    let preloaded = array_offset == JIT_LIST_ITEMS_OFFSET
+        && values.heap_translations.borrow().use_preloaded_list_data;
+    let data = if preloaded {
+        local_heap_cache(values, entry)
+            .and_then(|cache| cache.list_data)
+            .map(|data| builder.use_var(data))
+    } else {
+        None
+    };
+    let data = if let Some(data) = data {
+        data
+    } else if matches!(
         array_offset,
         JIT_INSTANCE_FIELDS_OFFSET | JIT_TUPLE_ITEMS_OFFSET
     ) {
@@ -10157,7 +10340,25 @@ fn emit_object_entry(
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
-    let local_cache = local_heap_cache(values, reference);
+    let local_slot = values.heap_translations.borrow().local(reference);
+    let local_cache = local_slot
+        .and_then(|slot| values.local_heap_caches.get(slot))
+        .copied()
+        .flatten();
+    let preloaded = object_tag == JIT_OBJECT_LIST
+        && values.heap_translations.borrow().use_preloaded_list_data
+        && local_cache.is_some_and(|cache| cache.list_data.is_some());
+    if preloaded {
+        let cache = local_cache.ok_or(CompileError::Backend)?;
+        let entry = builder.use_var(cache.entry);
+        if let Some(slot) = local_slot {
+            values
+                .heap_translations
+                .borrow_mut()
+                .record_local(entry, slot);
+        }
+        return Ok(entry);
+    }
     let expected = i64::from(object_tag) + 1;
     let entry = if let Some(cache) = local_cache {
         let hit = builder.create_block();
@@ -10194,6 +10395,12 @@ fn emit_object_entry(
         emit_object_guard(builder, values, wrong_kind, point, guard)?;
         entry
     };
+    if let Some(slot) = local_slot {
+        values
+            .heap_translations
+            .borrow_mut()
+            .record_local(entry, slot);
+    }
     Ok(entry)
 }
 
@@ -10447,6 +10654,12 @@ fn emit_object_guard(
         }
         ObjectGuard::Replay(stack) => {
             emit_interpreter_replay(builder, values, invalid, point, stack)
+        }
+        ObjectGuard::Branch(target) => {
+            let success = builder.create_block();
+            builder.ins().brif(invalid, target, &[], success, &[]);
+            builder.switch_to_block(success);
+            Ok(())
         }
     }
 }

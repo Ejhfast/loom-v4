@@ -563,6 +563,8 @@ struct CallSignature {
 #[derive(Debug, Clone)]
 pub(super) struct RegionPlan {
     pub(super) local_kinds: Vec<ScalarKind>,
+    /// Parameters whose list data stays fixed for this native call.
+    pub(super) preloaded_list_data: Vec<bool>,
     pub(super) result_kind: ScalarKind,
     pub(super) max_stack: usize,
     pub(super) max_stack_values: usize,
@@ -712,6 +714,7 @@ impl RegionPlan {
         let mut heap_write_sites = 0;
         let mut allocation_sites = 0;
         let mut collection_sites = 0;
+        let mut list_growth_sites = 0;
         let mut effect_sites = 0;
         let interpreter_sites = 0;
         let mut type_resolution_sites = 0;
@@ -783,6 +786,14 @@ impl RegionPlan {
                         ) {
                             collection_sites += 1;
                         }
+                        if matches!(
+                            access.kind,
+                            HeapAccessKind::ListPush { .. }
+                                | HeapAccessKind::ListInsert { .. }
+                                | HeapAccessKind::ListReserve
+                        ) {
+                            list_growth_sites += 1;
+                        }
                     }
                     _ => heap_read_sites += 1,
                 }
@@ -830,6 +841,20 @@ impl RegionPlan {
             return Err(UnsupportedReason::RegionLimit);
         }
         compute_liveness(&mut segments, local_kinds.len());
+        let stable_list_data = call_sites == 0 && list_growth_sites == 0;
+        let preloaded_list_data = source_func
+            .local_types
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, ty)| {
+                stable_list_data
+                    && slot < source_func.params.len()
+                    && matches!(source.types.get(ty as usize), Some(BcType::List(_)))
+                    && segments.iter().any(|segment| segment.uses[slot])
+                    && segments.iter().all(|segment| !segment.definitions[slot])
+            })
+            .collect();
         let root_local_count = local_kinds
             .iter()
             .filter(|kind| is_root_kind(**kind))
@@ -861,6 +886,7 @@ impl RegionPlan {
         }
         Ok(RegionPlan {
             local_kinds,
+            preloaded_list_data,
             result_kind,
             max_stack,
             max_stack_values,

@@ -4,6 +4,8 @@ Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
+Stable list parameters retain their canonical data pointer across safe loop backedges.
+
 Representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
@@ -471,13 +473,17 @@ The heap does not move live objects.
 
 The machine lease prevents concurrent heap mutation.
 
-A payload pointer lives only in straight-line code between calls.
+A movable payload pointer lives only in straight-line code between calls.
 
-Native code reloads every payload pointer after call_indirect.
+A static proof can retain one stable payload pointer across loop backedges.
 
-Native code reloads every payload pointer after a native call.
+The proof forbids owner reassignment and payload growth.
 
-Any callee can allocate or collect.
+A guest call ends the proof because it can mutate an alias.
+
+A typed runtime helper ends the proof when its contract can move that payload.
+
+Native code reloads a movable payload pointer after its proof ends.
 
 After a slow path, native code reloads:
 
@@ -2562,6 +2568,37 @@ The sampled JSON cold run improved by 7.8 percent.
 The exact tail still lowers each bytecode instruction a second time.
 
 Later code-density work must remove this duplicate lowering.
+
+### Stage F47: Retain stable list parameter data
+
+- select list parameters that no native path reassigns;
+- reject the proof when one guest call can mutate an alias;
+- reject the proof when one list operation can grow storage;
+- validate the canonical object once at native entry;
+- retain its canonical data pointer across safe loop backedges;
+- use no runtime branch at each element access;
+- keep exact-fuel code on the checked load path;
+- use one typed boundary when external state fails the entry proof;
+- measure cold and warm costs separately.
+
+This stage starts payload-address persistence.
+
+Local list proofs and broader loop invariants remain open.
+
+The focused JIT suite passed 148 tests.
+
+The direct and scheduled corpus differential passed in 54.76 seconds.
+
+The release comparison used commit `5883543` as its exact parent baseline.
+
+| List parameter loop | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Native warm | 1.150 ms | 1.095 ms | 4.8 percent faster |
+| Native cold | 7.076 ms | 7.199 ms | within local variance |
+
+The hot access performs no repeated payload-pointer load.
+
+This result does not define a completion threshold.
 
 ## 24. Rejected designs
 
