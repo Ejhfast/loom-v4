@@ -20,9 +20,12 @@ mod value_array;
 use lm_value::Value;
 use lm_value::{ObjRef, Witness};
 pub use shape::{
-    dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapIndex, Object,
-    PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch,
-    MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET, MIN_OBJECT_COST, SHAPES,
+    dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapEntryArray, MapIndex,
+    Object, PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch,
+    EMPTY_MAP_ENTRY, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE,
+    MAP_ENTRY_VALUE_OFFSET, MAP_INDEX_BUILT_OFFSET, MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET,
+    MAP_INDEX_SLOTS_DATA_OFFSET, MAP_INDEX_SLOTS_LEN_OFFSET, MAP_SLOT_ENTRY_OFFSET,
+    MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
@@ -36,7 +39,9 @@ use shared::{
 };
 use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
-    ValueArray, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
+    OwnedArray, OwnedSlice, ValueArray, OWNED_ARRAY_CAPACITY_OFFSET, OWNED_ARRAY_DATA_OFFSET,
+    OWNED_ARRAY_LEN_OFFSET, OWNED_ARRAY_SIZE, OWNED_SLICE_DATA_OFFSET, OWNED_SLICE_LEN_OFFSET,
+    OWNED_SLICE_SIZE, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
     VALUE_ARRAY_SIZE,
 };
 
@@ -202,7 +207,7 @@ struct ListLayout {
 
 #[repr(C)]
 struct MapLayout {
-    entries: Vec<MapEntry>,
+    entries: MapEntryArray,
     index: MapIndex,
 }
 
@@ -325,6 +330,31 @@ pub const JIT_MAP_LIVE_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
     + std::mem::offset_of!(MapLayout, index)
     + MAP_INDEX_LIVE_OFFSET;
+/// Byte offset of the map-entry data pointer.
+pub const JIT_MAP_ENTRIES_DATA_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, entries)
+    + OWNED_ARRAY_DATA_OFFSET;
+/// Byte offset of the map-entry count.
+pub const JIT_MAP_ENTRIES_LEN_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, entries)
+    + OWNED_ARRAY_LEN_OFFSET;
+/// Byte offset of the indexed map-entry count.
+pub const JIT_MAP_INDEX_BUILT_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, index)
+    + MAP_INDEX_BUILT_OFFSET;
+/// Byte offset of the map-slot data pointer.
+pub const JIT_MAP_INDEX_SLOTS_DATA_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, index)
+    + MAP_INDEX_SLOTS_DATA_OFFSET;
+/// Byte offset of the map-slot count.
+pub const JIT_MAP_INDEX_SLOTS_LEN_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, index)
+    + MAP_INDEX_SLOTS_LEN_OFFSET;
 /// Byte offset of the map structural epoch.
 pub const JIT_MAP_EPOCH_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
@@ -1399,11 +1429,19 @@ mod tests {
     }
 
     #[test]
-    fn native_map_layout_names_live_count_and_epoch() {
+    fn native_map_layout_names_entries_and_lookup_slots() {
         let mut heap = Heap::new(1 << 20);
+        let hash = 0x1234_5678_9abc_def0;
+        let mut index = MapIndex::with_live(StructuralEpoch(7), 0);
+        index.push_live(hash, 0);
         let reference = heap.alloc(Object::Map {
-            entries: Vec::new(),
-            index: MapIndex::with_live(StructuralEpoch(7), 3),
+            entries: vec![MapEntry {
+                key: Value::Int(4),
+                value: Value::Bool(true),
+                semantic_hash: 4,
+            }]
+            .into(),
+            index,
         });
         let entry = heap.entry(reference.slot);
         let base = std::ptr::from_ref(entry) as usize;
@@ -1414,8 +1452,44 @@ mod tests {
                 ((base + JIT_ENTRY_OBJECT_TAG_OFFSET) as *const u32).read(),
                 JIT_OBJECT_MAP
             );
-            assert_eq!(((base + JIT_MAP_LIVE_OFFSET) as *const u32).read(), 3);
+            assert_eq!(((base + JIT_MAP_LIVE_OFFSET) as *const u32).read(), 1);
             assert_eq!(((base + JIT_MAP_EPOCH_OFFSET) as *const u32).read(), 7);
+            assert_eq!(
+                ((base + JIT_MAP_ENTRIES_LEN_OFFSET) as *const usize).read(),
+                1
+            );
+            assert_eq!(
+                ((base + JIT_MAP_INDEX_BUILT_OFFSET) as *const u32).read(),
+                1
+            );
+            let entries =
+                ((base + JIT_MAP_ENTRIES_DATA_OFFSET) as *const *const u8).read() as usize;
+            assert_eq!(
+                ((entries + MAP_ENTRY_KEY_OFFSET) as *const Value).read(),
+                Value::Int(4)
+            );
+            assert_eq!(
+                ((entries + MAP_ENTRY_VALUE_OFFSET) as *const Value).read(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                ((entries + MAP_ENTRY_SEMANTIC_HASH_OFFSET) as *const i64).read(),
+                4
+            );
+            let slots =
+                ((base + JIT_MAP_INDEX_SLOTS_DATA_OFFSET) as *const *const u8).read() as usize;
+            let slot_count = ((base + JIT_MAP_INDEX_SLOTS_LEN_OFFSET) as *const usize).read();
+            let occupied = (0..slot_count)
+                .map(|slot| slots + slot * MAP_SLOT_SIZE)
+                .find(|slot| {
+                    ((*slot + MAP_SLOT_ENTRY_OFFSET) as *const u32).read() != EMPTY_MAP_ENTRY
+                })
+                .expect("one lookup slot is occupied");
+            assert_eq!(
+                ((occupied + MAP_SLOT_HASH_OFFSET) as *const u64).read(),
+                hash
+            );
+            assert_eq!(((occupied + MAP_SLOT_ENTRY_OFFSET) as *const u32).read(), 0);
         }
     }
 

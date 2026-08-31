@@ -1086,7 +1086,8 @@ mod tests {
                         value: Value::Int(20),
                         semantic_hash: second,
                     },
-                ],
+                ]
+                .into(),
                 index: MapIndex::with_live(Default::default(), 2),
             });
             freeze(heap, map, &GraphLimits::default()).expect("the map freezes");
@@ -1110,7 +1111,8 @@ mod tests {
                     key: Value::Int(1),
                     value: Value::Int(10),
                     semantic_hash: hash,
-                }],
+                }]
+                .into(),
                 index: MapIndex::with_live(Default::default(), 1),
             });
             freeze(heap, map, &GraphLimits::default()).expect("the map freezes");

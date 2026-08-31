@@ -1,4 +1,4 @@
-//! Stable owned storage for heap values.
+//! Stable owned array storage.
 
 use lm_value::Value;
 use std::collections::TryReserveError;
@@ -8,22 +8,48 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
-/// One owned value array with a stable native layout.
+/// One owned array with a stable native layout.
 #[repr(C)]
-pub struct ValueArray {
-    data: *mut Value,
+pub struct OwnedArray<T> {
+    data: *mut T,
     len: usize,
     capacity: usize,
 }
 
+/// One fixed owned slice with a stable native layout.
+#[repr(C)]
+pub struct OwnedSlice<T> {
+    data: *mut T,
+    len: usize,
+}
+
+/// One owned array of canonical heap values.
+pub type ValueArray = OwnedArray<Value>;
+
 /// Byte offset of the array data pointer.
-pub const VALUE_ARRAY_DATA_OFFSET: usize = std::mem::offset_of!(ValueArray, data);
+pub const OWNED_ARRAY_DATA_OFFSET: usize = std::mem::offset_of!(OwnedArray<u8>, data);
 /// Byte offset of the array length.
-pub const VALUE_ARRAY_LEN_OFFSET: usize = std::mem::offset_of!(ValueArray, len);
+pub const OWNED_ARRAY_LEN_OFFSET: usize = std::mem::offset_of!(OwnedArray<u8>, len);
 /// Byte offset of the array capacity.
-pub const VALUE_ARRAY_CAPACITY_OFFSET: usize = std::mem::offset_of!(ValueArray, capacity);
+pub const OWNED_ARRAY_CAPACITY_OFFSET: usize = std::mem::offset_of!(OwnedArray<u8>, capacity);
 /// Size of one native value-array record.
-pub const VALUE_ARRAY_SIZE: usize = std::mem::size_of::<ValueArray>();
+pub const OWNED_ARRAY_SIZE: usize = std::mem::size_of::<OwnedArray<u8>>();
+
+/// Byte offset of the owned-slice data pointer.
+pub const OWNED_SLICE_DATA_OFFSET: usize = std::mem::offset_of!(OwnedSlice<u8>, data);
+/// Byte offset of the owned-slice length.
+pub const OWNED_SLICE_LEN_OFFSET: usize = std::mem::offset_of!(OwnedSlice<u8>, len);
+/// Size of one owned-slice record.
+pub const OWNED_SLICE_SIZE: usize = std::mem::size_of::<OwnedSlice<u8>>();
+
+/// Byte offset of the value-array data pointer.
+pub const VALUE_ARRAY_DATA_OFFSET: usize = OWNED_ARRAY_DATA_OFFSET;
+/// Byte offset of the value-array length.
+pub const VALUE_ARRAY_LEN_OFFSET: usize = OWNED_ARRAY_LEN_OFFSET;
+/// Byte offset of the value-array capacity.
+pub const VALUE_ARRAY_CAPACITY_OFFSET: usize = OWNED_ARRAY_CAPACITY_OFFSET;
+/// Size of one native value-array record.
+pub const VALUE_ARRAY_SIZE: usize = OWNED_ARRAY_SIZE;
 
 const _: () = assert!(VALUE_ARRAY_DATA_OFFSET == 0);
 #[cfg(target_pointer_width = "64")]
@@ -33,11 +59,11 @@ const _: () = assert!(VALUE_ARRAY_CAPACITY_OFFSET == 16);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(VALUE_ARRAY_SIZE == 24);
 
-impl ValueArray {
+impl<T> OwnedArray<T> {
     /// Create one empty array.
-    pub fn new() -> ValueArray {
-        ValueArray {
-            data: NonNull::<Value>::dangling().as_ptr(),
+    pub fn new() -> OwnedArray<T> {
+        OwnedArray {
+            data: NonNull::<T>::dangling().as_ptr(),
             len: 0,
             capacity: 0,
         }
@@ -49,12 +75,12 @@ impl ValueArray {
     }
 
     /// Return this array as one slice.
-    pub fn as_slice(&self) -> &[Value] {
+    pub fn as_slice(&self) -> &[T] {
         self
     }
 
     /// Return this array as one mutable slice.
-    pub fn as_mut_slice(&mut self) -> &mut [Value] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
 
@@ -79,27 +105,27 @@ impl ValueArray {
     }
 
     /// Append one value.
-    pub fn push(&mut self, value: Value) {
+    pub fn push(&mut self, value: T) {
         self.vector().push(value);
     }
 
     /// Remove and return the last value.
-    pub fn pop(&mut self) -> Option<Value> {
+    pub fn pop(&mut self) -> Option<T> {
         self.vector().pop()
     }
 
     /// Insert one value at an index.
-    pub fn insert(&mut self, index: usize, value: Value) {
+    pub fn insert(&mut self, index: usize, value: T) {
         self.vector().insert(index, value);
     }
 
     /// Remove and return one value.
-    pub fn remove(&mut self, index: usize) -> Value {
+    pub fn remove(&mut self, index: usize) -> T {
         self.vector().remove(index)
     }
 
     /// Remove one value without preserving order.
-    pub fn swap_remove(&mut self, index: usize) -> Value {
+    pub fn swap_remove(&mut self, index: usize) -> T {
         self.vector().swap_remove(index)
     }
 
@@ -113,18 +139,26 @@ impl ValueArray {
         self.vector().clear();
     }
 
+    /// Keep only elements that satisfy one predicate.
+    pub fn retain<F>(&mut self, keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.vector().retain(keep);
+    }
+
     /// Convert this array into the standard owned form.
-    pub fn into_vec(self) -> Vec<Value> {
+    pub fn into_vec(self) -> Vec<T> {
         let held = ManuallyDrop::new(self);
-        // SAFETY: `ValueArray` owns this exact `Vec` allocation.
+        // SAFETY: `OwnedArray` owns this exact `Vec` allocation.
         unsafe { Vec::from_raw_parts(held.data, held.len, held.capacity) }
     }
 
-    fn vector(&mut self) -> VectorGuard<'_> {
+    fn vector(&mut self) -> VectorGuard<'_, T> {
         let data = self.data;
         let len = self.len;
         let capacity = self.capacity;
-        self.data = NonNull::<Value>::dangling().as_ptr();
+        self.data = NonNull::<T>::dangling().as_ptr();
         self.len = 0;
         self.capacity = 0;
         // SAFETY: This array owns one allocation with these raw parts.
@@ -136,13 +170,94 @@ impl ValueArray {
     }
 }
 
-impl Default for ValueArray {
-    fn default() -> ValueArray {
-        ValueArray::new()
+impl<T> OwnedSlice<T> {
+    /// Create one empty owned slice.
+    pub fn new() -> OwnedSlice<T> {
+        OwnedSlice {
+            data: NonNull::<T>::dangling().as_ptr(),
+            len: 0,
+        }
+    }
+
+    /// Return this owned slice as one slice.
+    pub fn as_slice(&self) -> &[T] {
+        self
+    }
+
+    /// Return this owned slice as one mutable slice.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self
     }
 }
 
-impl Drop for ValueArray {
+impl<T> Default for OwnedSlice<T> {
+    fn default() -> OwnedSlice<T> {
+        OwnedSlice::new()
+    }
+}
+
+impl<T> Drop for OwnedSlice<T> {
+    fn drop(&mut self) {
+        let slice = std::ptr::slice_from_raw_parts_mut(self.data, self.len);
+        // SAFETY: This slice owns one exact boxed-slice allocation.
+        unsafe {
+            drop(Box::from_raw(slice));
+        }
+    }
+}
+
+impl<T: Clone> Clone for OwnedSlice<T> {
+    fn clone(&self) -> OwnedSlice<T> {
+        self.as_slice().to_vec().into()
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for OwnedSlice<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(formatter)
+    }
+}
+
+impl<T> Deref for OwnedSlice<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        // SAFETY: `data` names `len` initialized elements.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
+}
+
+impl<T> DerefMut for OwnedSlice<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        // SAFETY: This mutable borrow has exclusive slice access.
+        unsafe { std::slice::from_raw_parts_mut(self.data, self.len) }
+    }
+}
+
+impl<T> From<Vec<T>> for OwnedSlice<T> {
+    fn from(values: Vec<T>) -> OwnedSlice<T> {
+        let mut values = values.into_boxed_slice();
+        let out = OwnedSlice {
+            data: values.as_mut_ptr(),
+            len: values.len(),
+        };
+        std::mem::forget(values);
+        out
+    }
+}
+
+// SAFETY: The owned allocation contains only `Send` elements.
+unsafe impl<T: Send> Send for OwnedSlice<T> {}
+// SAFETY: Shared access exposes only immutable `Sync` elements.
+unsafe impl<T: Sync> Sync for OwnedSlice<T> {}
+
+impl<T> Default for OwnedArray<T> {
+    fn default() -> OwnedArray<T> {
+        OwnedArray::new()
+    }
+}
+
+impl<T> Drop for OwnedArray<T> {
     fn drop(&mut self) {
         // SAFETY: This array owns one allocation with these raw parts.
         unsafe {
@@ -151,57 +266,57 @@ impl Drop for ValueArray {
     }
 }
 
-impl Clone for ValueArray {
-    fn clone(&self) -> ValueArray {
+impl<T: Clone> Clone for OwnedArray<T> {
+    fn clone(&self) -> OwnedArray<T> {
         self.as_slice().to_vec().into()
     }
 }
 
-impl fmt::Debug for ValueArray {
+impl<T: fmt::Debug> fmt::Debug for OwnedArray<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_slice().fmt(formatter)
     }
 }
 
-impl PartialEq for ValueArray {
-    fn eq(&self, other: &ValueArray) -> bool {
+impl<T: PartialEq> PartialEq for OwnedArray<T> {
+    fn eq(&self, other: &OwnedArray<T>) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
-impl Eq for ValueArray {}
+impl<T: Eq> Eq for OwnedArray<T> {}
 
-impl Deref for ValueArray {
-    type Target = [Value];
+impl<T> Deref for OwnedArray<T> {
+    type Target = [T];
 
-    fn deref(&self) -> &[Value] {
+    fn deref(&self) -> &[T] {
         // SAFETY: `data` names `len` initialized values owned by this array.
         unsafe { std::slice::from_raw_parts(self.data, self.len) }
     }
 }
 
-impl DerefMut for ValueArray {
-    fn deref_mut(&mut self) -> &mut [Value] {
+impl<T> DerefMut for OwnedArray<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
         // SAFETY: This mutable borrow has exclusive access to the array.
         unsafe { std::slice::from_raw_parts_mut(self.data, self.len) }
     }
 }
 
-impl AsRef<[Value]> for ValueArray {
-    fn as_ref(&self) -> &[Value] {
+impl<T> AsRef<[T]> for OwnedArray<T> {
+    fn as_ref(&self) -> &[T] {
         self
     }
 }
 
-impl AsMut<[Value]> for ValueArray {
-    fn as_mut(&mut self) -> &mut [Value] {
+impl<T> AsMut<[T]> for OwnedArray<T> {
+    fn as_mut(&mut self) -> &mut [T] {
         self
     }
 }
 
-impl From<Vec<Value>> for ValueArray {
-    fn from(mut values: Vec<Value>) -> ValueArray {
-        let out = ValueArray {
+impl<T> From<Vec<T>> for OwnedArray<T> {
+    fn from(mut values: Vec<T>) -> OwnedArray<T> {
+        let out = OwnedArray {
             data: values.as_mut_ptr(),
             len: values.len(),
             capacity: values.capacity(),
@@ -211,76 +326,76 @@ impl From<Vec<Value>> for ValueArray {
     }
 }
 
-impl From<ValueArray> for Vec<Value> {
-    fn from(values: ValueArray) -> Vec<Value> {
+impl<T> From<OwnedArray<T>> for Vec<T> {
+    fn from(values: OwnedArray<T>) -> Vec<T> {
         values.into_vec()
     }
 }
 
-impl FromIterator<Value> for ValueArray {
-    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> ValueArray {
+impl<T> FromIterator<T> for OwnedArray<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> OwnedArray<T> {
         iter.into_iter().collect::<Vec<_>>().into()
     }
 }
 
-impl Extend<Value> for ValueArray {
-    fn extend<T: IntoIterator<Item = Value>>(&mut self, iter: T) {
+impl<T> Extend<T> for OwnedArray<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.vector().extend(iter);
     }
 }
 
-impl IntoIterator for ValueArray {
-    type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
+impl<T> IntoIterator for OwnedArray<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.into_vec().into_iter()
     }
 }
 
-impl<'a> IntoIterator for &'a ValueArray {
-    type Item = &'a Value;
-    type IntoIter = std::slice::Iter<'a, Value>;
+impl<'a, T> IntoIterator for &'a OwnedArray<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-impl<'a> IntoIterator for &'a mut ValueArray {
-    type Item = &'a mut Value;
-    type IntoIter = std::slice::IterMut<'a, Value>;
+impl<'a, T> IntoIterator for &'a mut OwnedArray<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter_mut()
     }
 }
 
-// SAFETY: The owned allocation contains only `Value`, which is `Send`.
-unsafe impl Send for ValueArray {}
-// SAFETY: Shared access exposes only immutable `Value` references.
-unsafe impl Sync for ValueArray {}
+// SAFETY: The owned allocation contains only `Send` elements.
+unsafe impl<T: Send> Send for OwnedArray<T> {}
+// SAFETY: Shared access exposes only immutable `Sync` elements.
+unsafe impl<T: Sync> Sync for OwnedArray<T> {}
 
-struct VectorGuard<'a> {
-    owner: &'a mut ValueArray,
-    vector: ManuallyDrop<Vec<Value>>,
+struct VectorGuard<'a, T> {
+    owner: &'a mut OwnedArray<T>,
+    vector: ManuallyDrop<Vec<T>>,
 }
 
-impl Deref for VectorGuard<'_> {
-    type Target = Vec<Value>;
+impl<T> Deref for VectorGuard<'_, T> {
+    type Target = Vec<T>;
 
-    fn deref(&self) -> &Vec<Value> {
+    fn deref(&self) -> &Vec<T> {
         &self.vector
     }
 }
 
-impl DerefMut for VectorGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Vec<Value> {
+impl<T> DerefMut for VectorGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
         &mut self.vector
     }
 }
 
-impl Drop for VectorGuard<'_> {
+impl<T> Drop for VectorGuard<'_, T> {
     fn drop(&mut self) {
         self.owner.data = self.vector.as_mut_ptr();
         self.owner.len = self.vector.len();

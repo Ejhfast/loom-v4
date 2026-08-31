@@ -5406,7 +5406,10 @@ impl Machine {
                         }
                     }
                 }
-                let value = self.alloc(Object::Map { entries, index })?;
+                let value = self.alloc(Object::Map {
+                    entries: entries.into(),
+                    index,
+                })?;
                 self.push(value)?;
             }
             Instr::MapLen => {
@@ -6666,7 +6669,8 @@ mod tests {
                     key: Value::Int(7),
                     value: Value::Int(9),
                     semantic_hash: 99,
-                }],
+                }]
+                .into(),
                 index: MapIndex::with_live(StructuralEpoch::default(), 1),
             })
             .expect("the map allocation succeeds");

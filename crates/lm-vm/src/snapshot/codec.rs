@@ -2164,7 +2164,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 });
             }
             let index = MapIndex::with_live(epoch, entries.len());
-            Object::Map { entries, index }
+            Object::Map {
+                entries: entries.into(),
+                index,
+            }
         }
         4 => Object::Tuple {
             items: decode_values(

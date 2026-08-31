@@ -2389,6 +2389,23 @@ The implementation removed that cache.
 
 These changes do not complete payload-address optimization.
 
+### Stage F40: Expose the canonical map layout
+
+- replace the map-entry `Vec` with one stable owned array;
+- replace the map-slot boxed slice with one stable owned slice;
+- keep map entries and lookup slots as the only source of truth;
+- preserve the existing object payload size;
+- publish data, length, element-size, and field offsets from `lm-heap`;
+- keep snapshots, graph walks, and interpreter operations on the same storage.
+
+Gate: Heap tests read entries and lookup slots through every published offset.
+
+Gate: The compact object-size test still passes.
+
+The native map probe does not read this layout yet.
+
+The next stage inlines common map hits over these canonical arrays.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

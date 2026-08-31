@@ -13,7 +13,10 @@ use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
 use std::collections::TryReserveError;
 
-use crate::{NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText, ValueArray};
+use crate::{
+    NativeByteBuffer, NativeStringBuilder, OwnedArray, OwnedSlice, SharedBytes, SharedText,
+    ValueArray, OWNED_SLICE_DATA_OFFSET, OWNED_SLICE_LEN_OFFSET,
+};
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -119,27 +122,46 @@ pub struct MapIndex {
     live: u32,
     /// The structural epoch stored in existing index padding.
     pub epoch: StructuralEpoch,
-    slots: Box<[MapSlot]>,
+    slots: OwnedSlice<MapSlot>,
 }
 
 /// Byte offset of the live map-entry count.
 pub const MAP_INDEX_LIVE_OFFSET: usize = std::mem::offset_of!(MapIndex, live);
 /// Byte offset of the map structural epoch.
 pub const MAP_INDEX_EPOCH_OFFSET: usize = std::mem::offset_of!(MapIndex, epoch);
+/// Byte offset of the indexed entry count.
+pub const MAP_INDEX_BUILT_OFFSET: usize = std::mem::offset_of!(MapIndex, built);
+/// Byte offset of the map-slot data pointer.
+pub const MAP_INDEX_SLOTS_DATA_OFFSET: usize =
+    std::mem::offset_of!(MapIndex, slots) + OWNED_SLICE_DATA_OFFSET;
+/// Byte offset of the map-slot count.
+pub const MAP_INDEX_SLOTS_LEN_OFFSET: usize =
+    std::mem::offset_of!(MapIndex, slots) + OWNED_SLICE_LEN_OFFSET;
 
-const EMPTY_MAP_ENTRY: u32 = u32::MAX;
+/// Empty map-slot entry sentinel.
+pub const EMPTY_MAP_ENTRY: u32 = u32::MAX;
 const MIN_MAP_SLOTS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 struct MapSlot {
     hash: u64,
     entry: u32,
+    reserved: u32,
 }
+
+/// Size of one map lookup slot.
+pub const MAP_SLOT_SIZE: usize = std::mem::size_of::<MapSlot>();
+/// Byte offset of one map-slot hash.
+pub const MAP_SLOT_HASH_OFFSET: usize = std::mem::offset_of!(MapSlot, hash);
+/// Byte offset of one map-slot entry index.
+pub const MAP_SLOT_ENTRY_OFFSET: usize = std::mem::offset_of!(MapSlot, entry);
 
 impl MapSlot {
     const EMPTY: MapSlot = MapSlot {
         hash: 0,
         entry: EMPTY_MAP_ENTRY,
+        reserved: 0,
     };
 }
 
@@ -150,7 +172,7 @@ impl MapIndex {
             built: 0,
             live: u32::try_from(live).expect("map entry count fits u32"),
             epoch,
-            slots: Box::default(),
+            slots: OwnedSlice::new(),
         }
     }
 
@@ -186,14 +208,14 @@ impl MapIndex {
     /// Drop derived data after stable compaction.
     pub fn record_compaction(&mut self) {
         self.built = 0;
-        self.slots = Box::default();
+        self.slots = OwnedSlice::new();
     }
 
     /// Reset one empty map.
     pub fn reset(&mut self) {
         self.built = 0;
         self.live = 0;
-        self.slots = Box::default();
+        self.slots = OwnedSlice::new();
     }
 
     /// Entry indices whose stored key has this hash.
@@ -252,16 +274,13 @@ impl MapIndex {
     /// Clear the derived lookup table and keep the structural epoch.
     pub fn clear(&mut self) {
         self.built = 0;
-        self.slots = Box::default();
+        self.slots = OwnedSlice::new();
     }
 
     fn grow(&mut self) {
         let new_len = (self.slots.len() * 2).max(MIN_MAP_SLOTS);
-        let old = std::mem::replace(
-            &mut self.slots,
-            vec![MapSlot::EMPTY; new_len].into_boxed_slice(),
-        );
-        for slot in old {
+        let old = std::mem::replace(&mut self.slots, vec![MapSlot::EMPTY; new_len].into());
+        for slot in old.iter().copied() {
             if slot.entry != EMPTY_MAP_ENTRY {
                 insert_map_slot(&mut self.slots, slot.hash, slot.entry);
             }
@@ -301,7 +320,11 @@ fn insert_map_slot(slots: &mut [MapSlot], hash: u64, entry: u32) {
     let mut at = map_slot(hash, slots.len());
     loop {
         if slots[at].entry == EMPTY_MAP_ENTRY {
-            slots[at] = MapSlot { hash, entry };
+            slots[at] = MapSlot {
+                hash,
+                entry,
+                reserved: 0,
+            };
             return;
         }
         at = (at + 1) & (slots.len() - 1);
@@ -327,12 +350,25 @@ impl PartialEq for MapIndex {
 
 /// One insertion-ordered map entry.
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct MapEntry {
     pub key: Value,
     pub value: Value,
     /// The stable semantic hash of `key`.
     pub semantic_hash: i64,
 }
+
+/// Size of one canonical map entry.
+pub const MAP_ENTRY_SIZE: usize = std::mem::size_of::<MapEntry>();
+/// Byte offset of one map-entry key.
+pub const MAP_ENTRY_KEY_OFFSET: usize = std::mem::offset_of!(MapEntry, key);
+/// Byte offset of one map-entry value.
+pub const MAP_ENTRY_VALUE_OFFSET: usize = std::mem::offset_of!(MapEntry, value);
+/// Byte offset of one map-entry semantic hash.
+pub const MAP_ENTRY_SEMANTIC_HASH_OFFSET: usize = std::mem::offset_of!(MapEntry, semantic_hash);
+
+/// One stable array of map entries.
+pub type MapEntryArray = OwnedArray<MapEntry>;
 
 impl MapEntry {
     /// Test whether this entry contains a key and value.
@@ -425,7 +461,7 @@ pub enum Object {
     /// A map with entries in insertion order plus a derived lookup
     /// index.
     Map {
-        entries: Vec<MapEntry>,
+        entries: MapEntryArray,
         index: MapIndex,
     } = 3,
     /// A fixed-arity immutable tuple. Born frozen.
@@ -1063,7 +1099,7 @@ impl Object {
                 }
                 let copied_index = MapIndex::with_live(index.epoch, copied.len());
                 Object::Map {
-                    entries: copied,
+                    entries: copied.into(),
                     index: copied_index,
                 }
             }
@@ -1480,7 +1516,7 @@ impl Object {
                     }
                 }));
                 Object::Map {
-                    entries: copied,
+                    entries: copied.into(),
                     index: copied_index,
                 }
             }
@@ -1557,7 +1593,7 @@ impl Object {
                     }
                 }));
                 Object::Map {
-                    entries: copied,
+                    entries: copied.into(),
                     // The destination index rebuilds on the first lookup.
                     index: copied_index,
                 }
@@ -1687,7 +1723,8 @@ mod tests {
                     key: Value::Obj(a),
                     value: Value::Obj(b),
                     semantic_hash: 1,
-                }],
+                }]
+                .into(),
                 index: MapIndex::with_live(StructuralEpoch::default(), 1),
             },
             Object::Tuple {
@@ -1898,7 +1935,7 @@ mod tests {
                 epoch: Default::default(),
             },
             Object::Map {
-                entries: vec![],
+                entries: vec![].into(),
                 index: MapIndex::default(),
             },
             Object::Tuple {
@@ -2067,7 +2104,8 @@ mod tests {
                 key: Value::Obj(key),
                 value: Value::Obj(value),
                 semantic_hash: 1,
-            }],
+            }]
+            .into(),
             index: MapIndex::with_live(StructuralEpoch::default(), 1),
         };
         let mut out = Vec::new();

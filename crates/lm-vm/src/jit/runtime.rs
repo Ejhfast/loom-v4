@@ -863,7 +863,10 @@ impl NativeRuntime for MachineRuntime<'_> {
             }
         }
         self.allocate_object(
-            crate::Object::Map { entries, index },
+            crate::Object::Map {
+                entries: entries.into(),
+                index,
+            },
             request.roots,
             request.allow_collection,
         )
