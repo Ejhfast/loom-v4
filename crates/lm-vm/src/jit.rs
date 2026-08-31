@@ -671,7 +671,7 @@ impl JitEngine {
                 scratch.image_slots.len(),
             )
         };
-        let (exit, allocations) = {
+        let (exit, allocations, collection_slow_paths) = {
             let type_environments = std::mem::take(&mut machine.native_type_environments);
             let resolved_calls = std::mem::take(&mut machine.native_resolved_calls);
             let mut runtime = MachineRuntime {
@@ -683,6 +683,7 @@ impl JitEngine {
                 base_local: base,
                 base_operand: operand_base,
                 allocations: 0,
+                collection_slow_paths: 0,
             };
             let mut active_region = active_region;
             let mut active_entry = entry_index;
@@ -1139,9 +1140,10 @@ impl JitEngine {
                 active_region = parent_region;
                 active_entry = parent_entry;
             };
-            (result, runtime.allocations)
+            (result, runtime.allocations, runtime.collection_slow_paths)
         };
         metrics.note_native_allocations(allocations);
+        metrics.note_native_collection_slow_paths(collection_slow_paths);
         let exit = match exit {
             Ok(exit) => exit,
             Err(_) => {

@@ -52,6 +52,7 @@ pub struct EngineMetrics {
     pub native_fault_exits: u64,
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
+    pub native_collection_slow_paths: u64,
     pub native_effect_exits: u64,
     pub native_type_environment_exits: u64,
     pub native_type_environment_fallbacks: u64,
@@ -132,6 +133,7 @@ struct EngineCounters {
     native_fault_exits: AtomicU64,
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
+    native_collection_slow_paths: AtomicU64,
     native_effect_exits: AtomicU64,
     native_type_environment_exits: AtomicU64,
     native_type_environment_fallbacks: AtomicU64,
@@ -179,6 +181,7 @@ impl EngineCounters {
             native_fault_exits: read(&self.native_fault_exits),
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
+            native_collection_slow_paths: read(&self.native_collection_slow_paths),
             native_effect_exits: read(&self.native_effect_exits),
             native_type_environment_exits: read(&self.native_type_environment_exits),
             native_type_environment_fallbacks: read(&self.native_type_environment_fallbacks),
@@ -215,6 +218,7 @@ impl EngineCounters {
         reset(&self.native_fault_exits);
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
+        reset(&self.native_collection_slow_paths);
         reset(&self.native_effect_exits);
         reset(&self.native_type_environment_exits);
         reset(&self.native_type_environment_fallbacks);
@@ -275,6 +279,10 @@ impl EngineCounters {
             values.native_allocation_exits,
         );
         add(&self.native_allocations, values.native_allocations);
+        add(
+            &self.native_collection_slow_paths,
+            values.native_collection_slow_paths,
+        );
         add(&self.native_effect_exits, values.native_effect_exits);
         add(
             &self.native_type_environment_exits,
@@ -415,6 +423,13 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_allocations(&mut self, allocations: u64) {
         self.values.native_allocations = self.values.native_allocations.saturating_add(allocations);
+    }
+
+    pub(crate) fn note_native_collection_slow_paths(&mut self, paths: u64) {
+        self.values.native_collection_slow_paths = self
+            .values
+            .native_collection_slow_paths
+            .saturating_add(paths);
     }
 
     pub(crate) fn note_native_effect_exit(&mut self) {

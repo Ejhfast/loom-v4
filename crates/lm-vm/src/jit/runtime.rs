@@ -118,6 +118,7 @@ pub(super) struct MachineRuntime<'a> {
     pub(super) base_local: usize,
     pub(super) base_operand: usize,
     pub(super) allocations: u64,
+    pub(super) collection_slow_paths: u64,
 }
 
 impl Drop for MachineRuntime<'_> {
@@ -213,8 +214,9 @@ impl MachineRuntime<'_> {
             };
         }
         if !allow_collection {
-            return AllocationResult::Interpreter;
+            return AllocationResult::CollectionRequired;
         }
+        self.collection_slow_paths = self.collection_slow_paths.saturating_add(1);
         let roots = match decode_root_objects(roots) {
             Ok(roots) => roots,
             Err(CaptureDecodeFailure::Limit) => return AllocationResult::HeapLimit,
@@ -244,6 +246,7 @@ impl MachineRuntime<'_> {
     ) -> HeapOperationResult {
         match self.allocate_object(object, request.roots, request.allow_collection) {
             AllocationResult::Value { bits, heap } => HeapOperationResult::Value { bits, heap },
+            AllocationResult::CollectionRequired => HeapOperationResult::Interpreter,
             AllocationResult::HeapLimit => HeapOperationResult::HeapLimit,
             AllocationResult::Interpreter => HeapOperationResult::Interpreter,
         }
@@ -1751,9 +1754,9 @@ impl NativeRuntime for MachineRuntime<'_> {
             request.allow_collection,
         ) {
             value @ AllocationResult::Value { .. } => value,
-            AllocationResult::HeapLimit | AllocationResult::Interpreter => {
-                AllocationResult::Interpreter
-            }
+            AllocationResult::CollectionRequired
+            | AllocationResult::HeapLimit
+            | AllocationResult::Interpreter => AllocationResult::Interpreter,
         }
     }
 

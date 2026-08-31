@@ -8,6 +8,8 @@ Stable list parameters and locals retain their canonical data pointer across saf
 
 One reserved acyclic path can charge several segments with one fuel update.
 
+Common native allocations omit unrelated root stores before the rare collection path.
+
 Representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
@@ -2665,6 +2667,41 @@ The local cache still tests its proof before each access.
 Loop versioning can remove that branch for a proved hot loop.
 
 These measurements do not define a completion threshold.
+
+### Stage F50: Split allocation fast and collection paths
+
+- call each typed allocator with only its direct inputs;
+- forbid collection on the common call;
+- return one dedicated status when collection is required;
+- write complete native roots only on that status;
+- retry the same typed allocator with collection enabled;
+- preserve exact captures, array items, faults, and fuel state;
+- count collection slow paths without adding a common-path atomic operation.
+
+Instance allocation passes no roots on its common path.
+
+Closure, tuple, list, and map allocation pass only their direct values.
+
+Callback allocation also passes only its captures.
+
+A small-heap test forced 41 collection retries.
+
+The test preserved closure captures, tuple inputs, and list inputs.
+
+The focused JIT suite passed 150 tests.
+
+The direct and scheduled corpus differential passed in 53.36 seconds.
+
+The release comparison used commit `48334ca` as its exact parent baseline.
+
+| Native warm row | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Instance allocation | 3.732 ms | 3.621 ms | 3.0 percent faster |
+| Generic allocation | 4.864 ms | 4.826 ms | 0.8 percent faster |
+
+The small timing changes do not define this stage.
+
+The completed fast and slow allocation contract defines this stage.
 
 ## 24. Rejected designs
 

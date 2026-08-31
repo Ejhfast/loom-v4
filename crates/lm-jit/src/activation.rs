@@ -12,6 +12,7 @@ pub(super) const RUNTIME_HEAP_LIMIT: u32 = 2;
 pub(super) const RUNTIME_STACK_LIMIT: u32 = 3;
 pub(super) const RUNTIME_FAULT_FLAG: u32 = 1 << 31;
 pub(super) const RUNTIME_MAP_VACANT: u32 = 4;
+pub(super) const RUNTIME_COLLECTION_REQUIRED: u32 = 5;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
@@ -1537,6 +1538,7 @@ pub enum AllocationResult {
         bits: u64,
         heap: Option<JitHeapView>,
     },
+    CollectionRequired,
     HeapLimit,
     Interpreter,
 }
@@ -2403,6 +2405,7 @@ fn finish_object_allocation(
             }
             RUNTIME_OK
         }
+        AllocationResult::CollectionRequired => RUNTIME_COLLECTION_REQUIRED,
         AllocationResult::HeapLimit => RUNTIME_HEAP_LIMIT,
         AllocationResult::Interpreter => RUNTIME_INTERPRETER,
     }

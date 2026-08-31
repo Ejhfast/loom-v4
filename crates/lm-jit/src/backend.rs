@@ -4,8 +4,8 @@ use crate::activation::{
     NativeDispatchRow, NativeFunction, NativeImageSlot, RawExit, RawNativeActivation,
     RawNativeFrame, RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
     IMAGE_SLOT_CLASS, IMAGE_SLOT_EMPTY, IMAGE_SLOT_FUNCTION, RESOLVED_CALL_CACHE_WAYS,
-    RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
-    TYPE_ENVIRONMENT_CACHE_WAYS,
+    RUNTIME_COLLECTION_REQUIRED, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT,
+    RUNTIME_OK, RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
     bypasses_fuel_check, is_root_kind, CallContract, HeapAccessKind, ObjectContract,
@@ -10983,10 +10983,16 @@ fn emit_capture_allocation(
         replay_stack,
         fault_stack,
     } = emission;
-    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let capture_end = capture_start
+        .checked_add(capture_count)
+        .ok_or(CompileError::Backend)?;
+    let capture_roots = roots
+        .get(capture_start..capture_end)
+        .ok_or(CompileError::Backend)?;
+    let fast_root_count = emit_runtime_roots(builder, values, capture_roots)?;
     let function = builder.ins().iconst(types::I32, i64::from(function));
-    let collection = builder.ins().iconst(types::I32, 1);
-    let capture_start = builder.ins().iconst(
+    let fast_capture_start = builder.ins().iconst(types::I32, 0);
+    let slow_capture_start = builder.ins().iconst(
         types::I32,
         i64::try_from(capture_start).map_err(|_| CompileError::Backend)?,
     );
@@ -11005,21 +11011,60 @@ fn emit_capture_allocation(
         values.runtime_functions,
         function_offset,
     )?;
-    let call = builder.ins().call_indirect(
+    let no_collection = builder.ins().iconst(types::I32, 0);
+    let fast_call = builder.ins().call_indirect(
         values.capture_allocation_signature,
         allocation,
         &[
             values.runtime_context,
             function,
             environment,
-            collection,
-            capture_start,
+            no_collection,
+            fast_capture_start,
             capture_count,
-            root_count,
+            fast_root_count,
             values.allocation_result_pointer,
         ],
     );
-    let status = builder.inst_results(call)[0];
+    let fast_status = builder.inst_results(fast_call)[0];
+    let status = if callback {
+        fast_status
+    } else {
+        let retry = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, types::I32);
+        let collection_required = builder.ins().icmp_imm(
+            IntCC::Equal,
+            fast_status,
+            i64::from(RUNTIME_COLLECTION_REQUIRED),
+        );
+        builder
+            .ins()
+            .brif(collection_required, retry, &[], done, &[fast_status.into()]);
+
+        builder.switch_to_block(retry);
+        let root_count = emit_runtime_roots(builder, values, roots)?;
+        let allow_collection = builder.ins().iconst(types::I32, 1);
+        let slow_call = builder.ins().call_indirect(
+            values.capture_allocation_signature,
+            allocation,
+            &[
+                values.runtime_context,
+                function,
+                environment,
+                allow_collection,
+                slow_capture_start,
+                capture_count,
+                root_count,
+                values.allocation_result_pointer,
+            ],
+        );
+        let slow_status = builder.inst_results(slow_call)[0];
+        builder.ins().jump(done, &[slow_status.into()]);
+
+        builder.switch_to_block(done);
+        builder.block_params(done)[0]
+    };
     let limit_status = if callback {
         RUNTIME_STACK_LIMIT
     } else {
@@ -11060,9 +11105,15 @@ fn emit_value_array_allocation(
         replay_stack,
         fault_stack,
     } = emission;
-    let root_count = emit_runtime_roots(builder, values, roots)?;
-    let collection = builder.ins().iconst(types::I32, 1);
-    let item_start = builder.ins().iconst(
+    let item_end = item_start
+        .checked_add(item_count)
+        .ok_or(CompileError::Backend)?;
+    let item_roots = roots
+        .get(item_start..item_end)
+        .ok_or(CompileError::Backend)?;
+    let fast_root_count = emit_runtime_roots(builder, values, item_roots)?;
+    let fast_item_start = builder.ins().iconst(types::I32, 0);
+    let slow_item_start = builder.ins().iconst(
         types::I32,
         i64::try_from(item_start).map_err(|_| CompileError::Backend)?,
     );
@@ -11083,19 +11134,52 @@ fn emit_value_array_allocation(
         values.runtime_functions,
         function_offset,
     )?;
-    let call = builder.ins().call_indirect(
+    let no_collection = builder.ins().iconst(types::I32, 0);
+    let fast_call = builder.ins().call_indirect(
         values.value_array_allocation_signature,
         allocation,
         &[
             values.runtime_context,
-            collection,
-            item_start,
+            no_collection,
+            fast_item_start,
+            item_count,
+            fast_root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let fast_status = builder.inst_results(fast_call)[0];
+    let retry = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    let collection_required = builder.ins().icmp_imm(
+        IntCC::Equal,
+        fast_status,
+        i64::from(RUNTIME_COLLECTION_REQUIRED),
+    );
+    builder
+        .ins()
+        .brif(collection_required, retry, &[], done, &[fast_status.into()]);
+
+    builder.switch_to_block(retry);
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let allow_collection = builder.ins().iconst(types::I32, 1);
+    let slow_call = builder.ins().call_indirect(
+        values.value_array_allocation_signature,
+        allocation,
+        &[
+            values.runtime_context,
+            allow_collection,
+            slow_item_start,
             item_count,
             root_count,
             values.allocation_result_pointer,
         ],
     );
-    let status = builder.inst_results(call)[0];
+    let slow_status = builder.inst_results(slow_call)[0];
+    builder.ins().jump(done, &[slow_status.into()]);
+
+    builder.switch_to_block(done);
+    let status = builder.block_params(done)[0];
     let heap_limit = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
@@ -11128,7 +11212,7 @@ fn emit_allocate_instance(
     point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
-    let (status, result) = emit_allocation_call(builder, values, class, environment, roots, true)?;
+    let (status, result) = emit_allocation_call(builder, values, class, environment, roots)?;
     let heap_limit = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
@@ -11146,32 +11230,61 @@ fn emit_allocation_call(
     class: u32,
     environment: ir::Value,
     roots: &[NativeRoot],
-    allow_collection: bool,
 ) -> Result<(ir::Value, ir::Value), CompileError> {
-    let root_count = emit_runtime_roots(builder, values, roots)?;
     let class = builder.ins().iconst(types::I32, i64::from(class));
-    let collection = builder
-        .ins()
-        .iconst(types::I32, i64::from(allow_collection));
     let allocate_instance = load_value(
         builder,
         values.pointer_type,
         values.runtime_functions,
         mem::offset_of!(RawNativeFunctions, allocate_instance),
     )?;
-    let call = builder.ins().call_indirect(
+    let no_roots = builder.ins().iconst(types::I32, 0);
+    let no_collection = builder.ins().iconst(types::I32, 0);
+    let fast_call = builder.ins().call_indirect(
         values.allocation_signature,
         allocate_instance,
         &[
             values.runtime_context,
             class,
             environment,
-            collection,
+            no_collection,
+            no_roots,
+            values.allocation_result_pointer,
+        ],
+    );
+    let fast_status = builder.inst_results(fast_call)[0];
+    let retry = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    let collection_required = builder.ins().icmp_imm(
+        IntCC::Equal,
+        fast_status,
+        i64::from(RUNTIME_COLLECTION_REQUIRED),
+    );
+    builder
+        .ins()
+        .brif(collection_required, retry, &[], done, &[fast_status.into()]);
+
+    builder.switch_to_block(retry);
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let allow_collection = builder.ins().iconst(types::I32, 1);
+    let slow_call = builder.ins().call_indirect(
+        values.allocation_signature,
+        allocate_instance,
+        &[
+            values.runtime_context,
+            class,
+            environment,
+            allow_collection,
             root_count,
             values.allocation_result_pointer,
         ],
     );
-    let status = builder.inst_results(call)[0];
+    let slow_status = builder.inst_results(slow_call)[0];
+    builder.ins().jump(done, &[slow_status.into()]);
+
+    builder.switch_to_block(done);
+    let status = builder.block_params(done)[0];
     let result = builder.ins().load(
         types::I64,
         MemFlags::new(),

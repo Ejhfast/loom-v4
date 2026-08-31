@@ -805,6 +805,40 @@ fn tuple_and_list_literals_match_each_fuel_boundary() {
 }
 
 #[test]
+fn allocation_retry_preserves_capture_and_array_inputs() {
+    let source = concat!(
+        "class Token\n  value: Int = 0\n",
+        "  def init(mut self, value: Int)\n    self.value = value\n  end\nend\n",
+        "token = Token(41)\n",
+        "saved = do ||: Int token.value end\n",
+        "items = [token]\n",
+        "i = 0\n",
+        "while i < 1000\n",
+        "  saved = do ||: Int token.value end\n",
+        "  pair = (token, i)\n",
+        "  items = [pair[0]]\n",
+        "  i = i + 1\n",
+        "end\n",
+        "saved() + items[0].value\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-allocation-retry-roots.lm", source)
+        .expect("the allocation retry case compiles");
+    let config = VmConfig {
+        heap_bytes: 4096,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(82)));
+    assert!(metrics.native_collection_slow_paths > 0, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 1, "{metrics:?}");
+}
+
+#[test]
 fn tuple_allocation_preserves_the_heap_limit_fault() {
     let artifact = lm_testkit::compile_text("jit-tuple-allocation-limit.lm", "(1, 2)\n")
         .expect("the tuple allocation limit case compiles");
@@ -3118,6 +3152,7 @@ fn native_allocation_preserves_collection_roots() {
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
     assert!(metrics.native_allocations >= 900, "{metrics:?}");
+    assert!(metrics.native_collection_slow_paths > 0, "{metrics:?}");
     assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
 }
 
