@@ -411,6 +411,7 @@ pub(super) type RawMapPutDiscard =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u32) -> u32;
 pub(super) type RawMapInsertHashed =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, i64, i64, u32) -> u32;
+pub(super) type RawBytesEqual = unsafe extern "C" fn(*const u8, *const u8, usize) -> u32;
 
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
@@ -443,6 +444,7 @@ pub(super) struct RawNativeFunctions {
     pub(super) map_put_discard: RawMapPutDiscard,
     pub(super) map_put_probe: RawMapLookup,
     pub(super) map_put_commit: RawMapPutCommit,
+    pub(super) bytes_equal: RawBytesEqual,
     pub(super) value_equal: RawValueEqual,
     pub(super) text_compare: RawObjectBinary,
     pub(super) bytes_compare: RawObjectBinary,
@@ -556,6 +558,7 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         map_put_discard: map_put_discard::<R>,
         map_put_probe: map_put_probe::<R>,
         map_put_commit: map_put_commit::<R>,
+        bytes_equal,
         value_equal: values_equal::<R>,
         text_compare: text_compare::<R>,
         bytes_compare: bytes_compare::<R>,
@@ -635,6 +638,20 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         text_parse_float_value: text_parse_float_value::<R>,
         float_fixed: float_fixed::<R>,
     };
+}
+
+unsafe extern "C" fn bytes_equal(left: *const u8, right: *const u8, length: usize) -> u32 {
+    if length == 0 || left == right {
+        return 1;
+    }
+    if left.is_null() || right.is_null() {
+        return 0;
+    }
+    // SAFETY: Native code passes two live byte ranges with this exact length.
+    let left = unsafe { std::slice::from_raw_parts(left, length) };
+    // SAFETY: Native code passes two live byte ranges with this exact length.
+    let right = unsafe { std::slice::from_raw_parts(right, length) };
+    u32::from(left == right)
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(

@@ -1114,6 +1114,34 @@ fn map_insertions_preserve_heap_limit_and_frozen_faults() {
     assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::FrozenWrite));
 }
 
+#[test]
+fn map_removal_uses_direct_keys_and_preserves_compaction() {
+    let source = concat!(
+        "ints: {Int: Int} = {}\ni = 0\n",
+        "while i < 24\n  ints.put(i, i * 2)\n  i = i + 1\nend\n",
+        "i = 0\nsum = 0\nwhile i < 10\n",
+        "  sum = sum + ints.remove(i).expect(\"the key exists\")\n",
+        "  i = i + 1\nend\n",
+        "view = \"_key_\".slice(1, 3).expect(\"the view exists\")\n",
+        "text: {Text: Int} = {\"key\": 31}\ntext_value = text.remove(view)\n",
+        "stored = Bytes(\"bytes\")\nlookup = Bytes(\"bytes\")\n",
+        "bytes: {Bytes: Int} = {stored: 37}\nbyte_value = bytes.remove(lookup)\n",
+        "(sum, ints.len(), ints.get(9), ints.get(10), text_value, byte_value)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-remove-direct.lm", source)
+        .expect("the direct map-removal case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert!(
+        native_dump.contains("(90, 14, None, Some(20), Some(31), Some(37))"),
+        "{native_dump}"
+    );
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
 const MAP_MUTATION_SURFACE: &str = r#"
 final class Key implements Hashable
   value: Int

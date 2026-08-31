@@ -278,15 +278,21 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::MapGet { .. } => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        ExtendedInstr::MapNextIndex | ExtendedInstr::MapProbe => dedicated(Helper)
+        ExtendedInstr::MapProbe => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
-        ExtendedInstr::MapKeyAt
-        | ExtendedInstr::MapValueAt
-        | ExtendedInstr::MapRemove { .. }
-        | ExtendedInstr::MapProbeKey
+        ExtendedInstr::MapNextIndex => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::MapProbeKey
         | ExtendedInstr::MapProbeValue
         | ExtendedInstr::MapProbeRemove => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapKeyAt | ExtendedInstr::MapValueAt => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapRemove { .. } => dedicated(FastPath)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapClear => dedicated(Helper)

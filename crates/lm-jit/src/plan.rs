@@ -457,7 +457,9 @@ pub(super) enum HeapAccessKind {
     MapValueAt {
         value: ValueContract,
     },
-    MapRemove,
+    MapRemove {
+        key: ValueContract,
+    },
     MapClear,
     MapReserve,
     MapProbe,
@@ -762,7 +764,7 @@ impl RegionPlan {
                     | HeapAccessKind::ListEpoch
                     | HeapAccessKind::MapEpoch
                     | HeapAccessKind::MapPut { .. }
-                    | HeapAccessKind::MapRemove
+                    | HeapAccessKind::MapRemove { .. }
                     | HeapAccessKind::MapClear
                     | HeapAccessKind::MapReserve
                     | HeapAccessKind::MapProbeSetValue { .. }
@@ -1794,7 +1796,7 @@ fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value_type) = map_type(context, receiver)?;
+                let (key_type, value_type) = map_type(context, receiver)?;
                 let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(
@@ -1810,7 +1812,9 @@ fn analyze_segment(
                 });
                 heap_accesses.push(HeapAccess {
                     instruction: position,
-                    kind: HeapAccessKind::MapRemove,
+                    kind: HeapAccessKind::MapRemove {
+                        key: value_contract(context, key_type)?,
+                    },
                 });
             }
             Instr::Extended(ExtendedInstr::MapClear) => {

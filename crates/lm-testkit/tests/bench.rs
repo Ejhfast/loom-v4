@@ -1748,6 +1748,28 @@ fn bench_jit_scalar_regions() {
         ),
         0,
     );
+    report_jit_after_setup(
+        "jit_map_remove_reinsert",
+        concat!(
+            "table: {Int: Int} = {}\ni = 0\n",
+            "while i < 1000\n  table.put(i, i)\n  i = i + 1\nend\n",
+            "i = 0\nwhile i < 200000\n",
+            "  key = i % 1000\n  table.remove(key)\n  table.put(key, key)\n",
+            "  i = i + 1\nend\ntable.len()\n",
+        ),
+        64,
+    );
+    report_jit(
+        "jit_map_iteration",
+        concat!(
+            "table: {Int: Int} = {}\ni = 0\n",
+            "while i < 1000\n  table.put(i, i)\n  i = i + 1\nend\n",
+            "round = 0\nsum = 0\nwhile round < 1000\n",
+            "  for _, value in table\n    sum = sum + value\n  end\n",
+            "  round = round + 1\nend\nsum\n",
+        ),
+        0,
+    );
     report_jit(
         "jit_map_mutations",
         concat!(

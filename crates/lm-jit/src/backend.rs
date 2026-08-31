@@ -351,6 +351,7 @@ struct NativeValues<'a> {
     map_put_discard_signature: ir::SigRef,
     map_put_commit_signature: ir::SigRef,
     map_insert_hashed_signature: ir::SigRef,
+    bytes_equal_signature: ir::SigRef,
     value_equal_signature: ir::SigRef,
     object_binary_signature: ir::SigRef,
     object_unary_signature: ir::SigRef,
@@ -739,6 +740,16 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let map_insert_hashed_signature = builder.import_signature(map_insert_hashed_signature);
+    let mut bytes_equal_signature = ir::Signature::new(host_call_conv);
+    for _ in 0..3 {
+        bytes_equal_signature
+            .params
+            .push(AbiParam::new(pointer_type));
+    }
+    bytes_equal_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let bytes_equal_signature = builder.import_signature(bytes_equal_signature);
     let mut value_equal_signature = ir::Signature::new(host_call_conv);
     value_equal_signature
         .params
@@ -1005,6 +1016,7 @@ fn emit_region(
         map_put_discard_signature,
         map_put_commit_signature,
         map_insert_hashed_signature,
+        bytes_equal_signature,
         value_equal_signature,
         object_binary_signature,
         object_unary_signature,
@@ -2693,17 +2705,12 @@ fn emit_segment(
                 if !matches!(access.kind, HeapAccessKind::MapNextIndex) {
                     return Err(CompileError::Backend);
                 }
-                let result = emit_map_runtime_value(
+                let result = emit_map_next_index(
                     builder,
                     values,
-                    mem::offset_of!(RawNativeFunctions, map_next_index),
                     reference,
                     cursor,
                     expected,
-                    ValueContract {
-                        kind: ScalarKind::Int,
-                        object: None,
-                    },
                     HeapExitEmission {
                         point: FaultPoint {
                             block: segment.block,
@@ -2727,21 +2734,17 @@ fn emit_segment(
                     .find(|access| access.instruction == instruction)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                let (function_offset, contract) = match (operation, access.kind) {
-                    (ExtendedInstr::MapKeyAt, HeapAccessKind::MapKeyAt { value }) => {
-                        (mem::offset_of!(RawNativeFunctions, map_key_at), value)
-                    }
-                    (ExtendedInstr::MapValueAt, HeapAccessKind::MapValueAt { value }) => {
-                        (mem::offset_of!(RawNativeFunctions, map_value_at), value)
-                    }
+                let contract = match (operation, access.kind) {
+                    (ExtendedInstr::MapKeyAt, HeapAccessKind::MapKeyAt { value }) => value,
+                    (ExtendedInstr::MapValueAt, HeapAccessKind::MapValueAt { value }) => value,
                     _ => return Err(CompileError::Backend),
                 };
-                let result = emit_object_binary_runtime_value(
+                let result = emit_map_entry_at(
                     builder,
                     values,
-                    function_offset,
                     reference,
                     index,
+                    matches!(operation, ExtendedInstr::MapValueAt),
                     contract,
                     HeapExitEmission {
                         point: FaultPoint {
@@ -2766,9 +2769,9 @@ fn emit_segment(
                     .find(|access| access.instruction == instruction)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                if !matches!(heap_access.kind, HeapAccessKind::MapRemove) {
+                let HeapAccessKind::MapRemove { key: key_contract } = heap_access.kind else {
                     return Err(CompileError::Backend);
-                }
+                };
                 let option_access = segment
                     .option_accesses
                     .iter()
@@ -2790,12 +2793,12 @@ fn emit_segment(
                     },
                     &deopt_stack,
                 )?;
-                let result = emit_optional_map_value(
+                let result = emit_map_remove(
                     builder,
                     values,
-                    mem::offset_of!(RawNativeFunctions, map_remove),
                     reference,
                     key,
+                    key_contract,
                     family,
                     value,
                     HeapExitEmission {
@@ -11257,6 +11260,381 @@ fn emit_map_lookup(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_map_remove(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    key: NativeValue,
+    key_contract: ValueContract,
+    option_family: ir::Value,
+    value_contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let Some(key_kind) = direct_map_key_kind(key_contract) else {
+        return emit_optional_map_value(
+            builder,
+            values,
+            mem::offset_of!(RawNativeFunctions, map_remove),
+            reference,
+            key,
+            option_family,
+            value_contract,
+            exit,
+        );
+    };
+    let map_entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        exit.point,
+        ObjectGuard::Replay(exit.deopt_stack),
+    )?;
+    emit_mutable_guard(builder, values, map_entry, exit)?;
+    let entry_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_LEN_OFFSET,
+    )?;
+    let built = load_heap_value(builder, types::I32, map_entry, JIT_MAP_INDEX_BUILT_OFFSET)?;
+    let built = builder.ins().uextend(values.pointer_type, built);
+    let index_ready = builder.ins().icmp(IntCC::Equal, built, entry_count);
+    let direct = builder.create_block();
+    let slow = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(index_ready, direct, &[], slow, &[]);
+
+    builder.switch_to_block(direct);
+    let direct_key = emit_direct_map_key(builder, values, key, key_kind, exit)?;
+    let probe_start = builder.create_block();
+    builder
+        .ins()
+        .brif(direct_key.ready, probe_start, &[], slow, &[]);
+
+    builder.switch_to_block(probe_start);
+    let probe = emit_direct_map_probe(
+        builder,
+        values,
+        map_entry,
+        entry_count,
+        key,
+        direct_key,
+        exit,
+    )?;
+    let hit = builder.create_block();
+    let missing = builder.create_block();
+    builder.ins().brif(probe.found, hit, &[], missing, &[]);
+
+    builder.switch_to_block(missing);
+    let none_arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+    let none_bits = builder.ins().bor(option_family, none_arm);
+    let none_tag = builder
+        .ins()
+        .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+    builder
+        .ins()
+        .jump(done, &[none_bits.into(), none_tag.into()]);
+
+    builder.switch_to_block(hit);
+    emit_native_value_contract(
+        builder,
+        values,
+        probe.value,
+        value_contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let live = load_heap_value(builder, types::I32, map_entry, JIT_MAP_LIVE_OFFSET)?;
+    let has_live_entry = builder.ins().icmp_imm(IntCC::NotEqual, live, 0);
+    let next_live = builder.ins().iadd_imm(live, -1);
+    let next_live_native = builder.ins().uextend(values.pointer_type, next_live);
+    let tombstones = builder.ins().isub(entry_count, next_live_native);
+    let compaction_floor = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, tombstones, 8);
+    let weighted_tombstones = builder.ins().imul_imm(tombstones, 3);
+    let compaction_ratio =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, weighted_tombstones, entry_count);
+    let needs_compaction = builder.ins().band(compaction_floor, compaction_ratio);
+    let no_compaction = builder.ins().bxor_imm(needs_compaction, 1);
+    let epoch = load_heap_value(builder, types::I32, map_entry, JIT_MAP_EPOCH_OFFSET)?;
+    let epoch_ready = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, epoch, i64::from(u32::MAX));
+    let fast = builder.ins().band(has_live_entry, no_compaction);
+    let fast = builder.ins().band(fast, epoch_ready);
+    let commit = builder.create_block();
+    builder.ins().brif(fast, commit, &[], slow, &[]);
+
+    builder.switch_to_block(commit);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let uninit = builder
+        .ins()
+        .iconst(types::I64, ValueTag::Uninit as u64 as i64);
+    store_heap_value(
+        builder,
+        probe.entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_PAYLOAD_OFFSET,
+        zero,
+    )?;
+    store_heap_value(
+        builder,
+        probe.entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_TAG_OFFSET,
+        uninit,
+    )?;
+    store_heap_value(
+        builder,
+        probe.entry,
+        MAP_ENTRY_VALUE_OFFSET + VALUE_PAYLOAD_OFFSET,
+        zero,
+    )?;
+    store_heap_value(
+        builder,
+        probe.entry,
+        MAP_ENTRY_VALUE_OFFSET + VALUE_TAG_OFFSET,
+        uninit,
+    )?;
+    store_heap_value(builder, probe.entry, MAP_ENTRY_SEMANTIC_HASH_OFFSET, zero)?;
+    let epoch_tracked = builder.ins().icmp_imm(IntCC::NotEqual, epoch, 0);
+    let incremented_epoch = builder.ins().iadd_imm(epoch, 1);
+    let next_epoch = builder
+        .ins()
+        .select(epoch_tracked, incremented_epoch, epoch);
+    store_heap_value(builder, map_entry, JIT_MAP_LIVE_OFFSET, next_live)?;
+    store_heap_value(builder, map_entry, JIT_MAP_EPOCH_OFFSET, next_epoch)?;
+    builder
+        .ins()
+        .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+
+    builder.switch_to_block(slow);
+    let result = emit_optional_map_value(
+        builder,
+        values,
+        mem::offset_of!(RawNativeFunctions, map_remove),
+        reference,
+        key,
+        option_family,
+        value_contract,
+        exit,
+    )?;
+    builder
+        .ins()
+        .jump(done, &[result.bits.into(), result.tag.into()]);
+
+    builder.switch_to_block(done);
+    Ok(NativeValue {
+        bits: builder.block_params(done)[0],
+        tag: builder.block_params(done)[1],
+    })
+}
+
+fn emit_map_next_index(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    cursor: ir::Value,
+    expected: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let map_entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        exit.point,
+        ObjectGuard::Replay(exit.deopt_stack),
+    )?;
+    let epoch = load_heap_value(builder, types::I32, map_entry, JIT_MAP_EPOCH_OFFSET)?;
+    let epoch = builder.ins().uextend(types::I64, epoch);
+    let negative_epoch = builder.ins().icmp_imm(IntCC::SignedLessThan, expected, 0);
+    let wrong_epoch = builder.ins().icmp(IntCC::NotEqual, epoch, expected);
+    let invalid_epoch = builder.ins().bor(negative_epoch, wrong_epoch);
+    emit_interpreter_replay(builder, values, invalid_epoch, exit.point, exit.deopt_stack)?;
+    let negative_cursor = builder.ins().icmp_imm(IntCC::SignedLessThan, cursor, 0);
+    emit_interpreter_replay(
+        builder,
+        values,
+        negative_cursor,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+
+    let entry_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_LEN_OFFSET,
+    )?;
+    let count_i64 = if values.pointer_type == types::I64 {
+        entry_count
+    } else {
+        builder.ins().uextend(types::I64, entry_count)
+    };
+    let entries = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_DATA_OFFSET,
+    )?;
+    let scan = builder.create_block();
+    let found = builder.create_block();
+    let missing = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(scan, values.pointer_type);
+    builder.append_block_param(found, values.pointer_type);
+    builder.append_block_param(done, types::I64);
+    let in_range = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, cursor, count_i64);
+    let cursor_native = if values.pointer_type == types::I64 {
+        cursor
+    } else {
+        builder.ins().ireduce(values.pointer_type, cursor)
+    };
+    builder
+        .ins()
+        .brif(in_range, scan, &[cursor_native.into()], missing, &[]);
+
+    builder.switch_to_block(scan);
+    let position = builder.block_params(scan)[0];
+    let byte_offset = builder.ins().imul_imm(
+        position,
+        i64::try_from(MAP_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(entries, byte_offset);
+    let tag = load_heap_value(
+        builder,
+        types::I64,
+        entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_TAG_OFFSET,
+    )?;
+    let live = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, tag, ValueTag::Uninit as u64 as i64);
+    let next = builder.ins().iadd_imm(position, 1);
+    let more = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, next, entry_count);
+    let tombstone = builder.ins().bxor_imm(live, 1);
+    let continue_scan = builder.ins().band(tombstone, more);
+    let next_or_missing = builder.create_block();
+    builder
+        .ins()
+        .brif(live, found, &[position.into()], next_or_missing, &[]);
+
+    builder.switch_to_block(next_or_missing);
+    builder
+        .ins()
+        .brif(continue_scan, scan, &[next.into()], missing, &[]);
+
+    builder.switch_to_block(found);
+    let position = builder.block_params(found)[0];
+    let position = if values.pointer_type == types::I64 {
+        position
+    } else {
+        builder.ins().uextend(types::I64, position)
+    };
+    builder.ins().jump(done, &[position.into()]);
+
+    builder.switch_to_block(missing);
+    let none = builder.ins().iconst(types::I64, -1);
+    builder.ins().jump(done, &[none.into()]);
+
+    builder.switch_to_block(done);
+    let result = builder.block_params(done)[0];
+    let tag = builder
+        .ins()
+        .iconst(types::I64, ValueTag::Int as u64 as i64);
+    Ok(NativeValue { bits: result, tag })
+}
+
+fn emit_map_entry_at(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    load_stored_value: bool,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
+    let map_entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_MAP,
+        exit.point,
+        ObjectGuard::Replay(exit.deopt_stack),
+    )?;
+    let entry_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_LEN_OFFSET,
+    )?;
+    let count_i64 = if values.pointer_type == types::I64 {
+        entry_count
+    } else {
+        builder.ins().uextend(types::I64, entry_count)
+    };
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, count_i64);
+    let invalid = builder.ins().bor(negative, outside);
+    emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+    let native_index = if values.pointer_type == types::I64 {
+        index
+    } else {
+        builder.ins().ireduce(values.pointer_type, index)
+    };
+    let entries = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_DATA_OFFSET,
+    )?;
+    let byte_offset = builder.ins().imul_imm(
+        native_index,
+        i64::try_from(MAP_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(entries, byte_offset);
+    let key_tag = load_heap_value(
+        builder,
+        types::I64,
+        entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_TAG_OFFSET,
+    )?;
+    let tombstone = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, key_tag, ValueTag::Uninit as u64 as i64);
+    emit_interpreter_replay(builder, values, tombstone, exit.point, exit.deopt_stack)?;
+    let offset = if load_stored_value {
+        MAP_ENTRY_VALUE_OFFSET
+    } else {
+        MAP_ENTRY_KEY_OFFSET
+    };
+    let result = NativeValue {
+        bits: load_heap_value(builder, types::I64, entry, offset + VALUE_PAYLOAD_OFFSET)?,
+        tag: load_heap_value(builder, types::I64, entry, offset + VALUE_TAG_OFFSET)?,
+    };
+    emit_native_value_contract(
+        builder,
+        values,
+        result,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    Ok(result)
+}
+
 fn emit_map_lookup_slow(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -11725,8 +12103,19 @@ fn emit_object_map_key_equal(
     builder.switch_to_block(compare_bytes);
     let key_data = load_heap_value(builder, values.pointer_type, key_entry, data_offset)?;
     let stored_data = load_heap_value(builder, values.pointer_type, stored_entry, data_offset)?;
-    let ordering = builder.call_memcmp(values.frontend_config, key_data, stored_data, key_length);
-    let equal = builder.ins().icmp_imm(IntCC::Equal, ordering, 0);
+    let bytes_equal = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        mem::offset_of!(RawNativeFunctions, bytes_equal),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.bytes_equal_signature,
+        bytes_equal,
+        &[key_data, stored_data, key_length],
+    );
+    let equal = builder.inst_results(call)[0];
+    let equal = builder.ins().icmp_imm(IntCC::NotEqual, equal, 0);
     builder.ins().brif(equal, matched, &[], missed, &[]);
 
     builder.switch_to_block(matched);

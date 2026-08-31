@@ -2446,7 +2446,7 @@ Text keys, optional reads, and existing-value writes still use typed slow paths.
 - publish cached text and byte hash offsets from `lm-heap`;
 - validate each key through the canonical object table;
 - use cached private hashes for direct map probes;
-- compare equal text and byte candidates with one `memcmp` libcall;
+- compare equal text and byte candidates with one fixed typed helper;
 - accept `String` and `Substring` values through the `Text` contract;
 - keep uncached hashing and index rebuilding on fixed typed slow paths;
 - keep missing `MapAt` faults on the fixed typed slow path.
@@ -2509,6 +2509,29 @@ The next stages reduce remaining helper and allocator costs.
 Later stages add budgeted direct-call inlining and bounded continuation validation.
 
 Cold compilation and hotness policy remain separate final stages.
+
+### Stage F45: Inline common map removal and iteration paths
+
+- remove scalar, text, and byte keys through the canonical probe;
+- keep stable compaction and complex keys on typed slow paths;
+- scan canonical map entries for iteration;
+- load live map keys and values directly;
+- preserve epoch, frozen-write, and external-state behavior;
+- route byte equality through one fixed typed function table;
+- avoid address-range assumptions in generated code.
+
+The focused map tests and the complete JIT test target passed.
+
+The release comparison used commit `381dac6` as its exact parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Map removal and reinsertion | 10.824 ms | 6.505 ms | 39.9 percent faster |
+| Map iteration | 13.745 ms | 2.656 ms | 80.7 percent faster |
+
+These measurements expose the removed helper costs.
+
+They do not define a completion threshold.
 
 ## 24. Rejected designs
 
