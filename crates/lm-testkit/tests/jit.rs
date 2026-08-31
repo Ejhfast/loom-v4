@@ -1885,6 +1885,97 @@ fn nested_collection_preserves_suspended_caller_roots() {
 }
 
 #[test]
+fn direct_json_pipeline_preserves_native_roots_during_collection() {
+    let source = r##"
+use std.json.Json
+use std.json.parse
+use std.json.stringify
+
+builder = StringBuilder()
+builder.append("[")
+seed = 31337
+index = 0
+while index < 10
+  if index > 0
+    builder.append(",")
+  end
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  score = seed % 1000
+  builder.append("{\"id\":")
+  builder.append_int(index)
+  builder.append(",\"name\":\"user")
+  builder.append_int(index)
+  builder.append("\",\"score\":")
+  builder.append_int(score)
+  builder.append(",\"active\":")
+  if score % 2 == 0
+    builder.append("true")
+  else
+    builder.append("false")
+  end
+  builder.append("}")
+  index = index + 1
+end
+builder.append("]")
+source = builder.build()
+
+total = 0
+length = 0
+round = 0
+while round < 2
+  case parse(source)
+  in Ok(document)
+    case document
+    in Json.ListValue(items)
+      for item in items
+        case item
+        in Json.Object(fields)
+          case fields.get("score")
+          in Some(Json.Number(value))
+            if value >= 500.0
+              total = total + 1
+            end
+          in _ then total = total - 1000000
+          end
+        in _ then total = total - 1000000
+        end
+      end
+      case stringify(document)
+      in Ok(text) then length = length + text.len()
+      in Err(_) then total = total - 1000000
+      end
+    in _ then total = total - 1000000
+    end
+  in Err(_) then total = total - 1000000
+  end
+  round = round + 1
+end
+(total, length)
+"##;
+    let artifact =
+        lm_testkit::compile_text("jit-json-roots.lm", source).expect("the JSON root case compiles");
+    let config = VmConfig {
+        heap_bytes: 32 * 1024,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert!(matches!(interpreted, Outcome::Done(_)));
+    assert!(matches!(native, Outcome::Done(_)));
+    assert!(
+        interpreted_dump.starts_with("outcome: Done((10, 1010))\n"),
+        "{interpreted_dump}"
+    );
+    assert!(
+        native_dump.starts_with("outcome: Done((10, 1010))\n"),
+        "{native_dump}"
+    );
+    assert!(metrics.native_collection_slow_paths > 0, "{metrics:?}");
+}
+
+#[test]
 fn builder_construction_matches_each_fuel_boundary() {
     let source = concat!(
         "builder = StringBuilder()\n",

@@ -14326,20 +14326,20 @@ fn emit_spill_frame_roots(
     if local_kinds.len() != values.locals.len() || stack_kinds.len() != stack.len() {
         return Err(CompileError::Backend);
     }
+    // Keep every scanned tag canonical when a later call reuses this frame window.
     for (slot, kind) in local_kinds.iter().copied().enumerate() {
-        if !is_root_kind(kind) {
-            continue;
-        }
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let bits = builder.use_var(values.locals[slot]);
         let tag = emit_slot_tag(builder, values.local_tags[slot], kind)?;
         builder
             .ins()
-            .store(MemFlags::new(), bits, values.local_pointer, offset);
-        builder
-            .ins()
             .store(MemFlags::new(), tag, values.local_tag_pointer, offset);
+        if is_root_kind(kind) {
+            let bits = builder.use_var(values.locals[slot]);
+            builder
+                .ins()
+                .store(MemFlags::new(), bits, values.local_pointer, offset);
+        }
     }
     for (slot, (kind, value)) in stack_kinds
         .iter()
@@ -14347,17 +14347,16 @@ fn emit_spill_frame_roots(
         .zip(stack.iter().copied())
         .enumerate()
     {
-        if !is_root_kind(kind) {
-            continue;
-        }
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
         builder
             .ins()
-            .store(MemFlags::new(), value.bits, values.stack_pointer, offset);
-        builder
-            .ins()
             .store(MemFlags::new(), value.tag, values.stack_tag_pointer, offset);
+        if is_root_kind(kind) {
+            builder
+                .ins()
+                .store(MemFlags::new(), value.bits, values.stack_pointer, offset);
+        }
     }
     store_i32_constant(
         builder,
