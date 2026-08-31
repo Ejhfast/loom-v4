@@ -67,7 +67,30 @@ impl From<UnsupportedReason> for CompileError {
     }
 }
 
-pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion, CompileError> {
+pub(super) fn native_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, CompileError> {
+    let mut flags = settings::builder();
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|_| CompileError::Backend)?;
+    flags
+        .set("is_pic", "false")
+        .map_err(|_| CompileError::Backend)?;
+    flags
+        .set("opt_level", "speed")
+        .map_err(|_| CompileError::Backend)?;
+    flags
+        .set("preserve_frame_pointers", "true")
+        .map_err(|_| CompileError::Backend)?;
+    cranelift_native::builder()
+        .map_err(|_| CompileError::Backend)?
+        .finish(settings::Flags::new(flags))
+        .map_err(|_| CompileError::Backend)
+}
+
+pub(super) fn compile_region(
+    input: FunctionInput<'_>,
+    isa: cranelift_codegen::isa::OwnedTargetIsa,
+) -> Result<CompiledRegion, CompileError> {
     let plan = RegionPlan::for_function(&input)?;
     let type_environment_sites: Vec<TypeEnvironmentSite> = plan
         .segments
@@ -166,23 +189,6 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
         })
         .collect();
 
-    let mut flags = settings::builder();
-    flags
-        .set("use_colocated_libcalls", "false")
-        .map_err(|_| CompileError::Backend)?;
-    flags
-        .set("is_pic", "false")
-        .map_err(|_| CompileError::Backend)?;
-    flags
-        .set("opt_level", "speed")
-        .map_err(|_| CompileError::Backend)?;
-    flags
-        .set("preserve_frame_pointers", "true")
-        .map_err(|_| CompileError::Backend)?;
-    let isa = cranelift_native::builder()
-        .map_err(|_| CompileError::Backend)?
-        .finish(settings::Flags::new(flags))
-        .map_err(|_| CompileError::Backend)?;
     let pointer_type = isa.pointer_type();
     let frontend_config = isa.frontend_config();
     let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
@@ -219,6 +225,10 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
     module
         .define_function(body_id, &mut body_context)
         .map_err(|_| CompileError::Backend)?;
+    let body_code_size = body_context
+        .compiled_code()
+        .map(|code| code.code_buffer().len())
+        .ok_or(CompileError::Backend)?;
     let mut entry_context = module.make_context();
     entry_context.func.signature = entry_signature;
     entry_context.func.name = UserFuncName::user(0, entry_id.as_u32());
@@ -228,6 +238,10 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
     module
         .define_function(entry_id, &mut entry_context)
         .map_err(|_| CompileError::Backend)?;
+    let entry_code_size = entry_context
+        .compiled_code()
+        .map(|code| code.code_buffer().len())
+        .ok_or(CompileError::Backend)?;
     module
         .finalize_definitions()
         .map_err(|_| CompileError::Backend)?;
@@ -239,6 +253,7 @@ pub(super) fn compile_region(input: FunctionInput<'_>) -> Result<CompiledRegion,
     let call_entry = body_code as usize;
     Ok(CompiledRegion {
         function: input.root.function,
+        code_size: body_code_size.saturating_add(entry_code_size),
         plan,
         entry,
         call_entry,

@@ -4,7 +4,7 @@ use cranelift_jit::JITModule;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MAX_REGION_INSTRUCTIONS: usize = 65_536;
 const MAX_REGION_LOCALS: usize = 1_024;
@@ -67,10 +67,11 @@ pub enum Failure {
 }
 
 /// One host-owned native compiler.
-#[derive(Default)]
 pub struct JitEngine {
+    isa: OnceLock<Option<cranelift_codegen::isa::OwnedTargetIsa>>,
     compilation_attempts: AtomicU64,
     compiled_regions: AtomicU64,
+    compiled_code_bytes: AtomicU64,
     compiled_segments: AtomicU64,
     compiled_call_sites: AtomicU64,
     compiled_heap_read_sites: AtomicU64,
@@ -78,6 +79,24 @@ pub struct JitEngine {
     compiled_allocation_sites: AtomicU64,
     compiled_effect_sites: AtomicU64,
     compiled_interpreter_sites: AtomicU64,
+}
+
+impl Default for JitEngine {
+    fn default() -> JitEngine {
+        JitEngine {
+            isa: OnceLock::new(),
+            compilation_attempts: AtomicU64::new(0),
+            compiled_regions: AtomicU64::new(0),
+            compiled_code_bytes: AtomicU64::new(0),
+            compiled_segments: AtomicU64::new(0),
+            compiled_call_sites: AtomicU64::new(0),
+            compiled_heap_read_sites: AtomicU64::new(0),
+            compiled_heap_write_sites: AtomicU64::new(0),
+            compiled_allocation_sites: AtomicU64::new(0),
+            compiled_effect_sites: AtomicU64::new(0),
+            compiled_interpreter_sites: AtomicU64::new(0),
+        }
+    }
 }
 
 impl fmt::Debug for JitEngine {
@@ -89,6 +108,7 @@ impl fmt::Debug for JitEngine {
 /// One immutable compiled function region.
 pub struct CompiledRegion {
     function: u32,
+    code_size: usize,
     plan: RegionPlan,
     entry: NativeFunction,
     call_entry: usize,
@@ -278,6 +298,13 @@ impl NativeEntryCell {
 
     /// Publish one compiled region after its owner retains the region.
     pub fn publish(&self, region: &CompiledRegion) -> Result<(), Failure> {
+        self.prepare(region)?;
+        self.publish_prepared(region);
+        Ok(())
+    }
+
+    /// Store one region contract before code publication.
+    pub fn prepare(&self, region: &CompiledRegion) -> Result<(), Failure> {
         let local_count = u32::try_from(region.plan.local_kinds.len())
             .map_err(|_| Failure::BackendUnavailable)?;
         let max_stack =
@@ -291,8 +318,12 @@ impl NativeEntryCell {
         self.max_stack_values
             .store(max_stack_values, Ordering::Relaxed);
         self.max_roots.store(max_roots, Ordering::Relaxed);
-        self.code.store(region.call_entry, Ordering::Release);
         Ok(())
+    }
+
+    /// Publish code after its owner retains the prepared region.
+    pub fn publish_prepared(&self, region: &CompiledRegion) {
+        self.code.store(region.call_entry, Ordering::Release);
     }
 }
 
@@ -339,6 +370,12 @@ impl CompiledRegion {
     #[inline(always)]
     pub fn function(&self) -> u32 {
         self.function
+    }
+
+    /// Return the emitted machine-code size.
+    #[inline(always)]
+    pub fn code_size(&self) -> usize {
+        self.code_size
     }
 
     /// Return the local scalar representations.
@@ -782,9 +819,16 @@ impl JitEngine {
     #[inline(never)]
     pub fn compile(&self, input: FunctionInput<'_>) -> Result<Arc<CompiledRegion>, Failure> {
         self.compilation_attempts.fetch_add(1, Ordering::Relaxed);
-        match compile_region(input) {
+        let isa = self
+            .isa
+            .get_or_init(|| backend::native_isa().ok())
+            .clone()
+            .ok_or(Failure::BackendUnavailable)?;
+        match compile_region(input, isa) {
             Ok(region) => {
                 self.compiled_regions.fetch_add(1, Ordering::Relaxed);
+                self.compiled_code_bytes
+                    .fetch_add(region.code_size as u64, Ordering::Relaxed);
                 self.compiled_segments
                     .fetch_add(region.plan.segments.len() as u64, Ordering::Relaxed);
                 self.compiled_call_sites
@@ -811,6 +855,7 @@ impl JitEngine {
         CompilerMetrics {
             compilation_attempts: self.compilation_attempts.load(Ordering::Relaxed),
             compiled_regions: self.compiled_regions.load(Ordering::Relaxed),
+            compiled_code_bytes: self.compiled_code_bytes.load(Ordering::Relaxed),
             compiled_segments: self.compiled_segments.load(Ordering::Relaxed),
             compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
             compiled_heap_read_sites: self.compiled_heap_read_sites.load(Ordering::Relaxed),
@@ -825,6 +870,7 @@ impl JitEngine {
     pub fn reset_metrics(&self) {
         self.compilation_attempts.store(0, Ordering::Relaxed);
         self.compiled_regions.store(0, Ordering::Relaxed);
+        self.compiled_code_bytes.store(0, Ordering::Relaxed);
         self.compiled_segments.store(0, Ordering::Relaxed);
         self.compiled_call_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);

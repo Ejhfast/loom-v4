@@ -150,6 +150,7 @@ impl NativeContinuation {
 mod cache;
 
 pub(crate) use cache::NativeCodeState;
+pub(crate) use cache::DEFAULT_CODE_BUDGET;
 
 pub(crate) enum NativeAttempt {
     Fallback,
@@ -172,12 +173,29 @@ pub(crate) enum NativeAttempt {
 }
 
 /// One host-owned native compiler and immutable region cache.
-#[derive(Default)]
 pub(crate) struct JitEngine {
     compiler: lm_jit::JitEngine,
+    code_budget: Arc<cache::CodeBudget>,
     layouts:
         Mutex<std::collections::HashMap<usize, (Weak<lm_bytecode::CodeTables>, NativeCodeState)>>,
     runtime_exits: Mutex<std::collections::BTreeMap<(String, String, String), u64>>,
+}
+
+impl Default for JitEngine {
+    fn default() -> JitEngine {
+        JitEngine::with_code_budget(cache::DEFAULT_CODE_BUDGET)
+    }
+}
+
+impl JitEngine {
+    pub(crate) fn with_code_budget(limit: usize) -> JitEngine {
+        JitEngine {
+            compiler: lm_jit::JitEngine::default(),
+            code_budget: Arc::new(cache::CodeBudget::new(limit)),
+            layouts: Mutex::new(std::collections::HashMap::new()),
+            runtime_exits: Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
 }
 
 impl std::fmt::Debug for JitEngine {
@@ -198,6 +216,7 @@ impl JitEngine {
             .layouts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        layouts.retain(|_, (tables, _)| tables.strong_count() != 0);
         if let Some((known_tables, known_state)) = layouts.get(&key) {
             if known_tables
                 .upgrade()
@@ -206,10 +225,7 @@ impl JitEngine {
                 return known_state.clone();
             }
         }
-        if layouts.len() >= 256 {
-            layouts.retain(|_, (tables, _)| tables.strong_count() != 0);
-        }
-        let state = NativeCodeState::new(module);
+        let state = NativeCodeState::with_budget(module, Arc::clone(&self.code_budget));
         layouts.insert(key, (Arc::downgrade(&tables), state.clone()));
         state
     }
@@ -337,7 +353,7 @@ impl JitEngine {
             return NativeAttempt::Fallback;
         };
         metrics.note_native_entry_attempt();
-        let region = match slot.region(&self.compiler, native.compiled_count(), || {
+        let region = match slot.region(&self.compiler, || {
             let runtime =
                 context
                     .module
@@ -411,12 +427,19 @@ impl JitEngine {
             Ok(input)
         }) {
             Ok(region) => region,
-            Err(Failure::Unsupported(reason)) => {
+            Err(cache::RegionFailure::Compile(Failure::Unsupported(reason))) => {
                 metrics.note_unsupported_region_fallback(reason);
                 return NativeAttempt::Fallback;
             }
-            Err(Failure::BackendUnavailable) => {
+            Err(
+                cache::RegionFailure::Compile(Failure::BackendUnavailable)
+                | cache::RegionFailure::Busy,
+            ) => {
                 metrics.note_backend_unavailable();
+                return NativeAttempt::Fallback;
+            }
+            Err(cache::RegionFailure::Capacity) => {
+                metrics.note_code_cache_capacity();
                 return NativeAttempt::Fallback;
             }
         };

@@ -589,11 +589,21 @@ One host engine owns native compilers.
 
 The cache belongs to one exact arena layout.
 
-Each dense function slot owns one compilation verdict.
+Each dense function slot owns one permanent compiler verdict.
 
 Each slot also owns one stable native entry cell.
 
-A failed compilation records one negative verdict.
+An unsupported function records one negative verdict.
+
+Backend failure records one negative verdict.
+
+Code-cache capacity never records a compiler verdict.
+
+The host sets one machine-code byte budget.
+
+The cache never uses a fixed region-count limit.
+
+A released layout opens capacity for later compilation.
 
 Concurrent compilation serializes only one function request.
 
@@ -635,7 +645,7 @@ A classified site stops collecting observations.
 
 A cache lookup occurs before specialization work.
 
-A negative verdict stops later entry probes.
+A permanent negative verdict stops later entry probes.
 
 A compiled function can also become an unproductive verdict.
 
@@ -2176,6 +2186,37 @@ The JSON gate remains open.
 Auto did not promote the closure row.
 
 Deep recursion remains close to Interpreter performance under scheduler slices.
+
+### Stage F35: Bound native code by bytes
+
+- reuse one immutable Cranelift target configuration;
+- measure emitted code bytes for every region;
+- replace the fixed region limit with a host-owned byte budget;
+- keep capacity refusal separate from permanent compiler verdicts;
+- keep ready-region lookup lock-free;
+- add cold-start and many-function benchmark gates.
+
+Gate: More than 256 hot functions can compile when the byte budget permits them.
+
+Gate: Capacity refusal reports no unsupported function.
+
+The many-function gate compiled all 301 regions.
+
+Auto improved from 0.94 times to 1.09 times.
+
+Forced Native improved from 0.34 times to 1.09 times.
+
+Both modes reached complete native coverage.
+
+The cold JSON parse compiled 26 regions and 6,967,925 machine-code bytes.
+
+Its first Auto run took 1,425.51 milliseconds.
+
+Cold compilation remains the largest open performance defect.
+
+The corpus differential passed in 65.45 seconds.
+
+The full workspace suite passed.
 
 ## 24. Rejected designs
 

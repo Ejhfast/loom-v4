@@ -292,6 +292,36 @@ fn time_program_engine_scheduled(source: &str, mode: EngineMode) -> (Duration, E
     time_published_engine_scheduled(arena, namespace, mode)
 }
 
+/// Time the first scheduled run with one new execution engine.
+fn time_program_engine_scheduled_first(
+    source: &str,
+    mode: EngineMode,
+) -> (Duration, EngineMetrics) {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|error| panic!("the benchmark source must compile:\n{error}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+    let engine = Arc::new(Engine::new(mode));
+    let mut world = lm_vm::World::new_with_engine(
+        arena,
+        namespace,
+        config(),
+        Box::new(lm_vm::NullHost),
+        Arc::clone(&engine),
+    );
+    let start = Instant::now();
+    let outcome = lm_proc::Scheduler::default()
+        .run(&mut world)
+        .expect("the cold benchmark must run");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(outcome, lm_vm::Outcome::Done(_)),
+        "the cold {mode:?} benchmark faulted: {}",
+        world.show_outcome(&outcome),
+    );
+    (elapsed, engine.metrics())
+}
+
 /// Time one published program through the deterministic scheduler.
 fn time_published_engine_scheduled(
     arena: lm_link::CodeArena,
@@ -416,6 +446,7 @@ fn record_warm_round(
 fn add_compiler_metrics(total: &mut EngineMetrics, sample: EngineMetrics) {
     total.compilation_attempts += sample.compilation_attempts;
     total.compiled_regions += sample.compiled_regions;
+    total.compiled_code_bytes += sample.compiled_code_bytes;
     total.compiled_segments += sample.compiled_segments;
     total.compiled_call_sites += sample.compiled_call_sites;
     total.compiled_heap_read_sites += sample.compiled_heap_read_sites;
@@ -432,6 +463,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     );
     runtime.compilation_attempts = compiler.compilation_attempts;
     runtime.compiled_regions = compiler.compiled_regions;
+    runtime.compiled_code_bytes = compiler.compiled_code_bytes;
     runtime.compiled_segments = compiler.compiled_segments;
     runtime.compiled_call_sites = compiler.compiled_call_sites;
     runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
@@ -661,6 +693,38 @@ fn report_jit_representative(name: &str, source: &str) {
         println!("LOOM_JIT_METRICS\t{name}\tnative\t{native_metrics:?}");
         report_jit_profile(name, source);
     }
+}
+
+fn report_jit_cold(name: &str, source: &str) {
+    if !selected(name) {
+        return;
+    }
+    let (interpreted, _) = time_program_engine_scheduled_first(source, EngineMode::Interpreter);
+    let (automatic, metrics) = time_program_engine_scheduled_first(source, EngineMode::Auto);
+    println!(
+        "LOOM_JIT_COLD\t{name}\t{:.3}\t{:.3}\t{:.3}\t{}\t{}",
+        interpreted.as_secs_f64() * 1e3,
+        automatic.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / automatic.as_secs_f64(),
+        metrics.compiled_regions,
+        metrics.compiled_code_bytes,
+    );
+}
+
+fn many_hot_functions_source(functions: usize, rounds: usize) -> String {
+    let mut source = String::new();
+    for function in 0..functions {
+        source.push_str(&format!(
+            "def hot_{function}(value: Int): Int\n  if value < -1 then value - 1 else value + 1 end\nend\n"
+        ));
+    }
+    source.push_str("value = 0\nround = 0\n");
+    source.push_str(&format!("while round < {rounds}\n"));
+    for function in 0..functions {
+        source.push_str(&format!("  value = hot_{function}(value)\n"));
+    }
+    source.push_str("  round = round + 1\nend\nvalue\n");
+    source
 }
 
 fn report_jit_profile(name: &str, source: &str) {
@@ -1868,6 +1932,35 @@ fn bench_jit_text_and_conversion_operations() {
 // Group 1: representative JIT programs.
 // ---------------------------------------------------------------
 
+const JIT_JSON_PARSE_SOURCE: &str = r#"
+use std.json.Json
+use std.json.parse
+
+source = "{\"name\":\"loom\",\"values\":[1,2,3,4],\"ready\":true}"
+round = 0
+total = 0
+while round < 2000
+  case parse(source)
+  in Ok(Json.Object(fields)) then total = total + fields.len()
+  in _ then total = total - 1000
+  end
+  round = round + 1
+end
+total
+"#;
+
+#[test]
+#[ignore]
+fn bench_jit_cold_start_and_cache_pressure() {
+    println!(
+        "LOOM_JIT_COLD\tcase\tinterpreter_ms\tauto_ms\tauto_speedup\tcompiled_regions\tcode_bytes"
+    );
+    report_jit_cold("jit_cold_json_parse", JIT_JSON_PARSE_SOURCE);
+    let many = many_hot_functions_source(300, 1000);
+    report_jit_cold("jit_many_hot_functions", &many);
+    report_jit_representative("jit_many_hot_functions_warm", &many);
+}
+
 #[test]
 #[ignore]
 fn bench_jit_representative_programs() {
@@ -2152,25 +2245,7 @@ fn bench_jit_representative_programs() {
             "scan(Bytes(\"loom\"))\n",
         ),
     );
-    report_jit_representative(
-        "jit_json_parse",
-        r#"
-use std.json.Json
-use std.json.parse
-
-source = "{\"name\":\"loom\",\"values\":[1,2,3,4],\"ready\":true}"
-round = 0
-total = 0
-while round < 2000
-  case parse(source)
-  in Ok(Json.Object(fields)) then total = total + fields.len()
-  in _ then total = total - 1000
-  end
-  round = round + 1
-end
-total
-"#,
-    );
+    report_jit_representative("jit_json_parse", JIT_JSON_PARSE_SOURCE);
     report_jit_representative(
         "jit_json_stringify",
         r#"

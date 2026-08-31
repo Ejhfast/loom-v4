@@ -1190,6 +1190,21 @@ fn auto_mode_compiles_only_after_interpreted_work() {
 }
 
 #[test]
+fn native_code_capacity_is_not_an_unsupported_verdict() {
+    let artifact =
+        lm_testkit::compile_text("jit-budget.lm", SCALAR_LOOP).expect("the budget case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the budget case publishes");
+    let engine = Arc::new(Engine::with_native_code_budget(EngineMode::Native, 1));
+    let mut vm = Vm::new_with_engine(arena, namespace, VmConfig::default(), Arc::clone(&engine));
+    let outcome = vm.run();
+    assert_eq!(outcome, Outcome::Done(lm_value::Value::Int(49_995_000)));
+    let metrics = engine.metrics();
+    assert!(metrics.code_cache_capacity_fallbacks > 0, "{metrics:?}");
+    assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn auto_mode_demotes_repeated_quick_native_exits() {
     let source = concat!(
         "def append_one(mut items: [Int]): Int\n",

@@ -193,6 +193,7 @@ fn unreachable_code_uses_one_native_fault_exit() {
     let region = JitEngine::default()
         .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
         .expect("the terminal function compiles");
+    assert!(region.code_size() > 0);
     assert_eq!(region.plan.interpreter_sites, 0);
     assert_eq!(region.plan.segments.len(), 1);
     let mut runtime = TestRuntime {

@@ -137,6 +137,7 @@ impl<'a> FunctionInput<'a> {
 pub struct CompilerMetrics {
     pub compilation_attempts: u64,
     pub compiled_regions: u64,
+    pub compiled_code_bytes: u64,
     pub compiled_segments: u64,
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,

@@ -30,6 +30,7 @@ impl EngineMode {
 pub struct EngineMetrics {
     pub compilation_attempts: u64,
     pub compiled_regions: u64,
+    pub compiled_code_bytes: u64,
     pub compiled_segments: u64,
     pub compiled_call_sites: u64,
     pub compiled_heap_read_sites: u64,
@@ -66,6 +67,7 @@ pub struct EngineMetrics {
     pub unsupported_control_flow: u64,
     pub unsupported_region_limit: u64,
     pub missing_entry_fallbacks: u64,
+    pub code_cache_capacity_fallbacks: u64,
     pub backend_unavailable_fallbacks: u64,
 }
 
@@ -145,6 +147,7 @@ struct EngineCounters {
     unsupported_control_flow: AtomicU64,
     unsupported_region_limit: AtomicU64,
     missing_entry_fallbacks: AtomicU64,
+    code_cache_capacity_fallbacks: AtomicU64,
     backend_unavailable_fallbacks: AtomicU64,
 }
 
@@ -154,6 +157,7 @@ impl EngineCounters {
         EngineMetrics {
             compilation_attempts: compiler.compilation_attempts,
             compiled_regions: compiler.compiled_regions,
+            compiled_code_bytes: compiler.compiled_code_bytes,
             compiled_segments: compiler.compiled_segments,
             compiled_call_sites: compiler.compiled_call_sites,
             compiled_heap_read_sites: compiler.compiled_heap_read_sites,
@@ -190,6 +194,7 @@ impl EngineCounters {
             unsupported_control_flow: read(&self.unsupported_control_flow),
             unsupported_region_limit: read(&self.unsupported_region_limit),
             missing_entry_fallbacks: read(&self.missing_entry_fallbacks),
+            code_cache_capacity_fallbacks: read(&self.code_cache_capacity_fallbacks),
             backend_unavailable_fallbacks: read(&self.backend_unavailable_fallbacks),
         }
     }
@@ -225,6 +230,7 @@ impl EngineCounters {
         reset(&self.unsupported_control_flow);
         reset(&self.unsupported_region_limit);
         reset(&self.missing_entry_fallbacks);
+        reset(&self.code_cache_capacity_fallbacks);
         reset(&self.backend_unavailable_fallbacks);
     }
 
@@ -321,6 +327,10 @@ impl EngineCounters {
             values.missing_entry_fallbacks,
         );
         add(
+            &self.code_cache_capacity_fallbacks,
+            values.code_cache_capacity_fallbacks,
+        );
+        add(
             &self.backend_unavailable_fallbacks,
             values.backend_unavailable_fallbacks,
         );
@@ -341,6 +351,10 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_backend_unavailable(&mut self) {
         self.values.backend_unavailable_fallbacks += 1;
+    }
+
+    pub(crate) fn note_code_cache_capacity(&mut self) {
+        self.values.code_cache_capacity_fallbacks += 1;
     }
 
     pub(crate) fn note_native_entry_attempt(&mut self) {
@@ -476,11 +490,16 @@ pub struct Engine {
 impl Engine {
     /// Create one engine with the selected policy.
     pub fn new(mode: EngineMode) -> Engine {
+        Engine::with_native_code_budget(mode, crate::jit::DEFAULT_CODE_BUDGET)
+    }
+
+    /// Create one engine with a native machine-code byte limit.
+    pub fn with_native_code_budget(mode: EngineMode, bytes: usize) -> Engine {
         Engine {
             mode: AtomicU8::new(mode as u8),
             jit_profiling: AtomicBool::new(false),
             counters: EngineCounters::default(),
-            jit: crate::jit::JitEngine::default(),
+            jit: crate::jit::JitEngine::with_code_budget(bytes),
         }
     }
 

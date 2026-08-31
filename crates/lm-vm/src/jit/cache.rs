@@ -2,10 +2,10 @@
 
 use lm_jit::{Failure, FunctionInput, NativeDispatchRow};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-const MAX_COMPILED_REGIONS: usize = 256;
+pub(crate) const DEFAULT_CODE_BUDGET: usize = 128 * 1024 * 1024;
 const AUTO_COMPILE_WORK: u64 = 100_000;
 const TIER_COMPILED: u64 = u64::MAX - 1;
 const TIER_DENIED: u64 = u64::MAX;
@@ -13,6 +13,7 @@ const ENTRY_SAMPLE_COUNT: u32 = 8;
 const MIN_ENTRY_RETIRED: u64 = 32;
 const PRODUCTIVITY_PROVEN: u32 = u32::MAX - 1;
 const PRODUCTIVITY_DENIED: u32 = u32::MAX;
+const NO_CAPACITY_EPOCH: u64 = u64::MAX;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TierDecision {
@@ -30,11 +31,59 @@ struct NativeCodeRevision {
     dispatch_rows: Arc<Vec<NativeDispatchRow>>,
     dispatch_methods: Arc<Vec<u32>>,
     candidates: Arc<Vec<u64>>,
+    budget: Arc<CodeBudget>,
     compiled: Arc<AtomicUsize>,
 }
 
+pub(super) struct CodeBudget {
+    limit: usize,
+    used: AtomicUsize,
+    epoch: AtomicU64,
+}
+
+impl CodeBudget {
+    pub(super) fn new(limit: usize) -> CodeBudget {
+        CodeBudget {
+            limit,
+            used: AtomicUsize::new(0),
+            epoch: AtomicU64::new(0),
+        }
+    }
+
+    fn reserve(&self, bytes: usize) -> bool {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|next| *next <= self.limit)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, Ordering::AcqRel);
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+}
+
+pub(super) enum RegionFailure {
+    Compile(Failure),
+    Capacity,
+    Busy,
+}
+
 impl NativeCodeState {
+    #[cfg(test)]
     pub(crate) fn new(module: &crate::NamespaceRuntime) -> NativeCodeState {
+        Self::with_budget(module, Arc::new(CodeBudget::new(DEFAULT_CODE_BUDGET)))
+    }
+
+    pub(super) fn with_budget(
+        module: &crate::NamespaceRuntime,
+        budget: Arc<CodeBudget>,
+    ) -> NativeCodeState {
         let mut revision = NativeCodeRevision {
             slots: lm_bytecode::CodeTable::default(),
             entries: Arc::new(Vec::new()),
@@ -42,6 +91,7 @@ impl NativeCodeState {
             dispatch_rows: Arc::new(Vec::new()),
             dispatch_methods: Arc::new(Vec::new()),
             candidates: Arc::new(Vec::new()),
+            budget,
             compiled: Arc::new(AtomicUsize::new(0)),
         };
         while revision.slots.len() < module.funcs.len() {
@@ -86,10 +136,6 @@ impl NativeCodeState {
 
     pub(super) fn dispatch_methods(&self) -> &[u32] {
         self.0.dispatch_methods.as_slice()
-    }
-
-    pub(super) fn compiled_count(&self) -> &AtomicUsize {
-        self.0.compiled.as_ref()
     }
 
     pub(crate) fn enter_frame(
@@ -184,7 +230,7 @@ impl NativeCodeState {
                     profile.candidate_instructions.saturating_add(estimated);
             }
             let mut rejections = function_rejections(tables, definition, candidate);
-            if let Some(Err(Failure::Unsupported(reason))) = slot.verdict.get() {
+            if let Some(reason) = slot.unsupported_reason() {
                 let label = reason.label();
                 if let Some((_, count)) = rejections
                     .iter_mut()
@@ -268,7 +314,12 @@ impl NativeCodeRevision {
         if candidate {
             Arc::make_mut(&mut self.candidates)[word] |= 1_u64 << bit;
         }
-        let slot = Arc::new(NativeSlot::new(definition, candidate));
+        let slot = Arc::new(NativeSlot::new(
+            definition,
+            candidate,
+            Arc::clone(&self.budget),
+            Arc::clone(&self.compiled),
+        ));
         Arc::make_mut(&mut self.entries).push(Arc::as_ptr(&slot.entry) as usize);
         self.slots.push(slot);
     }
@@ -276,7 +327,11 @@ impl NativeCodeRevision {
 
 pub(super) struct NativeSlot {
     verdict: OnceLock<Result<Arc<lm_jit::CompiledRegion>, Failure>>,
+    compiling: AtomicBool,
+    capacity_epoch: AtomicU64,
     entry: Arc<lm_jit::NativeEntryCell>,
+    budget: Arc<CodeBudget>,
+    compiled: Arc<AtomicUsize>,
     event_weight: u32,
     tier: AtomicU64,
     productivity: AtomicU32,
@@ -285,7 +340,12 @@ pub(super) struct NativeSlot {
 }
 
 impl NativeSlot {
-    fn new(function: &lm_bytecode::Func, candidate: bool) -> NativeSlot {
+    fn new(
+        function: &lm_bytecode::Func,
+        candidate: bool,
+        budget: Arc<CodeBudget>,
+        compiled: Arc<AtomicUsize>,
+    ) -> NativeSlot {
         let event_weight = function
             .blocks
             .iter()
@@ -295,7 +355,11 @@ impl NativeSlot {
         let call_promotable = true;
         NativeSlot {
             verdict: OnceLock::new(),
+            compiling: AtomicBool::new(false),
+            capacity_epoch: AtomicU64::new(NO_CAPACITY_EPOCH),
             entry: Arc::new(lm_jit::NativeEntryCell::default()),
+            budget,
+            compiled,
             event_weight,
             tier: AtomicU64::new(if candidate { 0 } else { TIER_DENIED }),
             productivity: AtomicU32::new(0),
@@ -307,42 +371,76 @@ impl NativeSlot {
     pub(super) fn region<'a, F>(
         &self,
         compiler: &lm_jit::JitEngine,
-        compiled: &AtomicUsize,
         input: F,
-    ) -> Result<Arc<lm_jit::CompiledRegion>, Failure>
+    ) -> Result<Arc<lm_jit::CompiledRegion>, RegionFailure>
     where
         F: FnOnce() -> Result<FunctionInput<'a>, Failure>,
     {
-        let result = self
-            .verdict
-            .get_or_init(|| {
-                compiled
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        (count < MAX_COMPILED_REGIONS).then_some(count + 1)
-                    })
-                    .map_err(|_| Failure::BackendUnavailable)?;
-                let result = input()
-                    .and_then(|input| compiler.compile(input))
-                    .and_then(|region| self.entry.publish(&region).map(|()| region));
-                if result.is_err() {
-                    compiled.fetch_sub(1, Ordering::Relaxed);
+        if let Some(result) = self.verdict.get() {
+            return result.clone().map_err(RegionFailure::Compile);
+        }
+        let budget_epoch = self.budget.epoch();
+        if self.capacity_epoch.load(Ordering::Acquire) == budget_epoch {
+            return Err(RegionFailure::Capacity);
+        }
+        if self
+            .compiling
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(RegionFailure::Busy);
+        }
+        let result = input().and_then(|input| compiler.compile(input));
+        let result = match result {
+            Ok(region) => {
+                if !self.budget.reserve(region.code_size()) {
+                    self.capacity_epoch.store(budget_epoch, Ordering::Release);
+                    Err(RegionFailure::Capacity)
+                } else if let Err(error) = self.entry.prepare(&region) {
+                    self.budget.release(region.code_size());
+                    let result = Err(error);
+                    let _ = self.verdict.set(result.clone());
+                    self.tier.store(TIER_DENIED, Ordering::Release);
+                    Err(RegionFailure::Compile(error))
+                } else {
+                    let result = Ok(Arc::clone(&region));
+                    if self.verdict.set(result).is_err() {
+                        self.budget.release(region.code_size());
+                        Err(RegionFailure::Busy)
+                    } else {
+                        self.compiled.fetch_add(1, Ordering::Relaxed);
+                        self.tier.store(TIER_COMPILED, Ordering::Release);
+                        self.entry.publish_prepared(&region);
+                        Ok(region)
+                    }
                 }
-                result
-            })
-            .clone();
-        self.tier.store(
-            if result.is_ok() {
-                TIER_COMPILED
-            } else {
-                TIER_DENIED
-            },
-            Ordering::Release,
-        );
+            }
+            Err(Failure::Unsupported(reason)) => {
+                let result = Err(Failure::Unsupported(reason));
+                let _ = self.verdict.set(result.clone());
+                self.tier.store(TIER_DENIED, Ordering::Release);
+                Err(RegionFailure::Compile(Failure::Unsupported(reason)))
+            }
+            Err(Failure::BackendUnavailable) => {
+                let result = Err(Failure::BackendUnavailable);
+                let _ = self.verdict.set(result.clone());
+                self.tier.store(TIER_DENIED, Ordering::Release);
+                Err(RegionFailure::Compile(Failure::BackendUnavailable))
+            }
+        };
+        self.compiling.store(false, Ordering::Release);
         result
     }
 
     pub(super) fn compiled(&self) -> Option<Arc<lm_jit::CompiledRegion>> {
         self.verdict.get()?.as_ref().ok().cloned()
+    }
+
+    fn unsupported_reason(&self) -> Option<lm_jit::UnsupportedReason> {
+        match self.verdict.get() {
+            Some(Err(Failure::Unsupported(reason))) => Some(*reason),
+            _ => None,
+        }
     }
 
     pub(super) fn ready_for_auto(&self) -> bool {
@@ -444,6 +542,15 @@ impl NativeSlot {
     }
 }
 
+impl Drop for NativeSlot {
+    fn drop(&mut self) {
+        if let Some(Ok(region)) = self.verdict.get() {
+            self.budget.release(region.code_size());
+            self.compiled.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn function_is_candidate(module: &crate::NamespaceRuntime, function: &lm_bytecode::Func) -> bool {
     if !lm_jit::is_candidate(function)
         || !function
@@ -538,4 +645,20 @@ fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {
         .entry(reason)
         .and_modify(|count| *count = count.saturating_add(1))
         .or_insert(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_budget_uses_bytes_and_reopens_after_release() {
+        let budget = CodeBudget::new(100);
+        assert!(budget.reserve(60));
+        let epoch = budget.epoch();
+        assert!(!budget.reserve(50));
+        budget.release(60);
+        assert_ne!(budget.epoch(), epoch);
+        assert!(budget.reserve(50));
+    }
 }
