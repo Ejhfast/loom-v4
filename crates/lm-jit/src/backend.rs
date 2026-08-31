@@ -564,7 +564,15 @@ struct SegmentEmission<'a, 'b> {
     input: &'a FunctionInput<'b>,
     type_environment_sites: &'a [TypeEnvironmentSite],
     exact_fuel: bool,
+    exact_fuel_exit: ExactFuelExit,
     resume_blocks: Option<&'a [ir::Block]>,
+}
+
+#[derive(Clone, Copy)]
+struct ExactFuelExit {
+    block: ir::Block,
+    local_count: usize,
+    max_stack: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -856,7 +864,26 @@ fn emit_region(
                 .collect()
         })
         .collect();
+    let exact_fuel_exit = ExactFuelExit {
+        block: builder.create_block(),
+        local_count: plan.local_kinds.len(),
+        max_stack: plan.max_stack,
+    };
+    builder.append_block_param(exact_fuel_exit.block, types::I64);
+    builder.append_block_param(exact_fuel_exit.block, types::I32);
+    builder.append_block_param(exact_fuel_exit.block, types::I32);
+    builder.append_block_param(exact_fuel_exit.block, types::I32);
+    for _ in 0..exact_fuel_exit.local_count {
+        builder.append_block_param(exact_fuel_exit.block, types::I64);
+        builder.append_block_param(exact_fuel_exit.block, types::I64);
+        builder.append_block_param(exact_fuel_exit.block, types::I8);
+    }
+    for _ in 0..exact_fuel_exit.max_stack {
+        builder.append_block_param(exact_fuel_exit.block, types::I64);
+        builder.append_block_param(exact_fuel_exit.block, types::I64);
+    }
     builder.set_cold_block(invalid_block);
+    builder.set_cold_block(exact_fuel_exit.block);
     for block in exact_blocks.iter().flatten().copied() {
         builder.set_cold_block(block);
     }
@@ -1103,6 +1130,7 @@ fn emit_region(
                 input,
                 type_environment_sites,
                 exact_fuel: true,
+                exact_fuel_exit,
                 resume_blocks: Some(&exact_blocks[index]),
             },
         )?;
@@ -1130,10 +1158,13 @@ fn emit_region(
                 input,
                 type_environment_sites,
                 exact_fuel: false,
+                exact_fuel_exit,
                 resume_blocks: None,
             },
         )?;
     }
+
+    emit_exact_fuel_exit(&mut builder, values, exact_fuel_exit)?;
 
     builder.seal_all_blocks();
     builder.finalize();
@@ -1153,6 +1184,7 @@ fn emit_segment(
         input,
         type_environment_sites,
         exact_fuel,
+        exact_fuel_exit,
         resume_blocks,
     } = emission;
     values.heap_translations.borrow_mut().clear();
@@ -1224,6 +1256,7 @@ fn emit_segment(
                 segment.block,
                 segment.start + within as u32,
                 &stack,
+                exact_fuel_exit,
             )?;
         }
         let fault_prefix = if exact_fuel { 1 } else { prefix };
@@ -6730,32 +6763,186 @@ fn emit_exact_fuel_check(
     block: u32,
     instruction: u32,
     stack: &[NativeValue],
+    exit: ExactFuelExit,
 ) -> Result<(), CompileError> {
+    if exit.local_count != values.locals.len()
+        || exit.max_stack != values.stack.len()
+        || stack.len() > exit.max_stack
+    {
+        return Err(CompileError::Backend);
+    }
     let run = builder.create_block();
-    let stop = builder.create_block();
-    builder.set_cold_block(stop);
     let fuel = builder.use_var(values.fuel);
     let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
-    builder.ins().brif(available, run, &[], stop, &[]);
-    builder.switch_to_block(stop);
-    let retired = emit_retired(builder, values);
-    let result = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_FUEL,
-            block,
-            instruction,
-            result: NativeValue {
-                bits: result,
-                tag: result,
-            },
-        },
-        stack,
-    )?;
+    let mut arguments: Vec<ir::BlockArg> = Vec::with_capacity(
+        4 + exit.local_count.saturating_mul(3) + exit.max_stack.saturating_mul(2),
+    );
+    arguments.push(emit_retired(builder, values).into());
+    arguments.push(builder.ins().iconst(types::I32, i64::from(block)).into());
+    arguments.push(
+        builder
+            .ins()
+            .iconst(types::I32, i64::from(instruction))
+            .into(),
+    );
+    arguments.push(
+        builder
+            .ins()
+            .iconst(
+                types::I32,
+                i64::try_from(stack.len()).map_err(|_| CompileError::Backend)?,
+            )
+            .into(),
+    );
+    for (slot, kind) in values.local_kinds.iter().copied().enumerate() {
+        arguments.push(builder.use_var(values.locals[slot]).into());
+        arguments.push(emit_slot_tag(builder, values.local_tags[slot], kind)?.into());
+        arguments.push(builder.use_var(values.local_states[slot]).into());
+    }
+    let zero = builder.ins().iconst(types::I64, 0);
+    for slot in 0..exit.max_stack {
+        if let Some(value) = stack.get(slot).copied() {
+            arguments.push(value.bits.into());
+            arguments.push(value.tag.into());
+        } else {
+            arguments.push(zero.into());
+            arguments.push(zero.into());
+        }
+    }
+    builder
+        .ins()
+        .brif(available, run, &[], exit.block, &arguments);
     builder.switch_to_block(run);
+    Ok(())
+}
+
+fn emit_exact_fuel_exit(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    exit: ExactFuelExit,
+) -> Result<(), CompileError> {
+    builder.switch_to_block(exit.block);
+    let parameters = builder.block_params(exit.block).to_vec();
+    let expected = 4usize
+        .checked_add(
+            exit.local_count
+                .checked_mul(3)
+                .ok_or(CompileError::Backend)?,
+        )
+        .and_then(|count| count.checked_add(exit.max_stack.checked_mul(2)?))
+        .ok_or(CompileError::Backend)?;
+    if parameters.len() != expected {
+        return Err(CompileError::Backend);
+    }
+    let retired = parameters[0];
+    let block = parameters[1];
+    let instruction = parameters[2];
+    let stack_len = parameters[3];
+    let mut parameter = 4;
+    for slot in 0..exit.local_count {
+        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+        builder.ins().store(
+            MemFlags::new(),
+            parameters[parameter],
+            values.local_pointer,
+            offset,
+        );
+        builder.ins().store(
+            MemFlags::new(),
+            parameters[parameter + 1],
+            values.local_tag_pointer,
+            offset,
+        );
+        builder.ins().store(
+            MemFlags::new(),
+            parameters[parameter + 2],
+            values.local_state_pointer,
+            state_offset,
+        );
+        parameter += 3;
+    }
+    for slot in 0..exit.max_stack {
+        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
+            .map_err(|_| CompileError::Backend)?;
+        builder.ins().store(
+            MemFlags::new(),
+            parameters[parameter],
+            values.stack_pointer,
+            offset,
+        );
+        builder.ins().store(
+            MemFlags::new(),
+            parameters[parameter + 1],
+            values.stack_tag_pointer,
+            offset,
+        );
+        parameter += 2;
+    }
+    let frame = emit_current_frame_pointer(builder, values)?;
+    store_i32_value(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, block),
+        block,
+    )?;
+    store_i32_value(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, instruction),
+        instruction,
+    )?;
+    store_i32_value(
+        builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, operand_len),
+        stack_len,
+    )?;
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, retired),
+        retired,
+    )?;
+    store_i32_constant(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, kind),
+        EXIT_FUEL,
+    )?;
+    store_i32_value(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, block),
+        block,
+    )?;
+    store_i32_value(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, instruction),
+        instruction,
+    )?;
+    store_i32_value(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, stack_len),
+        stack_len,
+    )?;
+    let zero = builder.ins().iconst(types::I64, 0);
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, result_tag),
+        zero,
+    )?;
+    store_i64(
+        builder,
+        values.exit_pointer,
+        mem::offset_of!(RawExit, result),
+        zero,
+    )?;
+    builder.ins().return_(&[]);
     Ok(())
 }
 

@@ -867,6 +867,10 @@ Stage measurements validate one change and prevent regressions.
 
 Historical ratio targets do not define project completion.
 
+Each `Gate:` line validates only its local stage.
+
+A local gate cannot stop later production-mechanism work.
+
 ### Stage A: Recovery baseline
 
 - preserve the arena-scoped cache;
@@ -2532,6 +2536,32 @@ The release comparison used commit `381dac6` as its exact parent baseline.
 These measurements expose the removed helper costs.
 
 They do not define a completion threshold.
+
+### Stage F46: Share exact-fuel materialization
+
+- keep one native entry for each exact bytecode position;
+- route all depleted-fuel checkpoints to one cold exit block;
+- pass live typed values through SSA block arguments;
+- spill the canonical frame once in the shared block;
+- preserve exact fuel, program positions, and scheduler continuation;
+- record cold code size for scalar and complete-program compilation.
+
+The focused JIT suite passed 147 tests.
+
+The release comparison used commit `035163a` as its exact parent baseline.
+
+| Compiled set | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 8,944 bytes | 6,784 bytes | 24.2 percent smaller |
+| JSON cold set | 7,334,135 bytes | 6,893,690 bytes | 6.0 percent smaller |
+
+Scalar cold execution stayed within measurement variance.
+
+The sampled JSON cold run improved by 7.8 percent.
+
+The exact tail still lowers each bytecode instruction a second time.
+
+Later code-density work must remove this duplicate lowering.
 
 ## 24. Rejected designs
 

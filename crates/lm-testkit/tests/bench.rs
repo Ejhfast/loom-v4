@@ -2049,6 +2049,10 @@ fn bench_jit_cold_start_and_cache_pressure() {
     println!(
         "LOOM_JIT_COLD\tcase\tinterpreter_ms\tauto_ms\tauto_speedup\tcompiled_regions\tcode_bytes"
     );
+    report_jit_cold(
+        "jit_cold_int_loop",
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+    );
     report_jit_cold("jit_cold_json_parse", JIT_JSON_PARSE_SOURCE);
     let many = many_hot_functions_source(300, 1000);
     report_jit_cold("jit_many_hot_functions", &many);
