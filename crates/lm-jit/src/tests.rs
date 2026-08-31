@@ -199,6 +199,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         reserved_prefix_cost: 0,
         carry_reserved_cost: vec![],
         fast_entry: true,
+        defer_integer_overflow: false,
         exit: SegmentExit::Return,
         uses: vec![false, true],
         definitions: vec![true, false],

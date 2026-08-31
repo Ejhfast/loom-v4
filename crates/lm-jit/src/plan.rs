@@ -353,6 +353,8 @@ pub(super) struct Segment {
     pub(super) carry_reserved_cost: Vec<bool>,
     /// True when canonical machine state can use this segment's reserved path.
     pub(super) fast_entry: bool,
+    /// True when one cold replay edge can check all integer overflow flags.
+    pub(super) defer_integer_overflow: bool,
     pub(super) exit: SegmentExit,
     pub(super) uses: Vec<bool>,
     pub(super) definitions: Vec<bool>,
@@ -850,6 +852,19 @@ impl RegionPlan {
             return Err(UnsupportedReason::RegionLimit);
         }
         compute_liveness(&mut segments, local_kinds.len());
+        for segment in &mut segments {
+            segment.defer_integer_overflow = can_defer_integer_overflow(runtime, segment);
+            if segment.defer_integer_overflow
+                && !segment
+                    .replay_stacks
+                    .iter()
+                    .any(|(instruction, _)| *instruction == segment.start)
+            {
+                segment
+                    .replay_stacks
+                    .push((segment.start, segment.entry_stack.clone()));
+            }
+        }
         let stable_list_data = call_sites == 0 && list_growth_sites == 0;
         let cached_list_data: Vec<bool> = source_func
             .local_types
@@ -1142,6 +1157,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 reserved_prefix_cost: 0,
                 carry_reserved_cost: Vec::new(),
                 fast_entry: true,
+                defer_integer_overflow: false,
                 exit,
                 uses: Vec::new(),
                 definitions: Vec::new(),
@@ -1165,6 +1181,57 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
         }
     }
     Ok(segments)
+}
+
+fn can_defer_integer_overflow(func: &Func, segment: &Segment) -> bool {
+    if segment
+        .definitions
+        .iter()
+        .copied()
+        .zip(segment.live_in.iter().copied())
+        .any(|(defined, live)| defined && !live)
+    {
+        return false;
+    }
+    let Some(code) = func
+        .blocks
+        .get(segment.block as usize)
+        .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+    else {
+        return false;
+    };
+    let mut checked = 0usize;
+    for instruction in code {
+        match instruction {
+            Instr::Add | Instr::Sub | Instr::Mul | Instr::Neg => checked += 1,
+            Instr::ConstUnit
+            | Instr::ConstBool(_)
+            | Instr::ConstInt(_)
+            | Instr::ConstFloat(_)
+            | Instr::ConstChar(_)
+            | Instr::LoadLocal(_)
+            | Instr::StoreLocal(_)
+            | Instr::Pop
+            | Instr::Not
+            | Instr::LtInt
+            | Instr::LeInt
+            | Instr::GtInt
+            | Instr::GeInt
+            | Instr::EqInt
+            | Instr::NeInt
+            | Instr::EqBool
+            | Instr::NeBool
+            | Instr::EqRef
+            | Instr::NeRef
+            | Instr::OpConst(_)
+            | Instr::Jump(_)
+            | Instr::JumpIfFalse(_)
+            | Instr::JumpIfTrue(_)
+            | Instr::Return => {}
+            _ => return false,
+        }
+    }
+    checked > 1
 }
 
 pub(super) fn bypasses_fuel_check(segment: &Segment, index: usize, successor: usize) -> bool {

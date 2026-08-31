@@ -2803,6 +2803,38 @@ fn nested_arithmetic_faults_keep_residual_operands() {
 }
 
 #[test]
+fn deferred_integer_overflow_replays_from_the_segment_entry() {
+    let cases = [
+        concat!(
+            "def fail(left: Int, maximum: Int): Int\n",
+            "  left + (maximum + 1)\n",
+            "end\n",
+            "fail(7, 9223372036854775807)\n",
+        ),
+        concat!(
+            "def fail(maximum: Int): Int\n",
+            "  (1 + 2) + maximum\n",
+            "end\n",
+            "fail(9223372036854775807)\n",
+        ),
+    ];
+    for source in cases {
+        let artifact = lm_testkit::compile_text("jit-deferred-overflow.lm", source)
+            .expect("the overflow case compiles");
+        for fuel in 0..=24 {
+            let (interpreted, _, interpreted_dump) =
+                run_artifact(&artifact, EngineMode::Interpreter, fuel);
+            let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+            assert_eq!(native, interpreted, "fuel {fuel}");
+            assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+        }
+        let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+        assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::IntegerOverflow));
+        assert!(metrics.native_replay_exits > 0, "{metrics:?}");
+    }
+}
+
+#[test]
 fn realistic_scalar_expression_stays_native() {
     let source = concat!(
         "i = 0\ns = 0\n",

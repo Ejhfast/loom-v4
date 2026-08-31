@@ -671,6 +671,7 @@ impl CompiledRegion {
             frame_capacity,
             changed_from: u32::try_from(activation.changed_from)
                 .map_err(|_| Failure::BackendUnavailable)?,
+            root_code: self.call_entry,
             entries: entries.as_ptr(),
             entry_count: u32::try_from(entries.len()).map_err(|_| Failure::BackendUnavailable)?,
             max_stack_values: u32::try_from(max_stack_values)

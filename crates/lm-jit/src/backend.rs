@@ -238,9 +238,8 @@ pub(super) fn compile_region(
     let mut entry_context = module.make_context();
     entry_context.func.signature = entry_signature;
     entry_context.func.name = UserFuncName::user(0, entry_id.as_u32());
-    let body_reference = module.declare_func_in_func(body_id, &mut entry_context.func);
     let mut entry_frontend = FunctionBuilderContext::new();
-    emit_entry_wrapper(&mut entry_context.func, &mut entry_frontend, body_reference)?;
+    emit_entry_wrapper(&mut entry_context.func, &mut entry_frontend)?;
     module
         .define_function(entry_id, &mut entry_context)
         .map_err(|_| CompileError::Backend)?;
@@ -287,14 +286,31 @@ fn append_native_parameters(signature: &mut ir::Signature, pointer_type: ir::Typ
 fn emit_entry_wrapper(
     function: &mut ir::Function,
     frontend: &mut FunctionBuilderContext,
-    body: ir::FuncRef,
 ) -> Result<(), CompileError> {
+    let mut body_signature = function.signature.clone();
+    body_signature.call_conv = CallConv::Tail;
+    body_signature.params.push(AbiParam::new(types::I64));
+    body_signature.params.push(AbiParam::new(types::I32));
+    let pointer_type = function
+        .signature
+        .params
+        .first()
+        .map(|parameter| parameter.value_type)
+        .ok_or(CompileError::Backend)?;
     let mut builder = FunctionBuilder::new(function, frontend);
+    let body_signature = builder.import_signature(body_signature);
     let entry = builder.create_block();
     builder.switch_to_block(entry);
     builder.append_block_params_for_function_params(entry);
     let mut arguments = builder.block_params(entry).to_vec();
     let activation = *arguments.get(14).ok_or(CompileError::Backend)?;
+    let body = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        activation,
+        i32::try_from(mem::offset_of!(RawNativeActivation, root_code))
+            .map_err(|_| CompileError::Backend)?,
+    );
     let frame_len = builder.ins().load(
         types::I32,
         MemFlags::new(),
@@ -311,7 +327,9 @@ fn emit_entry_wrapper(
     let detached = builder.ins().select(detached, one_i32, zero_i32);
     arguments.push(zero_i64);
     arguments.push(detached);
-    builder.ins().call(body, &arguments);
+    builder
+        .ins()
+        .call_indirect(body_signature, body, &arguments);
     builder.ins().return_(&[]);
     builder.seal_all_blocks();
     builder.finalize();
@@ -573,6 +591,12 @@ struct SegmentEmission<'a, 'b> {
     exact_fuel: bool,
     exact_fuel_exit: ExactFuelExit,
     resume_blocks: Option<&'a [ir::Block]>,
+}
+
+struct DeferredIntegerOverflow {
+    flag: Option<ir::Value>,
+    locals: Vec<NativeValue>,
+    stack: Vec<NativeValue>,
 }
 
 #[derive(Clone, Copy)]
@@ -1376,6 +1400,15 @@ fn emit_segment(
                 })
             })
             .collect::<Result<_, CompileError>>()?
+    };
+    let mut deferred_integer_overflow = if segment.defer_integer_overflow && !exact_fuel {
+        Some(DeferredIntegerOverflow {
+            flag: None,
+            locals: capture_local_values(builder, values)?,
+            stack: stack.clone(),
+        })
+    } else {
+        None
     };
     // The entry guard initializes each live local in canonical state storage.
     // A store only initializes a slot that was dormant at this entry.
@@ -4244,18 +4277,26 @@ fn emit_segment(
                     Instr::Mul => builder.ins().smul_overflow(left, right),
                     _ => unreachable!(),
                 };
-                let result = emit_overflow_check(
-                    builder,
-                    values,
-                    overflow,
-                    result,
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: segment.start + prefix,
-                        prefix: fault_prefix,
-                    },
-                    &stack,
-                )?;
+                let result = if let Some(deferred) = deferred_integer_overflow.as_mut() {
+                    deferred.flag = Some(match deferred.flag {
+                        Some(prior) => builder.ins().bor(prior, overflow),
+                        None => overflow,
+                    });
+                    result
+                } else {
+                    emit_overflow_check(
+                        builder,
+                        values,
+                        overflow,
+                        result,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        &stack,
+                    )?
+                };
                 push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Div | Instr::Rem => {
@@ -4291,18 +4332,26 @@ fn emit_segment(
                 let value = pop_native(&mut stack)?;
                 let zero = builder.ins().iconst(types::I64, 0);
                 let (result, overflow) = builder.ins().ssub_overflow(zero, value);
-                let result = emit_overflow_check(
-                    builder,
-                    values,
-                    overflow,
-                    result,
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: segment.start + prefix,
-                        prefix: fault_prefix,
-                    },
-                    &stack,
-                )?;
+                let result = if let Some(deferred) = deferred_integer_overflow.as_mut() {
+                    deferred.flag = Some(match deferred.flag {
+                        Some(prior) => builder.ins().bor(prior, overflow),
+                        None => overflow,
+                    });
+                    result
+                } else {
+                    emit_overflow_check(
+                        builder,
+                        values,
+                        overflow,
+                        result,
+                        FaultPoint {
+                            block: segment.block,
+                            instruction: segment.start + prefix,
+                            prefix: fault_prefix,
+                        },
+                        &stack,
+                    )?
+                };
                 push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
             Instr::Not => {
@@ -4950,6 +4999,20 @@ fn emit_segment(
                 .ok_or(CompileError::Backend)?;
             builder.ins().jump(next, &[]);
         }
+    }
+
+    if let Some(deferred) = deferred_integer_overflow {
+        let overflow = deferred.flag.ok_or(CompileError::Backend)?;
+        emit_deferred_integer_overflow_replay(
+            builder,
+            values,
+            overflow,
+            segment.block,
+            segment.start,
+            reserved_prefix_cost,
+            &deferred.locals,
+            &deferred.stack,
+        )?;
     }
 
     if matches!(
@@ -7198,6 +7261,64 @@ fn emit_exact_fuel_exit(
         zero,
     )?;
     builder.ins().return_(&[]);
+    Ok(())
+}
+
+fn capture_local_values(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+) -> Result<Vec<NativeValue>, CompileError> {
+    values
+        .locals
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, variable)| {
+            Ok(NativeValue {
+                bits: builder.use_var(variable),
+                tag: emit_slot_tag(builder, values.local_tags[slot], values.local_kinds[slot])?,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_deferred_integer_overflow_replay(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    overflow: ir::Value,
+    block: u32,
+    instruction: u32,
+    retired_prefix: u32,
+    locals: &[NativeValue],
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let replay = builder.create_block();
+    let success = builder.create_block();
+    builder.set_cold_block(replay);
+    builder.ins().brif(overflow, replay, &[], success, &[]);
+
+    builder.switch_to_block(replay);
+    let retired = emit_retired_with_prefix(builder, values, retired_prefix);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit_with_locals(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_REPLAY,
+            block,
+            instruction,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
+        },
+        locals,
+        stack,
+    )?;
+
+    builder.switch_to_block(success);
     Ok(())
 }
 
@@ -13899,7 +14020,18 @@ fn emit_exit(
     exit: ExitEmission,
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    emit_spill_frame(builder, values, exit.block, exit.instruction, stack)?;
+    let locals = capture_local_values(builder, values)?;
+    emit_exit_with_locals(builder, values, exit, &locals, stack)
+}
+
+fn emit_exit_with_locals(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    exit: ExitEmission,
+    locals: &[NativeValue],
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    emit_spill_frame_values(builder, values, exit.block, exit.instruction, locals, stack)?;
     store_i64(
         builder,
         values.exit_pointer,
@@ -14171,15 +14303,16 @@ fn emit_function_return(
     )
 }
 
-fn emit_spill_frame(
+fn emit_spill_frame_values(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     block: u32,
     instruction: u32,
+    locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let frame = emit_current_frame_pointer(builder, values)?;
-    emit_spill_frame_to(builder, values, frame, block, instruction, stack)
+    emit_spill_frame_values_to(builder, values, frame, block, instruction, locals, stack)
 }
 
 fn emit_spill_frame_roots(
@@ -14242,17 +14375,38 @@ fn emit_spill_frame_to(
     instruction: u32,
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    for (slot, variable) in values.locals.iter().copied().enumerate() {
-        let value = builder.use_var(variable);
-        let tag = emit_slot_tag(builder, values.local_tags[slot], values.local_kinds[slot])?;
+    let locals = capture_local_values(builder, values)?;
+    emit_spill_frame_values_to(builder, values, frame, block, instruction, &locals, stack)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_spill_frame_values_to(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    frame: ir::Value,
+    block: u32,
+    instruction: u32,
+    locals: &[NativeValue],
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    if locals.len() != values.locals.len() {
+        return Err(CompileError::Backend);
+    }
+    for (slot, value) in locals.iter().copied().enumerate() {
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        builder
-            .ins()
-            .store(MemFlags::new(), value, values.local_pointer, local_offset);
-        builder
-            .ins()
-            .store(MemFlags::new(), tag, values.local_tag_pointer, local_offset);
+        builder.ins().store(
+            MemFlags::new(),
+            value.bits,
+            values.local_pointer,
+            local_offset,
+        );
+        builder.ins().store(
+            MemFlags::new(),
+            value.tag,
+            values.local_tag_pointer,
+            local_offset,
+        );
     }
     for (slot, value) in stack.iter().copied().enumerate() {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)

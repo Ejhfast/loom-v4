@@ -2741,6 +2741,50 @@ This change removes one redundant state representation.
 
 It does not complete the broader code-density work.
 
+### Stage F52: Defer pure-segment overflow faults
+
+- combine checked integer overflow flags inside one pure scalar segment;
+- branch once after the segment instead of once after each checked operation;
+- replay the segment from its canonical entry after a rare overflow;
+- preserve the exact fault position through interpreter replay;
+- defer no segment that initializes a dormant local;
+- retain immediate checks around calls, heap changes, and other faults;
+- load the root body through its published entry address;
+- use no relative relocation between separate executable mappings.
+
+The focused JIT suite passed 151 tests.
+
+Two deferred fault positions matched Interpreter at every tested fuel boundary.
+
+The direct and scheduled corpus differential passed in 39.23 seconds.
+
+The integer loop contains one overflow branch for its two checked additions.
+
+The expression loop contains one overflow branch for its four checked operations.
+
+The release comparison used commit `6ef1a1f` as its parent baseline.
+
+| Native warm row | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Integer loop | 0.695 ms | 0.536 ms | 22.9 percent faster |
+| Expression stack | 0.730 ms | 0.707 ms | 3.2 percent faster |
+
+An earlier parent run measured the integer loop at 0.542 ms.
+
+Thus, the integer timing includes material local variance.
+
+The removed hot branch defines this stage.
+
+The root entry change also removed one direct Cranelift relocation.
+
+This relocation could exceed its range during parallel compilation.
+
+The cold integer region now contains 5,916 machine-code bytes.
+
+Exact-fuel lowering still duplicates each instruction in the same function.
+
+The next code-density stage must isolate that cold path without an interpreter transition.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

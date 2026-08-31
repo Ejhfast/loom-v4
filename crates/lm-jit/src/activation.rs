@@ -77,6 +77,7 @@ pub(super) struct RawNativeActivation {
     pub(super) frame_len: u32,
     pub(super) frame_capacity: u32,
     pub(super) changed_from: u32,
+    pub(super) root_code: usize,
     pub(super) entries: *const usize,
     pub(super) entry_count: u32,
     pub(super) max_stack_values: u32,
