@@ -1171,13 +1171,17 @@ fn emit_region(
         let body = body_blocks[index];
         let exact_fuel = builder.create_block();
         builder.set_cold_block(exact_fuel);
-        let available = builder.use_var(fuel);
-        let enough = builder.ins().icmp_imm(
-            IntCC::UnsignedGreaterThanOrEqual,
-            available,
-            i64::from(segment.fuel_reserve),
-        );
-        builder.ins().brif(enough, body, &[], exact_fuel, &[]);
+        if segment.fast_entry {
+            let available = builder.use_var(fuel);
+            let enough = builder.ins().icmp_imm(
+                IntCC::UnsignedGreaterThanOrEqual,
+                available,
+                i64::from(segment.fuel_reserve),
+            );
+            builder.ins().brif(enough, body, &[], exact_fuel, &[]);
+        } else {
+            builder.ins().jump(exact_fuel, &[]);
+        }
 
         builder.switch_to_block(exact_fuel);
         let first = exact_blocks[index]
@@ -1189,10 +1193,14 @@ fn emit_region(
             .successors
             .iter()
             .map(|successor| {
-                preload_entry_blocks
-                    .get(*successor)
-                    .copied()
-                    .unwrap_or(blocks[*successor])
+                if plan.segments[*successor].fast_entry {
+                    preload_entry_blocks
+                        .get(*successor)
+                        .copied()
+                        .unwrap_or(blocks[*successor])
+                } else {
+                    exact_blocks[*successor][0]
+                }
             })
             .collect();
         emit_segment(
@@ -1357,6 +1365,14 @@ fn emit_segment(
         translations.clear();
         translations.set_preloaded_list_data(!exact_fuel);
     }
+    let reserved_prefix_cost = if exact_fuel {
+        0
+    } else {
+        segment.reserved_prefix_cost
+    };
+    let fast_segment_cost = reserved_prefix_cost
+        .checked_add(segment.cost)
+        .ok_or(CompileError::Backend)?;
     let mut stack: Vec<NativeValue> = if resume_blocks.is_some() {
         Vec::new()
     } else {
@@ -1428,7 +1444,20 @@ fn emit_segment(
                 exact_fuel_exit,
             )?;
         }
-        let fault_prefix = if exact_fuel { 1 } else { prefix };
+        let fault_prefix = if exact_fuel {
+            1
+        } else {
+            reserved_prefix_cost
+                .checked_add(prefix)
+                .ok_or(CompileError::Backend)?
+        };
+        let prior_prefix = if exact_fuel {
+            0
+        } else {
+            reserved_prefix_cost
+                .checked_add(prefix - 1)
+                .ok_or(CompileError::Backend)?
+        };
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -1619,7 +1648,7 @@ fn emit_segment(
                         FaultPoint {
                             block: segment.block,
                             instruction: position,
-                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                            prefix: prior_prefix,
                         },
                         &stack,
                     )?
@@ -1668,7 +1697,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &stack,
                 )?;
@@ -1687,7 +1716,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &stack,
                 )?;
@@ -1949,7 +1978,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: instruction_index,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &stack,
                 )?;
@@ -1981,7 +2010,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: instruction_index,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &deopt_stack,
                 )?;
@@ -2046,7 +2075,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction: instruction_index,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                 )?;
                 stack.push(result);
@@ -2084,7 +2113,7 @@ fn emit_segment(
                         resolve: FaultPoint {
                             block: segment.block,
                             instruction: instruction_index,
-                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                            prefix: prior_prefix,
                         },
                     },
                 )?;
@@ -2135,7 +2164,7 @@ fn emit_segment(
                         FaultPoint {
                             block: segment.block,
                             instruction: instruction_index,
-                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                            prefix: prior_prefix,
                         },
                         &deopt_stack,
                     )?;
@@ -2338,7 +2367,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &deopt_stack,
                 )?;
@@ -2405,7 +2434,7 @@ fn emit_segment(
                         FaultPoint {
                             block: segment.block,
                             instruction: instruction_index,
-                            prefix: if exact_fuel { 0 } else { prefix - 1 },
+                            prefix: prior_prefix,
                         },
                         &deopt_stack,
                     )?)
@@ -2991,7 +3020,7 @@ fn emit_segment(
                     FaultPoint {
                         block: segment.block,
                         instruction,
-                        prefix: if exact_fuel { 0 } else { prefix - 1 },
+                        prefix: prior_prefix,
                     },
                     &deopt_stack,
                 )?;
@@ -4940,7 +4969,7 @@ fn emit_segment(
             | SegmentExit::SlotCall { .. }
     ) {
         let call_instruction = segment.end - 1;
-        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
         let contract = segment
             .call_contract
             .as_ref()
@@ -5175,7 +5204,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Effect { .. }) {
         let effect_instruction = segment.end - 1;
-        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5198,7 +5227,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Boundary { .. }) {
         let instruction = segment.end - 1;
-        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5220,7 +5249,7 @@ fn emit_segment(
     }
 
     if matches!(segment.exit, SegmentExit::Unreachable) {
-        emit_segment_charge(builder, values, segment.cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5241,22 +5270,62 @@ fn emit_segment(
         return Ok(());
     }
 
-    emit_segment_charge(builder, values, segment.cost, exact_fuel);
     match segment.exit {
         SegmentExit::Jump { .. } => {
+            let carries = segment
+                .carry_reserved_cost
+                .first()
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            if !exact_fuel && !carries {
+                emit_charge(builder, values, fast_segment_cost);
+            }
             define_stack(builder, values, &stack)?;
             builder.ins().jump(successor_blocks[0], &[]);
         }
         SegmentExit::Conditional { jump_on_true, .. } => {
+            if segment.carry_reserved_cost.len() != 2 {
+                return Err(CompileError::Backend);
+            }
             let condition = pop_native(&mut stack)?;
             define_stack(builder, values, &stack)?;
             let condition = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
-            let target = successor_blocks[0];
-            let fallthrough = successor_blocks[1];
+            let mut target = successor_blocks[0];
+            let mut fallthrough = successor_blocks[1];
+            let mut charged_target = None;
+            let mut charged_fallthrough = None;
+            if !exact_fuel {
+                let carries_target = segment.carry_reserved_cost[0];
+                let carries_fallthrough = segment.carry_reserved_cost[1];
+                match (carries_target, carries_fallthrough) {
+                    (false, false) => emit_charge(builder, values, fast_segment_cost),
+                    (true, true) => {}
+                    (false, true) => {
+                        let block = builder.create_block();
+                        target = block;
+                        charged_target = Some(block);
+                    }
+                    (true, false) => {
+                        let block = builder.create_block();
+                        fallthrough = block;
+                        charged_fallthrough = Some(block);
+                    }
+                }
+            }
             if jump_on_true {
                 builder.ins().brif(condition, target, &[], fallthrough, &[]);
             } else {
                 builder.ins().brif(condition, fallthrough, &[], target, &[]);
+            }
+            if let Some(block) = charged_target {
+                builder.switch_to_block(block);
+                emit_charge(builder, values, fast_segment_cost);
+                builder.ins().jump(successor_blocks[0], &[]);
+            }
+            if let Some(block) = charged_fallthrough {
+                builder.switch_to_block(block);
+                emit_charge(builder, values, fast_segment_cost);
+                builder.ins().jump(successor_blocks[1], &[]);
             }
         }
         SegmentExit::Call { .. } => unreachable!(),
@@ -5266,6 +5335,7 @@ fn emit_segment(
         SegmentExit::InterfaceCall { .. } => unreachable!(),
         SegmentExit::SlotCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
+            emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
             define_stack(builder, values, &stack)?;
             builder.ins().jump(successor_blocks[0], &[]);
         }
@@ -5273,6 +5343,7 @@ fn emit_segment(
         SegmentExit::Boundary { .. } => unreachable!(),
         SegmentExit::Unreachable => unreachable!(),
         SegmentExit::Return => {
+            emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
             let result = pop_value(&mut stack)?;
             emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
         }

@@ -6,6 +6,8 @@ Direct instance, tuple, list, and byte access use the canonical heap layout.
 
 Stable list parameters retain their canonical data pointer across safe loop backedges.
 
+One reserved acyclic path can charge several segments with one fuel update.
+
 Representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
@@ -2599,6 +2601,41 @@ The release comparison used commit `5883543` as its exact parent baseline.
 The hot access performs no repeated payload-pointer load.
 
 This result does not define a completion threshold.
+
+### Stage F48: Coalesce reserved fuel charges
+
+- identify unique forward segment chains inside one fuel reservation;
+- carry one static uncharged cost through those chains;
+- charge the aggregate before a join, backedge, call, effect, fault, or return;
+- keep an exact canonical entry for every segment start;
+- route a mid-chain canonical entry through exact fuel code;
+- preserve the existing exact-instruction path for small fuel balances;
+- preserve exact state at every tested fuel boundary.
+
+This stage removes fuel writes from unique acyclic paths.
+
+It does not remove the exact-fuel duplicate lowering.
+
+The first entry design exposed mid-chain exact blocks directly.
+
+That design doubled the scalar-loop time after Cranelift optimization.
+
+The final design keeps one canonical segment dispatch and selects the exact path there.
+
+The focused JIT suite passed 148 tests.
+
+The direct and scheduled corpus differential passed in 53.25 seconds.
+
+The release comparison used commit `79d4f33` as its exact parent baseline.
+
+| Native warm row | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Integer loop | 0.629 ms | 0.575 ms | 8.6 percent faster |
+| Integer equality | 0.535 ms | 0.451 ms | 15.7 percent faster |
+| Expression stack | 0.913 ms | 0.827 ms | 9.4 percent faster |
+| Float addition | 2.350 ms | 2.294 ms | 2.4 percent faster |
+
+These gains do not define a completion threshold.
 
 ## 24. Rejected designs
 

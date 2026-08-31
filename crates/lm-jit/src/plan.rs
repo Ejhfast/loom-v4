@@ -347,6 +347,12 @@ pub(super) struct Segment {
     pub(super) end: u32,
     pub(super) cost: u32,
     pub(super) fuel_reserve: u32,
+    /// Instructions executed after the active reserve and before this segment.
+    pub(super) reserved_prefix_cost: u32,
+    /// Successor edges that retain the active reserve without one fuel write.
+    pub(super) carry_reserved_cost: Vec<bool>,
+    /// True when canonical machine state can use this segment's reserved path.
+    pub(super) fast_entry: bool,
     pub(super) exit: SegmentExit,
     pub(super) uses: Vec<bool>,
     pub(super) definitions: Vec<bool>,
@@ -827,6 +833,7 @@ impl RegionPlan {
             debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
         }
         compute_fuel_reserves(&mut segments)?;
+        compute_reserved_costs(&mut segments)?;
         for segment in &segments {
             for successor in &segment.successors {
                 if !stacks_use_equal_representations(
@@ -1121,6 +1128,9 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 end: instruction_index as u32 + 1,
                 cost: instruction_index as u32 + 1 - start as u32,
                 fuel_reserve: 0,
+                reserved_prefix_cost: 0,
+                carry_reserved_cost: Vec::new(),
+                fast_entry: true,
                 exit,
                 uses: Vec::new(),
                 definitions: Vec::new(),
@@ -1168,6 +1178,48 @@ fn compute_fuel_reserves(segments: &mut [Segment]) -> Result<(), UnsupportedReas
             .cost
             .checked_add(tail)
             .ok_or(UnsupportedReason::RegionLimit)?;
+    }
+    Ok(())
+}
+
+pub(super) fn compute_reserved_costs(segments: &mut [Segment]) -> Result<(), UnsupportedReason> {
+    let mut bypass_predecessors = vec![0usize; segments.len()];
+    let mut other_predecessors = vec![false; segments.len()];
+    for (index, segment) in segments.iter().enumerate() {
+        for successor in segment.successors.iter().copied() {
+            let count = bypass_predecessors
+                .get_mut(successor)
+                .ok_or(UnsupportedReason::InvalidControlFlow)?;
+            if bypasses_fuel_check(segment, index, successor) {
+                *count = count.checked_add(1).ok_or(UnsupportedReason::RegionLimit)?;
+            } else {
+                other_predecessors[successor] = true;
+            }
+        }
+    }
+
+    let carries_into: Vec<bool> = (0..segments.len())
+        .map(|index| index != 0 && bypass_predecessors[index] == 1 && !other_predecessors[index])
+        .collect();
+    for (index, segment) in segments.iter_mut().enumerate() {
+        segment.fast_entry = !carries_into[index];
+        segment.carry_reserved_cost = vec![false; segment.successors.len()];
+    }
+
+    for index in 0..segments.len() {
+        let pending = segments[index]
+            .reserved_prefix_cost
+            .checked_add(segments[index].cost)
+            .ok_or(UnsupportedReason::RegionLimit)?;
+        let successors = segments[index].successors.clone();
+        for (edge, successor) in successors.into_iter().enumerate() {
+            let carries =
+                bypasses_fuel_check(&segments[index], index, successor) && carries_into[successor];
+            segments[index].carry_reserved_cost[edge] = carries;
+            if carries {
+                segments[successor].reserved_prefix_cost = pending;
+            }
+        }
     }
     Ok(())
 }

@@ -172,6 +172,20 @@ fn segments_split_conditional_fallthrough() {
         .map(|segment| segment.fuel_reserve)
         .collect();
     assert_eq!(reserves, vec![13, 10, 6, 5, 2]);
+    let reserved_prefixes: Vec<u32> = plan
+        .segments
+        .iter()
+        .map(|segment| segment.reserved_prefix_cost)
+        .collect();
+    assert_eq!(reserved_prefixes, vec![0, 0, 4, 5, 4]);
+    let fast_entries: Vec<bool> = plan
+        .segments
+        .iter()
+        .map(|segment| segment.fast_entry)
+        .collect();
+    assert_eq!(fast_entries, vec![true, true, false, false, false]);
+    assert_eq!(plan.segments[1].carry_reserved_cost, vec![true, true]);
+    assert_eq!(plan.segments[3].carry_reserved_cost, vec![false]);
 }
 
 #[test]
@@ -182,6 +196,9 @@ fn liveness_ignores_a_local_replaced_before_use() {
         end: 3,
         cost: 3,
         fuel_reserve: 3,
+        reserved_prefix_cost: 0,
+        carry_reserved_cost: vec![],
+        fast_entry: true,
         exit: SegmentExit::Return,
         uses: vec![false, true],
         definitions: vec![true, false],
