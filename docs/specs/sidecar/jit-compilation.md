@@ -10,6 +10,8 @@ One reserved acyclic path can charge several segments with one fuel update.
 
 Common native allocations omit unrelated root stores before the rare collection path.
 
+Native local initialization uses the canonical frame-state bytes.
+
 Representative-program gains remain.
 
 This sidecar refines the executor contract in the multi-threaded scheduler sidecar.
@@ -2702,6 +2704,42 @@ The release comparison used commit `48334ca` as its exact parent baseline.
 The small timing changes do not define this stage.
 
 The completed fast and slow allocation contract defines this stage.
+
+### Stage F51: Keep local initialization in canonical state
+
+- use each native frame's state bytes as the only local initialization state;
+- initialize every guarded live local before native entry;
+- initialize one dormant local when native code first stores it;
+- materialize every initialized root-frame local;
+- preserve dormant locals that native code did not read or write;
+- remove local-state SSA values from fast and exact-fuel control flow;
+- remove local-state values from the shared exact-fuel exit signature.
+
+Liveness proves that a live segment-entry local already has initialized state.
+
+A later `StoreLocal` does not write the same state byte again.
+
+The integer loop contains no local-state load or store on its hot backedge.
+
+The focused JIT suite passed 150 tests.
+
+The dormant-value test preserved a wrong inactive local across native execution.
+
+The direct and scheduled corpus differential passed in 39.28 seconds.
+
+The prior checkpoint took 53.36 seconds in the same debug test configuration.
+
+The release comparison used commit `85ce062` as its exact parent baseline.
+
+| Native warm row | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Integer loop | 0.578 ms | 0.542 ms | 6.2 percent faster |
+
+The focused scalar group also preserved exact fuel and fault behavior.
+
+This change removes one redundant state representation.
+
+It does not complete the broader code-density work.
 
 ## 24. Rejected designs
 

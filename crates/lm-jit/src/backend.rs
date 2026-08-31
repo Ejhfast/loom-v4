@@ -19,7 +19,7 @@ use crate::{
     EXIT_GROW_ACTIVATION, EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT,
     EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
     EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
-    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, AliasRegion, InstBuilder,
@@ -323,7 +323,6 @@ struct NativeValues<'a> {
     locals: &'a [Variable],
     local_kinds: &'a [ScalarKind],
     local_tags: &'a [Option<Variable>],
-    local_states: &'a [Variable],
     local_heap_caches: &'a [Option<LocalHeapCache>],
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
@@ -903,7 +902,6 @@ fn emit_region(
     for _ in 0..exact_fuel_exit.local_count {
         builder.append_block_param(exact_fuel_exit.block, types::I64);
         builder.append_block_param(exact_fuel_exit.block, types::I64);
-        builder.append_block_param(exact_fuel_exit.block, types::I8);
     }
     for _ in 0..exact_fuel_exit.max_stack {
         builder.append_block_param(exact_fuel_exit.block, types::I64);
@@ -944,13 +942,10 @@ fn emit_region(
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
     let mut local_tags = Vec::with_capacity(plan.local_kinds.len());
-    let mut local_states = Vec::with_capacity(plan.local_kinds.len());
     for slot in 0..plan.local_kinds.len() {
         let local = builder.declare_var(types::I64);
-        let state = builder.declare_var(types::I8);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), local_pointer, offset);
@@ -965,17 +960,9 @@ fn emit_region(
         } else {
             None
         };
-        let local_state = builder.ins().load(
-            types::I8,
-            MemFlags::new(),
-            local_state_pointer,
-            state_offset,
-        );
         builder.def_var(local, value);
-        builder.def_var(state, local_state);
         locals.push(local);
         local_tags.push(tag);
-        local_states.push(state);
     }
     let zero_pointer = builder.ins().iconst(pointer_type, 0);
     let zero_i64 = builder.ins().iconst(types::I64, 0);
@@ -1054,7 +1041,6 @@ fn emit_region(
         locals: &locals,
         local_kinds: &plan.local_kinds,
         local_tags: &local_tags,
-        local_states: &local_states,
         local_heap_caches: &local_heap_caches,
         stack: &stack,
         stack_tags: &stack_tags,
@@ -1391,6 +1377,9 @@ fn emit_segment(
             })
             .collect::<Result<_, CompileError>>()?
     };
+    // The entry guard initializes each live local in canonical state storage.
+    // A store only initializes a slot that was dormant at this entry.
+    let mut initialized_locals = segment.live_in.clone();
     let code =
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
     for (within, instruction) in code.iter().copied().enumerate() {
@@ -1632,7 +1621,7 @@ fn emit_segment(
                         roots.push(NativeRoot {
                             bits: builder.use_var(variable),
                             tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
-                            state: Some(builder.use_var(values.local_states[slot])),
+                            state: Some(emit_local_state(builder, values, slot)?),
                         });
                     }
                 }
@@ -1751,10 +1740,13 @@ fn emit_segment(
                     plan.local_kinds[slot],
                     value.tag,
                 )?;
-                let state = builder
-                    .ins()
-                    .iconst(types::I8, i64::from(LOCAL_DIRTY | LOCAL_INITIALIZED));
-                builder.def_var(values.local_states[slot], state);
+                if !initialized_locals[slot] {
+                    let state = builder
+                        .ins()
+                        .iconst(types::I8, i64::from(LOCAL_INITIALIZED));
+                    store_local_state(builder, values, slot, state)?;
+                    initialized_locals[slot] = true;
+                }
                 values.heap_translations.borrow_mut().forget_local(slot);
                 clear_local_heap_cache(builder, values, slot);
             }
@@ -6939,6 +6931,33 @@ fn define_slot_tag(
     Ok(())
 }
 
+fn emit_local_state(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    slot: usize,
+) -> Result<ir::Value, CompileError> {
+    let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+    Ok(builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        values.local_state_pointer,
+        offset,
+    ))
+}
+
+fn store_local_state(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    slot: usize,
+    state: ir::Value,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
+    builder
+        .ins()
+        .store(MemFlags::new(), state, values.local_state_pointer, offset);
+    Ok(())
+}
+
 fn clear_local_heap_cache(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -7019,7 +7038,7 @@ fn emit_exact_fuel_check(
     let fuel = builder.use_var(values.fuel);
     let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
     let mut arguments: Vec<ir::BlockArg> = Vec::with_capacity(
-        4 + exit.local_count.saturating_mul(3) + exit.max_stack.saturating_mul(2),
+        4 + exit.local_count.saturating_mul(2) + exit.max_stack.saturating_mul(2),
     );
     arguments.push(emit_retired(builder, values).into());
     arguments.push(builder.ins().iconst(types::I32, i64::from(block)).into());
@@ -7041,7 +7060,6 @@ fn emit_exact_fuel_check(
     for (slot, kind) in values.local_kinds.iter().copied().enumerate() {
         arguments.push(builder.use_var(values.locals[slot]).into());
         arguments.push(emit_slot_tag(builder, values.local_tags[slot], kind)?.into());
-        arguments.push(builder.use_var(values.local_states[slot]).into());
     }
     let zero = builder.ins().iconst(types::I64, 0);
     for slot in 0..exit.max_stack {
@@ -7070,7 +7088,7 @@ fn emit_exact_fuel_exit(
     let expected = 4usize
         .checked_add(
             exit.local_count
-                .checked_mul(3)
+                .checked_mul(2)
                 .ok_or(CompileError::Backend)?,
         )
         .and_then(|count| count.checked_add(exit.max_stack.checked_mul(2)?))
@@ -7086,7 +7104,6 @@ fn emit_exact_fuel_exit(
     for slot in 0..exit.local_count {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         builder.ins().store(
             MemFlags::new(),
             parameters[parameter],
@@ -7099,13 +7116,7 @@ fn emit_exact_fuel_exit(
             values.local_tag_pointer,
             offset,
         );
-        builder.ins().store(
-            MemFlags::new(),
-            parameters[parameter + 2],
-            values.local_state_pointer,
-            state_offset,
-        );
-        parameter += 3;
+        parameter += 2;
     }
     for slot in 0..exit.max_stack {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
@@ -10921,7 +10932,7 @@ fn collect_native_roots(
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
                 tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
-                state: Some(builder.use_var(values.local_states[slot])),
+                state: Some(emit_local_state(builder, values, slot)?),
             });
         }
     }
@@ -10951,7 +10962,7 @@ fn collect_capture_allocation_roots(
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
                 tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
-                state: Some(builder.use_var(values.local_states[slot])),
+                state: Some(emit_local_state(builder, values, slot)?),
             });
         }
     }
@@ -14188,22 +14199,14 @@ fn emit_spill_frame_roots(
         }
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         let bits = builder.use_var(values.locals[slot]);
         let tag = emit_slot_tag(builder, values.local_tags[slot], kind)?;
-        let state = builder.use_var(values.local_states[slot]);
         builder
             .ins()
             .store(MemFlags::new(), bits, values.local_pointer, offset);
         builder
             .ins()
             .store(MemFlags::new(), tag, values.local_tag_pointer, offset);
-        builder.ins().store(
-            MemFlags::new(),
-            state,
-            values.local_state_pointer,
-            state_offset,
-        );
     }
     for (slot, (kind, value)) in stack_kinds
         .iter()
@@ -14242,22 +14245,14 @@ fn emit_spill_frame_to(
     for (slot, variable) in values.locals.iter().copied().enumerate() {
         let value = builder.use_var(variable);
         let tag = emit_slot_tag(builder, values.local_tags[slot], values.local_kinds[slot])?;
-        let state = builder.use_var(values.local_states[slot]);
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
-        let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         builder
             .ins()
             .store(MemFlags::new(), value, values.local_pointer, local_offset);
         builder
             .ins()
             .store(MemFlags::new(), tag, values.local_tag_pointer, local_offset);
-        builder.ins().store(
-            MemFlags::new(),
-            state,
-            values.local_state_pointer,
-            state_offset,
-        );
     }
     for (slot, value) in stack.iter().copied().enumerate() {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)

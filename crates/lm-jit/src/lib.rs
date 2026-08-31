@@ -48,7 +48,7 @@ pub use activation::{
     NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut,
     NativeRootError, NativeRoots, NativeRuntime, NativeTypeEnvironmentCache,
     NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
-    LOCAL_DIRTY, LOCAL_INITIALIZED,
+    LOCAL_INITIALIZED,
 };
 use activation::{
     NativeFunction, NativeRuntimeFunctions, RawExit, RawNativeActivation, RawRuntimeContext,

@@ -5,7 +5,7 @@ use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, ImageSlotTarge
 use crate::NamespaceRuntime;
 use lm_heap::Object;
 use lm_jit::{
-    ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind, LOCAL_DIRTY,
+    ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind,
     LOCAL_INITIALIZED,
 };
 use lm_value::{ObjRef, TypeEnvId, Value, ValueTag};
@@ -1693,7 +1693,7 @@ fn materialize_native_frames(
 
         if index == 0 {
             for (slot, state) in frame.states().iter().copied().enumerate() {
-                if state & LOCAL_DIRTY != 0 {
+                if state & LOCAL_INITIALIZED != 0 {
                     machine.vm.locals[root_base + slot] = parts_value(
                         region.local_kinds()[slot],
                         frame.local_tags()[slot],

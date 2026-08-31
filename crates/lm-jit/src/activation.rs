@@ -31,8 +31,6 @@ pub(super) const IMAGE_SLOT_CLASS: u32 = 2;
 const IMAGE_SLOT_VALUE: u32 = 3;
 const IMAGE_SLOT_PROCESS: u32 = 4;
 
-/// The native local changed during this activation.
-pub const LOCAL_DIRTY: u8 = 1;
 /// The native local contains an initialized value.
 pub const LOCAL_INITIALIZED: u8 = 2;
 
@@ -896,7 +894,7 @@ impl NativeFrameView<'_> {
         self.local_tags
     }
 
-    /// Return the local initialization and mutation states.
+    /// Return the local initialization states.
     pub fn states(&self) -> &[u8] {
         self.states
     }
