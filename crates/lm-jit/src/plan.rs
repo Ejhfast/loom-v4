@@ -1950,6 +1950,31 @@ fn analyze_segment(
                     stack: before.stack.clone(),
                 });
             }
+            Instr::Native(
+                NativeInstr::StrConcat
+                | NativeInstr::TextTrim
+                | NativeInstr::TextTrimStart
+                | NativeInstr::TextTrimEnd
+                | NativeInstr::TextToLowerAscii
+                | NativeInstr::TextToUpperAscii
+                | NativeInstr::TextReplace
+                | NativeInstr::TextPadStart
+                | NativeInstr::TextPadEnd
+                | NativeInstr::TextSplit
+                | NativeInstr::TextLines
+                | NativeInstr::TextSlice
+                | NativeInstr::TextSliceBytes
+                | NativeInstr::TextBytes
+                | NativeInstr::TextToString
+                | NativeInstr::BytesText
+                | NativeInstr::BytesHex,
+            )
+            | Instr::Numeric(NumericInstr::FloatFixed) => {
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
             Instr::ListPush => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 1)?;

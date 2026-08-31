@@ -1714,6 +1714,62 @@ fn bench_jit_builder_construction() {
     );
 }
 
+#[test]
+#[ignore]
+fn bench_jit_text_and_conversion_operations() {
+    println!(
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"
+    );
+    report_jit(
+        "jit_text_search",
+        concat!(
+            "text: Text = \"alpha,beta,gamma\"\ni = 0\ntotal = 0\n",
+            "while i < 200000\n",
+            "  if text.starts_with(\"alpha\") then total = total + 1 end\n",
+            "  if text.ends_with(\"gamma\") then total = total + 1 end\n",
+            "  if text.contains(\"beta\") then\n",
+            "    case text.find(\"beta\")\n",
+            "    in Some(index) then total = total + index\n",
+            "    in None then total = total - 1\n",
+            "    end\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_text_transform",
+        concat!(
+            "text: Text = \"  Alpha,beta  \"\ni = 0\ntotal = 0\n",
+            "while i < 20000\n",
+            "  mapped = text.trim().to_lower_ascii().replace(\",\", \"|\")\n",
+            "  total = total + mapped.len()\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_numeric_conversion",
+        concat!(
+            "i = 0\ntotal = 0\n",
+            "while i < 50000\n",
+            "  case \"7f\".parse_int(16)\n",
+            "  in Ok(value) then total = total + value\n",
+            "  in Err(_) then total = total - 1\n",
+            "  end\n",
+            "  case \"12.5\".parse_float()\n",
+            "  in Ok(value) then total = total + value.fixed(1).len()\n",
+            "  in Err(_) then total = total - 1\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+        0,
+    );
+}
+
 // ---------------------------------------------------------------
 // Group 1: representative JIT programs.
 // ---------------------------------------------------------------

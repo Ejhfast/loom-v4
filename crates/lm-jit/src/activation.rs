@@ -408,6 +408,39 @@ pub(super) struct RawNativeFunctions {
     pub(super) bytes_bit_or: RawHeapOperation,
     pub(super) bytes_bit_xor: RawHeapOperation,
     pub(super) bytes_bit_not: RawHeapOperation,
+    pub(super) text_concat: RawHeapOperation,
+    pub(super) text_starts_with: RawHeapOperation,
+    pub(super) text_ends_with: RawHeapOperation,
+    pub(super) text_contains: RawHeapOperation,
+    pub(super) text_find_scalar: RawHeapOperation,
+    pub(super) text_find_byte: RawHeapOperation,
+    pub(super) text_trim: RawHeapOperation,
+    pub(super) text_trim_start: RawHeapOperation,
+    pub(super) text_trim_end: RawHeapOperation,
+    pub(super) text_lower_ascii: RawHeapOperation,
+    pub(super) text_upper_ascii: RawHeapOperation,
+    pub(super) text_replace: RawHeapOperation,
+    pub(super) text_parse_int_status: RawHeapOperation,
+    pub(super) text_parse_int_value: RawHeapOperation,
+    pub(super) text_pad_start: RawHeapOperation,
+    pub(super) text_pad_end: RawHeapOperation,
+    pub(super) bytes_ends_with: RawHeapOperation,
+    pub(super) bytes_contains: RawHeapOperation,
+    pub(super) text_split: RawHeapOperation,
+    pub(super) text_lines: RawHeapOperation,
+    pub(super) text_slice: RawHeapOperation,
+    pub(super) text_slice_bytes: RawHeapOperation,
+    pub(super) text_bytes: RawHeapOperation,
+    pub(super) text_to_string: RawHeapOperation,
+    pub(super) bytes_text: RawHeapOperation,
+    pub(super) byte_buffer_find_from: RawHeapOperation,
+    pub(super) bytes_starts_with: RawHeapOperation,
+    pub(super) bytes_find_index: RawHeapOperation,
+    pub(super) bytes_hex: RawHeapOperation,
+    pub(super) bytes_is_utf8: RawHeapOperation,
+    pub(super) text_parse_float_status: RawHeapOperation,
+    pub(super) text_parse_float_value: RawHeapOperation,
+    pub(super) float_fixed: RawHeapOperation,
 }
 
 pub(super) type NativeFunction = unsafe extern "C" fn(
@@ -1446,6 +1479,106 @@ pub trait NativeRuntime {
 
     /// Invert one immutable byte value.
     fn bytes_bit_not(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Concatenate two text values.
+    fn text_concat(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test one text prefix.
+    fn text_starts_with(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test one text suffix.
+    fn text_ends_with(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test whether one text value contains another.
+    fn text_contains(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Find one text value by scalar index.
+    fn text_find_scalar(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Find one text value by byte index.
+    fn text_find_byte(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Remove outer whitespace from one text value.
+    fn text_trim(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Remove leading whitespace from one text value.
+    fn text_trim_start(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Remove trailing whitespace from one text value.
+    fn text_trim_end(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Convert ASCII letters to lower case.
+    fn text_lower_ascii(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Convert ASCII letters to upper case.
+    fn text_upper_ascii(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Replace each text match.
+    fn text_replace(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one integer parse status.
+    fn text_parse_int_status(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one parsed integer value.
+    fn text_parse_int_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Pad the start of one text value.
+    fn text_pad_start(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Pad the end of one text value.
+    fn text_pad_end(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test one immutable byte suffix.
+    fn bytes_ends_with(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test whether one byte value contains another.
+    fn bytes_contains(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Split one text value.
+    fn text_split(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Split one text value into lines.
+    fn text_lines(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one scalar-indexed text slice.
+    fn text_slice(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one byte-indexed text slice.
+    fn text_slice_bytes(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Share one text value as immutable bytes.
+    fn text_bytes(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Convert one text view to a string.
+    fn text_to_string(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Decode immutable UTF-8 bytes as a string.
+    fn bytes_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Find immutable bytes in one byte buffer.
+    fn byte_buffer_find_from(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test one immutable byte prefix.
+    fn bytes_starts_with(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Find one immutable byte value.
+    fn bytes_find_index(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Format immutable bytes as hexadecimal text.
+    fn bytes_hex(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test whether immutable bytes contain valid UTF-8.
+    fn bytes_is_utf8(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one float parse status.
+    fn text_parse_float_status(&mut self, request: HeapOperationRequest<'_>)
+        -> HeapOperationResult;
+
+    /// Return one parsed float value.
+    fn text_parse_float_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Format one float with fixed precision.
+    fn float_fixed(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 }
 
 /// One checked list-growth result.
@@ -2513,6 +2646,39 @@ heap_operation_entry!(bytes_bit_and, bytes_bit_and);
 heap_operation_entry!(bytes_bit_or, bytes_bit_or);
 heap_operation_entry!(bytes_bit_xor, bytes_bit_xor);
 heap_operation_entry!(bytes_bit_not, bytes_bit_not);
+heap_operation_entry!(text_concat, text_concat);
+heap_operation_entry!(text_starts_with, text_starts_with);
+heap_operation_entry!(text_ends_with, text_ends_with);
+heap_operation_entry!(text_contains, text_contains);
+heap_operation_entry!(text_find_scalar, text_find_scalar);
+heap_operation_entry!(text_find_byte, text_find_byte);
+heap_operation_entry!(text_trim, text_trim);
+heap_operation_entry!(text_trim_start, text_trim_start);
+heap_operation_entry!(text_trim_end, text_trim_end);
+heap_operation_entry!(text_lower_ascii, text_lower_ascii);
+heap_operation_entry!(text_upper_ascii, text_upper_ascii);
+heap_operation_entry!(text_replace, text_replace);
+heap_operation_entry!(text_parse_int_status, text_parse_int_status);
+heap_operation_entry!(text_parse_int_value, text_parse_int_value);
+heap_operation_entry!(text_pad_start, text_pad_start);
+heap_operation_entry!(text_pad_end, text_pad_end);
+heap_operation_entry!(bytes_ends_with, bytes_ends_with);
+heap_operation_entry!(bytes_contains, bytes_contains);
+heap_operation_entry!(text_split, text_split);
+heap_operation_entry!(text_lines, text_lines);
+heap_operation_entry!(text_slice, text_slice);
+heap_operation_entry!(text_slice_bytes, text_slice_bytes);
+heap_operation_entry!(text_bytes, text_bytes);
+heap_operation_entry!(text_to_string, text_to_string);
+heap_operation_entry!(bytes_text, bytes_text);
+heap_operation_entry!(byte_buffer_find_from, byte_buffer_find_from);
+heap_operation_entry!(bytes_starts_with, bytes_starts_with);
+heap_operation_entry!(bytes_find_index, bytes_find_index);
+heap_operation_entry!(bytes_hex, bytes_hex);
+heap_operation_entry!(bytes_is_utf8, bytes_is_utf8);
+heap_operation_entry!(text_parse_float_status, text_parse_float_status);
+heap_operation_entry!(text_parse_float_value, text_parse_float_value);
+heap_operation_entry!(float_fixed, float_fixed);
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn heap_operation<R: NativeRuntime>(

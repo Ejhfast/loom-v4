@@ -1537,7 +1537,7 @@ fn builders_and_byte_construction_use_dedicated_paths() {
     assert_eq!(native, interpreted, "{metrics:?}");
     assert_eq!(native_dump, interpreted_dump);
     assert!(matches!(native, Outcome::Done(_)));
-    assert_eq!(metrics.compiled_interpreter_sites, 1, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
 }
 
@@ -1614,6 +1614,82 @@ fn builder_growth_preserves_the_heap_limit() {
     assert_eq!(native, interpreted, "{metrics:?}");
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+}
+
+#[test]
+fn text_byte_and_conversion_algorithms_use_dedicated_paths() {
+    let source = concat!(
+        "base: Text = \"  Ab,é,,C  \"\n",
+        "joined = base.concat(\"!\")\n",
+        "checks = (base.starts_with(\"  A\"), base.ends_with(\"  \"), ",
+        "base.contains(\"é\"), base.find(\"é\"), base.find_bytes(\"é\"))\n",
+        "trimmed = (base.trim(), base.trim_start(), base.trim_end())\n",
+        "mapped = (base.to_lower_ascii(), base.to_upper_ascii())\n",
+        "replaced = base.replace(\",\", \"|\")\n",
+        "padded = (\"x\".pad_start(3), \"x\".pad_end(3))\n",
+        "pieces = \"a,b,,c\".split(\",\")\n",
+        "lines = \"a\\r\\nb\\n\".lines()\n",
+        "scalar_slice = case base.slice(2, 2)\n",
+        "in Ok(value) then value.to_string()\n",
+        "in Err(_) then \"bad\"\n",
+        "end\n",
+        "byte_slice = case base.slice_bytes(2, 2)\n",
+        "in Ok(value) then value.to_string()\n",
+        "in Err(_) then \"bad\"\n",
+        "end\n",
+        "bytes = base.bytes()\n",
+        "byte_checks = (bytes.starts_with(Bytes(\"  A\")), bytes.ends_with(Bytes(\"  \")), ",
+        "bytes.contains(Bytes(\"é\")), bytes.find(Bytes(\"é\")), bytes.hex(), bytes.utf8())\n",
+        "buffer = ByteBuffer().extend(Bytes(\"abcabc\"))\n",
+        "buffer_find = buffer.find_from(Bytes(\"bc\"), 2)\n",
+        "numbers = (\"7f\".parse_int(16), \"bad\".parse_int(10), ",
+        "\"1.25\".parse_float(), \"bad\".parse_float(), 12.5.fixed(2))\n",
+        "(joined, checks, trimmed, mapped, replaced, padded, pieces, lines, ",
+        "scalar_slice, byte_slice, byte_checks, buffer_find, numbers)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-text-algorithms.lm", source)
+        .expect("the text algorithm case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(matches!(native, Outcome::Done(_)));
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+}
+
+#[test]
+fn text_algorithms_match_each_fuel_boundary() {
+    let source = concat!(
+        "text = \"  abc,def  \"\n",
+        "bytes = text.trim().to_string().bytes()\n",
+        "parts = text.split(\",\")\n",
+        "(text.replace(\"abc\", \"ABC\"), bytes.hex(), parts, 1.25.fixed(3))\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-text-fuel.lm", source).expect("the text fuel case compiles");
+    for fuel in 0..=96 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
+fn text_conversion_faults_match_the_interpreter() {
+    let cases = [
+        ("1.5.fixed(-1)\n", lm_vm::FaultCode::InvalidPrecision),
+        ("b\"\\xff\".text()\n", lm_vm::FaultCode::BadCast),
+    ];
+    for (source, expected) in cases {
+        let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted, "{metrics:?}");
+        assert_eq!(native_dump, interpreted_dump);
+        assert_eq!(native, Outcome::Fault(expected));
+    }
 }
 
 #[test]

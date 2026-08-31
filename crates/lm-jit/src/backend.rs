@@ -3917,6 +3917,351 @@ fn emit_segment(
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Int, result)?;
             }
+            Instr::Native(
+                NativeInstr::StrConcat
+                | NativeInstr::StrStartsWith
+                | NativeInstr::StrEndsWith
+                | NativeInstr::StrContains
+                | NativeInstr::StrFindIndex
+                | NativeInstr::TextFindByteIndex
+                | NativeInstr::TextTrim
+                | NativeInstr::TextTrimStart
+                | NativeInstr::TextTrimEnd
+                | NativeInstr::TextToLowerAscii
+                | NativeInstr::TextToUpperAscii
+                | NativeInstr::TextReplace
+                | NativeInstr::TextParseIntStatus
+                | NativeInstr::TextParseIntValue
+                | NativeInstr::TextPadStart
+                | NativeInstr::TextPadEnd
+                | NativeInstr::BytesEndsWith
+                | NativeInstr::BytesContains
+                | NativeInstr::TextSplit
+                | NativeInstr::TextLines
+                | NativeInstr::TextSlice
+                | NativeInstr::TextSliceBytes
+                | NativeInstr::TextBytes
+                | NativeInstr::TextToString
+                | NativeInstr::BytesText
+                | NativeInstr::BbFindFrom
+                | NativeInstr::BytesStartsWith
+                | NativeInstr::BytesFindIndex
+                | NativeInstr::BytesHex
+                | NativeInstr::BytesIsUtf8,
+            )
+            | Instr::Numeric(
+                NumericInstr::TextParseFloatStatus
+                | NumericInstr::TextParseFloatValue
+                | NumericInstr::FloatFixed,
+            ) => {
+                let position = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let roots = match segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                {
+                    Some(site) => collect_native_roots(
+                        builder,
+                        values,
+                        &plan.local_kinds,
+                        &site.stack,
+                        &stack,
+                    )?,
+                    None => Vec::new(),
+                };
+                let zero = builder.ins().iconst(types::I64, 0);
+                let (arguments, function_offset, result_kind) = match instruction {
+                    Instr::Native(NativeInstr::StrConcat) => {
+                        let right = pop_native(&mut stack)?;
+                        let left = pop_native(&mut stack)?;
+                        (
+                            [left, right, zero],
+                            mem::offset_of!(RawNativeFunctions, text_concat),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::StrStartsWith) => {
+                        let prefix = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, prefix, zero],
+                            mem::offset_of!(RawNativeFunctions, text_starts_with),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::StrEndsWith) => {
+                        let suffix = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, suffix, zero],
+                            mem::offset_of!(RawNativeFunctions, text_ends_with),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::StrContains) => {
+                        let needle = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, needle, zero],
+                            mem::offset_of!(RawNativeFunctions, text_contains),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::StrFindIndex) => {
+                        let needle = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, needle, zero],
+                            mem::offset_of!(RawNativeFunctions, text_find_scalar),
+                            ScalarKind::Int,
+                        )
+                    }
+                    Instr::Native(NativeInstr::TextFindByteIndex) => {
+                        let needle = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, needle, zero],
+                            mem::offset_of!(RawNativeFunctions, text_find_byte),
+                            ScalarKind::Int,
+                        )
+                    }
+                    Instr::Native(
+                        operation @ (NativeInstr::TextTrim
+                        | NativeInstr::TextTrimStart
+                        | NativeInstr::TextTrimEnd),
+                    ) => {
+                        let text = pop_native(&mut stack)?;
+                        let function_offset = match operation {
+                            NativeInstr::TextTrim => {
+                                mem::offset_of!(RawNativeFunctions, text_trim)
+                            }
+                            NativeInstr::TextTrimStart => {
+                                mem::offset_of!(RawNativeFunctions, text_trim_start)
+                            }
+                            NativeInstr::TextTrimEnd => {
+                                mem::offset_of!(RawNativeFunctions, text_trim_end)
+                            }
+                            _ => return Err(CompileError::Backend),
+                        };
+                        ([text, zero, zero], function_offset, ScalarKind::Object(0))
+                    }
+                    Instr::Native(
+                        operation @ (NativeInstr::TextToLowerAscii | NativeInstr::TextToUpperAscii),
+                    ) => {
+                        let text = pop_native(&mut stack)?;
+                        let function_offset = if matches!(operation, NativeInstr::TextToLowerAscii)
+                        {
+                            mem::offset_of!(RawNativeFunctions, text_lower_ascii)
+                        } else {
+                            mem::offset_of!(RawNativeFunctions, text_upper_ascii)
+                        };
+                        ([text, zero, zero], function_offset, ScalarKind::Object(0))
+                    }
+                    Instr::Native(NativeInstr::TextReplace) => {
+                        let replacement = pop_native(&mut stack)?;
+                        let needle = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, needle, replacement],
+                            mem::offset_of!(RawNativeFunctions, text_replace),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(
+                        operation @ (NativeInstr::TextParseIntStatus
+                        | NativeInstr::TextParseIntValue),
+                    ) => {
+                        let radix = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        let function_offset =
+                            if matches!(operation, NativeInstr::TextParseIntStatus) {
+                                mem::offset_of!(RawNativeFunctions, text_parse_int_status)
+                            } else {
+                                mem::offset_of!(RawNativeFunctions, text_parse_int_value)
+                            };
+                        ([text, radix, zero], function_offset, ScalarKind::Int)
+                    }
+                    Instr::Native(
+                        operation @ (NativeInstr::TextPadStart | NativeInstr::TextPadEnd),
+                    ) => {
+                        let width = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        let function_offset = if matches!(operation, NativeInstr::TextPadStart) {
+                            mem::offset_of!(RawNativeFunctions, text_pad_start)
+                        } else {
+                            mem::offset_of!(RawNativeFunctions, text_pad_end)
+                        };
+                        ([text, width, zero], function_offset, ScalarKind::Object(0))
+                    }
+                    Instr::Native(NativeInstr::BytesEndsWith) => {
+                        let suffix = pop_native(&mut stack)?;
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, suffix, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_ends_with),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesContains) => {
+                        let needle = pop_native(&mut stack)?;
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, needle, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_contains),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::TextSplit) => {
+                        let separator = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, separator, zero],
+                            mem::offset_of!(RawNativeFunctions, text_split),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::TextLines) => {
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, text_lines),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(
+                        operation @ (NativeInstr::TextSlice | NativeInstr::TextSliceBytes),
+                    ) => {
+                        let length = pop_native(&mut stack)?;
+                        let start = pop_native(&mut stack)?;
+                        let text = pop_native(&mut stack)?;
+                        let function_offset = if matches!(operation, NativeInstr::TextSlice) {
+                            mem::offset_of!(RawNativeFunctions, text_slice)
+                        } else {
+                            mem::offset_of!(RawNativeFunctions, text_slice_bytes)
+                        };
+                        (
+                            [text, start, length],
+                            function_offset,
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::TextBytes) => {
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, text_bytes),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::TextToString) => {
+                        let text = pop_native(&mut stack)?;
+                        (
+                            [text, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, text_to_string),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesText) => {
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_text),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BbFindFrom) => {
+                        let start = pop_native(&mut stack)?;
+                        let needle = pop_native(&mut stack)?;
+                        let buffer = pop_native(&mut stack)?;
+                        (
+                            [buffer, needle, start],
+                            mem::offset_of!(RawNativeFunctions, byte_buffer_find_from),
+                            ScalarKind::Int,
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesStartsWith) => {
+                        let prefix = pop_native(&mut stack)?;
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, prefix, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_starts_with),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesFindIndex) => {
+                        let needle = pop_native(&mut stack)?;
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, needle, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_find_index),
+                            ScalarKind::Int,
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesHex) => {
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_hex),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Native(NativeInstr::BytesIsUtf8) => {
+                        let bytes = pop_native(&mut stack)?;
+                        (
+                            [bytes, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, bytes_is_utf8),
+                            ScalarKind::Bool,
+                        )
+                    }
+                    Instr::Numeric(
+                        operation @ (NumericInstr::TextParseFloatStatus
+                        | NumericInstr::TextParseFloatValue),
+                    ) => {
+                        let text = pop_native(&mut stack)?;
+                        let (function_offset, result_kind) =
+                            if matches!(operation, NumericInstr::TextParseFloatStatus) {
+                                (
+                                    mem::offset_of!(RawNativeFunctions, text_parse_float_status),
+                                    ScalarKind::Int,
+                                )
+                            } else {
+                                (
+                                    mem::offset_of!(RawNativeFunctions, text_parse_float_value),
+                                    ScalarKind::Float,
+                                )
+                            };
+                        ([text, zero, zero], function_offset, result_kind)
+                    }
+                    Instr::Numeric(NumericInstr::FloatFixed) => {
+                        let digits = pop_native(&mut stack)?;
+                        let value = pop_native(&mut stack)?;
+                        (
+                            [value, digits, zero],
+                            mem::offset_of!(RawNativeFunctions, float_fixed),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_heap_operation(
+                    builder,
+                    values,
+                    function_offset,
+                    arguments,
+                    &roots,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, result_kind, result)?;
+            }
             Instr::EqRef | Instr::NeRef => {
                 let right = pop_native(&mut stack)?;
                 let left = pop_native(&mut stack)?;

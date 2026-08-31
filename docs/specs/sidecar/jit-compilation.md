@@ -1972,6 +1972,46 @@ The representative gate remains open.
 | HTTP parse | 0.89 times | 48.53 percent |
 | HTTP serialize | 0.87 times | 41.81 percent |
 
+### Stage F30: Text, byte, and numeric conversion
+
+- compile fixed-cost text and byte queries through typed helpers;
+- compile allocating transformations through typed helpers;
+- preserve exact heap charges and collection roots;
+- preserve UTF-8, parsing, formatting, and fault behavior;
+- preserve exact fuel and scheduler state.
+
+No helper dispatches on an opcode number.
+
+Gate: All 33 text, byte, and numeric conversion operations use dedicated treatments.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 129 tests.
+
+The direct and scheduled corpus gate took 12.92 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| Text search | 88.386 ms | 79.967 ms | 43.038 ms | 2.05 times |
+| Text transformation | 6.227 ms | 16.288 ms | 6.787 ms | 0.92 times |
+| Numeric conversion | 36.904 ms | 100.922 ms | 77.980 ms | 0.47 times |
+
+The numeric row crosses many short native regions in each source operation.
+
+The batch completed 33 opcode treatments.
+
+The ledger now has 34 temporary treatments across 260 concrete operations.
+
+The representative gate remains open.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 1.00 times | 31.20 percent |
+| JSON parse | 0.97 times | 6.92 percent |
+| JSON stringify | 1.07 times | 56.72 percent |
+| HTTP parse | 0.89 times | 48.94 percent |
+| HTTP serialize | 0.86 times | 41.81 percent |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

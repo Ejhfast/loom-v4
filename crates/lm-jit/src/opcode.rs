@@ -279,9 +279,14 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
                 .with_replay()
                 .with_fault_stack(FaultStack::Pop(1))
         }
-        NumericInstr::TextParseFloatStatus
-        | NumericInstr::TextParseFloatValue
-        | NumericInstr::FloatFixed => temporary(Helper),
+        NumericInstr::TextParseFloatStatus | NumericInstr::TextParseFloatValue => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        NumericInstr::FloatFixed => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
     }
 }
 
@@ -477,35 +482,51 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         NativeInstr::BbAt => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
-        NativeInstr::StrConcat
-        | NativeInstr::StrStartsWith
+        NativeInstr::StrStartsWith
         | NativeInstr::StrEndsWith
         | NativeInstr::StrContains
         | NativeInstr::StrFindIndex
         | NativeInstr::TextFindByteIndex
-        | NativeInstr::TextTrim
+        | NativeInstr::TextParseIntStatus
+        | NativeInstr::TextParseIntValue
+        | NativeInstr::BytesEndsWith
+        | NativeInstr::BytesContains
+        | NativeInstr::BytesStartsWith
+        | NativeInstr::BytesFindIndex => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NativeInstr::BbFindFrom => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
+        NativeInstr::BytesIsUtf8 => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        NativeInstr::TextTrim
         | NativeInstr::TextTrimStart
         | NativeInstr::TextTrimEnd
         | NativeInstr::TextToLowerAscii
         | NativeInstr::TextToUpperAscii
-        | NativeInstr::TextReplace
-        | NativeInstr::TextParseIntStatus
-        | NativeInstr::TextParseIntValue
-        | NativeInstr::TextPadStart
-        | NativeInstr::TextPadEnd
-        | NativeInstr::BytesEndsWith
-        | NativeInstr::BytesContains
-        | NativeInstr::TextSplit
         | NativeInstr::TextLines
-        | NativeInstr::TextSlice
-        | NativeInstr::TextSliceBytes
         | NativeInstr::TextBytes
         | NativeInstr::TextToString
         | NativeInstr::BytesText
-        | NativeInstr::BbFindFrom
-        | NativeInstr::BytesStartsWith
-        | NativeInstr::BytesFindIndex
-        | NativeInstr::BytesHex
-        | NativeInstr::BytesIsUtf8 => temporary(Helper),
+        | NativeInstr::BytesHex => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
+        NativeInstr::StrConcat
+        | NativeInstr::TextPadStart
+        | NativeInstr::TextPadEnd
+        | NativeInstr::TextSplit => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
+        NativeInstr::TextReplace | NativeInstr::TextSlice | NativeInstr::TextSliceBytes => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(3))
+        }
     }
 }

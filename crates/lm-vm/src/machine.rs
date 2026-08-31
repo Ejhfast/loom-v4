@@ -6600,7 +6600,7 @@ pub(crate) fn float_text(value: f64) -> String {
 
 /// Parse one Float text form. Status 1 means invalid text.
 /// Status 2 means a finite decimal overflowed to infinity.
-fn parse_float_text(text: &str) -> Result<f64, i64> {
+pub(crate) fn parse_float_text(text: &str) -> Result<f64, i64> {
     match text {
         "NaN" => return Ok(f64::NAN),
         "inf" | "+inf" => return Ok(f64::INFINITY),
