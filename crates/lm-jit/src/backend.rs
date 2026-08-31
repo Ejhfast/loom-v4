@@ -315,10 +315,11 @@ fn emit_entry_wrapper(
 #[derive(Clone, Copy)]
 struct NativeValues<'a> {
     locals: &'a [Variable],
-    local_tags: &'a [Variable],
+    local_kinds: &'a [ScalarKind],
+    local_tags: &'a [Option<Variable>],
     local_states: &'a [Variable],
     stack: &'a [Variable],
-    stack_tags: &'a [Variable],
+    stack_tags: &'a [Option<Variable>],
     fuel: Variable,
     retired: Variable,
     local_pointer: ir::Value,
@@ -812,7 +813,6 @@ fn emit_region(
     let mut local_states = Vec::with_capacity(plan.local_kinds.len());
     for slot in 0..plan.local_kinds.len() {
         let local = builder.declare_var(types::I64);
-        let tag = builder.declare_var(types::I64);
         let state = builder.declare_var(types::I8);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
@@ -820,9 +820,17 @@ fn emit_region(
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), local_pointer, offset);
-        let value_tag = builder
-            .ins()
-            .load(types::I64, MemFlags::new(), local_tag_pointer, offset);
+        let tag = if value_tag(plan.local_kinds[slot]).is_none() {
+            let tag = builder.declare_var(types::I64);
+            let value_tag =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), local_tag_pointer, offset);
+            builder.def_var(tag, value_tag);
+            Some(tag)
+        } else {
+            None
+        };
         let local_state = builder.ins().load(
             types::I8,
             MemFlags::new(),
@@ -830,7 +838,6 @@ fn emit_region(
             state_offset,
         );
         builder.def_var(local, value);
-        builder.def_var(tag, value_tag);
         builder.def_var(state, local_state);
         locals.push(local);
         local_tags.push(tag);
@@ -838,19 +845,37 @@ fn emit_region(
     }
     let mut stack = Vec::with_capacity(plan.max_stack);
     let mut stack_tags = Vec::with_capacity(plan.max_stack);
-    for slot in 0..plan.max_stack {
+    let dynamic_stack_tags: Vec<bool> = (0..plan.max_stack)
+        .map(|slot| {
+            plan.segments.iter().any(|segment| {
+                segment.fuel_stacks.iter().any(|(_, kinds)| {
+                    kinds
+                        .get(slot)
+                        .copied()
+                        .is_some_and(|kind| value_tag(kind).is_none())
+                })
+            })
+        })
+        .collect();
+    for (slot, dynamic_tag) in dynamic_stack_tags.iter().copied().enumerate() {
         let variable = builder.declare_var(types::I64);
-        let tag = builder.declare_var(types::I64);
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
         let value = builder
             .ins()
             .load(types::I64, MemFlags::new(), stack_pointer, offset);
-        let value_tag = builder
-            .ins()
-            .load(types::I64, MemFlags::new(), stack_tag_pointer, offset);
+        let tag = if dynamic_tag {
+            let tag = builder.declare_var(types::I64);
+            let value_tag =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), stack_tag_pointer, offset);
+            builder.def_var(tag, value_tag);
+            Some(tag)
+        } else {
+            None
+        };
         builder.def_var(variable, value);
-        builder.def_var(tag, value_tag);
         stack.push(variable);
         stack_tags.push(tag);
     }
@@ -861,6 +886,7 @@ fn emit_region(
     builder.def_var(retired, retired_base);
     let values = NativeValues {
         locals: &locals,
+        local_kinds: &plan.local_kinds,
         local_tags: &local_tags,
         local_states: &local_states,
         stack: &stack,
@@ -1015,13 +1041,15 @@ fn emit_segment(
             .stack
             .iter()
             .copied()
-            .zip(values.stack_tags.iter().copied())
-            .take(segment.entry_stack.len())
-            .map(|(bits, tag)| NativeValue {
-                bits: builder.use_var(bits),
-                tag: builder.use_var(tag),
+            .zip(segment.entry_stack.iter().copied())
+            .enumerate()
+            .map(|(slot, (bits, kind))| {
+                Ok(NativeValue {
+                    bits: builder.use_var(bits),
+                    tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
+                })
             })
-            .collect()
+            .collect::<Result<_, CompileError>>()?
     };
     let code =
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
@@ -1043,13 +1071,15 @@ fn emit_segment(
                 .stack
                 .iter()
                 .copied()
-                .zip(values.stack_tags.iter().copied())
-                .take(kinds.len())
-                .map(|(bits, tag)| NativeValue {
-                    bits: builder.use_var(bits),
-                    tag: builder.use_var(tag),
+                .zip(kinds.iter().copied())
+                .enumerate()
+                .map(|(slot, (bits, kind))| {
+                    Ok(NativeValue {
+                        bits: builder.use_var(bits),
+                        tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
+                    })
                 })
-                .collect();
+                .collect::<Result<_, CompileError>>()?;
         }
         let prefix = within as u32 + 1;
         let deferred_boundary = within + 1 == code.len()
@@ -1246,7 +1276,7 @@ fn emit_segment(
                     if is_root_kind(kind) {
                         roots.push(NativeRoot {
                             bits: builder.use_var(variable),
-                            tag: builder.use_var(values.local_tags[slot]),
+                            tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
                             state: Some(builder.use_var(values.local_states[slot])),
                         });
                     }
@@ -1343,19 +1373,26 @@ fn emit_segment(
                 push_static(builder, &mut stack, ScalarKind::Operation, value)?;
             }
             Instr::LoadLocal(slot) => {
+                let slot = slot as usize;
                 stack.push(NativeValue {
-                    bits: builder.use_var(values.locals[slot as usize]),
-                    tag: builder.use_var(values.local_tags[slot as usize]),
+                    bits: builder.use_var(values.locals[slot]),
+                    tag: emit_slot_tag(builder, values.local_tags[slot], plan.local_kinds[slot])?,
                 });
             }
             Instr::StoreLocal(slot) => {
+                let slot = slot as usize;
                 let value = pop_value(&mut stack)?;
-                builder.def_var(values.locals[slot as usize], value.bits);
-                builder.def_var(values.local_tags[slot as usize], value.tag);
+                builder.def_var(values.locals[slot], value.bits);
+                define_slot_tag(
+                    builder,
+                    values.local_tags[slot],
+                    plan.local_kinds[slot],
+                    value.tag,
+                )?;
                 let state = builder
                     .ins()
                     .iconst(types::I8, i64::from(LOCAL_DIRTY | LOCAL_INITIALIZED));
-                builder.def_var(values.local_states[slot as usize], state);
+                builder.def_var(values.local_states[slot], state);
             }
             Instr::Pop => {
                 pop_native(&mut stack)?;
@@ -6456,6 +6493,33 @@ fn static_value(
     })
 }
 
+fn emit_slot_tag(
+    builder: &mut FunctionBuilder<'_>,
+    variable: Option<Variable>,
+    kind: ScalarKind,
+) -> Result<ir::Value, CompileError> {
+    if let Some(tag) = value_tag(kind) {
+        return Ok(builder.ins().iconst(types::I64, tag as u64 as i64));
+    }
+    variable
+        .map(|variable| builder.use_var(variable))
+        .ok_or(CompileError::Backend)
+}
+
+fn define_slot_tag(
+    builder: &mut FunctionBuilder<'_>,
+    variable: Option<Variable>,
+    kind: ScalarKind,
+    tag: ir::Value,
+) -> Result<(), CompileError> {
+    if value_tag(kind).is_some() {
+        return Ok(());
+    }
+    let variable = variable.ok_or(CompileError::Backend)?;
+    builder.def_var(variable, tag);
+    Ok(())
+}
+
 fn push_static(
     builder: &mut FunctionBuilder<'_>,
     stack: &mut Vec<NativeValue>,
@@ -9581,7 +9645,7 @@ fn collect_native_roots(
         if is_root_kind(kind) {
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
-                tag: builder.use_var(values.local_tags[slot]),
+                tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
                 state: Some(builder.use_var(values.local_states[slot])),
             });
         }
@@ -9611,7 +9675,7 @@ fn collect_capture_allocation_roots(
         if is_root_kind(kind) {
             roots.push(NativeRoot {
                 bits: builder.use_var(variable),
-                tag: builder.use_var(values.local_tags[slot]),
+                tag: emit_slot_tag(builder, values.local_tags[slot], kind)?,
                 state: Some(builder.use_var(values.local_states[slot])),
             });
         }
@@ -11428,7 +11492,7 @@ fn emit_spill_frame_roots(
             .map_err(|_| CompileError::Backend)?;
         let state_offset = i32::try_from(slot).map_err(|_| CompileError::Backend)?;
         let bits = builder.use_var(values.locals[slot]);
-        let tag = builder.use_var(values.local_tags[slot]);
+        let tag = emit_slot_tag(builder, values.local_tags[slot], kind)?;
         let state = builder.use_var(values.local_states[slot]);
         builder
             .ins()
@@ -11479,7 +11543,7 @@ fn emit_spill_frame_to(
 ) -> Result<(), CompileError> {
     for (slot, variable) in values.locals.iter().copied().enumerate() {
         let value = builder.use_var(variable);
-        let tag = builder.use_var(values.local_tags[slot]);
+        let tag = emit_slot_tag(builder, values.local_tags[slot], values.local_kinds[slot])?;
         let state = builder.use_var(values.local_states[slot]);
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
@@ -11560,15 +11624,17 @@ fn define_stack(
     if stack.len() > values.stack.len() {
         return Err(CompileError::Backend);
     }
-    for ((variable, tag), value) in values
+    for (slot, (variable, value)) in values
         .stack
         .iter()
         .copied()
-        .zip(values.stack_tags.iter().copied())
         .zip(stack.iter().copied())
+        .enumerate()
     {
         builder.def_var(variable, value.bits);
-        builder.def_var(tag, value.tag);
+        if let Some(tag) = values.stack_tags[slot] {
+            builder.def_var(tag, value.tag);
+        }
     }
     Ok(())
 }

@@ -360,6 +360,12 @@ The runtime tests every variant conversion.
 
 Native scalar registers can keep unboxed payloads.
 
+A statically tagged slot keeps only its payload in SSA form.
+
+Only `Tagged` and `Callback` slots keep a dynamic tag in SSA form.
+
+Canonical materialization writes the fixed tag for each static slot.
+
 A bare union uses its canonical tag and payload as two native values.
 
 The JIT never reserves one payload bit pattern for `Option` or another union.
@@ -2218,6 +2224,47 @@ The corpus differential passed in 65.45 seconds.
 
 The full workspace suite passed.
 
+### Stage F36: Specialize static scalar tags
+
+- derive each local tag from its verified `ScalarKind`;
+- load dynamic tags only for `Tagged` and `Callback` locals;
+- derive stack tag storage from all verified stack shapes;
+- keep canonical tag writes at each materialization point;
+- preserve exact fuel, faults, snapshots, and scheduler continuation;
+- remeasure all representative scheduler programs.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+Gate: Every representative forced-native row keeps complete native coverage.
+
+The focused JIT suite passed 137 tests.
+
+The direct and scheduled corpus differential passed in 52.13 seconds.
+
+| Workload | Auto gain | Native gain |
+| --- | ---: | ---: |
+| Slot call | 6.81 times | 6.43 times |
+| Deep recursion | 0.98 times | 0.99 times |
+| Call with branch | 17.24 times | 17.66 times |
+| Interface call | 28.05 times | 28.58 times |
+| Numeric surface | 17.53 times | 18.10 times |
+| Option values | 29.07 times | 29.54 times |
+| List sort | 9.73 times | 9.81 times |
+| JSON parse | 4.81 times | 4.86 times |
+| JSON stringify | 3.33 times | 3.34 times |
+| HTTP parse | 4.10 times | 4.12 times |
+| HTTP serialize | 5.74 times | 5.78 times |
+
+The JSON and HTTP warm gates pass.
+
+Deep recursion remains close to Interpreter performance.
+
+The cold JSON run took 1,811.88 milliseconds.
+
+It compiled 26 regions and 6,236,954 machine-code bytes.
+
+Cold compilation remains open.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
@@ -2239,6 +2286,8 @@ Interpreter profiling cannot take a mutex per call.
 Specialization cannot occur before a cache hit.
 
 Every eligible function cannot compile on its first entry.
+
+A statically tagged scalar cannot keep a redundant dynamic tag register.
 
 A call cannot materialize canonical state.
 
