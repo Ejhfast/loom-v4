@@ -643,6 +643,7 @@ impl World {
             return Err(ParallelError::Poisoned);
         }
         match self.advance_stack(&mut continuation.stack, &mut continuation.quantum) {
+            DriverStep::FuelPending => Ok(ParallelStep::Continue(continuation)),
             DriverStep::Event(event) => match continuation.purpose {
                 ParallelPurpose::Task => {
                     let exit = self.scheduler_event_exit(continuation.task, event);
@@ -1199,7 +1200,7 @@ impl World {
                     ParallelPurpose::Drive(drive) => ParallelParked::Drive(drive),
                 });
             }
-            DriverStep::Execute { .. } => {}
+            DriverStep::Execute { .. } | DriverStep::FuelPending => {}
         }
         if continuation.stack.len() == 1 {
             let activation = continuation

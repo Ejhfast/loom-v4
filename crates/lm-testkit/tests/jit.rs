@@ -365,6 +365,197 @@ fn the_default_scheduler_skips_unneeded_physical_yields() {
 }
 
 #[test]
+fn native_scheduler_polls_materialize_only_requested_yields() {
+    let artifact = lm_testkit::compile_text("jit-native-poll.lm", SCALAR_LOOP)
+        .expect("the poll case compiles");
+    let make_world = || {
+        let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact.clone())
+            .expect("the poll case publishes");
+        let engine = Arc::new(Engine::new(EngineMode::Native));
+        let world = World::new_with_engine(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        (world, engine)
+    };
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+
+    let (mut idle, idle_engine) = make_world();
+    let idle_control = lm_vm::ExecutionControl::new();
+    assert!(matches!(
+        idle.drive_slice_polled(root, u32::MAX, 4_096, &idle_control),
+        Some(lm_vm::SliceExit::Terminal)
+    ));
+    let idle_metrics = idle_engine.metrics();
+    assert_eq!(idle_metrics.native_continuation_suspends, 0);
+    assert!(idle_metrics.native_retired_instructions > 100_000);
+
+    let (mut requested, requested_engine) = make_world();
+    let control = lm_vm::ExecutionControl::new();
+    control.request_yield();
+    let before = requested.world_fuel();
+    assert!(matches!(
+        requested.drive_slice_polled(root, u32::MAX, 4_096, &control),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    assert_eq!(before - requested.world_fuel(), 4_096);
+    let requested_metrics = requested_engine.metrics();
+    assert_eq!(requested_metrics.native_continuation_suspends, 0);
+    assert!(requested_metrics.materializations > 0);
+    control.clear_yield();
+    assert!(matches!(
+        requested.drive_slice_polled(root, u32::MAX, 4_096, &control),
+        Some(lm_vm::SliceExit::Terminal)
+    ));
+    assert_eq!(
+        requested.task_outcome(root),
+        Outcome::Done(lm_value::Value::Int(49_995_000))
+    );
+}
+
+#[test]
+fn idle_native_polls_preserve_direct_calls() {
+    let source = concat!(
+        "def next(value: Int): Int\n  value + 1\nend\n",
+        "value = 0\nwhile value < 100000\n  value = next(value)\nend\nvalue\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-native-call-poll.lm", source).expect("the case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let control = lm_vm::ExecutionControl::new();
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice_polled(root, u32::MAX, 4_096, &control),
+        Some(lm_vm::SliceExit::Terminal)
+    ));
+    assert_eq!(
+        world.task_outcome(root),
+        Outcome::Done(lm_value::Value::Int(100_000))
+    );
+    assert!(engine.metrics().native_retired_instructions > 500_000);
+}
+
+#[test]
+fn automatic_native_polls_preserve_multishot_search_state() {
+    let source = include_str!("../../../examples/14-vm-as-multishot-search/05-n-queens.lm")
+        .replace(
+            "(solutions(4), solutions(5), solutions(6), solutions(7), solutions(8))",
+            "solutions(4)",
+        );
+    let artifact =
+        lm_testkit::compile_text("jit-multishot-poll.lm", &source).expect("the search compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the search publishes");
+    let run = |mode, demand_polling| {
+        let engine = Arc::new(Engine::new(mode));
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        world.allow("Vm").expect("the VM grant exists");
+        let outcome = if demand_polling {
+            // A short test interval exercises many idle poll rearms.
+            lm_proc::Scheduler::from_config(
+                lm_proc::SchedulerConfig::deterministic()
+                    .with_quanta(256, 256)
+                    .expect("the poll interval is valid"),
+            )
+            .run(&mut world)
+        } else {
+            fixed_scheduler().run(&mut world)
+        }
+        .expect("the search runs");
+        let dump = world.dump_live(&outcome);
+        (
+            outcome,
+            dump,
+            world.metrics().retired_instructions,
+            engine.metrics(),
+        )
+    };
+    let baseline = run(EngineMode::Interpreter, false);
+    let fixed_native = run(EngineMode::Native, false);
+    let interpreted = run(EngineMode::Interpreter, true);
+    let automatic = run(EngineMode::Auto, true);
+    let native = run(EngineMode::Native, true);
+    assert_eq!(interpreted.0, baseline.0, "{:?}", interpreted.3);
+    assert_eq!(interpreted.1, baseline.1, "{:?}", interpreted.3);
+    assert_eq!(interpreted.2, baseline.2, "{:?}", interpreted.3);
+    assert_eq!(fixed_native.0, baseline.0, "{:?}", fixed_native.3);
+    assert_eq!(fixed_native.1, baseline.1, "{:?}", fixed_native.3);
+    assert_eq!(fixed_native.2, baseline.2, "{:?}", fixed_native.3);
+    assert_eq!(native.0, baseline.0, "{:?} {:?}", native.1, native.3);
+    assert_eq!(native.1, baseline.1, "{:?}", native.3);
+    assert_eq!(native.2, baseline.2, "{:?}", native.3);
+    assert_eq!(automatic.0, baseline.0, "{:?}", automatic.3);
+    assert_eq!(automatic.1, baseline.1, "{:?}", automatic.3);
+    assert_eq!(automatic.2, baseline.2, "{:?}", automatic.3);
+    assert!(native.3.native_retired_instructions > 0, "{:?}", native.3);
+}
+
+#[test]
+fn native_poll_sweep_preserves_nested_vm_boundaries() {
+    let source = include_str!("../../../examples/14-vm-as-multishot-search/01-answer-a-choice.lm");
+    let artifact =
+        lm_testkit::compile_text("jit-nested-poll.lm", source).expect("the driver compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the driver publishes");
+    let run = |interval, engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            engine,
+        );
+        world.allow("Vm").expect("the VM grant exists");
+        let outcome = if let Some(interval) = interval {
+            lm_proc::Scheduler::from_config(
+                lm_proc::SchedulerConfig::deterministic()
+                    .with_quanta(interval, interval)
+                    .expect("the poll interval is valid"),
+            )
+            .run(&mut world)
+        } else {
+            fixed_scheduler().run(&mut world)
+        }
+        .expect("the driver runs");
+        let dump = world.dump_live(&outcome);
+        (outcome, dump, world.metrics().retired_instructions)
+    };
+    let baseline = run(None, Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    for interval in 1..=64 {
+        let actual = run(Some(interval), Arc::clone(&engine));
+        assert_eq!(actual.0, baseline.0, "poll interval {interval}");
+        assert_eq!(actual.1, baseline.1, "poll interval {interval}");
+        assert_eq!(actual.2, baseline.2, "poll interval {interval}");
+    }
+    assert!(engine.metrics().native_retired_instructions > 0);
+}
+
+#[test]
 fn interface_calls_use_one_polymorphic_native_cache() {
     let source = concat!(
         "interface Valued\n",

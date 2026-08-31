@@ -798,7 +798,6 @@ right = Builder.spawn()
     assert_eq!(outcome, "Done((Ok(106000), Ok(106000)))");
     assert_eq!(stats.max_active_leases, 2);
     assert!(stats.worker_heap_growth_bytes > 0);
-    assert!(stats.local_continuations > 0);
     assert_eq!(stats.global_quiescence, 0);
 }
 

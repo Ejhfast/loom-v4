@@ -421,6 +421,11 @@ impl World {
         self.budget.fuel.remaining()
     }
 
+    /// True when active worker claims hold all available world fuel.
+    pub fn parallel_fuel_pending(&self) -> bool {
+        self.budget.fuel.status() == FuelStatus::Pending
+    }
+
     /// The decoded image storage held by the trusted cache.
     pub fn trusted_image_bytes(&self) -> usize {
         self.trusted_bytes
@@ -1244,9 +1249,20 @@ impl World {
                         );
                         return DriverStep::Event(RootEvent::Ran);
                     }
-                    if self.budget.fuel.remaining() == 0 {
-                        self.machines[act.vm as usize].set_fault(FaultCode::OutOfFuel, "", None);
-                        continue;
+                    let available = self.budget.fuel.remaining().min(u64::from(u32::MAX)) as u32;
+                    if available == 0 {
+                        match self.budget.fuel.status() {
+                            FuelStatus::Available => continue,
+                            FuelStatus::Pending => return DriverStep::FuelPending,
+                            FuelStatus::Exhausted => {
+                                self.machines[act.vm as usize].set_fault(
+                                    FaultCode::OutOfFuel,
+                                    "",
+                                    None,
+                                );
+                                continue;
+                            }
+                        }
                     }
                     let requested = match *quantum {
                         Some(_) if act.mode == StopMode::OneStep => 1,
@@ -1254,7 +1270,6 @@ impl World {
                         None if act.mode == StopMode::OneStep => 1,
                         None => u32::MAX,
                     };
-                    let available = self.budget.fuel.remaining().min(u64::from(u32::MAX)) as u32;
                     // A bounded drive turn caps this batch, so the turn
                     // never retires past the bound its holder named.
                     let turn = stack
@@ -1337,6 +1352,7 @@ impl World {
                         quantum = Some(0);
                     }
                 }
+                DriverStep::FuelPending => return RootEvent::Ran,
                 DriverStep::Event(event) => return event,
             }
         }
@@ -1419,14 +1435,5 @@ impl World {
 }
 
 fn poll_after_retirement(remaining: u32, interval: u32, retired: u32) -> u32 {
-    if retired < remaining {
-        return remaining - retired;
-    }
-    let over = retired - remaining;
-    let within = over % interval;
-    if within == 0 {
-        interval
-    } else {
-        interval - within
-    }
+    lm_jit::PollSchedule::new(remaining, interval).remaining_after(u64::from(retired))
 }

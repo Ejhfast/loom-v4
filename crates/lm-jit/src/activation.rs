@@ -105,6 +105,10 @@ pub(super) struct RawNativeActivation {
     pub(super) resolved_call_mask: u32,
     pub(super) image_slots: *const NativeImageSlot,
     pub(super) image_slot_count: usize,
+    pub(super) poll_requested: *const u32,
+    pub(super) hard_fuel: u64,
+    pub(super) poll_deadline: u64,
+    pub(super) poll_interval: u32,
 }
 
 /// One compact native view of an image slot target.
@@ -755,6 +759,7 @@ pub struct NativeExecution<'a> {
     pub root_tags: &'a mut [u64],
     pub root_states: &'a mut [u8],
     pub fuel: u64,
+    pub poll: NativePoll<'a>,
     pub heap: JitHeapView,
     pub class_parents: &'a [u32],
     pub dispatch_rows: &'a [NativeDispatchRow],
@@ -764,6 +769,104 @@ pub struct NativeExecution<'a> {
     pub type_environments: NativeTypeEnvironmentView,
     pub resolved_calls: NativeResolvedCallView,
     pub image_slots: NativeImageSlotView,
+}
+
+/// One optional native scheduler poll.
+#[derive(Debug, Clone, Copy)]
+pub struct NativePoll<'a> {
+    requested: Option<&'a AtomicU32>,
+    schedule: PollSchedule,
+}
+
+/// One deterministic sequence of execution polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollSchedule {
+    first: u32,
+    interval: u32,
+}
+
+impl PollSchedule {
+    /// Create one poll schedule.
+    pub const fn new(first: u32, interval: u32) -> PollSchedule {
+        PollSchedule {
+            first: if first == 0 { 1 } else { first },
+            interval: if interval == 0 { 1 } else { interval },
+        }
+    }
+
+    /// Get the distance between polls.
+    pub const fn interval(self) -> u32 {
+        self.interval
+    }
+
+    /// Get the distance to the next poll after retired instructions.
+    pub fn remaining_after(self, retired: u64) -> u32 {
+        let first = u64::from(self.first);
+        if retired < first {
+            return (first - retired) as u32;
+        }
+        let interval = u64::from(self.interval);
+        let within = (retired - first) % interval;
+        if within == 0 {
+            self.interval
+        } else {
+            (interval - within) as u32
+        }
+    }
+
+    /// Test whether retired instructions end at one poll.
+    pub fn due_at(self, retired: u64) -> bool {
+        let first = u64::from(self.first);
+        retired >= first && (retired - first).is_multiple_of(u64::from(self.interval))
+    }
+
+    fn after_retirement(self, retired: u64) -> PollSchedule {
+        PollSchedule {
+            first: self.remaining_after(retired),
+            interval: self.interval,
+        }
+    }
+}
+
+impl NativePoll<'static> {
+    /// Disable native scheduler polling.
+    pub const fn disabled() -> NativePoll<'static> {
+        NativePoll {
+            requested: None,
+            schedule: PollSchedule::new(u32::MAX, u32::MAX),
+        }
+    }
+}
+
+impl<'a> NativePoll<'a> {
+    /// Create one native scheduler poll.
+    pub fn new(requested: &'a AtomicU32, first: u32, interval: u32) -> NativePoll<'a> {
+        NativePoll {
+            requested: Some(requested),
+            schedule: PollSchedule::new(first, interval),
+        }
+    }
+
+    pub(super) fn requested_pointer(self) -> *const u32 {
+        self.requested
+            .map_or(std::ptr::null(), |requested| requested.as_ptr())
+    }
+
+    pub(super) fn initial_fuel(self, hard_fuel: u64) -> u64 {
+        hard_fuel.min(u64::from(self.schedule.first))
+    }
+
+    pub(super) const fn interval(self) -> u32 {
+        self.schedule.interval
+    }
+
+    /// Move the first poll past retired instructions.
+    pub fn after_retirement(self, retired: u64) -> NativePoll<'a> {
+        NativePoll {
+            schedule: self.schedule.after_retirement(retired),
+            ..self
+        }
+    }
 }
 
 /// One fixed native view of image slot targets.

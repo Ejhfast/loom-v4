@@ -199,6 +199,10 @@ A **safepoint** is an interpreter boundary with complete machine state.
 
 An **execution poll** tests one coordinator request without materializing machine state.
 
+An idle native poll rearms inside generated code.
+
+A requested poll materializes one exact execution report.
+
 ## 7. Scheduler modes
 
 The public runtime has two scheduler modes.
@@ -268,6 +272,8 @@ This local rotation does not commit world state.
 The deterministic fairness poll interval is 16,384 guest instructions.
 
 The local poll keeps bounded fairness and stop delay.
+
+The poll interval defines fairness. A worker fuel reservation does not define fairness.
 
 A worker yields when another lease waits.
 
@@ -607,17 +613,31 @@ The coordinator serializes shared resource updates.
 
 Workers claim world fuel before each local turn.
 
+One worker reservation contains at most 64 fairness intervals.
+
+Normal budgets grant the complete reservation.
+
+A scarce reservation takes at most half of the available fuel.
+
+This rule leaves claim capacity for another worker.
+
 The coordinator cancels each retained resource ticket after worker failure.
 
 ### 13.1 Fuel
 
 The world fuel ledger supports atomic turn claims.
 
-The worker claims at most one parallel turn before execution.
+The worker claims one bounded reservation before execution.
 
 The worker returns unused fuel after an early stop.
 
 The claim keeps the aggregate fuel limit exact.
+
+Fuel stays pending while an active claim holds the remaining budget.
+
+The coordinator does not report exhaustion while fuel stays pending.
+
+Exhaustion requires zero available fuel and zero active claims.
 
 One atomic claim replaces one coordinator dispatch cycle.
 
@@ -1128,6 +1148,12 @@ No raw guest pointer survives a safepoint.
 The JIT materializes frames, values, roots, and program position before each physical safepoint.
 
 An idle execution poll does not require materialization.
+
+Generated code keeps native frames and scalar values live across an idle poll.
+
+The coordinator owns the poll request.
+
+Another runnable lease, recall, pause, snapshot, or stop sets the request.
 
 Safepoints include effects, allocation, yield, pause, barrier, replacement, fault, and turn expiry.
 

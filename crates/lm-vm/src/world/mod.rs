@@ -26,7 +26,7 @@ pub use parallel::{
 use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
-use crate::executor::{ExecutionFuel, ExecutionStop};
+use crate::executor::{ExecutionFuel, ExecutionStop, FuelStatus};
 use crate::host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
@@ -232,6 +232,7 @@ enum DriverStep {
         vm: VmId,
         limit: u32,
     },
+    FuelPending,
     Event(RootEvent),
 }
 

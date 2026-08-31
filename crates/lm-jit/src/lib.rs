@@ -44,11 +44,11 @@ pub use activation::{
     HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
     ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
     MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeImageSlot, NativeImageSlotView, NativeLiteralView, NativePreparation,
+    NativeImageSlot, NativeImageSlotView, NativeLiteralView, NativePoll, NativePreparation,
     NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut,
     NativeRootError, NativeRoots, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
-    LOCAL_INITIALIZED,
+    NativeTypeEnvironmentView, PollSchedule, RuntimeUnitResult, RuntimeValueResult,
+    ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use activation::{
     NativeFunction, NativeRuntimeFunctions, RawExit, RawNativeActivation, RawRuntimeContext,
@@ -609,6 +609,7 @@ impl CompiledRegion {
             root_tags,
             root_states,
             fuel,
+            poll,
             heap,
             class_parents,
             dispatch_rows,
@@ -658,6 +659,7 @@ impl CompiledRegion {
                 u32::try_from(base_stack_values).map_err(|_| Failure::BackendUnavailable)?;
         }
         let top = activation.frames[top_index];
+        let initial_fuel = poll.initial_fuel(fuel);
         let mut raw_activation = RawNativeActivation {
             scalars: activation.scalars.as_mut_ptr(),
             tags: activation.tags.as_mut_ptr(),
@@ -700,6 +702,10 @@ impl CompiledRegion {
             resolved_call_mask: resolved_calls.mask,
             image_slots: image_slots.entries,
             image_slot_count: image_slots.count,
+            poll_requested: poll.requested_pointer(),
+            hard_fuel: fuel,
+            poll_deadline: initial_fuel,
+            poll_interval: poll.interval(),
         };
         let mut exit = RawExit::default();
         let mut runtime_result = [0u64; 4];
@@ -738,7 +744,7 @@ impl CompiledRegion {
                 local_state_pointer,
                 operand_pointer,
                 operand_tag_pointer,
-                fuel,
+                initial_fuel,
                 entry,
                 std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
                 std::ptr::from_ref(runtime_functions),

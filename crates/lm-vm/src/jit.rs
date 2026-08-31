@@ -29,6 +29,7 @@ pub(crate) struct NativeExecutionContext<'a> {
     pub(crate) slots: Option<&'a [ImageSlotTarget]>,
     pub(crate) profile: bool,
     pub(crate) instruction_limit: u32,
+    pub(crate) poll: lm_jit::NativePoll<'a>,
 }
 
 /// One native activation retained at an ordinary scheduler quantum.
@@ -725,6 +726,7 @@ impl JitEngine {
                         root_tags: &mut scratch.root_tags,
                         root_states: &mut scratch.root_states,
                         fuel: remaining,
+                        poll: context.poll.after_retirement(prior_retired),
                         heap,
                         class_parents: native.class_parents(),
                         dispatch_rows: native.dispatch_rows(),

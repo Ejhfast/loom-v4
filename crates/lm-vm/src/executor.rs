@@ -8,44 +8,47 @@ use crate::machine::{ExecError, ExecOutcome, ImageSlotTarget, Machine, VmId};
 use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode, NamespaceRuntime};
 use lm_bytecode::closed::TypeEnvs;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// One coordinator-owned request for a scheduler yield.
 #[derive(Debug, Default)]
 pub struct ExecutionControl {
-    yield_requested: AtomicBool,
+    yield_requested: AtomicU32,
 }
 
 impl ExecutionControl {
     /// Create one control with no pending yield request.
     pub const fn new() -> ExecutionControl {
         ExecutionControl {
-            yield_requested: AtomicBool::new(false),
+            yield_requested: AtomicU32::new(0),
         }
     }
 
     /// Request a yield at the next execution poll.
     pub fn request_yield(&self) {
-        self.yield_requested.store(true, Ordering::Relaxed);
+        self.yield_requested.store(1, Ordering::Relaxed);
     }
 
     /// Clear a yield request before execution continues.
     pub fn clear_yield(&self) {
-        self.yield_requested.store(false, Ordering::Relaxed);
+        self.yield_requested.store(0, Ordering::Relaxed);
     }
 
     /// Test the current yield request.
     pub fn yield_requested(&self) -> bool {
-        self.yield_requested.load(Ordering::Relaxed)
+        self.yield_requested.load(Ordering::Relaxed) != 0
+    }
+
+    fn native_poll(&self, first: u32, interval: u32) -> lm_jit::NativePoll<'_> {
+        lm_jit::NativePoll::new(&self.yield_requested, first, interval)
     }
 }
 
 /// One deterministic execution poll.
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutionPoll<'a> {
-    first: u32,
-    interval: u32,
+    schedule: lm_jit::PollSchedule,
     control: &'a ExecutionControl,
 }
 
@@ -56,10 +59,22 @@ impl<'a> ExecutionPoll<'a> {
         control: &'a ExecutionControl,
     ) -> ExecutionPoll<'a> {
         ExecutionPoll {
-            first: first.max(1),
-            interval: interval.max(1),
+            schedule: lm_jit::PollSchedule::new(first, interval),
             control,
         }
+    }
+
+    fn remaining_after(self, retired: u32) -> u32 {
+        self.schedule.remaining_after(u64::from(retired))
+    }
+
+    fn due_at(self, retired: u32) -> bool {
+        self.schedule.due_at(u64::from(retired))
+    }
+
+    fn native_after(self, retired: u32) -> lm_jit::NativePoll<'a> {
+        self.control
+            .native_poll(self.remaining_after(retired), self.schedule.interval())
     }
 }
 
@@ -67,12 +82,14 @@ impl<'a> ExecutionPoll<'a> {
 #[derive(Debug)]
 pub(crate) struct ExecutionFuel {
     remaining: AtomicU64,
+    active_claims: AtomicU32,
 }
 
 impl ExecutionFuel {
     pub(crate) fn new(remaining: u64) -> ExecutionFuel {
         ExecutionFuel {
             remaining: AtomicU64::new(remaining),
+            active_claims: AtomicU32::new(0),
         }
     }
 
@@ -80,23 +97,67 @@ impl ExecutionFuel {
         self.remaining.load(Ordering::Relaxed)
     }
 
-    fn claim(&self, limit: u32) -> u32 {
-        let mut current = self.remaining();
+    pub(crate) fn status(&self) -> FuelStatus {
         loop {
-            let claimed = current.min(u64::from(limit)) as u32;
+            if self.remaining.load(Ordering::Acquire) != 0 {
+                return FuelStatus::Available;
+            }
+            if self.active_claims.load(Ordering::Acquire) != 0 {
+                return FuelStatus::Pending;
+            }
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return FuelStatus::Exhausted;
+            }
+        }
+    }
+
+    fn claim(&self, limit: u32) -> FuelClaimResult {
+        self.add_active_claim();
+        let mut current = self.remaining.load(Ordering::Acquire);
+        loop {
+            let requested = current.min(u64::from(limit)) as u32;
+            let claimed = if current <= u64::from(limit) && requested > 1 {
+                requested.div_ceil(2)
+            } else {
+                requested
+            };
             if claimed == 0 {
-                return 0;
+                let previous = self.active_claims.fetch_sub(1, Ordering::AcqRel);
+                assert!(
+                    previous != 0,
+                    "the active fuel claim count cannot underflow"
+                );
+                if previous > 1 {
+                    return FuelClaimResult::Pending;
+                }
+                match self.status() {
+                    FuelStatus::Available => {
+                        self.add_active_claim();
+                        current = self.remaining.load(Ordering::Acquire);
+                        continue;
+                    }
+                    FuelStatus::Pending => return FuelClaimResult::Pending,
+                    FuelStatus::Exhausted => return FuelClaimResult::Exhausted,
+                }
             }
             match self.remaining.compare_exchange_weak(
                 current,
                 current - u64::from(claimed),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             ) {
-                Ok(_) => return claimed,
+                Ok(_) => return FuelClaimResult::Claimed(claimed),
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    fn add_active_claim(&self) {
+        let previous = self.active_claims.fetch_add(1, Ordering::AcqRel);
+        assert!(
+            previous != u32::MAX,
+            "the active fuel claim count cannot overflow"
+        );
     }
 
     fn release(&self, count: u32) {
@@ -109,6 +170,15 @@ impl ExecutionFuel {
                 current.checked_add(u64::from(count))
             });
         assert!(result.is_ok(), "the world fuel counter cannot overflow");
+    }
+
+    fn finish_claim(&self, unused: u32) {
+        self.release(unused);
+        let previous = self.active_claims.fetch_sub(1, Ordering::AcqRel);
+        assert!(
+            previous != 0,
+            "the active fuel claim count cannot underflow"
+        );
     }
 
     pub(crate) fn charge(&self, count: u32) {
@@ -131,6 +201,25 @@ impl ExecutionFuel {
     }
 }
 
+enum FuelClaimResult {
+    Claimed(u32),
+    Pending,
+    Exhausted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FuelStatus {
+    Available,
+    Pending,
+    Exhausted,
+}
+
+enum FuelClaim {
+    Claimed(ExecutionFuelClaim),
+    Pending,
+    Exhausted,
+}
+
 struct ExecutionFuelClaim {
     fuel: Arc<ExecutionFuel>,
     claimed: u32,
@@ -138,19 +227,23 @@ struct ExecutionFuelClaim {
 }
 
 impl ExecutionFuelClaim {
-    fn new(fuel: Arc<ExecutionFuel>, limit: u32) -> ExecutionFuelClaim {
-        let claimed = fuel.claim(limit);
-        ExecutionFuelClaim {
-            fuel,
-            claimed,
-            retired: 0,
+    fn acquire(fuel: Arc<ExecutionFuel>, limit: u32) -> FuelClaim {
+        match fuel.claim(limit) {
+            FuelClaimResult::Claimed(claimed) => FuelClaim::Claimed(ExecutionFuelClaim {
+                fuel,
+                claimed,
+                retired: 0,
+            }),
+            FuelClaimResult::Pending => FuelClaim::Pending,
+            FuelClaimResult::Exhausted => FuelClaim::Exhausted,
         }
     }
 }
 
 impl Drop for ExecutionFuelClaim {
     fn drop(&mut self) {
-        self.fuel.release(self.claimed.saturating_sub(self.retired));
+        self.fuel
+            .finish_claim(self.claimed.saturating_sub(self.retired));
     }
 }
 
@@ -479,7 +572,15 @@ pub enum ExecutionTurn {
 }
 
 /// Execute one bounded worker-local turn.
-pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn {
+pub fn execute_turn(lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn {
+    execute_turn_with_poll(lease, turn_limit, None)
+}
+
+fn execute_turn_with_poll(
+    mut lease: ExecutionLease,
+    turn_limit: u32,
+    poll: Option<ExecutionPoll<'_>>,
+) -> ExecutionTurn {
     let remaining = lease
         .instruction_limit
         .saturating_sub(lease.retired_instructions);
@@ -487,13 +588,16 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
         return ExecutionTurn::Report(lease.into_report(ExecutionStop::QuantumExpired));
     }
     let requested = remaining.min(turn_limit.max(1));
-    let mut claim = ExecutionFuelClaim::new(Arc::clone(&lease.fuel), requested);
-    if claim.claimed == 0 {
-        return ExecutionTurn::Report(
-            lease.into_report(ExecutionStop::Fault(FaultCode::OutOfFuel)),
-        );
-    }
-    let (outcome, retired) = {
+    let mut claim = match ExecutionFuelClaim::acquire(Arc::clone(&lease.fuel), requested) {
+        FuelClaim::Claimed(claim) => claim,
+        FuelClaim::Pending => return ExecutionTurn::Continue(lease),
+        FuelClaim::Exhausted => {
+            return ExecutionTurn::Report(
+                lease.into_report(ExecutionStop::Fault(FaultCode::OutOfFuel)),
+            );
+        }
+    };
+    let result = {
         let ExecutionLease {
             machine,
             code,
@@ -515,11 +619,15 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
                 slots,
                 restricted_world: *restricted_world,
                 engine,
+                poll,
             },
         );
-        claim.retired = result.1;
+        claim.retired = result.retired;
         result
     };
+    let EngineTurnResult {
+        outcome, retired, ..
+    } = result;
     lease.retired_instructions = lease.retired_instructions.saturating_add(retired);
     lease.turns = lease.turns.saturating_add(1);
     let stop = match outcome {
@@ -533,21 +641,19 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
     ExecutionTurn::Report(lease.into_report(stop))
 }
 
-/// Execute local turns until control requests a yield.
+/// Execute one demand-driven worker reservation.
 pub fn execute_polled_turn(
-    mut lease: ExecutionLease,
+    lease: ExecutionLease,
     poll_limit: u32,
     control: &ExecutionControl,
 ) -> ExecutionTurn {
-    loop {
-        match execute_turn(lease, poll_limit) {
-            ExecutionTurn::Continue(mut next) if !control.yield_requested() => {
-                next.note_local_continuation();
-                lease = next;
-            }
-            result => return result,
-        }
-    }
+    const POLLS_PER_RESERVATION: u32 = 64;
+    let reservation = poll_limit.max(1).saturating_mul(POLLS_PER_RESERVATION);
+    execute_turn_with_poll(
+        lease,
+        reservation,
+        Some(ExecutionPoll::new(poll_limit, poll_limit, control)),
+    )
 }
 
 /// Return one lease at a pool recall point.
@@ -574,7 +680,11 @@ pub(crate) fn execute_inline(
     instruction_limit: u32,
     engine: &Engine,
 ) -> InlineExecutionReport {
-    let (outcome, retired_instructions) = run_engine_turn(
+    let EngineTurnResult {
+        outcome,
+        retired: retired_instructions,
+        ..
+    } = run_engine_turn(
         machine,
         instruction_limit,
         EngineTurnContext {
@@ -585,6 +695,7 @@ pub(crate) fn execute_inline(
             slots,
             restricted_world: false,
             engine,
+            poll: None,
         },
     );
     let stop = match outcome {
@@ -609,53 +720,83 @@ pub(crate) fn execute_inline_polled(
     poll: ExecutionPoll<'_>,
     engine: &Engine,
 ) -> InlineExecutionReport {
-    let mut retired_total = 0u32;
-    let mut poll_remaining = poll.first;
-    loop {
-        let remaining = instruction_limit.saturating_sub(retired_total);
-        if remaining == 0 {
-            return InlineExecutionReport {
-                stop: ExecutionStop::QuantumExpired,
-                retired_instructions: retired_total,
-                requested_yield: false,
-            };
-        }
-        let current = remaining.min(poll_remaining);
-        let report = execute_inline(machine, code, envs, slots, current, engine);
-        let Some(next_total) = retired_total.checked_add(report.retired_instructions) else {
-            return InlineExecutionReport {
-                stop: ExecutionStop::Fault(FaultCode::MalformedState),
-                retired_instructions: retired_total,
-                requested_yield: false,
-            };
-        };
-        if next_total > instruction_limit {
-            return InlineExecutionReport {
-                stop: ExecutionStop::Fault(FaultCode::MalformedState),
-                retired_instructions: retired_total,
-                requested_yield: false,
-            };
-        }
-        retired_total = next_total;
-        match report.stop {
-            ExecutionStop::QuantumExpired if retired_total < instruction_limit => {
-                if poll.control.yield_requested() {
-                    return InlineExecutionReport {
-                        stop: ExecutionStop::QuantumExpired,
-                        retired_instructions: retired_total,
-                        requested_yield: true,
-                    };
-                }
-                poll_remaining = poll.interval;
-            }
-            stop => {
+    if engine.mode() == EngineMode::Interpreter {
+        let mut retired_total = 0u32;
+        let mut poll_remaining = poll.schedule.remaining_after(0);
+        loop {
+            let remaining = instruction_limit.saturating_sub(retired_total);
+            if remaining == 0 {
                 return InlineExecutionReport {
-                    stop,
+                    stop: ExecutionStop::QuantumExpired,
                     retired_instructions: retired_total,
                     requested_yield: false,
                 };
             }
+            let current = remaining.min(poll_remaining);
+            let report = execute_inline(machine, code, envs, slots, current, engine);
+            let Some(next_total) = retired_total.checked_add(report.retired_instructions) else {
+                return InlineExecutionReport {
+                    stop: ExecutionStop::Fault(FaultCode::MalformedState),
+                    retired_instructions: retired_total,
+                    requested_yield: false,
+                };
+            };
+            if next_total > instruction_limit {
+                return InlineExecutionReport {
+                    stop: ExecutionStop::Fault(FaultCode::MalformedState),
+                    retired_instructions: retired_total,
+                    requested_yield: false,
+                };
+            }
+            retired_total = next_total;
+            match report.stop {
+                ExecutionStop::QuantumExpired if retired_total < instruction_limit => {
+                    if poll.control.yield_requested() {
+                        return InlineExecutionReport {
+                            stop: ExecutionStop::QuantumExpired,
+                            retired_instructions: retired_total,
+                            requested_yield: true,
+                        };
+                    }
+                    poll_remaining = poll.schedule.interval();
+                }
+                stop => {
+                    return InlineExecutionReport {
+                        stop,
+                        retired_instructions: retired_total,
+                        requested_yield: false,
+                    };
+                }
+            }
         }
+    }
+    let EngineTurnResult {
+        outcome,
+        retired,
+        requested_yield,
+    } = run_engine_turn(
+        machine,
+        instruction_limit,
+        EngineTurnContext {
+            module: code.module.as_ref(),
+            dispatch: code.dispatch.as_ref(),
+            native: &code.native,
+            envs,
+            slots,
+            restricted_world: false,
+            engine,
+            poll: Some(poll),
+        },
+    );
+    let stop = match outcome {
+        Ok(None) => ExecutionStop::QuantumExpired,
+        Ok(Some(outcome)) => ExecutionStop::Boundary(outcome),
+        Err(ExecError::Fault(code)) => ExecutionStop::Fault(code),
+    };
+    InlineExecutionReport {
+        stop,
+        retired_instructions: retired,
+        requested_yield,
     }
 }
 
@@ -668,21 +809,50 @@ struct EngineTurnContext<'a> {
     slots: Option<&'a [ImageSlotTarget]>,
     restricted_world: bool,
     engine: &'a Engine,
+    poll: Option<ExecutionPoll<'a>>,
+}
+
+struct EngineTurnResult {
+    outcome: Result<Option<ExecOutcome>, ExecError>,
+    retired: u32,
+    requested_yield: bool,
 }
 
 fn run_engine_turn(
     machine: &mut Machine,
     instruction_limit: u32,
     mut context: EngineTurnContext<'_>,
-) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
+) -> EngineTurnResult {
     if instruction_limit == 0 {
-        return (Ok(None), 0);
+        return EngineTurnResult {
+            outcome: Ok(None),
+            retired: 0,
+            requested_yield: false,
+        };
     }
     if context.engine.mode() == EngineMode::Interpreter {
         if let Err(code) = context.engine.materialize_native_state(machine) {
-            return (Err(ExecError::Fault(code)), 0);
+            return engine_turn_result(Err(ExecError::Fault(code)), 0, false);
         }
-        return run_interpreter_turn(machine, instruction_limit, &mut context, None);
+        let mut retired_total = 0;
+        loop {
+            let remaining = instruction_limit - retired_total;
+            let current = poll_cap(context.poll, retired_total, remaining);
+            let (outcome, retired) = run_interpreter_turn(machine, current, &mut context, None);
+            let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                return malformed_engine_turn(retired_total);
+            };
+            retired_total = next;
+            if let Some(result) = finish_interpreter_step(
+                outcome,
+                retired_total,
+                instruction_limit,
+                context.poll,
+                retired != 0,
+            ) {
+                return result;
+            }
+        }
     }
     let mut native_scratch = crate::jit::NativeScratch::default();
     let mut native_metrics = context.engine.turn_metrics();
@@ -695,6 +865,10 @@ fn run_engine_turn(
             slots: context.slots,
             profile: context.engine.jit_profiling(),
             instruction_limit: remaining,
+            poll: match context.poll {
+                Some(poll) => poll.native_after(retired_total),
+                None => lm_jit::NativePoll::disabled(),
+            },
         };
         match context.engine.execute_native(
             machine,
@@ -704,80 +878,188 @@ fn run_engine_turn(
             &mut native_metrics,
         ) {
             crate::jit::NativeAttempt::Complete { outcome, retired } => {
-                retired_total += retired;
-                return (outcome, retired_total);
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                let requested = poll_requests_yield(context.poll, retired_total, instruction_limit)
+                    && matches!(outcome, Ok(None));
+                return engine_turn_result(outcome, retired_total, requested);
             }
             crate::jit::NativeAttempt::AdvanceToEntry { instructions } => {
-                let advance = instructions.min(remaining).max(1);
+                let desired = instructions.min(remaining).max(1);
+                let advance = poll_cap(context.poll, retired_total, desired);
                 let (outcome, interpreted) =
                     run_interpreter_turn(machine, advance, &mut context, None);
-                retired_total += interpreted;
-                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
-                    if retired_total < instruction_limit {
-                        continue;
-                    }
-                    return (Ok(None), retired_total);
+                let Some(next) = checked_retired(retired_total, interpreted, instruction_limit)
+                else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if let Some(result) = finish_interpreter_step(
+                    outcome,
+                    retired_total,
+                    instruction_limit,
+                    context.poll,
+                    interpreted != 0,
+                ) {
+                    return result;
                 }
-                if advance < remaining && matches!(outcome, Ok(None)) {
-                    continue;
-                }
-                return (outcome, retired_total);
+                continue;
             }
             crate::jit::NativeAttempt::Continue { retired } => {
-                retired_total += retired;
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if poll_requests_yield(context.poll, retired_total, instruction_limit) {
+                    return engine_turn_result(Ok(None), retired_total, true);
+                }
                 let remaining = instruction_limit - retired_total;
                 if remaining == 0 {
-                    return (Ok(None), retired_total);
+                    return engine_turn_result(Ok(None), retired_total, false);
                 }
                 let resume_depth = machine.vm.frames.len();
+                let current = poll_cap(context.poll, retired_total, remaining);
                 let (outcome, interpreted) =
-                    run_interpreter_turn(machine, remaining, &mut context, Some(resume_depth));
-                retired_total += interpreted;
-                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
-                    if retired_total < instruction_limit {
-                        continue;
-                    }
-                    return (Ok(None), retired_total);
+                    run_interpreter_turn(machine, current, &mut context, Some(resume_depth));
+                let Some(next) = checked_retired(retired_total, interpreted, instruction_limit)
+                else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if let Some(result) = finish_interpreter_step(
+                    outcome,
+                    retired_total,
+                    instruction_limit,
+                    context.poll,
+                    interpreted != 0,
+                ) {
+                    return result;
                 }
-                return (outcome, retired_total);
+                continue;
             }
             crate::jit::NativeAttempt::InterpretOne { retired } => {
-                retired_total += retired;
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if poll_requests_yield(context.poll, retired_total, instruction_limit) {
+                    return engine_turn_result(Ok(None), retired_total, true);
+                }
                 let remaining = instruction_limit - retired_total;
                 if remaining == 0 {
-                    return (Ok(None), retired_total);
+                    return engine_turn_result(Ok(None), retired_total, false);
                 }
                 let (outcome, interpreted) = run_interpreter_turn(machine, 1, &mut context, None);
-                retired_total += interpreted;
-                if interpreted == 1
-                    && retired_total < instruction_limit
-                    && matches!(outcome, Ok(None))
-                {
-                    continue;
+                let Some(next) = checked_retired(retired_total, interpreted, instruction_limit)
+                else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if let Some(result) = finish_interpreter_step(
+                    outcome,
+                    retired_total,
+                    instruction_limit,
+                    context.poll,
+                    interpreted == 1,
+                ) {
+                    return result;
                 }
-                return (outcome, retired_total);
+                continue;
             }
             crate::jit::NativeAttempt::Reenter { retired } => {
-                retired_total += retired;
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if poll_requests_yield(context.poll, retired_total, instruction_limit) {
+                    return engine_turn_result(Ok(None), retired_total, true);
+                }
                 if retired_total < instruction_limit {
                     continue;
                 }
-                return (Ok(None), retired_total);
+                return engine_turn_result(Ok(None), retired_total, false);
             }
             crate::jit::NativeAttempt::Fallback => {
+                let current = poll_cap(context.poll, retired_total, remaining);
                 let (outcome, interpreted) =
-                    run_interpreter_turn(machine, remaining, &mut context, None);
-                retired_total += interpreted;
-                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
-                    if retired_total < instruction_limit {
-                        continue;
-                    }
-                    return (Ok(None), retired_total);
+                    run_interpreter_turn(machine, current, &mut context, None);
+                let Some(next) = checked_retired(retired_total, interpreted, instruction_limit)
+                else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if let Some(result) = finish_interpreter_step(
+                    outcome,
+                    retired_total,
+                    instruction_limit,
+                    context.poll,
+                    interpreted != 0,
+                ) {
+                    return result;
                 }
-                return (outcome, retired_total);
+                continue;
             }
         }
     }
+}
+
+fn engine_turn_result(
+    outcome: Result<Option<ExecOutcome>, ExecError>,
+    retired: u32,
+    requested_yield: bool,
+) -> EngineTurnResult {
+    EngineTurnResult {
+        outcome,
+        retired,
+        requested_yield,
+    }
+}
+
+fn malformed_engine_turn(retired: u32) -> EngineTurnResult {
+    engine_turn_result(
+        Err(ExecError::Fault(FaultCode::MalformedState)),
+        retired,
+        false,
+    )
+}
+
+fn checked_retired(total: u32, retired: u32, limit: u32) -> Option<u32> {
+    total.checked_add(retired).filter(|next| *next <= limit)
+}
+
+fn poll_cap(poll: Option<ExecutionPoll<'_>>, retired: u32, requested: u32) -> u32 {
+    poll.map_or(requested, |poll| {
+        requested.min(poll.remaining_after(retired))
+    })
+}
+
+fn poll_requests_yield(
+    poll: Option<ExecutionPoll<'_>>,
+    retired: u32,
+    instruction_limit: u32,
+) -> bool {
+    retired < instruction_limit
+        && poll.is_some_and(|poll| poll.due_at(retired) && poll.control.yield_requested())
+}
+
+fn finish_interpreter_step(
+    outcome: Result<Option<ExecOutcome>, ExecError>,
+    retired: u32,
+    instruction_limit: u32,
+    poll: Option<ExecutionPoll<'_>>,
+    can_continue: bool,
+) -> Option<EngineTurnResult> {
+    if matches!(outcome, Ok(None)) {
+        if poll_requests_yield(poll, retired, instruction_limit) {
+            return Some(engine_turn_result(Ok(None), retired, true));
+        }
+        if retired < instruction_limit && can_continue {
+            return None;
+        }
+    }
+    Some(engine_turn_result(outcome, retired, false))
 }
 
 fn run_interpreter_turn(
@@ -847,6 +1129,48 @@ mod tests {
     #[test]
     fn local_heaps_are_send() {
         assert_send::<Heap>();
+    }
+
+    #[test]
+    fn reserved_fuel_is_pending_until_the_active_claim_returns() {
+        let fuel = Arc::new(ExecutionFuel::new(1));
+        let mut first = match ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1) {
+            FuelClaim::Claimed(claim) => claim,
+            FuelClaim::Pending | FuelClaim::Exhausted => panic!("the first claim is available"),
+        };
+        assert!(matches!(
+            ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1),
+            FuelClaim::Pending
+        ));
+        first.retired = 0;
+        drop(first);
+
+        let mut second = match ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1) {
+            FuelClaim::Claimed(claim) => claim,
+            FuelClaim::Pending | FuelClaim::Exhausted => panic!("returned fuel is available"),
+        };
+        assert_eq!(second.claimed, 1);
+        second.retired = 1;
+        drop(second);
+        assert!(matches!(
+            ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1),
+            FuelClaim::Exhausted
+        ));
+    }
+
+    #[test]
+    fn a_scarce_fuel_claim_leaves_capacity_for_another_worker() {
+        let fuel = Arc::new(ExecutionFuel::new(100_000));
+        let first = match ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1_048_576) {
+            FuelClaim::Claimed(claim) => claim,
+            FuelClaim::Pending | FuelClaim::Exhausted => panic!("the first claim is available"),
+        };
+        assert_eq!(first.claimed, 50_000);
+        let second = match ExecutionFuelClaim::acquire(Arc::clone(&fuel), 1_048_576) {
+            FuelClaim::Claimed(claim) => claim,
+            FuelClaim::Pending | FuelClaim::Exhausted => panic!("the second claim is available"),
+        };
+        assert_eq!(second.claimed, 25_000);
     }
 
     #[test]

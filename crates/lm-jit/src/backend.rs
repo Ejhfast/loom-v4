@@ -345,8 +345,7 @@ struct NativeValues<'a> {
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
     fuel: Variable,
-    initial_fuel: ir::Value,
-    retired_base: ir::Value,
+    retired: Variable,
     local_pointer: ir::Value,
     local_tag_pointer: ir::Value,
     local_state_pointer: ir::Value,
@@ -1059,6 +1058,8 @@ fn emit_region(
     }
     let fuel = builder.declare_var(types::I64);
     builder.def_var(fuel, initial_fuel);
+    let retired = builder.declare_var(types::I64);
+    builder.def_var(retired, retired_base);
     let zero = builder.ins().iconst(types::I64, 0);
     let heap_translations = RefCell::new(HeapTranslationCache::default());
     let values = NativeValues {
@@ -1069,8 +1070,7 @@ fn emit_region(
         stack: &stack,
         stack_tags: &stack_tags,
         fuel,
-        initial_fuel,
-        retired_base,
+        retired,
         local_pointer,
         local_tag_pointer,
         local_state_pointer,
@@ -6177,7 +6177,9 @@ fn emit_native_call(
     } else {
         boundary_stack.clone()
     };
+    let poll = builder.create_block();
     let fuel_exit = builder.create_block();
+    let rearm = builder.create_block();
     let lookup = builder.create_block();
     let fallback = builder.create_block();
     let root_check = builder.create_block();
@@ -6194,10 +6196,17 @@ fn emit_native_call(
     let has_fuel = builder
         .ins()
         .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, fuel, 1);
-    builder.ins().brif(has_fuel, lookup, &[], fuel_exit, &[]);
+    builder.ins().brif(has_fuel, lookup, &[], poll, &[]);
+
+    builder.switch_to_block(poll);
+    let retired = emit_retired(builder, values);
+    emit_native_poll_decision(builder, values, retired, rearm, fuel_exit)?;
+
+    builder.switch_to_block(rearm);
+    emit_native_poll_rearm_values(builder, values, retired)?;
+    builder.ins().jump(lookup, &[]);
 
     builder.switch_to_block(fuel_exit);
-    let retired = emit_retired(builder, values);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -6667,8 +6676,8 @@ fn emit_native_call(
         next_frame_len,
     )?;
     let child_fuel = builder.use_var(values.fuel);
+    let caller_retired = emit_retired(builder, values);
     let zero_entry = builder.ins().iconst(types::I32, 0);
-    let zero_retired = builder.ins().iconst(types::I64, 0);
     builder.ins().call_indirect(
         values.native_signature,
         code,
@@ -6688,7 +6697,7 @@ fn emit_native_call(
             values.root_state_pointer,
             values.exit_pointer,
             values.activation_pointer,
-            zero_retired,
+            caller_retired,
             zero_entry,
         ],
     );
@@ -6698,10 +6707,11 @@ fn emit_native_call(
         values.exit_pointer,
         mem::offset_of!(RawExit, retired),
     )?;
-    let caller_fuel = builder.use_var(values.fuel);
-    let remaining_fuel = builder.ins().isub(caller_fuel, child_retired);
+    let poll_deadline = load_activation_u64(builder, values, RawActivationField::PollDeadline)?;
+    let remaining_fuel = builder.ins().isub(poll_deadline, child_retired);
     builder.def_var(values.fuel, remaining_fuel);
-    let total_retired = emit_retired(builder, values);
+    builder.def_var(values.retired, child_retired);
+    let total_retired = child_retired;
     let exit_kind = load_value(
         builder,
         types::I32,
@@ -7055,12 +7065,13 @@ fn emit_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost
     let fuel = builder.use_var(values.fuel);
     let fuel = builder.ins().iadd_imm(fuel, -i64::from(cost));
     builder.def_var(values.fuel, fuel);
+    let retired = builder.use_var(values.retired);
+    let retired = builder.ins().iadd_imm(retired, i64::from(cost));
+    builder.def_var(values.retired, retired);
 }
 
 fn emit_retired(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>) -> ir::Value {
-    let fuel = builder.use_var(values.fuel);
-    let spent = builder.ins().isub(values.initial_fuel, fuel);
-    builder.ins().iadd(values.retired_base, spent)
+    builder.use_var(values.retired)
 }
 
 fn emit_retired_with_prefix(
@@ -7098,12 +7109,27 @@ fn emit_exact_fuel_check(
         return Err(CompileError::Backend);
     }
     let run = builder.create_block();
+    let poll = builder.create_block();
+    let rearm = builder.create_block();
+    let materialize = builder.create_block();
+    builder.set_cold_block(materialize);
     let fuel = builder.use_var(values.fuel);
     let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
+    builder.ins().brif(available, run, &[], poll, &[]);
+
+    builder.switch_to_block(poll);
+    let retired = emit_retired(builder, values);
+    emit_native_poll_decision(builder, values, retired, rearm, materialize)?;
+
+    builder.switch_to_block(rearm);
+    emit_native_poll_rearm_values(builder, values, retired)?;
+    builder.ins().jump(run, &[]);
+
+    builder.switch_to_block(materialize);
     let mut arguments: Vec<ir::BlockArg> = Vec::with_capacity(
         4 + exit.local_count.saturating_mul(2) + exit.max_stack.saturating_mul(2),
     );
-    arguments.push(emit_retired(builder, values).into());
+    arguments.push(retired.into());
     arguments.push(builder.ins().iconst(types::I32, i64::from(block)).into());
     arguments.push(
         builder
@@ -7134,9 +7160,7 @@ fn emit_exact_fuel_check(
             arguments.push(zero.into());
         }
     }
-    builder
-        .ins()
-        .brif(available, run, &[], exit.block, &arguments);
+    builder.ins().jump(exit.block, &arguments);
     builder.switch_to_block(run);
     Ok(())
 }
@@ -7261,6 +7285,63 @@ fn emit_exact_fuel_exit(
         zero,
     )?;
     builder.ins().return_(&[]);
+    Ok(())
+}
+
+fn emit_native_poll_decision(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    retired: ir::Value,
+    rearm: ir::Block,
+    materialize: ir::Block,
+) -> Result<(), CompileError> {
+    let check_request = builder.create_block();
+    let check_budget = builder.create_block();
+    let requested = load_activation_pointer(builder, values, RawActivationField::PollRequested)?;
+    let has_poll = builder.ins().icmp_imm(IntCC::NotEqual, requested, 0);
+    builder
+        .ins()
+        .brif(has_poll, check_request, &[], materialize, &[]);
+
+    builder.switch_to_block(check_request);
+    let request = builder
+        .ins()
+        .atomic_load(types::I32, MemFlags::new(), requested);
+    let idle = builder.ins().icmp_imm(IntCC::Equal, request, 0);
+    builder
+        .ins()
+        .brif(idle, check_budget, &[], materialize, &[]);
+
+    builder.switch_to_block(check_budget);
+    let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
+    let has_budget = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, retired, hard_fuel);
+    builder.ins().brif(has_budget, rearm, &[], materialize, &[]);
+    Ok(())
+}
+
+fn emit_native_poll_rearm_values(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    retired: ir::Value,
+) -> Result<(), CompileError> {
+    let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
+    let remaining = builder.ins().isub(hard_fuel, retired);
+    let interval = load_activation_u32(builder, values, RawActivationField::PollInterval)?;
+    let interval = builder.ins().uextend(types::I64, interval);
+    let use_interval = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, interval, remaining);
+    let next_fuel = builder.ins().select(use_interval, interval, remaining);
+    let next_deadline = builder.ins().iadd(retired, next_fuel);
+    store_activation_u64(
+        builder,
+        values,
+        RawActivationField::PollDeadline,
+        next_deadline,
+    )?;
+    builder.def_var(values.fuel, next_fuel);
     Ok(())
 }
 
@@ -14516,6 +14597,10 @@ enum RawActivationField {
     RootCapacity,
     LiteralValues,
     LiteralCount,
+    PollRequested,
+    HardFuel,
+    PollDeadline,
+    PollInterval,
 }
 
 impl RawActivationField {
@@ -14554,6 +14639,16 @@ impl RawActivationField {
             RawActivationField::LiteralCount => {
                 mem::offset_of!(RawNativeActivation, literal_count)
             }
+            RawActivationField::PollRequested => {
+                mem::offset_of!(RawNativeActivation, poll_requested)
+            }
+            RawActivationField::HardFuel => mem::offset_of!(RawNativeActivation, hard_fuel),
+            RawActivationField::PollDeadline => {
+                mem::offset_of!(RawNativeActivation, poll_deadline)
+            }
+            RawActivationField::PollInterval => {
+                mem::offset_of!(RawNativeActivation, poll_interval)
+            }
         }
     }
 
@@ -14563,6 +14658,7 @@ impl RawActivationField {
             RawActivationField::ScalarLen
                 | RawActivationField::FrameLen
                 | RawActivationField::ChangedFrom
+                | RawActivationField::PollDeadline
         )
     }
 }
@@ -14580,6 +14676,25 @@ fn load_activation_u32(
     load_value_with_flags(
         builder,
         types::I32,
+        values.activation_pointer,
+        field.offset(),
+        flags,
+    )
+}
+
+fn load_activation_u64(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    field: RawActivationField,
+) -> Result<ir::Value, CompileError> {
+    let flags = if field.immutable() {
+        immutable_vmctx_mem_flags()
+    } else {
+        vmctx_mem_flags()
+    };
+    load_value_with_flags(
+        builder,
+        types::I64,
         values.activation_pointer,
         field.offset(),
         flags,
@@ -14618,6 +14733,19 @@ fn store_activation_u32(
         value,
         vmctx_mem_flags(),
     )
+}
+
+fn store_activation_u64(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    field: RawActivationField,
+    value: ir::Value,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(field.offset()).map_err(|_| CompileError::Backend)?;
+    builder
+        .ins()
+        .store(vmctx_mem_flags(), value, values.activation_pointer, offset);
+    Ok(())
 }
 
 fn load_cell_u32(

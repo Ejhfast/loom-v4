@@ -275,6 +275,9 @@ impl ParallelCoordinator<'_> {
 
     fn dispatch_ready_work(&mut self) -> Result<(), SchedulerError> {
         while self.pool.is_some() && !self.needs_quiescence() {
+            if self.world.parallel_fuel_pending() {
+                break;
+            }
             if let Some(drive) = self.drives.pop_front() {
                 let lease = self.take_lease()?;
                 let drive = drive

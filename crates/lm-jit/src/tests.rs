@@ -188,6 +188,161 @@ fn segments_split_conditional_fallthrough() {
     assert_eq!(plan.segments[3].carry_reserved_cost, vec![false]);
 }
 
+fn counting_loop_region() -> Arc<CompiledRegion> {
+    let module = module(vec![
+        vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],
+        vec![
+            Instr::LoadLocal(0),
+            Instr::ConstInt(10),
+            Instr::LtInt,
+            Instr::JumpIfFalse(3),
+            Instr::Jump(2),
+        ],
+        vec![
+            Instr::LoadLocal(0),
+            Instr::ConstInt(1),
+            Instr::Add,
+            Instr::StoreLocal(0),
+            Instr::Jump(1),
+        ],
+        vec![Instr::LoadLocal(0), Instr::Return],
+    ]);
+    let bundle = lm_abi::standard_bundle();
+    lm_verify::verify_module_with_bundle(&module, &bundle).expect("the poll loop verifies");
+    JitEngine::default()
+        .compile(FunctionInput::new(0, &module.funcs[0], &module, &bundle, 0))
+        .expect("the poll loop compiles")
+}
+
+fn execute_counting_loop(
+    region: &CompiledRegion,
+    activation: &mut NativeActivation,
+    fuel: u64,
+    poll: NativePoll<'_>,
+) -> ExecutionExit {
+    activation
+        .prepare_root(NativePreparation {
+            function: 0,
+            environment: 0,
+            capture_tag: ValueTag::Uninit as u64,
+            capture_bits: 0,
+            capture_data: 0,
+            capture_len: 0,
+            block: 0,
+            instruction: 0,
+            local_count: 2,
+            max_stack: region.max_stack(),
+            operand_len: 0,
+            scalar_limit: 4_096,
+            frame_limit: 256,
+        })
+        .expect("the poll root prepares");
+    let mut runtime = TestRuntime {
+        heap: Heap::new(1 << 20),
+    };
+    let mut roots = vec![0; region.max_roots().max(1)];
+    let mut root_tags = vec![0; region.max_roots().max(1)];
+    let mut root_states = vec![0; region.max_roots().max(1)];
+    region
+        .execute(
+            &mut runtime,
+            activation,
+            NativeExecution {
+                entry: 0,
+                entries: &[],
+                base_stack_values: 0,
+                max_stack_values: 4_096,
+                base_frames: 0,
+                max_frames: 256,
+                roots: &mut roots,
+                root_tags: &mut root_tags,
+                root_states: &mut root_states,
+                fuel,
+                poll,
+                heap: JitHeapView::EMPTY,
+                class_parents: &[],
+                dispatch_rows: &[],
+                dispatch_methods: &[],
+                literals: NativeLiteralView::EMPTY,
+                type_store_id: 1,
+                type_environments: NativeTypeEnvironmentView::EMPTY,
+                resolved_calls: NativeResolvedCallView::EMPTY,
+                image_slots: NativeImageSlotView::EMPTY,
+            },
+        )
+        .expect("the poll loop executes")
+}
+
+#[test]
+fn idle_native_polls_keep_the_region_active() {
+    let region = counting_loop_region();
+    let mut expected_activation = NativeActivation::default();
+    let expected = execute_counting_loop(
+        region.as_ref(),
+        &mut expected_activation,
+        1_000,
+        NativePoll::disabled(),
+    );
+    let requested = std::sync::atomic::AtomicU32::new(0);
+    let mut actual_activation = NativeActivation::default();
+    let actual = execute_counting_loop(
+        region.as_ref(),
+        &mut actual_activation,
+        1_000,
+        NativePoll::new(&requested, 3, 4),
+    );
+    assert_eq!(actual.kind(), ExitKind::Return);
+    assert_eq!(actual.retired(), expected.retired());
+    assert_eq!(actual.result(), expected.result());
+    assert_eq!(
+        actual_activation.root_buffers(),
+        expected_activation.root_buffers()
+    );
+}
+
+#[test]
+fn requested_native_poll_stops_at_the_exact_program_point() {
+    let region = counting_loop_region();
+    let mut expected_activation = NativeActivation::default();
+    let expected = execute_counting_loop(
+        region.as_ref(),
+        &mut expected_activation,
+        5,
+        NativePoll::disabled(),
+    );
+    let requested = std::sync::atomic::AtomicU32::new(1);
+    let mut actual_activation = NativeActivation::default();
+    let actual = execute_counting_loop(
+        region.as_ref(),
+        &mut actual_activation,
+        1_000,
+        NativePoll::new(&requested, 5, 7),
+    );
+    assert_eq!(actual.kind(), ExitKind::Fuel);
+    assert_eq!(actual.retired(), 5);
+    assert_eq!(actual.block(), expected.block());
+    assert_eq!(actual.instruction(), expected.instruction());
+    assert_eq!(actual.stack_len(), expected.stack_len());
+    assert_eq!(
+        actual_activation.root_buffers(),
+        expected_activation.root_buffers()
+    );
+}
+
+#[test]
+fn poll_schedule_keeps_one_phase_at_boundaries() {
+    let schedule = PollSchedule::new(3, 4);
+    assert_eq!(schedule.remaining_after(0), 3);
+    assert_eq!(schedule.remaining_after(1), 2);
+    assert_eq!(schedule.remaining_after(2), 1);
+    assert_eq!(schedule.remaining_after(3), 4);
+    assert_eq!(schedule.remaining_after(4), 3);
+    assert_eq!(schedule.remaining_after(7), 4);
+    assert!(!schedule.due_at(2));
+    assert!(schedule.due_at(3));
+    assert!(schedule.due_at(7));
+}
+
 #[test]
 fn liveness_ignores_a_local_replaced_before_use() {
     let mut segments = vec![Segment {
@@ -270,6 +425,7 @@ fn unreachable_code_uses_one_native_fault_exit() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 1,
+                poll: NativePoll::disabled(),
                 heap: JitHeapView::EMPTY,
                 class_parents: &[],
                 dispatch_rows: &[],
@@ -706,6 +862,7 @@ fn native_safe_byte_reads_return_a_byte_or_minus_one() {
                     root_tags: &mut root_tags,
                     root_states: &mut root_states,
                     fuel: 4,
+                    poll: NativePoll::disabled(),
                     heap,
                     class_parents: &[],
                     dispatch_rows: &[],
@@ -783,6 +940,7 @@ fn native_field_load_uses_the_direct_heap_view() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
+                poll: NativePoll::disabled(),
                 heap,
                 class_parents: &[],
                 dispatch_rows: &[],
@@ -858,6 +1016,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
+                poll: NativePoll::disabled(),
                 heap,
                 class_parents: &[],
                 dispatch_rows: &[],
@@ -934,6 +1093,7 @@ fn another_concrete_class_replays_the_field_instruction() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 3,
+                poll: NativePoll::disabled(),
                 heap,
                 class_parents: &[],
                 dispatch_rows: &[],
@@ -1011,6 +1171,7 @@ fn native_field_store_writes_the_canonical_value() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 5,
+                poll: NativePoll::disabled(),
                 heap,
                 class_parents: &[],
                 dispatch_rows: &[],
@@ -1092,6 +1253,7 @@ fn native_field_store_replays_a_frozen_receiver() {
                 root_tags: &mut root_tags,
                 root_states: &mut root_states,
                 fuel: 5,
+                poll: NativePoll::disabled(),
                 heap,
                 class_parents: &[],
                 dispatch_rows: &[],

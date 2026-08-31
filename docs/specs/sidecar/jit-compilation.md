@@ -1,10 +1,10 @@
 # JIT compilation
 
-Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and growable activations are implemented.
+Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, growable activations, and demand-driven polls are implemented.
 
 All scheduler tasks use one measured 16,384-instruction quantum.
 
-Demand-driven scheduler polls remain open.
+Generated code rearms idle scheduler polls without materializing machine state.
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
@@ -2923,11 +2923,79 @@ The scheduler suite passed 35 tests.
 
 The first pass still returns from generated code at every poll.
 
-The next pass must rearm fuel inside generated code.
+The second pass rearms fuel inside generated code.
 
 This change keeps native frames and scalar values live across idle polls.
 
 The common poll path must not materialize canonical machine state.
+
+Each exact checkpoint keeps its live values on the current SSA path.
+
+An idle poll reads one atomic request and rearms the next deadline.
+
+A requested poll uses the existing exact materialization exit.
+
+One worker reservation contains at most 64 poll intervals.
+
+The reservation bounds shared fuel claims. It does not define fairness.
+
+The scheduler poll interval defines fairness and request response time.
+
+The native poll tests passed at exact instruction boundaries.
+
+The focused JIT suite passed 157 tests.
+
+The parallel scheduler suite passed 35 tests.
+
+The direct and scheduled corpus differential passed for 163 programs.
+
+The corpus gate completed in 45.48 seconds.
+
+The warm debug workspace suite completed in 84.47 seconds.
+
+Test-only poll sweeps use every interval from 1 through 64.
+
+Production scheduling keeps the 16,384-instruction poll interval.
+
+One `PollSchedule` implementation defines interpreter and native phase arithmetic.
+
+A semantic boundary takes priority over a poll request at the same instruction.
+
+An idle poll does not clear heap proofs because it does not mutate the heap.
+
+| Warm row | Stage F54 | Generated rearm | Change |
+| --- | ---: | ---: | ---: |
+| Scheduled integer loop | 0.756 ms | 0.431 ms | 43.0 percent faster |
+| Scheduled deep recursion | 17.601 ms | 12.124 ms | 31.1 percent faster |
+
+The integer loop gained 76.72 times over interpreted execution.
+
+Scheduled deep recursion now matches its direct native time.
+
+| Representative row | Interpreter | Auto | Native | Auto gain |
+| --- | ---: | ---: | ---: | ---: |
+| JSON parse | 44.872 ms | 18.590 ms | 18.035 ms | 2.414 times |
+| JSON encode | 20.491 ms | 9.095 ms | 8.844 ms | 2.253 times |
+| HTTP parse | 41.523 ms | 19.555 ms | 19.372 ms | 2.123 times |
+| HTTP encode | 21.796 ms | 6.133 ms | 6.103 ms | 3.554 times |
+
+All representative rows retired every instruction through native code.
+
+The generated rearm first used one whole-function SSA merge and backedge.
+
+That graph exceeded the corpus memory limit and increased compile time.
+
+Local rearm blocks preserve the same values without the large merge.
+
+An active worker claim makes unavailable fuel pending, not exhausted.
+
+The coordinator waits for pending claims before it faults another task.
+
+A scarce claim takes at most half of the currently available fuel.
+
+This rule lets another worker claim fuel under a small world budget.
+
+Normal budgets still use the complete 64-poll reservation.
 
 ## 24. Rejected designs
 
