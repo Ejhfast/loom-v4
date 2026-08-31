@@ -259,7 +259,7 @@ Every segment ends at one of these points:
 - a safepoint;
 - a fault;
 - a return;
-- a temporary interpreter site.
+- an observable engine boundary.
 
 Native code can continue through segment edges and loop backedges.
 
@@ -284,19 +284,13 @@ The region planner does not duplicate bytecode stack effects.
 
 The backend contains one per-opcode lowering path.
 
-An unfinished treatment uses one temporary interpreter site.
+Every verified opcode has one production treatment.
 
-The site exits before the instruction retires.
+The current engine has no temporary opcode treatment.
 
-The interpreter executes exactly that instruction.
+An observable boundary can execute one instruction in the interpreter.
 
-The engine then retries native entry at the next program point.
-
-A temporary site never rejects the complete function.
-
-A temporary site does not count as native instruction coverage.
-
-Auto can demote a function with frequent interpreter sites.
+This boundary is the permanent class F treatment for that instruction.
 
 A restored machine can name an interior LMBC position.
 
@@ -611,7 +605,7 @@ Auto starts in the interpreter.
 
 A conservative classifier rejects only unsupported types, shapes, and resource sizes.
 
-One missing instruction treatment does not reject a function.
+The exhaustive opcode ledger prevents a missing instruction treatment.
 
 Rejected functions use no hotness counter and cause no compiler probe.
 
@@ -643,7 +637,7 @@ The engine samples retired work after native entry.
 
 Repeated quick exits disable later native entry for that function.
 
-A quick exit includes an interpreter boundary or an unsupported callee.
+A quick exit includes an observable boundary or an unavailable callee.
 
 Forced Native mode reports this decision without hiding it.
 
@@ -674,9 +668,8 @@ Clock-free counters include:
 - deoptimizations;
 - unproductive-entry demotions;
 - native frame-storage growth;
-- native fault exits.
-- compiled interpreter sites;
-- native interpreter exits.
+- native fault exits;
+- class F boundary exits.
 
 Native coverage counts instructions executed without runtime slow paths.
 
@@ -926,6 +919,10 @@ Gate result: Scheduled byte reads improved 10.42 times in Auto mode.
 Gate: One untreated integer instruction does not reject its function.
 
 Gate: Every fuel boundary matches the interpreter around that instruction.
+
+This stage used a transitional mechanism.
+
+Stage F32 removes this mechanism.
 
 ### Stage F3: Direct scalar coverage
 
@@ -2051,6 +2048,38 @@ The representative gate remains open.
 | HTTP parse | 0.87 times | 48.94 percent |
 | HTTP serialize | 0.81 times | 41.81 percent |
 
+### Stage F32: Syntax, dynamic values, and code boundaries
+
+- compile syntax queries and builders through fixed typed helpers;
+- compile `DynPack` through one typed allocation helper;
+- materialize before dynamic rendering and reflective code inspection;
+- remove the temporary opcode treatment state;
+- make the backend opcode match exhaustive.
+
+Gate: Every concrete opcode has one production treatment.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 134 tests.
+
+The corpus gate covered more than 160 programs in 12.72 seconds.
+
+The batch completed 20 opcode treatments.
+
+All 260 concrete operations now have production treatments.
+
+The ledger has no temporary treatment.
+
+| Workload | Auto gain | Native coverage |
+| --- | ---: | ---: |
+| List sort | 1.06 times | 31.20 percent |
+| JSON parse | 0.99 times | 6.92 percent |
+| JSON stringify | 1.06 times | 56.72 percent |
+| HTTP parse | 0.86 times | 48.94 percent |
+| HTTP serialize | 0.82 times | 41.81 percent |
+
+The representative gate remains open.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
@@ -2058,6 +2087,8 @@ A generic callback dispatcher cannot implement common heap instructions.
 A runtime stub cannot replace an opcode with an inline treatment.
 
 A temporary interpreter site cannot count as native coverage.
+
+A complete engine cannot retain a temporary opcode treatment.
 
 A parallel side record cannot mirror mutable object layout.
 

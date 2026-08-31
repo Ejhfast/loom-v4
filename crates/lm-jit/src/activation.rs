@@ -451,6 +451,19 @@ pub(super) struct RawNativeFunctions {
     pub(super) digest_value: RawDigest,
     pub(super) fault_code: RawHeapOperation,
     pub(super) fault_denied: RawHeapOperation,
+    pub(super) dyn_pack: RawHeapOperation,
+    pub(super) syntax_tree_root: RawHeapOperation,
+    pub(super) syntax_kind: RawHeapOperation,
+    pub(super) syntax_category: RawHeapOperation,
+    pub(super) syntax_range_start: RawHeapOperation,
+    pub(super) syntax_range_end: RawHeapOperation,
+    pub(super) syntax_text: RawHeapOperation,
+    pub(super) syntax_children: RawHeapOperation,
+    pub(super) syntax_detach: RawHeapOperation,
+    pub(super) syntax_build_token: RawHeapOperation,
+    pub(super) syntax_build_trivia: RawHeapOperation,
+    pub(super) syntax_build_node: RawHeapOperation,
+    pub(super) syntax_to_tree: RawHeapOperation,
     pub(super) string_builder_new: RawHeapOperation,
     pub(super) string_builder_append_text: RawHeapOperation,
     pub(super) string_builder_append_int: RawHeapOperation,
@@ -1495,6 +1508,45 @@ pub trait NativeRuntime {
 
     /// Create one policy-denied fault.
     fn fault_denied(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Package one canonical value with its closed static type.
+    fn dyn_pack(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one syntax tree root.
+    fn syntax_tree_root(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one syntax kind.
+    fn syntax_kind(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one syntax category.
+    fn syntax_category(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one syntax range start.
+    fn syntax_range_start(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one syntax range end.
+    fn syntax_range_end(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one syntax text view.
+    fn syntax_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one list of immediate syntax children.
+    fn syntax_children(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Create one compact syntax view.
+    fn syntax_detach(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Build one syntax token.
+    fn syntax_build_token(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Build one syntax trivia value.
+    fn syntax_build_trivia(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Build one syntax node.
+    fn syntax_build_node(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Convert one syntax node to a tree.
+    fn syntax_to_tree(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 
     /// Allocate one string builder.
     fn string_builder_new(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
@@ -2725,6 +2777,19 @@ macro_rules! heap_operation_entry {
 
 heap_operation_entry!(fault_code, fault_code);
 heap_operation_entry!(fault_denied, fault_denied);
+heap_operation_entry!(dyn_pack, dyn_pack);
+heap_operation_entry!(syntax_tree_root, syntax_tree_root);
+heap_operation_entry!(syntax_kind, syntax_kind);
+heap_operation_entry!(syntax_category, syntax_category);
+heap_operation_entry!(syntax_range_start, syntax_range_start);
+heap_operation_entry!(syntax_range_end, syntax_range_end);
+heap_operation_entry!(syntax_text, syntax_text);
+heap_operation_entry!(syntax_children, syntax_children);
+heap_operation_entry!(syntax_detach, syntax_detach);
+heap_operation_entry!(syntax_build_token, syntax_build_token);
+heap_operation_entry!(syntax_build_trivia, syntax_build_trivia);
+heap_operation_entry!(syntax_build_node, syntax_build_node);
+heap_operation_entry!(syntax_to_tree, syntax_to_tree);
 heap_operation_entry!(string_builder_new, string_builder_new);
 heap_operation_entry!(string_builder_append_text, string_builder_append_text);
 heap_operation_entry!(string_builder_append_int, string_builder_append_int);

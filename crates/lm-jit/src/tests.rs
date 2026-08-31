@@ -40,12 +40,11 @@ fn module(blocks: Vec<Vec<Instr>>) -> Module {
 }
 
 #[test]
-fn opcode_ledger_separates_class_status_and_exit() {
+fn opcode_ledger_separates_class_and_exit() {
     use lm_bytecode::{Instr, NumericInstr};
 
     let field = instruction_treatment(&Instr::LoadField(0));
     assert_eq!(field.class(), TreatmentClass::Guarded);
-    assert_eq!(field.status(), TreatmentStatus::Dedicated);
     assert_eq!(field.exit(), ExitBehavior::Continue);
 
     let call = instruction_treatment(&Instr::CallInterface {
@@ -54,17 +53,14 @@ fn opcode_ledger_separates_class_status_and_exit() {
         app: lm_bytecode::NO_APP,
     });
     assert_eq!(call.class(), TreatmentClass::Call);
-    assert_eq!(call.status(), TreatmentStatus::Dedicated);
     assert_eq!(call.exit(), ExitBehavior::Call);
 
     let helper = instruction_treatment(&Instr::Numeric(NumericInstr::BytesBitAnd));
     assert_eq!(helper.class(), TreatmentClass::Helper);
-    assert_eq!(helper.status(), TreatmentStatus::Dedicated);
     assert_eq!(helper.exit(), ExitBehavior::Allocation);
 
     let fault = instruction_treatment(&Instr::RaiseFault);
     assert_eq!(fault.class(), TreatmentClass::Exit);
-    assert_eq!(fault.status(), TreatmentStatus::Dedicated);
     assert_eq!(fault.exit(), ExitBehavior::Fault);
 }
 
@@ -94,7 +90,45 @@ fn dynamic_boundary_batch_has_only_dedicated_treatments() {
     ];
     assert!(operations
         .iter()
-        .all(|operation| instruction_treatment(operation).is_dedicated()));
+        .all(|operation| instruction_treatment(operation).class() != TreatmentClass::Inline));
+}
+
+#[test]
+fn syntax_dynamic_and_code_batch_has_production_treatments() {
+    use lm_bytecode::ExtendedInstr;
+
+    let helpers = [
+        ExtendedInstr::SyntaxTreeRoot,
+        ExtendedInstr::SyntaxKind,
+        ExtendedInstr::SyntaxCategory,
+        ExtendedInstr::SyntaxRangeStart,
+        ExtendedInstr::SyntaxRangeEnd,
+        ExtendedInstr::SyntaxText,
+        ExtendedInstr::SyntaxChildren,
+        ExtendedInstr::SyntaxDetach,
+        ExtendedInstr::DynPack { ty: 0 },
+        ExtendedInstr::SyntaxBuildToken,
+        ExtendedInstr::SyntaxBuildTrivia,
+        ExtendedInstr::SyntaxBuildNode,
+        ExtendedInstr::SyntaxToTree,
+    ];
+    assert!(helpers.iter().all(|operation| {
+        instruction_treatment(&Instr::Extended(*operation)).class() == TreatmentClass::Helper
+    }));
+
+    let boundaries = [
+        ExtendedInstr::DynRender,
+        ExtendedInstr::FunctionCode { func: 0 },
+        ExtendedInstr::ClassCode { class: 0 },
+        ExtendedInstr::CodeSource { ty: 0 },
+        ExtendedInstr::CodeDefinition,
+        ExtendedInstr::FaultSite { ty: 0 },
+        ExtendedInstr::FaultTrace { ty: 0 },
+    ];
+    assert!(boundaries.iter().all(|operation| {
+        let treatment = instruction_treatment(&Instr::Extended(*operation));
+        treatment.class() == TreatmentClass::Exit && treatment.exit() == ExitBehavior::Boundary
+    }));
 }
 
 #[test]
@@ -471,6 +505,19 @@ impl NativeRuntime for TestRuntime {
     interpreter_heap_operations!(
         fault_code,
         fault_denied,
+        dyn_pack,
+        syntax_tree_root,
+        syntax_kind,
+        syntax_category,
+        syntax_range_start,
+        syntax_range_end,
+        syntax_text,
+        syntax_children,
+        syntax_detach,
+        syntax_build_token,
+        syntax_build_trivia,
+        syntax_build_node,
+        syntax_to_tree,
         string_builder_new,
         string_builder_append_text,
         string_builder_append_int,

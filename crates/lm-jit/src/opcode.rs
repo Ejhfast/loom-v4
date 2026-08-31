@@ -19,15 +19,6 @@ pub enum TreatmentClass {
     Exit,
 }
 
-/// The current implementation state for one opcode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TreatmentStatus {
-    /// The JIT has the production treatment.
-    Dedicated,
-    /// The JIT uses one temporary interpreter site.
-    Temporary,
-}
-
 /// The control-flow behavior after one production treatment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitBehavior {
@@ -53,7 +44,6 @@ pub enum FaultStack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionTreatment {
     class: TreatmentClass,
-    status: TreatmentStatus,
     exit: ExitBehavior,
     replay: bool,
     fault_stack: FaultStack,
@@ -63,17 +53,6 @@ impl InstructionTreatment {
     const fn dedicated(class: TreatmentClass, exit: ExitBehavior) -> InstructionTreatment {
         InstructionTreatment {
             class,
-            status: TreatmentStatus::Dedicated,
-            exit,
-            replay: false,
-            fault_stack: FaultStack::None,
-        }
-    }
-
-    const fn temporary(class: TreatmentClass, exit: ExitBehavior) -> InstructionTreatment {
-        InstructionTreatment {
-            class,
-            status: TreatmentStatus::Temporary,
             exit,
             replay: false,
             fault_stack: FaultStack::None,
@@ -95,11 +74,6 @@ impl InstructionTreatment {
         self.class
     }
 
-    /// Return the current implementation state.
-    pub fn status(self) -> TreatmentStatus {
-        self.status
-    }
-
     /// Return the production exit behavior.
     pub fn exit(self) -> ExitBehavior {
         self.exit
@@ -114,19 +88,10 @@ impl InstructionTreatment {
     pub fn fault_stack(self) -> FaultStack {
         self.fault_stack
     }
-
-    /// Return true when the JIT has the production treatment.
-    pub fn is_dedicated(self) -> bool {
-        self.status == TreatmentStatus::Dedicated
-    }
 }
 
 const fn dedicated(class: TreatmentClass) -> InstructionTreatment {
     InstructionTreatment::dedicated(class, ExitBehavior::Continue)
-}
-
-const fn temporary(class: TreatmentClass) -> InstructionTreatment {
-    InstructionTreatment::temporary(class, ExitBehavior::Continue)
 }
 
 /// Return the exhaustive JIT treatment for one instruction.
@@ -383,23 +348,35 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::SyntaxKind
         | ExtendedInstr::SyntaxCategory
         | ExtendedInstr::SyntaxRangeStart
-        | ExtendedInstr::SyntaxRangeEnd => temporary(Inline),
+        | ExtendedInstr::SyntaxRangeEnd => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::SyntaxTreeRoot
         | ExtendedInstr::SyntaxText
         | ExtendedInstr::SyntaxChildren
         | ExtendedInstr::SyntaxDetach
-        | ExtendedInstr::DynRender
+        | ExtendedInstr::SyntaxToTree => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        ExtendedInstr::DynPack { .. } => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
+        ExtendedInstr::DynRender
+        | ExtendedInstr::FunctionCode { .. }
+        | ExtendedInstr::ClassCode { .. }
         | ExtendedInstr::CodeSource { .. }
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::FaultSite { .. }
-        | ExtendedInstr::FaultTrace { .. } => temporary(Helper),
-        ExtendedInstr::DynPack { .. }
-        | ExtendedInstr::SyntaxBuildToken
+        | ExtendedInstr::FaultTrace { .. } => {
+            InstructionTreatment::dedicated(Exit, ExitBehavior::Boundary)
+        }
+        ExtendedInstr::SyntaxBuildToken
         | ExtendedInstr::SyntaxBuildTrivia
-        | ExtendedInstr::SyntaxBuildNode
-        | ExtendedInstr::SyntaxToTree
-        | ExtendedInstr::FunctionCode { .. }
-        | ExtendedInstr::ClassCode { .. } => temporary(FastPath),
+        | ExtendedInstr::SyntaxBuildNode => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
     }
 }
 

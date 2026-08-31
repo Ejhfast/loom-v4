@@ -188,7 +188,6 @@ pub enum ExitKind {
     HeapLimit,
     Effect,
     StackLimit,
-    Interpreter,
     Replay,
     Literal,
     Unreachable,
@@ -319,9 +318,6 @@ pub(super) enum SegmentExit {
         fallthrough_ip: u32,
     },
     Boundary {
-        fallthrough_ip: Option<u32>,
-    },
-    Interpreter {
         fallthrough_ip: Option<u32>,
     },
     Unreachable,
@@ -690,7 +686,7 @@ impl RegionPlan {
         let mut allocation_sites = 0;
         let mut collection_sites = 0;
         let mut effect_sites = 0;
-        let mut interpreter_sites = 0;
+        let interpreter_sites = 0;
         let mut type_resolution_sites = 0;
         let analysis_context = SegmentAnalysisContext {
             func: runtime,
@@ -787,10 +783,6 @@ impl RegionPlan {
             }
             if matches!(segment.exit, SegmentExit::Boundary { .. }) {
                 segment.cost = segment.cost.saturating_sub(1);
-            }
-            if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
-                segment.cost = segment.cost.saturating_sub(1);
-                interpreter_sites += 1;
             }
             max_stack = max_stack.max(analysis.max_stack);
             max_stack_values = max_stack_values.max(analysis.max_stack_values);
@@ -1052,11 +1044,6 @@ fn segment_exit(
 ) -> Result<Option<SegmentExit>, UnsupportedReason> {
     let next = instruction_index as u32 + 1;
     let treatment = crate::instruction_treatment(instruction);
-    if !treatment.is_dedicated() {
-        return Ok(Some(SegmentExit::Interpreter {
-            fallthrough_ip: (instruction_index + 1 < block_len).then_some(next),
-        }));
-    }
     Ok(match treatment.exit() {
         crate::ExitBehavior::Continue => None,
         crate::ExitBehavior::Branch => Some(match instruction {
@@ -1184,12 +1171,6 @@ fn resolve_successors(
                 fallthrough_ip: Some(fallthrough_ip),
             } => vec![entry(entries, segment.block, fallthrough_ip)?],
             SegmentExit::Boundary {
-                fallthrough_ip: None,
-            } => Vec::new(),
-            SegmentExit::Interpreter {
-                fallthrough_ip: Some(fallthrough_ip),
-            } => vec![entry(entries, segment.block, fallthrough_ip)?],
-            SegmentExit::Interpreter {
                 fallthrough_ip: None,
             } => Vec::new(),
             SegmentExit::Return | SegmentExit::Unreachable => Vec::new(),
@@ -2074,6 +2055,27 @@ fn analyze_segment(
                     stack: before.stack.clone(),
                 });
             }
+            Instr::Extended(ExtendedInstr::DynPack { .. }) => {
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Extended(
+                ExtendedInstr::SyntaxTreeRoot
+                | ExtendedInstr::SyntaxText
+                | ExtendedInstr::SyntaxChildren
+                | ExtendedInstr::SyntaxDetach
+                | ExtendedInstr::SyntaxBuildToken
+                | ExtendedInstr::SyntaxBuildTrivia
+                | ExtendedInstr::SyntaxBuildNode
+                | ExtendedInstr::SyntaxToTree,
+            ) => {
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
             Instr::Call(target) => {
                 let signature = context
                     .calls
@@ -2274,12 +2276,14 @@ fn analyze_segment(
             | Instr::RaiseFault
             | Instr::Extended(ExtendedInstr::LoadSlot { .. })
             | Instr::Extended(ExtendedInstr::SendSlot { .. })
-            | Instr::Extended(ExtendedInstr::PrepareWait { .. }) => {
-                boundary_stack = before.stack.clone();
-            }
-            _ if matches!(segment.exit, SegmentExit::Interpreter { .. })
-                && offset + 1 == (segment.end - segment.start) as usize =>
-            {
+            | Instr::Extended(ExtendedInstr::PrepareWait { .. })
+            | Instr::Extended(ExtendedInstr::DynRender)
+            | Instr::Extended(ExtendedInstr::FunctionCode { .. })
+            | Instr::Extended(ExtendedInstr::ClassCode { .. })
+            | Instr::Extended(ExtendedInstr::CodeSource { .. })
+            | Instr::Extended(ExtendedInstr::CodeDefinition)
+            | Instr::Extended(ExtendedInstr::FaultSite { .. })
+            | Instr::Extended(ExtendedInstr::FaultTrace { .. }) => {
                 boundary_stack = before.stack.clone();
             }
             _ => {}

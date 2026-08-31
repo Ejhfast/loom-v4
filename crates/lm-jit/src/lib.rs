@@ -14,7 +14,6 @@ const EXIT_FUEL: u32 = 1;
 const EXIT_RETURN: u32 = 2;
 const EXIT_INTEGER_OVERFLOW: u32 = 3;
 const EXIT_DIVIDE_BY_ZERO: u32 = 4;
-const EXIT_INTERPRETER: u32 = 5;
 const EXIT_INVALID_ENTRY: u32 = 6;
 const EXIT_TYPE_MISMATCH: u32 = 7;
 const EXIT_UNINITIALIZED_FIELD: u32 = 8;
@@ -46,19 +45,21 @@ use activation::{
     bytes_bit_not, bytes_bit_or, bytes_bit_xor, bytes_compact, bytes_compare, bytes_concat,
     bytes_contains, bytes_ends_with, bytes_find_index, bytes_from_text, bytes_hash, bytes_hex,
     bytes_is_utf8, bytes_slice, bytes_starts_with, bytes_text, bytes_text_view, digest_value,
-    fault_code, fault_denied, float_fixed, freeze_graph, grow_list, insert_list, list_contains,
-    map_at, map_clear, map_get, map_has, map_insert_hashed, map_key_at, map_next_index, map_probe,
-    map_probe_key, map_probe_remove, map_probe_set_value, map_probe_value, map_put_commit,
-    map_put_discard, map_put_probe, map_remove, map_value_at, reserve_list, reserve_map,
-    string_builder_append_bool, string_builder_append_char, string_builder_append_float,
-    string_builder_append_int, string_builder_append_text, string_builder_build,
-    string_builder_finish, string_builder_new, text_bytes, text_compare, text_concat,
-    text_contains, text_ends_with, text_find_byte, text_find_scalar, text_hash, text_lines,
-    text_lower_ascii, text_pad_end, text_pad_start, text_parse_float_status,
-    text_parse_float_value, text_parse_int_status, text_parse_int_value, text_replace, text_slice,
-    text_slice_bytes, text_split, text_starts_with, text_to_string, text_trim, text_trim_end,
-    text_trim_start, text_upper_ascii, values_equal, NativeFunction, RawExit, RawNativeActivation,
-    RawNativeFunctions, RawRuntimeContext,
+    dyn_pack, fault_code, fault_denied, float_fixed, freeze_graph, grow_list, insert_list,
+    list_contains, map_at, map_clear, map_get, map_has, map_insert_hashed, map_key_at,
+    map_next_index, map_probe, map_probe_key, map_probe_remove, map_probe_set_value,
+    map_probe_value, map_put_commit, map_put_discard, map_put_probe, map_remove, map_value_at,
+    reserve_list, reserve_map, string_builder_append_bool, string_builder_append_char,
+    string_builder_append_float, string_builder_append_int, string_builder_append_text,
+    string_builder_build, string_builder_finish, string_builder_new, syntax_build_node,
+    syntax_build_token, syntax_build_trivia, syntax_category, syntax_children, syntax_detach,
+    syntax_kind, syntax_range_end, syntax_range_start, syntax_text, syntax_to_tree,
+    syntax_tree_root, text_bytes, text_compare, text_concat, text_contains, text_ends_with,
+    text_find_byte, text_find_scalar, text_hash, text_lines, text_lower_ascii, text_pad_end,
+    text_pad_start, text_parse_float_status, text_parse_float_value, text_parse_int_status,
+    text_parse_int_value, text_replace, text_slice, text_slice_bytes, text_split, text_starts_with,
+    text_to_string, text_trim, text_trim_end, text_trim_start, text_upper_ascii, values_equal,
+    NativeFunction, RawExit, RawNativeActivation, RawNativeFunctions, RawRuntimeContext,
 };
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
@@ -73,7 +74,6 @@ pub use activation::{
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
-    TreatmentStatus,
 };
 
 /// One native compilation or execution failure.
@@ -464,7 +464,6 @@ impl CompiledRegion {
                             | SegmentExit::SlotCall { .. }
                             | SegmentExit::Effect { .. }
                             | SegmentExit::Boundary { .. }
-                            | SegmentExit::Interpreter { .. }
                     )
             })
             .map(|segment| segment.boundary_stack.as_slice())
@@ -730,6 +729,19 @@ impl CompiledRegion {
             digest_value: digest_value::<R>,
             fault_code: fault_code::<R>,
             fault_denied: fault_denied::<R>,
+            dyn_pack: dyn_pack::<R>,
+            syntax_tree_root: syntax_tree_root::<R>,
+            syntax_kind: syntax_kind::<R>,
+            syntax_category: syntax_category::<R>,
+            syntax_range_start: syntax_range_start::<R>,
+            syntax_range_end: syntax_range_end::<R>,
+            syntax_text: syntax_text::<R>,
+            syntax_children: syntax_children::<R>,
+            syntax_detach: syntax_detach::<R>,
+            syntax_build_token: syntax_build_token::<R>,
+            syntax_build_trivia: syntax_build_trivia::<R>,
+            syntax_build_node: syntax_build_node::<R>,
+            syntax_to_tree: syntax_to_tree::<R>,
             string_builder_new: string_builder_new::<R>,
             string_builder_append_text: string_builder_append_text::<R>,
             string_builder_append_int: string_builder_append_int::<R>,
@@ -849,7 +861,6 @@ impl CompiledRegion {
             EXIT_RETURN => ExitKind::Return,
             EXIT_INTEGER_OVERFLOW => ExitKind::IntegerOverflow,
             EXIT_DIVIDE_BY_ZERO => ExitKind::DivideByZero,
-            EXIT_INTERPRETER => ExitKind::Interpreter,
             EXIT_TYPE_MISMATCH => ExitKind::TypeMismatch,
             EXIT_UNINITIALIZED_FIELD => ExitKind::UninitializedField,
             EXIT_CALL => ExitKind::Call,
@@ -962,11 +973,6 @@ pub fn is_candidate(function: &lm_bytecode::Func) -> bool {
         };
     }
     instructions != 0
-}
-
-/// Return true when one instruction has a dedicated JIT treatment.
-pub fn instruction_has_dedicated_treatment(instruction: &lm_bytecode::Instr) -> bool {
-    instruction_treatment(instruction).is_dedicated()
 }
 
 mod backend;

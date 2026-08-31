@@ -2,7 +2,6 @@
 
 use lm_jit::{Failure, FunctionInput, NativeDispatchRow};
 use std::collections::BTreeMap;
-use std::fmt::Debug;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -282,11 +281,7 @@ impl NativeSlot {
             .map(Vec::len)
             .sum::<usize>()
             .clamp(1, u32::MAX as usize) as u32;
-        let call_promotable = function
-            .blocks
-            .iter()
-            .flatten()
-            .all(lm_jit::instruction_has_dedicated_treatment);
+        let call_promotable = true;
         NativeSlot {
             verdict: OnceLock::new(),
             entry: Arc::new(lm_jit::NativeEntryCell::default()),
@@ -557,14 +552,8 @@ fn function_rejections(
     reasons.into_iter().collect()
 }
 
-fn function_treatment_gaps(function: &lm_bytecode::Func) -> Vec<(String, u32)> {
-    let mut gaps = BTreeMap::<String, u32>::new();
-    for instruction in function.blocks.iter().flatten() {
-        if !lm_jit::instruction_has_dedicated_treatment(instruction) {
-            add_reason(&mut gaps, instruction_rejection(instruction));
-        }
-    }
-    gaps.into_iter().collect()
+fn function_treatment_gaps(_function: &lm_bytecode::Func) -> Vec<(String, u32)> {
+    Vec::new()
 }
 
 fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {
@@ -572,27 +561,4 @@ fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {
         .entry(reason)
         .and_modify(|count| *count = count.saturating_add(1))
         .or_insert(1);
-}
-
-fn instruction_rejection(instruction: &lm_bytecode::Instr) -> String {
-    match instruction {
-        lm_bytecode::Instr::Native(operation) => {
-            format!("Native::{}", variant_name(operation))
-        }
-        lm_bytecode::Instr::Numeric(operation) => {
-            format!("Numeric::{}", variant_name(operation))
-        }
-        lm_bytecode::Instr::Extended(operation) => {
-            format!("Extended::{}", variant_name(operation))
-        }
-        _ => variant_name(instruction),
-    }
-}
-
-fn variant_name(value: &impl Debug) -> String {
-    let text = format!("{value:?}");
-    text.split([' ', '(', '{'])
-        .next()
-        .unwrap_or(text.as_str())
-        .to_string()
 }

@@ -1131,7 +1131,6 @@ impl JitEngine {
             let sample = match exit.kind() {
                 ExitKind::Fuel
                 | ExitKind::Return
-                | ExitKind::Interpreter
                 | ExitKind::Replay
                 | ExitKind::Allocation
                 | ExitKind::Effect
@@ -1226,7 +1225,6 @@ impl JitEngine {
         }
         match exit.kind() {
             ExitKind::Fuel
-            | ExitKind::Interpreter
             | ExitKind::Replay
             | ExitKind::Literal
             | ExitKind::Call
@@ -1239,10 +1237,7 @@ impl JitEngine {
             | ExitKind::Allocation
             | ExitKind::Effect
             | ExitKind::Boundary => {
-                let interpreter = matches!(
-                    exit.kind(),
-                    ExitKind::Interpreter | ExitKind::Replay | ExitKind::Literal
-                );
+                let interpreter = matches!(exit.kind(), ExitKind::Replay | ExitKind::Literal);
                 let grow_value_call = exit.kind() == ExitKind::GrowActivation
                     && top_region
                         .call_value_site(exit.block(), exit.instruction())

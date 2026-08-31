@@ -16,7 +16,7 @@ use crate::{
     NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_BOUNDARY, EXIT_CALL, EXIT_CALLBACK_CALL,
     EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
     EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
-    EXIT_INTERPRETER, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
+    EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
     EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
     EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
@@ -1045,7 +1045,6 @@ fn emit_segment(
                     | SegmentExit::SlotCall { .. }
                     | SegmentExit::Effect { .. }
                     | SegmentExit::Boundary { .. }
-                    | SegmentExit::Interpreter { .. }
             );
         if exact_fuel && !deferred_boundary {
             emit_exact_fuel_check(
@@ -3187,6 +3186,7 @@ fn emit_segment(
             }
             Instr::FaultCode
             | Instr::FaultDenied
+            | Instr::Extended(ExtendedInstr::DynPack { .. })
             | Instr::Native(
                 NativeInstr::SbNew
                 | NativeInstr::SbAppendInt
@@ -3232,6 +3232,23 @@ fn emit_segment(
                         (
                             [reason, zero, zero],
                             mem::offset_of!(RawNativeFunctions, fault_denied),
+                        )
+                    }
+                    Instr::Extended(ExtendedInstr::DynPack { ty }) => {
+                        let value = pop_value(&mut stack)?;
+                        let frame = emit_current_frame_pointer(builder, values)?;
+                        let environment = load_cell_u32(
+                            builder,
+                            frame,
+                            mem::offset_of!(RawNativeFrame, environment),
+                        )?;
+                        let environment = builder.ins().uextend(types::I64, environment);
+                        let environment = builder.ins().ishl_imm(environment, 32);
+                        let ty = builder.ins().iconst(types::I64, i64::from(ty));
+                        let packed = builder.ins().bor(ty, environment);
+                        (
+                            [value.bits, value.tag, packed],
+                            mem::offset_of!(RawNativeFunctions, dyn_pack),
                         )
                     }
                     Instr::Native(NativeInstr::SbNew) => (
@@ -3654,6 +3671,144 @@ fn emit_segment(
                     &deopt_stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Bool, value)?;
+            }
+            Instr::Extended(
+                ExtendedInstr::SyntaxTreeRoot
+                | ExtendedInstr::SyntaxKind
+                | ExtendedInstr::SyntaxCategory
+                | ExtendedInstr::SyntaxRangeStart
+                | ExtendedInstr::SyntaxRangeEnd
+                | ExtendedInstr::SyntaxText
+                | ExtendedInstr::SyntaxChildren
+                | ExtendedInstr::SyntaxDetach
+                | ExtendedInstr::SyntaxBuildToken
+                | ExtendedInstr::SyntaxBuildTrivia
+                | ExtendedInstr::SyntaxBuildNode
+                | ExtendedInstr::SyntaxToTree,
+            ) => {
+                let position = segment.start + within as u32;
+                let deopt_stack = stack.clone();
+                let roots = match segment
+                    .allocations
+                    .iter()
+                    .find(|site| site.instruction == position)
+                {
+                    Some(site) => collect_native_roots(
+                        builder,
+                        values,
+                        &plan.local_kinds,
+                        &site.stack,
+                        &stack,
+                    )?,
+                    None => Vec::new(),
+                };
+                let zero = builder.ins().iconst(types::I64, 0);
+                let (arguments, function_offset, result_kind) = match instruction {
+                    Instr::Extended(ExtendedInstr::SyntaxTreeRoot) => {
+                        let tree = pop_native(&mut stack)?;
+                        (
+                            [tree, zero, zero],
+                            mem::offset_of!(RawNativeFunctions, syntax_tree_root),
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Extended(
+                        operation @ (ExtendedInstr::SyntaxKind
+                        | ExtendedInstr::SyntaxCategory
+                        | ExtendedInstr::SyntaxRangeStart
+                        | ExtendedInstr::SyntaxRangeEnd),
+                    ) => {
+                        let element = pop_native(&mut stack)?;
+                        let function_offset = match operation {
+                            ExtendedInstr::SyntaxKind => {
+                                mem::offset_of!(RawNativeFunctions, syntax_kind)
+                            }
+                            ExtendedInstr::SyntaxCategory => {
+                                mem::offset_of!(RawNativeFunctions, syntax_category)
+                            }
+                            ExtendedInstr::SyntaxRangeStart => {
+                                mem::offset_of!(RawNativeFunctions, syntax_range_start)
+                            }
+                            ExtendedInstr::SyntaxRangeEnd => {
+                                mem::offset_of!(RawNativeFunctions, syntax_range_end)
+                            }
+                            _ => return Err(CompileError::Backend),
+                        };
+                        ([element, zero, zero], function_offset, ScalarKind::Int)
+                    }
+                    Instr::Extended(
+                        operation @ (ExtendedInstr::SyntaxText
+                        | ExtendedInstr::SyntaxChildren
+                        | ExtendedInstr::SyntaxDetach
+                        | ExtendedInstr::SyntaxToTree),
+                    ) => {
+                        let element = pop_native(&mut stack)?;
+                        let function_offset = match operation {
+                            ExtendedInstr::SyntaxText => {
+                                mem::offset_of!(RawNativeFunctions, syntax_text)
+                            }
+                            ExtendedInstr::SyntaxChildren => {
+                                mem::offset_of!(RawNativeFunctions, syntax_children)
+                            }
+                            ExtendedInstr::SyntaxDetach => {
+                                mem::offset_of!(RawNativeFunctions, syntax_detach)
+                            }
+                            ExtendedInstr::SyntaxToTree => {
+                                mem::offset_of!(RawNativeFunctions, syntax_to_tree)
+                            }
+                            _ => return Err(CompileError::Backend),
+                        };
+                        (
+                            [element, zero, zero],
+                            function_offset,
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    Instr::Extended(
+                        operation @ (ExtendedInstr::SyntaxBuildToken
+                        | ExtendedInstr::SyntaxBuildTrivia
+                        | ExtendedInstr::SyntaxBuildNode),
+                    ) => {
+                        let value = pop_native(&mut stack)?;
+                        let kind = pop_native(&mut stack)?;
+                        let builder_value = pop_native(&mut stack)?;
+                        let function_offset = match operation {
+                            ExtendedInstr::SyntaxBuildToken => {
+                                mem::offset_of!(RawNativeFunctions, syntax_build_token)
+                            }
+                            ExtendedInstr::SyntaxBuildTrivia => {
+                                mem::offset_of!(RawNativeFunctions, syntax_build_trivia)
+                            }
+                            ExtendedInstr::SyntaxBuildNode => {
+                                mem::offset_of!(RawNativeFunctions, syntax_build_node)
+                            }
+                            _ => return Err(CompileError::Backend),
+                        };
+                        (
+                            [builder_value, kind, value],
+                            function_offset,
+                            ScalarKind::Object(0),
+                        )
+                    }
+                    _ => return Err(CompileError::Backend),
+                };
+                let result = emit_heap_operation(
+                    builder,
+                    values,
+                    function_offset,
+                    arguments,
+                    &roots,
+                    HeapExitEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        fault_stack: &stack,
+                        deopt_stack: &deopt_stack,
+                    },
+                )?;
+                push_static(builder, &mut stack, result_kind, result)?;
             }
             Instr::Add | Instr::Sub | Instr::Mul => {
                 let right = pop_native(&mut stack)?;
@@ -4298,14 +4453,10 @@ fn emit_segment(
                 let result = builder.ins().uextend(types::I64, compared);
                 push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
-            Instr::Native(operation)
-                if crate::instruction_has_dedicated_treatment(&instruction) =>
-            {
+            Instr::Native(operation) => {
                 emit_char_instruction(builder, &mut stack, operation)?;
             }
-            Instr::Numeric(operation)
-                if crate::instruction_has_dedicated_treatment(&instruction) =>
-            {
+            Instr::Numeric(operation) => {
                 let deopt_stack = stack.clone();
                 emit_numeric_instruction(
                     builder,
@@ -4341,17 +4492,18 @@ fn emit_segment(
             | Instr::Extended(ExtendedInstr::LoadSlot { .. })
             | Instr::Extended(ExtendedInstr::SendSlot { .. })
             | Instr::Extended(ExtendedInstr::PrepareWait { .. })
+            | Instr::Extended(ExtendedInstr::DynRender)
+            | Instr::Extended(ExtendedInstr::FunctionCode { .. })
+            | Instr::Extended(ExtendedInstr::ClassCode { .. })
+            | Instr::Extended(ExtendedInstr::CodeSource { .. })
+            | Instr::Extended(ExtendedInstr::CodeDefinition)
+            | Instr::Extended(ExtendedInstr::FaultSite { .. })
+            | Instr::Extended(ExtendedInstr::FaultTrace { .. })
             | Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
             | Instr::Unreachable
             | Instr::Return => {}
-            _ if deferred_boundary && matches!(segment.exit, SegmentExit::Interpreter { .. }) => {}
-            _ => {
-                return Err(CompileError::Unsupported(
-                    UnsupportedReason::UnsupportedInstruction,
-                ))
-            }
         }
         if exact_fuel && !deferred_boundary {
             emit_charge(builder, values, 1);
@@ -4653,29 +4805,6 @@ fn emit_segment(
         return Ok(());
     }
 
-    if matches!(segment.exit, SegmentExit::Interpreter { .. }) {
-        let instruction = segment.end - 1;
-        emit_segment_charge(builder, values, segment.cost, exact_fuel);
-        let retired = builder.use_var(values.retired);
-        let zero = builder.ins().iconst(types::I64, 0);
-        emit_exit(
-            builder,
-            values,
-            ExitEmission {
-                retired,
-                kind: EXIT_INTERPRETER,
-                block: segment.block,
-                instruction,
-                result: NativeValue {
-                    bits: zero,
-                    tag: zero,
-                },
-            },
-            &stack,
-        )?;
-        return Ok(());
-    }
-
     if matches!(segment.exit, SegmentExit::Unreachable) {
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
         let retired = builder.use_var(values.retired);
@@ -4728,7 +4857,6 @@ fn emit_segment(
         }
         SegmentExit::Effect { .. } => unreachable!(),
         SegmentExit::Boundary { .. } => unreachable!(),
-        SegmentExit::Interpreter { .. } => unreachable!(),
         SegmentExit::Unreachable => unreachable!(),
         SegmentExit::Return => {
             let result = pop_value(&mut stack)?;
