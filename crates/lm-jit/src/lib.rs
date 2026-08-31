@@ -39,7 +39,7 @@ mod opcode;
 
 use activation::{
     allocate_callback, allocate_closure, allocate_instance, allocate_list, allocate_map,
-    allocate_tuple, bytes_compare, bytes_hash, digest_value, freeze_graph, grow_list,
+    allocate_tuple, bytes_compare, bytes_hash, digest_value, freeze_graph, grow_list, insert_list,
     list_contains, map_at, map_has, map_put_commit, map_put_discard, map_put_probe, reserve_list,
     text_compare, text_hash, values_equal, NativeFunction, RawExit, RawNativeActivation,
     RawNativeFunctions, RawRuntimeContext,
@@ -47,12 +47,12 @@ use activation::{
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, DigestRequest, ListGrowthRequest, ListGrowthResult,
-    ListReserveRequest, ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest,
-    MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeLiteralView, NativePreparation, NativeResolvedCallCache, NativeResolvedCallView,
-    NativeRootBuffers, NativeRootBuffersMut, NativeRuntime, NativeTypeEnvironmentCache,
-    NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult, ValueArrayAllocationRequest,
-    LOCAL_DIRTY, LOCAL_INITIALIZED,
+    ListInsertRequest, ListReserveRequest, ListReserveResult, MapPutCommitRequest,
+    MapPutDiscardRequest, MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution,
+    NativeFrameView, NativeLiteralView, NativePreparation, NativeResolvedCallCache,
+    NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut, NativeRuntime,
+    NativeTypeEnvironmentCache, NativeTypeEnvironmentView, RuntimeUnitResult, RuntimeValueResult,
+    ValueArrayAllocationRequest, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
@@ -667,6 +667,7 @@ impl CompiledRegion {
             allocate_list: allocate_list::<R>,
             allocate_map: allocate_map::<R>,
             grow_list: grow_list::<R>,
+            insert_list: insert_list::<R>,
             reserve_list: reserve_list::<R>,
             list_contains: list_contains::<R>,
             map_has: map_has::<R>,

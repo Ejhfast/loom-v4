@@ -397,6 +397,14 @@ pub(super) enum HeapAccessKind {
     ListPush {
         value: ValueContract,
     },
+    ListInsert {
+        value: ValueContract,
+    },
+    ListRemove {
+        value: ValueContract,
+        swap: bool,
+    },
+    ListTruncate,
     ListReserve,
     ListReorder,
     ListCapacity,
@@ -437,6 +445,7 @@ pub(super) enum OptionAccessKind {
     None,
     Payload { value: ValueContract },
     ListGet { value: ValueContract },
+    ListPop { value: ValueContract },
     MapPut { value: ValueContract, discard: bool },
     IsType { target: OptionTarget },
     CastType { target: OptionTarget },
@@ -675,6 +684,9 @@ impl RegionPlan {
                     HeapAccessKind::StoreField { .. }
                     | HeapAccessKind::ListSet { .. }
                     | HeapAccessKind::ListPush { .. }
+                    | HeapAccessKind::ListInsert { .. }
+                    | HeapAccessKind::ListRemove { .. }
+                    | HeapAccessKind::ListTruncate
                     | HeapAccessKind::ListReserve
                     | HeapAccessKind::ListReorder
                     | HeapAccessKind::ListEpoch
@@ -684,7 +696,9 @@ impl RegionPlan {
                         heap_write_sites += 1;
                         if matches!(
                             access.kind,
-                            HeapAccessKind::ListPush { .. } | HeapAccessKind::ListReserve
+                            HeapAccessKind::ListPush { .. }
+                                | HeapAccessKind::ListInsert { .. }
+                                | HeapAccessKind::ListReserve
                         ) {
                             collection_sites += 1;
                         }
@@ -1298,6 +1312,27 @@ fn analyze_segment(
                     kind: OptionAccessKind::ListGet { value },
                 });
             }
+            Instr::Extended(ExtendedInstr::ListPop { ty }) => {
+                let Instr::Extended(ExtendedInstr::ListPop { ty: source_ty }) = source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                let receiver = stack_from_end(&before.stack, 0)?;
+                let element = list_element_type(context.module, receiver)?;
+                let option_element = option_argument_type(context.module, source_ty)?;
+                let value = value_contract(context, element)?;
+                if !uses_equal_representation(
+                    value.kind,
+                    scalar_kind(context.module, option_element)?,
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: OptionAccessKind::ListPop { value },
+                });
+            }
             Instr::IsType(_) | Instr::CastType(_) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
                 let source_ty = match source_instruction {
@@ -1417,6 +1452,40 @@ fn analyze_segment(
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::ListSet { value: contract },
+                });
+            }
+            Instr::Extended(ExtendedInstr::ListInsert) => {
+                let value = stack_from_end(&before.stack, 0)?;
+                let receiver = stack_from_end(&before.stack, 2)?;
+                let element = list_element_type(context.module, receiver)?;
+                let contract = value_contract(context, element)?;
+                if !uses_equal_representation(value, contract.kind) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::ListInsert { value: contract },
+                });
+            }
+            Instr::Extended(
+                operation @ (ExtendedInstr::ListRemove | ExtendedInstr::ListSwapRemove),
+            ) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                let element = list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::ListRemove {
+                        value: value_contract(context, element)?,
+                        swap: matches!(operation, ExtendedInstr::ListSwapRemove),
+                    },
+                });
+            }
+            Instr::Extended(ExtendedInstr::ListTruncate) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                list_element_type(context.module, receiver)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::ListTruncate,
                 });
             }
             Instr::Extended(ExtendedInstr::ListCapacity) => {

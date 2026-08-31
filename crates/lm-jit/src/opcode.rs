@@ -316,11 +316,18 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::MapEpoch | ExtendedInstr::MapIterLen => dedicated(Guarded).with_replay(),
-        ExtendedInstr::ListPop { .. }
-        | ExtendedInstr::ListInsert
-        | ExtendedInstr::ListRemove
-        | ExtendedInstr::ListSwapRemove
-        | ExtendedInstr::ListTruncate => temporary(FastPath),
+        ExtendedInstr::ListPop { .. } => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(1)),
+        ExtendedInstr::ListInsert => dedicated(FastPath)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::ListRemove | ExtendedInstr::ListSwapRemove => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::ListTruncate => dedicated(Guarded)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::ListReserve => dedicated(FastPath)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),

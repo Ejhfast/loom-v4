@@ -1864,6 +1864,31 @@ The representative gate remains open.
 | HTTP parse | 0.86 times | 48.23 percent |
 | HTTP serialize | 0.83 times | 41.78 percent |
 
+### Stage F27: Direct list mutations
+
+- pop values through direct guarded array access;
+- insert values through an inline move and one growth path;
+- remove values through direct ordered or swapped moves;
+- truncate lists through direct length and charge updates;
+- preserve structural epochs for every mutation;
+- preserve exact option values, faults, and fuel state.
+
+Gate: All five list mutations use no temporary interpreter site.
+
+Gate: Direct and scheduled corpus results match Interpreter results.
+
+The focused JIT suite passed 119 tests.
+
+The direct and scheduled corpus gate took 11.94 seconds after compilation.
+
+| Workload | Interpreter | Native cold | Native warm | Native gain |
+| --- | ---: | ---: | ---: | ---: |
+| List mutations | 34.140 ms | 19.276 ms | 2.058 ms | 16.59 times |
+
+The batch completed five opcode treatments.
+
+The ledger now has 111 temporary treatments across 260 concrete operations.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -328,6 +328,7 @@ pub(super) type RawAllocateCapture =
 pub(super) type RawAllocateValues =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawGrowList = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32) -> u32;
+pub(super) type RawInsertList = unsafe extern "C" fn(*mut c_void, u64, i64, u64, u64, u32) -> u32;
 pub(super) type RawReserveList = unsafe extern "C" fn(*mut c_void, u64, i64, u32) -> u32;
 pub(super) type RawMapLookup = unsafe extern "C" fn(*mut c_void, u64, u64, u64, *mut u64) -> u32;
 pub(super) type RawValueEqual =
@@ -351,6 +352,7 @@ pub(super) struct RawNativeFunctions {
     pub(super) allocate_list: RawAllocateValues,
     pub(super) allocate_map: RawAllocateValues,
     pub(super) grow_list: RawGrowList,
+    pub(super) insert_list: RawInsertList,
     pub(super) reserve_list: RawReserveList,
     pub(super) list_contains: RawMapLookup,
     pub(super) map_has: RawMapLookup,
@@ -1195,6 +1197,9 @@ pub trait NativeRuntime {
     /// Grow one list and append one canonical value.
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult;
 
+    /// Grow one list and insert one canonical value.
+    fn insert_list(&mut self, request: ListInsertRequest<'_>) -> ListGrowthResult;
+
     /// Reserve additional capacity for one list.
     fn reserve_list(&mut self, request: ListReserveRequest<'_>) -> ListReserveResult;
 
@@ -1264,6 +1269,26 @@ pub struct ListGrowthRequest<'a> {
     /// Canonical appended value bits.
     pub value_bits: u64,
     /// Canonical appended value tag.
+    pub value_tag: u64,
+    /// Active root payloads.
+    pub root_bits: &'a [u64],
+    /// Active root tags.
+    pub root_tags: &'a [u64],
+    /// Active root states.
+    pub root_states: &'a [u8],
+    /// True when this frame can collect.
+    pub allow_collection: bool,
+}
+
+/// One typed request to insert a value after list growth.
+pub struct ListInsertRequest<'a> {
+    /// Canonical list reference bits.
+    pub reference: u64,
+    /// Requested insertion index.
+    pub index: i64,
+    /// Canonical inserted value bits.
+    pub value_bits: u64,
+    /// Canonical inserted value tag.
     pub value_tag: u64,
     /// Active root payloads.
     pub root_bits: &'a [u64],
@@ -1694,6 +1719,62 @@ pub(super) unsafe extern "C" fn grow_list<R: NativeRuntime>(
     let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
     match runtime.grow_list(ListGrowthRequest {
         reference,
+        value_bits,
+        value_tag,
+        root_bits,
+        root_tags,
+        root_states,
+        allow_collection,
+    }) {
+        ListGrowthResult::Done { heap } => {
+            // SAFETY: The native activation remains writable during the slow path.
+            unsafe {
+                (*context.activation).heap_pages = heap.pages;
+                (*context.activation).heap_page_count = heap.page_count;
+                (*context.activation).heap_slot_count = heap.slot_count;
+                (*context.activation).heap_used_bytes = heap.used_bytes;
+                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+            }
+            RUNTIME_OK
+        }
+        ListGrowthResult::HeapLimit => RUNTIME_HEAP_LIMIT,
+        ListGrowthResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+pub(super) unsafe extern "C" fn insert_list<R: NativeRuntime>(
+    context: *mut c_void,
+    reference: u64,
+    index: i64,
+    value_bits: u64,
+    value_tag: u64,
+    root_count: u32,
+) -> u32 {
+    if context.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let root_count = root_count as usize;
+    if root_count > context.root_capacity {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The checked count stays inside the activation root buffer.
+    let root_bits = unsafe { std::slice::from_raw_parts(context.roots, root_count) };
+    // SAFETY: Every root has one canonical tag slot.
+    let root_tags = unsafe { std::slice::from_raw_parts(context.root_tags, root_count) };
+    // SAFETY: Both root buffers have the same checked capacity.
+    let root_states = unsafe { std::slice::from_raw_parts(context.root_states, root_count) };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    // SAFETY: The activation remains live during this call.
+    let allow_collection = unsafe { (*context.activation).frame_len <= 1 };
+    match runtime.insert_list(ListInsertRequest {
+        reference,
+        index,
         value_bits,
         value_tag,
         root_bits,

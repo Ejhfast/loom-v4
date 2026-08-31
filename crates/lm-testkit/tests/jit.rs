@@ -1697,6 +1697,46 @@ fn list_push_uses_inline_writes_and_typed_growth() {
 }
 
 #[test]
+fn list_mutations_use_direct_heap_paths() {
+    let source = concat!(
+        "items: [Int] = []\ni = 0\ntotal = 0\n",
+        "while i < 200\n",
+        "  items.insert(0, i)\n",
+        "  items.insert(items.len(), i + 1)\n",
+        "  total = total + items.remove(0)\n",
+        "  total = total + items.swap_remove(0)\n",
+        "  items.push(i + 2)\n",
+        "  case items.pop()\n",
+        "  in Some(value) then total = total + value\n",
+        "  in None then total = total - 1000\n",
+        "  end\n",
+        "  items.push(i)\n",
+        "  items.truncate(0)\n",
+        "  case items.pop()\n",
+        "  in Some(_) then total = total - 1000\n",
+        "  in None then total = total + 1\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\ntotal\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-list-mutations.lm", source)
+        .expect("the list mutation case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(60_500)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 6, "{metrics:?}");
+    assert!(metrics.native_interpreter_exits <= 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+}
+
+#[test]
 fn list_push_preserves_heap_limit_and_frozen_faults() {
     let limit_source = concat!(
         "items: [Int] = []\ni = 0\n",

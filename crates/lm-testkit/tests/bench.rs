@@ -1550,6 +1550,26 @@ fn bench_jit_scalar_regions() {
         0,
     );
     report_jit(
+        "jit_list_mutations",
+        concat!(
+            "items: [Int] = []\ni = 0\ntotal = 0\n",
+            "while i < 100000\n",
+            "  items.insert(0, i)\n",
+            "  items.insert(items.len(), i + 1)\n",
+            "  total = total + items.remove(0)\n",
+            "  total = total + items.swap_remove(0)\n",
+            "  items.push(i)\n",
+            "  items.truncate(0)\n",
+            "  case items.pop()\n",
+            "  in Some(_) then total = total - 1000\n",
+            "  in None then total = total + 1\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_list_reserve",
         concat!(
             "items = [1]\nitems.reserve(64)\ni = 0\n",

@@ -6,10 +6,10 @@ use lm_heap::{MapEntry, MapIndex, StructuralEpoch};
 use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, DigestRequest, ListGrowthRequest, ListGrowthResult,
-    ListReserveRequest, ListReserveResult, MapPutCommitRequest, MapPutDiscardRequest,
-    MapPutProbeResult, NativeResolvedCallCache, NativeRuntime, NativeTypeEnvironmentCache,
-    RuntimeUnitResult, RuntimeValueResult, ScalarKind, ValueArrayAllocationRequest,
-    LOCAL_INITIALIZED,
+    ListInsertRequest, ListReserveRequest, ListReserveResult, MapPutCommitRequest,
+    MapPutDiscardRequest, MapPutProbeResult, NativeResolvedCallCache, NativeRuntime,
+    NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
+    ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, ValueTag};
 
@@ -772,6 +772,71 @@ impl NativeRuntime for MachineRuntime<'_> {
             return ListGrowthResult::Interpreter;
         }
         items.push(value);
+        self.machine.vm.heap.recharge_local(reference);
+        ListGrowthResult::Done {
+            heap: self.machine.vm.heap.jit_view(),
+        }
+    }
+
+    fn insert_list(&mut self, request: ListInsertRequest<'_>) -> ListGrowthResult {
+        let ListInsertRequest {
+            reference,
+            index,
+            value_bits,
+            value_tag,
+            root_bits,
+            root_tags,
+            root_states,
+            allow_collection,
+        } = request;
+        let Ok(index) = usize::try_from(index) else {
+            return ListGrowthResult::Interpreter;
+        };
+        let reference = object_reference(reference);
+        let Some(value) = tagged_value(value_tag, value_bits) else {
+            return ListGrowthResult::Interpreter;
+        };
+        let Some(crate::Object::List { items, epoch }) = self.machine.vm.heap.try_get(reference)
+        else {
+            return ListGrowthResult::Interpreter;
+        };
+        if self.machine.vm.heap.is_frozen(reference)
+            || index > items.len()
+            || epoch.ensure_bumpable().is_err()
+        {
+            return ListGrowthResult::Interpreter;
+        }
+        if self.machine.vm.heap.collection_due(16) && !allow_collection {
+            return ListGrowthResult::Interpreter;
+        }
+        let roots = match decode_root_objects(root_bits, root_tags, root_states) {
+            Ok(roots) => roots,
+            Err(CaptureDecodeFailure::Limit) => return ListGrowthResult::HeapLimit,
+            Err(CaptureDecodeFailure::Invalid) => return ListGrowthResult::Interpreter,
+        };
+        if let Err(fault) =
+            self.machine
+                .reserve_native(16, self.base_local, self.base_operand, &roots)
+        {
+            return if fault == crate::FaultCode::HeapLimit {
+                ListGrowthResult::HeapLimit
+            } else {
+                ListGrowthResult::Interpreter
+            };
+        }
+        let crate::Object::List { items, epoch } = self.machine.vm.heap.get_mut(reference) else {
+            return ListGrowthResult::Interpreter;
+        };
+        if index > items.len() {
+            return ListGrowthResult::Interpreter;
+        }
+        if items.try_reserve(1).is_err() {
+            return ListGrowthResult::HeapLimit;
+        }
+        if epoch.bump().is_err() {
+            return ListGrowthResult::Interpreter;
+        }
+        items.insert(index, value);
         self.machine.vm.heap.recharge_local(reference);
         ListGrowthResult::Done {
             heap: self.machine.vm.heap.jit_view(),

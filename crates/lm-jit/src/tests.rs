@@ -323,6 +323,10 @@ impl NativeRuntime for TestRuntime {
         ListGrowthResult::Interpreter
     }
 
+    fn insert_list(&mut self, _request: ListInsertRequest<'_>) -> ListGrowthResult {
+        ListGrowthResult::Interpreter
+    }
+
     fn reserve_list(&mut self, _request: ListReserveRequest<'_>) -> ListReserveResult {
         ListReserveResult::Interpreter
     }
