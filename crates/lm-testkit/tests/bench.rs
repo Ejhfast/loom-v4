@@ -1698,6 +1698,17 @@ fn bench_jit_scalar_regions() {
         ),
         64,
     );
+    report_jit_after_setup(
+        "jit_bytes_map_lookup",
+        concat!(
+            "key = Bytes(\"loom\")\ntable: {Bytes: Int} = {key: 5}\ni = 0\nsum = 0\n",
+            "while i < 1000000\n",
+            "  sum = sum + table.at(key)\n",
+            "  i = i + 1\n",
+            "end\nsum\n",
+        ),
+        64,
+    );
     report_jit(
         "jit_map_insert",
         concat!(

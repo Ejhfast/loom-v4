@@ -2435,6 +2435,27 @@ This stage does not complete map optimization.
 
 Text keys, optional reads, and existing-value writes still use typed slow paths.
 
+### Stage F42: Inline text and byte map hits
+
+- publish cached text and byte hash offsets from `lm-heap`;
+- validate each key through the canonical object table;
+- use cached private hashes for direct map probes;
+- compare equal text and byte candidates with one `memcmp` libcall;
+- accept `String` and `Substring` values through the `Text` contract;
+- keep uncached hashing and index rebuilding on fixed typed slow paths;
+- keep missing `MapAt` faults on the fixed typed slow path.
+
+The same-session comparison used commit `fa78315` as its parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Text map hit | 30.698 ms | 7.409 ms | 75.9 percent faster |
+| Byte map hit | 16.458 ms | 3.227 ms | 80.4 percent faster |
+
+The direct path uses the canonical map arrays and immutable shared data.
+
+`MapGet` and existing-value `MapPut` still use typed slow paths.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

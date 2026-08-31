@@ -367,6 +367,10 @@ pub const SHARED_TEXT_DATA_OFFSET: usize = std::mem::offset_of!(SharedText, data
 pub const SHARED_TEXT_BYTE_LEN_OFFSET: usize = std::mem::offset_of!(SharedText, byte_len);
 /// Byte offset of the visible Unicode scalar length.
 pub const SHARED_TEXT_SCALAR_LEN_OFFSET: usize = std::mem::offset_of!(SharedText, scalar_len);
+/// Byte offset of the cached semantic hash.
+pub const SHARED_TEXT_SEMANTIC_HASH_OFFSET: usize = std::mem::offset_of!(SharedText, semantic_hash);
+/// Byte offset of the cached private lookup hash.
+pub const SHARED_TEXT_LOOKUP_HASH_OFFSET: usize = std::mem::offset_of!(SharedText, lookup_hash);
 
 impl SharedText {
     /// Make an empty text value.
@@ -801,6 +805,11 @@ pub const SHARED_BYTES_DATA_OFFSET: usize =
 /// Byte offset of the immutable byte length.
 pub const SHARED_BYTES_LEN_OFFSET: usize =
     std::mem::offset_of!(SharedBytes, span) + std::mem::offset_of!(ByteSpan, len);
+/// Byte offset of the cached semantic hash.
+pub const SHARED_BYTES_SEMANTIC_HASH_OFFSET: usize =
+    std::mem::offset_of!(SharedBytes, semantic_hash);
+/// Byte offset of the cached private lookup hash.
+pub const SHARED_BYTES_LOOKUP_HASH_OFFSET: usize = std::mem::offset_of!(SharedBytes, lookup_hash);
 
 impl SharedBytes {
     /// Make an empty byte value.

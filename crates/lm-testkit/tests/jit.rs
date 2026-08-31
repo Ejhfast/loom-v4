@@ -859,7 +859,7 @@ fn map_literals_match_each_fuel_boundary() {
 }
 
 #[test]
-fn map_lookup_helpers_stay_native() {
+fn text_map_hits_stay_native() {
     let source = concat!(
         "table = {\"a\": 3, \"b\": 5}\n",
         "i = 0\nsum = 0\n",
@@ -883,7 +883,7 @@ fn map_lookup_helpers_stay_native() {
 }
 
 #[test]
-fn map_lookup_helpers_match_each_fuel_boundary() {
+fn text_map_hits_match_each_fuel_boundary() {
     let source = concat!(
         "table = {\"a\": 3}\n",
         "if table.has(\"a\") then table.at(\"a\") else 0 end\n",
@@ -897,6 +897,42 @@ fn map_lookup_helpers_match_each_fuel_boundary() {
         assert_eq!(native, interpreted, "fuel {fuel}");
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
+}
+
+#[test]
+fn text_map_hits_match_string_and_substring_keys() {
+    let source = concat!(
+        "source = \"_key_\"\n",
+        "view = source.slice(1, 3).expect(\"the view exists\")\n",
+        "first = Map[Text, Int]()\nfirst.put(\"key\", 7)\n",
+        "second = Map[Text, Int]()\nsecond.put(view, 11)\n",
+        "(first.at(view), second.at(\"key\"), first.has(\"absent\"))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-text-map-hits.lm", source)
+        .expect("the text map-hit case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
+fn byte_map_hits_compare_distinct_storage() {
+    let source = concat!(
+        "stored = Bytes(\"key\")\nlookup = Bytes(\"key\")\n",
+        "table: {Bytes: Int} = {}\ntable.put(stored, 13)\n",
+        "(table.at(lookup), table.has(Bytes(\"absent\")))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-byte-map-hits.lm", source)
+        .expect("the byte map-hit case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
 }
 
 #[test]

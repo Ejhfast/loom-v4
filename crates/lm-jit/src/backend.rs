@@ -32,12 +32,12 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
-    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_BYTE_BUFFER_ACTIVE_OFFSET,
-    JIT_BYTE_BUFFER_CAPACITY_OFFSET, JIT_BYTE_BUFFER_DATA_OFFSET, JIT_BYTE_BUFFER_LEN_OFFSET,
-    JIT_CLOSURE_CAPTURES_OFFSET, JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET,
-    JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET,
-    JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
-    JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
+    JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_BYTES_LOOKUP_HASH_OFFSET,
+    JIT_BYTE_BUFFER_ACTIVE_OFFSET, JIT_BYTE_BUFFER_CAPACITY_OFFSET, JIT_BYTE_BUFFER_DATA_OFFSET,
+    JIT_BYTE_BUFFER_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET, JIT_CLOSURE_ENV_OFFSET,
+    JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET,
+    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
+    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
     JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
     JIT_LIST_ITEMS_OFFSET, JIT_MAP_ENTRIES_DATA_OFFSET, JIT_MAP_ENTRIES_LEN_OFFSET,
     JIT_MAP_EPOCH_OFFSET, JIT_MAP_INDEX_BUILT_OFFSET, JIT_MAP_INDEX_SLOTS_DATA_OFFSET,
@@ -48,9 +48,10 @@ use lm_heap::{
     JIT_STRING_BUILDER_ASCII_OFFSET, JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
     JIT_STRING_BUILDER_CAPACITY_OFFSET, JIT_STRING_BUILDER_DATA_OFFSET,
     JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET,
-    JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SIZE,
-    MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
-    VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
+    JIT_TEXT_LOOKUP_HASH_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
+    MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SIZE, MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET,
+    MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET,
+    VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
@@ -11139,9 +11140,9 @@ fn emit_map_lookup(
     values: NativeValues<'_>,
     emission: MapLookupEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
-    if scalar_map_key_kind(emission.key_contract).is_none() {
+    let Some(key_kind) = direct_map_key_kind(emission.key_contract) else {
         return emit_map_lookup_slow(builder, values, emission);
-    }
+    };
 
     let entry = emit_object_entry(
         builder,
@@ -11168,13 +11169,18 @@ fn emit_map_lookup(
     builder.ins().brif(ready, direct, &[], slow, &[]);
 
     builder.switch_to_block(direct);
-    let probe = emit_scalar_map_probe(
+    let key = emit_direct_map_key(builder, values, emission.key, key_kind, emission.exit)?;
+    let probe_start = builder.create_block();
+    builder.ins().brif(key.ready, probe_start, &[], slow, &[]);
+
+    builder.switch_to_block(probe_start);
+    let probe = emit_direct_map_probe(
         builder,
         values,
         entry,
         entry_count,
         emission.key,
-        emission.key_contract,
+        key,
         emission.exit,
     )?;
     if emission.load_value {
@@ -11231,7 +11237,23 @@ struct DirectMapProbe {
     value: NativeValue,
 }
 
-fn scalar_map_key_kind(contract: ValueContract) -> Option<ScalarKind> {
+#[derive(Clone, Copy)]
+enum DirectMapKeyKind {
+    Scalar(ScalarKind),
+    Str,
+    Text,
+    Bytes,
+}
+
+#[derive(Clone, Copy)]
+struct DirectMapKey {
+    kind: DirectMapKeyKind,
+    lookup_hash: ir::Value,
+    object_entry: Option<ir::Value>,
+    ready: ir::Value,
+}
+
+fn direct_map_key_kind(contract: ValueContract) -> Option<DirectMapKeyKind> {
     match (contract.kind, contract.object) {
         (
             kind @ (ScalarKind::Unit
@@ -11240,30 +11262,90 @@ fn scalar_map_key_kind(contract: ValueContract) -> Option<ScalarKind> {
             | ScalarKind::Float
             | ScalarKind::Char),
             None,
-        ) => Some(kind),
+        ) => Some(DirectMapKeyKind::Scalar(kind)),
+        (ScalarKind::Object(_), Some(ObjectContract::Str)) => Some(DirectMapKeyKind::Str),
+        (ScalarKind::Object(_), Some(ObjectContract::Text)) => Some(DirectMapKeyKind::Text),
+        (ScalarKind::Object(_), Some(ObjectContract::Bytes)) => Some(DirectMapKeyKind::Bytes),
         _ => None,
     }
 }
 
-fn emit_scalar_map_probe(
+fn emit_direct_map_key(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    key: NativeValue,
+    kind: DirectMapKeyKind,
+    exit: HeapExitEmission<'_>,
+) -> Result<DirectMapKey, CompileError> {
+    let (lookup_hash, object_entry, ready) = match kind {
+        DirectMapKeyKind::Scalar(kind) => {
+            let semantic_hash = emit_scalar_map_semantic_hash(builder, key.bits, kind);
+            let lookup_key = load_vmctx_value(
+                builder,
+                types::I64,
+                values.activation_pointer,
+                mem::offset_of!(RawNativeActivation, lookup_hash_key),
+            )?;
+            let lookup_hash = builder.ins().bxor(semantic_hash, lookup_key);
+            let lookup_hash = emit_stable_hash_mix(builder, lookup_hash);
+            let ready = builder.ins().iconst(types::I8, 1);
+            (lookup_hash, None, ready)
+        }
+        DirectMapKeyKind::Str | DirectMapKeyKind::Text | DirectMapKeyKind::Bytes => {
+            let entry = match kind {
+                DirectMapKeyKind::Str => emit_object_entry(
+                    builder,
+                    values,
+                    key.bits,
+                    JIT_OBJECT_STR,
+                    exit.point,
+                    ObjectGuard::Replay(exit.deopt_stack),
+                )?,
+                DirectMapKeyKind::Text => emit_text_entry(
+                    builder,
+                    values,
+                    key.bits,
+                    exit.point,
+                    ObjectGuard::Replay(exit.deopt_stack),
+                )?,
+                DirectMapKeyKind::Bytes => emit_object_entry(
+                    builder,
+                    values,
+                    key.bits,
+                    JIT_OBJECT_BYTES,
+                    exit.point,
+                    ObjectGuard::Replay(exit.deopt_stack),
+                )?,
+                DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
+            };
+            let offset = match kind {
+                DirectMapKeyKind::Str | DirectMapKeyKind::Text => JIT_TEXT_LOOKUP_HASH_OFFSET,
+                DirectMapKeyKind::Bytes => JIT_BYTES_LOOKUP_HASH_OFFSET,
+                DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
+            };
+            let lookup_hash = load_heap_value(builder, types::I64, entry, offset)?;
+            let ready = builder.ins().icmp_imm(IntCC::NotEqual, lookup_hash, 0);
+            (lookup_hash, Some(entry), ready)
+        }
+    };
+    Ok(DirectMapKey {
+        kind,
+        lookup_hash,
+        object_entry,
+        ready,
+    })
+}
+
+fn emit_direct_map_probe(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     map_entry: ir::Value,
     entry_count: ir::Value,
     key: NativeValue,
-    contract: ValueContract,
+    direct_key: DirectMapKey,
     exit: HeapExitEmission<'_>,
 ) -> Result<DirectMapProbe, CompileError> {
-    let kind = scalar_map_key_kind(contract).ok_or(CompileError::Backend)?;
-    let semantic_hash = emit_scalar_map_semantic_hash(builder, key.bits, kind);
-    let lookup_key = load_vmctx_value(
-        builder,
-        types::I64,
-        values.activation_pointer,
-        mem::offset_of!(RawNativeActivation, lookup_hash_key),
-    )?;
-    let lookup_hash = builder.ins().bxor(semantic_hash, lookup_key);
-    let lookup_hash = emit_stable_hash_mix(builder, lookup_hash);
+    let lookup_hash = direct_key.lookup_hash;
     let slots = load_heap_value(
         builder,
         values.pointer_type,
@@ -11377,7 +11459,7 @@ fn emit_scalar_map_probe(
         JIT_MAP_ENTRIES_DATA_OFFSET,
     )?;
     let entry = builder.ins().iadd(entries, entry_offset);
-    let equal = emit_scalar_map_key_equal(builder, entry, key, kind)?;
+    let equal = emit_direct_map_key_equal(builder, values, entry, key, direct_key, exit)?;
     let equal_block = builder.create_block();
     builder.ins().brif(
         equal,
@@ -11448,6 +11530,121 @@ fn emit_scalar_map_semantic_hash(
         }
         _ => bits,
     }
+}
+
+fn emit_direct_map_key_equal(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    entry: ir::Value,
+    key: NativeValue,
+    direct_key: DirectMapKey,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    match direct_key.kind {
+        DirectMapKeyKind::Scalar(kind) => emit_scalar_map_key_equal(builder, entry, key, kind),
+        DirectMapKeyKind::Str | DirectMapKeyKind::Text | DirectMapKeyKind::Bytes => {
+            emit_object_map_key_equal(builder, values, entry, key, direct_key, exit)
+        }
+    }
+}
+
+fn emit_object_map_key_equal(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    map_entry: ir::Value,
+    key: NativeValue,
+    direct_key: DirectMapKey,
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let key_entry = direct_key.object_entry.ok_or(CompileError::Backend)?;
+    let stored_tag = load_heap_value(
+        builder,
+        types::I64,
+        map_entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_TAG_OFFSET,
+    )?;
+    let stored_bits = load_heap_value(
+        builder,
+        types::I64,
+        map_entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_PAYLOAD_OFFSET,
+    )?;
+    let matching_tag =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, stored_tag, ValueTag::Obj as u64 as i64);
+    let identical = builder.ins().icmp(IntCC::Equal, stored_bits, key.bits);
+    let identical = builder.ins().band(matching_tag, identical);
+    let matched = builder.create_block();
+    let inspect = builder.create_block();
+    let compare = builder.create_block();
+    let missed = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I8);
+    builder.ins().brif(identical, matched, &[], inspect, &[]);
+
+    builder.switch_to_block(inspect);
+    builder.ins().brif(matching_tag, compare, &[], missed, &[]);
+
+    builder.switch_to_block(compare);
+    let stored_entry = match direct_key.kind {
+        DirectMapKeyKind::Str => emit_object_entry(
+            builder,
+            values,
+            stored_bits,
+            JIT_OBJECT_STR,
+            exit.point,
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?,
+        DirectMapKeyKind::Text => emit_text_entry(
+            builder,
+            values,
+            stored_bits,
+            exit.point,
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?,
+        DirectMapKeyKind::Bytes => emit_object_entry(
+            builder,
+            values,
+            stored_bits,
+            JIT_OBJECT_BYTES,
+            exit.point,
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?,
+        DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
+    };
+    let (data_offset, length_offset) = match direct_key.kind {
+        DirectMapKeyKind::Str | DirectMapKeyKind::Text => {
+            (JIT_TEXT_DATA_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET)
+        }
+        DirectMapKeyKind::Bytes => (JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET),
+        DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
+    };
+    let key_length = load_heap_value(builder, values.pointer_type, key_entry, length_offset)?;
+    let stored_length = load_heap_value(builder, values.pointer_type, stored_entry, length_offset)?;
+    let same_length = builder.ins().icmp(IntCC::Equal, key_length, stored_length);
+    let compare_bytes = builder.create_block();
+    builder
+        .ins()
+        .brif(same_length, compare_bytes, &[], missed, &[]);
+
+    builder.switch_to_block(compare_bytes);
+    let key_data = load_heap_value(builder, values.pointer_type, key_entry, data_offset)?;
+    let stored_data = load_heap_value(builder, values.pointer_type, stored_entry, data_offset)?;
+    let ordering = builder.call_memcmp(values.frontend_config, key_data, stored_data, key_length);
+    let equal = builder.ins().icmp_imm(IntCC::Equal, ordering, 0);
+    builder.ins().brif(equal, matched, &[], missed, &[]);
+
+    builder.switch_to_block(matched);
+    let one = builder.ins().iconst(types::I8, 1);
+    builder.ins().jump(done, &[one.into()]);
+
+    builder.switch_to_block(missed);
+    let zero = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(done, &[zero.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
 }
 
 fn emit_scalar_map_key_equal(
