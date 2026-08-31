@@ -37,6 +37,10 @@ A selected benchmark ratio cannot complete this project.
 
 Benchmarks expose costs and prevent regressions.
 
+Ratios are diagnostic evidence only.
+
+A stage ends only after its structural target is complete and its measurements expose no new defect.
+
 The completed engine must have these properties:
 
 - adjacent typed operations can optimize as one native control-flow graph;
@@ -54,6 +58,8 @@ Optimized Rust kernels define ceilings, not required fixed ratios.
 The broad corpus detects semantic errors and workload regressions.
 
 Work remains open while measurements expose a removable structural cost.
+
+The project ends only after the engine contains the required production JIT mechanisms.
 
 ## 2. Core rules
 
@@ -2476,6 +2482,33 @@ The same-session comparison used commit `95afc5d` as its parent baseline.
 These paths preserve exact fuel, fault, and external-state behavior.
 
 New-key insertion remains on its typed allocation slow path.
+
+### Stage F44: Inline map insertion within reserved storage
+
+- expose canonical entry capacity and logical entry cost;
+- retain the vacant canonical index slot after a direct probe;
+- carry the exact semantic and private lookup hashes;
+- check entry capacity, index load, epoch, and heap charge before mutation;
+- write canonical entries and lookup slots without a runtime call;
+- publish entry and index counts after all payload writes;
+- keep growth, collection, index rebuilds, and complex keys on typed slow paths;
+- preserve exact fuel, faults, heap limits, and external-state behavior.
+
+The focused JIT suite passed 146 tests.
+
+The direct and scheduled corpus differential passed in 56.52 seconds.
+
+The release comparison used commit `bb3e62d` as its exact parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| New integer map entry | 3.947 ms | 1.717 ms | 56.5 percent faster |
+
+The next stages reduce remaining helper and allocator costs.
+
+Later stages add budgeted direct-call inlining and bounded continuation validation.
+
+Cold compilation and hotness policy remain separate final stages.
 
 ## 24. Rejected designs
 

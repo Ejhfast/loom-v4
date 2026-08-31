@@ -345,6 +345,13 @@ pub const JIT_MAP_ENTRIES_LEN_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
     + std::mem::offset_of!(MapLayout, entries)
     + OWNED_ARRAY_LEN_OFFSET;
+/// Byte offset of the map-entry capacity.
+pub const JIT_MAP_ENTRIES_CAPACITY_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
+    + OBJECT_PAYLOAD_OFFSET
+    + std::mem::offset_of!(MapLayout, entries)
+    + OWNED_ARRAY_CAPACITY_OFFSET;
+/// Logical heap charge for one canonical map entry.
+pub const JIT_MAP_ENTRY_COST: usize = shape::ENTRY_COST;
 /// Byte offset of the indexed map-entry count.
 pub const JIT_MAP_INDEX_BUILT_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET
     + OBJECT_PAYLOAD_OFFSET
@@ -1476,6 +1483,7 @@ mod tests {
                 ((base + JIT_MAP_ENTRIES_LEN_OFFSET) as *const usize).read(),
                 1
             );
+            assert!(((base + JIT_MAP_ENTRIES_CAPACITY_OFFSET) as *const usize).read() >= 1);
             assert_eq!(
                 ((base + JIT_MAP_INDEX_BUILT_OFFSET) as *const u32).read(),
                 1

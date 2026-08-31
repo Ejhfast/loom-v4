@@ -33,13 +33,14 @@ use cranelift_module::{default_libcall_names, Linkage, Module as _};
 use lm_bytecode::{ExtendedInstr, Func, Instr, NativeInstr, NumericInstr};
 use lm_heap::{
     JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET, JIT_BYTES_LOOKUP_HASH_OFFSET,
-    JIT_BYTE_BUFFER_ACTIVE_OFFSET, JIT_BYTE_BUFFER_CAPACITY_OFFSET, JIT_BYTE_BUFFER_DATA_OFFSET,
-    JIT_BYTE_BUFFER_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET, JIT_CLOSURE_ENV_OFFSET,
-    JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET, JIT_ENTRY_BYTES_OFFSET,
-    JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET,
-    JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
-    JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
-    JIT_LIST_ITEMS_OFFSET, JIT_MAP_ENTRIES_DATA_OFFSET, JIT_MAP_ENTRIES_LEN_OFFSET,
+    JIT_BYTES_SEMANTIC_HASH_OFFSET, JIT_BYTE_BUFFER_ACTIVE_OFFSET, JIT_BYTE_BUFFER_CAPACITY_OFFSET,
+    JIT_BYTE_BUFFER_DATA_OFFSET, JIT_BYTE_BUFFER_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET,
+    JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET,
+    JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET,
+    JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE,
+    JIT_INSTANCE_CLASS_OFFSET, JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET,
+    JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_ENTRIES_CAPACITY_OFFSET,
+    JIT_MAP_ENTRIES_DATA_OFFSET, JIT_MAP_ENTRIES_LEN_OFFSET, JIT_MAP_ENTRY_COST,
     JIT_MAP_EPOCH_OFFSET, JIT_MAP_INDEX_BUILT_OFFSET, JIT_MAP_INDEX_SLOTS_DATA_OFFSET,
     JIT_MAP_INDEX_SLOTS_LEN_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES, JIT_OBJECT_BYTE_BUFFER,
     JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP,
@@ -48,10 +49,10 @@ use lm_heap::{
     JIT_STRING_BUILDER_ASCII_OFFSET, JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
     JIT_STRING_BUILDER_CAPACITY_OFFSET, JIT_STRING_BUILDER_DATA_OFFSET,
     JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET,
-    JIT_TEXT_LOOKUP_HASH_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
-    MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SIZE, MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET,
-    MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET,
-    VALUE_ARRAY_LEN_OFFSET,
+    JIT_TEXT_LOOKUP_HASH_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TEXT_SEMANTIC_HASH_OFFSET,
+    JIT_TUPLE_ITEMS_OFFSET, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE,
+    MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
+    VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
@@ -9954,8 +9955,8 @@ fn emit_store_value(
         Some(tag) => builder.ins().iconst(types::I64, tag as u64 as i64),
         None => value.tag,
     };
-    store_heap_i64(builder, address, VALUE_TAG_OFFSET, tag)?;
-    store_heap_i64(builder, address, VALUE_PAYLOAD_OFFSET, value.bits)
+    store_heap_value(builder, address, VALUE_TAG_OFFSET, tag)?;
+    store_heap_value(builder, address, VALUE_PAYLOAD_OFFSET, value.bits)
 }
 
 fn emit_object_entry(
@@ -11296,6 +11297,7 @@ struct DirectMapProbe {
     found: ir::Value,
     value: NativeValue,
     entry: ir::Value,
+    vacant_slot: ir::Value,
 }
 
 #[derive(Clone, Copy)]
@@ -11309,6 +11311,7 @@ enum DirectMapKeyKind {
 #[derive(Clone, Copy)]
 struct DirectMapKey {
     kind: DirectMapKeyKind,
+    semantic_hash: ir::Value,
     lookup_hash: ir::Value,
     object_entry: Option<ir::Value>,
     ready: ir::Value,
@@ -11338,7 +11341,7 @@ fn emit_direct_map_key(
     kind: DirectMapKeyKind,
     exit: HeapExitEmission<'_>,
 ) -> Result<DirectMapKey, CompileError> {
-    let (lookup_hash, object_entry, ready) = match kind {
+    let (semantic_hash, lookup_hash, object_entry, ready) = match kind {
         DirectMapKeyKind::Scalar(kind) => {
             let semantic_hash = emit_scalar_map_semantic_hash(builder, key.bits, kind);
             let lookup_key = load_vmctx_value(
@@ -11350,7 +11353,7 @@ fn emit_direct_map_key(
             let lookup_hash = builder.ins().bxor(semantic_hash, lookup_key);
             let lookup_hash = emit_stable_hash_mix(builder, lookup_hash);
             let ready = builder.ins().iconst(types::I8, 1);
-            (lookup_hash, None, ready)
+            (semantic_hash, lookup_hash, None, ready)
         }
         DirectMapKeyKind::Str | DirectMapKeyKind::Text | DirectMapKeyKind::Bytes => {
             let entry = match kind {
@@ -11384,13 +11387,20 @@ fn emit_direct_map_key(
                 DirectMapKeyKind::Bytes => JIT_BYTES_LOOKUP_HASH_OFFSET,
                 DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
             };
+            let semantic_offset = match kind {
+                DirectMapKeyKind::Str | DirectMapKeyKind::Text => JIT_TEXT_SEMANTIC_HASH_OFFSET,
+                DirectMapKeyKind::Bytes => JIT_BYTES_SEMANTIC_HASH_OFFSET,
+                DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
+            };
+            let semantic_hash = load_heap_value(builder, types::I64, entry, semantic_offset)?;
             let lookup_hash = load_heap_value(builder, types::I64, entry, offset)?;
             let ready = builder.ins().icmp_imm(IntCC::NotEqual, lookup_hash, 0);
-            (lookup_hash, Some(entry), ready)
+            (semantic_hash, lookup_hash, Some(entry), ready)
         }
     };
     Ok(DirectMapKey {
         kind,
+        semantic_hash,
         lookup_hash,
         object_entry,
         ready,
@@ -11426,6 +11436,7 @@ fn emit_direct_map_probe(
     let advance = builder.create_block();
     let found = builder.create_block();
     let done = builder.create_block();
+    builder.append_block_param(empty, values.pointer_type);
     builder.append_block_param(probe, values.pointer_type);
     builder.append_block_param(probe, values.pointer_type);
     builder.append_block_param(candidate, values.pointer_type);
@@ -11437,14 +11448,18 @@ fn emit_direct_map_probe(
     builder.append_block_param(done, types::I64);
     builder.append_block_param(done, types::I64);
     builder.append_block_param(done, values.pointer_type);
+    builder.append_block_param(done, values.pointer_type);
 
     let has_slots = builder.ins().icmp_imm(IntCC::NotEqual, slot_count, 0);
-    builder.ins().brif(has_slots, start, &[], empty, &[]);
+    let zero_pointer = builder.ins().iconst(values.pointer_type, 0);
+    builder
+        .ins()
+        .brif(has_slots, start, &[], empty, &[zero_pointer.into()]);
 
     builder.switch_to_block(empty);
+    let vacant_slot = builder.block_params(empty)[0];
     let zero_i8 = builder.ins().iconst(types::I8, 0);
     let zero_i64 = builder.ins().iconst(types::I64, 0);
-    let zero_pointer = builder.ins().iconst(values.pointer_type, 0);
     builder.ins().jump(
         done,
         &[
@@ -11452,6 +11467,7 @@ fn emit_direct_map_probe(
             zero_i64.into(),
             zero_i64.into(),
             zero_pointer.into(),
+            vacant_slot.into(),
         ],
     );
 
@@ -11483,7 +11499,7 @@ fn emit_direct_map_probe(
         candidate,
         &[slot.into(), remaining.into()],
         empty,
-        &[],
+        &[slot_address.into()],
     );
 
     builder.switch_to_block(candidate);
@@ -11561,6 +11577,7 @@ fn emit_direct_map_probe(
             value.bits.into(),
             value.tag.into(),
             entry.into(),
+            zero_pointer.into(),
         ],
     );
 
@@ -11576,7 +11593,7 @@ fn emit_direct_map_probe(
         probe,
         &[next.into(), remaining.into()],
         empty,
-        &[],
+        &[zero_pointer.into()],
     );
 
     builder.switch_to_block(done);
@@ -11587,6 +11604,7 @@ fn emit_direct_map_probe(
             tag: builder.block_params(done)[2],
         },
         entry: builder.block_params(done)[3],
+        vacant_slot: builder.block_params(done)[4],
     })
 }
 
@@ -12029,6 +12047,7 @@ fn emit_map_put(
         exit.point,
         ObjectGuard::Replay(exit.deopt_stack),
     )?;
+    emit_mutable_guard(builder, values, map_entry, exit)?;
     let entry_count = load_heap_value(
         builder,
         values.pointer_type,
@@ -12065,10 +12084,10 @@ fn emit_map_put(
         exit,
     )?;
     let replace = builder.create_block();
-    builder.ins().brif(probe.found, replace, &[], slow, &[]);
+    let insert = builder.create_block();
+    builder.ins().brif(probe.found, replace, &[], insert, &[]);
 
     builder.switch_to_block(replace);
-    emit_mutable_guard(builder, values, map_entry, exit)?;
     emit_native_value_contract(
         builder,
         values,
@@ -12086,6 +12105,184 @@ fn emit_map_put(
         builder
             .ins()
             .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+    } else {
+        builder.ins().jump(done, &[]);
+    }
+
+    builder.switch_to_block(insert);
+    let entry_capacity = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_CAPACITY_OFFSET,
+    )?;
+    let has_entry_capacity =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, entry_count, entry_capacity);
+    let max_entry_count = builder
+        .ins()
+        .iconst(values.pointer_type, i64::from(u32::MAX));
+    let count_fits = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, entry_count, max_entry_count);
+    let next_count = builder.ins().iadd_imm(entry_count, 1);
+
+    let live = load_heap_value(builder, types::I32, map_entry, JIT_MAP_LIVE_OFFSET)?;
+    let live_native = builder.ins().uextend(values.pointer_type, live);
+    let live_valid = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, live_native, entry_count);
+    let live_fits = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, live, i64::from(u32::MAX));
+    let next_live = builder.ins().iadd_imm(live, 1);
+
+    let slot_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_INDEX_SLOTS_LEN_OFFSET,
+    )?;
+    let has_vacant_slot = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, probe.vacant_slot, 0);
+    let count_i64 = if values.pointer_type == types::I64 {
+        entry_count
+    } else {
+        builder.ins().uextend(types::I64, entry_count)
+    };
+    let slots_i64 = if values.pointer_type == types::I64 {
+        slot_count
+    } else {
+        builder.ins().uextend(types::I64, slot_count)
+    };
+    let required_slots = builder.ins().iadd_imm(count_i64, 1);
+    let required_slots = builder.ins().imul_imm(required_slots, 3);
+    let available_slots = builder.ins().imul_imm(slots_i64, 2);
+    let load_factor_ready = builder.ins().icmp(
+        IntCC::UnsignedLessThanOrEqual,
+        required_slots,
+        available_slots,
+    );
+
+    let epoch = load_heap_value(builder, types::I32, map_entry, JIT_MAP_EPOCH_OFFSET)?;
+    let epoch_ready = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, epoch, i64::from(u32::MAX));
+    let epoch_tracked = builder.ins().icmp_imm(IntCC::NotEqual, epoch, 0);
+    let incremented_epoch = builder.ins().iadd_imm(epoch, 1);
+    let next_epoch = builder
+        .ins()
+        .select(epoch_tracked, incremented_epoch, epoch);
+
+    let object_bytes = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_ENTRY_BYTES_OFFSET,
+    )?;
+    let next_object_bytes = builder
+        .ins()
+        .iadd_imm(object_bytes, JIT_MAP_ENTRY_COST as i64);
+    let object_charge_ready = builder.ins().icmp(
+        IntCC::UnsignedGreaterThanOrEqual,
+        next_object_bytes,
+        object_bytes,
+    );
+    let used_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_value(builder, values.pointer_type, used_pointer, 0)?;
+    let next_used = builder.ins().iadd_imm(used, JIT_MAP_ENTRY_COST as i64);
+    let heap_charge_ready = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, next_used, used);
+    let threshold = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_collection_threshold),
+    )?;
+    let below_threshold = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, next_used, threshold);
+
+    let mut fast = builder.ins().band(has_entry_capacity, count_fits);
+    fast = builder.ins().band(fast, live_valid);
+    fast = builder.ins().band(fast, live_fits);
+    fast = builder.ins().band(fast, has_vacant_slot);
+    fast = builder.ins().band(fast, load_factor_ready);
+    fast = builder.ins().band(fast, epoch_ready);
+    fast = builder.ins().band(fast, object_charge_ready);
+    fast = builder.ins().band(fast, heap_charge_ready);
+    fast = builder.ins().band(fast, below_threshold);
+    let commit = builder.create_block();
+    builder.ins().brif(fast, commit, &[], slow, &[]);
+
+    builder.switch_to_block(commit);
+    let entries = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_DATA_OFFSET,
+    )?;
+    let entry_offset = builder.ins().imul_imm(
+        entry_count,
+        i64::try_from(MAP_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(entries, entry_offset);
+    let key_address = builder.ins().iadd_imm(
+        entry,
+        i64::try_from(MAP_ENTRY_KEY_OFFSET).map_err(|_| CompileError::Backend)?,
+    );
+    emit_store_value(builder, key_address, key, key_contract.kind)?;
+    let value_address = builder.ins().iadd_imm(
+        entry,
+        i64::try_from(MAP_ENTRY_VALUE_OFFSET).map_err(|_| CompileError::Backend)?,
+    );
+    emit_store_value(builder, value_address, stored, previous_contract.kind)?;
+    store_heap_value(
+        builder,
+        entry,
+        MAP_ENTRY_SEMANTIC_HASH_OFFSET,
+        direct_key.semantic_hash,
+    )?;
+    store_heap_value(
+        builder,
+        probe.vacant_slot,
+        MAP_SLOT_HASH_OFFSET,
+        direct_key.lookup_hash,
+    )?;
+    let entry_index = builder.ins().ireduce(types::I32, entry_count);
+    store_heap_value(
+        builder,
+        probe.vacant_slot,
+        MAP_SLOT_ENTRY_OFFSET,
+        entry_index,
+    )?;
+    store_heap_value(builder, map_entry, JIT_MAP_EPOCH_OFFSET, next_epoch)?;
+    store_heap_value(
+        builder,
+        map_entry,
+        JIT_ENTRY_BYTES_OFFSET,
+        next_object_bytes,
+    )?;
+    store_heap_value(builder, used_pointer, 0, next_used)?;
+    store_heap_value(builder, map_entry, JIT_MAP_ENTRIES_LEN_OFFSET, next_count)?;
+    store_heap_value(builder, map_entry, JIT_MAP_LIVE_OFFSET, next_live)?;
+    let next_built = builder.ins().ireduce(types::I32, next_count);
+    store_heap_value(builder, map_entry, JIT_MAP_INDEX_BUILT_OFFSET, next_built)?;
+    if let Some(option_family) = option_family {
+        let none_arm = builder.ins().iconst(types::I64, 1_i64 << 32);
+        let bits = builder.ins().bor(option_family, none_arm);
+        let tag = builder
+            .ins()
+            .iconst(types::I64, ValueTag::EmptyCase as u64 as i64);
+        builder.ins().jump(done, &[bits.into(), tag.into()]);
     } else {
         builder.ins().jump(done, &[]);
     }
@@ -13425,7 +13622,7 @@ fn store_i64(
     Ok(())
 }
 
-fn store_heap_i64(
+fn store_heap_value(
     builder: &mut FunctionBuilder<'_>,
     pointer: ir::Value,
     offset: usize,

@@ -991,7 +991,7 @@ fn scalar_map_hits_match_each_fuel_boundary() {
 }
 
 #[test]
-fn map_put_uses_direct_replacement_and_typed_insertion() {
+fn map_put_uses_direct_replacement_and_checked_insertion() {
     let source = concat!(
         "table: {String: Int} = {}\ni = 0\nsum = 0\n",
         "while i < 1000\n",
@@ -1015,6 +1015,28 @@ fn map_put_uses_direct_replacement_and_typed_insertion() {
     assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
     assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 25_000, "{metrics:?}");
+}
+
+#[test]
+fn map_put_inserts_scalar_text_and_byte_keys_into_spare_storage() {
+    let source = concat!(
+        "ints: {Int: Int} = {}\nints.put(1, 10)\nint_old = ints.put(2, 20)\n",
+        "text_key = \"next\"\ntext_seed: {Text: Int} = {text_key: 0}\n",
+        "text: {Text: Int} = {\"base\": 1}\ntext_old = text.put(text_key, 30)\n",
+        "byte_key = Bytes(\"next\")\nbyte_seed: {Bytes: Int} = {byte_key: 0}\n",
+        "bytes: {Bytes: Int} = {Bytes(\"base\"): 1}\n",
+        "byte_old = bytes.put(byte_key, 40)\n",
+        "(int_old, text_old, byte_old, ints.at(2), text.at(text_key), bytes.at(byte_key))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-map-put-spare.lm", source)
+        .expect("the spare map insertion case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert!(native_dump.contains("(None, None, None, 20, 30, 40)"));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
 }
 
 #[test]
