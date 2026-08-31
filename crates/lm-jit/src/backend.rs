@@ -9085,7 +9085,15 @@ fn emit_loaded_value(
 ) -> Result<NativeValue, CompileError> {
     let tag = load_value(builder, types::I64, address, VALUE_TAG_OFFSET)?;
     emit_scalar_tag_guard(builder, values, tag, contract.kind, point, deopt_stack)?;
-    let payload = emit_value_payload(builder, values, address, contract.kind, point, deopt_stack)?;
+    let payload = emit_value_payload(
+        builder,
+        values,
+        address,
+        tag,
+        contract.kind,
+        point,
+        deopt_stack,
+    )?;
     emit_value_contract(builder, values, payload, contract, point, deopt_stack)?;
     Ok(NativeValue { bits: payload, tag })
 }
@@ -9384,6 +9392,7 @@ fn emit_value_payload(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     value: ir::Value,
+    tag: ir::Value,
     kind: ScalarKind,
     point: FaultPoint,
     deopt_stack: &[NativeValue],
@@ -9394,10 +9403,12 @@ fn emit_value_payload(
             let byte = load_value(builder, types::I8, value, VALUE_PAYLOAD_OFFSET)?;
             builder.ins().uextend(types::I64, byte)
         }
-        ScalarKind::Int
-        | ScalarKind::Object(_)
-        | ScalarKind::Tagged(_)
-        | ScalarKind::Callback(_) => load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?,
+        ScalarKind::Int | ScalarKind::Object(_) | ScalarKind::Callback(_) => {
+            load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?
+        }
+        ScalarKind::Tagged(_) => {
+            emit_tagged_value_payload(builder, values, value, tag, point, deopt_stack)?
+        }
         ScalarKind::Char => {
             let scalar = load_value(builder, types::I32, value, VALUE_PAYLOAD_OFFSET)?;
             builder.ins().uextend(types::I64, scalar)
@@ -9413,6 +9424,68 @@ fn emit_value_payload(
         }
     };
     Ok(payload)
+}
+
+fn emit_tagged_value_payload(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    value: ir::Value,
+    tag: ir::Value,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let unit = builder.create_block();
+    let boolean = builder.create_block();
+    let narrow = builder.create_block();
+    let full = builder.create_block();
+    let float = builder.create_block();
+    let invalid = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+
+    let mut dispatch = Switch::new();
+    dispatch.set_entry(ValueTag::Unit as u128, unit);
+    dispatch.set_entry(ValueTag::Bool as u128, boolean);
+    dispatch.set_entry(ValueTag::Char as u128, narrow);
+    dispatch.set_entry(ValueTag::Op as u128, narrow);
+    dispatch.set_entry(ValueTag::Int as u128, full);
+    dispatch.set_entry(ValueTag::Obj as u128, full);
+    dispatch.set_entry(ValueTag::Callback as u128, full);
+    dispatch.set_entry(ValueTag::EmptyCase as u128, full);
+    dispatch.set_entry(ValueTag::Float as u128, float);
+    dispatch.emit(builder, tag, invalid);
+
+    builder.switch_to_block(unit);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(done, &[zero.into()]);
+
+    builder.switch_to_block(boolean);
+    let payload = load_value(builder, types::I8, value, VALUE_PAYLOAD_OFFSET)?;
+    let payload = builder.ins().uextend(types::I64, payload);
+    builder.ins().jump(done, &[payload.into()]);
+
+    builder.switch_to_block(narrow);
+    let payload = load_value(builder, types::I32, value, VALUE_PAYLOAD_OFFSET)?;
+    let payload = builder.ins().uextend(types::I64, payload);
+    builder.ins().jump(done, &[payload.into()]);
+
+    builder.switch_to_block(full);
+    let payload = load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?;
+    builder.ins().jump(done, &[payload.into()]);
+
+    builder.switch_to_block(float);
+    let payload = load_value(builder, types::I64, value, VALUE_PAYLOAD_OFFSET)?;
+    emit_canonical_float_guard(builder, values, payload, point, deopt_stack)?;
+    builder.ins().jump(done, &[payload.into()]);
+
+    builder.switch_to_block(invalid);
+    let reject = builder.ins().iconst(types::I8, 1);
+    emit_interpreter_replay(builder, values, reject, point, deopt_stack)?;
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(done, &[zero.into()]);
+
+    builder.switch_to_block(done);
+    Ok(builder.block_params(done)[0])
 }
 
 fn emit_canonical_float_guard(

@@ -21,3 +21,4 @@ lm-proc = { path = "../lm-proc" }
 
 [dev-dependencies]
 lm-host = { path = "../lm-host" }
+lm-jit = { path = "../lm-jit" }

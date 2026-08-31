@@ -288,6 +288,12 @@ Every verified opcode has one production treatment.
 
 The current engine has no temporary opcode treatment.
 
+Opcode coverage does not prove function coverage.
+
+The function gate must cover every value type, reachable control-flow shape, and relocated contract.
+
+Each rejected function reports one exact rejection reason.
+
 An observable boundary can execute one instruction in the interpreter.
 
 This boundary is the permanent class F treatment for that instruction.
@@ -691,6 +697,10 @@ Every supported test compares Interpreter and Native.
 Tests compare complete live machine state.
 
 The standalone corpus runs through direct turns and deterministic scheduler turns.
+
+The corpus gate compiles every unique verified artifact function.
+
+No corpus function can return an `Unsupported` result.
 
 Scheduler runs use 1,024-instruction quanta and one deterministic recording host.
 
@@ -2079,6 +2089,46 @@ The ledger has no temporary treatment.
 | HTTP serialize | 0.82 times | 41.81 percent |
 
 The representative gate remains open.
+
+### Stage F33: Complete function acceptance
+
+- give every `BcType` one native value representation;
+- accept generic instance fields through their relocated class;
+- remove unreachable segments before native control-flow analysis;
+- load tagged payloads without reading Rust padding bytes;
+- preserve exact planner rejection reasons;
+- compile every unique verified corpus function;
+- require zero unsupported fallbacks in direct and scheduled runs.
+
+Gate: Every unique verified corpus function compiles without `Unsupported`.
+
+Gate: Direct and scheduled corpus runs match Interpreter results.
+
+Gate: Direct and scheduled corpus runs report zero unsupported fallbacks.
+
+The focused JIT suite passed 134 tests.
+
+The full corpus gate passed in 61.93 seconds in the debug workspace profile.
+
+The full workspace test suite passed.
+
+The representative performance gate remains open.
+
+### Stage F34: Close representative performance gaps
+
+- preserve the complete function-acceptance gate;
+- measure native entries, exits, helpers, materializations, and compilation for each representative row;
+- remove repeated work from hot native entry and exit paths;
+- keep class F exits only at observable runtime boundaries;
+- keep common operations in classes A through D;
+- remeasure every language benchmark and large corpus program;
+- meet the JSON, HTTP, and five-percent gates.
+
+Gate: Auto slows no large corpus program by more than five percent.
+
+Gate: At least one JSON row improves by more than two times.
+
+Gate: At least one HTTP row improves by more than two times.
 
 ## 24. Rejected designs
 

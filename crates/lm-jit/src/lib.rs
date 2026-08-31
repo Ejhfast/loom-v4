@@ -80,7 +80,7 @@ pub use opcode::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     /// The function uses an unsupported operation or type.
-    Unsupported,
+    Unsupported(UnsupportedReason),
     /// The backend cannot compile or execute this region.
     BackendUnavailable,
 }
@@ -897,7 +897,10 @@ impl CompiledRegion {
 
 mod plan;
 
-pub use plan::{CompilerMetrics, EntryPlan, ExecutionExit, ExitKind, FunctionInput, ScalarKind};
+pub use plan::{
+    type_has_native_representation, CompilerMetrics, EntryPlan, ExecutionExit, ExitKind,
+    FunctionInput, ScalarKind, UnsupportedReason,
+};
 use plan::{RegionPlan, SegmentExit};
 impl JitEngine {
     /// Compile one verified function for its current arena layout.
@@ -924,7 +927,7 @@ impl JitEngine {
                     .fetch_add(region.plan.interpreter_sites as u64, Ordering::Relaxed);
                 Ok(Arc::new(region))
             }
-            Err(CompileError::Unsupported(_reason)) => Err(Failure::Unsupported),
+            Err(CompileError::Unsupported(reason)) => Err(Failure::Unsupported(reason)),
             Err(CompileError::Backend) => Err(Failure::BackendUnavailable),
         }
     }

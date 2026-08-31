@@ -261,14 +261,29 @@ impl ExecutionExit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum UnsupportedReason {
+/// One exact reason that prevents native compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedReason {
     MissingSource,
     NonScalarType,
     UnsupportedInstruction,
     InvalidStack,
     InvalidControlFlow,
     RegionLimit,
+}
+
+impl UnsupportedReason {
+    /// Return the stable diagnostic label.
+    pub fn label(self) -> &'static str {
+        match self {
+            UnsupportedReason::MissingSource => "missing source metadata",
+            UnsupportedReason::NonScalarType => "missing native value representation",
+            UnsupportedReason::UnsupportedInstruction => "missing opcode treatment",
+            UnsupportedReason::InvalidStack => "invalid native stack analysis",
+            UnsupportedReason::InvalidControlFlow => "invalid native control-flow analysis",
+            UnsupportedReason::RegionLimit => "native region resource limit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -665,6 +680,7 @@ impl RegionPlan {
                 ))
             })
             .collect::<Result<_, UnsupportedReason>>()?;
+        segments.retain(|segment| verified_points.contains_key(&(segment.block, segment.start)));
         let local_kinds = source_func
             .local_types
             .iter()
@@ -960,7 +976,19 @@ fn scalar_kind_in(
             | BcType::Map(_, _)
             | BcType::Fn(_, _, _, _)
             | BcType::Digest
-            | BcType::Fault,
+            | BcType::Fault
+            | BcType::Request
+            | BcType::PolicyTable
+            | BcType::Vm
+            | BcType::Run(_)
+            | BcType::Wait(_)
+            | BcType::PendingCall(_, _)
+            | BcType::Handle(_, _)
+            | BcType::VmSnapshot
+            | BcType::RunSnapshot(_)
+            | BcType::FileHandle
+            | BcType::ResourceHandle
+            | BcType::HostResource,
         ) => Ok(ScalarKind::Object(ty)),
         Some(BcType::Callback(_, _, _, _)) => Ok(ScalarKind::Callback(ty)),
         Some(BcType::Class(class)) => {
@@ -978,8 +1006,47 @@ fn scalar_kind_in(
             Ok(ScalarKind::Object(ty))
         }
         Some(BcType::Op(_, _)) => Ok(ScalarKind::Operation),
-        Some(BcType::Var(_) | BcType::Projection { .. }) => Ok(ScalarKind::Tagged(ty)),
-        _ => Err(UnsupportedReason::NonScalarType),
+        Some(BcType::Never | BcType::Var(_) | BcType::Projection { .. }) => {
+            Ok(ScalarKind::Tagged(ty))
+        }
+        None => Err(UnsupportedReason::MissingSource),
+    }
+}
+
+/// Return true when one bytecode type has a native value representation.
+pub fn type_has_native_representation(ty: &BcType) -> bool {
+    match ty {
+        BcType::Unit
+        | BcType::Never
+        | BcType::Bool
+        | BcType::Int
+        | BcType::Float
+        | BcType::Str
+        | BcType::Class(_)
+        | BcType::Inst(_, _)
+        | BcType::List(_)
+        | BcType::Map(_, _)
+        | BcType::Tuple(_)
+        | BcType::Fn(_, _, _, _)
+        | BcType::Callback(_, _, _, _)
+        | BcType::Var(_)
+        | BcType::Projection { .. }
+        | BcType::Fault
+        | BcType::Request
+        | BcType::PolicyTable
+        | BcType::Vm
+        | BcType::Run(_)
+        | BcType::Wait(_)
+        | BcType::PendingCall(_, _)
+        | BcType::Handle(_, _)
+        | BcType::Op(_, _)
+        | BcType::Digest
+        | BcType::VmSnapshot
+        | BcType::RunSnapshot(_)
+        | BcType::Bytes
+        | BcType::FileHandle
+        | BcType::ResourceHandle
+        | BcType::HostResource => true,
     }
 }
 
@@ -2429,7 +2496,8 @@ fn field_contract(
     let ScalarKind::Object(ty) = receiver else {
         return Err(UnsupportedReason::InvalidStack);
     };
-    let Some(BcType::Class(class)) = context.module.types.get(ty as usize) else {
+    let Some(BcType::Class(class) | BcType::Inst(class, _)) = context.module.types.get(ty as usize)
+    else {
         return Err(UnsupportedReason::NonScalarType);
     };
     let field_type = context

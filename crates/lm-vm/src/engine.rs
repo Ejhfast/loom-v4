@@ -56,6 +56,12 @@ pub struct EngineMetrics {
     pub native_type_environment_fallbacks: u64,
     pub native_interpreter_exits: u64,
     pub unsupported_region_fallbacks: u64,
+    pub unsupported_missing_source: u64,
+    pub unsupported_value_representation: u64,
+    pub unsupported_instruction: u64,
+    pub unsupported_stack_analysis: u64,
+    pub unsupported_control_flow: u64,
+    pub unsupported_region_limit: u64,
     pub missing_entry_fallbacks: u64,
     pub backend_unavailable_fallbacks: u64,
 }
@@ -116,6 +122,12 @@ struct EngineCounters {
     native_type_environment_fallbacks: AtomicU64,
     native_interpreter_exits: AtomicU64,
     unsupported_region_fallbacks: AtomicU64,
+    unsupported_missing_source: AtomicU64,
+    unsupported_value_representation: AtomicU64,
+    unsupported_instruction: AtomicU64,
+    unsupported_stack_analysis: AtomicU64,
+    unsupported_control_flow: AtomicU64,
+    unsupported_region_limit: AtomicU64,
     missing_entry_fallbacks: AtomicU64,
     backend_unavailable_fallbacks: AtomicU64,
 }
@@ -152,6 +164,12 @@ impl EngineCounters {
             native_type_environment_fallbacks: read(&self.native_type_environment_fallbacks),
             native_interpreter_exits: read(&self.native_interpreter_exits),
             unsupported_region_fallbacks: read(&self.unsupported_region_fallbacks),
+            unsupported_missing_source: read(&self.unsupported_missing_source),
+            unsupported_value_representation: read(&self.unsupported_value_representation),
+            unsupported_instruction: read(&self.unsupported_instruction),
+            unsupported_stack_analysis: read(&self.unsupported_stack_analysis),
+            unsupported_control_flow: read(&self.unsupported_control_flow),
+            unsupported_region_limit: read(&self.unsupported_region_limit),
             missing_entry_fallbacks: read(&self.missing_entry_fallbacks),
             backend_unavailable_fallbacks: read(&self.backend_unavailable_fallbacks),
         }
@@ -178,6 +196,12 @@ impl EngineCounters {
         reset(&self.native_type_environment_fallbacks);
         reset(&self.native_interpreter_exits);
         reset(&self.unsupported_region_fallbacks);
+        reset(&self.unsupported_missing_source);
+        reset(&self.unsupported_value_representation);
+        reset(&self.unsupported_instruction);
+        reset(&self.unsupported_stack_analysis);
+        reset(&self.unsupported_control_flow);
+        reset(&self.unsupported_region_limit);
         reset(&self.missing_entry_fallbacks);
         reset(&self.backend_unavailable_fallbacks);
     }
@@ -239,6 +263,30 @@ impl EngineCounters {
         add(
             &self.unsupported_region_fallbacks,
             values.unsupported_region_fallbacks,
+        );
+        add(
+            &self.unsupported_missing_source,
+            values.unsupported_missing_source,
+        );
+        add(
+            &self.unsupported_value_representation,
+            values.unsupported_value_representation,
+        );
+        add(
+            &self.unsupported_instruction,
+            values.unsupported_instruction,
+        );
+        add(
+            &self.unsupported_stack_analysis,
+            values.unsupported_stack_analysis,
+        );
+        add(
+            &self.unsupported_control_flow,
+            values.unsupported_control_flow,
+        );
+        add(
+            &self.unsupported_region_limit,
+            values.unsupported_region_limit,
         );
         add(
             &self.missing_entry_fallbacks,
@@ -343,8 +391,23 @@ impl EngineTurnMetrics<'_> {
         self.values.native_interpreter_exits += 1;
     }
 
-    pub(crate) fn note_unsupported_region_fallback(&mut self) {
+    pub(crate) fn note_unsupported_region_fallback(&mut self, reason: lm_jit::UnsupportedReason) {
         self.values.unsupported_region_fallbacks += 1;
+        let counter = match reason {
+            lm_jit::UnsupportedReason::MissingSource => &mut self.values.unsupported_missing_source,
+            lm_jit::UnsupportedReason::NonScalarType => {
+                &mut self.values.unsupported_value_representation
+            }
+            lm_jit::UnsupportedReason::UnsupportedInstruction => {
+                &mut self.values.unsupported_instruction
+            }
+            lm_jit::UnsupportedReason::InvalidStack => &mut self.values.unsupported_stack_analysis,
+            lm_jit::UnsupportedReason::InvalidControlFlow => {
+                &mut self.values.unsupported_control_flow
+            }
+            lm_jit::UnsupportedReason::RegionLimit => &mut self.values.unsupported_region_limit,
+        };
+        *counter = counter.saturating_add(1);
     }
 
     pub(crate) fn note_missing_entry_fallback(&mut self) {

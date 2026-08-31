@@ -519,6 +519,7 @@ dependencies = [
  "lm-heap",
  "lm-hir",
  "lm-host",
+ "lm-jit",
  "lm-link",
  "lm-proc",
  "lm-source",

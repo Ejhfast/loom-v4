@@ -183,7 +183,18 @@ impl NativeCodeState {
                 profile.candidate_instructions =
                     profile.candidate_instructions.saturating_add(estimated);
             }
-            let rejections = function_rejections(tables, definition, candidate);
+            let mut rejections = function_rejections(tables, definition, candidate);
+            if let Some(Err(Failure::Unsupported(reason))) = slot.verdict.get() {
+                let label = reason.label();
+                if let Some((_, count)) = rejections
+                    .iter_mut()
+                    .find(|(existing, _)| existing == label)
+                {
+                    *count = count.saturating_add(1);
+                } else {
+                    rejections.push((label.to_string(), 1));
+                }
+            }
             let treatment_gaps = function_treatment_gaps(definition);
             let unit = estimated / u64::from(slot.event_weight.max(1));
             for (reason, count) in &rejections {
@@ -466,51 +477,17 @@ fn function_is_candidate(module: &crate::NamespaceRuntime, function: &lm_bytecod
 }
 
 fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
-    matches!(
-        module.types.get(ty as usize),
-        Some(
-            lm_bytecode::BcType::Unit
-                | lm_bytecode::BcType::Bool
-                | lm_bytecode::BcType::Int
-                | lm_bytecode::BcType::Float
-                | lm_bytecode::BcType::Str
-                | lm_bytecode::BcType::Class(_)
-                | lm_bytecode::BcType::Inst(_, _)
-                | lm_bytecode::BcType::List(_)
-                | lm_bytecode::BcType::Map(_, _)
-                | lm_bytecode::BcType::Tuple(_)
-                | lm_bytecode::BcType::Fn(_, _, _, _)
-                | lm_bytecode::BcType::Callback(_, _, _, _)
-                | lm_bytecode::BcType::Bytes
-                | lm_bytecode::BcType::Op(_, _)
-                | lm_bytecode::BcType::Var(_)
-                | lm_bytecode::BcType::Projection { .. }
-        )
-    )
+    module
+        .types
+        .get(ty as usize)
+        .is_some_and(lm_jit::type_has_native_representation)
 }
 
 fn table_type_is_candidate(tables: &lm_bytecode::CodeTables, ty: u32) -> bool {
-    matches!(
-        tables.types.get(ty as usize),
-        Some(
-            lm_bytecode::BcType::Unit
-                | lm_bytecode::BcType::Bool
-                | lm_bytecode::BcType::Int
-                | lm_bytecode::BcType::Float
-                | lm_bytecode::BcType::Str
-                | lm_bytecode::BcType::Class(_)
-                | lm_bytecode::BcType::Inst(_, _)
-                | lm_bytecode::BcType::List(_)
-                | lm_bytecode::BcType::Map(_, _)
-                | lm_bytecode::BcType::Tuple(_)
-                | lm_bytecode::BcType::Fn(_, _, _, _)
-                | lm_bytecode::BcType::Callback(_, _, _, _)
-                | lm_bytecode::BcType::Bytes
-                | lm_bytecode::BcType::Op(_, _)
-                | lm_bytecode::BcType::Var(_)
-                | lm_bytecode::BcType::Projection { .. }
-        )
-    )
+    tables
+        .types
+        .get(ty as usize)
+        .is_some_and(lm_jit::type_has_native_representation)
 }
 
 fn function_rejections(

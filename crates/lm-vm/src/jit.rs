@@ -318,16 +318,19 @@ impl JitEngine {
         };
         metrics.note_native_entry_attempt();
         let region = match slot.region(&self.compiler, native.compiled_count(), || {
-            let runtime = context
-                .module
-                .funcs
-                .get(function as usize)
-                .ok_or(Failure::Unsupported)?;
+            let runtime =
+                context
+                    .module
+                    .funcs
+                    .get(function as usize)
+                    .ok_or(Failure::Unsupported(
+                        lm_jit::UnsupportedReason::MissingSource,
+                    ))?;
             let (unit, local) = context
                 .module
                 .code_namespace()
                 .function_unit(function)
-                .map_err(|_| Failure::Unsupported)?;
+                .map_err(|_| Failure::Unsupported(lm_jit::UnsupportedReason::MissingSource))?;
             let mut input = FunctionInput::new(
                 function,
                 runtime,
@@ -341,7 +344,9 @@ impl JitEngine {
                 .module
                 .code_namespace()
                 .relocation(unit.id())
-                .ok_or(Failure::Unsupported)?;
+                .ok_or(Failure::Unsupported(
+                    lm_jit::UnsupportedReason::MissingSource,
+                ))?;
             input.set_class_relocation(relocation.classes());
             let mut callees = Vec::new();
             for instruction in runtime.blocks.iter().flatten() {
@@ -354,21 +359,26 @@ impl JitEngine {
                 }
             }
             for callee in callees {
-                let callee_runtime = context
-                    .module
-                    .funcs
-                    .get(callee as usize)
-                    .ok_or(Failure::Unsupported)?;
+                let callee_runtime =
+                    context
+                        .module
+                        .funcs
+                        .get(callee as usize)
+                        .ok_or(Failure::Unsupported(
+                            lm_jit::UnsupportedReason::MissingSource,
+                        ))?;
                 let (callee_unit, callee_local) = context
                     .module
                     .code_namespace()
                     .function_unit(callee)
-                    .map_err(|_| Failure::Unsupported)?;
+                    .map_err(|_| Failure::Unsupported(lm_jit::UnsupportedReason::MissingSource))?;
                 let callee_relocation = context
                     .module
                     .code_namespace()
                     .relocation(callee_unit.id())
-                    .ok_or(Failure::Unsupported)?;
+                    .ok_or(Failure::Unsupported(
+                        lm_jit::UnsupportedReason::MissingSource,
+                    ))?;
                 input.add_relocated_direct_callee(
                     callee,
                     callee_runtime,
@@ -381,8 +391,8 @@ impl JitEngine {
             Ok(input)
         }) {
             Ok(region) => region,
-            Err(Failure::Unsupported) => {
-                metrics.note_unsupported_region_fallback();
+            Err(Failure::Unsupported(reason)) => {
+                metrics.note_unsupported_region_fallback(reason);
                 return NativeAttempt::Fallback;
             }
             Err(Failure::BackendUnavailable) => {
