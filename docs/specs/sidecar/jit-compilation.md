@@ -21,9 +21,15 @@ The JIT has these goals:
 - keep common operations inside native code;
 - report cold and warm costs separately.
 
-A supported warm workload must improve by more than two times.
+Representative workloads diagnose coverage, overhead, and regressions.
 
-A representative program cannot regress by more than five percent in Auto mode.
+They do not define completion.
+
+Native scalar kernels use optimized Rust implementations as performance ceilings.
+
+The engine must approach production typed-JIT code quality while it preserves Loom semantics.
+
+No workload ratio closes optimization while a removable structural hot-path cost remains.
 
 ## 2. Core rules
 
@@ -2255,7 +2261,9 @@ The direct and scheduled corpus differential passed in 52.13 seconds.
 | HTTP parse | 4.10 times | 4.12 times |
 | HTTP serialize | 5.74 times | 5.78 times |
 
-The JSON and HTTP warm gates pass.
+The JSON and HTTP warm rows improved.
+
+These gains do not close native optimization.
 
 Deep recursion remains close to Interpreter performance.
 
@@ -2264,6 +2272,43 @@ The cold JSON run took 1,811.88 milliseconds.
 It compiled 26 regions and 6,236,954 machine-code bytes.
 
 Cold compilation remains open.
+
+The next work compares native kernels with optimized Rust ceilings.
+
+It removes structural costs before it changes hotness policy.
+
+### Stage F37: Reduce fuel accounting density
+
+- keep one running fuel counter;
+- derive retired instructions only at engine exits;
+- reserve one maximum acyclic control-flow path;
+- bypass interior fuel checks after a successful reserve check;
+- end each reserve region at a backedge or safepoint;
+- keep exact instruction paths for small remaining fuel;
+- place exact and fault paths in cold machine-code blocks.
+
+Gate: Every direct and scheduled fuel sweep matches Interpreter state.
+
+The focused JIT suite passed 137 tests.
+
+The direct and scheduled corpus differential passed in 56.17 seconds.
+
+The same-session comparison used commit `8e6b257` as its parent baseline.
+
+| Scalar path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Direct native warm | 1.005 ms | 0.551 ms | 45.2 percent faster |
+| Scheduled native warm | 3.919 ms | 3.696 ms | 5.7 percent faster |
+
+The direct scalar gain rose from 34.05 times to 57.97 times.
+
+List sorting improved by 6.2 percent in the broad scheduler sample.
+
+JSON parse stayed within two percent of the parent measurement.
+
+HTTP parse improved by 2.2 percent.
+
+These measurements do not close the optimized Rust ceiling gap.
 
 ## 24. Rejected designs
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::plan::{compute_liveness, split_segments, Segment};
+use crate::plan::{compute_liveness, split_segments, RegionPlan, Segment};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
 use lm_heap::{Heap, JitHeapView, Object, SharedBytes};
 use lm_value::{Value, ValueTag, Witness};
@@ -156,6 +156,22 @@ fn segments_split_conditional_fallthrough() {
     assert_eq!(segments.len(), 5);
     assert_eq!((segments[1].block, segments[1].start), (1, 0));
     assert_eq!((segments[2].block, segments[2].start), (1, 4));
+
+    let bundle = lm_abi::standard_bundle();
+    let plan = RegionPlan::for_function(&FunctionInput::new(
+        0,
+        &module.funcs[0],
+        &module,
+        &bundle,
+        0,
+    ))
+    .expect("the loop plan builds");
+    let reserves: Vec<u32> = plan
+        .segments
+        .iter()
+        .map(|segment| segment.fuel_reserve)
+        .collect();
+    assert_eq!(reserves, vec![13, 10, 6, 5, 2]);
 }
 
 #[test]
@@ -165,6 +181,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         start: 0,
         end: 3,
         cost: 3,
+        fuel_reserve: 3,
         exit: SegmentExit::Return,
         uses: vec![false, true],
         definitions: vec![true, false],

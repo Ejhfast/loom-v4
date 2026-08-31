@@ -8,9 +8,9 @@ use crate::activation::{
     TYPE_ENVIRONMENT_CACHE_WAYS,
 };
 use crate::plan::{
-    is_root_kind, CallContract, HeapAccessKind, ObjectContract, OptionAccessKind, OptionTarget,
-    RegionPlan, Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract,
-    VirtualReceiver,
+    bypasses_fuel_check, is_root_kind, CallContract, HeapAccessKind, ObjectContract,
+    OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit, UnsupportedReason,
+    ValueCallTarget, ValueContract, VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -321,7 +321,8 @@ struct NativeValues<'a> {
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
     fuel: Variable,
-    retired: Variable,
+    initial_fuel: ir::Value,
+    retired_base: ir::Value,
     local_pointer: ir::Value,
     local_tag_pointer: ir::Value,
     local_state_pointer: ir::Value,
@@ -501,7 +502,7 @@ enum NativeCallFallback {
 struct SegmentEmission<'a, 'b> {
     bytecode: &'a Func,
     segment: &'a Segment,
-    blocks: &'a [ir::Block],
+    successor_blocks: &'a [ir::Block],
     values: NativeValues<'a>,
     plan: &'a RegionPlan,
     input: &'a FunctionInput<'b>,
@@ -775,6 +776,9 @@ fn emit_region(
     let blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
         .collect();
+    let body_blocks: Vec<ir::Block> = (0..plan.segments.len())
+        .map(|_| builder.create_block())
+        .collect();
     let exact_blocks: Vec<Vec<ir::Block>> = plan
         .segments
         .iter()
@@ -786,6 +790,10 @@ fn emit_region(
                 .collect()
         })
         .collect();
+    builder.set_cold_block(invalid_block);
+    for block in exact_blocks.iter().flatten().copied() {
+        builder.set_cold_block(block);
+    }
 
     builder.switch_to_block(entry_block);
     builder.append_block_params_for_function_params(entry_block);
@@ -880,10 +888,8 @@ fn emit_region(
         stack_tags.push(tag);
     }
     let fuel = builder.declare_var(types::I64);
-    let retired = builder.declare_var(types::I64);
     builder.def_var(fuel, initial_fuel);
     let zero = builder.ins().iconst(types::I64, 0);
-    builder.def_var(retired, retired_base);
     let values = NativeValues {
         locals: &locals,
         local_kinds: &plan.local_kinds,
@@ -892,7 +898,8 @@ fn emit_region(
         stack: &stack,
         stack_tags: &stack_tags,
         fuel,
-        retired,
+        initial_fuel,
+        retired_base,
         local_pointer,
         local_tag_pointer,
         local_state_pointer,
@@ -947,7 +954,7 @@ fn emit_region(
     dispatch.emit(&mut builder, entry, invalid_block);
 
     builder.switch_to_block(invalid_block);
-    let retired_value = builder.use_var(retired);
+    let retired_value = emit_retired(&mut builder, values);
     emit_exit(
         &mut builder,
         values,
@@ -966,13 +973,14 @@ fn emit_region(
 
     for (index, segment) in plan.segments.iter().enumerate() {
         builder.switch_to_block(blocks[index]);
-        let body = builder.create_block();
+        let body = body_blocks[index];
         let exact_fuel = builder.create_block();
+        builder.set_cold_block(exact_fuel);
         let available = builder.use_var(fuel);
         let enough = builder.ins().icmp_imm(
             IntCC::UnsignedGreaterThanOrEqual,
             available,
-            i64::from(segment.cost),
+            i64::from(segment.fuel_reserve),
         );
         builder.ins().brif(enough, body, &[], exact_fuel, &[]);
 
@@ -982,12 +990,17 @@ fn emit_region(
             .copied()
             .ok_or(CompileError::Backend)?;
         builder.ins().jump(first, &[]);
+        let exact_successors: Vec<ir::Block> = segment
+            .successors
+            .iter()
+            .map(|successor| blocks[*successor])
+            .collect();
         emit_segment(
             &mut builder,
             SegmentEmission {
                 bytecode,
                 segment,
-                blocks: &blocks,
+                successor_blocks: &exact_successors,
                 values,
                 plan,
                 input,
@@ -998,12 +1011,23 @@ fn emit_region(
         )?;
 
         builder.switch_to_block(body);
+        let fast_successors: Vec<ir::Block> = segment
+            .successors
+            .iter()
+            .map(|successor| {
+                if bypasses_fuel_check(segment, index, *successor) {
+                    body_blocks[*successor]
+                } else {
+                    blocks[*successor]
+                }
+            })
+            .collect();
         emit_segment(
             &mut builder,
             SegmentEmission {
                 bytecode,
                 segment,
-                blocks: &blocks,
+                successor_blocks: &fast_successors,
                 values,
                 plan,
                 input,
@@ -1026,7 +1050,7 @@ fn emit_segment(
     let SegmentEmission {
         bytecode,
         segment,
-        blocks,
+        successor_blocks,
         values,
         plan,
         input,
@@ -4810,7 +4834,7 @@ fn emit_segment(
                 instruction: call_instruction,
                 successor_entry: u32::try_from(segment.successors[0])
                     .map_err(|_| CompileError::Backend)?,
-                successor: blocks[segment.successors[0]],
+                successor: successor_blocks[0],
             },
         )?;
         return Ok(());
@@ -4819,7 +4843,7 @@ fn emit_segment(
     if matches!(segment.exit, SegmentExit::Effect { .. }) {
         let effect_instruction = segment.end - 1;
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
-        let retired = builder.use_var(values.retired);
+        let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
             builder,
@@ -4842,7 +4866,7 @@ fn emit_segment(
     if matches!(segment.exit, SegmentExit::Boundary { .. }) {
         let instruction = segment.end - 1;
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
-        let retired = builder.use_var(values.retired);
+        let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
             builder,
@@ -4864,7 +4888,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Unreachable) {
         emit_segment_charge(builder, values, segment.cost, exact_fuel);
-        let retired = builder.use_var(values.retired);
+        let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
             builder,
@@ -4888,14 +4912,14 @@ fn emit_segment(
     match segment.exit {
         SegmentExit::Jump { .. } => {
             define_stack(builder, values, &stack)?;
-            builder.ins().jump(blocks[segment.successors[0]], &[]);
+            builder.ins().jump(successor_blocks[0], &[]);
         }
         SegmentExit::Conditional { jump_on_true, .. } => {
             let condition = pop_native(&mut stack)?;
             define_stack(builder, values, &stack)?;
             let condition = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
-            let target = blocks[segment.successors[0]];
-            let fallthrough = blocks[segment.successors[1]];
+            let target = successor_blocks[0];
+            let fallthrough = successor_blocks[1];
             if jump_on_true {
                 builder.ins().brif(condition, target, &[], fallthrough, &[]);
             } else {
@@ -4910,7 +4934,7 @@ fn emit_segment(
         SegmentExit::SlotCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
             define_stack(builder, values, &stack)?;
-            builder.ins().jump(blocks[segment.successors[0]], &[]);
+            builder.ins().jump(successor_blocks[0], &[]);
         }
         SegmentExit::Effect { .. } => unreachable!(),
         SegmentExit::Boundary { .. } => unreachable!(),
@@ -5198,7 +5222,7 @@ fn emit_call_value_target(
             builder.ins().brif(is_callback, callback, &[], invalid, &[]);
 
             builder.switch_to_block(invalid);
-            let retired = builder.use_var(values.retired);
+            let retired = emit_retired(builder, values);
             let zero = builder.ins().iconst(types::I64, 0);
             emit_exit(
                 builder,
@@ -5447,8 +5471,7 @@ fn emit_resolved_call_lookup(
     builder.ins().jump(miss, &[]);
 
     builder.switch_to_block(miss);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix);
     emit_exit(
         builder,
         values,
@@ -5620,8 +5643,7 @@ fn emit_type_cache_lookup(
     builder.ins().jump(miss, &[]);
 
     builder.switch_to_block(miss);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix);
     let parent_bits = builder.ins().uextend(types::I64, parent);
     let (kind, bits) = match request {
         TypeCacheRequest::Environment => (EXIT_TYPE_ENVIRONMENT, parent_bits),
@@ -5718,7 +5740,7 @@ fn emit_native_call(
     builder.ins().brif(has_fuel, lookup, &[], fuel_exit, &[]);
 
     builder.switch_to_block(fuel_exit);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -5747,7 +5769,7 @@ fn emit_native_call(
 
         builder.switch_to_block(fault_block);
         emit_charge(builder, values, 1);
-        let retired = builder.use_var(values.retired);
+        let retired = emit_retired(builder, values);
         let code = builder.ins().iadd_imm(fault, -1);
         let code = builder.ins().uextend(types::I64, code);
         let zero = builder.ins().iconst(types::I64, 0);
@@ -5818,7 +5840,7 @@ fn emit_native_call(
     builder.ins().brif(roots_fit, limits, &[], grow_roots, &[]);
 
     builder.switch_to_block(grow_roots);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let required_roots = builder.ins().uextend(types::I64, required_roots);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
@@ -5899,7 +5921,7 @@ fn emit_native_call(
 
     builder.switch_to_block(stack_limit);
     emit_charge(builder, values, 1);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -5958,7 +5980,7 @@ fn emit_native_call(
     builder.ins().brif(storage_fits, invoke, &[], grow, &[]);
 
     builder.switch_to_block(grow);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let target_value = builder.ins().uextend(types::I64, target);
     let required_scalars = builder.ins().uextend(types::I64, scalar_end);
     let required_scalars = builder.ins().ishl_imm(required_scalars, 32);
@@ -5981,7 +6003,7 @@ fn emit_native_call(
     )?;
 
     builder.switch_to_block(fallback);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let (kind, result) = match fallback_kind {
         NativeCallFallback::Direct => {
             let target_value = builder.ins().uextend(types::I64, target);
@@ -6219,12 +6241,10 @@ fn emit_native_call(
         values.exit_pointer,
         mem::offset_of!(RawExit, retired),
     )?;
-    let caller_retired = builder.use_var(values.retired);
-    let total_retired = builder.ins().iadd(caller_retired, child_retired);
-    builder.def_var(values.retired, total_retired);
     let caller_fuel = builder.use_var(values.fuel);
     let remaining_fuel = builder.ins().isub(caller_fuel, child_retired);
     builder.def_var(values.fuel, remaining_fuel);
+    let total_retired = emit_retired(builder, values);
     let exit_kind = load_value(
         builder,
         types::I32,
@@ -6532,11 +6552,23 @@ fn push_static(
 
 fn emit_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost: u32) {
     let fuel = builder.use_var(values.fuel);
-    let retired = builder.use_var(values.retired);
     let fuel = builder.ins().iadd_imm(fuel, -i64::from(cost));
-    let retired = builder.ins().iadd_imm(retired, i64::from(cost));
     builder.def_var(values.fuel, fuel);
-    builder.def_var(values.retired, retired);
+}
+
+fn emit_retired(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>) -> ir::Value {
+    let fuel = builder.use_var(values.fuel);
+    let spent = builder.ins().isub(values.initial_fuel, fuel);
+    builder.ins().iadd(values.retired_base, spent)
+}
+
+fn emit_retired_with_prefix(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    prefix: u32,
+) -> ir::Value {
+    let retired = emit_retired(builder, values);
+    builder.ins().iadd_imm(retired, i64::from(prefix))
 }
 
 fn emit_segment_charge(
@@ -6559,11 +6591,12 @@ fn emit_exact_fuel_check(
 ) -> Result<(), CompileError> {
     let run = builder.create_block();
     let stop = builder.create_block();
+    builder.set_cold_block(stop);
     let fuel = builder.use_var(values.fuel);
     let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
     builder.ins().brif(available, run, &[], stop, &[]);
     builder.switch_to_block(stop);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let result = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -6613,10 +6646,10 @@ fn emit_fault_check(
 ) -> Result<(), CompileError> {
     let fault = builder.create_block();
     let success = builder.create_block();
+    builder.set_cold_block(fault);
     builder.ins().brif(faulted, fault, &[], success, &[]);
     builder.switch_to_block(fault);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -9110,8 +9143,7 @@ fn emit_literal_load(
     builder.ins().brif(invalid, missing, &[], ready, &[]);
 
     builder.switch_to_block(missing);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix);
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -10801,8 +10833,7 @@ fn emit_runtime_fault_status(
     builder.ins().brif(fault, fault_block, &[], checked, &[]);
 
     builder.switch_to_block(fault_block);
-    let retired = builder.use_var(values.retired);
-    let retired = builder.ins().iadd_imm(retired, i64::from(point.prefix));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix);
     let code = builder
         .ins()
         .band_imm(status, i64::from(!RUNTIME_FAULT_FLAG));
@@ -10878,10 +10909,7 @@ fn emit_interpreter_replay(
     let success = builder.create_block();
     builder.ins().brif(replay, interpreter, &[], success, &[]);
     builder.switch_to_block(interpreter);
-    let retired = builder.use_var(values.retired);
-    let retired = builder
-        .ins()
-        .iadd_imm(retired, i64::from(point.prefix.saturating_sub(1)));
+    let retired = emit_retired_with_prefix(builder, values, point.prefix.saturating_sub(1));
     let zero = builder.ins().iconst(types::I64, 0);
     emit_exit(
         builder,
@@ -11265,7 +11293,7 @@ fn emit_function_return(
     builder.ins().brif(detached, lookup, &[], direct, &[]);
 
     builder.switch_to_block(direct);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     store_i64(
         builder,
         values.exit_pointer,
@@ -11420,7 +11448,7 @@ fn emit_function_return(
         mem::offset_of!(RawNativeFrame, resume_entry),
     )?;
     let fuel = builder.use_var(values.fuel);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     let detached = builder.ins().iconst(types::I32, 1);
     builder.ins().return_call_indirect(
         values.native_signature,
@@ -11447,7 +11475,7 @@ fn emit_function_return(
     );
 
     builder.switch_to_block(normal);
-    let retired = builder.use_var(values.retired);
+    let retired = emit_retired(builder, values);
     emit_exit(
         builder,
         values,

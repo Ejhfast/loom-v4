@@ -346,6 +346,7 @@ pub(super) struct Segment {
     pub(super) start: u32,
     pub(super) end: u32,
     pub(super) cost: u32,
+    pub(super) fuel_reserve: u32,
     pub(super) exit: SegmentExit,
     pub(super) uses: Vec<bool>,
     pub(super) definitions: Vec<bool>,
@@ -805,6 +806,7 @@ impl RegionPlan {
             max_stack_values = max_stack_values.max(analysis.max_stack_values);
             debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
         }
+        compute_fuel_reserves(&mut segments)?;
         for segment in &segments {
             for successor in &segment.successors {
                 if !stacks_use_equal_representations(
@@ -1083,6 +1085,7 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 start: start as u32,
                 end: instruction_index as u32 + 1,
                 cost: instruction_index as u32 + 1 - start as u32,
+                fuel_reserve: 0,
                 exit,
                 uses: Vec::new(),
                 definitions: Vec::new(),
@@ -1106,6 +1109,32 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
         }
     }
     Ok(segments)
+}
+
+pub(super) fn bypasses_fuel_check(segment: &Segment, index: usize, successor: usize) -> bool {
+    successor > index
+        && matches!(
+            segment.exit,
+            SegmentExit::Jump { .. } | SegmentExit::Conditional { .. }
+        )
+}
+
+fn compute_fuel_reserves(segments: &mut [Segment]) -> Result<(), UnsupportedReason> {
+    for index in (0..segments.len()).rev() {
+        let tail = segments[index]
+            .successors
+            .iter()
+            .copied()
+            .filter(|successor| bypasses_fuel_check(&segments[index], index, *successor))
+            .map(|successor| segments[successor].fuel_reserve)
+            .max()
+            .unwrap_or(0);
+        segments[index].fuel_reserve = segments[index]
+            .cost
+            .checked_add(tail)
+            .ok_or(UnsupportedReason::RegionLimit)?;
+    }
+    Ok(())
 }
 
 fn segment_exit(
