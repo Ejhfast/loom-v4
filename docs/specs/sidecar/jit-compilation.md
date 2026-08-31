@@ -2,7 +2,9 @@
 
 Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, and growable activations are implemented.
 
-Pure uncontended tasks use a larger coordinator quantum.
+All scheduler tasks use one measured 16,384-instruction quantum.
+
+Demand-driven scheduler polls remain open.
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
@@ -2795,15 +2797,13 @@ Exact-fuel lowering still duplicates each instruction in the same function.
 
 The next code-density stage must isolate that cold path without an interpreter transition.
 
-### Stage F53: Preserve roots and reduce uncontended turns
+### Stage F53: Preserve roots and test extended turns
 
 - store canonical tags for every suspended native frame slot;
 - preserve root payloads for each root-capable slot;
 - add one direct JSON collection regression test;
 - read top and indexed native frames without a depth scan;
-- retain the 1,024-instruction fairness quantum;
-- use a larger quantum only for one pure task;
-- keep effectful and competing tasks on the fairness quantum;
+- test a larger quantum for one pure task;
 - keep the fixed-quantum corpus differential.
 
 The direct JSON test uses a 32 KiB heap.
@@ -2812,11 +2812,9 @@ The test forces native collection during parsing and encoding.
 
 The test preserved every live native object across collection.
 
-The default uncontended quantum is 1,048,576 guest instructions.
+The first implementation used a verified effect row and task existence.
 
-The verified root effect row proves that the task cannot create scheduler work.
-
-An explicit scheduler quantum disables this extension by default.
+That rule was too specific and is removed in Stage F54.
 
 The fixed-quantum corpus gate continues to test native continuation state.
 
@@ -2850,6 +2848,63 @@ Each representative native row reached complete instruction coverage.
 These measurements used one stable arena and one shared engine.
 
 They do not close the remaining allocation, helper, inlining, or code-density work.
+
+### Stage F54: Recalibrate the fairness quantum
+
+- remove the pure-task quantum;
+- use one default quantum for every task;
+- set deterministic and parallel defaults to 16,384 instructions;
+- preserve explicit quantum configuration;
+- measure message workloads and representative native workloads;
+- retain the fixed-quantum corpus differential.
+
+The 1,024-instruction default came from interpreter execution speed.
+
+Native execution made each physical scheduler exit too frequent.
+
+A 16,384-instruction quantum recovers most direct native throughput.
+
+The longest measured slice stays below one millisecond.
+
+Message rows stayed near their previous values.
+
+| Message row | Before deterministic | Current deterministic | Before parallel | Current parallel |
+| --- | ---: | ---: | ---: | ---: |
+| Ping-pong | 4.471 ms | 4.453 ms | 4.485 ms | 4.462 ms |
+| Stream | 0.212 ms | 0.232 ms | 0.214 ms | 0.231 ms |
+| Independent pairs | 4.549 ms | 4.536 ms | 4.639 ms | 4.631 ms |
+| Many senders | 0.388 ms | 0.405 ms | 0.389 ms | 0.404 ms |
+| Allocated stream | 0.179 ms | 0.180 ms | 0.179 ms | 0.181 ms |
+
+| Warm row | Interpreter | Native | Native gain |
+| --- | ---: | ---: | ---: |
+| Scheduled integer loop | 32.242 ms | 0.756 ms | 42.62 times |
+| Scheduled deep recursion | 36.061 ms | 17.601 ms | 2.05 times |
+
+This stage fixes a stale constant.
+
+It does not make a scheduler poll cheap.
+
+Stage F55 separates a poll decision from a physical yield.
+
+### Stage F55: Yield only on coordinator demand
+
+- keep deterministic poll points at the fairness interval;
+- expose one coordinator-owned yield request to the active executor;
+- rearm execution without materialization when no yield is requested;
+- yield when another runnable task or scheduler operation needs service;
+- apply one control contract to interpreter and native execution;
+- remove every effect-row and task-existence shortcut;
+- preserve explicit fixed-quantum execution for tests and hosts;
+- measure physical yield cost and scheduler response delay.
+
+The poll result must depend only on deterministic coordinator state.
+
+The executor must not read mutable `World` state.
+
+Snapshot, recall, and stop requests must force the next poll to yield.
+
+The common poll path must not materialize canonical machine state.
 
 ## 24. Rejected designs
 

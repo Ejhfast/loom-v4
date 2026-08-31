@@ -294,7 +294,7 @@ fn virtual_calls_preserve_scheduler_retirement_counts() {
 }
 
 #[test]
-fn the_default_scheduler_extends_only_a_pure_uncontended_task() {
+fn the_default_scheduler_uses_one_quantum_for_all_tasks() {
     let pure = concat!(
         "index = 0\ntotal = 0\n",
         "while index < 100000\n",
@@ -324,12 +324,12 @@ fn the_default_scheduler_extends_only_a_pure_uncontended_task() {
         lm_proc::SchedulerMode::Deterministic,
         lm_proc::DEFAULT_QUANTUM,
     ));
-    let extended = run_pure(lm_proc::Scheduler::default());
-    assert!(fixed > extended.saturating_mul(100), "{fixed} {extended}");
+    let default = run_pure(lm_proc::Scheduler::default());
+    assert_eq!(default, fixed);
     let parallel = run_pure(lm_proc::Scheduler::from_config(
         lm_proc::SchedulerConfig::parallel(1),
     ));
-    assert_eq!(parallel, extended);
+    assert_eq!(parallel, default);
 
     let effectful = concat!(
         "def run(): Int with Clock.Now\n",

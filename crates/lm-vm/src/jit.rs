@@ -103,10 +103,6 @@ impl CanonicalStack {
 }
 
 impl NativeContinuation {
-    pub(crate) fn root_function(&self) -> Option<u32> {
-        self.canonical.frames.first().map(|frame| frame.func)
-    }
-
     pub(crate) fn extend_gc_roots(&self, roots: &mut Vec<ObjRef>) {
         for frame in &self.canonical.frames {
             if let Some(crate::machine::FrameCapture::Closure(reference)) = frame.closure {

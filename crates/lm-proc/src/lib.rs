@@ -41,13 +41,10 @@ use std::collections::{BTreeMap, VecDeque};
 pub const WORKER_STACK: usize = 8 << 20;
 
 /// The default guest instruction count of one scheduler slice.
-pub const DEFAULT_QUANTUM: u32 = 1_024;
-
-/// The default quantum for one pure task without competition.
-pub const DEFAULT_UNCONTENDED_QUANTUM: u32 = 1 << 20;
+pub const DEFAULT_QUANTUM: u32 = 16_384;
 
 /// The default guest instruction count of one parallel worker turn.
-pub const DEFAULT_PARALLEL_QUANTUM: u32 = 4_096;
+pub const DEFAULT_PARALLEL_QUANTUM: u32 = 16_384;
 
 /// The largest supported parallel worker count.
 pub const MAX_PARALLEL_WORKERS: usize = 256;
@@ -70,7 +67,6 @@ pub enum SchedulerMode {
 pub struct SchedulerConfig {
     mode: SchedulerMode,
     quantum: u32,
-    uncontended_quantum: u32,
     parallel_quantum: u32,
     pool: Option<SchedulerPool>,
 }
@@ -87,7 +83,6 @@ impl SchedulerConfig {
         SchedulerConfig {
             mode: SchedulerMode::Deterministic,
             quantum: DEFAULT_QUANTUM,
-            uncontended_quantum: DEFAULT_UNCONTENDED_QUANTUM,
             parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
             pool: None,
         }
@@ -98,7 +93,6 @@ impl SchedulerConfig {
         SchedulerConfig {
             mode: SchedulerMode::Parallel { workers },
             quantum: DEFAULT_QUANTUM,
-            uncontended_quantum: DEFAULT_UNCONTENDED_QUANTUM,
             parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
             pool: None,
         }
@@ -110,7 +104,6 @@ impl SchedulerConfig {
         SchedulerConfig {
             mode: SchedulerMode::Parallel { workers },
             quantum: DEFAULT_QUANTUM,
-            uncontended_quantum: DEFAULT_UNCONTENDED_QUANTUM,
             parallel_quantum: DEFAULT_PARALLEL_QUANTUM,
             pool: Some(pool),
         }
@@ -128,22 +121,7 @@ impl SchedulerConfig {
             ));
         }
         self.quantum = quantum;
-        self.uncontended_quantum = quantum;
         self.parallel_quantum = parallel_quantum;
-        Ok(self)
-    }
-
-    /// Set the quantum for one pure task without competition.
-    pub fn with_uncontended_quantum(
-        mut self,
-        quantum: u32,
-    ) -> Result<SchedulerConfig, SchedulerError> {
-        if quantum == 0 {
-            return Err(SchedulerError::new(
-                "the uncontended instruction quantum must be greater than zero",
-            ));
-        }
-        self.uncontended_quantum = quantum;
         Ok(self)
     }
 
@@ -193,7 +171,6 @@ pub struct SchedulerStats {
 pub struct Scheduler {
     mode: SchedulerMode,
     quantum: u32,
-    uncontended_quantum: u32,
     parallel_quantum: u32,
     pool: Option<SchedulerPool>,
     include_root: bool,
@@ -491,7 +468,6 @@ impl Scheduler {
         Scheduler::new_with_quanta(
             config.mode,
             config.quantum,
-            config.uncontended_quantum,
             config.parallel_quantum,
             config.pool,
         )
@@ -499,20 +475,18 @@ impl Scheduler {
 
     /// Create one scheduler with an explicit instruction quantum.
     pub fn new_with_quantum(mode: SchedulerMode, quantum: u32) -> Scheduler {
-        Scheduler::new_with_quanta(mode, quantum, quantum, quantum, None)
+        Scheduler::new_with_quanta(mode, quantum, quantum, None)
     }
 
     fn new_with_quanta(
         mode: SchedulerMode,
         quantum: u32,
-        uncontended_quantum: u32,
         parallel_quantum: u32,
         pool: Option<SchedulerPool>,
     ) -> Scheduler {
         Scheduler {
             mode,
             quantum: quantum.max(1),
-            uncontended_quantum: uncontended_quantum.max(1),
             parallel_quantum: parallel_quantum.max(1),
             pool,
             include_root: true,
@@ -540,15 +514,6 @@ impl Scheduler {
 
     pub(crate) fn parallel_quantum(&self) -> u32 {
         self.parallel_quantum
-    }
-
-    fn deterministic_quantum(&self, world: &World, task: TaskKey) -> u32 {
-        let has_competition = self.tasks.iter().any(|(other, _)| *other != task);
-        if has_competition || !world.task_has_empty_effect_row(task) {
-            self.quantum
-        } else {
-            self.uncontended_quantum.max(self.quantum)
-        }
     }
 
     pub fn stats(&self) -> SchedulerStats {
@@ -591,8 +556,7 @@ impl Scheduler {
                     self.stats.proc_slices = self.stats.proc_slices.saturating_add(1);
                 }
                 self.tasks.insert(task, IndexedState::Running);
-                let configured = self.deterministic_quantum(world, task);
-                let quantum = world.snapshot_wait_quantum(task, configured);
+                let quantum = world.snapshot_wait_quantum(task, self.quantum);
                 let before = world.world_fuel();
                 let heap_before = world.heap_of(task.vm).used_bytes();
                 let exit = world.drive_slice(task, quantum);
@@ -1129,9 +1093,6 @@ mod tests {
     fn scheduler_configuration_rejects_zero_quanta() {
         assert!(SchedulerConfig::deterministic().with_quanta(0, 1).is_err());
         assert!(SchedulerConfig::deterministic().with_quanta(1, 0).is_err());
-        assert!(SchedulerConfig::deterministic()
-            .with_uncontended_quantum(0)
-            .is_err());
     }
 
     #[test]

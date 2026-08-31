@@ -20,11 +20,9 @@ A boundary, trip, fault, lease limit, or recall returns the machine.
 
 The coordinator applies sends, host requests, control operations, and terminal publication.
 
-The deterministic scheduler keeps the current FIFO policy and fairness quantum.
+The deterministic scheduler keeps the FIFO policy and one measured fairness quantum.
 
-A pure task can use a larger quantum when no other task exists.
-
-Its verified effect row proves that it cannot create scheduler work.
+All tasks use the same default fairness quantum.
 
 The parallel root-only coordinator uses the same rule.
 
@@ -209,15 +207,11 @@ It runs one machine slice at a time on the coordinator thread.
 
 It preserves task ordering and trace ordering.
 
-An effectful task always uses the fairness quantum.
+Every task uses the configured fairness quantum.
 
-A task also uses the fairness quantum while any other task exists.
+The default fairness quantum is 16,384 guest instructions.
 
-One pure task can use the configured uncontended quantum.
-
-The default uncontended quantum is 1,048,576 guest instructions.
-
-An explicit quantum also sets the uncontended quantum to the same value.
+An explicit quantum replaces this default.
 
 It creates no worker channels and pays no parallel scheduling cost.
 
@@ -253,7 +247,7 @@ After pool activation, a ready task receives a worker or the coordinator inline 
 
 Parallel mode does not promise equal processor time.
 
-The default parallel turn is 4,096 guest instructions.
+The default parallel turn is 16,384 guest instructions.
 
 A worker lease can contain many parallel turns.
 
@@ -267,7 +261,7 @@ A worker rotates its current lease when another lease waits.
 
 This local rotation does not commit world state.
 
-The deterministic fairness quantum remains 1,024 guest instructions.
+The deterministic fairness quantum is 16,384 guest instructions.
 
 The local turn keeps bounded fairness and stop delay.
 

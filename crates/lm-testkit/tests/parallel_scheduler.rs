@@ -822,7 +822,7 @@ right = Spinner.spawn()
     let bytes = compile_to_bytes("parallel-fuel.lm", source).expect("the source compiles");
     let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the artifact loads");
     let limits = WorldLimits {
-        fuel: 10_000,
+        fuel: 100_000,
         ..WorldLimits::default()
     };
     let mut world = World::new_with_limits(

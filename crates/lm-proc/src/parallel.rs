@@ -868,8 +868,9 @@ impl ParallelCoordinator<'_> {
             self.scheduler.stats.proc_slices = self.scheduler.stats.proc_slices.saturating_add(1);
         }
         self.scheduler.tasks.insert(task, IndexedState::Running);
-        let configured = self.scheduler.deterministic_quantum(self.world, task);
-        let quantum = self.world.snapshot_wait_quantum(task, configured);
+        let quantum = self
+            .world
+            .snapshot_wait_quantum(task, self.scheduler.quantum);
         let metrics_before = self.world.metrics();
         let before = self.world.world_fuel();
         let heap_before = self.world.heap_of(task.vm).used_bytes();
