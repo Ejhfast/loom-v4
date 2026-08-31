@@ -1847,6 +1847,26 @@ fn bench_jit_builder_construction() {
         0,
     );
     report_jit(
+        "jit_string_builder_int",
+        concat!(
+            "builder = StringBuilder()\ni = 0\n",
+            "while i < 200000\n",
+            "  builder.append_int(i)\n  i = i + 1\n",
+            "end\nbuilder.build().len()\n",
+        ),
+        0,
+    );
+    report_jit(
+        "jit_string_builder_char",
+        concat!(
+            "builder = StringBuilder()\ni = 0\n",
+            "while i < 200000\n",
+            "  builder.push_char('é')\n  i = i + 1\n",
+            "end\nbuilder.build().len()\n",
+        ),
+        0,
+    );
+    report_jit(
         "jit_byte_buffer",
         concat!(
             "buffer = ByteBuffer()\ni = 0\n",

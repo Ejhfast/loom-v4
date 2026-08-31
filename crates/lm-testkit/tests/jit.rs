@@ -1693,7 +1693,7 @@ fn nested_collection_preserves_suspended_caller_roots() {
 fn builder_construction_matches_each_fuel_boundary() {
     let source = concat!(
         "builder = StringBuilder()\n",
-        "text = builder.append(\"loom\").append_bool(false).build()\n",
+        "text = builder.append(\"loom\").append_int(-12).append_bool(false).push_char('é').build()\n",
         "buffer = ByteBuffer()\n",
         "bytes = buffer.reserve(8).append(1).extend(Bytes(text)).build()\n",
         "(text, bytes)\n",
@@ -1707,6 +1707,24 @@ fn builder_construction_matches_each_fuel_boundary() {
         assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
+}
+
+#[test]
+fn native_builder_formats_integer_bounds_and_unicode_widths() {
+    let source = concat!(
+        "builder = StringBuilder()\n",
+        "builder.append_int(0).append(\",\").append_int(-1).append(\",\")\n",
+        "builder.append_int(-9223372036854775807 - 1).append(\",\")\n",
+        "builder.append_int(9223372036854775807)\n",
+        "builder.push_char('A').push_char('é').push_char('猫').push_char('😀')\n",
+        "builder.finish() == \"0,-1,-9223372036854775808,9223372036854775807Aé猫😀\"\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
 }
 
 #[test]

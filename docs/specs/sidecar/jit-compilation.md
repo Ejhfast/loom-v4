@@ -2361,7 +2361,33 @@ The same-session comparison used commit `80c72ea` as its parent baseline.
 
 These results isolate repeated object translation as a material heap cost.
 
-The next stage retains safe payload addresses across call-free regions.
+The next stages retain safe payload addresses and inline remaining builder capacity hits.
+
+### Stage F39: Inline builder capacity hits
+
+- mark immutable instance and tuple array pointers as movable, read-only heap values;
+- compile integer formatting directly into native digit stores;
+- compile character UTF-8 encoding directly into native byte stores;
+- keep typed growth helpers for insufficient capacity;
+- reload payload pointers after every runtime or native call;
+- add fuel tests for signed integer bounds and all UTF-8 widths.
+
+The focused builder tests passed.
+
+The same-session comparison used commit `208c632` as its parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Integer builder append | 3.550 ms | 1.048 ms | 70.5 percent faster |
+| Character builder append | 2.828 ms | 0.311 ms | 89.0 percent faster |
+| Text builder append | 0.706 ms | 0.705 ms | unchanged |
+| Byte builder append | 0.327 ms | 0.328 ms | unchanged |
+
+An explicit runtime payload cache regressed field and element loops.
+
+The implementation removed that cache.
+
+These changes do not complete payload-address optimization.
 
 ## 24. Rejected designs
 
@@ -2392,6 +2418,8 @@ A call cannot materialize canonical state.
 A successful call cannot spill a complete caller or child frame.
 
 A scheduler continuation cannot keep stale duplicate scalar state.
+
+A runtime payload cache cannot add one branch to every field or element access.
 
 Generated code cannot serialize process-local heap addresses.
 

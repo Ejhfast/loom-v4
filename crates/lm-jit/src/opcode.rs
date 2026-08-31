@@ -446,13 +446,12 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
                 .with_fault_stack(FaultStack::Pop(2))
         }
         NativeInstr::SbAppendStr
+        | NativeInstr::SbAppendInt
         | NativeInstr::SbAppendBool
+        | NativeInstr::SbAppendChar
         | NativeInstr::BbAppend
         | NativeInstr::BbExtend
         | NativeInstr::BbReserve => dedicated(FastPath)
-            .with_replay()
-            .with_fault_stack(FaultStack::Pop(2)),
-        NativeInstr::SbAppendInt | NativeInstr::SbAppendChar => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         NativeInstr::SbClear | NativeInstr::BbClear => dedicated(Guarded)
