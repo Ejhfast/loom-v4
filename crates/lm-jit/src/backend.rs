@@ -14,16 +14,16 @@ use crate::plan::{
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
-    NativeEntryCell, ScalarKind, TypeEnvironmentSite, EXIT_BOUNDARY, EXIT_CALL, EXIT_CALLBACK_CALL,
-    EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL, EXIT_GROW_ACTIVATION,
-    EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT, EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL,
-    EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT,
-    EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD,
-    EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
+    NativeEntryCell, ScalarKind, TreatmentClass, TypeEnvironmentSite, EXIT_BOUNDARY, EXIT_CALL,
+    EXIT_CALLBACK_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL,
+    EXIT_GROW_ACTIVATION, EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
+    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
+    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_DIRTY, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
-    self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags,
-    UserFuncName,
+    self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, AliasRegion, InstBuilder,
+    MemFlags, UserFuncName,
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_codegen::settings::{self, Configurable};
@@ -53,6 +53,7 @@ use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
     VALUE_TAG_OFFSET,
 };
+use std::cell::RefCell;
 use std::mem;
 use std::sync::Mutex;
 
@@ -318,6 +319,7 @@ struct NativeValues<'a> {
     local_kinds: &'a [ScalarKind],
     local_tags: &'a [Option<Variable>],
     local_states: &'a [Variable],
+    local_heap_caches: &'a [Option<LocalHeapCache>],
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
     fuel: Variable,
@@ -355,6 +357,43 @@ struct NativeValues<'a> {
     detached_return: ir::Value,
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
+    heap_translations: &'a RefCell<HeapTranslationCache>,
+}
+
+/// These variables carry one validated local reference across native backedges.
+#[derive(Clone, Copy)]
+struct LocalHeapCache {
+    entry: Variable,
+    object_kind: Variable,
+    class: Variable,
+    actual_class: Variable,
+}
+
+/// This compile-time map associates emitted references with their source local.
+#[derive(Default)]
+struct HeapTranslationCache {
+    locals: Vec<(ir::Value, usize)>,
+}
+
+impl HeapTranslationCache {
+    fn clear(&mut self) {
+        self.locals.clear();
+    }
+
+    fn record_local(&mut self, reference: ir::Value, slot: usize) {
+        self.locals.push((reference, slot));
+    }
+
+    fn forget_local(&mut self, slot: usize) {
+        self.locals.retain(|(_, cached_slot)| *cached_slot != slot);
+    }
+
+    fn local(&self, reference: ir::Value) -> Option<usize> {
+        self.locals
+            .iter()
+            .rev()
+            .find_map(|(cached, slot)| (*cached == reference).then_some(*slot))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -851,6 +890,33 @@ fn emit_region(
         local_tags.push(tag);
         local_states.push(state);
     }
+    let zero_pointer = builder.ins().iconst(pointer_type, 0);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let zero_i32 = builder.ins().iconst(types::I32, 0);
+    let local_heap_caches: Vec<Option<LocalHeapCache>> = plan
+        .local_kinds
+        .iter()
+        .copied()
+        .map(|kind| {
+            if !matches!(
+                kind,
+                ScalarKind::Object(_) | ScalarKind::Tagged(_) | ScalarKind::Callback(_)
+            ) {
+                return None;
+            }
+            let cache = LocalHeapCache {
+                entry: builder.declare_var(pointer_type),
+                object_kind: builder.declare_var(types::I64),
+                class: builder.declare_var(types::I64),
+                actual_class: builder.declare_var(types::I32),
+            };
+            builder.def_var(cache.entry, zero_pointer);
+            builder.def_var(cache.object_kind, zero_i64);
+            builder.def_var(cache.class, zero_i64);
+            builder.def_var(cache.actual_class, zero_i32);
+            Some(cache)
+        })
+        .collect();
     let mut stack = Vec::with_capacity(plan.max_stack);
     let mut stack_tags = Vec::with_capacity(plan.max_stack);
     let dynamic_stack_tags: Vec<bool> = (0..plan.max_stack)
@@ -890,11 +956,13 @@ fn emit_region(
     let fuel = builder.declare_var(types::I64);
     builder.def_var(fuel, initial_fuel);
     let zero = builder.ins().iconst(types::I64, 0);
+    let heap_translations = RefCell::new(HeapTranslationCache::default());
     let values = NativeValues {
         locals: &locals,
         local_kinds: &plan.local_kinds,
         local_tags: &local_tags,
         local_states: &local_states,
+        local_heap_caches: &local_heap_caches,
         stack: &stack,
         stack_tags: &stack_tags,
         fuel,
@@ -932,6 +1000,7 @@ fn emit_region(
         detached_return,
         pointer_type,
         frontend_config,
+        heap_translations: &heap_translations,
     };
 
     let mut dispatch = Switch::new();
@@ -1058,6 +1127,7 @@ fn emit_segment(
         exact_fuel,
         resume_blocks,
     } = emission;
+    values.heap_translations.borrow_mut().clear();
     let mut stack: Vec<NativeValue> = if resume_blocks.is_some() {
         Vec::new()
     } else {
@@ -1079,6 +1149,7 @@ fn emit_segment(
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
     for (within, instruction) in code.iter().copied().enumerate() {
         if let Some(resume_blocks) = resume_blocks {
+            values.heap_translations.borrow_mut().clear();
             let block = resume_blocks
                 .get(within)
                 .copied()
@@ -1398,8 +1469,15 @@ fn emit_segment(
             }
             Instr::LoadLocal(slot) => {
                 let slot = slot as usize;
+                let bits = builder.use_var(values.locals[slot]);
+                if values.local_heap_caches[slot].is_some() {
+                    values
+                        .heap_translations
+                        .borrow_mut()
+                        .record_local(bits, slot);
+                }
                 stack.push(NativeValue {
-                    bits: builder.use_var(values.locals[slot]),
+                    bits,
                     tag: emit_slot_tag(builder, values.local_tags[slot], plan.local_kinds[slot])?,
                 });
             }
@@ -1417,6 +1495,8 @@ fn emit_segment(
                     .ins()
                     .iconst(types::I8, i64::from(LOCAL_DIRTY | LOCAL_INITIALIZED));
                 builder.def_var(values.local_states[slot], state);
+                values.heap_translations.borrow_mut().forget_local(slot);
+                clear_local_heap_cache(builder, values, slot);
             }
             Instr::Pop => {
                 pop_native(&mut stack)?;
@@ -4584,6 +4664,15 @@ fn emit_segment(
             | Instr::Unreachable
             | Instr::Return => {}
         }
+        if matches!(
+            crate::instruction_treatment(&instruction).class(),
+            TreatmentClass::FastPath
+                | TreatmentClass::Call
+                | TreatmentClass::Helper
+                | TreatmentClass::Exit
+        ) {
+            values.heap_translations.borrow_mut().clear();
+        }
         if exact_fuel && !deferred_boundary {
             emit_charge(builder, values, 1);
         }
@@ -5125,18 +5214,15 @@ fn emit_generic_virtual_receiver_key(
         instruction: point.instruction.saturating_add(1),
         prefix: point.prefix.saturating_add(1),
     };
-    let entry = emit_object_entry(
+    let (entry, actual) = emit_instance_entry(
         builder,
         values,
         receiver.bits,
-        JIT_OBJECT_INSTANCE,
+        class,
         guard_point,
         ObjectGuard::Replay(stack),
+        ObjectGuard::Replay(stack),
     )?;
-    let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let matches = emit_class_matches(builder, values, actual, class)?;
-    let invalid = builder.ins().bxor_imm(matches, 1);
-    emit_interpreter_replay(builder, values, invalid, guard_point, stack)?;
     let environment = load_value(builder, types::I32, entry, JIT_INSTANCE_ENV_OFFSET)?;
     let class_key = builder.ins().uextend(types::I64, actual);
     let environment_key = builder.ins().uextend(types::I64, environment);
@@ -6380,18 +6466,15 @@ fn emit_virtual_target(
             builder.ins().iconst(types::I32, i64::from(class))
         }
         VirtualReceiver::Instance { class } => {
-            let entry = emit_object_entry(
+            let (_, actual) = emit_instance_entry(
                 builder,
                 values,
                 receiver.bits,
-                JIT_OBJECT_INSTANCE,
+                class,
                 point,
                 ObjectGuard::Replay(deopt_stack),
+                ObjectGuard::Replay(deopt_stack),
             )?;
-            let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-            let matches = emit_class_matches(builder, values, actual, class)?;
-            let invalid = builder.ins().bxor_imm(matches, 1);
-            emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
             actual
         }
         VirtualReceiver::Text { string, substring } => {
@@ -6540,6 +6623,23 @@ fn define_slot_tag(
     Ok(())
 }
 
+fn clear_local_heap_cache(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    slot: usize,
+) {
+    let Some(cache) = values.local_heap_caches.get(slot).copied().flatten() else {
+        return;
+    };
+    let zero_pointer = builder.ins().iconst(values.pointer_type, 0);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let zero_i32 = builder.ins().iconst(types::I32, 0);
+    builder.def_var(cache.entry, zero_pointer);
+    builder.def_var(cache.object_kind, zero_i64);
+    builder.def_var(cache.class, zero_i64);
+    builder.def_var(cache.actual_class, zero_i32);
+}
+
 fn push_static(
     builder: &mut FunctionBuilder<'_>,
     stack: &mut Vec<NativeValue>,
@@ -6679,18 +6779,15 @@ fn emit_load_field(
     result: ValueContract,
     exit: HeapExitEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
-    let entry = emit_object_entry(
+    let (entry, _) = emit_instance_entry(
         builder,
         values,
         reference,
-        JIT_OBJECT_INSTANCE,
+        receiver_class,
         exit.point,
         ObjectGuard::Fault(exit.fault_stack),
+        ObjectGuard::Replay(exit.deopt_stack),
     )?;
-    let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let class_matches = emit_class_matches(builder, values, class, receiver_class)?;
-    let other_class = builder.ins().bxor_imm(class_matches, 1);
-    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
     let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
     let value = emit_array_element(
         builder,
@@ -6777,18 +6874,15 @@ fn emit_store_field(
         exit.point,
         exit.deopt_stack,
     )?;
-    let entry = emit_object_entry(
+    let (entry, _) = emit_instance_entry(
         builder,
         values,
         reference,
-        JIT_OBJECT_INSTANCE,
+        receiver_class,
         exit.point,
         ObjectGuard::Fault(exit.fault_stack),
+        ObjectGuard::Replay(exit.deopt_stack),
     )?;
-    let class = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let class_matches = emit_class_matches(builder, values, class, receiver_class)?;
-    let other_class = builder.ins().bxor_imm(class_matches, 1);
-    emit_interpreter_replay(builder, values, other_class, exit.point, exit.deopt_stack)?;
     emit_mutable_guard(builder, values, entry, exit)?;
     let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
     let address = emit_array_element(
@@ -6960,18 +7054,15 @@ fn emit_seal_instance(
     point: FaultPoint,
     deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    let entry = emit_object_entry(
+    let (entry, _) = emit_instance_entry(
         builder,
         values,
         reference,
-        JIT_OBJECT_INSTANCE,
+        class,
         point,
         ObjectGuard::Replay(deopt_stack),
+        ObjectGuard::Replay(deopt_stack),
     )?;
-    let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-    let matches = emit_class_matches(builder, values, actual, class)?;
-    let mismatch = builder.ins().bxor_imm(matches, 1);
-    emit_interpreter_replay(builder, values, mismatch, point, deopt_stack)?;
     let frozen = builder.ins().iconst(types::I8, 1);
     store_i8_value(builder, entry, JIT_ENTRY_FROZEN_OFFSET, frozen)
 }
@@ -8998,7 +9089,7 @@ fn emit_active_guard(
     point: FaultPoint,
     deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    let active = load_value(builder, types::I8, entry, offset)?;
+    let active = load_heap_value(builder, types::I8, entry, offset)?;
     let inactive = builder.ins().icmp_imm(IntCC::Equal, active, 0);
     emit_interpreter_replay(builder, values, inactive, point, deopt_stack)
 }
@@ -9009,7 +9100,7 @@ fn emit_mutable_guard(
     entry: ir::Value,
     exit: HeapExitEmission<'_>,
 ) -> Result<(), CompileError> {
-    let frozen = load_value(builder, types::I8, entry, JIT_ENTRY_FROZEN_OFFSET)?;
+    let frozen = load_heap_value(builder, types::I8, entry, JIT_ENTRY_FROZEN_OFFSET)?;
     let frozen = builder.ins().icmp_imm(IntCC::NotEqual, frozen, 0);
     emit_interpreter_replay(builder, values, frozen, exit.point, exit.deopt_stack)
 }
@@ -9027,7 +9118,7 @@ fn emit_checked_list_index(
     } else {
         builder.ins().ireduce(values.pointer_type, index)
     };
-    let len = load_value(
+    let len = load_heap_value(
         builder,
         values.pointer_type,
         entry,
@@ -9050,7 +9141,7 @@ fn emit_array_element(
     point: FaultPoint,
     fault_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
-    let len = load_value(
+    let len = load_heap_value(
         builder,
         values.pointer_type,
         entry,
@@ -9077,7 +9168,7 @@ fn emit_array_address(
     array_offset: usize,
     index: ir::Value,
 ) -> Result<ir::Value, CompileError> {
-    let data = load_value(
+    let data = load_heap_value(
         builder,
         values.pointer_type,
         entry,
@@ -9276,10 +9367,22 @@ fn emit_value_contract(
         )?;
         return Ok(());
     }
+    if let ObjectContract::Instance(class) = object {
+        emit_instance_entry(
+            builder,
+            values,
+            payload,
+            class,
+            point,
+            ObjectGuard::Replay(deopt_stack),
+            ObjectGuard::Replay(deopt_stack),
+        )?;
+        return Ok(());
+    }
     let tag = match object {
         ObjectContract::Str => JIT_OBJECT_STR,
         ObjectContract::Text => unreachable!(),
-        ObjectContract::Instance(_) => JIT_OBJECT_INSTANCE,
+        ObjectContract::Instance(_) => unreachable!(),
         ObjectContract::List => JIT_OBJECT_LIST,
         ObjectContract::Map => JIT_OBJECT_MAP,
         ObjectContract::Tuple => JIT_OBJECT_TUPLE,
@@ -9289,7 +9392,7 @@ fn emit_value_contract(
         ObjectContract::StringBuilder => JIT_OBJECT_STRING_BUILDER,
         ObjectContract::ByteBuffer => JIT_OBJECT_BYTE_BUFFER,
     };
-    let entry = emit_object_entry(
+    emit_object_entry(
         builder,
         values,
         payload,
@@ -9297,12 +9400,6 @@ fn emit_value_contract(
         point,
         ObjectGuard::Replay(deopt_stack),
     )?;
-    if let ObjectContract::Instance(class) = object {
-        let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
-        let matches = emit_class_matches(builder, values, actual, class)?;
-        let mismatch = builder.ins().bxor_imm(matches, 1);
-        emit_interpreter_replay(builder, values, mismatch, point, deopt_stack)?;
-    }
     Ok(())
 }
 
@@ -9387,8 +9484,8 @@ fn emit_store_value(
         Some(tag) => builder.ins().iconst(types::I64, tag as u64 as i64),
         None => value.tag,
     };
-    store_i64(builder, address, VALUE_TAG_OFFSET, tag)?;
-    store_i64(builder, address, VALUE_PAYLOAD_OFFSET, value.bits)
+    store_heap_i64(builder, address, VALUE_TAG_OFFSET, tag)?;
+    store_heap_i64(builder, address, VALUE_PAYLOAD_OFFSET, value.bits)
 }
 
 fn emit_object_entry(
@@ -9399,13 +9496,125 @@ fn emit_object_entry(
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
-    let entry = emit_heap_entry(builder, values, reference, point, guard)?;
-    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
-    let wrong_kind = builder
-        .ins()
-        .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
-    emit_object_guard(builder, values, wrong_kind, point, guard)?;
+    let local_cache = local_heap_cache(values, reference);
+    let expected = i64::from(object_tag) + 1;
+    let entry = if let Some(cache) = local_cache {
+        let hit = builder.create_block();
+        let miss = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, values.pointer_type);
+        let cached_kind = builder.use_var(cache.object_kind);
+        let proven = builder.ins().icmp_imm(IntCC::Equal, cached_kind, expected);
+        builder.ins().brif(proven, hit, &[], miss, &[]);
+
+        builder.switch_to_block(hit);
+        let entry = builder.use_var(cache.entry);
+        builder.ins().jump(done, &[entry.into()]);
+
+        builder.switch_to_block(miss);
+        let entry = emit_heap_entry(builder, values, reference, point, guard)?;
+        let kind = load_heap_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+        let wrong_kind = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
+        emit_object_guard(builder, values, wrong_kind, point, guard)?;
+        let expected = builder.ins().iconst(types::I64, expected);
+        builder.def_var(cache.object_kind, expected);
+        builder.ins().jump(done, &[entry.into()]);
+
+        builder.switch_to_block(done);
+        builder.block_params(done)[0]
+    } else {
+        let entry = emit_heap_entry(builder, values, reference, point, guard)?;
+        let kind = load_heap_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+        let wrong_kind = builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, kind, i64::from(object_tag));
+        emit_object_guard(builder, values, wrong_kind, point, guard)?;
+        entry
+    };
     Ok(entry)
+}
+
+fn emit_instance_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    class: u32,
+    point: FaultPoint,
+    object_guard: ObjectGuard<'_>,
+    class_guard: ObjectGuard<'_>,
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let local_cache = local_heap_cache(values, reference);
+    let expected = i64::from(class) + 1;
+    let (entry, actual) = if let Some(cache) = local_cache {
+        let hit = builder.create_block();
+        let miss = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, values.pointer_type);
+        builder.append_block_param(done, types::I32);
+        let cached_class = builder.use_var(cache.class);
+        let proven = builder.ins().icmp_imm(IntCC::Equal, cached_class, expected);
+        builder.ins().brif(proven, hit, &[], miss, &[]);
+
+        builder.switch_to_block(hit);
+        let entry = builder.use_var(cache.entry);
+        let actual = builder.use_var(cache.actual_class);
+        builder.ins().jump(done, &[entry.into(), actual.into()]);
+
+        builder.switch_to_block(miss);
+        let (entry, actual) = emit_instance_entry_miss(
+            builder,
+            values,
+            reference,
+            class,
+            point,
+            object_guard,
+            class_guard,
+        )?;
+        let expected = builder.ins().iconst(types::I64, expected);
+        builder.def_var(cache.class, expected);
+        builder.def_var(cache.actual_class, actual);
+        builder.ins().jump(done, &[entry.into(), actual.into()]);
+
+        builder.switch_to_block(done);
+        (builder.block_params(done)[0], builder.block_params(done)[1])
+    } else {
+        emit_instance_entry_miss(
+            builder,
+            values,
+            reference,
+            class,
+            point,
+            object_guard,
+            class_guard,
+        )?
+    };
+    Ok((entry, actual))
+}
+
+fn emit_instance_entry_miss(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    class: u32,
+    point: FaultPoint,
+    object_guard: ObjectGuard<'_>,
+    class_guard: ObjectGuard<'_>,
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_INSTANCE,
+        point,
+        object_guard,
+    )?;
+    let actual = load_heap_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let matches = emit_class_matches(builder, values, actual, class)?;
+    let mismatch = builder.ins().bxor_imm(matches, 1);
+    emit_object_guard(builder, values, mismatch, point, class_guard)?;
+    Ok((entry, actual))
 }
 
 fn emit_text_entry(
@@ -9415,8 +9624,46 @@ fn emit_text_entry(
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
+    const TEXT_PROOF: i64 = (u32::MAX as i64) + 2;
+    let local_cache = local_heap_cache(values, reference);
+    let entry = if let Some(cache) = local_cache {
+        let hit = builder.create_block();
+        let miss = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, values.pointer_type);
+        let cached_kind = builder.use_var(cache.object_kind);
+        let proven = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, cached_kind, TEXT_PROOF);
+        builder.ins().brif(proven, hit, &[], miss, &[]);
+
+        builder.switch_to_block(hit);
+        let entry = builder.use_var(cache.entry);
+        builder.ins().jump(done, &[entry.into()]);
+
+        builder.switch_to_block(miss);
+        let entry = emit_text_entry_miss(builder, values, reference, point, guard)?;
+        let proof = builder.ins().iconst(types::I64, TEXT_PROOF);
+        builder.def_var(cache.object_kind, proof);
+        builder.ins().jump(done, &[entry.into()]);
+
+        builder.switch_to_block(done);
+        builder.block_params(done)[0]
+    } else {
+        emit_text_entry_miss(builder, values, reference, point, guard)?
+    };
+    Ok(entry)
+}
+
+fn emit_text_entry_miss(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
     let entry = emit_heap_entry(builder, values, reference, point, guard)?;
-    let kind = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let kind = load_heap_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
     let string = builder
         .ins()
         .icmp_imm(IntCC::Equal, kind, i64::from(JIT_OBJECT_STR));
@@ -9436,9 +9683,43 @@ fn emit_heap_entry(
     point: FaultPoint,
     guard: ObjectGuard<'_>,
 ) -> Result<ir::Value, CompileError> {
+    let local_cache = local_heap_cache(values, reference);
+    let entry = if let Some(cache) = local_cache {
+        let hit = builder.create_block();
+        let miss = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, values.pointer_type);
+        let cached = builder.use_var(cache.entry);
+        let present = builder.ins().icmp_imm(IntCC::NotEqual, cached, 0);
+        builder.ins().brif(present, hit, &[], miss, &[]);
+
+        builder.switch_to_block(hit);
+        builder.ins().jump(done, &[cached.into()]);
+
+        builder.switch_to_block(miss);
+        let entry = emit_heap_entry_miss(builder, values, reference, point, guard)?;
+        builder.ins().jump(done, &[entry.into()]);
+
+        builder.switch_to_block(done);
+        let entry = builder.block_params(done)[0];
+        builder.def_var(cache.entry, entry);
+        entry
+    } else {
+        emit_heap_entry_miss(builder, values, reference, point, guard)?
+    };
+    Ok(entry)
+}
+
+fn emit_heap_entry_miss(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
     let slot = builder.ins().ireduce(types::I32, reference);
     let slot_index = builder.ins().uextend(values.pointer_type, slot);
-    let slot_count = load_value(
+    let slot_count = load_vmctx_value(
         builder,
         values.pointer_type,
         values.activation_pointer,
@@ -9449,7 +9730,7 @@ fn emit_heap_entry(
         .icmp(IntCC::UnsignedGreaterThanOrEqual, slot_index, slot_count);
     emit_object_guard(builder, values, outside, point, guard)?;
 
-    let pages = load_value(
+    let pages = load_vmctx_value(
         builder,
         values.pointer_type,
         values.activation_pointer,
@@ -9465,7 +9746,7 @@ fn emit_heap_entry(
     let page_address = builder.ins().iadd(pages, page_offset);
     let page = builder
         .ins()
-        .load(values.pointer_type, MemFlags::trusted(), page_address, 0);
+        .load(values.pointer_type, table_mem_flags(), page_address, 0);
     let within_page = builder.ins().band_imm(slot_index, i64::from(JIT_PAGE_MASK));
     let entry_offset = builder.ins().imul_imm(
         within_page,
@@ -9474,8 +9755,8 @@ fn emit_heap_entry(
     let entry = builder.ins().iadd(page, entry_offset);
     let expected_generation = builder.ins().ushr_imm(reference, 32);
     let expected_generation = builder.ins().ireduce(types::I32, expected_generation);
-    let generation = load_value(builder, types::I32, entry, JIT_ENTRY_GENERATION_OFFSET)?;
-    let live = load_value(builder, types::I32, entry, JIT_ENTRY_LIVE_OFFSET)?;
+    let generation = load_heap_value(builder, types::I32, entry, JIT_ENTRY_GENERATION_OFFSET)?;
+    let live = load_heap_value(builder, types::I32, entry, JIT_ENTRY_LIVE_OFFSET)?;
     let stale = builder
         .ins()
         .icmp(IntCC::NotEqual, generation, expected_generation);
@@ -9485,6 +9766,11 @@ fn emit_heap_entry(
     let invalid = builder.ins().bor(stale, dead);
     emit_object_guard(builder, values, invalid, point, guard)?;
     Ok(entry)
+}
+
+fn local_heap_cache(values: NativeValues<'_>, reference: ir::Value) -> Option<LocalHeapCache> {
+    let slot = values.heap_translations.borrow().local(reference)?;
+    values.local_heap_caches.get(slot).copied().flatten()
 }
 
 fn emit_object_guard(
@@ -11738,6 +12024,15 @@ impl RawActivationField {
             }
         }
     }
+
+    fn immutable(self) -> bool {
+        !matches!(
+            self,
+            RawActivationField::ScalarLen
+                | RawActivationField::FrameLen
+                | RawActivationField::ChangedFrom
+        )
+    }
 }
 
 fn load_activation_u32(
@@ -11745,11 +12040,17 @@ fn load_activation_u32(
     values: NativeValues<'_>,
     field: RawActivationField,
 ) -> Result<ir::Value, CompileError> {
-    load_value(
+    let flags = if field.immutable() {
+        immutable_vmctx_mem_flags()
+    } else {
+        vmctx_mem_flags()
+    };
+    load_value_with_flags(
         builder,
         types::I32,
         values.activation_pointer,
         field.offset(),
+        flags,
     )
 }
 
@@ -11758,11 +12059,17 @@ fn load_activation_pointer(
     values: NativeValues<'_>,
     field: RawActivationField,
 ) -> Result<ir::Value, CompileError> {
-    load_value(
+    let flags = if field.immutable() {
+        immutable_vmctx_mem_flags()
+    } else {
+        vmctx_mem_flags()
+    };
+    load_value_with_flags(
         builder,
         values.pointer_type,
         values.activation_pointer,
         field.offset(),
+        flags,
     )
 }
 
@@ -11772,7 +12079,13 @@ fn store_activation_u32(
     field: RawActivationField,
     value: ir::Value,
 ) -> Result<(), CompileError> {
-    store_i32_value(builder, values.activation_pointer, field.offset(), value)
+    store_i32_value_with_flags(
+        builder,
+        values.activation_pointer,
+        field.offset(),
+        value,
+        vmctx_mem_flags(),
+    )
 }
 
 fn load_cell_u32(
@@ -11822,8 +12135,66 @@ fn load_value(
     pointer: ir::Value,
     offset: usize,
 ) -> Result<ir::Value, CompileError> {
+    load_value_with_flags(builder, ty, pointer, offset, MemFlags::new())
+}
+
+fn load_heap_value(
+    builder: &mut FunctionBuilder<'_>,
+    ty: ir::Type,
+    pointer: ir::Value,
+    offset: usize,
+) -> Result<ir::Value, CompileError> {
+    load_value_with_flags(builder, ty, pointer, offset, heap_mem_flags())
+}
+
+fn load_vmctx_value(
+    builder: &mut FunctionBuilder<'_>,
+    ty: ir::Type,
+    pointer: ir::Value,
+    offset: usize,
+) -> Result<ir::Value, CompileError> {
+    load_value_with_flags(builder, ty, pointer, offset, vmctx_mem_flags())
+}
+
+fn load_value_with_flags(
+    builder: &mut FunctionBuilder<'_>,
+    ty: ir::Type,
+    pointer: ir::Value,
+    offset: usize,
+    flags: MemFlags,
+) -> Result<ir::Value, CompileError> {
     let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
-    Ok(builder.ins().load(ty, MemFlags::new(), pointer, offset))
+    Ok(builder.ins().load(ty, flags, pointer, offset))
+}
+
+fn store_i32_value_with_flags(
+    builder: &mut FunctionBuilder<'_>,
+    pointer: ir::Value,
+    offset: usize,
+    value: ir::Value,
+    flags: MemFlags,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
+    builder.ins().store(flags, value, pointer, offset);
+    Ok(())
+}
+
+const fn vmctx_mem_flags() -> MemFlags {
+    MemFlags::trusted().with_alias_region(Some(AliasRegion::Vmctx))
+}
+
+const fn immutable_vmctx_mem_flags() -> MemFlags {
+    vmctx_mem_flags().with_readonly().with_can_move()
+}
+
+const fn heap_mem_flags() -> MemFlags {
+    MemFlags::trusted().with_alias_region(Some(AliasRegion::Heap))
+}
+
+const fn table_mem_flags() -> MemFlags {
+    MemFlags::trusted()
+        .with_readonly()
+        .with_alias_region(Some(AliasRegion::Table))
 }
 
 fn store_i64(
@@ -11834,5 +12205,18 @@ fn store_i64(
 ) -> Result<(), CompileError> {
     let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
     builder.ins().store(MemFlags::new(), value, pointer, offset);
+    Ok(())
+}
+
+fn store_heap_i64(
+    builder: &mut FunctionBuilder<'_>,
+    pointer: ir::Value,
+    offset: usize,
+    value: ir::Value,
+) -> Result<(), CompileError> {
+    let offset = i32::try_from(offset).map_err(|_| CompileError::Backend)?;
+    builder
+        .ins()
+        .store(heap_mem_flags(), value, pointer, offset);
     Ok(())
 }

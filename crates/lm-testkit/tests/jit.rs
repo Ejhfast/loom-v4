@@ -2721,6 +2721,39 @@ fn direct_heap_access_matches_each_fuel_boundary() {
 }
 
 #[test]
+fn heap_proofs_end_when_a_local_changes() {
+    let source = concat!(
+        "class Cell\n",
+        "  value: Int\n",
+        "  def init(mut self, value: Int)\n    self.value = value\n  end\n",
+        "end\n",
+        "left = Cell(1)\nright = Cell(10)\ncurrent = left\n",
+        "i = 0\nsum = 0\n",
+        "while i < 100\n",
+        "  sum = sum + current.value\n",
+        "  if i == 49 then current = right end\n",
+        "  i = i + 1\n",
+        "end\n",
+        "current = left\n",
+        "current.value = if true then current = right; 7 else 7 end\n",
+        "sum + current.value * 10 + left.value\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-heap-proof-local.lm", source)
+        .expect("the heap proof case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(657)));
+    assert!(metrics.compiled_heap_read_sites > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 500, "{metrics:?}");
+}
+
+#[test]
 fn direct_collection_metadata_matches_selected_fuel_boundaries() {
     let source = concat!(
         "items = [1, 2, 3]\n",

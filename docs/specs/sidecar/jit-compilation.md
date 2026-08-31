@@ -31,6 +31,30 @@ The engine must approach production typed-JIT code quality while it preserves Lo
 
 No workload ratio closes optimization while a removable structural hot-path cost remains.
 
+### 1.1 Completion rule
+
+A selected benchmark ratio cannot complete this project.
+
+Benchmarks expose costs and prevent regressions.
+
+The completed engine must have these properties:
+
+- adjacent typed operations can optimize as one native control-flow graph;
+- fuel accounting adds no avoidable work inside a reserved native region;
+- validated heap addresses remain available across safe call-free regions and loop backedges;
+- common field, element, map-hit, and builder-capacity paths stay inline;
+- typed helpers handle only work that dominates their call cost;
+- direct calls use the native convention, and small monomorphic calls can inline;
+- continuation work does not scan unchanged native depth on every scheduler quantum;
+- cold compilation does not block ordinary execution for unbounded time;
+- hotness policy cannot hide a structural code-generation defect.
+
+Optimized Rust kernels define ceilings, not required fixed ratios.
+
+The broad corpus detects semantic errors and workload regressions.
+
+Work remains open while measurements expose a removable structural cost.
+
 ## 2. Core rules
 
 Verified LMBC is the only executable input.
@@ -2136,7 +2160,7 @@ The full workspace test suite passed.
 
 The representative performance gate remains open.
 
-### Stage F34: Close representative performance gaps
+### Stage F34: Measure complete-program performance
 
 - preserve the complete function-acceptance gate;
 - measure native entries, exits, helpers, materializations, and compilation for each representative row;
@@ -2144,13 +2168,13 @@ The representative performance gate remains open.
 - keep class F exits only at observable runtime boundaries;
 - keep common operations in classes A through D;
 - remeasure every language benchmark and large corpus program;
-- meet the JSON, HTTP, and five-percent gates.
+- record JSON and HTTP ratios without using them as completion criteria.
 
-Gate: Auto slows no large corpus program by more than five percent.
+Regression limit: Auto slows no large corpus program by more than five percent.
 
-Gate: At least one JSON row improves by more than two times.
+Diagnostic target: At least one JSON row improves by more than two times.
 
-Gate: At least one HTTP row improves by more than two times.
+Diagnostic target: At least one HTTP row improves by more than two times.
 
 Checkpoint: Native collection can inspect roots from every suspended native frame.
 
@@ -2191,9 +2215,9 @@ All representative forced-native rows reached complete native coverage.
 
 No representative Auto row slowed by more than five percent.
 
-The HTTP gate passed through serialization.
+HTTP serialization crossed its local diagnostic target.
 
-The JSON gate remains open.
+JSON remained below its local diagnostic target.
 
 Auto did not promote the closure row.
 
@@ -2309,6 +2333,35 @@ JSON parse stayed within two percent of the parent measurement.
 HTTP parse improved by 2.2 percent.
 
 These measurements do not close the optimized Rust ceiling gap.
+
+### Stage F38: Carry heap proofs across loop backedges
+
+- assign one optional proof cache to each object-bearing local;
+- validate the slot, generation, live flag, object kind, and class on the first access;
+- carry the validated entry and class proof across native loop backedges;
+- invalidate every proof when `StoreLocal` changes its source local;
+- keep payload pointers outside this stage;
+- classify heap, table, and activation memory for backend alias analysis.
+
+Correctness check: Every focused JIT test passed.
+
+Correctness check: Direct and scheduled corpus runs matched Interpreter results.
+
+The corpus reported no unsupported fallback.
+
+The same-session comparison used commit `80c72ea` as its parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Field read | 1.526 ms | 1.011 ms | 33.7 percent faster |
+| Tuple read | 1.230 ms | 0.901 ms | 26.7 percent faster |
+| List read | 1.674 ms | 1.180 ms | 29.5 percent faster |
+| List replacement | 1.619 ms | 1.102 ms | 31.9 percent faster |
+| Scalar loop | 0.552 ms | 0.541 ms | 2.0 percent faster |
+
+These results isolate repeated object translation as a material heap cost.
+
+The next stage retains safe payload addresses across call-free regions.
 
 ## 24. Rejected designs
 
