@@ -495,6 +495,24 @@ impl World {
         self.drive_stack(&mut stack, quantum)
     }
 
+    /// Resume one saved stack with demand-driven execution polls.
+    pub(super) fn resume_stack_polled(
+        &mut self,
+        vm: VmId,
+        limit: u32,
+        poll: u32,
+        control: &crate::ExecutionControl,
+    ) -> RootEvent {
+        let Some(saved) = self.suspended.remove(&vm) else {
+            return self.fault_event(vm, "the machine holds no suspended stack");
+        };
+        let mut stack = saved.activations;
+        if stack.is_empty() {
+            return self.fault_event(vm, "the suspended stack holds no activation");
+        }
+        self.drive_stack_polled(&mut stack, limit, poll, control)
+    }
+
     /// Fault one machine and answer its terminal event.
     ///
     /// The call answers a driver entry that reached a state this build
@@ -846,6 +864,33 @@ impl World {
             &mut self.envs,
             slots,
             limit,
+            self.engine.as_ref(),
+        )
+    }
+
+    fn execute_inline_polled(
+        &mut self,
+        vm: VmId,
+        limit: u32,
+        first_poll: u32,
+        poll_interval: u32,
+        control: &crate::ExecutionControl,
+    ) -> crate::executor::InlineExecutionReport {
+        let execution = self.execution_code_of(vm);
+        let image = self.machines[vm as usize].image;
+        let slots = image.and_then(|key| {
+            self.vm_images.get(key.image as usize).and_then(|record| {
+                (record.live && record.generation == key.generation)
+                    .then_some(record.slots.as_slice())
+            })
+        });
+        crate::executor::execute_inline_polled(
+            &mut self.machines[vm as usize],
+            execution.as_ref(),
+            &mut self.envs,
+            slots,
+            limit,
+            crate::executor::ExecutionPoll::new(first_poll, poll_interval, control),
             self.engine.as_ref(),
         )
     }
@@ -1233,20 +1278,63 @@ impl World {
     pub(super) fn drive_stack(
         &mut self,
         stack: &mut Vec<Activation>,
-        mut quantum: Option<u32>,
+        quantum: Option<u32>,
     ) -> RootEvent {
+        self.drive_stack_with_control(stack, quantum, None)
+    }
+
+    /// Drive one stack with demand-driven execution polls.
+    pub(super) fn drive_stack_polled(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        limit: u32,
+        poll: u32,
+        control: &crate::ExecutionControl,
+    ) -> RootEvent {
+        self.drive_stack_with_control(stack, Some(limit.max(1)), Some((poll.max(1), control)))
+    }
+
+    fn drive_stack_with_control(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        mut quantum: Option<u32>,
+        poll: Option<(u32, &crate::ExecutionControl)>,
+    ) -> RootEvent {
+        let mut poll_remaining = poll.map(|(interval, _)| interval);
         loop {
             match self.advance_stack(stack, &mut quantum) {
                 DriverStep::Execute { top_idx, vm, limit } => {
-                    let report = self.execute_inline(vm, limit);
-                    if let Some(event) = self.commit_execution_stop(
-                        stack,
-                        top_idx,
-                        vm,
-                        &mut quantum,
-                        report.into_commit(),
-                    ) {
+                    let report = match poll {
+                        Some((interval, control)) => self.execute_inline_polled(
+                            vm,
+                            limit,
+                            poll_remaining.unwrap_or(interval),
+                            interval,
+                            control,
+                        ),
+                        None => self.execute_inline(vm, limit),
+                    };
+                    if let (Some((interval, _)), Some(remaining)) = (poll, poll_remaining) {
+                        poll_remaining = Some(poll_after_retirement(
+                            remaining,
+                            interval,
+                            report.retired_instructions(),
+                        ));
+                    }
+                    let requested_yield = report.requested_yield();
+                    let commit = report.into_commit();
+                    let event =
+                        self.commit_execution_stop(stack, top_idx, vm, &mut quantum, commit);
+                    if let Some((_, control)) = poll {
+                        if !self.schedule_events.is_empty() {
+                            control.request_yield();
+                        }
+                    }
+                    if let Some(event) = event {
                         return event;
+                    }
+                    if requested_yield {
+                        quantum = Some(0);
                     }
                 }
                 DriverStep::Event(event) => return event,
@@ -1327,5 +1415,18 @@ impl World {
         };
         self.emit_wake(WakeKey::Done(key));
         self.emit_wake(WakeKey::Send(key));
+    }
+}
+
+fn poll_after_retirement(remaining: u32, interval: u32, retired: u32) -> u32 {
+    if retired < remaining {
+        return remaining - retired;
+    }
+    let over = retired - remaining;
+    let within = over % interval;
+    if within == 0 {
+        interval
+    } else {
+        interval - within
     }
 }

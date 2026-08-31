@@ -1,6 +1,8 @@
 //! The bounded execution worker pool.
 
-use lm_vm::{execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
+use lm_vm::{
+    execute_polled_turn, recall, ExecutionControl, ExecutionLease, ExecutionReport, ExecutionTurn,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -14,7 +16,14 @@ struct WorkerJob {
     id: u64,
     lease: ExecutionLease,
     quantum: u32,
+    control: Arc<ExecutionControl>,
     reports: Sender<WorkerEvent>,
+}
+
+#[derive(Clone)]
+struct RunningJob {
+    id: u64,
+    control: Arc<ExecutionControl>,
 }
 
 pub(crate) enum WorkerEvent {
@@ -24,7 +33,7 @@ pub(crate) enum WorkerEvent {
 
 struct PoolState {
     queue: VecDeque<WorkerJob>,
-    running: Vec<Option<u64>>,
+    running: Vec<Option<RunningJob>>,
     live: Vec<bool>,
     recalls: BTreeSet<u64>,
     waiters: BTreeMap<u64, Arc<dyn Fn() + Send + Sync>>,
@@ -178,12 +187,24 @@ impl SchedulerPool {
             ));
         };
         state.next_job = next;
+        let control = Arc::new(ExecutionControl::new());
         state.queue.push_back(WorkerJob {
             id,
             lease,
             quantum: quantum.max(1),
+            control,
             reports,
         });
+        let has_idle_worker = state
+            .running
+            .iter()
+            .zip(&state.live)
+            .any(|(running, live)| *live && running.is_none());
+        if !has_idle_worker {
+            for running in state.running.iter().flatten() {
+                running.control.request_yield();
+            }
+        }
         drop(state);
         self.inner.shared.available.notify_one();
         Ok(id)
@@ -216,8 +237,11 @@ impl SchedulerPool {
                 .running
                 .iter()
                 .flatten()
-                .filter(|job| requested.contains(job))
-                .copied()
+                .filter(|job| requested.contains(&job.id))
+                .map(|job| {
+                    job.control.request_yield();
+                    job.id
+                })
                 .collect();
             state.recalls.extend(running);
             let waiters = state.waiters.values().cloned().collect();
@@ -258,6 +282,9 @@ impl Drop for PoolInner {
                 .lock()
                 .expect("the worker pool state is available");
             state.shutdown = true;
+            for running in state.running.iter().flatten() {
+                running.control.request_yield();
+            }
             state.queue.drain(..).collect::<Vec<_>>()
         };
         for job in queued {
@@ -277,7 +304,9 @@ fn worker_loop(worker: usize, shared: Arc<PoolShared>) {
         return;
     };
     loop {
-        let result = catch_unwind(AssertUnwindSafe(|| execute_turn(job.lease, job.quantum)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            execute_polled_turn(job.lease, job.quantum, job.control.as_ref())
+        }));
         match result {
             Ok(ExecutionTurn::Continue(mut lease)) => {
                 let recalled = {
@@ -292,13 +321,22 @@ fn worker_loop(worker: usize, shared: Arc<PoolShared>) {
                         lease.note_local_rotation();
                         job.lease = lease;
                         state.queue.push_back(job);
-                        state.running[worker] = Some(next.id);
+                        if state.queue.is_empty() {
+                            next.control.clear_yield();
+                        } else {
+                            next.control.request_yield();
+                        }
+                        state.running[worker] = Some(RunningJob {
+                            id: next.id,
+                            control: Arc::clone(&next.control),
+                        });
                         drop(state);
                         job = next;
                         continue;
                     } else {
                         lease.note_local_continuation();
                         job.lease = lease;
+                        job.control.clear_yield();
                         drop(state);
                         continue;
                     }
@@ -354,7 +392,15 @@ fn take_job(shared: &Arc<PoolShared>, worker: usize) -> Option<WorkerJob> {
             return None;
         }
         if let Some(job) = state.queue.pop_front() {
-            state.running[worker] = Some(job.id);
+            if state.queue.is_empty() {
+                job.control.clear_yield();
+            } else {
+                job.control.request_yield();
+            }
+            state.running[worker] = Some(RunningJob {
+                id: job.id,
+                control: Arc::clone(&job.control),
+            });
             return Some(job);
         }
         state.running[worker] = None;

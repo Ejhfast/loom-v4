@@ -294,7 +294,7 @@ fn virtual_calls_preserve_scheduler_retirement_counts() {
 }
 
 #[test]
-fn the_default_scheduler_uses_one_quantum_for_all_tasks() {
+fn the_default_scheduler_skips_unneeded_physical_yields() {
     let pure = concat!(
         "index = 0\ntotal = 0\n",
         "while index < 100000\n",
@@ -325,7 +325,7 @@ fn the_default_scheduler_uses_one_quantum_for_all_tasks() {
         lm_proc::DEFAULT_QUANTUM,
     ));
     let default = run_pure(lm_proc::Scheduler::default());
-    assert_eq!(default, fixed);
+    assert!(fixed > default.saturating_mul(50), "{fixed} {default}");
     let parallel = run_pure(lm_proc::Scheduler::from_config(
         lm_proc::SchedulerConfig::parallel(1),
     ));
@@ -361,7 +361,7 @@ fn the_default_scheduler_uses_one_quantum_for_all_tasks() {
         lm_proc::DEFAULT_QUANTUM,
     ));
     let default = run_effectful(lm_proc::Scheduler::default());
-    assert_eq!(default, fixed);
+    assert!(fixed > default.saturating_mul(50), "{fixed} {default}");
 }
 
 #[test]

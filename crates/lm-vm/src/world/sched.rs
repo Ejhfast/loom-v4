@@ -854,6 +854,27 @@ impl World {
 
     /// Drive one task for at most `quantum` guest instructions.
     pub fn drive_slice(&mut self, key: TaskKey, quantum: u32) -> Option<SliceExit> {
+        self.drive_slice_with_control(key, quantum, None)
+    }
+
+    /// Drive one task until its limit or a requested scheduler poll.
+    pub fn drive_slice_polled(
+        &mut self,
+        key: TaskKey,
+        limit: u32,
+        poll: u32,
+        control: &crate::ExecutionControl,
+    ) -> Option<SliceExit> {
+        self.drive_slice_with_control(key, limit, Some((poll.max(1), control)))
+    }
+
+    fn drive_slice_with_control(
+        &mut self,
+        key: TaskKey,
+        quantum: u32,
+        control: Option<(u32, &crate::ExecutionControl)>,
+    ) -> Option<SliceExit> {
+        let quantum = quantum.max(1);
         match self.task_status(key) {
             TaskStatus::Dormant => return None,
             TaskStatus::Terminal => return Some(SliceExit::Terminal),
@@ -870,7 +891,8 @@ impl World {
                 _ => None,
             })
         {
-            return Some(self.service_wait_slice(key.vm, wait, quantum));
+            let service_quantum = control.map_or(quantum, |(poll, _)| quantum.min(poll));
+            return Some(self.service_wait_slice(key.vm, wait, service_quantum));
         }
         if self.machines[key.vm as usize].vm.state == MachineState::Blocked
             && !self.suspended.contains_key(&key.vm)
@@ -888,7 +910,10 @@ impl World {
             }
         }
         let event = if self.suspended.contains_key(&key.vm) {
-            self.resume_stack_with_quantum(key.vm, Some(quantum.max(1)))
+            match control {
+                Some((poll, control)) => self.resume_stack_polled(key.vm, quantum, poll, control),
+                None => self.resume_stack_with_quantum(key.vm, Some(quantum.max(1))),
+            }
         } else if self.machines[key.vm as usize].vm.state == MachineState::Ready {
             let mut stack = Vec::new();
             self.push_activation(
@@ -902,7 +927,12 @@ impl World {
                     fuel: None,
                 },
             );
-            self.drive_stack(&mut stack, Some(quantum.max(1)))
+            match control {
+                Some((poll, control)) => {
+                    self.drive_stack_polled(&mut stack, quantum, poll, control)
+                }
+                None => self.drive_stack(&mut stack, Some(quantum.max(1))),
+            }
         } else {
             self.fault_event(key.vm, "the scheduler task is not ready to run")
         };

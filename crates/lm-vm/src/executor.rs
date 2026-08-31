@@ -8,8 +8,60 @@ use crate::machine::{ExecError, ExecOutcome, ImageSlotTarget, Machine, VmId};
 use crate::resource::ResourceBudgetReservation;
 use crate::{DispatchRow, FaultCode, NamespaceRuntime};
 use lm_bytecode::closed::TypeEnvs;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// One coordinator-owned request for a scheduler yield.
+#[derive(Debug, Default)]
+pub struct ExecutionControl {
+    yield_requested: AtomicBool,
+}
+
+impl ExecutionControl {
+    /// Create one control with no pending yield request.
+    pub const fn new() -> ExecutionControl {
+        ExecutionControl {
+            yield_requested: AtomicBool::new(false),
+        }
+    }
+
+    /// Request a yield at the next execution poll.
+    pub fn request_yield(&self) {
+        self.yield_requested.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear a yield request before execution continues.
+    pub fn clear_yield(&self) {
+        self.yield_requested.store(false, Ordering::Relaxed);
+    }
+
+    /// Test the current yield request.
+    pub fn yield_requested(&self) -> bool {
+        self.yield_requested.load(Ordering::Relaxed)
+    }
+}
+
+/// One deterministic execution poll.
+#[derive(Clone, Copy)]
+pub(crate) struct ExecutionPoll<'a> {
+    first: u32,
+    interval: u32,
+    control: &'a ExecutionControl,
+}
+
+impl<'a> ExecutionPoll<'a> {
+    pub(crate) fn new(
+        first: u32,
+        interval: u32,
+        control: &'a ExecutionControl,
+    ) -> ExecutionPoll<'a> {
+        ExecutionPoll {
+            first: first.max(1),
+            interval: interval.max(1),
+            control,
+        }
+    }
+}
 
 /// The exact instruction budget shared by one machine world.
 #[derive(Debug)]
@@ -247,9 +299,18 @@ pub(crate) struct ExecutionCommit {
 pub(crate) struct InlineExecutionReport {
     stop: ExecutionStop,
     retired_instructions: u32,
+    requested_yield: bool,
 }
 
 impl InlineExecutionReport {
+    pub(crate) fn retired_instructions(&self) -> u32 {
+        self.retired_instructions
+    }
+
+    pub(crate) fn requested_yield(&self) -> bool {
+        self.requested_yield
+    }
+
     pub(crate) fn into_commit(self) -> ExecutionCommit {
         let boundary = !matches!(
             self.stop,
@@ -472,6 +533,23 @@ pub fn execute_turn(mut lease: ExecutionLease, turn_limit: u32) -> ExecutionTurn
     ExecutionTurn::Report(lease.into_report(stop))
 }
 
+/// Execute local turns until control requests a yield.
+pub fn execute_polled_turn(
+    mut lease: ExecutionLease,
+    poll_limit: u32,
+    control: &ExecutionControl,
+) -> ExecutionTurn {
+    loop {
+        match execute_turn(lease, poll_limit) {
+            ExecutionTurn::Continue(mut next) if !control.yield_requested() => {
+                next.note_local_continuation();
+                lease = next;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Return one lease at a pool recall point.
 pub fn recall(lease: ExecutionLease) -> ExecutionReport {
     lease.into_report(ExecutionStop::Recalled)
@@ -517,6 +595,67 @@ pub(crate) fn execute_inline(
     InlineExecutionReport {
         stop,
         retired_instructions,
+        requested_yield: false,
+    }
+}
+
+/// Execute inline polls until control requests a yield.
+pub(crate) fn execute_inline_polled(
+    machine: &mut Machine,
+    code: &ExecutionCode,
+    envs: &mut TypeEnvs,
+    slots: Option<&[ImageSlotTarget]>,
+    instruction_limit: u32,
+    poll: ExecutionPoll<'_>,
+    engine: &Engine,
+) -> InlineExecutionReport {
+    let mut retired_total = 0u32;
+    let mut poll_remaining = poll.first;
+    loop {
+        let remaining = instruction_limit.saturating_sub(retired_total);
+        if remaining == 0 {
+            return InlineExecutionReport {
+                stop: ExecutionStop::QuantumExpired,
+                retired_instructions: retired_total,
+                requested_yield: false,
+            };
+        }
+        let current = remaining.min(poll_remaining);
+        let report = execute_inline(machine, code, envs, slots, current, engine);
+        let Some(next_total) = retired_total.checked_add(report.retired_instructions) else {
+            return InlineExecutionReport {
+                stop: ExecutionStop::Fault(FaultCode::MalformedState),
+                retired_instructions: retired_total,
+                requested_yield: false,
+            };
+        };
+        if next_total > instruction_limit {
+            return InlineExecutionReport {
+                stop: ExecutionStop::Fault(FaultCode::MalformedState),
+                retired_instructions: retired_total,
+                requested_yield: false,
+            };
+        }
+        retired_total = next_total;
+        match report.stop {
+            ExecutionStop::QuantumExpired if retired_total < instruction_limit => {
+                if poll.control.yield_requested() {
+                    return InlineExecutionReport {
+                        stop: ExecutionStop::QuantumExpired,
+                        retired_instructions: retired_total,
+                        requested_yield: true,
+                    };
+                }
+                poll_remaining = poll.interval;
+            }
+            stop => {
+                return InlineExecutionReport {
+                    stop,
+                    retired_instructions: retired_total,
+                    requested_yield: false,
+                };
+            }
+        }
     }
 }
 

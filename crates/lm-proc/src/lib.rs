@@ -11,7 +11,7 @@
 //! scheduler from the machines it copied.
 //!
 //! One VM never executes concurrently. The deterministic mode uses
-//! one FIFO ready queue and one fixed instruction quantum.
+//! one FIFO ready queue and one instruction poll interval.
 //! Parallel mode moves independent machine leases to bounded workers.
 //! One coordinator commits every cross-machine action.
 //!
@@ -29,10 +29,11 @@ pub use parallel::SchedulerError;
 pub use pool::SchedulerPool;
 
 use lm_vm::{
-    CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
-    WaitSourceKey, WakeKey, World,
+    CompletionKey, ExecutionControl, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus,
+    WaitSetKey, WaitSourceKey, WakeKey, World,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 /// The stack of one scheduler worker thread.
 ///
@@ -172,6 +173,8 @@ pub struct Scheduler {
     mode: SchedulerMode,
     quantum: u32,
     parallel_quantum: u32,
+    fixed_quantum: bool,
+    execution_control: Arc<ExecutionControl>,
     pool: Option<SchedulerPool>,
     include_root: bool,
     stats: SchedulerStats,
@@ -469,25 +472,29 @@ impl Scheduler {
             config.mode,
             config.quantum,
             config.parallel_quantum,
+            false,
             config.pool,
         )
     }
 
     /// Create one scheduler with an explicit instruction quantum.
     pub fn new_with_quantum(mode: SchedulerMode, quantum: u32) -> Scheduler {
-        Scheduler::new_with_quanta(mode, quantum, quantum, None)
+        Scheduler::new_with_quanta(mode, quantum, quantum, true, None)
     }
 
     fn new_with_quanta(
         mode: SchedulerMode,
         quantum: u32,
         parallel_quantum: u32,
+        fixed_quantum: bool,
         pool: Option<SchedulerPool>,
     ) -> Scheduler {
         Scheduler {
             mode,
             quantum: quantum.max(1),
             parallel_quantum: parallel_quantum.max(1),
+            fixed_quantum,
+            execution_control: Arc::new(ExecutionControl::new()),
             pool,
             include_root: true,
             stats: SchedulerStats::default(),
@@ -516,6 +523,18 @@ impl Scheduler {
         self.parallel_quantum
     }
 
+    fn prepare_execution_poll(&self) {
+        self.execution_control.clear_yield();
+        if self.fixed_quantum
+            || self
+                .tasks
+                .values()
+                .any(|state| matches!(state, IndexedState::Queued(_)))
+        {
+            self.execution_control.request_yield();
+        }
+    }
+
     pub fn stats(&self) -> SchedulerStats {
         self.stats
     }
@@ -538,6 +557,16 @@ impl Scheduler {
 
     /// Run one execution with stable FIFO scheduling.
     fn run_deterministic(&mut self, world: &mut World) -> Outcome {
+        let execution_control = Arc::clone(&self.execution_control);
+        world.set_scheduler_wake(Some(Arc::new(move || {
+            execution_control.request_yield();
+        })));
+        let outcome = self.run_deterministic_loop(world);
+        world.set_scheduler_wake(None);
+        outcome
+    }
+
+    fn run_deterministic_loop(&mut self, world: &mut World) -> Outcome {
         self.reset(world, true);
         loop {
             self.consume_events(world);
@@ -556,10 +585,9 @@ impl Scheduler {
                     self.stats.proc_slices = self.stats.proc_slices.saturating_add(1);
                 }
                 self.tasks.insert(task, IndexedState::Running);
-                let quantum = world.snapshot_wait_quantum(task, self.quantum);
                 let before = world.world_fuel();
                 let heap_before = world.heap_of(task.vm).used_bytes();
-                let exit = world.drive_slice(task, quantum);
+                let exit = self.drive_scheduler_slice(world, task, false);
                 let retired = before.saturating_sub(world.world_fuel());
                 world.note_scheduler_slice(task, retired, exit.is_some(), heap_before);
                 // A terminal parent loses its pass-through before a
@@ -604,6 +632,24 @@ impl Scheduler {
         }
     }
 
+    fn drive_scheduler_slice(
+        &self,
+        world: &mut World,
+        task: TaskKey,
+        extra_competition: bool,
+    ) -> Option<SliceExit> {
+        if self.fixed_quantum {
+            let quantum = world.snapshot_wait_quantum(task, self.quantum);
+            return world.drive_slice(task, quantum);
+        }
+        self.prepare_execution_poll();
+        if extra_competition {
+            self.execution_control.request_yield();
+        }
+        let limit = world.snapshot_wait_quantum(task, u32::MAX);
+        world.drive_slice_polled(task, limit, self.quantum, self.execution_control.as_ref())
+    }
+
     /// Reset policy state at one requested run boundary.
     fn reset(&mut self, world: &mut World, include_root: bool) {
         self.include_root = include_root;
@@ -617,6 +663,7 @@ impl Scheduler {
         self.waiting.clear();
         self.parked.clear();
         self.events.clear();
+        self.execution_control.clear_yield();
         for (task, status) in world.scheduler_seeds(include_root) {
             self.index_status(world, task, status);
         }

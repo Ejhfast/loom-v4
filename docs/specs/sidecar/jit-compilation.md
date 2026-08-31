@@ -2904,6 +2904,29 @@ The executor must not read mutable `World` state.
 
 Snapshot, recall, and stop requests must force the next poll to yield.
 
+The first implementation rearms execution inside the executor.
+
+It skips `World` and coordinator work when no request exists.
+
+It applies the same control to deterministic and parallel execution.
+
+The parallel pool requests a yield when another lease waits.
+
+The scheduler requests a yield when execution creates scheduler work.
+
+The scheduler suite passed 35 tests.
+
+| Warm row | Stage F54 | First F55 pass | Change |
+| --- | ---: | ---: | ---: |
+| Scheduled integer loop | 0.756 ms | 0.676 ms | 10.6 percent faster |
+| Scheduled deep recursion | 17.601 ms | 17.495 ms | within variance |
+
+The first pass still returns from generated code at every poll.
+
+The next pass must rearm fuel inside generated code.
+
+This change keeps native frames and scalar values live across idle polls.
+
 The common poll path must not materialize canonical machine state.
 
 ## 24. Rejected designs

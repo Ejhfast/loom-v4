@@ -25,7 +25,10 @@ pub use engine::{
     Engine, EngineMetrics, EngineMode, JitFunctionProfile, JitProfile, JitProfileRejection,
     JitProfileRuntimeExit, JitProfileTreatmentGap,
 };
-pub use executor::{execute, execute_turn, recall, ExecutionLease, ExecutionReport, ExecutionTurn};
+pub use executor::{
+    execute, execute_polled_turn, execute_turn, recall, ExecutionControl, ExecutionLease,
+    ExecutionReport, ExecutionTurn,
+};
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,

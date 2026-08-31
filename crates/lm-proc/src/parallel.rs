@@ -96,7 +96,9 @@ impl Scheduler {
         }
         self.reset(world, true);
         let (wake_tx, wake) = mpsc::channel();
+        let execution_control = Arc::clone(&self.execution_control);
         let notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            execution_control.request_yield();
             let _ = wake_tx.send(());
         });
         let (report_tx, reports) = mpsc::channel();
@@ -348,11 +350,13 @@ impl ParallelCoordinator<'_> {
                         recall_requested: false,
                     },
                 );
-                self.scheduler.stats.max_active_leases = self
-                    .scheduler
-                    .stats
-                    .max_active_leases
-                    .max(self.active.len().min(u32::MAX as usize) as u32);
+                self.scheduler.stats.max_active_leases =
+                    self.scheduler.stats.max_active_leases.max(
+                        self.active
+                            .len()
+                            .min(self.worker_count)
+                            .min(u32::MAX as usize) as u32,
+                    );
             }
             ParallelStep::Complete { task, exit } => {
                 if starts_slice {
@@ -868,13 +872,14 @@ impl ParallelCoordinator<'_> {
             self.scheduler.stats.proc_slices = self.scheduler.stats.proc_slices.saturating_add(1);
         }
         self.scheduler.tasks.insert(task, IndexedState::Running);
-        let quantum = self
-            .world
-            .snapshot_wait_quantum(task, self.scheduler.quantum);
+        let quantum = self.scheduler.quantum;
+        let extra_competition = !self.continuations.is_empty() || !self.drives.is_empty();
         let metrics_before = self.world.metrics();
         let before = self.world.world_fuel();
         let heap_before = self.world.heap_of(task.vm).used_bytes();
-        let exit = self.world.drive_slice(task, quantum);
+        let exit = self
+            .scheduler
+            .drive_scheduler_slice(self.world, task, extra_competition);
         let retired = before.saturating_sub(self.world.world_fuel());
         self.world
             .note_scheduler_slice(task, retired, exit.is_some(), heap_before);

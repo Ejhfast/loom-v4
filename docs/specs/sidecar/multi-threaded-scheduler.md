@@ -20,9 +20,11 @@ A boundary, trip, fault, lease limit, or recall returns the machine.
 
 The coordinator applies sends, host requests, control operations, and terminal publication.
 
-The deterministic scheduler keeps the FIFO policy and one measured fairness quantum.
+The deterministic scheduler keeps the FIFO policy and one measured fairness poll interval.
 
-All tasks use the same default fairness quantum.
+All tasks use the same default fairness poll interval.
+
+The executor yields only when coordinator work needs service.
 
 The parallel root-only coordinator uses the same rule.
 
@@ -195,23 +197,25 @@ A **commit** is one coordinator state transition.
 
 A **safepoint** is an interpreter boundary with complete machine state.
 
+An **execution poll** tests one coordinator request without materializing machine state.
+
 ## 7. Scheduler modes
 
 The public runtime has two scheduler modes.
 
 ### 7.1 Deterministic mode
 
-`Deterministic` keeps the current ready queue and fairness quantum.
+`Deterministic` keeps the current ready queue and fairness poll interval.
 
 It runs one machine slice at a time on the coordinator thread.
 
 It preserves task ordering and trace ordering.
 
-Every task uses the configured fairness quantum.
+Every task uses the configured fairness poll interval.
 
 The default fairness quantum is 16,384 guest instructions.
 
-An explicit quantum replaces this default.
+An explicit fixed quantum replaces demand-driven polling.
 
 It creates no worker channels and pays no parallel scheduling cost.
 
@@ -247,7 +251,7 @@ After pool activation, a ready task receives a worker or the coordinator inline 
 
 Parallel mode does not promise equal processor time.
 
-The default parallel turn is 16,384 guest instructions.
+The default parallel poll interval is 16,384 guest instructions.
 
 A worker lease can contain many parallel turns.
 
@@ -261,9 +265,13 @@ A worker rotates its current lease when another lease waits.
 
 This local rotation does not commit world state.
 
-The deterministic fairness quantum is 16,384 guest instructions.
+The deterministic fairness poll interval is 16,384 guest instructions.
 
-The local turn keeps bounded fairness and stop delay.
+The local poll keeps bounded fairness and stop delay.
+
+A worker yields when another lease waits.
+
+A worker continues locally when no lease waits.
 
 Parallel mode starts with one coordinator probe.
 
@@ -1117,7 +1125,9 @@ Compiled code stores no worker identifier or mutable `World` pointer.
 
 No raw guest pointer survives a safepoint.
 
-The JIT materializes frames, values, roots, and program position before each safepoint.
+The JIT materializes frames, values, roots, and program position before each physical safepoint.
+
+An idle execution poll does not require materialization.
 
 Safepoints include effects, allocation, yield, pause, barrier, replacement, fault, and turn expiry.
 
