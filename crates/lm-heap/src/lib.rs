@@ -28,7 +28,8 @@ pub use shape::{
     MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
-    process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
+    keyed_lookup_hash, process_lookup_hash, process_lookup_key, NativeByteBuffer,
+    NativeStringBuilder, SharedBytes, SharedText,
 };
 use shared::{
     BYTE_BUFFER_ACTIVE_OFFSET, BYTE_BUFFER_CAPACITY_OFFSET, BYTE_BUFFER_DATA_OFFSET,
@@ -64,6 +65,7 @@ pub struct JitHeapView {
     pub slot_count: usize,
     pub used_bytes: *mut usize,
     pub collection_threshold: usize,
+    pub lookup_hash_key: u64,
 }
 
 impl JitHeapView {
@@ -74,6 +76,7 @@ impl JitHeapView {
         slot_count: 0,
         used_bytes: std::ptr::null_mut(),
         collection_threshold: 0,
+        lookup_hash_key: 0,
     };
 }
 
@@ -579,6 +582,7 @@ impl Heap {
             slot_count: self.slot_count(),
             used_bytes: std::ptr::from_mut(&mut self.used_bytes),
             collection_threshold: self.collection_threshold,
+            lookup_hash_key: process_lookup_key(),
         }
     }
 

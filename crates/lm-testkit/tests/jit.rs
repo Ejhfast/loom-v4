@@ -900,6 +900,61 @@ fn map_lookup_helpers_match_each_fuel_boundary() {
 }
 
 #[test]
+fn scalar_map_hits_match_each_key_representation() {
+    let source = concat!(
+        "ints: {Int: Int} = {-7: 11, 9: 13}\n",
+        "bools: {Bool: Int} = {false: 17, true: 19}\n",
+        "chars: {Char: Int} = {'a': 23, '猫': 29}\n",
+        "floats: {Float: Int} = {-0.0: 31, 2.5: 37}\n",
+        "(ints.at(-7), ints.has(9), bools.at(true), ",
+        "chars.at('猫'), floats.at(0.0), floats.has(2.5))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-scalar-map-hits.lm", source)
+        .expect("the scalar map-hit case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
+fn scalar_map_probe_handles_collisions_misses_and_tombstones() {
+    let source = concat!(
+        "table: {Int: Int} = {}\ni = 0\n",
+        "while i < 64\n  table.put(i, i * 3)\n  i = i + 1\nend\n",
+        "removed = table.remove(17)\ni = 0\nsum = 0\n",
+        "while i < 64\n",
+        "  if table.has(i)\n    sum = sum + table.at(i)\n  end\n",
+        "  i = i + 1\n",
+        "end\n(sum, removed, table.has(1000), table.has(17))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-scalar-map-probe.lm", source)
+        .expect("the scalar map-probe case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
+fn scalar_map_hits_match_each_fuel_boundary() {
+    let source = "table: {Int: Int} = {3: 5}\nif table.has(3) then table.at(3) else 0 end\n";
+    let artifact = lm_testkit::compile_text("jit-scalar-map-fuel.lm", source)
+        .expect("the scalar map fuel case compiles");
+    for fuel in 0..=24 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
 fn map_insertions_use_typed_probe_and_commit_helpers() {
     let source = concat!(
         "table: {String: Int} = {}\ni = 0\nsum = 0\n",

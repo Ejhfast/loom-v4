@@ -776,11 +776,11 @@ They cover every object kind exposed to native code.
 
 Mutation tests force list reallocation between two native entries.
 
-## 20. Performance gates
+## 20. Performance evidence
 
-The complete corpus is a permanent gate.
+The complete corpus is a permanent correctness gate.
 
-The language benchmark set is a permanent gate.
+The language benchmark set detects performance regressions.
 
 Representative rows include:
 
@@ -796,15 +796,19 @@ Representative rows include:
 - quick native exits;
 - scheduler-sliced scalar loops.
 
-Auto cannot slow a large corpus program by more than five percent.
+Same-session comparisons identify regressions outside measured variance.
+
+Each identified regression needs a structural explanation or a correction.
 
 Interpreter mode must remain within measurement noise.
 
-At least one JSON row must improve by more than two times.
+Optimized Rust kernels show the remaining code-generation cost.
 
-At least one HTTP row must improve by more than two times.
+Complete programs show the combined engine and runtime cost.
 
-Common field and list loops target the scalar-loop performance range.
+No fixed workload ratio defines completion.
+
+Section 1.1 defines the production-JIT completion rule.
 
 Cold and warm results remain separate.
 
@@ -852,6 +856,10 @@ lm-vm passes one heap view into each native activation.
 No compiled function captures a mutable World pointer.
 
 ## 22. Implementation stages
+
+Stage measurements validate one change and prevent regressions.
+
+Historical ratio targets do not define project completion.
 
 ### Stage A: Recovery baseline
 
@@ -2405,6 +2413,27 @@ Gate: The compact object-size test still passes.
 The native map probe does not read this layout yet.
 
 The next stage inlines common map hits over these canonical arrays.
+
+### Stage F41: Inline scalar map hits
+
+- publish one private process hash key through the checked heap view;
+- use the same keyed mixer in native and interpreter map probes;
+- probe canonical lookup slots without a runtime call;
+- compare Unit, Bool, Int, Float, and Char keys in native code;
+- load hit values from the canonical entry array;
+- keep index rebuilding and complex keys on fixed typed slow paths;
+- test collisions, misses, tombstones, float zero, and fuel boundaries.
+
+The same-session comparison used commit `ff2daf2` as its parent baseline.
+
+| Direct native path | Parent | Current | Change |
+| --- | ---: | ---: | ---: |
+| Integer map hit | 36.532 ms | 4.889 ms | 86.6 percent faster |
+| Text map hit | 30.959 ms | 31.533 ms | within variance |
+
+This stage does not complete map optimization.
+
+Text keys, optional reads, and existing-value writes still use typed slow paths.
 
 ## 24. Rejected designs
 

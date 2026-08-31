@@ -437,8 +437,11 @@ pub(super) enum HeapAccessKind {
     ListEpoch,
     ListIterLen,
     MapLen,
-    MapHas,
+    MapHas {
+        key: ValueContract,
+    },
     MapAt {
+        key: ValueContract,
         value: ValueContract,
     },
     MapGet,
@@ -1567,18 +1570,21 @@ fn analyze_segment(
             }
             Instr::MapHas => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                map_type(context, receiver)?;
+                let (key, _) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
-                    kind: HeapAccessKind::MapHas,
+                    kind: HeapAccessKind::MapHas {
+                        key: value_contract(context, key)?,
+                    },
                 });
             }
             Instr::MapAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (_, value) = map_type(context, receiver)?;
+                let (key, value) = map_type(context, receiver)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapAt {
+                        key: value_contract(context, key)?,
                         value: value_contract(context, value)?,
                     },
                 });

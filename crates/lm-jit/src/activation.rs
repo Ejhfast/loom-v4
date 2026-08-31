@@ -89,6 +89,7 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_slot_count: usize,
     pub(super) heap_used_bytes: *mut usize,
     pub(super) heap_collection_threshold: usize,
+    pub(super) lookup_hash_key: u64,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
     pub(super) dispatch_rows: *const NativeDispatchRow,

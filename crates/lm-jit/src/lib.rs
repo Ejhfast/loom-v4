@@ -683,6 +683,7 @@ impl CompiledRegion {
             heap_slot_count: heap.slot_count,
             heap_used_bytes: heap.used_bytes,
             heap_collection_threshold: heap.collection_threshold,
+            lookup_hash_key: heap.lookup_hash_key,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
             dispatch_rows: dispatch_rows.as_ptr(),

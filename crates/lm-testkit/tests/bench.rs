@@ -1685,6 +1685,19 @@ fn bench_jit_scalar_regions() {
         ),
         64,
     );
+    report_jit_after_setup(
+        "jit_int_map_lookup",
+        concat!(
+            "table: {Int: Int} = {3: 5, 7: 11}\ni = 0\nsum = 0\n",
+            "while i < 1000000\n",
+            "  if table.has(3)\n",
+            "    sum = sum + table.at(7)\n",
+            "  end\n",
+            "  i = i + 1\n",
+            "end\nsum\n",
+        ),
+        64,
+    );
     report_jit(
         "jit_map_insert",
         concat!(

@@ -18,10 +18,25 @@ const UTF8_UNKNOWN: u8 = 0;
 const UTF8_VALID: u8 = 1;
 const UTF8_INVALID: u8 = 2;
 
-/// Hash one internal lookup key with the process key.
-pub fn process_lookup_hash<T: Hash>(value: T) -> u64 {
-    static HASHER: OnceLock<RandomState> = OnceLock::new();
-    HASHER.get_or_init(RandomState::new).hash_one(value)
+/// Return the private key for process-local lookup hashes.
+pub fn process_lookup_key() -> u64 {
+    static KEY: OnceLock<u64> = OnceLock::new();
+    *KEY.get_or_init(|| RandomState::new().hash_one(0x4c6f_6f6d_4d61_704bu64))
+}
+
+/// Mix one semantic hash with a private lookup key.
+pub fn keyed_lookup_hash(key: u64, value: i64) -> u64 {
+    let mut mixed = value as u64 ^ key;
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+/// Hash one semantic value with the private process key.
+pub fn process_lookup_hash(value: i64) -> u64 {
+    keyed_lookup_hash(process_lookup_key(), value)
 }
 
 /// Hash stable bytes for a semantic value hash.
@@ -1435,10 +1450,20 @@ impl Default for NativeByteBuffer {
 #[cfg(test)]
 mod tests {
     use super::{
-        NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText, UTF8_INVALID, UTF8_UNKNOWN,
-        UTF8_VALID,
+        keyed_lookup_hash, process_lookup_hash, process_lookup_key, NativeByteBuffer,
+        NativeStringBuilder, SharedBytes, SharedText, UTF8_INVALID, UTF8_UNKNOWN, UTF8_VALID,
     };
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn the_published_lookup_key_reproduces_process_hashes() {
+        for value in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert_eq!(
+                keyed_lookup_hash(process_lookup_key(), value),
+                process_lookup_hash(value)
+            );
+        }
+    }
 
     #[test]
     fn scalar_slices_share_storage_and_keep_utf8_boundaries() {

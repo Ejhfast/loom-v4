@@ -39,14 +39,17 @@ use lm_heap::{
     JIT_ENTRY_GENERATION_OFFSET, JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG,
     JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE, JIT_INSTANCE_CLASS_OFFSET,
     JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET, JIT_LIST_EPOCH_OFFSET,
-    JIT_LIST_ITEMS_OFFSET, JIT_MAP_EPOCH_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES,
-    JIT_OBJECT_BYTE_BUFFER, JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE,
-    JIT_OBJECT_LIST, JIT_OBJECT_MAP, JIT_OBJECT_STR, JIT_OBJECT_STRING_BUILDER,
-    JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE, JIT_PAGE_MASK, JIT_PAGE_SHIFT,
-    JIT_STRING_BUILDER_ACTIVE_OFFSET, JIT_STRING_BUILDER_ASCII_OFFSET,
-    JIT_STRING_BUILDER_BYTE_LEN_OFFSET, JIT_STRING_BUILDER_CAPACITY_OFFSET,
-    JIT_STRING_BUILDER_DATA_OFFSET, JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET,
-    JIT_TEXT_DATA_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET,
+    JIT_LIST_ITEMS_OFFSET, JIT_MAP_ENTRIES_DATA_OFFSET, JIT_MAP_ENTRIES_LEN_OFFSET,
+    JIT_MAP_EPOCH_OFFSET, JIT_MAP_INDEX_BUILT_OFFSET, JIT_MAP_INDEX_SLOTS_DATA_OFFSET,
+    JIT_MAP_INDEX_SLOTS_LEN_OFFSET, JIT_MAP_LIVE_OFFSET, JIT_OBJECT_BYTES, JIT_OBJECT_BYTE_BUFFER,
+    JIT_OBJECT_CLOSURE, JIT_OBJECT_DIGEST, JIT_OBJECT_INSTANCE, JIT_OBJECT_LIST, JIT_OBJECT_MAP,
+    JIT_OBJECT_STR, JIT_OBJECT_STRING_BUILDER, JIT_OBJECT_SUBSTRING, JIT_OBJECT_TUPLE,
+    JIT_PAGE_MASK, JIT_PAGE_SHIFT, JIT_STRING_BUILDER_ACTIVE_OFFSET,
+    JIT_STRING_BUILDER_ASCII_OFFSET, JIT_STRING_BUILDER_BYTE_LEN_OFFSET,
+    JIT_STRING_BUILDER_CAPACITY_OFFSET, JIT_STRING_BUILDER_DATA_OFFSET,
+    JIT_STRING_BUILDER_SCALAR_LEN_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET, JIT_TEXT_DATA_OFFSET,
+    JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TUPLE_ITEMS_OFFSET, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SIZE,
+    MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
     VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
@@ -500,6 +503,7 @@ struct ValueArrayAllocationEmission<'a> {
 struct MapLookupEmission<'a> {
     reference: ir::Value,
     key: NativeValue,
+    key_contract: ValueContract,
     load_value: bool,
     exit: HeapExitEmission<'a>,
 }
@@ -2036,9 +2040,9 @@ fn emit_segment(
                     .find(|access| access.instruction == instruction_index)
                     .copied()
                     .ok_or(CompileError::Backend)?;
-                let value_contract = match (instruction, access.kind) {
-                    (Instr::MapHas, HeapAccessKind::MapHas) => None,
-                    (Instr::MapAt, HeapAccessKind::MapAt { value }) => Some(value),
+                let (key_contract, value_contract) = match (instruction, access.kind) {
+                    (Instr::MapHas, HeapAccessKind::MapHas { key }) => (key, None),
+                    (Instr::MapAt, HeapAccessKind::MapAt { key, value }) => (key, Some(value)),
                     _ => return Err(CompileError::Backend),
                 };
                 let point = FaultPoint {
@@ -2052,6 +2056,7 @@ fn emit_segment(
                     MapLookupEmission {
                         reference,
                         key,
+                        key_contract,
                         load_value: matches!(instruction, Instr::MapAt),
                         exit: HeapExitEmission {
                             point,
@@ -11134,6 +11139,77 @@ fn emit_map_lookup(
     values: NativeValues<'_>,
     emission: MapLookupEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
+    if scalar_map_key_kind(emission.key_contract).is_none() {
+        return emit_map_lookup_slow(builder, values, emission);
+    }
+
+    let entry = emit_object_entry(
+        builder,
+        values,
+        emission.reference,
+        JIT_OBJECT_MAP,
+        emission.exit.point,
+        ObjectGuard::Replay(emission.exit.deopt_stack),
+    )?;
+    let entry_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_MAP_ENTRIES_LEN_OFFSET,
+    )?;
+    let built = load_heap_value(builder, types::I32, entry, JIT_MAP_INDEX_BUILT_OFFSET)?;
+    let built = builder.ins().uextend(values.pointer_type, built);
+    let ready = builder.ins().icmp(IntCC::Equal, built, entry_count);
+    let direct = builder.create_block();
+    let slow = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(ready, direct, &[], slow, &[]);
+
+    builder.switch_to_block(direct);
+    let probe = emit_scalar_map_probe(
+        builder,
+        values,
+        entry,
+        entry_count,
+        emission.key,
+        emission.key_contract,
+        emission.exit,
+    )?;
+    if emission.load_value {
+        let hit = builder.create_block();
+        builder.ins().brif(probe.found, hit, &[], slow, &[]);
+        builder.switch_to_block(hit);
+        builder
+            .ins()
+            .jump(done, &[probe.value.bits.into(), probe.value.tag.into()]);
+    } else {
+        let found = builder.ins().uextend(types::I64, probe.found);
+        let tag = builder
+            .ins()
+            .iconst(types::I64, ValueTag::Bool as u64 as i64);
+        builder.ins().jump(done, &[found.into(), tag.into()]);
+    }
+
+    builder.switch_to_block(slow);
+    let result = emit_map_lookup_slow(builder, values, emission)?;
+    builder
+        .ins()
+        .jump(done, &[result.bits.into(), result.tag.into()]);
+
+    builder.switch_to_block(done);
+    Ok(NativeValue {
+        bits: builder.block_params(done)[0],
+        tag: builder.block_params(done)[1],
+    })
+}
+
+fn emit_map_lookup_slow(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    emission: MapLookupEmission<'_>,
+) -> Result<NativeValue, CompileError> {
     let function_offset = if emission.load_value {
         mem::offset_of!(RawNativeFunctions, map_at)
     } else {
@@ -11147,6 +11223,289 @@ fn emit_map_lookup(
         emission.key,
         emission.exit,
     )
+}
+
+#[derive(Clone, Copy)]
+struct DirectMapProbe {
+    found: ir::Value,
+    value: NativeValue,
+}
+
+fn scalar_map_key_kind(contract: ValueContract) -> Option<ScalarKind> {
+    match (contract.kind, contract.object) {
+        (
+            kind @ (ScalarKind::Unit
+            | ScalarKind::Bool
+            | ScalarKind::Int
+            | ScalarKind::Float
+            | ScalarKind::Char),
+            None,
+        ) => Some(kind),
+        _ => None,
+    }
+}
+
+fn emit_scalar_map_probe(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    map_entry: ir::Value,
+    entry_count: ir::Value,
+    key: NativeValue,
+    contract: ValueContract,
+    exit: HeapExitEmission<'_>,
+) -> Result<DirectMapProbe, CompileError> {
+    let kind = scalar_map_key_kind(contract).ok_or(CompileError::Backend)?;
+    let semantic_hash = emit_scalar_map_semantic_hash(builder, key.bits, kind);
+    let lookup_key = load_vmctx_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, lookup_hash_key),
+    )?;
+    let lookup_hash = builder.ins().bxor(semantic_hash, lookup_key);
+    let lookup_hash = emit_stable_hash_mix(builder, lookup_hash);
+    let slots = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_INDEX_SLOTS_DATA_OFFSET,
+    )?;
+    let slot_count = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_INDEX_SLOTS_LEN_OFFSET,
+    )?;
+    let empty = builder.create_block();
+    let start = builder.create_block();
+    let probe = builder.create_block();
+    let candidate = builder.create_block();
+    let advance = builder.create_block();
+    let found = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(probe, values.pointer_type);
+    builder.append_block_param(probe, values.pointer_type);
+    builder.append_block_param(candidate, values.pointer_type);
+    builder.append_block_param(candidate, values.pointer_type);
+    builder.append_block_param(advance, values.pointer_type);
+    builder.append_block_param(advance, values.pointer_type);
+    builder.append_block_param(found, values.pointer_type);
+    builder.append_block_param(done, types::I8);
+    builder.append_block_param(done, types::I64);
+    builder.append_block_param(done, types::I64);
+
+    let has_slots = builder.ins().icmp_imm(IntCC::NotEqual, slot_count, 0);
+    builder.ins().brif(has_slots, start, &[], empty, &[]);
+
+    builder.switch_to_block(empty);
+    let zero_i8 = builder.ins().iconst(types::I8, 0);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(done, &[zero_i8.into(), zero_i64.into(), zero_i64.into()]);
+
+    builder.switch_to_block(start);
+    let right = builder.ins().rotr_imm(lookup_hash, 25);
+    let left = builder.ins().rotl_imm(lookup_hash, 17);
+    let mixed = builder.ins().bxor(lookup_hash, right);
+    let mixed = builder.ins().bxor(mixed, left);
+    let mask = builder.ins().iadd_imm(slot_count, -1);
+    let first = builder.ins().band(mixed, mask);
+    builder
+        .ins()
+        .jump(probe, &[first.into(), slot_count.into()]);
+
+    builder.switch_to_block(probe);
+    let slot = builder.block_params(probe)[0];
+    let remaining = builder.block_params(probe)[1];
+    let slot_offset = builder.ins().imul_imm(
+        slot,
+        i64::try_from(MAP_SLOT_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let slot_address = builder.ins().iadd(slots, slot_offset);
+    let entry_index = load_heap_value(builder, types::I32, slot_address, MAP_SLOT_ENTRY_OFFSET)?;
+    let occupied = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, entry_index, u32::MAX as i64);
+    builder.ins().brif(
+        occupied,
+        candidate,
+        &[slot.into(), remaining.into()],
+        empty,
+        &[],
+    );
+
+    builder.switch_to_block(candidate);
+    let slot = builder.block_params(candidate)[0];
+    let remaining = builder.block_params(candidate)[1];
+    let slot_offset = builder.ins().imul_imm(
+        slot,
+        i64::try_from(MAP_SLOT_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let slot_address = builder.ins().iadd(slots, slot_offset);
+    let stored_hash = load_heap_value(builder, types::I64, slot_address, MAP_SLOT_HASH_OFFSET)?;
+    let same_hash = builder.ins().icmp(IntCC::Equal, stored_hash, lookup_hash);
+    builder.ins().brif(
+        same_hash,
+        found,
+        &[slot.into()],
+        advance,
+        &[slot.into(), remaining.into()],
+    );
+
+    builder.switch_to_block(found);
+    let slot = builder.block_params(found)[0];
+    let slot_offset = builder.ins().imul_imm(
+        slot,
+        i64::try_from(MAP_SLOT_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let slot_address = builder.ins().iadd(slots, slot_offset);
+    let entry_index = load_heap_value(builder, types::I32, slot_address, MAP_SLOT_ENTRY_OFFSET)?;
+    let entry_index = builder.ins().uextend(values.pointer_type, entry_index);
+    let invalid = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, entry_index, entry_count);
+    emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+    let entry_offset = builder.ins().imul_imm(
+        entry_index,
+        i64::try_from(MAP_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entries = load_heap_value(
+        builder,
+        values.pointer_type,
+        map_entry,
+        JIT_MAP_ENTRIES_DATA_OFFSET,
+    )?;
+    let entry = builder.ins().iadd(entries, entry_offset);
+    let equal = emit_scalar_map_key_equal(builder, entry, key, kind)?;
+    let equal_block = builder.create_block();
+    builder.ins().brif(
+        equal,
+        equal_block,
+        &[],
+        advance,
+        &[slot.into(), remaining.into()],
+    );
+
+    builder.switch_to_block(equal_block);
+    let value = NativeValue {
+        bits: load_heap_value(
+            builder,
+            types::I64,
+            entry,
+            MAP_ENTRY_VALUE_OFFSET + VALUE_PAYLOAD_OFFSET,
+        )?,
+        tag: load_heap_value(
+            builder,
+            types::I64,
+            entry,
+            MAP_ENTRY_VALUE_OFFSET + VALUE_TAG_OFFSET,
+        )?,
+    };
+    let one = builder.ins().iconst(types::I8, 1);
+    builder
+        .ins()
+        .jump(done, &[one.into(), value.bits.into(), value.tag.into()]);
+
+    builder.switch_to_block(advance);
+    let slot = builder.block_params(advance)[0];
+    let remaining = builder.block_params(advance)[1];
+    let next = builder.ins().iadd_imm(slot, 1);
+    let next = builder.ins().band(next, mask);
+    let remaining = builder.ins().iadd_imm(remaining, -1);
+    let continue_probe = builder.ins().icmp_imm(IntCC::NotEqual, remaining, 0);
+    builder.ins().brif(
+        continue_probe,
+        probe,
+        &[next.into(), remaining.into()],
+        empty,
+        &[],
+    );
+
+    builder.switch_to_block(done);
+    Ok(DirectMapProbe {
+        found: builder.block_params(done)[0],
+        value: NativeValue {
+            bits: builder.block_params(done)[1],
+            tag: builder.block_params(done)[2],
+        },
+    })
+}
+
+fn emit_scalar_map_semantic_hash(
+    builder: &mut FunctionBuilder<'_>,
+    bits: ir::Value,
+    kind: ScalarKind,
+) -> ir::Value {
+    match kind {
+        ScalarKind::Unit => builder.ins().iconst(types::I64, 0),
+        ScalarKind::Bool | ScalarKind::Int | ScalarKind::Char => bits,
+        ScalarKind::Float => {
+            let shifted = builder.ins().ishl_imm(bits, 1);
+            let zero = builder.ins().icmp_imm(IntCC::Equal, shifted, 0);
+            let zero_bits = builder.ins().iconst(types::I64, 0);
+            builder.ins().select(zero, zero_bits, bits)
+        }
+        _ => bits,
+    }
+}
+
+fn emit_scalar_map_key_equal(
+    builder: &mut FunctionBuilder<'_>,
+    entry: ir::Value,
+    key: NativeValue,
+    kind: ScalarKind,
+) -> Result<ir::Value, CompileError> {
+    let expected_tag = value_tag(kind).ok_or(CompileError::Backend)?;
+    let stored_tag = load_heap_value(
+        builder,
+        types::I64,
+        entry,
+        MAP_ENTRY_KEY_OFFSET + VALUE_TAG_OFFSET,
+    )?;
+    let valid = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, stored_tag, expected_tag as u64 as i64);
+    let stored_bits = match kind {
+        ScalarKind::Unit => builder.ins().iconst(types::I64, 0),
+        ScalarKind::Bool => {
+            let bits = load_heap_value(
+                builder,
+                types::I8,
+                entry,
+                MAP_ENTRY_KEY_OFFSET + VALUE_PAYLOAD_OFFSET,
+            )?;
+            builder.ins().uextend(types::I64, bits)
+        }
+        ScalarKind::Char => {
+            let bits = load_heap_value(
+                builder,
+                types::I32,
+                entry,
+                MAP_ENTRY_KEY_OFFSET + VALUE_PAYLOAD_OFFSET,
+            )?;
+            builder.ins().uextend(types::I64, bits)
+        }
+        ScalarKind::Int | ScalarKind::Float => load_heap_value(
+            builder,
+            types::I64,
+            entry,
+            MAP_ENTRY_KEY_OFFSET + VALUE_PAYLOAD_OFFSET,
+        )?,
+        _ => return Err(CompileError::Backend),
+    };
+    let equal = if kind == ScalarKind::Float {
+        let left = float_value(builder, stored_bits);
+        let right = float_value(builder, key.bits);
+        let equal = builder.ins().fcmp(FloatCC::Equal, left, right);
+        let left_nan = builder.ins().fcmp(FloatCC::Unordered, left, left);
+        let right_nan = builder.ins().fcmp(FloatCC::Unordered, right, right);
+        let both_nan = builder.ins().band(left_nan, right_nan);
+        builder.ins().bor(equal, both_nan)
+    } else {
+        builder.ins().icmp(IntCC::Equal, stored_bits, key.bits)
+    };
+    Ok(builder.ins().band(valid, equal))
 }
 
 fn emit_runtime_value_lookup(
