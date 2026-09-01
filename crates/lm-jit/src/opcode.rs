@@ -46,6 +46,7 @@ pub struct InstructionTreatment {
     class: TreatmentClass,
     exit: ExitBehavior,
     replay: bool,
+    replay_barrier: bool,
     fault_stack: FaultStack,
 }
 
@@ -55,12 +56,18 @@ impl InstructionTreatment {
             class,
             exit,
             replay: false,
+            replay_barrier: false,
             fault_stack: FaultStack::None,
         }
     }
 
     const fn with_replay(mut self) -> InstructionTreatment {
         self.replay = true;
+        self
+    }
+
+    const fn with_replay_barrier(mut self) -> InstructionTreatment {
+        self.replay_barrier = true;
         self
     }
 
@@ -82,6 +89,11 @@ impl InstructionTreatment {
     /// Return true when a guard can replay this instruction.
     pub fn replays(self) -> bool {
         self.replay
+    }
+
+    /// Return true when later replay cannot repeat this instruction.
+    pub fn is_replay_barrier(self) -> bool {
+        self.replay_barrier
     }
 
     /// Return the canonical operand shape for one native fault.
@@ -149,7 +161,11 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::LoadField(_) | Instr::TupleGet(_) | Instr::ListLen => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
-        Instr::StoreField(_) | Instr::ListAt => dedicated(Guarded)
+        Instr::StoreField(_) => dedicated(Guarded)
+            .with_replay()
+            .with_replay_barrier()
+            .with_fault_stack(FaultStack::Pop(2)),
+        Instr::ListAt => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::IsType(_) | Instr::CastType(_) => dedicated(Guarded).with_replay(),
@@ -161,6 +177,7 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         }
         Instr::ListPush => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::MapLen => dedicated(Guarded).with_replay(),
         Instr::MapHas | Instr::MapAt => dedicated(Helper)
@@ -168,15 +185,18 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::MapPut { .. } => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
         Instr::EqValue | Instr::NeValue => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         Instr::Freeze => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         Instr::Digest { .. } => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         Instr::EqDigest | Instr::NeDigest => dedicated(Guarded).with_replay(),
         Instr::Jump(_) | Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => {
@@ -239,6 +259,7 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::FloatToIntValue => dedicated(Inline).with_replay(),
         NumericInstr::SbAppendFloat => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor => {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
@@ -286,60 +307,74 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::MapNextIndex => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
-        ExtendedInstr::MapProbeKey
-        | ExtendedInstr::MapProbeValue
-        | ExtendedInstr::MapProbeRemove => dedicated(Helper)
+        ExtendedInstr::MapProbeKey | ExtendedInstr::MapProbeValue => dedicated(Helper)
             .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapProbeRemove => dedicated(Helper)
+            .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapKeyAt | ExtendedInstr::MapValueAt => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapRemove { .. } => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapClear => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::MapReserve => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::MapProbeFound => dedicated(Inline)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::MapProbeSetValue => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::MapInsertHashed => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(5)),
         ExtendedInstr::MapWriteGuard => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
-        ExtendedInstr::ListEpoch
-        | ExtendedInstr::ListIterLen
-        | ExtendedInstr::SealInstance
-        | ExtendedInstr::ListCapacity => dedicated(Guarded).with_replay(),
+        ExtendedInstr::ListEpoch | ExtendedInstr::ListIterLen | ExtendedInstr::ListCapacity => {
+            dedicated(Guarded).with_replay()
+        }
+        ExtendedInstr::SealInstance => dedicated(Guarded).with_replay().with_replay_barrier(),
         ExtendedInstr::ListSet => dedicated(Guarded)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::MapEpoch | ExtendedInstr::MapIterLen => dedicated(Guarded).with_replay(),
         ExtendedInstr::ListPop { .. } => dedicated(Guarded)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::ListInsert => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::ListRemove | ExtendedInstr::ListSwapRemove => dedicated(Guarded)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::ListTruncate => dedicated(Guarded)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::ListReserve => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::ListReorder => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::ListContains => dedicated(Helper)
             .with_replay()
@@ -365,6 +400,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         | ExtendedInstr::SyntaxDetach
         | ExtendedInstr::SyntaxToTree => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         ExtendedInstr::DynPack { .. } => {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
@@ -384,6 +420,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         | ExtendedInstr::SyntaxBuildTrivia
         | ExtendedInstr::SyntaxBuildNode => dedicated(Helper)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
     }
 }
@@ -461,9 +498,11 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::BbExtend
         | NativeInstr::BbReserve => dedicated(FastPath)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         NativeInstr::SbClear | NativeInstr::BbClear => dedicated(Guarded)
             .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
         NativeInstr::SbByteLen | NativeInstr::SbLen | NativeInstr::BbLen => dedicated(Guarded)
             .with_replay()

@@ -3224,6 +3224,61 @@ The direct and scheduled corpus differential passed.
 
 Warm representative results stayed within measurement variance.
 
+### Stage F62: Share segment replay and narrow native calls
+
+- mark non-repeatable mutations in the opcode ledger;
+- end a segment after each marked mutation;
+- give each segment one guarded replay state;
+- replay the segment from its exact entry state;
+- share one materialization block for all call preflight exits;
+- pass only the activation pointer and three control values between native functions;
+- load stable ABI pointers once in each function prologue;
+- keep the host entry ABI to the activation pointer and entry index.
+
+A replay exit now reports the segment entry.
+
+The interpreter repeats only the pure prefix before the guarded instruction.
+
+A successful mutation ends its segment before later guarded work can replay.
+
+The per-segment replay change reduced the JSON code set by one percent after call-exit sharing.
+
+This result rejects the larger code-size estimate for replay-state merging.
+
+The call-exit and ABI changes produced the main code-size reduction.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed in 23.02 seconds.
+
+The full workspace suite passed in 57.02 seconds.
+
+| Cold release row | Stage F61 | Stage F62 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.982 ms | 1.872 ms | 5.5 percent faster |
+| JSON compile and run | 357.067 ms | 336.882 ms | 5.7 percent faster |
+| 301-function compile and run | 497.778 ms | 442.455 ms | 11.1 percent faster |
+
+| Compiled code set | Stage F61 | Stage F62 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,455 bytes | 1,969 bytes | 19.8 percent smaller |
+| JSON parser | 1,237,654 bytes | 1,090,122 bytes | 11.9 percent smaller |
+| 301 functions | 1,550,129 bytes | 1,243,211 bytes | 19.8 percent smaller |
+
+| Warm release row | Stage F61 | Stage F62 | Change |
+| --- | ---: | ---: | ---: |
+| JSON parse | 16.864 ms | 16.171 ms | 4.1 percent faster |
+| JSON encode | 8.101 ms | 7.816 ms | 3.5 percent faster |
+| HTTP parse | 17.202 ms | 17.220 ms | within variance |
+| HTTP encode | 6.101 ms | 5.834 ms | 4.4 percent faster |
+
+| Warm call row | Stage F62 gain |
+| --- | ---: |
+| Deep recursion | 4.53 times |
+| Branching direct call | 9.14 times |
+| Interface call | 6.80 times |
+| Generic direct call | 6.90 times |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

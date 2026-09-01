@@ -665,23 +665,7 @@ unsafe extern "C" fn bytes_equal(left: *const u8, right: *const u8, length: usiz
     u32::from(left == right)
 }
 
-pub(super) type NativeFunction = unsafe extern "C" fn(
-    *mut u64,
-    *mut u64,
-    *mut u8,
-    *mut u64,
-    *mut u64,
-    u64,
-    u32,
-    *mut c_void,
-    *const RawNativeFunctions,
-    *mut u64,
-    *mut u64,
-    *mut u64,
-    *mut u8,
-    *mut RawExit,
-    *mut RawNativeActivation,
-);
+pub(super) type NativeFunction = unsafe extern "C" fn(*mut RawNativeActivation, u32);
 
 /// Reusable scalar and frame storage for one native turn.
 #[derive(Debug, Default)]

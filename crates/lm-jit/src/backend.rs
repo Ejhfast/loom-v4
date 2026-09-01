@@ -199,16 +199,19 @@ pub(super) fn compile_region(
     let frontend_config = isa.frontend_config();
     let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
     let mut entry_signature = module.make_signature();
-    append_native_parameters(&mut entry_signature, pointer_type);
+    entry_signature.params.push(AbiParam::new(pointer_type));
+    entry_signature.params.push(AbiParam::new(types::I32));
     let host_call_conv = entry_signature.call_conv;
     let target = BackendTarget {
         pointer_type,
         frontend_config,
         host_call_conv,
     };
-    let mut body_signature = entry_signature.clone();
+    let mut body_signature = module.make_signature();
     body_signature.call_conv = CallConv::Tail;
+    body_signature.params.push(AbiParam::new(pointer_type));
     body_signature.params.push(AbiParam::new(types::I64));
+    body_signature.params.push(AbiParam::new(types::I32));
     body_signature.params.push(AbiParam::new(types::I32));
     let body_id = module
         .declare_function("loom_native_body", Linkage::Local, &body_signature)
@@ -270,40 +273,34 @@ pub(super) fn compile_region(
     })
 }
 
-fn append_native_parameters(signature: &mut ir::Signature, pointer_type: ir::Type) {
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(types::I64));
-    signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..8 {
-        signature.params.push(AbiParam::new(pointer_type));
-    }
-}
-
 fn emit_entry_wrapper(
     function: &mut ir::Function,
     frontend: &mut FunctionBuilderContext,
 ) -> Result<(), CompileError> {
-    let mut body_signature = function.signature.clone();
-    body_signature.call_conv = CallConv::Tail;
-    body_signature.params.push(AbiParam::new(types::I64));
-    body_signature.params.push(AbiParam::new(types::I32));
     let pointer_type = function
         .signature
         .params
         .first()
         .map(|parameter| parameter.value_type)
         .ok_or(CompileError::Backend)?;
+    let mut body_signature = ir::Signature::new(CallConv::Tail);
+    body_signature.params.push(AbiParam::new(pointer_type));
+    body_signature.params.push(AbiParam::new(types::I64));
+    body_signature.params.push(AbiParam::new(types::I32));
+    body_signature.params.push(AbiParam::new(types::I32));
     let mut builder = FunctionBuilder::new(function, frontend);
     let body_signature = builder.import_signature(body_signature);
     let entry = builder.create_block();
     builder.switch_to_block(entry);
     builder.append_block_params_for_function_params(entry);
-    let mut arguments = builder.block_params(entry).to_vec();
-    let activation = *arguments.get(14).ok_or(CompileError::Backend)?;
+    let activation = *builder
+        .block_params(entry)
+        .first()
+        .ok_or(CompileError::Backend)?;
+    let entry_index = *builder
+        .block_params(entry)
+        .get(1)
+        .ok_or(CompileError::Backend)?;
     let body = builder.ins().load(
         pointer_type,
         MemFlags::new(),
@@ -325,11 +322,11 @@ fn emit_entry_wrapper(
     let zero_i32 = builder.ins().iconst(types::I32, 0);
     let one_i32 = builder.ins().iconst(types::I32, 1);
     let detached = builder.ins().select(detached, one_i32, zero_i32);
-    arguments.push(zero_i64);
-    arguments.push(detached);
-    builder
-        .ins()
-        .call_indirect(body_signature, body, &arguments);
+    builder.ins().call_indirect(
+        body_signature,
+        body,
+        &[activation, zero_i64, entry_index, detached],
+    );
     builder.ins().return_(&[]);
     builder.seal_all_blocks();
     builder.finalize();
@@ -599,7 +596,6 @@ struct DeferredIntegerOverflow {
 }
 
 struct ReplayBlock {
-    instruction: u32,
     block: ir::Block,
     used: Cell<bool>,
 }
@@ -872,16 +868,8 @@ fn emit_region(
     let heap_operation_signature = builder.import_signature(heap_operation_signature);
     let mut native_signature = ir::Signature::new(call_conv);
     native_signature.params.push(AbiParam::new(pointer_type));
-    native_signature.params.push(AbiParam::new(pointer_type));
-    native_signature.params.push(AbiParam::new(pointer_type));
-    native_signature.params.push(AbiParam::new(pointer_type));
-    native_signature.params.push(AbiParam::new(pointer_type));
     native_signature.params.push(AbiParam::new(types::I64));
     native_signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..8 {
-        native_signature.params.push(AbiParam::new(pointer_type));
-    }
-    native_signature.params.push(AbiParam::new(types::I64));
     native_signature.params.push(AbiParam::new(types::I32));
     let native_signature = builder.import_signature(native_signature);
     let entry_block = builder.create_block();
@@ -915,14 +903,12 @@ fn emit_region(
         .segments
         .iter()
         .map(|segment| {
-            segment
-                .replay_stacks
-                .iter()
-                .map(|(instruction, _)| ReplayBlock {
-                    instruction: *instruction,
+            (!segment.replay_stacks.is_empty())
+                .then(|| ReplayBlock {
                     block: builder.create_block(),
                     used: Cell::new(false),
                 })
+                .into_iter()
                 .collect()
         })
         .collect();
@@ -940,23 +926,114 @@ fn emit_region(
     builder.switch_to_block(entry_block);
     builder.append_block_params_for_function_params(entry_block);
     let parameters = builder.block_params(entry_block);
-    let local_pointer = parameters[0];
-    let local_tag_pointer = parameters[1];
-    let local_state_pointer = parameters[2];
-    let stack_pointer = parameters[3];
-    let stack_tag_pointer = parameters[4];
-    let initial_fuel = parameters[5];
-    let entry = parameters[6];
-    let runtime_context = parameters[7];
-    let runtime_functions = parameters[8];
-    let allocation_result_pointer = parameters[9];
-    let root_pointer = parameters[10];
-    let root_tag_pointer = parameters[11];
-    let root_state_pointer = parameters[12];
-    let exit_pointer = parameters[13];
-    let activation_pointer = parameters[14];
-    let retired_base = parameters[15];
-    let detached_return = parameters[16];
+    let activation_pointer = parameters[0];
+    let retired_base = parameters[1];
+    let entry = parameters[2];
+    let detached_return = parameters[3];
+    let scalars = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, scalars),
+    )?;
+    let tags = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, tags),
+    )?;
+    let states = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, states),
+    )?;
+    let frames = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, frames),
+    )?;
+    let frame_len = load_value(
+        &mut builder,
+        types::I32,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, frame_len),
+    )?;
+    let frame_index = builder.ins().iadd_imm(frame_len, -1);
+    let frame_index = builder.ins().uextend(pointer_type, frame_index);
+    let frame_offset = builder
+        .ins()
+        .imul_imm(frame_index, mem::size_of::<RawNativeFrame>() as i64);
+    let frame = builder.ins().iadd(frames, frame_offset);
+    let scalar_base = load_cell_u32(
+        &mut builder,
+        frame,
+        mem::offset_of!(RawNativeFrame, scalar_base),
+    )?;
+    let scalar_base = builder.ins().uextend(pointer_type, scalar_base);
+    let scalar_byte_offset = builder.ins().ishl_imm(scalar_base, 3);
+    let local_pointer = builder.ins().iadd(scalars, scalar_byte_offset);
+    let local_tag_pointer = builder.ins().iadd(tags, scalar_byte_offset);
+    let local_state_pointer = builder.ins().iadd(states, scalar_base);
+    let local_bytes = i64::try_from(
+        plan.local_kinds
+            .len()
+            .checked_mul(8)
+            .ok_or(CompileError::Backend)?,
+    )
+    .map_err(|_| CompileError::Backend)?;
+    let stack_pointer = builder.ins().iadd_imm(local_pointer, local_bytes);
+    let stack_tag_pointer = builder.ins().iadd_imm(local_tag_pointer, local_bytes);
+    let poll_deadline = load_value(
+        &mut builder,
+        types::I64,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, poll_deadline),
+    )?;
+    let initial_fuel = builder.ins().isub(poll_deadline, retired_base);
+    let runtime_context = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, runtime_context),
+    )?;
+    let runtime_functions = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, runtime_functions),
+    )?;
+    let allocation_result_pointer = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, allocation_result),
+    )?;
+    let root_pointer = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, roots),
+    )?;
+    let root_tag_pointer = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, root_tags),
+    )?;
+    let root_state_pointer = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, root_states),
+    )?;
+    let exit_pointer = load_value(
+        &mut builder,
+        pointer_type,
+        activation_pointer,
+        mem::offset_of!(RawNativeActivation, exit),
+    )?;
 
     let mut locals = Vec::with_capacity(plan.local_kinds.len());
     let mut local_tags = Vec::with_capacity(plan.local_kinds.len());
@@ -1353,42 +1430,53 @@ fn emit_segment(
             })
         })
         .collect::<Result<_, CompileError>>()?;
-    let mut replay_exits = Vec::with_capacity(values.replay_blocks.len());
-    emit_segment_body(builder, emission, stack, &mut replay_exits)?;
-    for replay in replay_exits {
+    let replay_exit = if let Some(replay) = values.replay_blocks.first() {
+        Some(ReplayExitState {
+            target: replay.block,
+            block: segment.block,
+            instruction: segment.start,
+            retired: builder.use_var(values.retired),
+            prefix: segment.reserved_prefix_cost,
+            locals: capture_local_values(builder, values)?,
+            stack: stack.clone(),
+        })
+    } else {
+        None
+    };
+    emit_segment_body(builder, emission, stack)?;
+    if let Some(replay) = replay_exit {
         let used = values
             .replay_blocks
             .iter()
             .find(|candidate| candidate.block == replay.target)
             .is_some_and(|candidate| candidate.used.get());
-        if !used {
-            continue;
-        }
-        builder.switch_to_block(replay.target);
-        let retired = if replay.prefix == 0 {
-            replay.retired
-        } else {
-            builder
-                .ins()
-                .iadd_imm(replay.retired, i64::from(replay.prefix))
-        };
-        let zero = builder.ins().iconst(types::I64, 0);
-        emit_exit_with_locals(
-            builder,
-            values,
-            ExitEmission {
-                retired,
-                kind: EXIT_REPLAY,
-                block: replay.block,
-                instruction: replay.instruction,
-                result: NativeValue {
-                    bits: zero,
-                    tag: zero,
+        if used {
+            builder.switch_to_block(replay.target);
+            let retired = if replay.prefix == 0 {
+                replay.retired
+            } else {
+                builder
+                    .ins()
+                    .iadd_imm(replay.retired, i64::from(replay.prefix))
+            };
+            let zero = builder.ins().iconst(types::I64, 0);
+            emit_exit_with_locals(
+                builder,
+                values,
+                ExitEmission {
+                    retired,
+                    kind: EXIT_REPLAY,
+                    block: replay.block,
+                    instruction: replay.instruction,
+                    result: NativeValue {
+                        bits: zero,
+                        tag: zero,
+                    },
                 },
-            },
-            &replay.locals,
-            &replay.stack,
-        )?;
+                &replay.locals,
+                &replay.stack,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1397,7 +1485,6 @@ fn emit_segment_body(
     builder: &mut FunctionBuilder<'_>,
     emission: SegmentEmission<'_, '_>,
     mut stack: Vec<NativeValue>,
-    replay_exits: &mut Vec<ReplayExitState>,
 ) -> Result<(), CompileError> {
     let SegmentEmission {
         bytecode,
@@ -1439,23 +1526,6 @@ fn emit_segment_body(
         let prior_prefix = reserved_prefix_cost
             .checked_add(prefix - 1)
             .ok_or(CompileError::Backend)?;
-        let position = segment.start + within as u32;
-        if crate::instruction_treatment(&instruction).replays() {
-            let target = values
-                .replay_blocks
-                .iter()
-                .find_map(|replay| (replay.instruction == position).then_some(replay.block))
-                .ok_or(CompileError::Backend)?;
-            replay_exits.push(ReplayExitState {
-                target,
-                block: segment.block,
-                instruction: position,
-                retired: builder.use_var(values.retired),
-                prefix: prior_prefix,
-                locals: capture_local_values(builder, values)?,
-                stack: stack.clone(),
-            });
-        }
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -6157,9 +6227,14 @@ fn emit_native_call(
     let invoke = builder.create_block();
     let returned = builder.create_block();
     let propagate = builder.create_block();
+    let preflight_exit = builder.create_block();
+    builder.append_block_param(preflight_exit, types::I32);
+    builder.append_block_param(preflight_exit, types::I64);
+    builder.append_block_param(preflight_exit, types::I64);
 
     builder.set_cold_block(hard_check);
     builder.set_cold_block(fuel_exit);
+    builder.set_cold_block(preflight_exit);
     let fuel = builder.use_var(values.fuel);
     let has_fuel = builder
         .ins()
@@ -6178,22 +6253,11 @@ fn emit_native_call(
         .brif(has_hard_fuel, lookup, &[], fuel_exit, &[]);
 
     builder.switch_to_block(fuel_exit);
+    let kind = builder.ins().iconst(types::I32, i64::from(EXIT_FUEL));
     let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_FUEL,
-            block,
-            instruction,
-            result: NativeValue {
-                bits: zero,
-                tag: zero,
-            },
-        },
-        &boundary_stack,
-    )?;
+    builder
+        .ins()
+        .jump(preflight_exit, &[kind.into(), zero.into(), zero.into()]);
 
     builder.switch_to_block(lookup);
     if let Some(fault) = fault {
@@ -6277,24 +6341,13 @@ fn emit_native_call(
     builder.ins().brif(roots_fit, limits, &[], grow_roots, &[]);
 
     builder.switch_to_block(grow_roots);
-    let retired = emit_retired(builder, values);
+    let kind = builder.ins().iconst(types::I32, i64::from(EXIT_GROW_ROOTS));
     let required_roots = builder.ins().uextend(types::I64, required_roots);
     let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_GROW_ROOTS,
-            block,
-            instruction,
-            result: NativeValue {
-                bits: required_roots,
-                tag: zero,
-            },
-        },
-        &boundary_stack,
-    )?;
+    builder.ins().jump(
+        preflight_exit,
+        &[kind.into(), required_roots.into(), zero.into()],
+    );
 
     builder.switch_to_block(limits);
     let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
@@ -6417,30 +6470,20 @@ fn emit_native_call(
     builder.ins().brif(storage_fits, invoke, &[], grow, &[]);
 
     builder.switch_to_block(grow);
-    let retired = emit_retired(builder, values);
     let target_value = builder.ins().uextend(types::I64, target);
     let required_scalars = builder.ins().uextend(types::I64, scalar_end);
     let required_scalars = builder.ins().ishl_imm(required_scalars, 32);
     let growth = builder.ins().bor(required_scalars, target_value);
     let environment_tag = builder.ins().uextend(types::I64, environment);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_GROW_ACTIVATION,
-            block,
-            instruction,
-            result: NativeValue {
-                bits: growth,
-                tag: environment_tag,
-            },
-        },
-        &boundary_stack,
-    )?;
+    let kind = builder
+        .ins()
+        .iconst(types::I32, i64::from(EXIT_GROW_ACTIVATION));
+    builder.ins().jump(
+        preflight_exit,
+        &[kind.into(), growth.into(), environment_tag.into()],
+    );
 
     builder.switch_to_block(fallback);
-    let retired = emit_retired(builder, values);
     let (kind, result) = match fallback_kind {
         NativeCallFallback::Direct => {
             let target_value = builder.ins().uextend(types::I64, target);
@@ -6464,16 +6507,32 @@ fn emit_native_call(
             )
         }
     };
-    emit_exit(
+    let kind = builder.ins().iconst(types::I32, i64::from(kind));
+    builder.ins().jump(
+        preflight_exit,
+        &[kind.into(), result.bits.into(), result.tag.into()],
+    );
+
+    builder.switch_to_block(preflight_exit);
+    let kind = builder.block_params(preflight_exit)[0];
+    let result = NativeValue {
+        bits: builder.block_params(preflight_exit)[1],
+        tag: builder.block_params(preflight_exit)[2],
+    };
+    let retired = emit_retired(builder, values);
+    let locals = capture_local_values(builder, values)?;
+    emit_exit_with_locals_and_kind(
         builder,
         values,
         ExitEmission {
             retired,
-            kind,
+            kind: EXIT_FUEL,
             block,
             instruction,
             result,
         },
+        kind,
+        &locals,
         &boundary_stack,
     )?;
 
@@ -6498,10 +6557,6 @@ fn emit_native_call(
     let child_locals = builder.ins().iadd(scalars, scalar_byte_offset);
     let child_tags = builder.ins().iadd(tags, scalar_byte_offset);
     let child_states = builder.ins().iadd(states, scalar_base_pointer);
-    let local_count_pointer = builder.ins().uextend(values.pointer_type, local_count);
-    let local_byte_offset = builder.ins().ishl_imm(local_count_pointer, 3);
-    let child_operands = builder.ins().iadd(child_locals, local_byte_offset);
-    let child_operand_tags = builder.ins().iadd(child_tags, local_byte_offset);
     let zero_i8 = builder.ins().iconst(types::I8, 0);
     match contract.local_count {
         Some(local_count) => {
@@ -6646,29 +6701,15 @@ fn emit_native_call(
         RawActivationField::FrameLen,
         next_frame_len,
     )?;
-    let child_fuel = builder.use_var(values.fuel);
     let caller_retired = emit_retired(builder, values);
     let zero_entry = builder.ins().iconst(types::I32, 0);
     builder.ins().call_indirect(
         values.native_signature,
         code,
         &[
-            child_locals,
-            child_tags,
-            child_states,
-            child_operands,
-            child_operand_tags,
-            child_fuel,
-            zero_entry,
-            values.runtime_context,
-            values.runtime_functions,
-            values.allocation_result_pointer,
-            values.root_pointer,
-            values.root_tag_pointer,
-            values.root_state_pointer,
-            values.exit_pointer,
             values.activation_pointer,
             caller_retired,
+            zero_entry,
             zero_entry,
         ],
     );
@@ -13598,15 +13639,10 @@ fn emit_interpreter_replay(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     replay: ir::Value,
-    point: FaultPoint,
+    _point: FaultPoint,
     _stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    let instruction = point.instruction.saturating_sub(1);
-    let replay_block = values
-        .replay_blocks
-        .iter()
-        .find(|replay| replay.instruction == instruction)
-        .ok_or(CompileError::Backend)?;
+    let replay_block = values.replay_blocks.first().ok_or(CompileError::Backend)?;
     replay_block.used.set(true);
     let success = builder.create_block();
     builder
@@ -14116,16 +14152,6 @@ fn emit_function_return(
     builder.ins().brif(published, tail, &[], normal, &[]);
 
     builder.switch_to_block(tail);
-    let runtime_context =
-        load_activation_pointer(builder, values, RawActivationField::RuntimeContext)?;
-    let runtime_functions =
-        load_activation_pointer(builder, values, RawActivationField::RuntimeFunctions)?;
-    let allocation_result =
-        load_activation_pointer(builder, values, RawActivationField::AllocationResult)?;
-    let roots = load_activation_pointer(builder, values, RawActivationField::Roots)?;
-    let root_tags = load_activation_pointer(builder, values, RawActivationField::RootTags)?;
-    let root_states = load_activation_pointer(builder, values, RawActivationField::RootStates)?;
-    let exit = load_activation_pointer(builder, values, RawActivationField::Exit)?;
     let child_index = builder.ins().iadd_imm(frame_len, -1);
     let child_index = builder.ins().uextend(values.pointer_type, child_index);
     let child_offset = builder
@@ -14197,50 +14223,17 @@ fn emit_function_return(
         RawActivationField::ScalarLen,
         child_scalar_base,
     )?;
-    let parent_local_base = builder
-        .ins()
-        .uextend(values.pointer_type, parent_scalar_base);
-    let parent_local_offset = builder.ins().ishl_imm(parent_local_base, 3);
-    let parent_locals = builder.ins().iadd(scalars, parent_local_offset);
-    let parent_tags = builder.ins().iadd(tags, parent_local_offset);
-    let states = load_activation_pointer(builder, values, RawActivationField::States)?;
-    let parent_states = builder.ins().iadd(states, parent_local_base);
-    let parent_local_count = builder
-        .ins()
-        .uextend(values.pointer_type, parent_local_count);
-    let parent_operand_offset = builder.ins().ishl_imm(parent_local_count, 3);
-    let parent_operands = builder.ins().iadd(parent_locals, parent_operand_offset);
-    let parent_operand_tags = builder.ins().iadd(parent_tags, parent_operand_offset);
     let parent_entry = load_cell_u32(
         builder,
         parent,
         mem::offset_of!(RawNativeFrame, resume_entry),
     )?;
-    let fuel = builder.use_var(values.fuel);
     let retired = emit_retired(builder, values);
     let detached = builder.ins().iconst(types::I32, 1);
     builder.ins().return_call_indirect(
         values.native_signature,
         code,
-        &[
-            parent_locals,
-            parent_tags,
-            parent_states,
-            parent_operands,
-            parent_operand_tags,
-            fuel,
-            parent_entry,
-            runtime_context,
-            runtime_functions,
-            allocation_result,
-            roots,
-            root_tags,
-            root_states,
-            exit,
-            values.activation_pointer,
-            retired,
-            detached,
-        ],
+        &[values.activation_pointer, retired, parent_entry, detached],
     );
 
     builder.switch_to_block(normal);
@@ -14503,13 +14496,6 @@ fn store_i32_constant(
 
 #[derive(Clone, Copy)]
 enum RawActivationField {
-    RuntimeContext,
-    RuntimeFunctions,
-    AllocationResult,
-    Roots,
-    RootTags,
-    RootStates,
-    Exit,
     Scalars,
     Tags,
     States,
@@ -14536,19 +14522,6 @@ enum RawActivationField {
 impl RawActivationField {
     fn offset(self) -> usize {
         match self {
-            RawActivationField::RuntimeContext => {
-                mem::offset_of!(RawNativeActivation, runtime_context)
-            }
-            RawActivationField::RuntimeFunctions => {
-                mem::offset_of!(RawNativeActivation, runtime_functions)
-            }
-            RawActivationField::AllocationResult => {
-                mem::offset_of!(RawNativeActivation, allocation_result)
-            }
-            RawActivationField::Roots => mem::offset_of!(RawNativeActivation, roots),
-            RawActivationField::RootTags => mem::offset_of!(RawNativeActivation, root_tags),
-            RawActivationField::RootStates => mem::offset_of!(RawNativeActivation, root_states),
-            RawActivationField::Exit => mem::offset_of!(RawNativeActivation, exit),
             RawActivationField::Scalars => mem::offset_of!(RawNativeActivation, scalars),
             RawActivationField::Tags => mem::offset_of!(RawNativeActivation, tags),
             RawActivationField::States => mem::offset_of!(RawNativeActivation, states),

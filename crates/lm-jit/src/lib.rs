@@ -463,7 +463,7 @@ impl CompiledRegion {
     /// Return operand representations for one guarded interpreter replay.
     #[inline(always)]
     pub fn replay_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        self.plan.replay_operand_kinds(block, instruction)
+        self.plan.operand_kinds(block, instruction)
     }
 
     /// Return operand representations for one suspended native caller.
@@ -580,7 +580,6 @@ impl CompiledRegion {
             activation.frames[top_index].caller_stack_values =
                 u32::try_from(base_stack_values).map_err(|_| Failure::BackendUnavailable)?;
         }
-        let top = activation.frames[top_index];
         let initial_fuel = poll.initial_fuel(fuel);
         let mut exit = RawExit::default();
         let mut runtime_result = [0u64; 4];
@@ -648,44 +647,9 @@ impl CompiledRegion {
             root_capacity: root_capacity as usize,
         };
         raw_activation.runtime_context = std::ptr::from_mut(&mut runtime_context).cast::<c_void>();
-        // SAFETY: Each checked frame names one complete scalar window.
-        let local_pointer = unsafe {
-            activation
-                .scalars
-                .as_mut_ptr()
-                .add(top.scalar_base as usize)
-        };
-        // SAFETY: The tag table uses the same checked scalar window.
-        let local_tag_pointer =
-            unsafe { activation.tags.as_mut_ptr().add(top.scalar_base as usize) };
-        // SAFETY: The state table uses the same scalar window indexes.
-        let local_state_pointer =
-            unsafe { activation.states.as_mut_ptr().add(top.scalar_base as usize) };
-        // SAFETY: The checked frame reserves its complete local window.
-        let operand_pointer = unsafe { local_pointer.add(top.local_count as usize) };
-        // SAFETY: The checked frame reserves its complete tag window.
-        let operand_tag_pointer = unsafe { local_tag_pointer.add(top.local_count as usize) };
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
-        unsafe {
-            (self.entry)(
-                local_pointer,
-                local_tag_pointer,
-                local_state_pointer,
-                operand_pointer,
-                operand_tag_pointer,
-                initial_fuel,
-                entry,
-                std::ptr::from_mut(&mut runtime_context).cast::<c_void>(),
-                std::ptr::from_ref(runtime_functions),
-                runtime_result.as_mut_ptr(),
-                roots.as_mut_ptr(),
-                root_tags.as_mut_ptr(),
-                root_states.as_mut_ptr(),
-                &mut exit,
-                &mut raw_activation,
-            );
-        }
+        unsafe { (self.entry)(&mut raw_activation, entry) }
         if raw_activation.scalar_len > raw_activation.scalar_capacity
             || raw_activation.frame_len > raw_activation.frame_capacity
             || raw_activation.frame_len == 0

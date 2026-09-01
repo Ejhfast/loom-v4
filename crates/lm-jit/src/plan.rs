@@ -696,20 +696,6 @@ impl RegionPlan {
         })
     }
 
-    pub(super) fn replay_operand_kinds(
-        &self,
-        block: u32,
-        instruction: u32,
-    ) -> Option<&[ScalarKind]> {
-        self.segments.iter().find_map(|segment| {
-            segment
-                .replay_stacks
-                .iter()
-                .find(|(at, _)| segment.block == block && *at == instruction)
-                .map(|(_, stack)| stack.as_slice())
-        })
-    }
-
     pub(super) fn suspended_operand_kinds(
         &self,
         block: u32,
@@ -746,7 +732,7 @@ impl RegionPlan {
     ) -> Option<&[ScalarKind]> {
         match kind {
             ExitKind::Return => Some(&[]),
-            ExitKind::Replay => self.replay_operand_kinds(block, instruction),
+            ExitKind::Replay => self.operand_kinds(block, instruction),
             ExitKind::IntegerOverflow
             | ExitKind::DivideByZero
             | ExitKind::TypeMismatch
@@ -1258,7 +1244,15 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
                 start = instruction_index;
             }
             let exit = segment_exit(instruction, instruction_index, block.len())?;
-            let Some(exit) = exit else { continue };
+            let exit = match exit {
+                Some(exit) => exit,
+                None if crate::instruction_treatment(instruction).is_replay_barrier() => {
+                    SegmentExit::Continue {
+                        fallthrough_ip: instruction_index as u32 + 1,
+                    }
+                }
+                None => continue,
+            };
             segments.push(empty_segment(
                 block_index,
                 start,

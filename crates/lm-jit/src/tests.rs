@@ -191,6 +191,21 @@ fn segments_split_conditional_fallthrough() {
     assert_eq!(plan.segments[3].carry_reserved_cost, vec![false]);
 }
 
+#[test]
+fn replay_barriers_end_the_current_segment() {
+    let module = module(vec![vec![
+        Instr::StoreField(0),
+        Instr::LoadField(0),
+        Instr::Return,
+    ]]);
+    let segments = split_segments(&module.funcs[0]).expect("the field segment splits");
+    assert_eq!(segments.len(), 2);
+    assert_eq!((segments[0].start, segments[0].end), (0, 1));
+    assert_eq!((segments[1].start, segments[1].end), (1, 3));
+    assert!(instruction_treatment(&Instr::StoreField(0)).is_replay_barrier());
+    assert!(!instruction_treatment(&Instr::LoadField(0)).is_replay_barrier());
+}
+
 fn counting_loop_region() -> Arc<CompiledRegion> {
     let module = module(vec![
         vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],
@@ -1054,7 +1069,7 @@ fn native_field_fault_keeps_the_exact_program_point() {
 }
 
 #[test]
-fn another_concrete_class_replays_the_field_instruction() {
+fn another_concrete_class_replays_from_the_segment_head() {
     let module = field_module();
     let bundle = lm_abi::standard_bundle();
     let engine = JitEngine::default();
@@ -1125,7 +1140,8 @@ fn another_concrete_class_replays_the_field_instruction() {
         )
         .expect("the field load executes");
     assert_eq!(exit.kind(), ExitKind::Replay);
-    assert_eq!((exit.block(), exit.instruction()), (0, 1));
+    assert_eq!(exit.retired(), 0);
+    assert_eq!((exit.block(), exit.instruction()), (0, 0));
 }
 
 #[test]
@@ -1211,7 +1227,7 @@ fn native_field_store_writes_the_canonical_value() {
 }
 
 #[test]
-fn native_field_store_replays_a_frozen_receiver() {
+fn native_field_store_replays_from_the_segment_head() {
     let module = field_store_module();
     let bundle = lm_abi::standard_bundle();
     let region = JitEngine::default()
@@ -1285,7 +1301,7 @@ fn native_field_store_replays_a_frozen_receiver() {
         )
         .expect("the field store executes");
     assert_eq!(exit.kind(), ExitKind::Replay);
-    assert_eq!(exit.retired(), 2);
-    assert_eq!((exit.block(), exit.instruction()), (0, 2));
-    assert_eq!(exit.stack_len(), 2);
+    assert_eq!(exit.retired(), 0);
+    assert_eq!((exit.block(), exit.instruction()), (0, 0));
+    assert_eq!(exit.stack_len(), 0);
 }
