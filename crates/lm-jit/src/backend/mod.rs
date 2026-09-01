@@ -23,6 +23,7 @@ use crate::{
     EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_POLL,
     EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH,
     EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_INITIALIZED,
+    NATIVE_FRAME_OVERHEAD, NATIVE_STACK_BUDGET,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, AliasRegion, InstBuilder,
@@ -234,10 +235,17 @@ pub(super) fn compile_region(
     module
         .define_function(body_id, &mut body_context)
         .map_err(|_| CompileError::Backend)?;
-    let body_code_size = body_context
-        .compiled_code()
-        .map(|code| code.code_buffer().len())
-        .ok_or(CompileError::Backend)?;
+    let body_code = body_context.compiled_code().ok_or(CompileError::Backend)?;
+    let body_code_size = body_code.code_buffer().len();
+    let native_stack_bytes = body_code
+        .buffer
+        .frame_layout()
+        .map_or(0, |layout| layout.frame_to_fp_offset)
+        .checked_add(NATIVE_FRAME_OVERHEAD)
+        .ok_or(CompileError::Unsupported(UnsupportedReason::RegionLimit))?;
+    if native_stack_bytes > NATIVE_STACK_BUDGET {
+        return Err(CompileError::Unsupported(UnsupportedReason::RegionLimit));
+    }
     let mut entry_context = module.make_context();
     entry_context.func.signature = entry_signature;
     entry_context.func.name = UserFuncName::user(0, entry_id.as_u32());
@@ -262,6 +270,7 @@ pub(super) fn compile_region(
     Ok(CompiledRegion {
         function: input.root.function,
         code_size: body_code_size.saturating_add(entry_code_size),
+        native_stack_bytes,
         plan,
         entry,
         call_entry,

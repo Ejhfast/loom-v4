@@ -951,12 +951,13 @@ pub(super) fn emit_native_call(
         builder
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, total_frames, max_frames);
+    let native_stack_check = builder.create_block();
     let stack_check = builder.create_block();
     builder
         .ins()
-        .brif(frame_overflow, stack_limit, &[], stack_check, &[]);
+        .brif(frame_overflow, stack_limit, &[], native_stack_check, &[]);
 
-    builder.switch_to_block(stack_check);
+    builder.switch_to_block(native_stack_check);
     let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
     let active_frame_index = builder.ins().iadd_imm(frame_len, -1);
     let active_frame_index = builder
@@ -967,6 +968,35 @@ pub(super) fn emit_native_call(
         std_mem::size_of::<RawNativeFrame>() as i64,
     );
     let active_frame = builder.ins().iadd(frames, active_frame_offset);
+    let native_stack_bytes = load_cell_u32(
+        builder,
+        active_frame,
+        std_mem::offset_of!(RawNativeFrame, native_stack_bytes),
+    )?;
+    let callee_stack_bytes = load_cell_u32(
+        builder,
+        cell,
+        std_mem::offset_of!(NativeEntryCell, native_stack_bytes),
+    )?;
+    let next_native_stack_bytes = builder.ins().iadd(native_stack_bytes, callee_stack_bytes);
+    let native_stack_wrapped = builder.ins().icmp(
+        IntCC::UnsignedLessThan,
+        next_native_stack_bytes,
+        native_stack_bytes,
+    );
+    let native_stack_exceeded = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThan,
+        next_native_stack_bytes,
+        i64::from(crate::NATIVE_STACK_BUDGET),
+    );
+    let native_stack_blocked = builder
+        .ins()
+        .bor(native_stack_wrapped, native_stack_exceeded);
+    builder
+        .ins()
+        .brif(native_stack_blocked, fallback, &[], stack_check, &[]);
+
+    builder.switch_to_block(stack_check);
     let caller_prefix = load_cell_u32(
         builder,
         active_frame,
@@ -1141,7 +1171,7 @@ pub(super) fn emit_native_call(
     builder.switch_to_block(invoke);
     emit_charge(builder, values, 1);
     let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
-    let caller_frame = emit_current_frame_pointer(builder, values)?;
+    let caller_frame = active_frame;
     emit_spill_frame_roots(
         builder,
         values,
@@ -1294,6 +1324,12 @@ pub(super) fn emit_native_call(
         child_frame,
         std_mem::offset_of!(RawNativeFrame, caller_stack_values),
         caller_values,
+    )?;
+    store_i32_value(
+        builder,
+        child_frame,
+        std_mem::offset_of!(RawNativeFrame, native_stack_bytes),
+        next_native_stack_bytes,
     )?;
     let next_frame_len = builder.ins().iadd_imm(frame_len, 1);
     store_activation_u32(builder, values, RawActivationField::ScalarLen, scalar_end)?;

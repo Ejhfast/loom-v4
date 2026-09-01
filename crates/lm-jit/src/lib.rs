@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 const MAX_REGION_INSTRUCTIONS: usize = 65_536;
 const MAX_REGION_LOCALS: usize = 1_024;
 const MAX_REGION_STACK: usize = 1_024;
+// This budget leaves ample host stack space around generated calls.
+const NATIVE_STACK_BUDGET: u32 = 256 * 1024;
+// This reserve covers call setup outside the reported Cranelift frame.
+const NATIVE_FRAME_OVERHEAD: u32 = 128;
 
 const EXIT_FUEL: u32 = 1;
 const EXIT_RETURN: u32 = 2;
@@ -109,6 +113,7 @@ impl fmt::Debug for JitEngine {
 pub struct CompiledRegion {
     function: u32,
     code_size: usize,
+    native_stack_bytes: u32,
     plan: RegionPlan,
     entry: NativeFunction,
     call_entry: usize,
@@ -282,6 +287,7 @@ pub struct NativeEntryCell {
     max_stack: AtomicU32,
     max_stack_values: AtomicU32,
     max_roots: AtomicU32,
+    native_stack_bytes: AtomicU32,
 }
 
 impl NativeEntryCell {
@@ -293,6 +299,7 @@ impl NativeEntryCell {
             max_stack: AtomicU32::new(0),
             max_stack_values: AtomicU32::new(0),
             max_roots: AtomicU32::new(0),
+            native_stack_bytes: AtomicU32::new(0),
         }
     }
 
@@ -318,6 +325,8 @@ impl NativeEntryCell {
         self.max_stack_values
             .store(max_stack_values, Ordering::Relaxed);
         self.max_roots.store(max_roots, Ordering::Relaxed);
+        self.native_stack_bytes
+            .store(region.native_stack_bytes, Ordering::Relaxed);
         Ok(())
     }
 
@@ -583,6 +592,7 @@ impl CompiledRegion {
             activation.frames[top_index].caller_stack_values =
                 u32::try_from(base_stack_values).map_err(|_| Failure::BackendUnavailable)?;
         }
+        activation.frames[top_index].native_stack_bytes = self.native_stack_bytes;
         let initial_fuel = poll.initial_fuel(fuel);
         let mut exit = RawExit::default();
         let mut runtime_result = [0u64; 4];

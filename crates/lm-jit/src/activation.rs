@@ -70,6 +70,7 @@ pub(super) struct RawNativeFrame {
     pub(super) operand_len: u32,
     pub(super) native_created: u32,
     pub(super) caller_stack_values: u32,
+    pub(super) native_stack_bytes: u32,
 }
 
 /// One transient instance whose fields stay in native scalar storage.
@@ -1177,6 +1178,7 @@ impl NativeActivation {
             operand_len: u32::try_from(operand_len).map_err(|_| Failure::BackendUnavailable)?,
             native_created: 0,
             caller_stack_values: 0,
+            native_stack_bytes: 0,
         };
         self.scalar_len = window;
         self.frame_len = 1;

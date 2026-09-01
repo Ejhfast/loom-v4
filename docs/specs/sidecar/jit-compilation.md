@@ -263,9 +263,27 @@ The native engine performs growth outside generated call code.
 
 Storage growth does not materialize VmState.
 
-Only the guest frame and stack limits bound native depth.
+A separate byte budget bounds one physical native call chain.
 
-No call materializes VmState.
+Cranelift reports each compiled function's maximum frame size.
+
+The compiler adds one fixed ABI reserve to that size.
+
+Each native frame records its cumulative physical stack cost.
+
+The current portable budget is 256 KiB.
+
+A compiled frame larger than this budget uses the interpreter.
+
+An excess call exits before it retires.
+
+The VM then creates the guest frame in canonical heap storage.
+
+Native execution resumes with a fresh physical stack budget.
+
+This rollover does not change the guest frame limit.
+
+An in-budget call does not materialize VmState.
 
 No call invokes a generic runtime dispatcher.
 
@@ -3660,6 +3678,39 @@ Focused effect, worker, sparse-cycle, and VM control tests passed.
 The direct and scheduled corpus differential passed after the retained-effect change.
 
 The full workspace suite passed in 73.75 seconds.
+
+### Stage F70: Bound physical native recursion
+
+- record each generated function's measured stack-frame size;
+- add one conservative ABI reserve to that size;
+- track cumulative bytes in the existing native frame table;
+- exit before a native call exceeds the physical byte budget;
+- resume that call through canonical heap frames;
+- reset the physical budget at each native engine entry;
+- keep the independent guest frame limit unchanged.
+
+A 60,000-level recursive program completed on a 1 MiB host stack.
+
+Interpreter and Native modes produced identical final states.
+
+The test observed multiple physical rollovers and no guest fault.
+
+The release comparison used the unchanged branch revision from the same session.
+
+| Deep-recursion row | Previous | Current | Change |
+| --- | ---: | ---: | ---: |
+| Direct Native | 7.602 ms | 7.789 ms | 2.5 percent slower |
+| Scheduled Native | 7.945 ms | 7.781 ms | 2.1 percent faster |
+
+Both changes remain within measurement variance.
+
+The focused JIT suite passed 171 tests.
+
+The direct and scheduled corpus differential passed in 22.49 seconds.
+
+Clippy passed for every workspace target.
+
+The full workspace suite passed in 76.53 seconds after a focused rebuild.
 
 ## 24. Rejected designs
 

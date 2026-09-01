@@ -538,6 +538,35 @@ fn deep_recursion_grows_one_native_turn_stack() {
 }
 
 #[test]
+fn deep_recursion_rolls_over_before_the_host_stack_limit() {
+    let source = concat!(
+        "def descend(value: Int): Int\n",
+        "  if value == 0 then 0 else descend(value - 1) + 1 end\n",
+        "end\n",
+        "descend(60000)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-deep-recursion.lm", source)
+        .expect("the deep recursion case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let native = std::thread::Builder::new()
+        .name("jit-small-stack".to_owned())
+        .stack_size(1024 * 1024)
+        .spawn(move || run_artifact(&artifact, EngineMode::Native, u64::MAX))
+        .expect("the small-stack JIT thread starts")
+        .join()
+        .expect("the small-stack JIT thread returns");
+    let (native, metrics, native_dump) = native;
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(60_000)));
+    assert!(metrics.native_entries > 3, "{metrics:?}");
+    assert!(metrics.materializations > 3, "{metrics:?}");
+    assert_eq!(metrics.native_fault_exits, 0, "{metrics:?}");
+    assert_eq!(metrics.backend_unavailable_fallbacks, 0, "{metrics:?}");
+}
+
+#[test]
 fn mutual_recursion_stays_on_one_native_turn_stack() {
     let source = concat!(
         "def even(value: Int): Bool\n",
