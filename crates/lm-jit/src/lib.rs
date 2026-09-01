@@ -34,6 +34,7 @@ const EXIT_CALLBACK_CALL: u32 = 22;
 const EXIT_GUEST_FAULT: u32 = 23;
 const EXIT_GROW_ROOTS: u32 = 24;
 const EXIT_BOUNDARY: u32 = 25;
+const EXIT_POLL: u32 = 26;
 
 mod activation;
 mod opcode;
@@ -425,6 +426,9 @@ impl CompiledRegion {
     pub fn entry_plan(&self, block: u32, instruction: u32) -> Option<EntryPlan<'_>> {
         let index = self.plan.entries.get(&(block, instruction)).copied()?;
         let segment = &self.plan.segments[index];
+        if segment.carries_reserved_prefix {
+            return None;
+        }
         Some(EntryPlan {
             index: index as u32,
             live_locals: &segment.live_in,
@@ -435,23 +439,7 @@ impl CompiledRegion {
     /// Return one internal entry for a retained native activation.
     #[inline(always)]
     pub fn resume_plan(&self, block: u32, instruction: u32) -> Option<EntryPlan<'_>> {
-        if let Some(entry) = self.entry_plan(block, instruction) {
-            return Some(entry);
-        }
-        let index = self
-            .plan
-            .resume_entries
-            .get(&(block, instruction))
-            .copied()?;
-        let target_index = index.checked_sub(self.plan.segments.len() as u32)? as usize;
-        let target = self.plan.resume_targets.get(target_index)?;
-        let segment = self.plan.segments.get(target.segment)?;
-        let (_, operand_kinds) = segment.fuel_stacks.get(target.offset)?;
-        Some(EntryPlan {
-            index,
-            live_locals: &segment.live_in,
-            operand_kinds,
-        })
+        self.entry_plan(block, instruction)
     }
 
     /// Return the distance from an interior position to its next entry.
@@ -624,13 +612,7 @@ impl CompiledRegion {
             .frame_len
             .checked_sub(1)
             .ok_or(Failure::BackendUnavailable)?;
-        if entry as usize
-            >= self
-                .plan
-                .segments
-                .len()
-                .checked_add(self.plan.resume_targets.len())
-                .ok_or(Failure::BackendUnavailable)?
+        if entry as usize >= self.plan.segments.len()
             || activation.frames[top_index].local_count as usize != self.plan.local_kinds.len()
             || (activation.frames[top_index].max_stack as usize) < self.plan.max_stack
             || roots.len() < self.plan.max_roots.max(1)
@@ -660,7 +642,17 @@ impl CompiledRegion {
         }
         let top = activation.frames[top_index];
         let initial_fuel = poll.initial_fuel(fuel);
+        let mut exit = RawExit::default();
+        let mut runtime_result = [0u64; 4];
+        let runtime_functions: &'static _ = &NativeRuntimeFunctions::<R>::TABLE;
         let mut raw_activation = RawNativeActivation {
+            runtime_context: std::ptr::null_mut(),
+            runtime_functions: std::ptr::from_ref(runtime_functions),
+            allocation_result: runtime_result.as_mut_ptr(),
+            roots: roots.as_mut_ptr(),
+            root_tags: root_tags.as_mut_ptr(),
+            root_states: root_states.as_mut_ptr(),
+            exit: std::ptr::from_mut(&mut exit),
             scalars: activation.scalars.as_mut_ptr(),
             tags: activation.tags.as_mut_ptr(),
             states: activation.states.as_mut_ptr(),
@@ -707,8 +699,6 @@ impl CompiledRegion {
             poll_deadline: initial_fuel,
             poll_interval: poll.interval(),
         };
-        let mut exit = RawExit::default();
-        let mut runtime_result = [0u64; 4];
         let mut runtime_context = RawRuntimeContext {
             runtime: std::ptr::from_mut(runtime),
             activation: std::ptr::from_mut(&mut raw_activation),
@@ -717,7 +707,7 @@ impl CompiledRegion {
             root_states: root_states.as_ptr(),
             root_capacity: root_capacity as usize,
         };
-        let runtime_functions: &'static _ = &NativeRuntimeFunctions::<R>::TABLE;
+        raw_activation.runtime_context = std::ptr::from_mut(&mut runtime_context).cast::<c_void>();
         // SAFETY: Each checked frame names one complete scalar window.
         let local_pointer = unsafe {
             activation
@@ -799,6 +789,7 @@ impl CompiledRegion {
             EXIT_GUEST_FAULT => ExitKind::GuestFault,
             EXIT_GROW_ROOTS => ExitKind::GrowRoots,
             EXIT_BOUNDARY => ExitKind::Boundary,
+            EXIT_POLL => ExitKind::Poll,
             EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
             _ => return Err(Failure::BackendUnavailable),
         };

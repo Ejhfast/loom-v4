@@ -178,12 +178,12 @@ fn segments_split_conditional_fallthrough() {
         .map(|segment| segment.reserved_prefix_cost)
         .collect();
     assert_eq!(reserved_prefixes, vec![0, 0, 4, 5, 4]);
-    let fast_entries: Vec<bool> = plan
+    let carried_prefixes: Vec<bool> = plan
         .segments
         .iter()
-        .map(|segment| segment.fast_entry)
+        .map(|segment| segment.carries_reserved_prefix)
         .collect();
-    assert_eq!(fast_entries, vec![true, true, false, false, false]);
+    assert_eq!(carried_prefixes, vec![false, false, true, true, true]);
     assert_eq!(plan.segments[1].carry_reserved_cost, vec![true, true]);
     assert_eq!(plan.segments[3].carry_reserved_cost, vec![false]);
 }
@@ -301,15 +301,8 @@ fn idle_native_polls_keep_the_region_active() {
 }
 
 #[test]
-fn requested_native_poll_stops_at_the_exact_program_point() {
+fn requested_native_poll_stops_at_a_segment_boundary() {
     let region = counting_loop_region();
-    let mut expected_activation = NativeActivation::default();
-    let expected = execute_counting_loop(
-        region.as_ref(),
-        &mut expected_activation,
-        5,
-        NativePoll::disabled(),
-    );
     let requested = std::sync::atomic::AtomicU32::new(1);
     let mut actual_activation = NativeActivation::default();
     let actual = execute_counting_loop(
@@ -318,15 +311,12 @@ fn requested_native_poll_stops_at_the_exact_program_point() {
         1_000,
         NativePoll::new(&requested, 5, 7),
     );
-    assert_eq!(actual.kind(), ExitKind::Fuel);
-    assert_eq!(actual.retired(), 5);
-    assert_eq!(actual.block(), expected.block());
-    assert_eq!(actual.instruction(), expected.instruction());
-    assert_eq!(actual.stack_len(), expected.stack_len());
-    assert_eq!(
-        actual_activation.root_buffers(),
-        expected_activation.root_buffers()
-    );
+    assert_eq!(actual.kind(), ExitKind::Poll);
+    assert!(actual.retired() >= 5);
+    let entry = region
+        .entry_plan(actual.block(), actual.instruction())
+        .expect("the poll stops at a native segment entry");
+    assert_eq!(actual.stack_len() as usize, entry.operand_kinds().len());
 }
 
 #[test]
@@ -353,7 +343,8 @@ fn liveness_ignores_a_local_replaced_before_use() {
         fuel_reserve: 3,
         reserved_prefix_cost: 0,
         carry_reserved_cost: vec![],
-        fast_entry: true,
+        carries_reserved_prefix: false,
+        retry_entry: false,
         defer_integer_overflow: false,
         exit: SegmentExit::Return,
         uses: vec![false, true],

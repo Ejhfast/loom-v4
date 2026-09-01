@@ -1,10 +1,14 @@
 # JIT compilation
 
-Status: Native calls, the heap ABI, sampled tiering, scheduler continuation, growable activations, and demand-driven polls are implemented.
+Status: Native calls, the heap ABI, sampled tiering, growable activations, hybrid fuel landing, and demand-driven polls are implemented.
 
 All scheduler tasks use one measured 16,384-instruction quantum.
 
 Generated code rearms idle scheduler polls without materializing machine state.
+
+Generated code stops requested polls at deterministic reservation heads.
+
+The interpreter lands exact hard-fuel stops within one partial reservation.
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
@@ -303,7 +307,7 @@ Faults, effects, and terminal returns always materialize native state.
 
 A region is one verified function control-flow graph.
 
-A segment is one fixed-cost path between fuel checkpoints.
+A segment is one fixed-cost path between reservation heads and engine boundaries.
 
 Conditional jumps split LMBC blocks into segments.
 
@@ -316,6 +320,10 @@ Every segment ends at one of these points:
 - a fault;
 - a return;
 - an observable engine boundary.
+
+A retryable operation starts one segment.
+
+A cache or storage miss resumes only at that segment head.
 
 Native code can continue through segment edges and loop backedges.
 
@@ -362,15 +370,27 @@ The interpreter advances to a supported native entry.
 
 Fuel measures retired LMBC instructions.
 
-Native code checks fuel before each segment.
+Native code reserves hard fuel before each segment chain.
 
 Full segment fuel runs the normal segment path.
 
-Partial segment fuel runs exact instruction checkpoints.
+One acyclic forward chain can share that reservation.
 
-Each checkpoint charges one LMBC instruction.
+Insufficient hard fuel materializes canonical state at the current segment head.
 
-The final checkpoint records the next instruction position.
+The interpreter then lands the exact hard-fuel stop.
+
+`vm.step()` and explicit bounded drive retain exact stopping behavior.
+
+Scheduler polls test requests at deterministic reservation heads.
+
+A requested poll can pass its deadline by at most one active reservation.
+
+The poll exit reports the exact retired count and canonical state.
+
+An idle poll rearms inside generated code.
+
+Generated code contains no per-instruction fuel tail.
 
 A call instruction charges one fuel unit.
 
@@ -384,7 +404,7 @@ Loom faults use explicit exit records.
 
 Cranelift traps never represent guest faults.
 
-Every fuel limit must produce the same interpreter and native state.
+Every hard fuel limit must produce the same interpreter and native state.
 
 ## 9. Value ABI
 
@@ -2929,11 +2949,11 @@ This change keeps native frames and scalar values live across idle polls.
 
 The common poll path must not materialize canonical machine state.
 
-Each exact checkpoint keeps its live values on the current SSA path.
+Each reservation head keeps its live values on the current SSA path.
 
 An idle poll reads one atomic request and rearms the next deadline.
 
-A requested poll uses the existing exact materialization exit.
+A requested poll uses the canonical segment-head exit.
 
 One worker reservation contains at most 64 poll intervals.
 
@@ -2941,7 +2961,7 @@ The reservation bounds shared fuel claims. It does not define fairness.
 
 The scheduler poll interval defines fairness and request response time.
 
-The native poll tests passed at exact instruction boundaries.
+The native poll tests passed at deterministic reservation boundaries.
 
 The focused JIT suite passed 157 tests.
 
@@ -2996,6 +3016,57 @@ A scarce claim takes at most half of the currently available fuel.
 This rule lets another worker claim fuel under a small world budget.
 
 Normal budgets still use the complete 64-poll reservation.
+
+### Stage F56: Use hybrid fuel landing
+
+- remove the per-instruction native fuel tail;
+- keep one exact retired-instruction counter;
+- reserve hard fuel at native segment heads;
+- let the interpreter land an exact hard-fuel stop;
+- stop requested polls at deterministic reservation heads;
+- prevent fuel carry into retryable operations;
+- advance interior machine positions with the interpreter;
+- reload cold ABI pointers only on a parent return.
+
+Stages F46 through F52 describe retired exact-tail designs.
+
+This stage replaces those exact-tail rules.
+
+Exact instruction counting remains unchanged.
+
+Only physical stop placement changes for scheduler polls.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed in 27.76 seconds.
+
+The full workspace suite passed in 76.48 seconds.
+
+| Cold release row | Stage F55 | Stage F56 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 3.667 ms | 1.948 ms | 46.9 percent faster |
+| JSON compile and run | 1,019.450 ms | 505.595 ms | 50.4 percent faster |
+| 301-function compile and run | 1,027.289 ms | 573.209 ms | 44.2 percent faster |
+
+| Compiled code set | Stage F55 | Stage F56 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 6,685 bytes | 2,966 bytes | 55.6 percent smaller |
+| JSON parser | 4,846,808 bytes | 2,546,955 bytes | 47.4 percent smaller |
+| 301 functions | 3,353,070 bytes | 1,897,130 bytes | 43.4 percent smaller |
+
+| Warm release row | Stage F55 | Stage F56 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 0.413 ms | 0.416 ms | within variance |
+| JSON parse | 18.315 ms | 16.864 ms | 7.9 percent faster |
+| JSON encode | 8.969 ms | 8.101 ms | 9.7 percent faster |
+| HTTP parse | 18.972 ms | 17.202 ms | 9.3 percent faster |
+| HTTP encode | 6.058 ms | 6.101 ms | within variance |
+
+The lattice removal deletes the quadratic live-state term from generated code.
+
+Cold code still contains fault and boundary materialization paths.
+
+These paths remain necessary and stay outside the hot path.
 
 ## 24. Rejected designs
 

@@ -550,7 +550,7 @@ fn report_jit_effect(name: &str, source: &str, required_exits: u64) {
     let (interpreted, _) = time_effect_program_engine(source, EngineMode::Interpreter);
     let cold = time_effect_program_native_cold(source);
     let (native, metrics) = time_effect_program_engine(source, EngineMode::Native);
-    assert!(metrics.native_retired_instructions > 0);
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
     assert!(metrics.compiled_effect_sites > 0);
     assert!(metrics.native_effect_exits >= required_exits);
     println!(
@@ -595,7 +595,7 @@ fn report_jit_after_setup(name: &str, source: &str, setup: u32) {
     let (interpreted, _) = time_program_engine_after_setup(source, EngineMode::Interpreter, setup);
     let cold = time_program_native_cold_after_setup(source, setup);
     let (native, metrics) = time_program_engine_after_setup(source, EngineMode::Native, setup);
-    assert!(metrics.native_retired_instructions > 0);
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
     println!(
         "LOOM_JIT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
@@ -1453,6 +1453,19 @@ end
 // ---------------------------------------------------------------
 // Group 0: guarded scalar JIT regions.
 // ---------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn bench_jit_hot_scalar_loop() {
+    println!(
+        "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"
+    );
+    report_jit(
+        "jit_int_loop",
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+        0,
+    );
+}
 
 #[test]
 #[ignore]

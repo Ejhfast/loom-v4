@@ -109,6 +109,13 @@ pub(super) struct RawNativeActivation {
     pub(super) hard_fuel: u64,
     pub(super) poll_deadline: u64,
     pub(super) poll_interval: u32,
+    pub(super) runtime_context: *mut c_void,
+    pub(super) runtime_functions: *const RawNativeFunctions,
+    pub(super) allocation_result: *mut u64,
+    pub(super) roots: *mut u64,
+    pub(super) root_tags: *mut u64,
+    pub(super) root_states: *mut u8,
+    pub(super) exit: *mut RawExit,
 }
 
 /// One compact native view of an image slot target.

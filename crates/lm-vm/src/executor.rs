@@ -981,6 +981,12 @@ fn run_engine_turn(
                 }
                 return engine_turn_result(Ok(None), retired_total, false);
             }
+            crate::jit::NativeAttempt::RequestedYield { retired } => {
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                return engine_turn_result(Ok(None), next, true);
+            }
             crate::jit::NativeAttempt::Fallback => {
                 let current = poll_cap(context.poll, retired_total, remaining);
                 let (outcome, interpreted) =
@@ -1422,27 +1428,32 @@ mod tests {
             Box::default(),
             None,
             ExecutionLimits {
-                instructions: 64,
+                instructions: 1_024,
                 exclusive_world: true,
                 fuel: Arc::new(ExecutionFuel::new(u64::MAX)),
                 engine: Arc::clone(&engine),
             },
         );
-        let turn = std::thread::spawn(move || execute_turn(lease, 8))
+        let turn = std::thread::spawn(move || execute_turn(lease, 63))
             .join()
             .expect("the worker returns one turn");
         let ExecutionTurn::Continue(lease) = turn else {
             panic!("the native lease must remain active");
         };
+        assert!(lease.machine.has_native_continuation());
         let report = recall(lease);
         assert!(report.stopped_by_recall());
-        assert_eq!(report.retired_instructions(), 8);
+        assert_eq!(report.retired_instructions(), 63);
         let (_, machine, _, _, _, retired) = report.into_parts(reservation);
-        assert_eq!(retired, 8);
-        assert_eq!(machine.vm.locals, vec![Value::Int(0)]);
+        assert_eq!(retired, 63);
+        assert!(!machine.has_native_continuation());
+        assert_eq!(machine.vm.locals, vec![Value::Int(6)]);
         let frame = machine.vm.frames.last().expect("the frame remains live");
-        assert_eq!((frame.block, frame.ip), (2, 0));
-        assert_eq!(engine.metrics().native_retired_instructions, 8);
+        assert_eq!((frame.block, frame.ip), (1, 0));
+        let metrics = engine.metrics();
+        assert_eq!(metrics.native_retired_instructions, 63);
+        assert_eq!(metrics.native_continuation_suspends, 1);
+        assert_eq!(metrics.native_continuation_materializations, 1);
     }
 
     #[test]

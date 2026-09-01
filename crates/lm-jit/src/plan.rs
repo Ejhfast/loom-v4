@@ -179,6 +179,7 @@ impl EntryPlan<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
     Fuel,
+    Poll,
     Return,
     IntegerOverflow,
     DivideByZero,
@@ -289,6 +290,9 @@ impl UnsupportedReason {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SegmentExit {
+    Continue {
+        fallthrough_ip: u32,
+    },
     Jump {
         target_block: u32,
     },
@@ -351,8 +355,10 @@ pub(super) struct Segment {
     pub(super) reserved_prefix_cost: u32,
     /// Successor edges that retain the active reserve without one fuel write.
     pub(super) carry_reserved_cost: Vec<bool>,
-    /// True when canonical machine state can use this segment's reserved path.
-    pub(super) fast_entry: bool,
+    /// True when one native predecessor carries an uncharged prefix.
+    pub(super) carries_reserved_prefix: bool,
+    /// True when a runtime-filled cache can retry this segment.
+    pub(super) retry_entry: bool,
     /// True when one cold replay edge can check all integer overflow flags.
     pub(super) defer_integer_overflow: bool,
     pub(super) exit: SegmentExit,
@@ -581,8 +587,6 @@ pub(super) struct RegionPlan {
     pub(super) max_roots: usize,
     pub(super) segments: Vec<Segment>,
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
-    pub(super) resume_entries: std::collections::HashMap<(u32, u32), u32>,
-    pub(super) resume_targets: Vec<ResumeTarget>,
     pub(super) call_sites: usize,
     pub(super) heap_read_sites: usize,
     pub(super) heap_write_sites: usize,
@@ -591,12 +595,6 @@ pub(super) struct RegionPlan {
     pub(super) effect_sites: usize,
     pub(super) interpreter_sites: usize,
     pub(super) type_resolution_sites: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ResumeTarget {
-    pub(super) segment: usize,
-    pub(super) offset: usize,
 }
 
 struct SegmentAnalysis {
@@ -894,28 +892,6 @@ impl RegionPlan {
         let max_roots = root_local_count
             .checked_add(max_stack)
             .ok_or(UnsupportedReason::RegionLimit)?;
-        let mut resume_entries = std::collections::HashMap::new();
-        let mut resume_targets = Vec::new();
-        for (segment_index, segment) in segments.iter().enumerate() {
-            for offset in 1..segment.fuel_stacks.len() {
-                let (instruction, _) = &segment.fuel_stacks[offset];
-                let index = segments
-                    .len()
-                    .checked_add(resume_targets.len())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .ok_or(UnsupportedReason::RegionLimit)?;
-                if resume_entries
-                    .insert((segment.block, *instruction), index)
-                    .is_some()
-                {
-                    return Err(UnsupportedReason::InvalidControlFlow);
-                }
-                resume_targets.push(ResumeTarget {
-                    segment: segment_index,
-                    offset,
-                });
-            }
-        }
         Ok(RegionPlan {
             local_kinds,
             cached_list_data,
@@ -926,8 +902,6 @@ impl RegionPlan {
             max_roots,
             segments,
             entries,
-            resume_entries,
-            resume_targets,
             call_sites,
             heap_read_sites,
             heap_write_sites,
@@ -943,7 +917,7 @@ impl RegionPlan {
         self.segments
             .iter()
             .find(|segment| {
-                segment.block == block && segment.start < instruction && instruction < segment.end
+                segment.block == block && segment.start <= instruction && instruction < segment.end
             })
             .map(|segment| segment.end - instruction)
     }
@@ -1146,41 +1120,90 @@ pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedRea
     for (block_index, block) in func.blocks.iter().enumerate() {
         let mut start = 0usize;
         for (instruction_index, instruction) in block.iter().enumerate() {
+            if requires_retry_entry(instruction) && start < instruction_index {
+                segments.push(empty_segment(
+                    block_index,
+                    start,
+                    instruction_index,
+                    SegmentExit::Continue {
+                        fallthrough_ip: instruction_index as u32,
+                    },
+                ));
+                start = instruction_index;
+            }
             let exit = segment_exit(instruction, instruction_index, block.len())?;
             let Some(exit) = exit else { continue };
-            segments.push(Segment {
-                block: block_index as u32,
-                start: start as u32,
-                end: instruction_index as u32 + 1,
-                cost: instruction_index as u32 + 1 - start as u32,
-                fuel_reserve: 0,
-                reserved_prefix_cost: 0,
-                carry_reserved_cost: Vec::new(),
-                fast_entry: true,
-                defer_integer_overflow: false,
+            segments.push(empty_segment(
+                block_index,
+                start,
+                instruction_index + 1,
                 exit,
-                uses: Vec::new(),
-                definitions: Vec::new(),
-                successors: Vec::new(),
-                live_in: Vec::new(),
-                entry_stack: Vec::new(),
-                call_contract: None,
-                exit_stack: Vec::new(),
-                boundary_stack: Vec::new(),
-                heap_accesses: Vec::new(),
-                option_accesses: Vec::new(),
-                fuel_stacks: Vec::new(),
-                replay_stacks: Vec::new(),
-                fault_stacks: Vec::new(),
-                allocations: Vec::new(),
-            });
+            ));
             start = instruction_index + 1;
         }
         if start != block.len() {
             return Err(UnsupportedReason::InvalidControlFlow);
         }
     }
+    for segment in &mut segments {
+        segment.retry_entry = func
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize))
+            .is_some_and(requires_retry_entry);
+    }
     Ok(segments)
+}
+
+fn empty_segment(block: usize, start: usize, end: usize, exit: SegmentExit) -> Segment {
+    Segment {
+        block: block as u32,
+        start: start as u32,
+        end: end as u32,
+        cost: end as u32 - start as u32,
+        fuel_reserve: 0,
+        reserved_prefix_cost: 0,
+        carry_reserved_cost: Vec::new(),
+        carries_reserved_prefix: false,
+        retry_entry: false,
+        defer_integer_overflow: false,
+        exit,
+        uses: Vec::new(),
+        definitions: Vec::new(),
+        successors: Vec::new(),
+        live_in: Vec::new(),
+        entry_stack: Vec::new(),
+        call_contract: None,
+        exit_stack: Vec::new(),
+        boundary_stack: Vec::new(),
+        heap_accesses: Vec::new(),
+        option_accesses: Vec::new(),
+        fuel_stacks: Vec::new(),
+        replay_stacks: Vec::new(),
+        fault_stacks: Vec::new(),
+        allocations: Vec::new(),
+    }
+}
+
+fn requires_retry_entry(instruction: &Instr) -> bool {
+    matches!(
+        crate::instruction_treatment(instruction).exit(),
+        crate::ExitBehavior::Call
+    ) || matches!(
+        instruction,
+        Instr::NewG { .. }
+            | Instr::IsType(_)
+            | Instr::CastType(_)
+            | Instr::MapPut { .. }
+            | Instr::Extended(
+                ExtendedInstr::OptionNone { .. }
+                    | ExtendedInstr::OptionPayload { .. }
+                    | ExtendedInstr::ListGet { .. }
+                    | ExtendedInstr::ListPop { .. }
+                    | ExtendedInstr::MapGet { .. }
+                    | ExtendedInstr::MapRemove { .. }
+            )
+    )
 }
 
 fn can_defer_integer_overflow(func: &Func, segment: &Segment) -> bool {
@@ -1234,8 +1257,10 @@ fn can_defer_integer_overflow(func: &Func, segment: &Segment) -> bool {
     checked > 1
 }
 
-pub(super) fn bypasses_fuel_check(segment: &Segment, index: usize, successor: usize) -> bool {
+pub(super) fn bypasses_fuel_check(segments: &[Segment], index: usize, successor: usize) -> bool {
+    let segment = &segments[index];
     successor > index
+        && !segments[successor].retry_entry
         && matches!(
             segment.exit,
             SegmentExit::Jump { .. } | SegmentExit::Conditional { .. }
@@ -1248,7 +1273,7 @@ fn compute_fuel_reserves(segments: &mut [Segment]) -> Result<(), UnsupportedReas
             .successors
             .iter()
             .copied()
-            .filter(|successor| bypasses_fuel_check(&segments[index], index, *successor))
+            .filter(|successor| bypasses_fuel_check(segments, index, *successor))
             .map(|successor| segments[successor].fuel_reserve)
             .max()
             .unwrap_or(0);
@@ -1268,7 +1293,7 @@ pub(super) fn compute_reserved_costs(segments: &mut [Segment]) -> Result<(), Uns
             let count = bypass_predecessors
                 .get_mut(successor)
                 .ok_or(UnsupportedReason::InvalidControlFlow)?;
-            if bypasses_fuel_check(segment, index, successor) {
+            if bypasses_fuel_check(segments, index, successor) {
                 *count = count.checked_add(1).ok_or(UnsupportedReason::RegionLimit)?;
             } else {
                 other_predecessors[successor] = true;
@@ -1280,7 +1305,7 @@ pub(super) fn compute_reserved_costs(segments: &mut [Segment]) -> Result<(), Uns
         .map(|index| index != 0 && bypass_predecessors[index] == 1 && !other_predecessors[index])
         .collect();
     for (index, segment) in segments.iter_mut().enumerate() {
-        segment.fast_entry = !carries_into[index];
+        segment.carries_reserved_prefix = carries_into[index];
         segment.carry_reserved_cost = vec![false; segment.successors.len()];
     }
 
@@ -1292,7 +1317,7 @@ pub(super) fn compute_reserved_costs(segments: &mut [Segment]) -> Result<(), Uns
         let successors = segments[index].successors.clone();
         for (edge, successor) in successors.into_iter().enumerate() {
             let carries =
-                bypasses_fuel_check(&segments[index], index, successor) && carries_into[successor];
+                bypasses_fuel_check(segments, index, successor) && carries_into[successor];
             segments[index].carry_reserved_cost[edge] = carries;
             if carries {
                 segments[successor].reserved_prefix_cost = pending;
@@ -1399,6 +1424,9 @@ fn resolve_successors(
 ) -> Result<(), UnsupportedReason> {
     for segment in segments {
         segment.successors = match segment.exit {
+            SegmentExit::Continue { fallthrough_ip } => {
+                vec![entry(entries, segment.block, fallthrough_ip)?]
+            }
             SegmentExit::Jump { target_block } => vec![entry(entries, target_block, 0)?],
             SegmentExit::Conditional {
                 target_block,

@@ -404,7 +404,8 @@ fn native_scheduler_polls_materialize_only_requested_yields() {
         requested.drive_slice_polled(root, u32::MAX, 4_096, &control),
         Some(lm_vm::SliceExit::Yielded)
     ));
-    assert_eq!(before - requested.world_fuel(), 4_096);
+    let retired = before - requested.world_fuel();
+    assert!((4_096..=4_160).contains(&retired), "{retired}");
     let requested_metrics = requested_engine.metrics();
     assert_eq!(requested_metrics.native_continuation_suspends, 0);
     assert!(requested_metrics.materializations > 0);
@@ -1582,7 +1583,7 @@ fn captured_closure_calls_stay_native() {
 }
 
 #[test]
-fn captured_closure_calls_preserve_scheduler_quanta() {
+fn captured_closure_calls_preserve_scheduler_results() {
     let source = concat!(
         "base = 7\n",
         "stored = do |value: Int|: Int base + value end\n",
@@ -1616,7 +1617,8 @@ fn captured_closure_calls_preserve_scheduler_quanta() {
     let native = run(Arc::clone(&engine));
     assert_eq!(native, interpreted, "{:?}", engine.metrics());
     let metrics = engine.metrics();
-    assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
+    assert_eq!(metrics.native_continuation_suspends, 0, "{metrics:?}");
+    assert!(metrics.materializations > 0, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 100_000, "{metrics:?}");
 }
 
@@ -4292,18 +4294,19 @@ fn engine_switches_preserve_scalar_state() {
     ));
     let suspended = engine.metrics();
     assert!(suspended.native_retired_instructions > 0);
-    assert_eq!(suspended.native_continuation_suspends, 1);
+    assert_eq!(suspended.native_continuation_suspends, 0);
+    assert!(suspended.materializations > 0);
     assert_eq!(suspended.native_continuation_materializations, 0);
     engine.set_mode(EngineMode::Interpreter);
     assert_eq!(
         world.run_root(),
         Outcome::Done(lm_value::Value::Int(49_995_000))
     );
-    assert_eq!(engine.metrics().native_continuation_materializations, 1);
+    assert_eq!(engine.metrics().native_continuation_materializations, 0);
 }
 
 #[test]
-fn native_quanta_keep_one_authoritative_continuation() {
+fn exact_native_quanta_keep_canonical_state() {
     let artifact = lm_testkit::compile_text("jit-quanta.lm", SCALAR_LOOP)
         .expect("the continuation case compiles");
     let (arena, namespace) =
@@ -4327,15 +4330,16 @@ fn native_quanta_keep_one_authoritative_continuation() {
         ));
     }
     let metrics = engine.metrics();
-    assert_eq!(metrics.native_continuation_suspends, 2);
-    assert_eq!(metrics.native_continuation_resumes, 1);
+    assert_eq!(metrics.native_continuation_suspends, 0);
+    assert_eq!(metrics.native_continuation_resumes, 0);
     assert_eq!(metrics.native_continuation_materializations, 0);
+    assert!(metrics.materializations >= 2, "{metrics:?}");
     engine.set_mode(EngineMode::Interpreter);
     assert_eq!(
         world.run_root(),
         Outcome::Done(lm_value::Value::Int(49_995_000))
     );
-    assert_eq!(engine.metrics().native_continuation_materializations, 1);
+    assert_eq!(engine.metrics().native_continuation_materializations, 0);
 }
 
 #[test]
@@ -4553,6 +4557,44 @@ fn native_execution_resumes_after_an_interpreter_mid_segment_stop() {
 }
 
 #[test]
+fn a_reserved_chain_entry_advances_to_a_native_head() {
+    let source = concat!(
+        "items = [0, 1, 2, 3, 4, 5, 6, 7]\n",
+        "i = 0\n",
+        "while i < 10000\n",
+        "  items.set(i % 8, i)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "items.at(7)\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-reserved-entry.lm", source)
+        .expect("the reserved entry case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Interpreter));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    assert!(matches!(
+        world.drive_slice(root, 48),
+        Some(lm_vm::SliceExit::Yielded)
+    ));
+    engine.set_mode(EngineMode::Native);
+    assert_eq!(world.run_root(), Outcome::Done(lm_value::Value::Int(9_999)));
+    let metrics = engine.metrics();
+    assert!(metrics.missing_entry_fallbacks > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+}
+
+#[test]
 fn alternating_engines_preserve_each_bounded_turn() {
     let source = "i = 0\ns = 0\nwhile i < 100\n  s = s + i\n  i = i + 1\nend\ns\n";
     let artifact = lm_testkit::compile_text("jit-alternate.lm", source).expect("the case compiles");
@@ -4577,7 +4619,7 @@ fn alternating_engines_preserve_each_bounded_turn() {
             EngineMode::Interpreter
         };
         engine.set_mode(mode);
-        match world.drive_slice(root, 13) {
+        match world.drive_slice(root, 64) {
             Some(lm_vm::SliceExit::Yielded) => {}
             Some(lm_vm::SliceExit::Terminal) => break,
             other => panic!("the alternating run stopped early: {other:?}"),
@@ -4612,13 +4654,14 @@ fn native_capture_resumes_in_the_interpreter() {
         native.drive_slice(root, 4096),
         Some(lm_vm::SliceExit::Yielded)
     ));
-    assert_eq!(engine.metrics().native_continuation_suspends, 1);
+    assert_eq!(engine.metrics().native_continuation_suspends, 0);
+    assert!(engine.metrics().materializations > 0);
     assert_eq!(engine.metrics().native_continuation_materializations, 0);
     let gate = native.next_gate();
     let snapshot = native
         .capture_snapshot(gate, 0, false)
         .expect("native state captures");
-    assert_eq!(engine.metrics().native_continuation_materializations, 1);
+    assert_eq!(engine.metrics().native_continuation_materializations, 0);
     let bytes =
         lm_vm::snapshot::codec::encode(snapshot.world(), usize::MAX).expect("native state encodes");
     let admitted = lm_testkit::load_snapshot_for_artifact(

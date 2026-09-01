@@ -167,6 +167,9 @@ pub(crate) enum NativeAttempt {
     Reenter {
         retired: u32,
     },
+    RequestedYield {
+        retired: u32,
+    },
     Complete {
         outcome: Result<Option<ExecOutcome>, ExecError>,
         retired: u32,
@@ -762,15 +765,18 @@ impl JitEngine {
                         && scratch.roots.try_reserve(growth).is_ok()
                         && scratch.root_tags.try_reserve(growth).is_ok()
                         && scratch.root_states.try_reserve(growth).is_ok();
-                    if let (true, Some(grow_region), Some(resume)) = (grew, grow_region, resume) {
+                    if grew {
                         scratch.roots.resize(required.max(1), 0);
                         scratch.root_tags.resize(required.max(1), 0);
                         scratch.root_states.resize(required.max(1), 0);
-                        prior_retired = next_retired;
-                        active_region = grow_region;
-                        active_entry = resume;
                         metrics.note_native_activation_grow();
-                        continue;
+                        if let (Some(grow_region), Some(resume)) = (grow_region, resume) {
+                            prior_retired = next_retired;
+                            active_region = grow_region;
+                            active_entry = resume;
+                            continue;
+                        }
+                        break exit.add_prior_retired(prior_retired);
                     }
                     break Err(Failure::BackendUnavailable);
                 }
@@ -792,20 +798,21 @@ impl JitEngine {
                         .as_deref()
                         .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
                         .map(|entry| entry.index());
-                    if let (Some(grow_region), Some(resume)) = (grow_region, resume) {
-                        let grew = scratch.activation.grow(
-                            required_scalars,
-                            required_frames,
-                            max_stack_values,
-                            max_frames,
-                        );
-                        if matches!(grew, Ok(true)) {
+                    let grew = scratch.activation.grow(
+                        required_scalars,
+                        required_frames,
+                        max_stack_values,
+                        max_frames,
+                    );
+                    if matches!(grew, Ok(true)) {
+                        metrics.note_native_activation_grow();
+                        if let (Some(grow_region), Some(resume)) = (grow_region, resume) {
                             prior_retired = next_retired;
                             active_region = grow_region;
                             active_entry = resume;
-                            metrics.note_native_activation_grow();
                             continue;
                         }
+                        break exit.add_prior_retired(prior_retired);
                     }
                 }
                 if exit.kind() == ExitKind::TypeResolution {
@@ -842,21 +849,22 @@ impl JitEngine {
                             .as_deref()
                             .and_then(|region| region.resume_plan(exit.block(), exit.instruction()))
                             .map(|entry| entry.index());
-                        if let (Some(resolve_region), Some(resume)) = (resolve_region, resume) {
-                            let cached = runtime.type_environments.cache_type_site(
-                                runtime.envs.canonical_store_id(),
-                                function,
-                                exit.block(),
-                                exit.instruction(),
-                                environment.0,
-                                family,
-                            );
-                            if cached {
+                        let cached = runtime.type_environments.cache_type_site(
+                            runtime.envs.canonical_store_id(),
+                            function,
+                            exit.block(),
+                            exit.instruction(),
+                            environment.0,
+                            family,
+                        );
+                        if cached {
+                            if let (Some(resolve_region), Some(resume)) = (resolve_region, resume) {
                                 prior_retired = next_retired;
                                 active_region = resolve_region;
                                 active_entry = resume;
                                 continue;
                             }
+                            break exit.add_prior_retired(prior_retired);
                         }
                     }
                 }
@@ -897,16 +905,15 @@ impl JitEngine {
                             else {
                                 break Err(Failure::BackendUnavailable);
                             };
-                            let Some(resume) = resolve_region
+                            if let Some(resume) = resolve_region
                                 .resume_plan(exit.block(), exit.instruction())
                                 .map(|entry| entry.index())
-                            else {
-                                break Err(Failure::BackendUnavailable);
-                            };
-                            prior_retired = next_retired;
-                            active_region = resolve_region;
-                            active_entry = resume;
-                            continue;
+                            {
+                                prior_retired = next_retired;
+                                active_region = resolve_region;
+                                active_entry = resume;
+                                continue;
+                            }
                         }
                         metrics.note_native_type_environment_fallback();
                     }
@@ -1276,9 +1283,11 @@ impl JitEngine {
         }
         match exit.kind() {
             ExitKind::Fuel
+            | ExitKind::Poll
             | ExitKind::Replay
             | ExitKind::Literal
             | ExitKind::Call
+            | ExitKind::GrowRoots
             | ExitKind::GrowActivation
             | ExitKind::TypeResolution
             | ExitKind::TypeEnvironment
@@ -1288,6 +1297,9 @@ impl JitEngine {
             | ExitKind::Allocation
             | ExitKind::Effect
             | ExitKind::Boundary => {
+                if exit.kind() == ExitKind::Poll {
+                    return NativeAttempt::RequestedYield { retired };
+                }
                 let interpreter = matches!(exit.kind(), ExitKind::Replay | ExitKind::Literal);
                 let grow_value_call = exit.kind() == ExitKind::GrowActivation
                     && top_region
@@ -1336,7 +1348,9 @@ impl JitEngine {
                 }
                 if matches!(
                     exit.kind(),
-                    ExitKind::Allocation
+                    ExitKind::GrowRoots
+                        | ExitKind::GrowActivation
+                        | ExitKind::Allocation
                         | ExitKind::Effect
                         | ExitKind::TypeResolution
                         | ExitKind::TypeEnvironment
@@ -1424,7 +1438,6 @@ impl JitEngine {
                     retired,
                 }
             }
-            ExitKind::GrowRoots => malformed_native_exit(retired),
         }
     }
 

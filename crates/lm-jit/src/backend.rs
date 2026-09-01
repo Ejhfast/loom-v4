@@ -17,9 +17,9 @@ use crate::{
     NativeEntryCell, ScalarKind, TreatmentClass, TypeEnvironmentSite, EXIT_BOUNDARY, EXIT_CALL,
     EXIT_CALLBACK_CALL, EXIT_DIVIDE_BY_ZERO, EXIT_EFFECT, EXIT_FUEL, EXIT_GENERIC_VIRTUAL_CALL,
     EXIT_GROW_ACTIVATION, EXIT_GROW_ROOTS, EXIT_GUEST_FAULT, EXIT_HEAP_LIMIT,
-    EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_REPLAY,
-    EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH, EXIT_TYPE_RESOLUTION,
-    EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_INITIALIZED,
+    EXIT_INTEGER_OVERFLOW, EXIT_INTERFACE_CALL, EXIT_INVALID_ENTRY, EXIT_LITERAL, EXIT_POLL,
+    EXIT_REPLAY, EXIT_RETURN, EXIT_STACK_LIMIT, EXIT_TYPE_ENVIRONMENT, EXIT_TYPE_MISMATCH,
+    EXIT_TYPE_RESOLUTION, EXIT_UNINITIALIZED_FIELD, EXIT_UNREACHABLE, LOCAL_INITIALIZED,
 };
 use cranelift_codegen::ir::{
     self, condcodes::FloatCC, condcodes::IntCC, types, AbiParam, AliasRegion, InstBuilder,
@@ -587,22 +587,12 @@ struct SegmentEmission<'a, 'b> {
     plan: &'a RegionPlan,
     input: &'a FunctionInput<'b>,
     type_environment_sites: &'a [TypeEnvironmentSite],
-    exact_fuel: bool,
-    exact_fuel_exit: ExactFuelExit,
-    resume_blocks: Option<&'a [ir::Block]>,
 }
 
 struct DeferredIntegerOverflow {
     flag: Option<ir::Value>,
     locals: Vec<NativeValue>,
     stack: Vec<NativeValue>,
-}
-
-#[derive(Clone, Copy)]
-struct ExactFuelExit {
-    block: ir::Block,
-    local_count: usize,
-    max_stack: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -902,43 +892,11 @@ fn emit_region(
     let body_blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
         .collect();
-    let exact_blocks: Vec<Vec<ir::Block>> = plan
-        .segments
-        .iter()
-        .map(|segment| {
-            segment
-                .fuel_stacks
-                .iter()
-                .map(|_| builder.create_block())
-                .collect()
-        })
-        .collect();
-    let exact_fuel_exit = ExactFuelExit {
-        block: builder.create_block(),
-        local_count: plan.local_kinds.len(),
-        max_stack: plan.max_stack,
-    };
-    builder.append_block_param(exact_fuel_exit.block, types::I64);
-    builder.append_block_param(exact_fuel_exit.block, types::I32);
-    builder.append_block_param(exact_fuel_exit.block, types::I32);
-    builder.append_block_param(exact_fuel_exit.block, types::I32);
-    for _ in 0..exact_fuel_exit.local_count {
-        builder.append_block_param(exact_fuel_exit.block, types::I64);
-        builder.append_block_param(exact_fuel_exit.block, types::I64);
-    }
-    for _ in 0..exact_fuel_exit.max_stack {
-        builder.append_block_param(exact_fuel_exit.block, types::I64);
-        builder.append_block_param(exact_fuel_exit.block, types::I64);
-    }
     builder.set_cold_block(invalid_block);
-    builder.set_cold_block(exact_fuel_exit.block);
     if let Some(block) = preload_failure {
         builder.set_cold_block(block);
     }
     for block in preload_boundary_blocks.iter().copied() {
-        builder.set_cold_block(block);
-    }
-    for block in exact_blocks.iter().flatten().copied() {
         builder.set_cold_block(block);
     }
 
@@ -1114,19 +1072,6 @@ fn emit_region(
             preload_entry_blocks.get(index).copied().unwrap_or(block),
         );
     }
-    for (offset, target) in plan.resume_targets.iter().enumerate() {
-        let index = plan
-            .segments
-            .len()
-            .checked_add(offset)
-            .ok_or(CompileError::Backend)?;
-        let block = exact_blocks
-            .get(target.segment)
-            .and_then(|blocks| blocks.get(target.offset))
-            .copied()
-            .ok_or(CompileError::Backend)?;
-        dispatch.set_entry(index as u128, block);
-    }
     dispatch.emit(&mut builder, entry, invalid_block);
 
     builder.switch_to_block(invalid_block);
@@ -1180,62 +1125,29 @@ fn emit_region(
     for (index, segment) in plan.segments.iter().enumerate() {
         builder.switch_to_block(blocks[index]);
         let body = body_blocks[index];
-        let exact_fuel = builder.create_block();
-        builder.set_cold_block(exact_fuel);
-        if segment.fast_entry {
-            let available = builder.use_var(fuel);
+        if segment.carries_reserved_prefix {
+            emit_entry_exit(&mut builder, values, segment, EXIT_BOUNDARY)?;
+        } else {
+            let fuel_boundary = builder.create_block();
+            builder.set_cold_block(fuel_boundary);
+            let available = builder.use_var(values.fuel);
             let enough = builder.ins().icmp_imm(
-                IntCC::UnsignedGreaterThanOrEqual,
+                IntCC::SignedGreaterThanOrEqual,
                 available,
                 i64::from(segment.fuel_reserve),
             );
-            builder.ins().brif(enough, body, &[], exact_fuel, &[]);
-        } else {
-            builder.ins().jump(exact_fuel, &[]);
-        }
+            builder.ins().brif(enough, body, &[], fuel_boundary, &[]);
 
-        builder.switch_to_block(exact_fuel);
-        let first = exact_blocks[index]
-            .first()
-            .copied()
-            .ok_or(CompileError::Backend)?;
-        builder.ins().jump(first, &[]);
-        let exact_successors: Vec<ir::Block> = segment
-            .successors
-            .iter()
-            .map(|successor| {
-                if plan.segments[*successor].fast_entry {
-                    preload_entry_blocks
-                        .get(*successor)
-                        .copied()
-                        .unwrap_or(blocks[*successor])
-                } else {
-                    exact_blocks[*successor][0]
-                }
-            })
-            .collect();
-        emit_segment(
-            &mut builder,
-            SegmentEmission {
-                bytecode,
-                segment,
-                successor_blocks: &exact_successors,
-                values,
-                plan,
-                input,
-                type_environment_sites,
-                exact_fuel: true,
-                exact_fuel_exit,
-                resume_blocks: Some(&exact_blocks[index]),
-            },
-        )?;
+            builder.switch_to_block(fuel_boundary);
+            emit_reservation_boundary(&mut builder, values, segment, body)?;
+        }
 
         builder.switch_to_block(body);
         let fast_successors: Vec<ir::Block> = segment
             .successors
             .iter()
             .map(|successor| {
-                if bypasses_fuel_check(segment, index, *successor) {
+                if bypasses_fuel_check(&plan.segments, index, *successor) {
                     body_blocks[*successor]
                 } else {
                     blocks[*successor]
@@ -1252,14 +1164,9 @@ fn emit_region(
                 plan,
                 input,
                 type_environment_sites,
-                exact_fuel: false,
-                exact_fuel_exit,
-                resume_blocks: None,
             },
         )?;
     }
-
-    emit_exact_fuel_exit(&mut builder, values, exact_fuel_exit)?;
 
     builder.seal_all_blocks();
     builder.finalize();
@@ -1323,6 +1230,15 @@ fn emit_preload_boundary(
     values: NativeValues<'_>,
     segment: &Segment,
 ) -> Result<(), CompileError> {
+    emit_entry_exit(builder, values, segment, EXIT_BOUNDARY)
+}
+
+fn emit_entry_exit(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    segment: &Segment,
+    kind: u32,
+) -> Result<(), CompileError> {
     let stack = values
         .stack
         .iter()
@@ -1343,7 +1259,7 @@ fn emit_preload_boundary(
         values,
         ExitEmission {
             retired,
-            kind: EXIT_BOUNDARY,
+            kind,
             block: segment.block,
             instruction: segment.start,
             result: NativeValue {
@@ -1367,41 +1283,30 @@ fn emit_segment(
         plan,
         input,
         type_environment_sites,
-        exact_fuel,
-        exact_fuel_exit,
-        resume_blocks,
     } = emission;
     {
         let mut translations = values.heap_translations.borrow_mut();
         translations.clear();
-        translations.set_cached_list_data(!exact_fuel);
+        translations.set_cached_list_data(true);
     }
-    let reserved_prefix_cost = if exact_fuel {
-        0
-    } else {
-        segment.reserved_prefix_cost
-    };
+    let reserved_prefix_cost = segment.reserved_prefix_cost;
     let fast_segment_cost = reserved_prefix_cost
         .checked_add(segment.cost)
         .ok_or(CompileError::Backend)?;
-    let mut stack: Vec<NativeValue> = if resume_blocks.is_some() {
-        Vec::new()
-    } else {
-        values
-            .stack
-            .iter()
-            .copied()
-            .zip(segment.entry_stack.iter().copied())
-            .enumerate()
-            .map(|(slot, (bits, kind))| {
-                Ok(NativeValue {
-                    bits: builder.use_var(bits),
-                    tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
-                })
+    let mut stack: Vec<NativeValue> = values
+        .stack
+        .iter()
+        .copied()
+        .zip(segment.entry_stack.iter().copied())
+        .enumerate()
+        .map(|(slot, (bits, kind))| {
+            Ok(NativeValue {
+                bits: builder.use_var(bits),
+                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
             })
-            .collect::<Result<_, CompileError>>()?
-    };
-    let mut deferred_integer_overflow = if segment.defer_integer_overflow && !exact_fuel {
+        })
+        .collect::<Result<_, CompileError>>()?;
+    let mut deferred_integer_overflow = if segment.defer_integer_overflow {
         Some(DeferredIntegerOverflow {
             flag: None,
             locals: capture_local_values(builder, values)?,
@@ -1416,71 +1321,13 @@ fn emit_segment(
     let code =
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
     for (within, instruction) in code.iter().copied().enumerate() {
-        if let Some(resume_blocks) = resume_blocks {
-            values.heap_translations.borrow_mut().clear();
-            let block = resume_blocks
-                .get(within)
-                .copied()
-                .ok_or(CompileError::Backend)?;
-            builder.switch_to_block(block);
-            let (position, kinds) = segment
-                .fuel_stacks
-                .get(within)
-                .ok_or(CompileError::Backend)?;
-            if *position != segment.start + within as u32 {
-                return Err(CompileError::Backend);
-            }
-            stack = values
-                .stack
-                .iter()
-                .copied()
-                .zip(kinds.iter().copied())
-                .enumerate()
-                .map(|(slot, (bits, kind))| {
-                    Ok(NativeValue {
-                        bits: builder.use_var(bits),
-                        tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
-                    })
-                })
-                .collect::<Result<_, CompileError>>()?;
-        }
         let prefix = within as u32 + 1;
-        let deferred_boundary = within + 1 == code.len()
-            && matches!(
-                segment.exit,
-                SegmentExit::Call { .. }
-                    | SegmentExit::VirtualCall { .. }
-                    | SegmentExit::ValueCall { .. }
-                    | SegmentExit::GenericVirtualCall { .. }
-                    | SegmentExit::InterfaceCall { .. }
-                    | SegmentExit::SlotCall { .. }
-                    | SegmentExit::Effect { .. }
-                    | SegmentExit::Boundary { .. }
-            );
-        if exact_fuel && !deferred_boundary {
-            emit_exact_fuel_check(
-                builder,
-                values,
-                segment.block,
-                segment.start + within as u32,
-                &stack,
-                exact_fuel_exit,
-            )?;
-        }
-        let fault_prefix = if exact_fuel {
-            1
-        } else {
-            reserved_prefix_cost
-                .checked_add(prefix)
-                .ok_or(CompileError::Backend)?
-        };
-        let prior_prefix = if exact_fuel {
-            0
-        } else {
-            reserved_prefix_cost
-                .checked_add(prefix - 1)
-                .ok_or(CompileError::Backend)?
-        };
+        let fault_prefix = reserved_prefix_cost
+            .checked_add(prefix)
+            .ok_or(CompileError::Backend)?;
+        let prior_prefix = reserved_prefix_cost
+            .checked_add(prefix - 1)
+            .ok_or(CompileError::Backend)?;
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -4988,17 +4835,6 @@ fn emit_segment(
         ) {
             values.heap_translations.borrow_mut().clear();
         }
-        if exact_fuel && !deferred_boundary {
-            emit_charge(builder, values, 1);
-        }
-        if let Some(resume_blocks) = resume_blocks.filter(|_| within + 1 < code.len()) {
-            define_stack(builder, values, &stack)?;
-            let next = resume_blocks
-                .get(within + 1)
-                .copied()
-                .ok_or(CompileError::Backend)?;
-            builder.ins().jump(next, &[]);
-        }
     }
 
     if let Some(deferred) = deferred_integer_overflow {
@@ -5025,7 +4861,7 @@ fn emit_segment(
             | SegmentExit::SlotCall { .. }
     ) {
         let call_instruction = segment.end - 1;
-        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost);
         let contract = segment
             .call_contract
             .as_ref()
@@ -5260,7 +5096,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Effect { .. }) {
         let effect_instruction = segment.end - 1;
-        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5283,7 +5119,7 @@ fn emit_segment(
 
     if matches!(segment.exit, SegmentExit::Boundary { .. }) {
         let instruction = segment.end - 1;
-        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5305,7 +5141,7 @@ fn emit_segment(
     }
 
     if matches!(segment.exit, SegmentExit::Unreachable) {
-        emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+        emit_segment_charge(builder, values, fast_segment_cost);
         let retired = emit_retired(builder, values);
         let zero = builder.ins().iconst(types::I64, 0);
         emit_exit(
@@ -5327,13 +5163,18 @@ fn emit_segment(
     }
 
     match segment.exit {
+        SegmentExit::Continue { .. } => {
+            emit_segment_charge(builder, values, fast_segment_cost);
+            define_stack(builder, values, &stack)?;
+            builder.ins().jump(successor_blocks[0], &[]);
+        }
         SegmentExit::Jump { .. } => {
             let carries = segment
                 .carry_reserved_cost
                 .first()
                 .copied()
                 .ok_or(CompileError::Backend)?;
-            if !exact_fuel && !carries {
+            if !carries {
                 emit_charge(builder, values, fast_segment_cost);
             }
             define_stack(builder, values, &stack)?;
@@ -5350,22 +5191,20 @@ fn emit_segment(
             let mut fallthrough = successor_blocks[1];
             let mut charged_target = None;
             let mut charged_fallthrough = None;
-            if !exact_fuel {
-                let carries_target = segment.carry_reserved_cost[0];
-                let carries_fallthrough = segment.carry_reserved_cost[1];
-                match (carries_target, carries_fallthrough) {
-                    (false, false) => emit_charge(builder, values, fast_segment_cost),
-                    (true, true) => {}
-                    (false, true) => {
-                        let block = builder.create_block();
-                        target = block;
-                        charged_target = Some(block);
-                    }
-                    (true, false) => {
-                        let block = builder.create_block();
-                        fallthrough = block;
-                        charged_fallthrough = Some(block);
-                    }
+            let carries_target = segment.carry_reserved_cost[0];
+            let carries_fallthrough = segment.carry_reserved_cost[1];
+            match (carries_target, carries_fallthrough) {
+                (false, false) => emit_charge(builder, values, fast_segment_cost),
+                (true, true) => {}
+                (false, true) => {
+                    let block = builder.create_block();
+                    target = block;
+                    charged_target = Some(block);
+                }
+                (true, false) => {
+                    let block = builder.create_block();
+                    fallthrough = block;
+                    charged_fallthrough = Some(block);
                 }
             }
             if jump_on_true {
@@ -5391,7 +5230,7 @@ fn emit_segment(
         SegmentExit::InterfaceCall { .. } => unreachable!(),
         SegmentExit::SlotCall { .. } => unreachable!(),
         SegmentExit::Allocation { .. } => {
-            emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+            emit_segment_charge(builder, values, fast_segment_cost);
             define_stack(builder, values, &stack)?;
             builder.ins().jump(successor_blocks[0], &[]);
         }
@@ -5399,7 +5238,7 @@ fn emit_segment(
         SegmentExit::Boundary { .. } => unreachable!(),
         SegmentExit::Unreachable => unreachable!(),
         SegmentExit::Return => {
-            emit_segment_charge(builder, values, fast_segment_cost, exact_fuel);
+            emit_segment_charge(builder, values, fast_segment_cost);
             let result = pop_value(&mut stack)?;
             emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
         }
@@ -6177,9 +6016,8 @@ fn emit_native_call(
     } else {
         boundary_stack.clone()
     };
-    let poll = builder.create_block();
+    let hard_check = builder.create_block();
     let fuel_exit = builder.create_block();
-    let rearm = builder.create_block();
     let lookup = builder.create_block();
     let fallback = builder.create_block();
     let root_check = builder.create_block();
@@ -6192,19 +6030,24 @@ fn emit_native_call(
     let returned = builder.create_block();
     let propagate = builder.create_block();
 
+    builder.set_cold_block(hard_check);
+    builder.set_cold_block(fuel_exit);
     let fuel = builder.use_var(values.fuel);
     let has_fuel = builder
         .ins()
-        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, fuel, 1);
-    builder.ins().brif(has_fuel, lookup, &[], poll, &[]);
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, fuel, 1);
+    builder.ins().brif(has_fuel, lookup, &[], hard_check, &[]);
 
-    builder.switch_to_block(poll);
+    builder.switch_to_block(hard_check);
     let retired = emit_retired(builder, values);
-    emit_native_poll_decision(builder, values, retired, rearm, fuel_exit)?;
-
-    builder.switch_to_block(rearm);
-    emit_native_poll_rearm_values(builder, values, retired)?;
-    builder.ins().jump(lookup, &[]);
+    let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
+    let remaining = builder.ins().isub(hard_fuel, retired);
+    let has_hard_fuel = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, remaining, 1);
+    builder
+        .ins()
+        .brif(has_hard_fuel, lookup, &[], fuel_exit, &[]);
 
     builder.switch_to_block(fuel_exit);
     let zero = builder.ins().iconst(types::I64, 0);
@@ -7083,242 +6926,70 @@ fn emit_retired_with_prefix(
     builder.ins().iadd_imm(retired, i64::from(prefix))
 }
 
-fn emit_segment_charge(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    cost: u32,
-    exact_fuel: bool,
-) {
-    if !exact_fuel {
-        emit_charge(builder, values, cost);
-    }
+fn emit_segment_charge(builder: &mut FunctionBuilder<'_>, values: NativeValues<'_>, cost: u32) {
+    emit_charge(builder, values, cost);
 }
 
-fn emit_exact_fuel_check(
+fn emit_reservation_boundary(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
-    block: u32,
-    instruction: u32,
-    stack: &[NativeValue],
-    exit: ExactFuelExit,
+    segment: &Segment,
+    continuation: ir::Block,
 ) -> Result<(), CompileError> {
-    if exit.local_count != values.locals.len()
-        || exit.max_stack != values.stack.len()
-        || stack.len() > exit.max_stack
-    {
-        return Err(CompileError::Backend);
-    }
-    let run = builder.create_block();
-    let poll = builder.create_block();
-    let rearm = builder.create_block();
-    let materialize = builder.create_block();
-    builder.set_cold_block(materialize);
-    let fuel = builder.use_var(values.fuel);
-    let available = builder.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
-    builder.ins().brif(available, run, &[], poll, &[]);
-
-    builder.switch_to_block(poll);
-    let retired = emit_retired(builder, values);
-    emit_native_poll_decision(builder, values, retired, rearm, materialize)?;
-
-    builder.switch_to_block(rearm);
-    emit_native_poll_rearm_values(builder, values, retired)?;
-    builder.ins().jump(run, &[]);
-
-    builder.switch_to_block(materialize);
-    let mut arguments: Vec<ir::BlockArg> = Vec::with_capacity(
-        4 + exit.local_count.saturating_mul(2) + exit.max_stack.saturating_mul(2),
-    );
-    arguments.push(retired.into());
-    arguments.push(builder.ins().iconst(types::I32, i64::from(block)).into());
-    arguments.push(
-        builder
-            .ins()
-            .iconst(types::I32, i64::from(instruction))
-            .into(),
-    );
-    arguments.push(
-        builder
-            .ins()
-            .iconst(
-                types::I32,
-                i64::try_from(stack.len()).map_err(|_| CompileError::Backend)?,
-            )
-            .into(),
-    );
-    for (slot, kind) in values.local_kinds.iter().copied().enumerate() {
-        arguments.push(builder.use_var(values.locals[slot]).into());
-        arguments.push(emit_slot_tag(builder, values.local_tags[slot], kind)?.into());
-    }
-    let zero = builder.ins().iconst(types::I64, 0);
-    for slot in 0..exit.max_stack {
-        if let Some(value) = stack.get(slot).copied() {
-            arguments.push(value.bits.into());
-            arguments.push(value.tag.into());
-        } else {
-            arguments.push(zero.into());
-            arguments.push(zero.into());
-        }
-    }
-    builder.ins().jump(exit.block, &arguments);
-    builder.switch_to_block(run);
-    Ok(())
-}
-
-fn emit_exact_fuel_exit(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    exit: ExactFuelExit,
-) -> Result<(), CompileError> {
-    builder.switch_to_block(exit.block);
-    let parameters = builder.block_params(exit.block).to_vec();
-    let expected = 4usize
-        .checked_add(
-            exit.local_count
-                .checked_mul(2)
-                .ok_or(CompileError::Backend)?,
-        )
-        .and_then(|count| count.checked_add(exit.max_stack.checked_mul(2)?))
-        .ok_or(CompileError::Backend)?;
-    if parameters.len() != expected {
-        return Err(CompileError::Backend);
-    }
-    let retired = parameters[0];
-    let block = parameters[1];
-    let instruction = parameters[2];
-    let stack_len = parameters[3];
-    let mut parameter = 4;
-    for slot in 0..exit.local_count {
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        builder.ins().store(
-            MemFlags::new(),
-            parameters[parameter],
-            values.local_pointer,
-            offset,
-        );
-        builder.ins().store(
-            MemFlags::new(),
-            parameters[parameter + 1],
-            values.local_tag_pointer,
-            offset,
-        );
-        parameter += 2;
-    }
-    for slot in 0..exit.max_stack {
-        let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
-            .map_err(|_| CompileError::Backend)?;
-        builder.ins().store(
-            MemFlags::new(),
-            parameters[parameter],
-            values.stack_pointer,
-            offset,
-        );
-        builder.ins().store(
-            MemFlags::new(),
-            parameters[parameter + 1],
-            values.stack_tag_pointer,
-            offset,
-        );
-        parameter += 2;
-    }
-    let frame = emit_current_frame_pointer(builder, values)?;
-    store_i32_value(
-        builder,
-        frame,
-        mem::offset_of!(RawNativeFrame, block),
-        block,
-    )?;
-    store_i32_value(
-        builder,
-        frame,
-        mem::offset_of!(RawNativeFrame, instruction),
-        instruction,
-    )?;
-    store_i32_value(
-        builder,
-        frame,
-        mem::offset_of!(RawNativeFrame, operand_len),
-        stack_len,
-    )?;
-    store_i64(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, retired),
-        retired,
-    )?;
-    store_i32_constant(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, kind),
-        EXIT_FUEL,
-    )?;
-    store_i32_value(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, block),
-        block,
-    )?;
-    store_i32_value(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, instruction),
-        instruction,
-    )?;
-    store_i32_value(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, stack_len),
-        stack_len,
-    )?;
-    let zero = builder.ins().iconst(types::I64, 0);
-    store_i64(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, result_tag),
-        zero,
-    )?;
-    store_i64(
-        builder,
-        values.exit_pointer,
-        mem::offset_of!(RawExit, result),
-        zero,
-    )?;
-    builder.ins().return_(&[]);
-    Ok(())
-}
-
-fn emit_native_poll_decision(
-    builder: &mut FunctionBuilder<'_>,
-    values: NativeValues<'_>,
-    retired: ir::Value,
-    rearm: ir::Block,
-    materialize: ir::Block,
-) -> Result<(), CompileError> {
+    let check_poll = builder.create_block();
     let check_request = builder.create_block();
-    let check_budget = builder.create_block();
-    let requested = load_activation_pointer(builder, values, RawActivationField::PollRequested)?;
-    let has_poll = builder.ins().icmp_imm(IntCC::NotEqual, requested, 0);
+    let load_request = builder.create_block();
+    let rearm = builder.create_block();
+    let fuel_exit = builder.create_block();
+    let poll_exit = builder.create_block();
+    builder.set_cold_block(check_poll);
+    builder.set_cold_block(check_request);
+    builder.set_cold_block(load_request);
+    builder.set_cold_block(rearm);
+    builder.set_cold_block(fuel_exit);
+    builder.set_cold_block(poll_exit);
+    let retired = emit_retired(builder, values);
+    let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
+    let hard_remaining = builder.ins().isub(hard_fuel, retired);
+    let has_hard_fuel = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        hard_remaining,
+        i64::from(segment.fuel_reserve),
+    );
     builder
         .ins()
-        .brif(has_poll, check_request, &[], materialize, &[]);
+        .brif(has_hard_fuel, check_poll, &[], fuel_exit, &[]);
+
+    builder.switch_to_block(fuel_exit);
+    emit_entry_exit(builder, values, segment, EXIT_FUEL)?;
+
+    builder.switch_to_block(check_poll);
+    let deadline = load_activation_u64(builder, values, RawActivationField::PollDeadline)?;
+    let due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, retired, deadline);
+    builder
+        .ins()
+        .brif(due, check_request, &[], continuation, &[]);
 
     builder.switch_to_block(check_request);
+    let requested = load_activation_pointer(builder, values, RawActivationField::PollRequested)?;
+    let enabled = builder.ins().icmp_imm(IntCC::NotEqual, requested, 0);
+    builder.ins().brif(enabled, load_request, &[], rearm, &[]);
+
+    builder.switch_to_block(load_request);
     let request = builder
         .ins()
         .atomic_load(types::I32, MemFlags::new(), requested);
     let idle = builder.ins().icmp_imm(IntCC::Equal, request, 0);
-    builder
-        .ins()
-        .brif(idle, check_budget, &[], materialize, &[]);
+    builder.ins().brif(idle, rearm, &[], poll_exit, &[]);
 
-    builder.switch_to_block(check_budget);
-    let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
-    let has_budget = builder
-        .ins()
-        .icmp(IntCC::UnsignedLessThan, retired, hard_fuel);
-    builder.ins().brif(has_budget, rearm, &[], materialize, &[]);
-    Ok(())
+    builder.switch_to_block(rearm);
+    emit_native_poll_rearm_values(builder, values, retired)?;
+    builder.ins().jump(continuation, &[]);
+
+    builder.switch_to_block(poll_exit);
+    emit_entry_exit(builder, values, segment, EXIT_POLL)
 }
 
 fn emit_native_poll_rearm_values(
@@ -14112,7 +13783,15 @@ fn emit_exit_with_locals(
     locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    emit_spill_frame_values(builder, values, exit.block, exit.instruction, locals, stack)?;
+    let storage = reload_active_frame_storage(builder, values)?;
+    emit_spill_frame_values(
+        builder,
+        storage,
+        exit.block,
+        exit.instruction,
+        locals,
+        stack,
+    )?;
     store_i64(
         builder,
         values.exit_pointer,
@@ -14157,6 +13836,40 @@ fn emit_exit_with_locals(
     )?;
     builder.ins().return_(&[]);
     Ok(())
+}
+
+fn reload_active_frame_storage<'a>(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'a>,
+) -> Result<NativeValues<'a>, CompileError> {
+    let frame = emit_current_frame_pointer(builder, values)?;
+    let scalar_base = load_cell_u32(builder, frame, mem::offset_of!(RawNativeFrame, scalar_base))?;
+    let scalar_base = builder.ins().uextend(values.pointer_type, scalar_base);
+    let scalar_offset = builder.ins().ishl_imm(scalar_base, 3);
+    let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
+    let tags = load_activation_pointer(builder, values, RawActivationField::Tags)?;
+    let states = load_activation_pointer(builder, values, RawActivationField::States)?;
+    let local_pointer = builder.ins().iadd(scalars, scalar_offset);
+    let local_tag_pointer = builder.ins().iadd(tags, scalar_offset);
+    let local_state_pointer = builder.ins().iadd(states, scalar_base);
+    let local_bytes = i64::try_from(
+        values
+            .locals
+            .len()
+            .checked_mul(8)
+            .ok_or(CompileError::Backend)?,
+    )
+    .map_err(|_| CompileError::Backend)?;
+    let stack_pointer = builder.ins().iadd_imm(local_pointer, local_bytes);
+    let stack_tag_pointer = builder.ins().iadd_imm(local_tag_pointer, local_bytes);
+    Ok(NativeValues {
+        local_pointer,
+        local_tag_pointer,
+        local_state_pointer,
+        stack_pointer,
+        stack_tag_pointer,
+        ..values
+    })
 }
 
 fn emit_function_return(
@@ -14251,6 +13964,16 @@ fn emit_function_return(
     builder.ins().brif(published, tail, &[], normal, &[]);
 
     builder.switch_to_block(tail);
+    let runtime_context =
+        load_activation_pointer(builder, values, RawActivationField::RuntimeContext)?;
+    let runtime_functions =
+        load_activation_pointer(builder, values, RawActivationField::RuntimeFunctions)?;
+    let allocation_result =
+        load_activation_pointer(builder, values, RawActivationField::AllocationResult)?;
+    let roots = load_activation_pointer(builder, values, RawActivationField::Roots)?;
+    let root_tags = load_activation_pointer(builder, values, RawActivationField::RootTags)?;
+    let root_states = load_activation_pointer(builder, values, RawActivationField::RootStates)?;
+    let exit = load_activation_pointer(builder, values, RawActivationField::Exit)?;
     let child_index = builder.ins().iadd_imm(frame_len, -1);
     let child_index = builder.ins().uextend(values.pointer_type, child_index);
     let child_offset = builder
@@ -14355,13 +14078,13 @@ fn emit_function_return(
             parent_operand_tags,
             fuel,
             parent_entry,
-            values.runtime_context,
-            values.runtime_functions,
-            values.allocation_result_pointer,
-            values.root_pointer,
-            values.root_tag_pointer,
-            values.root_state_pointer,
-            values.exit_pointer,
+            runtime_context,
+            runtime_functions,
+            allocation_result,
+            roots,
+            root_tags,
+            root_states,
+            exit,
             values.activation_pointer,
             retired,
             detached,
@@ -14580,6 +14303,13 @@ fn store_i32_constant(
 
 #[derive(Clone, Copy)]
 enum RawActivationField {
+    RuntimeContext,
+    RuntimeFunctions,
+    AllocationResult,
+    Roots,
+    RootTags,
+    RootStates,
+    Exit,
     Scalars,
     Tags,
     States,
@@ -14606,6 +14336,19 @@ enum RawActivationField {
 impl RawActivationField {
     fn offset(self) -> usize {
         match self {
+            RawActivationField::RuntimeContext => {
+                mem::offset_of!(RawNativeActivation, runtime_context)
+            }
+            RawActivationField::RuntimeFunctions => {
+                mem::offset_of!(RawNativeActivation, runtime_functions)
+            }
+            RawActivationField::AllocationResult => {
+                mem::offset_of!(RawNativeActivation, allocation_result)
+            }
+            RawActivationField::Roots => mem::offset_of!(RawNativeActivation, roots),
+            RawActivationField::RootTags => mem::offset_of!(RawNativeActivation, root_tags),
+            RawActivationField::RootStates => mem::offset_of!(RawNativeActivation, root_states),
+            RawActivationField::Exit => mem::offset_of!(RawNativeActivation, exit),
             RawActivationField::Scalars => mem::offset_of!(RawNativeActivation, scalars),
             RawActivationField::Tags => mem::offset_of!(RawNativeActivation, tags),
             RawActivationField::States => mem::offset_of!(RawNativeActivation, states),
