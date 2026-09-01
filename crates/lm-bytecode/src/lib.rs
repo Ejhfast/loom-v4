@@ -15,6 +15,9 @@ pub mod debug;
 pub mod hash;
 pub mod identity;
 pub mod interface;
+pub mod stack;
+
+pub use stack::{stack_effect, StackEffectTables};
 
 use std::fmt;
 
