@@ -58,7 +58,7 @@ use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
     VALUE_TAG_OFFSET,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 use std::sync::Mutex;
 
@@ -377,6 +377,7 @@ struct NativeValues<'a> {
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
     detached_return: ir::Value,
+    replay_blocks: &'a [ReplayBlock],
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
     heap_translations: &'a RefCell<HeapTranslationCache>,
@@ -591,6 +592,22 @@ struct SegmentEmission<'a, 'b> {
 
 struct DeferredIntegerOverflow {
     flag: Option<ir::Value>,
+    locals: Vec<NativeValue>,
+    stack: Vec<NativeValue>,
+}
+
+struct ReplayBlock {
+    instruction: u32,
+    block: ir::Block,
+    used: Cell<bool>,
+}
+
+struct ReplayExitState {
+    target: ir::Block,
+    block: u32,
+    instruction: u32,
+    retired: ir::Value,
+    prefix: u32,
     locals: Vec<NativeValue>,
     stack: Vec<NativeValue>,
 }
@@ -892,12 +909,30 @@ fn emit_region(
     let body_blocks: Vec<ir::Block> = (0..plan.segments.len())
         .map(|_| builder.create_block())
         .collect();
+    let replay_blocks: Vec<Vec<ReplayBlock>> = plan
+        .segments
+        .iter()
+        .map(|segment| {
+            segment
+                .replay_stacks
+                .iter()
+                .map(|(instruction, _)| ReplayBlock {
+                    instruction: *instruction,
+                    block: builder.create_block(),
+                    used: Cell::new(false),
+                })
+                .collect()
+        })
+        .collect();
     builder.set_cold_block(invalid_block);
     if let Some(block) = preload_failure {
         builder.set_cold_block(block);
     }
     for block in preload_boundary_blocks.iter().copied() {
         builder.set_cold_block(block);
+    }
+    for replay in replay_blocks.iter().flatten() {
+        builder.set_cold_block(replay.block);
     }
 
     builder.switch_to_block(entry_block);
@@ -1060,6 +1095,7 @@ fn emit_region(
         exit_pointer,
         activation_pointer,
         detached_return,
+        replay_blocks: &[],
         pointer_type,
         frontend_config,
         heap_translations: &heap_translations,
@@ -1143,6 +1179,10 @@ fn emit_region(
         }
 
         builder.switch_to_block(body);
+        let segment_values = NativeValues {
+            replay_blocks: &replay_blocks[index],
+            ..values
+        };
         let fast_successors: Vec<ir::Block> = segment
             .successors
             .iter()
@@ -1160,7 +1200,7 @@ fn emit_region(
                 bytecode,
                 segment,
                 successor_blocks: &fast_successors,
-                values,
+                values: segment_values,
                 plan,
                 input,
                 type_environment_sites,
@@ -1275,6 +1315,67 @@ fn emit_segment(
     builder: &mut FunctionBuilder<'_>,
     emission: SegmentEmission<'_, '_>,
 ) -> Result<(), CompileError> {
+    let values = emission.values;
+    let segment = emission.segment;
+    let stack: Vec<NativeValue> = values
+        .stack
+        .iter()
+        .copied()
+        .zip(segment.entry_stack.iter().copied())
+        .enumerate()
+        .map(|(slot, (bits, kind))| {
+            Ok(NativeValue {
+                bits: builder.use_var(bits),
+                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
+            })
+        })
+        .collect::<Result<_, CompileError>>()?;
+    let mut replay_exits = Vec::with_capacity(values.replay_blocks.len());
+    emit_segment_body(builder, emission, stack, &mut replay_exits)?;
+    for replay in replay_exits {
+        let used = values
+            .replay_blocks
+            .iter()
+            .find(|candidate| candidate.block == replay.target)
+            .is_some_and(|candidate| candidate.used.get());
+        if !used {
+            continue;
+        }
+        builder.switch_to_block(replay.target);
+        let retired = if replay.prefix == 0 {
+            replay.retired
+        } else {
+            builder
+                .ins()
+                .iadd_imm(replay.retired, i64::from(replay.prefix))
+        };
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit_with_locals(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_REPLAY,
+                block: replay.block,
+                instruction: replay.instruction,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
+            },
+            &replay.locals,
+            &replay.stack,
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_segment_body(
+    builder: &mut FunctionBuilder<'_>,
+    emission: SegmentEmission<'_, '_>,
+    mut stack: Vec<NativeValue>,
+    replay_exits: &mut Vec<ReplayExitState>,
+) -> Result<(), CompileError> {
     let SegmentEmission {
         bytecode,
         segment,
@@ -1293,19 +1394,6 @@ fn emit_segment(
     let fast_segment_cost = reserved_prefix_cost
         .checked_add(segment.cost)
         .ok_or(CompileError::Backend)?;
-    let mut stack: Vec<NativeValue> = values
-        .stack
-        .iter()
-        .copied()
-        .zip(segment.entry_stack.iter().copied())
-        .enumerate()
-        .map(|(slot, (bits, kind))| {
-            Ok(NativeValue {
-                bits: builder.use_var(bits),
-                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
-            })
-        })
-        .collect::<Result<_, CompileError>>()?;
     let mut deferred_integer_overflow = if segment.defer_integer_overflow {
         Some(DeferredIntegerOverflow {
             flag: None,
@@ -1328,6 +1416,23 @@ fn emit_segment(
         let prior_prefix = reserved_prefix_cost
             .checked_add(prefix - 1)
             .ok_or(CompileError::Backend)?;
+        let position = segment.start + within as u32;
+        if crate::instruction_treatment(&instruction).replays() {
+            let target = values
+                .replay_blocks
+                .iter()
+                .find_map(|replay| (replay.instruction == position).then_some(replay.block))
+                .ok_or(CompileError::Backend)?;
+            replay_exits.push(ReplayExitState {
+                target,
+                block: segment.block,
+                instruction: position,
+                retired: builder.use_var(values.retired),
+                prefix: prior_prefix,
+                locals: capture_local_values(builder, values)?,
+                stack: stack.clone(),
+            });
+        }
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -6676,6 +6781,11 @@ fn emit_virtual_target(
     point: FaultPoint,
     deopt_stack: &[NativeValue],
 ) -> Result<ir::Value, CompileError> {
+    let guard_point = FaultPoint {
+        block: point.block,
+        instruction: point.instruction.saturating_add(1),
+        prefix: point.prefix.saturating_add(1),
+    };
     let class = match contract {
         VirtualReceiver::Immediate { class } => builder.ins().iconst(types::I32, i64::from(class)),
         VirtualReceiver::Object { tag, class } => {
@@ -6684,7 +6794,7 @@ fn emit_virtual_target(
                 values,
                 receiver.bits,
                 tag,
-                point,
+                guard_point,
                 ObjectGuard::Replay(deopt_stack),
             )?;
             builder.ins().iconst(types::I32, i64::from(class))
@@ -6695,7 +6805,7 @@ fn emit_virtual_target(
                 values,
                 receiver.bits,
                 class,
-                point,
+                guard_point,
                 ObjectGuard::Replay(deopt_stack),
                 ObjectGuard::Replay(deopt_stack),
             )?;
@@ -6706,7 +6816,7 @@ fn emit_virtual_target(
                 builder,
                 values,
                 receiver.bits,
-                point,
+                guard_point,
                 ObjectGuard::Replay(deopt_stack),
             )?;
             let tag = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
@@ -6729,7 +6839,7 @@ fn emit_virtual_target(
     let outside = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, class_index, row_count);
-    emit_interpreter_replay(builder, values, outside, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, outside, guard_point, deopt_stack)?;
     let rows = load_value(
         builder,
         values.pointer_type,
@@ -6760,13 +6870,13 @@ fn emit_virtual_target(
     )?;
     let selector = builder.ins().iconst(types::I32, i64::from(selector));
     let below = builder.ins().icmp(IntCC::UnsignedLessThan, selector, base);
-    emit_interpreter_replay(builder, values, below, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, below, guard_point, deopt_stack)?;
     let offset = builder.ins().isub(selector, base);
     let offset = builder.ins().uextend(values.pointer_type, offset);
     let past = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, offset, len);
-    emit_interpreter_replay(builder, values, past, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, past, guard_point, deopt_stack)?;
     let method_index = builder.ins().iadd(start, offset);
     let method_count = load_value(
         builder,
@@ -6779,7 +6889,7 @@ fn emit_virtual_target(
         method_index,
         method_count,
     );
-    emit_interpreter_replay(builder, values, method_outside, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, method_outside, guard_point, deopt_stack)?;
     let methods = load_value(
         builder,
         values.pointer_type,
@@ -6796,7 +6906,7 @@ fn emit_virtual_target(
     let missing = builder
         .ins()
         .icmp_imm(IntCC::Equal, target, u32::MAX as i64);
-    emit_interpreter_replay(builder, values, missing, point, deopt_stack)?;
+    emit_interpreter_replay(builder, values, missing, guard_point, deopt_stack)?;
     Ok(target)
 }
 
@@ -13457,29 +13567,19 @@ fn emit_interpreter_replay(
     values: NativeValues<'_>,
     replay: ir::Value,
     point: FaultPoint,
-    stack: &[NativeValue],
+    _stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    let interpreter = builder.create_block();
+    let instruction = point.instruction.saturating_sub(1);
+    let replay_block = values
+        .replay_blocks
+        .iter()
+        .find(|replay| replay.instruction == instruction)
+        .ok_or(CompileError::Backend)?;
+    replay_block.used.set(true);
     let success = builder.create_block();
-    builder.ins().brif(replay, interpreter, &[], success, &[]);
-    builder.switch_to_block(interpreter);
-    let retired = emit_retired_with_prefix(builder, values, point.prefix.saturating_sub(1));
-    let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_REPLAY,
-            block: point.block,
-            instruction: point.instruction.saturating_sub(1),
-            result: NativeValue {
-                bits: zero,
-                tag: zero,
-            },
-        },
-        stack,
-    )?;
+    builder
+        .ins()
+        .brif(replay, replay_block.block, &[], success, &[]);
     builder.switch_to_block(success);
     Ok(())
 }

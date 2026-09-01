@@ -127,11 +127,13 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         Instr::Neg => dedicated(Inline).with_fault_stack(FaultStack::Pop(1)),
         Instr::Native(operation) => native_treatment(*operation),
         Instr::Numeric(operation) => numeric_treatment(*operation),
-        Instr::Call(_)
-        | Instr::CallG { .. }
+        Instr::Call(_) => InstructionTreatment::dedicated(Call, ExitBehavior::Call),
+        Instr::CallG { .. }
         | Instr::CallVirtual { .. }
         | Instr::CallVirtualG { .. }
-        | Instr::CallInterface { .. } => InstructionTreatment::dedicated(Call, ExitBehavior::Call),
+        | Instr::CallInterface { .. } => {
+            InstructionTreatment::dedicated(Call, ExitBehavior::Call).with_replay()
+        }
         Instr::CallValue { .. } => {
             InstructionTreatment::dedicated(Call, ExitBehavior::Call).with_replay()
         }
@@ -343,7 +345,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
         ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. } => {
-            InstructionTreatment::dedicated(Call, ExitBehavior::Call)
+            InstructionTreatment::dedicated(Call, ExitBehavior::Call).with_replay()
         }
         ExtendedInstr::LoadSlot { .. } => {
             InstructionTreatment::dedicated(Exit, ExitBehavior::Boundary)

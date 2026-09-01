@@ -54,6 +54,7 @@ fn opcode_ledger_separates_class_and_exit() {
     });
     assert_eq!(call.class(), TreatmentClass::Call);
     assert_eq!(call.exit(), ExitBehavior::Call);
+    assert!(call.replays());
 
     let helper = instruction_treatment(&Instr::Numeric(NumericInstr::BytesBitAnd));
     assert_eq!(helper.class(), TreatmentClass::Helper);

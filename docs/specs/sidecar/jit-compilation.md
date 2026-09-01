@@ -3068,6 +3068,42 @@ Cold code still contains fault and boundary materialization paths.
 
 These paths remain necessary and stay outside the hot path.
 
+### Stage F57: Share guarded replay exits
+
+- give each replayable instruction one cold replay block;
+- branch all guards for that instruction to the shared block;
+- capture instruction-head state once;
+- keep normal reservation heads unchanged;
+- record replay behavior for guarded call treatments.
+
+The shared block materializes one exact instruction-head state.
+
+The interpreter replays that instruction after the exit.
+
+Virtual-call guards now use the call instruction as their replay position.
+
+The focused JIT suite passed 158 tests.
+
+The full workspace suite passed.
+
+| Cold release row | Stage F56 | Stage F57 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.948 ms | 1.907 ms | within variance |
+| JSON compile and run | 505.595 ms | 464.755 ms | 8.1 percent faster |
+| 301-function compile and run | 573.209 ms | 568.077 ms | within variance |
+
+| Compiled code set | Stage F56 | Stage F57 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,966 bytes | 2,966 bytes | unchanged |
+| JSON parser | 2,546,955 bytes | 2,200,070 bytes | 13.6 percent smaller |
+| 301 functions | 1,897,130 bytes | 1,897,130 bytes | unchanged |
+
+Warm representative results stayed within measurement variance.
+
+Remaining cold exits still spill all initialized locals and operands.
+
+The next stage must reduce those spill sets.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
