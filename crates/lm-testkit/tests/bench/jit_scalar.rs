@@ -38,6 +38,22 @@ fn bench_jit_inline_leaf_scheduler() {
 
 #[test]
 #[ignore]
+fn bench_jit_text_split_helper() {
+    report_jit_representative(
+        "jit_text_split_helper",
+        concat!(
+            "row = \"alpha,beta,gamma,delta,epsilon,zeta,eta,theta,iota,kappa\"\n",
+            "total = 0\ni = 0\n",
+            "while i < 100000\n",
+            "  total = total + row.split(\",\").len()\n",
+            "  i = i + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_jit_scalar_regions() {
     println!(
         "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"

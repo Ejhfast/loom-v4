@@ -390,106 +390,28 @@ impl MachineRuntime<'_> {
         } else {
             None
         };
-        let visible = text.as_str();
-        let mut ranges = Vec::new();
-        match separator.as_ref() {
-            Some(separator) if separator.as_str().is_empty() => {
-                let Some(count) = text.char_count().checked_add(2) else {
-                    return HeapOperationResult::HeapLimit;
-                };
-                if ranges.try_reserve_exact(count).is_err() {
-                    return HeapOperationResult::HeapLimit;
-                }
-                ranges.push((0, 0));
-                let mut start = 0;
-                for (at, scalar) in visible.char_indices() {
-                    ranges.push((at, at + scalar.len_utf8()));
-                    start = at + scalar.len_utf8();
-                }
-                ranges.push((start, visible.len()));
-            }
-            Some(separator) => {
-                let needle = separator.as_str();
-                let Some(count) = visible.match_indices(needle).count().checked_add(1) else {
-                    return HeapOperationResult::HeapLimit;
-                };
-                if ranges.try_reserve_exact(count).is_err() {
-                    return HeapOperationResult::HeapLimit;
-                }
-                let mut start = 0;
-                while let Some(at) = visible[start..].find(needle) {
-                    let at = start + at;
-                    ranges.push((start, at));
-                    start = at + needle.len();
-                }
-                ranges.push((start, visible.len()));
-            }
-            None => {
-                let count = visible
-                    .as_bytes()
-                    .iter()
-                    .filter(|byte| **byte == b'\n')
-                    .count()
-                    .saturating_add(1);
-                if ranges.try_reserve_exact(count).is_err() {
-                    return HeapOperationResult::HeapLimit;
-                }
-                let mut start = 0;
-                while start < visible.len() {
-                    let end = visible[start..]
-                        .find('\n')
-                        .map(|at| start + at)
-                        .unwrap_or(visible.len());
-                    let stop = if visible[start..end].ends_with('\r') {
-                        end - 1
-                    } else {
-                        end
-                    };
-                    ranges.push((start, stop));
-                    start = end + 1;
-                }
-            }
-        }
-        let Some(cost) = ranges.len().checked_mul(2 * lm_heap::MIN_OBJECT_COST) else {
+        let pieces = match separator.as_ref() {
+            Some(separator) => text.try_split_views(separator.as_str()),
+            None => text.try_line_views(),
+        };
+        let pieces = match pieces {
+            Ok(pieces) => pieces,
+            Err(_) => return HeapOperationResult::HeapLimit,
+        };
+        let Some(cost) = lm_heap::Heap::text_view_list_base_cost(pieces.len()) else {
             return HeapOperationResult::HeapLimit;
         };
         if let Err(result) = self.reserve_heap_growth(cost, &request) {
             return result;
         }
-        let mut items = Vec::new();
-        if items.try_reserve_exact(ranges.len()).is_err() {
+        let piece_count = pieces.len();
+        let Some(reference) = self.machine.vm.heap.try_alloc_text_view_list(pieces) else {
             return HeapOperationResult::HeapLimit;
-        }
-        let mut extra_roots = Vec::new();
-        if extra_roots.try_reserve_exact(ranges.len()).is_err() {
-            return HeapOperationResult::HeapLimit;
-        }
-        for (start, end) in ranges {
-            let Some(piece) = text.slice(start, end) else {
-                return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds);
-            };
-            let reference = match self.allocate_heap_reference(
-                crate::Object::Substring(piece),
-                &request,
-                &extra_roots,
-            ) {
-                Ok(reference) => reference,
-                Err(result) => return result,
-            };
-            extra_roots.push(reference);
-            items.push(Value::Obj(reference));
-        }
-        let reference = match self.allocate_heap_reference(
-            crate::Object::List {
-                items: items.into(),
-                epoch: StructuralEpoch::default(),
-            },
-            &request,
-            &extra_roots,
-        ) {
-            Ok(reference) => reference,
-            Err(result) => return result,
         };
+        self.allocations = self
+            .allocations
+            .saturating_add(u64::try_from(piece_count).unwrap_or(u64::MAX))
+            .saturating_add(1);
         HeapOperationResult::Value {
             bits: object_bits(reference),
             heap: Some(self.machine.vm.heap.jit_view()),

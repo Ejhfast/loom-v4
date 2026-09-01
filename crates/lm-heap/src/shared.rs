@@ -560,6 +560,71 @@ impl SharedText {
         })
     }
 
+    /// Split this text into shared views with one scan.
+    pub fn try_split_views(&self, separator: &str) -> Result<Vec<SharedText>, TryReserveError> {
+        let mut pieces = Vec::new();
+        if separator.is_empty() {
+            pieces.try_reserve_exact(self.char_count().saturating_add(2))?;
+            pieces.push(self.slice(0, 0).expect("zero is one valid boundary"));
+            let mut end = 0;
+            for (at, scalar) in self.as_str().char_indices() {
+                end = at + scalar.len_utf8();
+                pieces.push(
+                    self.slice(at, end)
+                        .expect("one decoded scalar has valid boundaries"),
+                );
+            }
+            pieces.push(
+                self.slice(end, self.len())
+                    .expect("the text end is one valid boundary"),
+            );
+            return Ok(pieces);
+        }
+
+        let visible = self.as_str();
+        let mut start = 0;
+        while let Some(relative) = visible[start..].find(separator) {
+            let at = start + relative;
+            pieces.try_reserve(1)?;
+            pieces.push(
+                self.slice(start, at)
+                    .expect("a text match has valid boundaries"),
+            );
+            start = at + separator.len();
+        }
+        pieces.try_reserve(1)?;
+        pieces.push(
+            self.slice(start, visible.len())
+                .expect("the remaining text has valid boundaries"),
+        );
+        Ok(pieces)
+    }
+
+    /// Split this text into line views with one scan.
+    pub fn try_line_views(&self) -> Result<Vec<SharedText>, TryReserveError> {
+        let visible = self.as_str();
+        let mut pieces = Vec::new();
+        let mut start = 0;
+        while start < visible.len() {
+            let end = visible[start..]
+                .find('\n')
+                .map(|relative| start + relative)
+                .unwrap_or(visible.len());
+            let stop = if visible[start..end].ends_with('\r') {
+                end - 1
+            } else {
+                end
+            };
+            pieces.try_reserve(1)?;
+            pieces.push(
+                self.slice(start, stop)
+                    .expect("one text line has valid boundaries"),
+            );
+            start = end + 1;
+        }
+        Ok(pieces)
+    }
+
     /// Make a shared range from Unicode scalar positions.
     pub fn scalar_slice(&self, start: usize, length: usize) -> Option<SharedText> {
         let end = start.checked_add(length)?;
@@ -1484,6 +1549,33 @@ mod tests {
         assert!(text.slice(1, 2).is_none());
         assert_eq!(text.scalar_at_byte(1), Some('é'));
         assert_eq!(text.scalar_at_byte(2), None);
+    }
+
+    #[test]
+    fn split_views_preserve_empty_fields_and_unicode_boundaries() {
+        let text = SharedText::from("a,é,,猫");
+        let fields = text.try_split_views(",").expect("the fields fit");
+        assert_eq!(
+            fields.iter().map(SharedText::as_str).collect::<Vec<_>>(),
+            ["a", "é", "", "猫"]
+        );
+        assert!(fields.iter().all(|field| text.shares_storage(field)));
+
+        let scalars = SharedText::from("aé")
+            .try_split_views("")
+            .expect("the scalars fit");
+        assert_eq!(
+            scalars.iter().map(SharedText::as_str).collect::<Vec<_>>(),
+            ["", "a", "é", ""]
+        );
+
+        let lines = SharedText::from("a\r\nb\n")
+            .try_line_views()
+            .expect("the lines fit");
+        assert_eq!(
+            lines.iter().map(SharedText::as_str).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
     }
 
     #[test]

@@ -911,93 +911,29 @@ impl Machine {
                 let split = matches!(instr, Instr::Native(lm_bytecode::NativeInstr::TextSplit));
                 let separator = if split { Some(self.pop_obj()?) } else { None };
                 let text = self.pop_obj()?;
-                // Collect the byte ranges first. Each piece shares the
-                // source allocation, so the walk sizes the result
-                // before it allocates anything.
-                let ranges: Vec<(usize, usize)> = {
-                    let source = self.text_value(text)?;
-                    let visible = source.as_str();
-                    match separator {
-                        Some(reference) => {
-                            let needle = self.text_value(reference)?.as_str();
-                            let mut ranges = Vec::new();
-                            if needle.is_empty() {
-                                // An empty separator matches at every
-                                // scalar boundary, so the result holds
-                                // one empty piece at each end and one
-                                // piece for each scalar.
-                                ranges.push((0, 0));
-                                let mut start = 0;
-                                for (at, scalar) in visible.char_indices() {
-                                    ranges.push((at, at + scalar.len_utf8()));
-                                    start = at + scalar.len_utf8();
-                                }
-                                ranges.push((start, visible.len()));
-                            } else {
-                                let mut start = 0;
-                                while let Some(at) = visible[start..].find(needle) {
-                                    let at = start + at;
-                                    ranges.push((start, at));
-                                    start = at + needle.len();
-                                }
-                                ranges.push((start, visible.len()));
-                            }
-                            ranges
-                        }
-                        None => {
-                            let mut ranges = Vec::new();
-                            let mut start = 0;
-                            while start < visible.len() {
-                                let end = visible[start..]
-                                    .find('\n')
-                                    .map(|at| start + at)
-                                    .unwrap_or(visible.len());
-                                // A carriage return before the newline
-                                // belongs to the separator.
-                                let stop = if visible[start..end].ends_with('\r') {
-                                    end - 1
-                                } else {
-                                    end
-                                };
-                                ranges.push((start, stop));
-                                start = end + 1;
-                            }
-                            ranges
-                        }
+                let source = self.text_value(text)?.clone();
+                let pieces = match separator {
+                    Some(reference) => {
+                        let separator = self.text_value(reference)?.clone();
+                        source.try_split_views(separator.as_str())
                     }
-                };
+                    None => source.try_line_views(),
+                }
+                .map_err(|_| FaultCode::HeapLimit)?;
                 // One Substring object and one list slot per piece.
-                // `alloc` charges the exact cost; this bound only
-                // keeps the walk from starting work it cannot finish.
-                let cost = ranges
-                    .len()
-                    .checked_mul(2 * lm_heap::MIN_OBJECT_COST)
-                    .ok_or(FaultCode::HeapLimit)?;
+                let cost =
+                    Heap::text_view_list_base_cost(pieces.len()).ok_or(FaultCode::HeapLimit)?;
                 let mut roots = vec![Value::Obj(text)];
                 if let Some(reference) = separator {
                     roots.push(Value::Obj(reference));
                 }
                 self.reserve(cost, &roots)?;
-                let mut items = Vec::with_capacity(ranges.len());
-                for (start, end) in ranges {
-                    let piece = self
-                        .text_value(text)?
-                        .slice(start, end)
-                        .ok_or(FaultCode::IndexOutOfBounds)?;
-                    let value = self.alloc(Object::Substring(piece))?;
-                    items.push(value);
-                    // Every piece stays reachable through the operand
-                    // stack until the list owns it.
-                    self.push(value)?;
-                }
-                for _ in 0..items.len() {
-                    self.vm.operands.pop();
-                }
-                let value = self.alloc(Object::List {
-                    items: items.into(),
-                    epoch: StructuralEpoch::default(),
-                })?;
-                self.push(value)?;
+                let reference = self
+                    .vm
+                    .heap
+                    .try_alloc_text_view_list(pieces)
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.push(Value::Obj(reference))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => {
                 let suffix = self.pop_obj()?;

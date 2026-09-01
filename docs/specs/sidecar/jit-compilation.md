@@ -3870,6 +3870,59 @@ Clippy passed for every workspace target.
 
 The full workspace suite passed.
 
+### Stage F73: Batch text split allocation
+
+- put split and line scanning in `SharedText`;
+- scan each input once;
+- share this implementation between both execution engines;
+- reserve one exact heap batch for every substring and the result list;
+- update shared-allocation references once for each batch;
+- collect adjacent shared-reference releases during one sweep;
+- decode native roots only when collection is due;
+- keep every substring as one canonical heap object.
+
+The initial cost model assumed one runtime transition for each piece.
+
+`TextSplit` already made one typed runtime call for the complete operation.
+
+The old native helper counted matches before the allocation scan.
+
+The interpreter and native helper also implemented separate split algorithms.
+
+The new path creates views during one scan.
+
+One heap transaction installs all views and the final list.
+
+The transaction checks the exact byte and object counts before it changes the heap.
+
+One split piece still owns one `SharedText` value and one 112-byte canonical entry.
+
+The batch does not add a compact object representation.
+
+One diagnostic run returned the source for every result piece.
+
+That run took 20.0 milliseconds and isolated the remaining substring-object cost.
+
+The release helper row creates one million pieces through the default scheduler.
+
+| Split helper row | Before F73 | Stage F73 | Change |
+| --- | ---: | ---: | ---: |
+| Interpreter time | 87.167 ms | 57.556 ms | 34.0 percent faster |
+| Auto time | 61.744 ms | 52.250 ms | 15.4 percent faster |
+| Native time | 61.725 ms | 52.172 ms | 15.5 percent faster |
+| Auto native coverage | 100 percent | 100 percent | unchanged |
+| Native native coverage | 100 percent | 100 percent | unchanged |
+
+The existing interpreter split row improved from 72.5 to 54.4 nanoseconds per piece.
+
+The focused JIT suite passed 174 tests.
+
+The direct and scheduled corpus differential passed in 23.04 seconds.
+
+Clippy passed for every workspace target.
+
+The full workspace suite passed.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

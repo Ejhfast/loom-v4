@@ -107,10 +107,10 @@ impl MachineRuntime<'_> {
         growth: usize,
         request: &HeapOperationRequest<'_>,
     ) -> Result<(), HeapOperationResult> {
-        if growth == 0 {
+        if growth == 0 || !self.machine.vm.heap.collection_due(growth) {
             return Ok(());
         }
-        if self.machine.vm.heap.collection_due(growth) && !request.allow_collection {
+        if !request.allow_collection {
             return Err(HeapOperationResult::Interpreter);
         }
         let roots = match decode_root_objects(request.roots) {

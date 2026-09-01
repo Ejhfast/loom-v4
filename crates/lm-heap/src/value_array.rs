@@ -167,7 +167,7 @@ impl<T> OwnedArray<T> {
         (held.data, held.len, held.capacity)
     }
 
-    fn vector(&mut self) -> VectorGuard<'_, T> {
+    pub(crate) fn vector(&mut self) -> VectorGuard<'_, T> {
         let data = self.data;
         let len = self.len;
         let capacity = self.capacity;
@@ -399,7 +399,7 @@ unsafe impl<T: Send> Send for OwnedArray<T> {}
 // SAFETY: Shared access exposes only immutable `Sync` elements.
 unsafe impl<T: Sync> Sync for OwnedArray<T> {}
 
-struct VectorGuard<'a, T> {
+pub(crate) struct VectorGuard<'a, T> {
     owner: &'a mut OwnedArray<T>,
     vector: ManuallyDrop<Vec<T>>,
 }

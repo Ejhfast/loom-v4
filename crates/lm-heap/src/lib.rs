@@ -16,9 +16,7 @@ pub mod shape;
 mod shared;
 mod value_array;
 
-#[cfg(test)]
-use lm_value::Value;
-use lm_value::{ObjRef, Witness};
+use lm_value::{ObjRef, Value, Witness};
 pub use shape::{
     dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapEntryArray, MapIndex,
     Object, PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch,
@@ -173,6 +171,28 @@ impl Hasher for AllocationHasher {
 
 type SharedAllocations =
     std::collections::HashMap<usize, SharedCharge, BuildHasherDefault<AllocationHasher>>;
+
+fn remove_shared_references(
+    allocations: &mut SharedAllocations,
+    key: usize,
+    references: usize,
+) -> usize {
+    let Some(charge) = allocations.get_mut(&key) else {
+        debug_assert!(false, "a shared allocation has a heap charge");
+        return 0;
+    };
+    charge.references = charge
+        .references
+        .checked_sub(references)
+        .expect("a shared allocation has enough references");
+    if charge.references != 0 {
+        return 0;
+    }
+    allocations
+        .remove(&key)
+        .map(|charge| charge.capacity)
+        .unwrap_or(0)
+}
 
 /// One live object-table payload.
 #[repr(C)]
@@ -764,20 +784,37 @@ impl Heap {
                 .unwrap_or(0)
     }
 
+    #[inline]
     fn add_shared(&mut self, shared: Option<(usize, usize)>) -> usize {
+        self.add_shared_references(shared, 1)
+    }
+
+    #[inline]
+    fn add_shared_references(
+        &mut self,
+        shared: Option<(usize, usize)>,
+        references: usize,
+    ) -> usize {
+        if references == 0 {
+            return 0;
+        }
         let Some((key, capacity)) = shared else {
             return 0;
         };
         match self.shared_allocations.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 debug_assert_eq!(entry.get().capacity, capacity);
-                entry.get_mut().references += 1;
+                entry.get_mut().references = entry
+                    .get()
+                    .references
+                    .checked_add(references)
+                    .expect("the shared reference count fits");
                 0
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(SharedCharge {
                     capacity,
-                    references: 1,
+                    references,
                 });
                 capacity
             }
@@ -788,18 +825,7 @@ impl Heap {
         let Some(key) = key else {
             return 0;
         };
-        let Some(charge) = self.shared_allocations.get_mut(&key) else {
-            debug_assert!(false, "a shared allocation has a heap charge");
-            return 0;
-        };
-        charge.references -= 1;
-        if charge.references != 0 {
-            return 0;
-        }
-        self.shared_allocations
-            .remove(&key)
-            .map(|charge| charge.capacity)
-            .unwrap_or(0)
+        remove_shared_references(&mut self.shared_allocations, key, 1)
     }
 
     /// True when object growth would exceed a byte limit.
@@ -892,6 +918,11 @@ impl Heap {
         };
         self.used_bytes += cost;
         self.live += 1;
+        self.install_entry(header, object)
+    }
+
+    #[inline]
+    fn install_entry(&mut self, header: Header, object: Object) -> ObjRef {
         if let Some(slot) = self.free.pop() {
             let entry = self.entry_mut(slot);
             debug_assert!(!entry.is_live());
@@ -913,6 +944,64 @@ impl Heap {
             slot: slot as u32,
             generation,
         }
+    }
+
+    /// Get the base heap cost for one list of shared text views.
+    pub fn text_view_list_base_cost(count: usize) -> Option<usize> {
+        count
+            .checked_mul(MIN_OBJECT_COST + std::mem::size_of::<Value>())?
+            .checked_add(MIN_OBJECT_COST)
+    }
+
+    /// Allocate shared text views and their list as one heap batch.
+    pub fn try_alloc_text_view_list(&mut self, views: Vec<SharedText>) -> Option<ObjRef> {
+        let count = views.len();
+        let base = Self::text_view_list_base_cost(count)?;
+        let object_count = count.checked_add(1)?;
+        let shared = views
+            .first()
+            .map(|view| (view.allocation_key(), view.retained_capacity()));
+        if let Some((key, capacity)) = shared {
+            if views
+                .iter()
+                .any(|view| view.allocation_key() != key || view.retained_capacity() != capacity)
+            {
+                return None;
+            }
+        }
+        let shared_cost = shared
+            .filter(|(key, _)| !self.shared_allocations.contains_key(key))
+            .map(|(_, capacity)| capacity)
+            .unwrap_or(0);
+        let cost = base.checked_add(shared_cost)?;
+        if self.would_exceed_batch(cost, object_count) {
+            return None;
+        }
+        let mut values = Vec::new();
+        if values.try_reserve_exact(count).is_err() || !self.reserve_precharged_slots(object_count)
+        {
+            return None;
+        }
+        let charged_shared = self.add_shared_references(shared, count);
+        debug_assert_eq!(charged_shared, shared_cost);
+        let view_base = count * MIN_OBJECT_COST;
+        self.used_bytes += view_base + charged_shared;
+        self.live += count;
+        for view in views {
+            let object = Object::Substring(view);
+            let header = Header {
+                frozen: u8::from(object.shape().born_frozen),
+                reserved: [0; 7],
+                bytes: MIN_OBJECT_COST,
+                shared: SharedKey::new(shared.map(|(key, _)| key)),
+            };
+            let reference = self.install_entry(header, object);
+            values.push(Value::Obj(reference));
+        }
+        Some(self.alloc(Object::List {
+            items: values.into(),
+            epoch: StructuralEpoch::default(),
+        }))
     }
 
     /// Allocate one object with a fallible table reservation.
@@ -1207,6 +1296,8 @@ impl Heap {
         // costs a hash, so the empty case skips it.
         let has_digests = !self.digests.is_empty();
         let shared_allocations = &mut self.shared_allocations;
+        let mut pending_shared: Option<(usize, usize)> = None;
+        let mut free = self.free.vector();
         for (page_idx, page) in self.pages.iter_mut().enumerate() {
             for (idx, entry) in page.iter_mut().enumerate() {
                 let slot = (page_idx * PAGE_SLOTS + idx) as u32;
@@ -1216,26 +1307,36 @@ impl Heap {
                 let (header, _) = entry.take().expect("live object");
                 freed_bytes += header.bytes;
                 if let Some(key) = header.shared.get() {
-                    let charge = shared_allocations
-                        .get_mut(&key)
-                        .expect("a shared allocation has a heap charge");
-                    charge.references -= 1;
-                    if charge.references == 0 {
-                        freed_bytes += shared_allocations
-                            .remove(&key)
-                            .expect("the shared allocation exists")
-                            .capacity;
+                    match pending_shared {
+                        Some((pending, references)) if pending == key => {
+                            pending_shared = Some((
+                                pending,
+                                references
+                                    .checked_add(1)
+                                    .expect("the freed reference count fits"),
+                            ));
+                        }
+                        Some((pending, references)) => {
+                            freed_bytes +=
+                                remove_shared_references(shared_allocations, pending, references);
+                            pending_shared = Some((key, 1));
+                        }
+                        None => pending_shared = Some((key, 1)),
                     }
                 }
                 freed += 1;
                 entry.generation = entry.generation.wrapping_add(1);
                 self.generations[slot as usize] = entry.generation;
-                self.free.push(slot);
+                free.push(slot);
                 if has_digests {
                     self.digests.remove(&slot);
                 }
             }
         }
+        if let Some((key, references)) = pending_shared {
+            freed_bytes += remove_shared_references(shared_allocations, key, references);
+        }
+        drop(free);
         self.used_bytes -= freed_bytes;
         self.live -= freed;
         self.set_next_collection_threshold();
@@ -1441,6 +1542,47 @@ mod tests {
         heap.free(binary);
         assert_eq!(heap.used_bytes(), 0);
         assert_eq!(heap.allocation_cost(&pending_view), view_base + capacity);
+    }
+
+    #[test]
+    fn one_text_view_batch_shares_one_backing_charge() {
+        let mut heap = Heap::new(1 << 20);
+        let text = SharedText::from("alpha beta");
+        let capacity = text.retained_capacity();
+        let source = heap.alloc(Object::Str(text.clone()));
+        let source_cost = MIN_OBJECT_COST + capacity;
+        let views = vec![
+            text.slice(0, 5).expect("the first range is valid"),
+            text.slice(6, 10).expect("the second range is valid"),
+        ];
+        let list = heap
+            .try_alloc_text_view_list(views)
+            .expect("the text range batch fits");
+
+        let Object::List { items: values, .. } = heap.get(list) else {
+            panic!("the batch returns one list");
+        };
+        assert_eq!(values.len(), 2);
+        assert_eq!(heap.live_count(), 4);
+        assert_eq!(
+            heap.used_bytes(),
+            source_cost + 3 * MIN_OBJECT_COST + 2 * std::mem::size_of::<Value>()
+        );
+        for (value, expected) in values.iter().zip(["alpha", "beta"]) {
+            let Value::Obj(reference) = value else {
+                panic!("the batch returns object values");
+            };
+            let Object::Substring(piece) = heap.get(*reference) else {
+                panic!("the batch allocates substrings");
+            };
+            assert_eq!(piece.as_str(), expected);
+        }
+
+        heap.sweep(|slot| slot == source.slot);
+        assert_eq!(heap.live_count(), 1);
+        assert_eq!(heap.used_bytes(), source_cost);
+        heap.free(source);
+        assert_eq!(heap.used_bytes(), 0);
     }
 
     #[test]
