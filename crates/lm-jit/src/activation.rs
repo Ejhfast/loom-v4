@@ -87,8 +87,12 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_pages: *const usize,
     pub(super) heap_page_count: usize,
     pub(super) heap_slot_count: usize,
+    pub(super) heap_slots: *mut usize,
+    pub(super) heap_free: *mut c_void,
+    pub(super) heap_live: *mut usize,
     pub(super) heap_used_bytes: *mut usize,
     pub(super) heap_collection_threshold: usize,
+    pub(super) inline_allocations: u64,
     pub(super) lookup_hash_key: u64,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
@@ -400,6 +404,7 @@ pub(super) fn resolved_call_cache_set(
 
 pub(super) type RawAllocateInstance =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, *mut u64) -> u32;
+pub(super) type RawPrepareInstanceFields = unsafe extern "C" fn(u32, *mut u64) -> u32;
 pub(super) type RawAllocateCapture =
     unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, u32, *mut u64) -> u32;
 pub(super) type RawAllocateValues =
@@ -427,6 +432,7 @@ pub(super) type RawBytesEqual = unsafe extern "C" fn(*const u8, *const u8, usize
 /// Fixed native entry points for typed runtime slow paths.
 #[repr(C)]
 pub(super) struct RawNativeFunctions {
+    pub(super) prepare_instance_fields: RawPrepareInstanceFields,
     pub(super) allocate_instance: RawAllocateInstance,
     pub(super) allocate_closure: RawAllocateCapture,
     pub(super) allocate_callback: RawAllocateCapture,
@@ -541,6 +547,7 @@ pub(super) struct NativeRuntimeFunctions<R>(std::marker::PhantomData<fn(&mut R)>
 
 impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
     pub(super) const TABLE: RawNativeFunctions = RawNativeFunctions {
+        prepare_instance_fields,
         allocate_instance: allocate_instance::<R>,
         allocate_closure: allocate_closure::<R>,
         allocate_callback: allocate_callback::<R>,
@@ -1769,6 +1776,9 @@ pub struct DigestRequest<'a> {
 
 /// Typed runtime slow paths for one native activation.
 pub trait NativeRuntime {
+    /// Record allocations completed without a runtime call.
+    fn record_inline_allocations(&mut self, _count: u64) {}
+
     /// Allocate one instance with its exact environment and active roots.
     fn allocate_instance(
         &mut self,
@@ -2226,6 +2236,23 @@ pub struct MapInsertHashedRequest<'a> {
     pub allow_collection: bool,
 }
 
+unsafe extern "C" fn prepare_instance_fields(count: u32, result: *mut u64) -> u32 {
+    if result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    let Ok(fields) = lm_heap::ValueArray::try_repeated(Value::Uninit, count as usize) else {
+        return RUNTIME_HEAP_LIMIT;
+    };
+    let (data, len, capacity) = fields.into_raw_parts();
+    // SAFETY: The native caller provides four writable result words.
+    unsafe {
+        result.write(data as usize as u64);
+        result.add(1).write(len as u64);
+        result.add(2).write(capacity as u64);
+    }
+    RUNTIME_OK
+}
+
 pub(super) unsafe extern "C" fn allocate_instance<R: NativeRuntime>(
     context: *mut c_void,
     class: u32,
@@ -2511,11 +2538,7 @@ fn finish_object_allocation(
             unsafe {
                 (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
                 if let Some(heap) = heap {
-                    (*activation).heap_pages = heap.pages;
-                    (*activation).heap_page_count = heap.page_count;
-                    (*activation).heap_slot_count = heap.slot_count;
-                    (*activation).heap_used_bytes = heap.used_bytes;
-                    (*activation).heap_collection_threshold = heap.collection_threshold;
+                    update_heap_view(activation, heap);
                 }
                 result.write(bits);
             }
@@ -2524,6 +2547,21 @@ fn finish_object_allocation(
         AllocationResult::CollectionRequired => RUNTIME_COLLECTION_REQUIRED,
         AllocationResult::HeapLimit => RUNTIME_HEAP_LIMIT,
         AllocationResult::Interpreter => RUNTIME_INTERPRETER,
+    }
+}
+
+/// Refresh one borrowed heap view after a runtime slow path.
+unsafe fn update_heap_view(activation: *mut RawNativeActivation, heap: JitHeapView) {
+    // SAFETY: The caller retains one writable native activation.
+    unsafe {
+        (*activation).heap_pages = heap.pages;
+        (*activation).heap_page_count = heap.page_count;
+        (*activation).heap_slot_count = heap.slot_count;
+        (*activation).heap_slots = heap.slots;
+        (*activation).heap_free = heap.free.cast();
+        (*activation).heap_live = heap.live;
+        (*activation).heap_used_bytes = heap.used_bytes;
+        (*activation).heap_collection_threshold = heap.collection_threshold;
     }
 }
 
@@ -2559,11 +2597,7 @@ pub(super) unsafe extern "C" fn grow_list<R: NativeRuntime>(
         ListGrowthResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
             unsafe {
-                (*context.activation).heap_pages = heap.pages;
-                (*context.activation).heap_page_count = heap.page_count;
-                (*context.activation).heap_slot_count = heap.slot_count;
-                (*context.activation).heap_used_bytes = heap.used_bytes;
-                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+                update_heap_view(context.activation, heap);
             }
             RUNTIME_OK
         }
@@ -2606,11 +2640,7 @@ pub(super) unsafe extern "C" fn insert_list<R: NativeRuntime>(
         ListGrowthResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
             unsafe {
-                (*context.activation).heap_pages = heap.pages;
-                (*context.activation).heap_page_count = heap.page_count;
-                (*context.activation).heap_slot_count = heap.slot_count;
-                (*context.activation).heap_used_bytes = heap.used_bytes;
-                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+                update_heap_view(context.activation, heap);
             }
             RUNTIME_OK
         }
@@ -2673,11 +2703,7 @@ unsafe fn reserve_collection<R: NativeRuntime>(
         CollectionReserveResult::Done { heap } => {
             // SAFETY: The native activation remains writable during the slow path.
             unsafe {
-                (*context.activation).heap_pages = heap.pages;
-                (*context.activation).heap_page_count = heap.page_count;
-                (*context.activation).heap_slot_count = heap.slot_count;
-                (*context.activation).heap_used_bytes = heap.used_bytes;
-                (*context.activation).heap_collection_threshold = heap.collection_threshold;
+                update_heap_view(context.activation, heap);
             }
             RUNTIME_OK
         }
@@ -3207,11 +3233,7 @@ fn finish_heap_operation(
                 result.write(bits);
                 (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
                 if let Some(heap) = heap {
-                    (*activation).heap_pages = heap.pages;
-                    (*activation).heap_page_count = heap.page_count;
-                    (*activation).heap_slot_count = heap.slot_count;
-                    (*activation).heap_used_bytes = heap.used_bytes;
-                    (*activation).heap_collection_threshold = heap.collection_threshold;
+                    update_heap_view(activation, heap);
                 }
             }
             RUNTIME_OK

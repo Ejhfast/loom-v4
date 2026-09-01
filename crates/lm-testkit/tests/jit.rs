@@ -3512,6 +3512,7 @@ fn native_allocation_resumes_native_execution() {
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(1000)));
     assert!(metrics.compiled_allocation_sites > 0, "{metrics:?}");
     assert!(metrics.native_allocations >= 1000, "{metrics:?}");
+    assert!(metrics.native_inline_allocations >= 999, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 10_000);
     assert_eq!(metrics.guard_failures, 0);
 }

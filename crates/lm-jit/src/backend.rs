@@ -37,7 +37,8 @@ use lm_heap::{
     JIT_BYTE_BUFFER_DATA_OFFSET, JIT_BYTE_BUFFER_LEN_OFFSET, JIT_CLOSURE_CAPTURES_OFFSET,
     JIT_CLOSURE_ENV_OFFSET, JIT_CLOSURE_FUNCTION_OFFSET, JIT_DIGEST_BYTES_OFFSET,
     JIT_ENTRY_BYTES_OFFSET, JIT_ENTRY_FROZEN_OFFSET, JIT_ENTRY_GENERATION_OFFSET,
-    JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET, JIT_ENTRY_SIZE,
+    JIT_ENTRY_LIVE_OFFSET, JIT_ENTRY_LIVE_TAG, JIT_ENTRY_OBJECT_TAG_OFFSET,
+    JIT_ENTRY_SHARED_KEY_OFFSET, JIT_ENTRY_SHARED_PRESENT_OFFSET, JIT_ENTRY_SIZE,
     JIT_INSTANCE_CLASS_OFFSET, JIT_INSTANCE_ENV_OFFSET, JIT_INSTANCE_FIELDS_OFFSET,
     JIT_LIST_EPOCH_OFFSET, JIT_LIST_ITEMS_OFFSET, JIT_MAP_ENTRIES_CAPACITY_OFFSET,
     JIT_MAP_ENTRIES_DATA_OFFSET, JIT_MAP_ENTRIES_LEN_OFFSET, JIT_MAP_ENTRY_COST,
@@ -52,7 +53,8 @@ use lm_heap::{
     JIT_TEXT_LOOKUP_HASH_OFFSET, JIT_TEXT_SCALAR_LEN_OFFSET, JIT_TEXT_SEMANTIC_HASH_OFFSET,
     JIT_TUPLE_ITEMS_OFFSET, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE,
     MAP_ENTRY_VALUE_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
-    VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
+    MIN_OBJECT_COST, OWNED_ARRAY_DATA_OFFSET, OWNED_ARRAY_LEN_OFFSET, VALUE_ARRAY_CAPACITY_OFFSET,
+    VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_EMPTY_DATA, VALUE_ARRAY_LEN_OFFSET,
 };
 use lm_value::{
     canonical_float_bits, ValueTag, CANONICAL_NAN_BITS, VALUE_PAYLOAD_OFFSET, VALUE_SIZE,
@@ -336,6 +338,7 @@ struct NativeValues<'a> {
     root_tag_pointer: ir::Value,
     root_state_pointer: ir::Value,
     allocation_signature: ir::SigRef,
+    instance_fields_signature: ir::SigRef,
     capture_allocation_signature: ir::SigRef,
     value_array_allocation_signature: ir::SigRef,
     list_growth_signature: ir::SigRef,
@@ -624,6 +627,17 @@ fn emit_region(
         .push(AbiParam::new(pointer_type));
     allocation_signature.returns.push(AbiParam::new(types::I32));
     let allocation_signature = builder.import_signature(allocation_signature);
+    let mut instance_fields_signature = ir::Signature::new(host_call_conv);
+    instance_fields_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    instance_fields_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    instance_fields_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let instance_fields_signature = builder.import_signature(instance_fields_signature);
     let mut capture_allocation_signature = ir::Signature::new(host_call_conv);
     capture_allocation_signature
         .params
@@ -1133,6 +1147,7 @@ fn emit_region(
         root_tag_pointer,
         root_state_pointer,
         allocation_signature,
+        instance_fields_signature,
         capture_allocation_signature,
         value_array_allocation_signature,
         list_growth_signature,
@@ -1702,14 +1717,17 @@ fn emit_segment_body(
                     builder,
                     values,
                     class,
+                    instance_field_count(input, class),
                     environment,
                     &roots,
-                    FaultPoint {
-                        block: segment.block,
-                        instruction: position + 1,
-                        prefix: fault_prefix,
+                    ReplayEmission {
+                        point: FaultPoint {
+                            block: segment.block,
+                            instruction: position + 1,
+                            prefix: fault_prefix,
+                        },
+                        deopt_stack: &stack,
                     },
-                    &stack,
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Object(0), value)?;
             }
@@ -11244,21 +11262,318 @@ fn emit_allocate_instance(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     class: u32,
+    field_count: Option<u32>,
     environment: ir::Value,
     roots: &[NativeRoot],
-    point: FaultPoint,
-    stack: &[NativeValue],
+    exit: ReplayEmission<'_>,
 ) -> Result<ir::Value, CompileError> {
-    let (status, result) = emit_allocation_call(builder, values, class, environment, roots)?;
+    let (status, result) =
+        emit_instance_allocation(builder, values, class, field_count, environment, roots)?;
     let heap_limit = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
-    emit_fault_check(builder, values, heap_limit, EXIT_HEAP_LIMIT, point, stack)?;
+    emit_fault_check(
+        builder,
+        values,
+        heap_limit,
+        EXIT_HEAP_LIMIT,
+        exit.point,
+        exit.deopt_stack,
+    )?;
     let replay = builder
         .ins()
         .icmp_imm(IntCC::NotEqual, status, i64::from(RUNTIME_OK));
-    emit_interpreter_replay(builder, values, replay, point, stack)?;
+    emit_interpreter_replay(builder, values, replay, exit.point, exit.deopt_stack)?;
     Ok(result)
+}
+
+fn instance_field_count(input: &FunctionInput<'_>, class: u32) -> Option<u32> {
+    let source_class = match input.root.class_relocation {
+        Some(classes) => classes.iter().position(|relocated| *relocated == class)?,
+        None => class as usize,
+    };
+    let count = input.root.source.classes.get(source_class)?.fields.len();
+    u32::try_from(count).ok()
+}
+
+fn emit_instance_allocation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    class: u32,
+    field_count: Option<u32>,
+    environment: ir::Value,
+    roots: &[NativeRoot],
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let Some(field_count) = field_count else {
+        return emit_allocation_call(builder, values, class, environment, roots);
+    };
+    let cost = (field_count as usize)
+        .checked_mul(VALUE_SIZE)
+        .and_then(|fields| MIN_OBJECT_COST.checked_add(fields))
+        .ok_or(CompileError::Backend)?;
+    let cost = i64::try_from(cost).map_err(|_| CompileError::Backend)?;
+
+    let used_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+    let next_used = builder.ins().iadd_imm(used, cost);
+    let charge_overflow = builder.ins().icmp(IntCC::UnsignedLessThan, next_used, used);
+    let threshold = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_collection_threshold),
+    )?;
+    let collection_due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, next_used, threshold);
+    let charge_blocked = builder.ins().bor(charge_overflow, collection_due);
+
+    let free = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_free),
+    )?;
+    let free_len = load_heap_value(builder, values.pointer_type, free, OWNED_ARRAY_LEN_OFFSET)?;
+    let has_free = builder.ins().icmp_imm(IntCC::NotEqual, free_len, 0);
+    let slots_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_slots),
+    )?;
+    let slots = load_heap_value(builder, values.pointer_type, slots_pointer, 0)?;
+    let page_count = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_page_count),
+    )?;
+    let page_capacity = builder
+        .ins()
+        .ishl_imm(page_count, i64::from(JIT_PAGE_SHIFT));
+    let has_fresh = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, slots, page_capacity);
+    let has_slot = builder.ins().bor(has_free, has_fresh);
+    let charge_ready = builder.ins().bxor_imm(charge_blocked, 1);
+    let fast = builder.ins().band(has_slot, charge_ready);
+
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(slow_block);
+    let (slow_status, slow_result) =
+        emit_allocation_call(builder, values, class, environment, roots)?;
+    builder
+        .ins()
+        .jump(done, &[slow_status.into(), slow_result.into()]);
+
+    builder.switch_to_block(fast_block);
+    let fields_ready = builder.create_block();
+    builder.append_block_param(fields_ready, values.pointer_type);
+    builder.append_block_param(fields_ready, values.pointer_type);
+    builder.append_block_param(fields_ready, values.pointer_type);
+    if field_count == 0 {
+        let data = builder.ins().iconst(
+            values.pointer_type,
+            i64::try_from(VALUE_ARRAY_EMPTY_DATA).map_err(|_| CompileError::Backend)?,
+        );
+        let zero = builder.ins().iconst(values.pointer_type, 0);
+        builder
+            .ins()
+            .jump(fields_ready, &[data.into(), zero.into(), zero.into()]);
+    } else {
+        let prepare = load_value(
+            builder,
+            values.pointer_type,
+            values.runtime_functions,
+            mem::offset_of!(RawNativeFunctions, prepare_instance_fields),
+        )?;
+        let count = builder.ins().iconst(types::I32, i64::from(field_count));
+        let call = builder.ins().call_indirect(
+            values.instance_fields_signature,
+            prepare,
+            &[count, values.allocation_result_pointer],
+        );
+        let status = builder.inst_results(call)[0];
+        let data = builder.ins().load(
+            values.pointer_type,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            0,
+        );
+        let len = builder.ins().load(
+            values.pointer_type,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            8,
+        );
+        let capacity = builder.ins().load(
+            values.pointer_type,
+            MemFlags::new(),
+            values.allocation_result_pointer,
+            16,
+        );
+        let prepared = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_OK));
+        let failed = builder.create_block();
+        builder.ins().brif(
+            prepared,
+            fields_ready,
+            &[data.into(), len.into(), capacity.into()],
+            failed,
+            &[],
+        );
+        builder.switch_to_block(failed);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().jump(done, &[status.into(), zero.into()]);
+    }
+
+    builder.switch_to_block(fields_ready);
+    let fields_data = builder.block_params(fields_ready)[0];
+    let fields_len = builder.block_params(fields_ready)[1];
+    let fields_capacity = builder.block_params(fields_ready)[2];
+    let recycled = builder.create_block();
+    let fresh = builder.create_block();
+    let slot_ready = builder.create_block();
+    builder.append_block_param(slot_ready, types::I32);
+    builder.ins().brif(has_free, recycled, &[], fresh, &[]);
+
+    builder.switch_to_block(recycled);
+    let free_data = load_heap_value(builder, values.pointer_type, free, OWNED_ARRAY_DATA_OFFSET)?;
+    let next_free_len = builder.ins().iadd_imm(free_len, -1);
+    let free_offset = builder.ins().imul_imm(next_free_len, 4);
+    let free_slot = builder.ins().iadd(free_data, free_offset);
+    let recycled_slot = builder
+        .ins()
+        .load(types::I32, heap_mem_flags(), free_slot, 0);
+    store_heap_value(builder, free, OWNED_ARRAY_LEN_OFFSET, next_free_len)?;
+    builder.ins().jump(slot_ready, &[recycled_slot.into()]);
+
+    builder.switch_to_block(fresh);
+    let fresh_slot = builder.ins().ireduce(types::I32, slots);
+    let next_slots = builder.ins().iadd_imm(slots, 1);
+    store_heap_value(builder, slots_pointer, 0, next_slots)?;
+    let slot_count_offset = i32::try_from(mem::offset_of!(RawNativeActivation, heap_slot_count))
+        .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        next_slots,
+        values.activation_pointer,
+        slot_count_offset,
+    );
+    builder.ins().jump(slot_ready, &[fresh_slot.into()]);
+
+    builder.switch_to_block(slot_ready);
+    let slot = builder.block_params(slot_ready)[0];
+    let slot_index = builder.ins().uextend(values.pointer_type, slot);
+    let pages = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_pages),
+    )?;
+    let page_index = builder
+        .ins()
+        .ushr_imm(slot_index, i64::from(JIT_PAGE_SHIFT));
+    let page_offset = builder.ins().imul_imm(
+        page_index,
+        i64::try_from(mem::size_of::<usize>()).map_err(|_| CompileError::Backend)?,
+    );
+    let page_address = builder.ins().iadd(pages, page_offset);
+    let page = builder
+        .ins()
+        .load(values.pointer_type, table_mem_flags(), page_address, 0);
+    let within_page = builder.ins().band_imm(slot_index, i64::from(JIT_PAGE_MASK));
+    let entry_offset = builder.ins().imul_imm(
+        within_page,
+        i64::try_from(JIT_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(page, entry_offset);
+    let generation = load_heap_value(builder, types::I32, entry, JIT_ENTRY_GENERATION_OFFSET)?;
+
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let cost_value = builder.ins().iconst(values.pointer_type, cost);
+    let object_tag = builder
+        .ins()
+        .iconst(types::I32, i64::from(JIT_OBJECT_INSTANCE));
+    let class_value = builder.ins().iconst(types::I32, i64::from(class));
+    store_heap_value(builder, entry, JIT_ENTRY_FROZEN_OFFSET, zero_i64)?;
+    store_heap_value(builder, entry, JIT_ENTRY_BYTES_OFFSET, cost_value)?;
+    store_heap_value(builder, entry, JIT_ENTRY_SHARED_PRESENT_OFFSET, zero_i64)?;
+    store_heap_value(builder, entry, JIT_ENTRY_SHARED_KEY_OFFSET, zero_i64)?;
+    store_heap_value(builder, entry, JIT_ENTRY_OBJECT_TAG_OFFSET, object_tag)?;
+    store_heap_value(builder, entry, JIT_INSTANCE_CLASS_OFFSET, class_value)?;
+    store_heap_value(
+        builder,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+        fields_data,
+    )?;
+    store_heap_value(
+        builder,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+        fields_len,
+    )?;
+    store_heap_value(
+        builder,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_CAPACITY_OFFSET,
+        fields_capacity,
+    )?;
+    store_heap_value(builder, entry, JIT_INSTANCE_ENV_OFFSET, environment)?;
+    let live_tag = builder
+        .ins()
+        .iconst(types::I32, i64::from(JIT_ENTRY_LIVE_TAG));
+    store_heap_value(builder, entry, JIT_ENTRY_LIVE_OFFSET, live_tag)?;
+    store_heap_value(builder, used_pointer, 0, next_used)?;
+    let live_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_live),
+    )?;
+    let live = load_heap_value(builder, values.pointer_type, live_pointer, 0)?;
+    let next_live = builder.ins().iadd_imm(live, 1);
+    store_heap_value(builder, live_pointer, 0, next_live)?;
+    let allocations = load_vmctx_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, inline_allocations),
+    )?;
+    let allocations = builder.ins().iadd_imm(allocations, 1);
+    let allocations_offset =
+        i32::try_from(mem::offset_of!(RawNativeActivation, inline_allocations))
+            .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        allocations,
+        values.activation_pointer,
+        allocations_offset,
+    );
+
+    let generation = builder.ins().uextend(types::I64, generation);
+    let generation = builder.ins().ishl_imm(generation, 32);
+    let slot = builder.ins().uextend(types::I64, slot);
+    let result = builder.ins().bor(generation, slot);
+    let status = builder.ins().iconst(types::I32, i64::from(RUNTIME_OK));
+    builder.ins().jump(done, &[status.into(), result.into()]);
+
+    builder.switch_to_block(done);
+    Ok((builder.block_params(done)[0], builder.block_params(done)[1]))
 }
 
 fn emit_allocation_call(

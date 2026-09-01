@@ -493,11 +493,13 @@ This state gives automatic drops and requires no uninitialized storage.
 
 The heap exposes canonical page addresses, page count, and slot count.
 
-The heap also exposes one writable charge counter and one collection threshold.
+It exposes writable slot, free, live, and charge records.
+
+It also exposes one collection threshold.
 
 One canonical page holds 1,024 entries.
 
-Each page reserves its complete capacity before publication.
+Each page contains valid Dead entries before publication.
 
 The page address never changes after publication.
 
@@ -571,6 +573,7 @@ The native layout does not affect snapshot bytes or semantic digests.
 
 Native code implements these common operations directly:
 
+- static-shape instance entry installation;
 - handle validation;
 - exact class tests;
 - instance field loads;
@@ -619,7 +622,8 @@ A miss leaves native code through one typed resolver path.
 
 Slow paths handle:
 
-- object allocation;
+- object payload allocation;
+- object-page growth;
 - collection;
 - list growth;
 - map operations;
@@ -943,7 +947,7 @@ Gate: Exported offsets name canonical objects after every heap operation.
 - delete the operation-number dispatcher;
 - compile direct instance field loads;
 - keep effects as explicit exits;
-- keep allocation as one typed slow path;
+- keep allocation on one typed path until the heap ABI is stable;
 - retain every differential test as a gate.
 
 Gate: Field reads use no runtime slow call.
@@ -3360,6 +3364,42 @@ The release CLI grew from 20,041,040 bytes to 20,222,840 bytes.
 The focused JIT suite passed 158 tests.
 
 The direct and scheduled corpus differential passed in 22.35 seconds.
+
+The full workspace suite passed.
+
+### Stage F65: Install static instances in canonical entries
+
+- store complete object pages with valid Dead entries;
+- expose the canonical free-slot array and allocation counters;
+- allocate instance fields through one fallible payload helper;
+- install the header and instance payload in generated code;
+- publish the Live tag after all payload writes;
+- retain page growth and collection as typed slow paths;
+- retain `ValueArray` as the only payload owner;
+- count inline allocations once per native turn.
+
+The fast path uses a recycled slot or one unused slot in an existing page.
+
+The first allocation in a new page uses the page-growth slow path.
+
+An unknown static layout also uses the existing typed allocator.
+
+The field helper transfers one `ValueArray` allocation into the canonical Object.
+
+It creates no side record and no second owner.
+
+| Warm release row | Stage F64 | Stage F65 | Change |
+| --- | ---: | ---: | ---: |
+| Plain allocation, native | 2.493 ms | 0.983 ms | 60.6 percent faster |
+| Generic allocation, native | 3.349 ms | 1.962 ms | 41.4 percent faster |
+| Class initialization, native | 25.079 ms | 23.057 ms | 8.1 percent faster |
+| JSON parse, native | 14.358 ms | 14.505 ms | within variance |
+
+The plain allocation test completed 899,991 of 900,000 allocations inline.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed.
 
 The full workspace suite passed.
 

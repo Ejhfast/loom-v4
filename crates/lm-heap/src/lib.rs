@@ -44,8 +44,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 pub use value_array::{
     OwnedArray, OwnedSlice, ValueArray, OWNED_ARRAY_CAPACITY_OFFSET, OWNED_ARRAY_DATA_OFFSET,
     OWNED_ARRAY_LEN_OFFSET, OWNED_ARRAY_SIZE, OWNED_SLICE_DATA_OFFSET, OWNED_SLICE_LEN_OFFSET,
-    OWNED_SLICE_SIZE, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_LEN_OFFSET,
-    VALUE_ARRAY_SIZE,
+    OWNED_SLICE_SIZE, VALUE_ARRAY_CAPACITY_OFFSET, VALUE_ARRAY_DATA_OFFSET, VALUE_ARRAY_EMPTY_DATA,
+    VALUE_ARRAY_LEN_OFFSET, VALUE_ARRAY_SIZE,
 };
 
 /// Object-table slots per page.
@@ -65,6 +65,9 @@ pub struct JitHeapView {
     pub pages: *const usize,
     pub page_count: usize,
     pub slot_count: usize,
+    pub slots: *mut usize,
+    pub free: *mut OwnedArray<u32>,
+    pub live: *mut usize,
     pub used_bytes: *mut usize,
     pub collection_threshold: usize,
     pub lookup_hash_key: u64,
@@ -76,6 +79,9 @@ impl JitHeapView {
         pages: std::ptr::null(),
         page_count: 0,
         slot_count: 0,
+        slots: std::ptr::null_mut(),
+        free: std::ptr::null_mut(),
+        live: std::ptr::null_mut(),
         used_bytes: std::ptr::null_mut(),
         collection_threshold: 0,
         lookup_hash_key: 0,
@@ -96,7 +102,39 @@ struct Header {
     /// The logical byte cost currently charged for the object.
     bytes: usize,
     /// The shared immutable allocation charged through this object.
-    shared: Option<usize>,
+    shared: SharedKey,
+}
+
+/// One stable optional shared-allocation key.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct SharedKey {
+    present: u8,
+    reserved: [u8; 7],
+    key: usize,
+}
+
+impl SharedKey {
+    const NONE: SharedKey = SharedKey {
+        present: 0,
+        reserved: [0; 7],
+        key: 0,
+    };
+
+    fn new(key: Option<usize>) -> SharedKey {
+        match key {
+            Some(key) => SharedKey {
+                present: 1,
+                reserved: [0; 7],
+                key,
+            },
+            None => SharedKey::NONE,
+        }
+    }
+
+    fn get(self) -> Option<usize> {
+        (self.present != 0).then_some(self.key)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +196,13 @@ struct Entry {
 }
 
 impl Entry {
+    fn dead(generation: u32) -> Entry {
+        Entry {
+            generation,
+            state: EntryState::Dead,
+        }
+    }
+
     fn live(&self) -> Option<(&Header, &Object)> {
         match &self.state {
             EntryState::Dead => None,
@@ -194,6 +239,25 @@ impl Entry {
             EntryState::Dead => None,
             EntryState::Live(live) => Some((live.header, live.object)),
         }
+    }
+}
+
+/// One fixed canonical object page.
+struct ObjectPage {
+    entries: Box<[Entry]>,
+}
+
+impl std::ops::Deref for ObjectPage {
+    type Target = [Entry];
+
+    fn deref(&self) -> &[Entry] {
+        &self.entries
+    }
+}
+
+impl std::ops::DerefMut for ObjectPage {
+    fn deref_mut(&mut self) -> &mut [Entry] {
+        &mut self.entries
     }
 }
 
@@ -257,6 +321,18 @@ pub const JIT_ENTRY_BYTES_OFFSET: usize = std::mem::offset_of!(Entry, state)
     + ENTRY_STATE_PAYLOAD_OFFSET
     + std::mem::offset_of!(LiveEntry, header)
     + std::mem::offset_of!(Header, bytes);
+/// Byte offset of the shared-allocation presence flag.
+pub const JIT_ENTRY_SHARED_PRESENT_OFFSET: usize = std::mem::offset_of!(Entry, state)
+    + ENTRY_STATE_PAYLOAD_OFFSET
+    + std::mem::offset_of!(LiveEntry, header)
+    + std::mem::offset_of!(Header, shared)
+    + std::mem::offset_of!(SharedKey, present);
+/// Byte offset of the shared-allocation key.
+pub const JIT_ENTRY_SHARED_KEY_OFFSET: usize = std::mem::offset_of!(Entry, state)
+    + ENTRY_STATE_PAYLOAD_OFFSET
+    + std::mem::offset_of!(LiveEntry, header)
+    + std::mem::offset_of!(Header, shared)
+    + std::mem::offset_of!(SharedKey, key);
 /// Byte offset of the object tag.
 pub const JIT_ENTRY_OBJECT_TAG_OFFSET: usize = std::mem::offset_of!(Entry, state)
     + ENTRY_STATE_PAYLOAD_OFFSET
@@ -417,6 +493,7 @@ pub const JIT_DIGEST_BYTES_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_
 
 const _: () = assert!(JIT_ENTRY_GENERATION_OFFSET == 0);
 const _: () = assert!(std::mem::size_of::<Header>() == shape::HEADER_COST);
+const _: () = assert!(std::mem::size_of::<SharedKey>() == 16);
 
 /// Statistics of one heap, for `lm inspect --live`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,14 +598,14 @@ struct DigestCacheEntry {
 
 /// The VM heap.
 pub struct Heap {
-    pages: Vec<Vec<Entry>>,
+    pages: Vec<ObjectPage>,
     /// Stable addresses of canonical object pages.
     page_addresses: Vec<usize>,
     /// The latest generation of every slot ever allocated.
     generations: Vec<u32>,
     /// The current number of addressable object slots.
     slots: usize,
-    free: Vec<u32>,
+    free: OwnedArray<u32>,
     live: usize,
     used_bytes: usize,
     cap_bytes: usize,
@@ -553,7 +630,7 @@ impl Heap {
             page_addresses: Vec::new(),
             generations: Vec::new(),
             slots: 0,
-            free: Vec::new(),
+            free: OwnedArray::new(),
             live: 0,
             used_bytes: 0,
             cap_bytes,
@@ -601,6 +678,9 @@ impl Heap {
             pages: self.page_addresses.as_ptr(),
             page_count: self.page_addresses.len(),
             slot_count: self.slot_count(),
+            slots: std::ptr::from_mut(&mut self.slots),
+            free: std::ptr::from_mut(&mut self.free),
+            live: std::ptr::from_mut(&mut self.live),
             used_bytes: std::ptr::from_mut(&mut self.used_bytes),
             collection_threshold: self.collection_threshold,
             lookup_hash_key: process_lookup_key(),
@@ -611,14 +691,48 @@ impl Heap {
         if self.pages.try_reserve(1).is_err() || self.page_addresses.try_reserve(1).is_err() {
             return false;
         }
-        let mut page = Vec::new();
-        if page.try_reserve_exact(PAGE_SLOTS).is_err() {
+        let page_start = self.pages.len().saturating_mul(PAGE_SLOTS);
+        let page_end = match page_start.checked_add(PAGE_SLOTS) {
+            Some(page_end) => page_end,
+            None => return false,
+        };
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(PAGE_SLOTS).is_err()
+            || self
+                .generations
+                .try_reserve(page_end.saturating_sub(self.generations.len()))
+                .is_err()
+        {
             return false;
         }
+        for slot in page_start..page_end {
+            entries.push(Entry::dead(
+                self.generations.get(slot).copied().unwrap_or(0),
+            ));
+        }
+        self.generations.resize(page_end, 0);
+        let page = ObjectPage {
+            entries: entries.into_boxed_slice(),
+        };
         let address = page.as_ptr() as usize;
         self.pages.push(page);
         self.page_addresses.push(address);
         true
+    }
+
+    fn add_page(&mut self) {
+        let page_start = self.pages.len() * PAGE_SLOTS;
+        let page_end = page_start + PAGE_SLOTS;
+        self.generations.resize(page_end, 0);
+        let mut entries = Vec::with_capacity(PAGE_SLOTS);
+        for slot in page_start..page_end {
+            entries.push(Entry::dead(self.generations[slot]));
+        }
+        let page = ObjectPage {
+            entries: entries.into_boxed_slice(),
+        };
+        self.page_addresses.push(page.as_ptr() as usize);
+        self.pages.push(page);
     }
 
     /// True when charging `cost` more bytes would exceed the cap.
@@ -774,7 +888,7 @@ impl Heap {
             frozen: u8::from(object.shape().born_frozen),
             reserved: [0; 7],
             bytes: base,
-            shared: shared_key,
+            shared: SharedKey::new(shared_key),
         };
         self.used_bytes += cost;
         self.live += 1;
@@ -786,30 +900,14 @@ impl Heap {
             return ObjRef { slot, generation };
         }
 
-        let need_page = self
-            .pages
-            .last()
-            .map(|page| page.len() == PAGE_SLOTS)
-            .unwrap_or(true);
-        if need_page {
-            let page = Vec::with_capacity(PAGE_SLOTS);
-            self.page_addresses.push(page.as_ptr() as usize);
-            self.pages.push(page);
+        if self.slots == self.pages.len() * PAGE_SLOTS {
+            self.add_page();
         }
-        let page_idx = self.pages.len() - 1;
-        let page = &mut self.pages[page_idx];
-        let slot = page_idx * PAGE_SLOTS + page.len();
-        debug_assert!(slot <= self.generations.len());
-        let generation = if slot == self.generations.len() {
-            self.generations.push(0);
-            0
-        } else {
-            self.generations[slot]
-        };
-        page.push(Entry {
-            generation,
-            state: EntryState::Live(LiveEntry { header, object }),
-        });
+        let slot = self.slots;
+        let entry = self.entry_mut(slot as u32);
+        debug_assert!(!entry.is_live());
+        let generation = entry.generation;
+        entry.replace(header, object);
         self.slots = slot + 1;
         ObjRef {
             slot: slot as u32,
@@ -822,26 +920,11 @@ impl Heap {
         if self.would_exceed(self.allocation_cost(&object)) {
             return Err(object);
         }
-        if self.free.is_empty() {
-            let need_page = self
-                .pages
-                .last()
-                .map(|page| page.len() == PAGE_SLOTS)
-                .unwrap_or(true);
-            if need_page {
-                if self.generations.try_reserve(1).is_err() || !self.try_add_page() {
-                    return Err(object);
-                }
-            } else if self
-                .pages
-                .last_mut()
-                .expect("the last page exists")
-                .try_reserve(1)
-                .is_err()
-                || self.generations.try_reserve(1).is_err()
-            {
-                return Err(object);
-            }
+        if self.free.is_empty()
+            && self.slots == self.pages.len() * PAGE_SLOTS
+            && !self.try_add_page()
+        {
+            return Err(object);
         }
         Ok(self.alloc(object))
     }
@@ -898,7 +981,7 @@ impl Heap {
             let (header, object) = entry.live().expect("live object");
             (
                 header.bytes,
-                header.shared,
+                header.shared.get(),
                 object.heap_base_cost(),
                 object.shared_allocation(),
             )
@@ -912,7 +995,7 @@ impl Heap {
         let entry = self.entry_mut(r.slot);
         let (header, _) = entry.live_mut().expect("live object");
         header.bytes = new_cost;
-        header.shared = new_shared_key;
+        header.shared = SharedKey::new(new_shared_key);
         self.used_bytes = self.used_bytes - old_cost - released + new_cost + added;
     }
 
@@ -922,7 +1005,7 @@ impl Heap {
             let entry = self.entry_mut(r.slot);
             assert_eq!(entry.generation, r.generation, "stale object reference");
             let (header, object) = entry.live_mut().expect("live object");
-            debug_assert!(header.shared.is_none());
+            debug_assert!(header.shared.get().is_none());
             debug_assert!(object.shared_allocation().is_none());
             let old_cost = header.bytes;
             let new_cost = object.heap_base_cost();
@@ -944,7 +1027,7 @@ impl Heap {
         let (header, _) = entry.take().expect("live object");
         entry.generation = entry.generation.wrapping_add(1);
         self.generations[slot as usize] = entry.generation;
-        let shared = self.remove_shared(header.shared);
+        let shared = self.remove_shared(header.shared.get());
         let released = header.bytes + shared;
         self.used_bytes -= released;
         self.live -= 1;
@@ -1062,7 +1145,7 @@ impl Heap {
                 }
                 let (header, _) = entry.take().expect("live object");
                 freed_bytes += header.bytes;
-                if let Some(key) = header.shared {
+                if let Some(key) = header.shared.get() {
                     let charge = shared_allocations
                         .get_mut(&key)
                         .expect("a shared allocation has a heap charge");
@@ -1090,6 +1173,7 @@ impl Heap {
 
     /// Release trailing empty pages and their work tables.
     pub fn trim_free_pages(&mut self) {
+        let old_page_count = self.pages.len();
         while self
             .pages
             .last()
@@ -1098,11 +1182,12 @@ impl Heap {
             self.pages.pop();
             self.page_addresses.pop();
         }
-        let slots = self.pages.iter().map(Vec::len).sum();
-        self.slots = slots;
-        self.free.retain(|slot| (*slot as usize) < slots);
+        if self.pages.len() != old_page_count {
+            self.slots = self.pages.len() * PAGE_SLOTS;
+        }
+        self.free.retain(|slot| (*slot as usize) < self.slots);
         self.free.shrink_to_fit();
-        self.scratch.trim(slots);
+        self.scratch.trim(self.slots);
     }
 
     /// Rebuild all live objects into a dense table.
@@ -1645,6 +1730,12 @@ mod tests {
         assert_eq!(view.slot_count, PAGE_SLOTS + 1);
         // SAFETY: The view names this live heap charge counter.
         assert_eq!(unsafe { view.used_bytes.read() }, heap.used_bytes());
+        // SAFETY: The view names this heap's allocation counters.
+        assert_eq!(unsafe { view.slots.read() }, heap.slot_count());
+        // SAFETY: The view names this heap's allocation counters.
+        assert_eq!(unsafe { view.live.read() }, heap.live_count());
+        // SAFETY: The view names this heap's canonical free-slot array.
+        assert!(unsafe { &*view.free }.is_empty());
         assert_eq!(view.collection_threshold, heap.collection_threshold);
 
         // SAFETY: The view names two complete canonical entry pages.

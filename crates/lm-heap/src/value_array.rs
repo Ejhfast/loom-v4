@@ -50,6 +50,8 @@ pub const VALUE_ARRAY_LEN_OFFSET: usize = OWNED_ARRAY_LEN_OFFSET;
 pub const VALUE_ARRAY_CAPACITY_OFFSET: usize = OWNED_ARRAY_CAPACITY_OFFSET;
 /// Size of one native value-array record.
 pub const VALUE_ARRAY_SIZE: usize = OWNED_ARRAY_SIZE;
+/// Canonical data pointer for one empty value array.
+pub const VALUE_ARRAY_EMPTY_DATA: usize = std::mem::align_of::<Value>();
 
 const _: () = assert!(VALUE_ARRAY_DATA_OFFSET == 0);
 #[cfg(target_pointer_width = "64")]
@@ -139,6 +141,11 @@ impl<T> OwnedArray<T> {
         self.vector().clear();
     }
 
+    /// Reduce the allocation to the current length.
+    pub fn shrink_to_fit(&mut self) {
+        self.vector().shrink_to_fit();
+    }
+
     /// Keep only elements that satisfy one predicate.
     pub fn retain<F>(&mut self, keep: F)
     where
@@ -154,6 +161,12 @@ impl<T> OwnedArray<T> {
         unsafe { Vec::from_raw_parts(held.data, held.len, held.capacity) }
     }
 
+    /// Transfer this allocation as stable raw parts.
+    pub fn into_raw_parts(self) -> (*mut T, usize, usize) {
+        let held = ManuallyDrop::new(self);
+        (held.data, held.len, held.capacity)
+    }
+
     fn vector(&mut self) -> VectorGuard<'_, T> {
         let data = self.data;
         let len = self.len;
@@ -167,6 +180,16 @@ impl<T> OwnedArray<T> {
             owner: self,
             vector: ManuallyDrop::new(vector),
         }
+    }
+}
+
+impl<T: Clone> OwnedArray<T> {
+    /// Create one fallible array with repeated values.
+    pub fn try_repeated(value: T, len: usize) -> Result<OwnedArray<T>, TryReserveError> {
+        let mut values = Vec::new();
+        values.try_reserve_exact(len)?;
+        values.resize(len, value);
+        Ok(values.into())
     }
 }
 

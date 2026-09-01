@@ -558,7 +558,11 @@ impl CompiledRegion {
             || roots.len() < self.plan.max_roots.max(1)
             || root_tags.len() < self.plan.max_roots.max(1)
             || root_states.len() < self.plan.max_roots.max(1)
-            || (self.plan.collection_sites != 0 && heap.used_bytes.is_null())
+            || ((self.plan.allocation_sites != 0 || self.plan.collection_sites != 0)
+                && (heap.used_bytes.is_null()
+                    || heap.slots.is_null()
+                    || heap.free.is_null()
+                    || heap.live.is_null()))
             || ((!self.type_environment_sites.is_empty() || self.plan.type_resolution_sites != 0)
                 && (type_store_id == 0 || type_environments.entries.is_null()))
             || ((!self.interface_call_sites.is_empty()
@@ -615,8 +619,12 @@ impl CompiledRegion {
             heap_pages: heap.pages,
             heap_page_count: heap.page_count,
             heap_slot_count: heap.slot_count,
+            heap_slots: heap.slots,
+            heap_free: heap.free.cast(),
+            heap_live: heap.live,
             heap_used_bytes: heap.used_bytes,
             heap_collection_threshold: heap.collection_threshold,
+            inline_allocations: 0,
             lookup_hash_key: heap.lookup_hash_key,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
@@ -650,6 +658,7 @@ impl CompiledRegion {
         // SAFETY: The compiler bounds every access by the checked buffer lengths.
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe { (self.entry)(&mut raw_activation, entry) }
+        runtime.record_inline_allocations(raw_activation.inline_allocations);
         if raw_activation.scalar_len > raw_activation.scalar_capacity
             || raw_activation.frame_len > raw_activation.frame_capacity
             || raw_activation.frame_len == 0
