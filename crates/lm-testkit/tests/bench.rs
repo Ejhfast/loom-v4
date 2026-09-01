@@ -29,6 +29,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Rounds per case. One warm-up plus this many measured rounds.
 const ROUNDS: usize = 9;
 /// Measured rounds for message cases with high coordinator cost.

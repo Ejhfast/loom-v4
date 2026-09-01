@@ -3318,6 +3318,51 @@ Warm representative times stayed within variance or improved.
 
 The scheduled deep-recursion gain increased from 4.53 to 4.73 times.
 
+### Stage F64: Select the host allocator
+
+- select mimalloc in `lm-cli`;
+- use the same allocator in the release benchmark binary;
+- keep allocator policy out of runtime libraries;
+- preserve `ValueArray` ownership and layout;
+- compare guest allocation and helper-heavy programs;
+- measure CLI startup and binary size.
+
+The global allocator owns each free operation without one heap context.
+
+This allocator already provides size classes and segment ownership.
+
+The change reaches allocations inside interpreter and native helpers.
+
+It does not change guest heap limits or collection semantics.
+
+| Warm release row | System allocator | mimalloc | Change |
+| --- | ---: | ---: | ---: |
+| Plain allocation, interpreter | 8.171 ms | 7.536 ms | 7.8 percent faster |
+| Plain allocation, native | 3.465 ms | 2.493 ms | 28.1 percent faster |
+| Generic allocation, interpreter | 10.129 ms | 9.071 ms | 10.4 percent faster |
+| Generic allocation, native | 4.301 ms | 3.349 ms | 22.1 percent faster |
+| Byte construction, interpreter | 9.608 ms | 7.459 ms | 22.4 percent faster |
+| Byte construction, native | 12.427 ms | 8.102 ms | 34.8 percent faster |
+| Class initialization, native | 31.976 ms | 25.079 ms | 21.6 percent faster |
+| JSON parse, native | 16.077 ms | 14.358 ms | 10.7 percent faster |
+| JSON encode, native | 8.052 ms | 7.019 ms | 12.8 percent faster |
+| HTTP parse, native | 17.388 ms | 15.301 ms | 12.0 percent faster |
+| HTTP encode, native | 5.697 ms | 5.356 ms | 6.0 percent faster |
+
+The retained string-builder row did not change.
+
+That row performs only 18 object allocations during nine measured runs.
+
+Factorial source startup improved from 9.344 ms to 8.351 ms at the median.
+
+The release CLI grew from 20,041,040 bytes to 20,222,840 bytes.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed in 22.35 seconds.
+
+The full workspace suite passed.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
@@ -3351,5 +3396,9 @@ A scheduler continuation cannot keep stale duplicate scalar state.
 A runtime payload cache cannot add one branch to every field or element access.
 
 Generated code cannot serialize process-local heap addresses.
+
+A runtime library cannot select one process-global allocator.
+
+A second payload owner cannot mirror `ValueArray` ownership.
 
 These designs remain rejected even when local differential tests pass.

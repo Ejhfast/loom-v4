@@ -18,6 +18,9 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn report_stdout(args: std::fmt::Arguments<'_>) {
     let _ = std::io::stdout().lock().write_fmt(args);
 }

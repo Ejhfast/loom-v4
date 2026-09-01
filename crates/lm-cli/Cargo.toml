@@ -21,3 +21,4 @@ lm-value = { path = "../lm-value" }
 lm-vm = { path = "../lm-vm" }
 lm-proc = { path = "../lm-proc" }
 lm-host = { path = "../lm-host" }
+mimalloc = "0.1.52"

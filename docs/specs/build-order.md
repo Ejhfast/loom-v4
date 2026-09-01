@@ -77,6 +77,8 @@ ABI + source/HIR/types + bytecode/verifier + value/heap/graph/VM
 
 `lm-vm` has no filesystem, clock, network, process, or compiler-frontend dependency. `lm-host` never receives a general writable guest pointer. Unsafe Rust is confined to allocation pages, raw-copy helpers, native-code entry, executable-memory backends, and the optional C shim.
 
+The final host binary selects the process allocator. Runtime libraries do not select a global allocator.
+
 ---
 
 ## 2. Weekly completion contract
