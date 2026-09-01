@@ -4,7 +4,6 @@ Same algorithms, same LCG, same sizes as the programs directory.
 Run: nix-shell --run "python3 benchmarks/jit/ports.py [case ...]"
 """
 
-import json
 import time
 from functools import reduce
 
@@ -138,6 +137,29 @@ def wordcount():
     return total_words + best
 
 
+def _pure_json():
+    """Return the pure-Python json implementation.
+
+    CPython accelerates the json module with the C `_json` extension.
+    The Loom side runs std.json as Loom code, so the fair comparison
+    bypasses the accelerator and uses the Python implementation that
+    the standard library ships for decoding and encoding.
+    """
+    import json.decoder as decoder
+    import json.encoder as encoder
+    import json.scanner as scanner
+
+    decoder.scanstring = decoder.py_scanstring
+    scanner.make_scanner = scanner.py_make_scanner
+    encoder.c_make_encoder = None
+    loads = decoder.JSONDecoder().decode
+    dumps = encoder.JSONEncoder(separators=(",", ":")).encode
+    return loads, dumps
+
+
+PURE_LOADS, PURE_DUMPS = _pure_json()
+
+
 def json_pipeline():
     records = []
     seed = 31337
@@ -152,11 +174,11 @@ def json_pipeline():
     total = 0
     length = 0
     for _ in range(30):
-        document = json.loads(source)
+        document = PURE_LOADS(source)
         for item in document:
             if item["score"] >= 500.0:
                 total += 1
-        length += len(json.dumps(document, separators=(",", ":")))
+        length += len(PURE_DUMPS(document))
     return total + length
 
 
@@ -461,7 +483,7 @@ def json_parse_large():
     source = "[" + ",".join(records) + "]"
     total = 0
     for _ in range(30):
-        document = json.loads(source)
+        document = PURE_LOADS(source)
         total += len(document)
     return total
 

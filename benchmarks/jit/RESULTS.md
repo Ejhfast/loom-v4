@@ -11,6 +11,8 @@ It also compares Loom against CPython on the same workloads.
 - Warm means the native code set is stable before the measured rounds.
 - The CPython column is the median of five warm rounds of `ports.py`.
 - The CPython version is 3.13.
+- The JSON cases bypass the C `_json` accelerator.
+- They run the pure-Python implementation that the standard library ships.
 - `run.sh` reports end-to-end process times instead. Those include compilation.
 
 ## Modes
@@ -33,8 +35,8 @@ It also compares Loom against CPython on the same workloads.
 | pipeline_style | 108.6 | 15.6 | 15.2 | 7.0x | 45.8 | 2.9x |
 | expr_interpreter | 24.5 | 3.6 | 3.6 | 6.8x | 6.3 | 1.7x |
 | many_functions | 328.1 | 92.7 | 92.9 | 3.5x | 421.8 | 4.6x |
-| json_pipeline | 127.6 | 47.6 | 46.1 | 2.7x | 2.6 | 0.06x |
-| json_parse_large | 86.3 | 33.9 | 33.0 | 2.5x | 1.3 | 0.04x |
+| json_pipeline | 127.6 | 47.6 | 46.1 | 2.7x | 27.6 | 0.58x |
+| json_parse_large | 86.3 | 33.9 | 33.0 | 2.5x | 22.0 | 0.65x |
 | wordcount | 21.0 | 9.2 | 9.2 | 2.3x | 5.6 | 0.60x |
 | csv_report | 12.9 | 7.4 | 7.4 | 1.7x | 4.1 | 0.55x |
 | gcx_churn_low | 72.3 | 1.2 | 1.2 | 59.2x | 38.7 | 32.3x |
@@ -43,13 +45,15 @@ It also compares Loom against CPython on the same workloads.
 | gcx_alloc_burst | 34.4 | 7.1 | 7.1 | 4.9x | 23.7 | 3.3x |
 
 The `auto` geo-mean gain over the interpreter is 7.6x on the core ten rows.
-Loom `auto` leads CPython 2.2x geo-mean on the same ten rows.
+Loom `auto` leads CPython 2.8x geo-mean on the same ten rows.
 Native matches auto on every row within noise.
 
 ## Notes
 
-- The JSON rows compare `std.json` in Loom against the C `json` module.
-- The wordcount and csv rows also compare against C string paths.
+- The JSON rows compare `std.json` against the pure-Python `json` library.
+- Both sides run language-level code. A wrapped C library is not the subject.
+- The pure-Python lexer still uses compiled regular expressions.
+- The wordcount and csv rows compare against C string paths.
 - Every row runs identically in all three modes. The suite checks this.
 - Effect and parallel benchmarks live in `crates/lm-testkit`.
 
