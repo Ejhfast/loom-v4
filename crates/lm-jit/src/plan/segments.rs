@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
+pub(crate) fn split_segments(func: &Func) -> Result<Vec<Segment>, UnsupportedReason> {
     let mut segments = Vec::new();
     for (block_index, block) in func.blocks.iter().enumerate() {
         let mut start = 0usize;

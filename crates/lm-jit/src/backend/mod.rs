@@ -600,6 +600,25 @@ struct SegmentEmission<'a, 'b> {
     type_environment_sites: &'a [TypeEnvironmentSite],
 }
 
+struct InstructionEmission<'a, 'b, 'c, 'd> {
+    builder: &'a mut FunctionBuilder<'b>,
+    values: NativeValues<'c>,
+    plan: &'c RegionPlan,
+    input: &'c FunctionInput<'d>,
+    segment: &'c Segment,
+    type_environment_sites: &'c [TypeEnvironmentSite],
+    stack: &'a mut Vec<NativeValue>,
+    virtual_stack: &'a mut Vec<bool>,
+    initialized_locals: &'a mut Vec<bool>,
+    virtual_locals: &'a mut Vec<bool>,
+    deferred_integer_overflow: &'a mut Option<DeferredIntegerOverflow>,
+    instruction: Instr,
+    within: usize,
+    prefix: u32,
+    fault_prefix: u32,
+    prior_prefix: u32,
+}
+
 struct DeferredIntegerOverflow {
     flag: Option<ir::Value>,
     locals: Vec<NativeValue>,

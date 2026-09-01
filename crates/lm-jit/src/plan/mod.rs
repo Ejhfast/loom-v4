@@ -1147,5 +1147,5 @@ use segments::*;
 
 pub(crate) use calls::is_root_kind;
 pub use calls::type_has_native_representation;
-pub(crate) use flow::transfer_virtual_instruction;
-pub(crate) use segments::bypasses_fuel_check;
+pub(crate) use flow::{compute_dirty_locals, compute_liveness, transfer_virtual_instruction};
+pub(crate) use segments::{bypasses_fuel_check, split_segments};

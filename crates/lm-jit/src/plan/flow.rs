@@ -501,7 +501,7 @@ pub(crate) fn transfer_virtual_instruction(
     Ok(())
 }
 
-pub(super) fn compute_liveness(segments: &mut [Segment], locals: usize) {
+pub(crate) fn compute_liveness(segments: &mut [Segment], locals: usize) {
     for segment in segments.iter_mut() {
         segment.live_in = vec![false; locals];
     }
@@ -533,7 +533,7 @@ pub(super) fn compute_liveness(segments: &mut [Segment], locals: usize) {
     }
 }
 
-pub(super) fn compute_dirty_locals(segments: &mut [Segment], locals: usize) {
+pub(crate) fn compute_dirty_locals(segments: &mut [Segment], locals: usize) {
     let mut work = VecDeque::new();
     for (segment_index, segment) in segments.iter_mut().enumerate() {
         debug_assert_eq!(segment.definitions.len(), locals);
