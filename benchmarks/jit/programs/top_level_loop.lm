@@ -1,0 +1,13 @@
+seed = 1
+total = 0
+i = 0
+while i < 3000000
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  if seed % 3 == 0
+    total = total + seed % 97
+  else
+    total = total - seed % 13
+  end
+  i = i + 1
+end
+(total, seed)

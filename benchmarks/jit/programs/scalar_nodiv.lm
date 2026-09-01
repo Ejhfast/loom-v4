@@ -1,0 +1,13 @@
+seed = 1
+total = 0
+i = 0
+while i < 3000000
+  seed = (seed * 31 + 7).bit_and(1048575)
+  if seed > 524288
+    total = total + seed
+  else
+    total = total - 1
+  end
+  i = i + 1
+end
+(total, seed)

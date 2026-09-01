@@ -1,0 +1,60 @@
+regions = ["north", "south", "east", "west", "center"]
+products = ["ore", "grain", "wood", "cloth", "tools", "salt"]
+builder = StringBuilder()
+seed = 8080
+i = 0
+while i < 3000
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append(regions[seed % 5])
+  builder.append(",")
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append(products[seed % 6])
+  builder.append(",")
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append_int(1 + seed % 40)
+  builder.append(",")
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append_int(50 + seed % 950)
+  builder.append("\n")
+  i = i + 1
+end
+csv = builder.build()
+
+grand_total = 0
+report_len = 0
+rep = 0
+while rep < 3
+  revenue = Map[String, Int]()
+  for line in csv.split("\n")
+    if line.len() > 0
+      fields = line.split(",")
+      units = case fields.at(2).parse_int(10)
+      in Ok(value) then value
+      in Err(_) then 0
+      end
+      price = case fields.at(3).parse_int(10)
+      in Ok(value) then value
+      in Err(_) then 0
+      end
+      key = fields.at(0).to_string()
+      current = case revenue.get(key)
+      in Some(value) then value
+      in None then 0
+      end
+      revenue.put(key, current + units * price)
+    end
+  end
+  out = StringBuilder()
+  grand_total = 0
+  for key in revenue.keys_list()
+    value = revenue.at(key)
+    grand_total = grand_total + value
+    out.append(key)
+    out.append(": ")
+    out.append_int(value)
+    out.append("\n")
+  end
+  report_len = report_len + out.build().len()
+  rep = rep + 1
+end
+(grand_total, report_len)

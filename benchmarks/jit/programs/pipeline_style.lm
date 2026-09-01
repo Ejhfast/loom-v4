@@ -1,0 +1,17 @@
+values = List[Int]()
+seed = 60601
+i = 0
+while i < 50000
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  values.push(seed % 100000)
+  i = i + 1
+end
+total = 0
+rep = 0
+while rep < 10
+  evens = values.filter() { |value: Int| value % 2 == 0 }
+  scaled = evens.map() { |value: Int| value * 3 % 1000 }
+  total = (total + scaled.fold(0) { |sum: Int, value: Int| (sum + value) % 1000003 }) % 1000003
+  rep = rep + 1
+end
+total

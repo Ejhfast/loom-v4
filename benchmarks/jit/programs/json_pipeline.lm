@@ -1,0 +1,64 @@
+use std.json.Json
+use std.json.parse
+use std.json.stringify
+
+builder = StringBuilder()
+builder.append("[")
+seed = 31337
+i = 0
+while i < 150
+  if i > 0
+    builder.append(",")
+  end
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  score = seed % 1000
+  builder.append("{\"id\":")
+  builder.append_int(i)
+  builder.append(",\"name\":\"user")
+  builder.append_int(i)
+  builder.append("\",\"score\":")
+  builder.append_int(score)
+  builder.append(",\"active\":")
+  if score % 2 == 0
+    builder.append("true")
+  else
+    builder.append("false")
+  end
+  builder.append("}")
+  i = i + 1
+end
+builder.append("]")
+source = builder.build()
+
+total = 0
+length = 0
+rep = 0
+while rep < 30
+  case parse(source)
+  in Ok(document)
+    case document
+    in Json.ListValue(items)
+      for item in items
+        case item
+        in Json.Object(fields)
+          case fields.get("score")
+          in Some(Json.Number(value))
+            if value >= 500.0
+              total = total + 1
+            end
+          in _ then total = total - 1000000
+          end
+        in _ then total = total - 1000000
+        end
+      end
+      case stringify(document)
+      in Ok(text) then length = length + text.len()
+      in Err(_) then total = total - 1000000
+      end
+    in _ then total = total - 1000000
+    end
+  in Err(_) then total = total - 1000000
+  end
+  rep = rep + 1
+end
+(total, length)

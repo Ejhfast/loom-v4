@@ -1,0 +1,41 @@
+def matmul(a: [Float], b: [Float], n: Int): [Float]
+  out = List[Float]()
+  out.reserve(n * n)
+  row = 0
+  while row < n
+    col = 0
+    while col < n
+      sum = 0.0
+      k = 0
+      while k < n
+        sum = sum + a[row * n + k] * b[k * n + col]
+        k = k + 1
+      end
+      out.push(sum)
+      col = col + 1
+    end
+    row = row + 1
+  end
+  out
+end
+
+n = 56
+a = List[Float]()
+b = List[Float]()
+seed = 12345
+i = 0
+while i < n * n
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  a.push((seed % 1000).to_float() / 1000.0)
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  b.push((seed % 1000).to_float() / 1000.0)
+  i = i + 1
+end
+total = 0.0
+rep = 0
+while rep < 3
+  c = matmul(a, b, n)
+  total = total + c[0] + c[n * n - 1] + c[n + 7]
+  rep = rep + 1
+end
+total

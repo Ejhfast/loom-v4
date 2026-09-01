@@ -1,0 +1,44 @@
+vocab = [
+  "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+  "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi",
+  "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
+  "red", "orange", "yellow", "green", "blue", "indigo", "violet", "gray",
+  "one", "two", "three", "four", "five", "six", "seven", "eight"
+]
+builder = StringBuilder()
+seed = 99
+i = 0
+while i < 20000
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append(vocab[seed % 40])
+  builder.append(" ")
+  i = i + 1
+end
+doc = builder.build()
+total_words = 0
+best_count = 0
+rep = 0
+while rep < 2
+  words = doc.split(" ")
+  counts = Map[String, Int]()
+  for word in words
+    if word.len() > 0
+      key = word.to_string()
+      current = case counts.get(key)
+      in Some(value) then value
+      in None then 0
+      end
+      counts.put(key, current + 1)
+      total_words = total_words + 1
+    end
+  end
+  best_count = 0
+  for key in counts.keys_list()
+    value = counts.at(key)
+    if value > best_count
+      best_count = value
+    end
+  end
+  rep = rep + 1
+end
+(total_words, best_count)

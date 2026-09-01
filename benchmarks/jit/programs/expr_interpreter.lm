@@ -1,0 +1,161 @@
+enum Token
+  Num(value: Int)
+  Plus
+  Minus
+  Star
+  Slash
+  Done
+end
+
+enum Expr
+  Literal(value: Int)
+  Add(left: Expr, right: Expr)
+  Sub(left: Expr, right: Expr)
+  Mul(left: Expr, right: Expr)
+  Div(left: Expr, right: Expr)
+end
+
+def tokenize(text: String): [Token]
+  tokens = List[Token]()
+  i = 0
+  n = text.len()
+  while i < n
+    code = text.at(i).expect("the scalar exists").codepoint()
+    if code == 32
+      i = i + 1
+    elsif code == 43
+      tokens.push(Token.Plus)
+      i = i + 1
+    elsif code == 45
+      tokens.push(Token.Minus)
+      i = i + 1
+    elsif code == 42
+      tokens.push(Token.Star)
+      i = i + 1
+    elsif code == 47
+      tokens.push(Token.Slash)
+      i = i + 1
+    else
+      value = 0
+      while i < n
+        digit = text.at(i).expect("the scalar exists").codepoint()
+        if digit >= 48 and digit <= 57
+          value = value * 10 + (digit - 48)
+          i = i + 1
+        else
+          break
+        end
+      end
+      tokens.push(Token.Num(value))
+    end
+  end
+  tokens.push(Token.Done)
+  tokens
+end
+
+class Parser
+  tokens: [Token]
+  position: Int = 0
+
+  def init(mut self, tokens: [Token])
+    self.tokens = tokens
+  end
+
+  def peek(self): Token
+    self.tokens[self.position]
+  end
+
+  def advance(mut self): Token
+    token = self.tokens[self.position]
+    self.position = self.position + 1
+    token
+  end
+
+  def parse_factor(mut self): Expr
+    case self.advance()
+    in Token.Num(value) then Expr.Literal(value)
+    in _ then Expr.Literal(0)
+    end
+  end
+
+  def parse_term(mut self): Expr
+    left = self.parse_factor()
+    more = true
+    while more
+      case self.peek()
+      in Token.Star
+        self.advance()
+        left = Expr.Mul(left, self.parse_factor())
+      in Token.Slash
+        self.advance()
+        left = Expr.Div(left, self.parse_factor())
+      in _ then more = false
+      end
+    end
+    left
+  end
+
+  def parse_expr(mut self): Expr
+    left = self.parse_term()
+    more = true
+    while more
+      case self.peek()
+      in Token.Plus
+        self.advance()
+        left = Expr.Add(left, self.parse_term())
+      in Token.Minus
+        self.advance()
+        left = Expr.Sub(left, self.parse_term())
+      in _ then more = false
+      end
+    end
+    left
+  end
+end
+
+def eval(expr: Expr): Int
+  case expr
+  in Expr.Literal(value) then value
+  in Expr.Add(left, right) then eval(left) + eval(right)
+  in Expr.Sub(left, right) then eval(left) - eval(right)
+  in Expr.Mul(left, right) then eval(left) * eval(right)
+  in Expr.Div(left, right) then eval(left) / eval(right)
+  end
+end
+
+seed = 2024
+total = 0
+program = 0
+while program < 150
+  builder = StringBuilder()
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  builder.append_int(1 + seed % 9)
+  part = 0
+  while part < 14
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    op = seed % 4
+    if op == 0
+      builder.append(" + ")
+    elsif op == 1
+      builder.append(" - ")
+    elsif op == 2
+      builder.append(" * ")
+    else
+      builder.append(" / ")
+    end
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    builder.append_int(1 + seed % 9)
+    part = part + 1
+  end
+  text = builder.build()
+  tokens = tokenize(text)
+  parser = Parser(tokens)
+  tree = parser.parse_expr()
+  round = 0
+  while round < 30
+    total = total + eval(tree)
+    round = round + 1
+  end
+  program = program + 1
+end
+total

@@ -1,0 +1,26 @@
+class Node
+  a: Int
+  b: Int
+
+  def init(mut self, a: Int, b: Int)
+    self.a = a
+    self.b = b
+  end
+end
+
+peak = List[Node]()
+peak.reserve(150000)
+i = 0
+while i < 150000
+  peak.push(Node(i, i * 2))
+  i = i + 1
+end
+peak = List[Node]()
+total = 0
+i = 0
+while i < 400000
+  node = Node(i, i + 1)
+  total = total + node.a
+  i = i + 1
+end
+(total, peak.len())

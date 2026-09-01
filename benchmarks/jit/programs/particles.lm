@@ -1,0 +1,59 @@
+class Particle
+  x: Float
+  y: Float
+  vx: Float
+  vy: Float
+
+  def init(mut self, x: Float, y: Float, vx: Float, vy: Float)
+    self.x = x
+    self.y = y
+    self.vx = vx
+    self.vy = vy
+  end
+
+  def step(mut self, gravity: Float, bounds: Float)
+    self.vy = self.vy + gravity
+    self.x = self.x + self.vx
+    self.y = self.y + self.vy
+    if self.x < 0.0 or self.x > bounds
+      self.vx = 0.0 - self.vx
+    end
+    if self.y < 0.0 or self.y > bounds
+      self.vy = 0.0 - self.vy
+    end
+  end
+
+  def energy(self): Float
+    self.vx * self.vx + self.vy * self.vy
+  end
+end
+
+particles = List[Particle]()
+seed = 5150
+i = 0
+while i < 400
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  x = (seed % 1000).to_float()
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  y = (seed % 1000).to_float()
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  vx = (seed % 19).to_float() - 9.0
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  vy = (seed % 19).to_float() - 9.0
+  particles.push(Particle(x, y, vx, vy))
+  i = i + 1
+end
+observed = 0.0
+tick = 0
+while tick < 400
+  for particle in particles
+    particle.step(0.5, 1000.0)
+  end
+  if tick % 100 == 0
+    for particle in particles
+      observed = observed + particle.energy()
+    end
+  end
+  tick = tick + 1
+end
+observed
