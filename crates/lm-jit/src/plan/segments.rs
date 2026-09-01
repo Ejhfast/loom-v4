@@ -1377,6 +1377,7 @@ pub(super) fn analyze_segment(
                     value_target: Some(value_target),
                     virtual_result: false,
                     scalar_result: None,
+                    behavior: crate::FunctionBehavior::conservative(),
                 });
             }
             Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
@@ -1409,6 +1410,7 @@ pub(super) fn analyze_segment(
                     value_target: None,
                     virtual_result: false,
                     scalar_result: None,
+                    behavior: crate::FunctionBehavior::conservative(),
                 });
             }
             Instr::CallInterface { .. } => {
@@ -1444,6 +1446,7 @@ pub(super) fn analyze_segment(
                     value_target: None,
                     virtual_result: false,
                     scalar_result: None,
+                    behavior: crate::FunctionBehavior::conservative(),
                 });
             }
             Instr::Extended(ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. }) => {
@@ -1488,6 +1491,7 @@ pub(super) fn analyze_segment(
                     value_target: None,
                     virtual_result: false,
                     scalar_result: None,
+                    behavior: crate::FunctionBehavior::conservative(),
                 });
             }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {

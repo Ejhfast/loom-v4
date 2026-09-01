@@ -808,7 +808,10 @@ pub(super) fn emit_native_call(
     let lookup = builder.create_block();
     let fallback = builder.create_block();
     let root_check = builder.create_block();
-    let grow_roots = builder.create_block();
+    let grow_roots = contract
+        .behavior
+        .may_collect()
+        .then(|| builder.create_block());
     let stack_limit = builder.create_block();
     let capacity = builder.create_block();
     let storage = builder.create_block();
@@ -920,27 +923,31 @@ pub(super) fn emit_native_call(
         .brif(published, root_check, &[], fallback, &[]);
 
     builder.switch_to_block(root_check);
-    let required_roots = load_cell_u32(
-        builder,
-        cell,
-        std_mem::offset_of!(NativeEntryCell, max_roots),
-    )?;
-    let root_capacity = load_activation_u32(builder, values, RawActivationField::RootCapacity)?;
-    let roots_fit = builder.ins().icmp(
-        IntCC::UnsignedLessThanOrEqual,
-        required_roots,
-        root_capacity,
-    );
-    builder.ins().brif(roots_fit, limits, &[], grow_roots, &[]);
+    if let Some(grow_roots) = grow_roots {
+        let required_roots = load_cell_u32(
+            builder,
+            cell,
+            std_mem::offset_of!(NativeEntryCell, max_roots),
+        )?;
+        let root_capacity = load_activation_u32(builder, values, RawActivationField::RootCapacity)?;
+        let roots_fit = builder.ins().icmp(
+            IntCC::UnsignedLessThanOrEqual,
+            required_roots,
+            root_capacity,
+        );
+        builder.ins().brif(roots_fit, limits, &[], grow_roots, &[]);
 
-    builder.switch_to_block(grow_roots);
-    let kind = builder.ins().iconst(types::I32, i64::from(EXIT_GROW_ROOTS));
-    let required_roots = builder.ins().uextend(types::I64, required_roots);
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(
-        preflight_exit,
-        &[kind.into(), required_roots.into(), zero.into()],
-    );
+        builder.switch_to_block(grow_roots);
+        let kind = builder.ins().iconst(types::I32, i64::from(EXIT_GROW_ROOTS));
+        let required_roots = builder.ins().uextend(types::I64, required_roots);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().jump(
+            preflight_exit,
+            &[kind.into(), required_roots.into(), zero.into()],
+        );
+    } else {
+        builder.ins().jump(limits, &[]);
+    }
 
     builder.switch_to_block(limits);
     let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
@@ -1172,14 +1179,16 @@ pub(super) fn emit_native_call(
     emit_charge(builder, values, 1);
     let prior_changed = load_activation_u32(builder, values, RawActivationField::ChangedFrom)?;
     let caller_frame = active_frame;
-    emit_spill_frame_roots(
-        builder,
-        values,
-        caller_frame,
-        local_kinds,
-        caller_stack_kinds,
-        &caller_stack,
-    )?;
+    if contract.behavior.may_collect() {
+        emit_spill_frame_roots(
+            builder,
+            values,
+            caller_frame,
+            local_kinds,
+            caller_stack_kinds,
+            &caller_stack,
+        )?;
+    }
     let scalars = load_activation_pointer(builder, values, RawActivationField::Scalars)?;
     let tags = load_activation_pointer(builder, values, RawActivationField::Tags)?;
     let states = load_activation_pointer(builder, values, RawActivationField::States)?;
@@ -1443,6 +1452,358 @@ pub(super) fn emit_native_call(
     define_stack(builder, values, stack)?;
     builder.ins().jump(successor, &[]);
     Ok(())
+}
+
+pub(super) fn emit_inline_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    input: &FunctionInput<'_>,
+    stack: &mut Vec<NativeValue>,
+    call: InlineCallEmission<'_, '_>,
+) -> Result<(), CompileError> {
+    let InlineCallEmission {
+        definition,
+        inline,
+        contract,
+        boundary_len,
+        block,
+        instruction,
+        successor,
+    } = call;
+    let plan = inline.plan.as_ref();
+    let argument_start = stack
+        .len()
+        .checked_sub(contract.params.len())
+        .ok_or(CompileError::Backend)?;
+    let arguments = stack[argument_start..].to_vec();
+    emit_inline_call_preflight(
+        builder,
+        values,
+        InlineCallPreflight {
+            plan,
+            parameter_count: contract.params.len(),
+            boundary_len,
+            block,
+            instruction,
+            stack,
+        },
+    )?;
+    emit_charge(builder, values, 1);
+
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let zero_i32 = builder.ins().iconst(types::I32, 0);
+    let zero_pointer = builder.ins().iconst(values.pointer_type, 0);
+    let mut locals = Vec::with_capacity(plan.local_kinds.len());
+    let mut local_tags = Vec::with_capacity(plan.local_kinds.len());
+    for kind in plan.local_kinds.iter().copied() {
+        let local = builder.declare_var(types::I64);
+        builder.def_var(local, zero_i64);
+        locals.push(local);
+        let tag = value_tag(kind).is_none().then(|| {
+            let tag = builder.declare_var(types::I64);
+            builder.def_var(tag, zero_i64);
+            tag
+        });
+        local_tags.push(tag);
+    }
+    if arguments.len() > locals.len() {
+        return Err(CompileError::Backend);
+    }
+    for (slot, argument) in arguments.iter().copied().enumerate() {
+        builder.def_var(locals[slot], argument.bits);
+        define_slot_tag(
+            builder,
+            local_tags[slot],
+            plan.local_kinds[slot],
+            argument.tag,
+        )?;
+    }
+
+    let local_heap_caches = plan
+        .local_kinds
+        .iter()
+        .copied()
+        .map(|kind| {
+            if !matches!(
+                kind,
+                ScalarKind::Object(_) | ScalarKind::Tagged(_) | ScalarKind::Callback(_)
+            ) {
+                return None;
+            }
+            let cache = LocalHeapCache {
+                entry: builder.declare_var(values.pointer_type),
+                object_kind: builder.declare_var(types::I64),
+                class: builder.declare_var(types::I64),
+                actual_class: builder.declare_var(types::I32),
+                list_data: None,
+                preloaded_list_data: false,
+            };
+            builder.def_var(cache.entry, zero_pointer);
+            builder.def_var(cache.object_kind, zero_i64);
+            builder.def_var(cache.class, zero_i64);
+            builder.def_var(cache.actual_class, zero_i32);
+            Some(cache)
+        })
+        .collect::<Vec<_>>();
+
+    let mut child_stack = Vec::with_capacity(plan.max_stack);
+    let mut child_stack_tags = Vec::with_capacity(plan.max_stack);
+    for slot in 0..plan.max_stack {
+        let variable = builder.declare_var(types::I64);
+        builder.def_var(variable, zero_i64);
+        child_stack.push(variable);
+        let dynamic = plan.segments.iter().any(|segment| {
+            segment.fuel_stacks.iter().any(|(_, kinds)| {
+                kinds
+                    .get(slot)
+                    .copied()
+                    .is_some_and(|kind| value_tag(kind).is_none())
+            })
+        });
+        let tag = dynamic.then(|| {
+            let tag = builder.declare_var(types::I64);
+            builder.def_var(tag, zero_i64);
+            tag
+        });
+        child_stack_tags.push(tag);
+    }
+
+    let return_block = builder.create_block();
+    builder.append_block_param(return_block, types::I64);
+    builder.append_block_param(return_block, types::I64);
+    let entry_blocks = (0..plan.segments.len())
+        .map(|_| builder.create_block())
+        .collect::<Vec<_>>();
+    let body_blocks = (0..plan.segments.len())
+        .map(|_| builder.create_block())
+        .collect::<Vec<_>>();
+    let entry = plan
+        .entries
+        .get(&(0, 0))
+        .copied()
+        .ok_or(CompileError::Backend)?;
+    builder.ins().jump(entry_blocks[entry], &[]);
+
+    let scalar_instances = Vec::<ScalarInstanceValues>::new();
+    let heap_translations = RefCell::new(HeapTranslationCache::default());
+    let child_values = NativeValues {
+        plan,
+        locals: &locals,
+        local_kinds: &plan.local_kinds,
+        dirty_locals: None,
+        local_tags: &local_tags,
+        local_heap_caches: &local_heap_caches,
+        scalar_instances: &scalar_instances,
+        stack: &child_stack,
+        stack_tags: &child_stack_tags,
+        replay_blocks: values.replay_blocks,
+        replay_failures: true,
+        inline_return: Some(return_block),
+        heap_translations: &heap_translations,
+        ..values
+    };
+    let child_input = input
+        .child(definition.function)
+        .ok_or(CompileError::Backend)?;
+    for (index, segment) in plan.segments.iter().enumerate() {
+        builder.switch_to_block(entry_blocks[index]);
+        let fuel = builder.use_var(values.fuel);
+        let enough = builder.ins().icmp_imm(
+            IntCC::SignedGreaterThanOrEqual,
+            fuel,
+            i64::from(segment.fuel_reserve),
+        );
+        let replay = builder.ins().bxor_imm(enough, 1);
+        emit_interpreter_replay(
+            builder,
+            child_values,
+            replay,
+            FaultPoint {
+                block: segment.block,
+                instruction: segment.start,
+                prefix: 0,
+            },
+            &[],
+        )?;
+        builder.ins().jump(body_blocks[index], &[]);
+
+        builder.switch_to_block(body_blocks[index]);
+        let successor_blocks = segment
+            .successors
+            .iter()
+            .map(|successor| {
+                if bypasses_fuel_check(&plan.segments, index, *successor) {
+                    body_blocks[*successor]
+                } else {
+                    entry_blocks[*successor]
+                }
+            })
+            .collect::<Vec<_>>();
+        let segment_values = NativeValues {
+            dirty_locals: Some(&segment.dirty_locals),
+            ..child_values
+        };
+        let entry_stack = segment_entry_values(builder, segment_values, segment)?;
+        emit_segment_body(
+            builder,
+            SegmentEmission {
+                bytecode: definition.runtime,
+                segment,
+                successor_blocks: &successor_blocks,
+                values: segment_values,
+                plan,
+                input: &child_input,
+                type_environment_sites: &[],
+            },
+            entry_stack,
+            segment.virtual_stack_in.clone(),
+        )?;
+    }
+
+    builder.switch_to_block(return_block);
+    stack.truncate(argument_start);
+    stack.push(NativeValue {
+        bits: builder.block_params(return_block)[0],
+        tag: builder.block_params(return_block)[1],
+    });
+    define_stack(builder, values, stack)?;
+    builder.ins().jump(successor, &[]);
+    Ok(())
+}
+
+struct InlineCallPreflight<'a> {
+    plan: &'a RegionPlan,
+    parameter_count: usize,
+    boundary_len: usize,
+    block: u32,
+    instruction: u32,
+    stack: &'a [NativeValue],
+}
+
+fn emit_inline_call_preflight(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    preflight: InlineCallPreflight<'_>,
+) -> Result<(), CompileError> {
+    let InlineCallPreflight {
+        plan,
+        parameter_count,
+        boundary_len,
+        block,
+        instruction,
+        stack,
+    } = preflight;
+    let poll_remaining = builder.use_var(values.fuel);
+    let can_start = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, poll_remaining, 1);
+    let replay = builder.ins().bxor_imm(can_start, 1);
+    emit_interpreter_replay(
+        builder,
+        values,
+        replay,
+        FaultPoint {
+            block,
+            instruction,
+            prefix: 0,
+        },
+        stack,
+    )?;
+
+    let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
+    let base_frames = load_activation_u32(builder, values, RawActivationField::BaseFrames)?;
+    let max_frames = load_activation_u32(builder, values, RawActivationField::MaxFrames)?;
+    let total_frames = builder.ins().iadd(base_frames, frame_len);
+    let frames_fit = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, total_frames, max_frames);
+
+    let frames = load_activation_pointer(builder, values, RawActivationField::Frames)?;
+    let active_frame_index = builder.ins().iadd_imm(frame_len, -1);
+    let active_frame_index = builder
+        .ins()
+        .uextend(values.pointer_type, active_frame_index);
+    let active_frame_offset = builder.ins().imul_imm(
+        active_frame_index,
+        std_mem::size_of::<RawNativeFrame>() as i64,
+    );
+    let active_frame = builder.ins().iadd(frames, active_frame_offset);
+    let caller_prefix = load_cell_u32(
+        builder,
+        active_frame,
+        std_mem::offset_of!(RawNativeFrame, caller_stack_values),
+    )?;
+    let active_local_count = load_cell_u32(
+        builder,
+        active_frame,
+        std_mem::offset_of!(RawNativeFrame, local_count),
+    )?;
+    let active_values = builder.ins().iadd(caller_prefix, active_local_count);
+    let active_values = builder.ins().iadd_imm(
+        active_values,
+        i64::try_from(boundary_len).map_err(|_| CompileError::Backend)?,
+    );
+    let caller_values = builder.ins().iadd_imm(
+        active_values,
+        -i64::try_from(parameter_count).map_err(|_| CompileError::Backend)?,
+    );
+    let pushed_values = builder.ins().iadd_imm(
+        caller_values,
+        i64::try_from(plan.local_kinds.len()).map_err(|_| CompileError::Backend)?,
+    );
+    let max_values = load_activation_u32(builder, values, RawActivationField::MaxStackValues)?;
+    let locals_fit = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, pushed_values, max_values);
+
+    let stack_fits = builder.ins().band(frames_fit, locals_fit);
+    let stack_fault = builder.ins().bxor_imm(stack_fits, 1);
+    let fault = builder.create_block();
+    let body_check = builder.create_block();
+    builder.set_cold_block(fault);
+    builder.ins().brif(stack_fault, fault, &[], body_check, &[]);
+
+    builder.switch_to_block(fault);
+    emit_charge(builder, values, 1);
+    let retired = emit_retired(builder, values);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
+        builder,
+        values,
+        ExitEmission {
+            retired,
+            kind: EXIT_STACK_LIMIT,
+            block,
+            instruction: instruction + 1,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
+        },
+        stack,
+    )?;
+
+    builder.switch_to_block(body_check);
+    let body_values = builder.ins().iadd_imm(
+        pushed_values,
+        i64::try_from(plan.max_stack_values).map_err(|_| CompileError::Backend)?,
+    );
+    let body_fits = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, body_values, max_values);
+    let replay = builder.ins().bxor_imm(body_fits, 1);
+
+    emit_interpreter_replay(
+        builder,
+        values,
+        replay,
+        FaultPoint {
+            block,
+            instruction,
+            prefix: 0,
+        },
+        stack,
+    )
 }
 
 pub(super) fn emit_clear_local_states(

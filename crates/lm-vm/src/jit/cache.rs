@@ -32,6 +32,7 @@ struct NativeCodeRevision {
     dispatch_rows: Arc<Vec<NativeDispatchRow>>,
     dispatch_methods: Arc<Vec<u32>>,
     candidates: Arc<Vec<u64>>,
+    behaviors: lm_jit::FunctionBehaviors,
     budget: Arc<CodeBudget>,
     compiled: Arc<AtomicUsize>,
 }
@@ -92,6 +93,7 @@ impl NativeCodeState {
             dispatch_rows: Arc::new(Vec::new()),
             dispatch_methods: Arc::new(Vec::new()),
             candidates: Arc::new(Vec::new()),
+            behaviors: lm_jit::FunctionBehaviors::analyze(&module.funcs),
             budget,
             compiled: Arc::new(AtomicUsize::new(0)),
         };
@@ -114,6 +116,7 @@ impl NativeCodeState {
         while revision.slots.len() < module.funcs.len() {
             revision.push_slot(module, revision.slots.len());
         }
+        revision.behaviors = lm_jit::FunctionBehaviors::analyze(&module.funcs);
         revision.extend_classes(module);
         revision.extend_dispatch(module);
         self.0 = Arc::new(revision);
@@ -125,6 +128,10 @@ impl NativeCodeState {
 
     pub(super) fn entries(&self) -> &[usize] {
         self.0.entries.as_slice()
+    }
+
+    pub(super) fn behaviors(&self) -> lm_jit::FunctionBehaviors {
+        self.0.behaviors.clone()
     }
 
     pub(super) fn class_parents(&self) -> &[u32] {

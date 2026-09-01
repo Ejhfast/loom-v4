@@ -32,6 +32,7 @@ pub(super) fn call_contracts(
                 local_count: source_func.local_types.len(),
                 result,
                 virtual_constructor: virtual_constructor(definition),
+                behavior: input.behavior(definition.function),
             },
         );
     }
@@ -444,6 +445,7 @@ pub(super) fn instantiate_call(
         value_target: None,
         virtual_result: signature.virtual_constructor.is_some(),
         scalar_result: None,
+        behavior: signature.behavior,
     })
 }
 

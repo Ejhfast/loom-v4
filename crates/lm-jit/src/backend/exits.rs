@@ -159,6 +159,19 @@ pub(super) fn emit_deferred_integer_overflow_replay(
     locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
+    if values.replay_failures {
+        return emit_interpreter_replay(
+            builder,
+            values,
+            overflow,
+            FaultPoint {
+                block,
+                instruction,
+                prefix: retired_prefix,
+            },
+            stack,
+        );
+    }
     let replay = builder.create_block();
     let success = builder.create_block();
     builder.set_cold_block(replay);
@@ -215,6 +228,9 @@ pub(super) fn emit_fault_check(
     point: FaultPoint,
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
+    if values.replay_failures {
+        return emit_interpreter_replay(builder, values, faulted, point, stack);
+    }
     let fault = builder.create_block();
     let success = builder.create_block();
     builder.set_cold_block(fault);
@@ -267,6 +283,9 @@ pub(super) fn emit_runtime_fault_status(
         .ins()
         .band_imm(status, i64::from(RUNTIME_FAULT_FLAG));
     let fault = builder.ins().icmp_imm(IntCC::NotEqual, fault, 0);
+    if values.replay_failures {
+        return emit_interpreter_replay(builder, values, fault, point, fault_stack);
+    }
     let fault_block = builder.create_block();
     let checked = builder.create_block();
     builder.ins().brif(fault, fault_block, &[], checked, &[]);

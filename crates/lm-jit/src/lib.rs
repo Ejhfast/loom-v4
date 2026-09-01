@@ -41,6 +41,7 @@ const EXIT_POLL: u32 = 26;
 
 mod activation;
 mod opcode;
+mod summary;
 
 pub use activation::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
@@ -60,6 +61,7 @@ use activation::{
 pub use opcode::{
     instruction_treatment, ExitBehavior, FaultStack, InstructionTreatment, TreatmentClass,
 };
+pub use summary::{FunctionBehavior, FunctionBehaviors};
 
 /// One native compilation or execution failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,7 @@ pub struct JitEngine {
     compiled_code_bytes: AtomicU64,
     compiled_segments: AtomicU64,
     compiled_call_sites: AtomicU64,
+    compiled_inlined_call_sites: AtomicU64,
     compiled_heap_read_sites: AtomicU64,
     compiled_heap_write_sites: AtomicU64,
     compiled_allocation_sites: AtomicU64,
@@ -94,6 +97,7 @@ impl Default for JitEngine {
             compiled_code_bytes: AtomicU64::new(0),
             compiled_segments: AtomicU64::new(0),
             compiled_call_sites: AtomicU64::new(0),
+            compiled_inlined_call_sites: AtomicU64::new(0),
             compiled_heap_read_sites: AtomicU64::new(0),
             compiled_heap_write_sites: AtomicU64::new(0),
             compiled_allocation_sites: AtomicU64::new(0),
@@ -780,6 +784,8 @@ impl JitEngine {
                     .fetch_add(region.plan.segments.len() as u64, Ordering::Relaxed);
                 self.compiled_call_sites
                     .fetch_add(region.plan.call_sites as u64, Ordering::Relaxed);
+                self.compiled_inlined_call_sites
+                    .fetch_add(region.plan.inlined_call_sites as u64, Ordering::Relaxed);
                 self.compiled_heap_read_sites
                     .fetch_add(region.plan.heap_read_sites as u64, Ordering::Relaxed);
                 self.compiled_heap_write_sites
@@ -805,6 +811,7 @@ impl JitEngine {
             compiled_code_bytes: self.compiled_code_bytes.load(Ordering::Relaxed),
             compiled_segments: self.compiled_segments.load(Ordering::Relaxed),
             compiled_call_sites: self.compiled_call_sites.load(Ordering::Relaxed),
+            compiled_inlined_call_sites: self.compiled_inlined_call_sites.load(Ordering::Relaxed),
             compiled_heap_read_sites: self.compiled_heap_read_sites.load(Ordering::Relaxed),
             compiled_heap_write_sites: self.compiled_heap_write_sites.load(Ordering::Relaxed),
             compiled_allocation_sites: self.compiled_allocation_sites.load(Ordering::Relaxed),
@@ -820,6 +827,7 @@ impl JitEngine {
         self.compiled_code_bytes.store(0, Ordering::Relaxed);
         self.compiled_segments.store(0, Ordering::Relaxed);
         self.compiled_call_sites.store(0, Ordering::Relaxed);
+        self.compiled_inlined_call_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_read_sites.store(0, Ordering::Relaxed);
         self.compiled_heap_write_sites.store(0, Ordering::Relaxed);
         self.compiled_allocation_sites.store(0, Ordering::Relaxed);

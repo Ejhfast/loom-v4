@@ -412,6 +412,7 @@ impl JitEngine {
             );
             input.set_runtime_string_count(context.module.strings.len());
             input.set_runtime_core_roles(&context.module.core_roles);
+            input.set_function_behaviors(native.behaviors());
             let relocation = context
                 .module
                 .code_namespace()

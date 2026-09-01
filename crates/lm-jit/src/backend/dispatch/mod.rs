@@ -424,6 +424,30 @@ pub(super) fn emit_segment_body(
             .call_contract
             .as_ref()
             .ok_or(CompileError::Backend)?;
+        if let SegmentExit::Call {
+            target, app: None, ..
+        } = segment.exit
+        {
+            if let Some(inline) = plan.inline_functions.get(&target) {
+                let definition = input.definition(target).ok_or(CompileError::Backend)?;
+                emit_inline_call(
+                    builder,
+                    values,
+                    input,
+                    &mut stack,
+                    InlineCallEmission {
+                        definition,
+                        inline,
+                        contract,
+                        boundary_len: segment.boundary_stack.len(),
+                        block: segment.block,
+                        instruction: call_instruction,
+                        successor: successor_blocks[0],
+                    },
+                )?;
+                return Ok(());
+            }
+        }
         let capture = if matches!(segment.exit, SegmentExit::ValueCall { .. }) {
             let callable = stack
                 .len()
@@ -798,6 +822,15 @@ pub(super) fn emit_segment_body(
         SegmentExit::Return => {
             emit_segment_charge(builder, values, fast_segment_cost);
             let result = pop_value(&mut stack)?;
+            if let Some(target) = values.inline_return {
+                if !stack.is_empty() {
+                    return Err(CompileError::Backend);
+                }
+                builder
+                    .ins()
+                    .jump(target, &[result.bits.into(), result.tag.into()]);
+                return Ok(());
+            }
             for (slot, pending) in virtual_locals.iter().copied().enumerate() {
                 if pending {
                     let local = builder.use_var(values.locals[slot]);

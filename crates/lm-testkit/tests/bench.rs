@@ -488,6 +488,7 @@ fn add_compiler_metrics(total: &mut EngineMetrics, sample: EngineMetrics) {
     total.compiled_code_bytes += sample.compiled_code_bytes;
     total.compiled_segments += sample.compiled_segments;
     total.compiled_call_sites += sample.compiled_call_sites;
+    total.compiled_inlined_call_sites += sample.compiled_inlined_call_sites;
     total.compiled_heap_read_sites += sample.compiled_heap_read_sites;
     total.compiled_heap_write_sites += sample.compiled_heap_write_sites;
     total.compiled_allocation_sites += sample.compiled_allocation_sites;
@@ -505,6 +506,7 @@ fn with_compiler_metrics(mut runtime: EngineMetrics, compiler: EngineMetrics) ->
     runtime.compiled_code_bytes = compiler.compiled_code_bytes;
     runtime.compiled_segments = compiler.compiled_segments;
     runtime.compiled_call_sites = compiler.compiled_call_sites;
+    runtime.compiled_inlined_call_sites = compiler.compiled_inlined_call_sites;
     runtime.compiled_heap_read_sites = compiler.compiled_heap_read_sites;
     runtime.compiled_heap_write_sites = compiler.compiled_heap_write_sites;
     runtime.compiled_allocation_sites = compiler.compiled_allocation_sites;

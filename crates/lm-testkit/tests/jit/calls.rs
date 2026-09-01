@@ -98,6 +98,7 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
     let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(10_000)));
     assert_eq!(metrics.compiled_call_sites, 1);
+    assert_eq!(metrics.compiled_inlined_call_sites, 1);
     assert!(metrics.native_retired_instructions > 40_000);
     assert_eq!(metrics.unsupported_region_fallbacks, 0, "{metrics:?}");
 }
@@ -470,6 +471,7 @@ fn a_faulting_native_callee_matches_the_interpreter() {
         assert_eq!(native_dump, interpreted_dump);
         assert_eq!(native, Outcome::Fault(expected));
         assert_eq!(metrics.compiled_call_sites, 1);
+        assert_eq!(metrics.compiled_inlined_call_sites, 1);
         assert_eq!(metrics.native_fault_exits, 1);
     }
 }
@@ -511,6 +513,7 @@ fn recursive_calls_stay_on_one_native_turn_stack() {
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(5_050)));
     assert_eq!(metrics.compiled_call_sites, 2);
+    assert_eq!(metrics.compiled_inlined_call_sites, 0);
     assert_eq!(metrics.compiled_regions, 2, "{metrics:?}");
     assert!(metrics.native_entries <= 3, "{metrics:?}");
     assert!(metrics.materializations <= 3, "{metrics:?}");
@@ -652,7 +655,7 @@ fn recursive_calls_match_each_fuel_boundary() {
 }
 
 #[test]
-fn noninline_calls_match_each_fuel_boundary() {
+fn inlined_branching_calls_match_each_fuel_boundary() {
     let source = concat!(
         "def choose(value: Int): Int\n",
         "  if value > 0 then value + 1 else 0 end\n",
@@ -672,6 +675,44 @@ fn noninline_calls_match_each_fuel_boundary() {
         assert_eq!(native, interpreted, "fuel {fuel}");
         assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
     }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(5)));
+    assert_eq!(metrics.compiled_inlined_call_sites, 1);
+}
+
+#[test]
+fn inlined_super_calls_match_the_interpreter() {
+    let source = concat!(
+        "class Base\n",
+        "  def hello(self): String\n    \"base\"\n  end\n",
+        "end\n",
+        "class Child < Base\n",
+        "  def hello(self): String\n    \"child+#{super.hello()}\"\n  end\n",
+        "end\n",
+        "Child().hello()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-super-inline.lm", source)
+        .expect("the super call case compiles");
+    let (interpreted, _, interpreted_dump) = run_artifact(&artifact, EngineMode::Interpreter, 128);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, 128);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+}
+
+#[test]
+fn mutating_callees_remain_native_calls() {
+    let source = concat!(
+        "def append(mut items: List[Int], value: Int): ()\n",
+        "  items.push(value)\n",
+        "end\n",
+        "items: List[Int] = []\nappend(items, 7)\nitems.len()\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1)));
+    assert_eq!(metrics.compiled_inlined_call_sites, 0);
 }
 
 #[test]

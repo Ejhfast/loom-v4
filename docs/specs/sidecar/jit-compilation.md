@@ -3712,6 +3712,88 @@ Clippy passed for every workspace target.
 
 The full workspace suite passed in 76.53 seconds after a focused rebuild.
 
+### Stage F71: Summarize and inline direct leaves
+
+- compute conservative behavior facts for every function in one namespace revision;
+- propagate those facts through exact direct calls until the table reaches a fixed point;
+- classify runtime-selected calls as conservative;
+- skip caller root preparation when an exact callee cannot collect;
+- retain list payload data when an exact callee cannot grow an existing list;
+- inline bounded, acyclic, direct leaves through the shared opcode emitter;
+- reject generic, captured, allocating, mutating, effectful, and dynamically calling leaves;
+- replay pure inline failures from the original call position;
+- preserve exact call fuel, guest frame limits, and stack-value limits;
+- count inlined call sites with one clock-free compiler metric.
+
+The summary records allocation, collection, list growth, mutation, suspension, faults, and dynamic calls.
+
+An empty effect row does not prove the absence of allocation, mutation, or faults.
+
+A missing summary uses all conservative facts.
+
+The inliner accepts at most 32 instructions and 12 segments per callee.
+
+One parent can add at most 96 expanded instructions.
+
+The accepted callee cannot contain a guest call or a control-flow cycle.
+
+An accepted callee uses only `Inline` and `Guarded` treatments.
+
+A helper treatment remains a native call.
+
+The inliner uses `emit_segment_body` for both parent and child instructions.
+
+It does not contain a second opcode match.
+
+Each child reservation boundary can replay the unchanged call through the interpreter.
+
+This rule preserves exact fuel when the remaining budget ends inside the child.
+
+Frame-limit failures remain native faults at the post-call position.
+
+Deferred overflow also uses the caller replay path.
+
+The focused call suite covers inline selection, mutation rejection, faults, and every tested fuel boundary.
+
+A missing literal in an inline leaf initially repeated the caller entry until fuel ended.
+
+Literal misses now use the caller replay path.
+
+The regression test covers a string-returning `super` call.
+
+The release call comparison used the pre-stage branch and the current branch.
+
+| Warm call row | Before F71 | Stage F71 | Change |
+| --- | ---: | ---: | ---: |
+| Factorial | 0.855 ms | 0.793 ms | 7.3 percent faster |
+| Fibonacci | 1.646 ms | 1.505 ms | 8.6 percent faster |
+| Deep recursion | 7.800 ms | 7.663 ms | within variance |
+| Direct leaf | 6.489 ms | 1.628 ms | 74.9 percent faster |
+| Branching direct leaf | 6.466 ms | 1.904 ms | 70.6 percent faster |
+
+| Warm representative row | Auto gain | Native gain | Native coverage |
+| --- | ---: | ---: | ---: |
+| JSON parse | 3.05 times | 3.06 times | 100 percent |
+| JSON encode | 2.87 times | 2.91 times | 100 percent |
+| HTTP parse | 2.63 times | 2.60 times | 100 percent |
+| HTTP encode | 4.17 times | 4.18 times | 100 percent |
+
+| Current cold row | Time | Compiled regions | Machine code |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 1.589 ms | 1 | 1,705 bytes |
+| JSON parse | 318.930 ms | 26 | 1,061,009 bytes |
+| 301 functions | 353.622 ms | 295 | 1,183,133 bytes |
+
+The JIT unit suite passed 21 tests.
+
+The focused JIT suite passed 173 tests.
+
+The direct and scheduled corpus differential passed in 23.22 seconds.
+
+Clippy passed for the complete workspace.
+
+The full workspace suite passed in 65.58 seconds.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
@@ -3739,6 +3821,10 @@ A statically tagged scalar cannot keep a redundant dynamic tag register.
 A call cannot materialize canonical state.
 
 A successful call cannot spill a complete caller or child frame.
+
+An effect row cannot stand in for allocation or mutation analysis.
+
+A direct-call inliner cannot contain a second opcode emitter.
 
 A scheduler continuation cannot keep stale duplicate scalar state.
 

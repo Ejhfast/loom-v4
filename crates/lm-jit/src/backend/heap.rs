@@ -468,7 +468,7 @@ pub(super) fn emit_literal_load(
     stack: &[NativeValue],
 ) -> Result<NativeValue, CompileError> {
     let load = builder.create_block();
-    let missing = builder.create_block();
+    let missing = (!values.replay_failures).then(|| builder.create_block());
     let ready = builder.create_block();
     let index = builder.ins().iconst(
         values.pointer_type,
@@ -478,7 +478,12 @@ pub(super) fn emit_literal_load(
     let outside = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, index, count);
-    builder.ins().brif(outside, missing, &[], load, &[]);
+    if let Some(missing) = missing {
+        builder.ins().brif(outside, missing, &[], load, &[]);
+    } else {
+        emit_interpreter_replay(builder, values, outside, point, stack)?;
+        builder.ins().jump(load, &[]);
+    }
 
     builder.switch_to_block(load);
     let literals = load_activation_pointer(builder, values, RawActivationField::LiteralValues)?;
@@ -491,26 +496,31 @@ pub(super) fn emit_literal_load(
     let invalid = builder
         .ins()
         .icmp_imm(IntCC::NotEqual, tag, ValueTag::Obj as u64 as i64);
-    builder.ins().brif(invalid, missing, &[], ready, &[]);
+    if let Some(missing) = missing {
+        builder.ins().brif(invalid, missing, &[], ready, &[]);
 
-    builder.switch_to_block(missing);
-    let retired = emit_retired_with_prefix(builder, values, point.prefix);
-    let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
-        builder,
-        values,
-        ExitEmission {
-            retired,
-            kind: EXIT_LITERAL,
-            block: point.block,
-            instruction: point.instruction,
-            result: NativeValue {
-                bits: zero,
-                tag: zero,
+        builder.switch_to_block(missing);
+        let retired = emit_retired_with_prefix(builder, values, point.prefix);
+        let zero = builder.ins().iconst(types::I64, 0);
+        emit_exit(
+            builder,
+            values,
+            ExitEmission {
+                retired,
+                kind: EXIT_LITERAL,
+                block: point.block,
+                instruction: point.instruction,
+                result: NativeValue {
+                    bits: zero,
+                    tag: zero,
+                },
             },
-        },
-        stack,
-    )?;
+            stack,
+        )?;
+    } else {
+        emit_interpreter_replay(builder, values, invalid, point, stack)?;
+        builder.ins().jump(ready, &[]);
+    }
 
     builder.switch_to_block(ready);
     let bits = load_value(builder, types::I64, address, VALUE_PAYLOAD_OFFSET)?;

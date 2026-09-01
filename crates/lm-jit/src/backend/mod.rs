@@ -10,10 +10,10 @@ use crate::activation::{
     VIRTUAL_INSTANCE_FIELDS,
 };
 use crate::plan::{
-    bypasses_fuel_check, is_root_kind, transfer_virtual_instruction, CallContract, HeapAccessKind,
-    ObjectContract, OptionAccessKind, OptionTarget, RegionPlan, ScalarFieldSource,
-    ScalarReplacement, Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract,
-    VirtualReceiver,
+    bypasses_fuel_check, is_root_kind, transfer_virtual_instruction, CallContract,
+    FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract, OptionAccessKind,
+    OptionTarget, RegionPlan, ScalarFieldSource, ScalarReplacement, Segment, SegmentExit,
+    UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -371,6 +371,8 @@ struct NativeValues<'a> {
     exit_pointer: ir::Value,
     activation_pointer: ir::Value,
     replay_blocks: &'a [ReplayBlock],
+    replay_failures: bool,
+    inline_return: Option<ir::Block>,
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
     heap_translations: &'a RefCell<HeapTranslationCache>,
@@ -581,6 +583,16 @@ struct NativeCallEmission<'a> {
     block: u32,
     instruction: u32,
     successor_entry: u32,
+    successor: ir::Block,
+}
+
+struct InlineCallEmission<'a, 'b> {
+    definition: FunctionDefinition<'a>,
+    inline: &'b InlineFunctionPlan,
+    contract: &'b CallContract,
+    boundary_len: usize,
+    block: u32,
+    instruction: u32,
     successor: ir::Block,
 }
 
@@ -1255,6 +1267,8 @@ fn emit_region(
         exit_pointer,
         activation_pointer,
         replay_blocks: &[],
+        replay_failures: false,
+        inline_return: None,
         pointer_type,
         frontend_config,
         heap_translations: &heap_translations,
@@ -1495,19 +1509,7 @@ fn emit_segment(
 ) -> Result<(), CompileError> {
     let values = emission.values;
     let segment = emission.segment;
-    let stack: Vec<NativeValue> = values
-        .stack
-        .iter()
-        .copied()
-        .zip(segment.entry_stack.iter().copied())
-        .enumerate()
-        .map(|(slot, (bits, kind))| {
-            Ok(NativeValue {
-                bits: builder.use_var(bits),
-                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
-            })
-        })
-        .collect::<Result<_, CompileError>>()?;
+    let stack = segment_entry_values(builder, values, segment)?;
     let replay_exit = if let Some(replay) = values.replay_blocks.first() {
         Some(ReplayExitState {
             target: replay.block,
@@ -1557,6 +1559,26 @@ fn emit_segment(
         }
     }
     Ok(())
+}
+
+fn segment_entry_values(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    segment: &Segment,
+) -> Result<Vec<NativeValue>, CompileError> {
+    values
+        .stack
+        .iter()
+        .copied()
+        .zip(segment.entry_stack.iter().copied())
+        .enumerate()
+        .map(|(slot, (bits, kind))| {
+            Ok(NativeValue {
+                bits: builder.use_var(bits),
+                tag: emit_slot_tag(builder, values.stack_tags[slot], kind)?,
+            })
+        })
+        .collect::<Result<_, CompileError>>()
 }
 
 mod alloc;

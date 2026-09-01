@@ -37,6 +37,7 @@ pub(super) struct FunctionDefinition<'a> {
 pub struct FunctionInput<'a> {
     pub(super) root: FunctionDefinition<'a>,
     direct_callees: Vec<FunctionDefinition<'a>>,
+    behaviors: crate::FunctionBehaviors,
     runtime_string_count: usize,
     runtime_core: lm_bytecode::corepin::CoreLayout,
 }
@@ -61,6 +62,7 @@ impl<'a> FunctionInput<'a> {
                 class_relocation: None,
             },
             direct_callees: Vec::new(),
+            behaviors: crate::FunctionBehaviors::default(),
             runtime_string_count: source.strings.len(),
             runtime_core: lm_bytecode::corepin::declared_layout(source),
         }
@@ -79,6 +81,11 @@ impl<'a> FunctionInput<'a> {
     /// Supply the source-to-runtime class relocation for this unit.
     pub fn set_class_relocation(&mut self, classes: &'a [u32]) {
         self.root.class_relocation = Some(classes);
+    }
+
+    /// Supply transitive behavior facts for this namespace revision.
+    pub fn set_function_behaviors(&mut self, behaviors: crate::FunctionBehaviors) {
+        self.behaviors = behaviors;
     }
 
     /// Add one exact direct callee used by the root function.
@@ -132,10 +139,25 @@ impl<'a> FunctionInput<'a> {
         self.runtime_string_count
     }
 
-    fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
+    pub(super) fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
         std::iter::once(self.root)
             .chain(self.direct_callees.iter().copied())
             .find(|definition| definition.function == function)
+    }
+
+    fn behavior(&self, function: u32) -> crate::FunctionBehavior {
+        self.behaviors.get(function)
+    }
+
+    pub(super) fn child(&self, function: u32) -> Option<FunctionInput<'a>> {
+        let root = self.definition(function)?;
+        Some(FunctionInput {
+            root,
+            direct_callees: Vec::new(),
+            behaviors: self.behaviors.clone(),
+            runtime_string_count: self.runtime_string_count,
+            runtime_core: self.runtime_core,
+        })
     }
 }
 
@@ -147,6 +169,7 @@ pub struct CompilerMetrics {
     pub compiled_code_bytes: u64,
     pub compiled_segments: u64,
     pub compiled_call_sites: u64,
+    pub compiled_inlined_call_sites: u64,
     pub compiled_heap_read_sites: u64,
     pub compiled_heap_write_sites: u64,
     pub compiled_allocation_sites: u64,
@@ -583,6 +606,8 @@ pub(super) struct CallContract {
     pub(super) virtual_result: bool,
     /// One constructor result that can stay in SSA values.
     pub(super) scalar_result: Option<ScalarReplacement>,
+    /// Transitive behavior of one exact target.
+    pub(super) behavior: crate::FunctionBehavior,
 }
 
 /// One constant field value in a scalar-replaced instance.
@@ -646,6 +671,7 @@ struct CallSignature {
     local_count: usize,
     result: CallValueKind,
     virtual_constructor: Option<VirtualConstructor>,
+    behavior: crate::FunctionBehavior,
 }
 
 /// One generated constructor that can keep its fields in native storage.
@@ -654,6 +680,12 @@ pub(super) struct VirtualConstructor {
     pub(super) class: u32,
     pub(super) field_count: u32,
     pub(super) object_local: u32,
+}
+
+/// One bounded direct callee that uses the shared segment emitter.
+#[derive(Debug, Clone)]
+pub(super) struct InlineFunctionPlan {
+    pub(super) plan: Box<RegionPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,7 +703,9 @@ pub(super) struct RegionPlan {
     pub(super) max_roots: usize,
     pub(super) segments: Vec<Segment>,
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
+    pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
     pub(super) call_sites: usize,
+    pub(super) inlined_call_sites: usize,
     pub(super) heap_read_sites: usize,
     pub(super) heap_write_sites: usize,
     pub(super) allocation_sites: usize,
@@ -832,6 +866,13 @@ impl RegionPlan {
     }
 
     pub(super) fn for_function(input: &FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
+        Self::for_function_mode(input, true)
+    }
+
+    fn for_function_mode(
+        input: &FunctionInput<'_>,
+        select_inlines: bool,
+    ) -> Result<RegionPlan, UnsupportedReason> {
         let runtime = input.root.runtime;
         let instructions = runtime
             .blocks
@@ -923,6 +964,7 @@ impl RegionPlan {
         let mut allocation_sites = 0;
         let mut collection_sites = 0;
         let mut list_growth_sites = 0;
+        let mut calls_may_grow_list = false;
         let mut effect_sites = 0;
         let interpreter_sites = 0;
         let mut type_resolution_sites = 0;
@@ -1021,6 +1063,10 @@ impl RegionPlan {
                     | SegmentExit::SlotCall { .. }
             ) {
                 call_sites += 1;
+                calls_may_grow_list |= segment
+                    .call_contract
+                    .as_ref()
+                    .is_none_or(|contract| contract.behavior.may_grow_list());
                 segment.cost = segment.cost.saturating_sub(1);
             }
             if matches!(segment.exit, SegmentExit::Effect { .. }) {
@@ -1082,7 +1128,7 @@ impl RegionPlan {
                     .push((segment.start, segment.entry_stack.clone()));
             }
         }
-        let stable_list_data = call_sites == 0 && list_growth_sites == 0;
+        let stable_list_data = !calls_may_grow_list && list_growth_sites == 0;
         let cached_list_data: Vec<bool> = source_func
             .local_types
             .iter()
@@ -1111,6 +1157,24 @@ impl RegionPlan {
         let max_roots = root_local_count
             .checked_add(max_stack)
             .ok_or(UnsupportedReason::RegionLimit)?;
+        let inline_functions = if select_inlines {
+            select_inline_functions(input, &mut segments)?
+        } else {
+            HashMap::new()
+        };
+        let inlined_call_sites = segments
+            .iter()
+            .filter(|segment| {
+                matches!(
+                    segment.exit,
+                    SegmentExit::Call {
+                        target,
+                        app: None,
+                        ..
+                    } if inline_functions.contains_key(&target)
+                )
+            })
+            .count();
         Ok(RegionPlan {
             local_kinds,
             cached_list_data,
@@ -1123,7 +1187,9 @@ impl RegionPlan {
             max_roots,
             segments,
             entries,
+            inline_functions,
             call_sites,
+            inlined_call_sites,
             heap_read_sites,
             heap_write_sites,
             allocation_sites,
@@ -1142,6 +1208,150 @@ impl RegionPlan {
             })
             .map(|segment| segment.end - instruction)
     }
+}
+
+fn select_inline_functions(
+    input: &FunctionInput<'_>,
+    segments: &mut [Segment],
+) -> Result<HashMap<u32, InlineFunctionPlan>, UnsupportedReason> {
+    const MAX_INLINE_INSTRUCTIONS: usize = 32;
+    const MAX_INLINE_SEGMENTS: usize = 12;
+    const MAX_INLINE_BUDGET: usize = 96;
+
+    let mut plans = HashMap::new();
+    let mut expanded = 0usize;
+    let call_counts = segments.iter().fold(HashMap::new(), |mut counts, segment| {
+        if let SegmentExit::Call {
+            target, app: None, ..
+        } = segment.exit
+        {
+            *counts.entry(target).or_insert(0usize) += 1;
+        }
+        counts
+    });
+    for segment in segments.iter_mut() {
+        let SegmentExit::Call {
+            target, app: None, ..
+        } = segment.exit
+        else {
+            continue;
+        };
+        if plans.contains_key(&target) {
+            ensure_inline_replay(segment);
+            continue;
+        }
+        let behavior = input.behavior(target);
+        if behavior.may_suspend_or_perform()
+            || behavior.may_collect()
+            || behavior.may_mutate()
+            || behavior.has_dynamic_call()
+        {
+            continue;
+        }
+        let Some(definition) = input.definition(target) else {
+            continue;
+        };
+        let instruction_count = definition
+            .runtime
+            .blocks
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        let expanded_instructions =
+            instruction_count.saturating_mul(call_counts.get(&target).copied().unwrap_or(1));
+        if instruction_count == 0
+            || instruction_count > MAX_INLINE_INSTRUCTIONS
+            || definition.runtime.type_params != 0
+            || definition.runtime.effect_params != 0
+            || !definition.runtime.captures.is_empty()
+            || definition
+                .runtime
+                .blocks
+                .iter()
+                .flatten()
+                .any(|instruction| {
+                    !matches!(
+                        crate::instruction_treatment(instruction).class(),
+                        crate::TreatmentClass::Inline | crate::TreatmentClass::Guarded
+                    )
+                })
+            || expanded.saturating_add(expanded_instructions) > MAX_INLINE_BUDGET
+        {
+            continue;
+        }
+        let Some(child) = input.child(target) else {
+            continue;
+        };
+        let Ok(mut plan) = RegionPlan::for_function_mode(&child, false) else {
+            continue;
+        };
+        if plan.segments.len() > MAX_INLINE_SEGMENTS
+            || plan.call_sites != 0
+            || plan.heap_write_sites != 0
+            || plan.allocation_sites != 0
+            || plan.effect_sites != 0
+            || plan.interpreter_sites != 0
+            || plan.type_resolution_sites != 0
+            || plan.virtual_constructor.is_some()
+            || !plan.scalar_instances.is_empty()
+        {
+            continue;
+        }
+        if acyclic_max_path_cost(&plan).is_none() {
+            continue;
+        }
+        for segment in &mut plan.segments {
+            segment.live_in.fill(true);
+        }
+        plan.cached_list_data.fill(false);
+        plan.preloaded_list_data.fill(false);
+        expanded += expanded_instructions;
+        plans.insert(
+            target,
+            InlineFunctionPlan {
+                plan: Box::new(plan),
+            },
+        );
+        ensure_inline_replay(segment);
+    }
+    Ok(plans)
+}
+
+fn ensure_inline_replay(segment: &mut Segment) {
+    if segment.replay_stacks.is_empty() {
+        segment
+            .replay_stacks
+            .push((segment.start, segment.entry_stack.clone()));
+    }
+}
+
+fn acyclic_max_path_cost(plan: &RegionPlan) -> Option<u32> {
+    fn visit(plan: &RegionPlan, index: usize, states: &mut [u8], costs: &mut [u32]) -> Option<u32> {
+        match *states.get(index)? {
+            1 => return None,
+            2 => return costs.get(index).copied(),
+            _ => {}
+        }
+        states[index] = 1;
+        let tail = plan.segments[index]
+            .successors
+            .iter()
+            .copied()
+            .map(|successor| visit(plan, successor, states, costs))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        let cost = plan.segments[index].cost.checked_add(tail)?;
+        costs[index] = cost;
+        states[index] = 2;
+        Some(cost)
+    }
+
+    let entry = plan.entries.get(&(0, 0)).copied()?;
+    let mut states = vec![0; plan.segments.len()];
+    let mut costs = vec![0; plan.segments.len()];
+    visit(plan, entry, &mut states, &mut costs)
 }
 
 mod calls;
