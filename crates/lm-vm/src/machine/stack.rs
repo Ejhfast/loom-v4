@@ -4,6 +4,13 @@ use super::*;
 
 impl Machine {
     pub fn push(&mut self, value: Value) -> Result<(), FaultCode> {
+        // A canonical stack mutation observes retained native state.
+        // Materialize it before the mutation.
+        if self.native_continuation.is_some()
+            && crate::jit::materialize_native_continuation(self).is_err()
+        {
+            return Err(FaultCode::MalformedState);
+        }
         if self.vm.operands.len() + self.vm.locals.len() >= self.config.max_stack_values as usize {
             return Err(FaultCode::StackLimit);
         }

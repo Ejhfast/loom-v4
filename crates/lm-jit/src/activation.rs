@@ -1389,6 +1389,44 @@ impl NativeActivation {
         self.changed_from = self.changed_from.min(self.frame_len);
         Ok(())
     }
+
+    /// Remove one effect request and install its reply in the top frame.
+    pub fn finish_effect(
+        &mut self,
+        consumed: usize,
+        block: u32,
+        instruction: u32,
+        tag: u64,
+        result: u64,
+    ) -> Result<u32, Failure> {
+        let top_index = self
+            .frame_len
+            .checked_sub(1)
+            .ok_or(Failure::BackendUnavailable)?;
+        let frame = self.frames[top_index];
+        let operand_len = frame.operand_len as usize;
+        let prefix = operand_len
+            .checked_sub(consumed)
+            .ok_or(Failure::BackendUnavailable)?;
+        if prefix >= frame.max_stack as usize {
+            return Err(Failure::BackendUnavailable);
+        }
+        let slot = (frame.scalar_base as usize)
+            .checked_add(frame.local_count as usize)
+            .and_then(|base| base.checked_add(prefix))
+            .ok_or(Failure::BackendUnavailable)?;
+        if slot >= self.scalar_len || slot >= self.tags.len() {
+            return Err(Failure::BackendUnavailable);
+        }
+        self.scalars[slot] = result;
+        self.tags[slot] = tag;
+        let frame = &mut self.frames[top_index];
+        frame.block = block;
+        frame.instruction = instruction;
+        frame.operand_len = u32::try_from(prefix + 1).map_err(|_| Failure::BackendUnavailable)?;
+        self.changed_from = self.changed_from.min(top_index);
+        Ok(frame.operand_len)
+    }
 }
 
 impl NativeTypeEnvironmentCache {

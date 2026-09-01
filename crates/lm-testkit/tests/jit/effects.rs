@@ -27,6 +27,63 @@ fn exact_effects_resume_native_execution() {
     assert!(metrics.compiled_effect_sites > 0, "{metrics:?}");
     assert_eq!(metrics.native_effect_exits, 100, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    assert!(metrics.native_continuation_suspends >= 100, "{metrics:?}");
+    assert!(metrics.native_continuation_resumes >= 100, "{metrics:?}");
+    assert_eq!(
+        metrics.native_continuation_materializations, 1,
+        "{metrics:?}"
+    );
+}
+
+#[test]
+fn auto_keeps_one_dense_effect_cycle_interpreted() {
+    let source = concat!(
+        "def go(): Int with Clock.Now\n",
+        "  i = 0\n  observed = 0\n",
+        "  while i < 20000\n",
+        "    observed = sys.clock.now()\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  i\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-dense-effect.lm", source)
+        .expect("the dense effect case compiles");
+    let (automatic, metrics, _, _) =
+        run_effect(&artifact, EngineMode::Auto, u64::MAX, &["Clock.Now"]);
+    assert_eq!(automatic, Outcome::Done(lm_value::Value::Int(20000)));
+    assert_eq!(metrics.compiled_effect_sites, 0, "{metrics:?}");
+    assert_eq!(metrics.native_effect_exits, 0, "{metrics:?}");
+    assert_eq!(metrics.unproductive_native_demotions, 0, "{metrics:?}");
+}
+
+#[test]
+fn auto_keeps_sparse_effect_work_native() {
+    let source = concat!(
+        "def go(): Int with Clock.Now\n",
+        "  outer = 0\n  total = 0\n  observed = 0\n",
+        "  while outer < 100\n",
+        "    inner = 0\n",
+        "    while inner < 2000\n",
+        "      total = total + 1\n",
+        "      inner = inner + 1\n",
+        "    end\n",
+        "    observed = sys.clock.now()\n",
+        "    outer = outer + 1\n",
+        "  end\n",
+        "  total\n",
+        "end\n",
+        "go()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-sparse-effect.lm", source)
+        .expect("the sparse effect case compiles");
+    let (automatic, metrics, _, _) =
+        run_effect(&artifact, EngineMode::Auto, u64::MAX, &["Clock.Now"]);
+    assert_eq!(automatic, Outcome::Done(lm_value::Value::Int(200000)));
+    assert!(metrics.compiled_effect_sites > 0, "{metrics:?}");
+    assert!(metrics.native_effect_exits > 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
 }
 
 #[test]
@@ -83,7 +140,7 @@ fn exact_effects_match_each_fuel_boundary() {
 }
 
 #[test]
-fn a_deep_effect_materializes_the_native_turn_stack() {
+fn a_deep_effect_retains_the_native_turn_stack() {
     let source = concat!(
         "def descend(value: Int): Int with Clock.Now\n",
         "  if value == 0 then\n",
@@ -106,6 +163,10 @@ fn a_deep_effect_materializes_the_native_turn_stack() {
     assert_eq!(native_trace, interpreted_trace);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(21)));
     assert_eq!(metrics.native_effect_exits, 1, "{metrics:?}");
+    assert_eq!(
+        metrics.native_continuation_materializations, 1,
+        "{metrics:?}"
+    );
 }
 
 #[test]
@@ -152,6 +213,61 @@ fn deferred_effect_replies_resume_native_execution() {
     assert_eq!(native_trace, interpreted_trace);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(3)));
     assert_eq!(metrics.native_effect_exits, 3, "{metrics:?}");
+    assert_eq!(
+        metrics.native_continuation_materializations, 1,
+        "{metrics:?}"
+    );
+}
+
+#[test]
+fn vm_control_replies_resume_each_native_activation() {
+    let source = concat!(
+        "def child(): Int with Clock.Now\n",
+        "  i = 0\n",
+        "  while i < 20\n",
+        "    observed = sys.clock.now()\n",
+        "    i = i + 1\n",
+        "  end\n",
+        "  i\n",
+        "end\n\n",
+        "def drive_child(): Int with Vm\n",
+        "  run = sys.vm.Vm().activate_or_fault(child, args: ())\n",
+        "  answered = 0\n",
+        "  loop do\n",
+        "    case run.drive()\n",
+        "    in Asked(request)\n",
+        "      case request\n",
+        "      in Call(Clock.Now, call, ())\n",
+        "        run.answer(call, answered)\n",
+        "        answered = answered + 1\n",
+        "      in _ then return -1\n",
+        "      end\n",
+        "    in Done(value) then return value\n",
+        "    in Fault(_) then return -2\n",
+        "    end\n",
+        "  end\n",
+        "end\n",
+        "drive_child()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-vm-control-effect.lm", source)
+        .expect("the VM control case compiles");
+    let (interpreted, _, interpreted_dump, interpreted_trace) =
+        run_effect(&artifact, EngineMode::Interpreter, u64::MAX, &["Vm"]);
+    let (native, metrics, native_dump, native_trace) =
+        run_effect(&artifact, EngineMode::Native, u64::MAX, &["Vm"]);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native_trace, interpreted_trace);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(20)));
+    assert!(metrics.native_continuation_suspends >= 60, "{metrics:?}");
+    assert_eq!(
+        metrics.native_continuation_resumes, metrics.native_continuation_suspends,
+        "{metrics:?}"
+    );
+    assert!(
+        metrics.native_continuation_materializations <= 25,
+        "{metrics:?}"
+    );
 }
 
 #[test]

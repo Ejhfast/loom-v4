@@ -3,7 +3,8 @@
 use lm_proc::{Scheduler, SchedulerMode, SchedulerStats};
 use lm_testkit::compile_to_bytes;
 use lm_testkit::publish_artifact_bytes;
-use lm_vm::{RecordingHost, TraceEvent, VmConfig, World, WorldLimits};
+use lm_vm::{Engine, EngineMode, RecordingHost, TraceEvent, VmConfig, World, WorldLimits};
+use std::sync::Arc;
 
 fn run_parallel_with(
     source: &str,
@@ -30,6 +31,25 @@ fn run_parallel_with(
 
 fn run_parallel(source: &str, workers: usize) -> Result<(String, SchedulerStats), String> {
     run_parallel_with(source, workers, &["Proc"])
+}
+
+fn run_parallel_native(source: &str, workers: usize) -> Result<(String, SchedulerStats), String> {
+    let bytes = compile_to_bytes("parallel-native.lm", source)?;
+    let (arena, namespace) = publish_artifact_bytes(&bytes).map_err(|error| error.to_string())?;
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        engine,
+    );
+    world.allow("Proc")?;
+    let mut scheduler = Scheduler::default();
+    let outcome = scheduler
+        .run_parallel(&mut world, workers)
+        .map_err(|error| error.to_string())?;
+    Ok((world.show_outcome(&outcome), scheduler.stats()))
 }
 
 fn compare_modes(
@@ -704,6 +724,25 @@ fn independent_cpu_procs_hold_two_worker_leases() {
     assert_eq!(outcome, "Done((Ok(200000), Ok(200000)))");
     assert_eq!(stats.max_active_leases, 2);
     assert!(stats.local_continuations > 0);
+}
+
+#[test]
+fn native_cpu_procs_enter_the_worker_pool() {
+    let source = "class Spinner < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   i = 0\n\
+                  \x20   while i < 200000\n\
+                  \x20     i = i + 1\n\
+                  \x20   end\n\
+                  \x20   i\n\
+                  \x20 end\n\
+                  end\n\
+                  a = Spinner.spawn()\n\
+                  b = Spinner.spawn()\n\
+                  (a.done(), b.done())\n";
+    let (outcome, stats) = run_parallel_native(source, 2).expect("the native world runs");
+    assert_eq!(outcome, "Done((Ok(200000), Ok(200000)))");
+    assert_eq!(stats.max_active_leases, 2, "{stats:?}");
 }
 
 #[test]

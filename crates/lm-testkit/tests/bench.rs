@@ -23,7 +23,10 @@
 
 use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
 use lm_source::SourceFile;
-use lm_vm::{Engine, EngineMetrics, EngineMode, Vm, VmConfig};
+use lm_vm::{
+    CompletionKey, Engine, EngineMetrics, EngineMode, Host, HostArg, HostCompletion, HostStart,
+    HostValue, Vm, VmConfig,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,6 +41,39 @@ const ROUNDS: usize = 9;
 const MESSAGE_ROUNDS: usize = 5;
 /// Maximum runs used to reach a stable native-code set.
 const MAX_WARM_RUNS: usize = 128;
+
+#[derive(Default)]
+struct SynchronousEffectHost {
+    now: i64,
+    written: usize,
+}
+
+impl Host for SynchronousEffectHost {
+    fn start(&mut self, _key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        match op {
+            lm_abi::OP_CLOCK_NOW => {
+                self.now = self.now.saturating_add(1);
+                HostStart::Completed(HostValue::Int(self.now))
+            }
+            lm_abi::OP_IO_WRITE => {
+                let Some(HostArg::Bytes(bytes)) = args.first() else {
+                    return HostStart::Failed("Io.Write needs one byte value".to_string());
+                };
+                self.written = self.written.saturating_add(bytes.len());
+                HostStart::Completed(HostValue::ok(HostValue::Int(bytes.len() as i64)))
+            }
+            _ => HostStart::Failed(format!("the benchmark host cannot serve operation {op}")),
+        }
+    }
+
+    fn poll(&mut self) -> Option<HostCompletion> {
+        None
+    }
+
+    fn wait(&mut self) -> Option<HostCompletion> {
+        None
+    }
+}
 
 fn median(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
@@ -492,12 +528,14 @@ fn time_effect_program_engine(source: &str, mode: EngineMode) -> (Duration, Engi
             arena.clone(),
             namespace,
             config(),
-            Box::new(lm_vm::RecordingHost::new(1)),
+            Box::new(SynchronousEffectHost::default()),
             Arc::clone(&engine),
         );
         world
             .allow("Clock.Now")
             .expect("the clock grant must exist");
+        world.allow("Io.Write").expect("the I/O grant must exist");
+        world.allow("Vm").expect("the VM grant must exist");
         let start = Instant::now();
         let outcome = world.run_root();
         let elapsed = start.elapsed();
@@ -529,12 +567,14 @@ fn time_effect_program_native_cold(source: &str) -> Duration {
             arena.clone(),
             namespace,
             config(),
-            Box::new(lm_vm::RecordingHost::new(1)),
+            Box::new(SynchronousEffectHost::default()),
             engine,
         );
         world
             .allow("Clock.Now")
             .expect("the clock grant must exist");
+        world.allow("Io.Write").expect("the I/O grant must exist");
+        world.allow("Vm").expect("the VM grant must exist");
         let start = Instant::now();
         let outcome = world.run_root();
         let elapsed = start.elapsed();
@@ -551,17 +591,20 @@ fn report_jit_effect(name: &str, source: &str, required_exits: u64) {
         return;
     }
     let (interpreted, _) = time_effect_program_engine(source, EngineMode::Interpreter);
+    let (automatic, _) = time_effect_program_engine(source, EngineMode::Auto);
     let cold = time_effect_program_native_cold(source);
     let (native, metrics) = time_effect_program_engine(source, EngineMode::Native);
     assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
     assert!(metrics.compiled_effect_sites > 0);
     assert!(metrics.native_effect_exits >= required_exits);
     println!(
-        "LOOM_JIT_EFFECT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{}\t{}\t{}",
+        "LOOM_JIT_EFFECT\t{name}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{:.3}\t{:.2}\t{}\t{}\t{}",
         interpreted.as_secs_f64() * 1e3,
         cold.as_secs_f64() * 1e3,
         native.as_secs_f64() * 1e3,
         interpreted.as_secs_f64() / native.as_secs_f64(),
+        automatic.as_secs_f64() * 1e3,
+        interpreted.as_secs_f64() / automatic.as_secs_f64(),
         metrics.compiled_effect_sites,
         metrics.native_effect_exits,
         metrics.native_entries,
@@ -949,6 +992,53 @@ fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -
 /// Time one proc program with the parallel coordinator.
 fn time_parallel_world(source: &str, workers: usize, expected: &str) -> Duration {
     time_parallel_world_with(source, workers, &["Proc"], expected)
+}
+
+/// Time one parallel program with one shared execution engine.
+fn time_parallel_world_engine(
+    source: &str,
+    workers: usize,
+    expected: &str,
+    mode: EngineMode,
+) -> (Duration, lm_proc::SchedulerStats) {
+    let bytes = lm_testkit::compile_to_bytes("parallel-native-bench.lm", source)
+        .unwrap_or_else(|error| panic!("the benchmark source must compile:\n{error}"));
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the benchmark artifact must load");
+    let engine = Arc::new(Engine::new(mode));
+    let mut compiler_metrics = EngineMetrics::default();
+    let mut runs = Vec::with_capacity(ROUNDS);
+    let mut last_stats = lm_proc::SchedulerStats::default();
+    let mut round = 0;
+    while runs.len() < ROUNDS {
+        assert!(round < MAX_WARM_RUNS, "native compilation did not settle");
+        let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
+        let mut world = lm_vm::World::new_with_engine(
+            arena.clone(),
+            namespace,
+            config(),
+            Box::new(host),
+            Arc::clone(&engine),
+        );
+        world.allow("Proc").expect("the Proc grant must exist");
+        let mut scheduler = lm_proc::Scheduler::default();
+        let start = Instant::now();
+        let outcome = scheduler
+            .run_parallel(&mut world, workers)
+            .expect("the parallel benchmark must run");
+        let elapsed = start.elapsed();
+        assert_eq!(world.show_outcome(&outcome), expected);
+        last_stats = scheduler.stats();
+        record_warm_round(
+            &engine,
+            elapsed,
+            round == 0,
+            &mut runs,
+            &mut compiler_metrics,
+        );
+        round += 1;
+    }
+    (median(runs), last_stats)
 }
 
 /// Time one parallel program with explicit grants.

@@ -890,7 +890,7 @@ impl ParallelCoordinator<'_> {
         let metrics_after = self.world.metrics();
         Ok(Some(
             exit == Some(SliceExit::Yielded)
-                && retired == u64::from(quantum)
+                && retired >= u64::from(quantum)
                 && metrics_after
                     .boundary_exits
                     .saturating_sub(metrics_before.boundary_exits)

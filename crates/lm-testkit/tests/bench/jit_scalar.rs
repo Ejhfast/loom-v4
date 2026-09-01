@@ -427,7 +427,7 @@ fn bench_jit_scalar_regions() {
         0,
     );
     println!(
-        "LOOM_JIT_EFFECT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\teffect_sites\teffect_exits\tentries"
+        "LOOM_JIT_EFFECT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tnative_speedup\tauto_ms\tauto_speedup\teffect_sites\teffect_exits\tentries"
     );
     report_jit_effect(
         "jit_effect_mixed",
@@ -463,6 +463,53 @@ fn bench_jit_scalar_regions() {
             "go()\n",
         ),
         180_000,
+    );
+    report_jit_effect(
+        "jit_print_boundary",
+        concat!(
+            "def go(): Int with Io.Write\n",
+            "  i = 0\n",
+            "  while i < 20000\n",
+            "    print(\"x\").expect(\"the output writes\")\n",
+            "    i = i + 1\n",
+            "  end\n",
+            "  i\n",
+            "end\n",
+            "go()\n",
+        ),
+        180_000,
+    );
+    report_jit_effect(
+        "jit_guest_drive_boundary",
+        concat!(
+            "def child(): Int with Clock.Now\n",
+            "  i = 0\n",
+            "  while i < 2000\n",
+            "    observed = sys.clock.now()\n",
+            "    i = i + 1\n",
+            "  end\n",
+            "  i\n",
+            "end\n\n",
+            "def drive_child(): Int with Vm\n",
+            "  run = sys.vm.Vm().activate_or_fault(child, args: ())\n",
+            "  answered = 0\n",
+            "  loop do\n",
+            "    case run.drive()\n",
+            "    in Asked(request)\n",
+            "      case request\n",
+            "      in Call(Clock.Now, call, ())\n",
+            "        run.answer(call, answered)\n",
+            "        answered = answered + 1\n",
+            "      in _ then return -1\n",
+            "      end\n",
+            "    in Done(value) then return value\n",
+            "    in Fault(_) then return -2\n",
+            "    end\n",
+            "  end\n",
+            "end\n",
+            "drive_child()\n",
+        ),
+        36_000,
     );
     report_jit_sliced(
         "jit_int_loop_sliced",

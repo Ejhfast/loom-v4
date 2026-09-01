@@ -275,6 +275,16 @@ impl ExecutionExit {
             .ok_or(Failure::BackendUnavailable)?;
         Ok(self)
     }
+
+    /// Convert this exit into one retained entry position.
+    pub fn resume_at(&mut self, block: u32, instruction: u32, stack_len: u32) {
+        self.kind = ExitKind::Fuel;
+        self.block = block;
+        self.instruction = instruction;
+        self.stack_len = stack_len;
+        self.result_tag = 0;
+        self.result = 0;
+    }
 }
 
 /// One exact reason that prevents native compilation.

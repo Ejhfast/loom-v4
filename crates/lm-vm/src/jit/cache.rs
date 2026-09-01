@@ -14,6 +14,7 @@ const MIN_ENTRY_RETIRED: u64 = 32;
 const PRODUCTIVITY_PROVEN: u32 = u32::MAX - 1;
 const PRODUCTIVITY_DENIED: u32 = u32::MAX;
 const NO_CAPACITY_EPOCH: u64 = u64::MAX;
+const MAX_DENSE_EFFECT_CYCLE_COST: usize = 16;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TierDecision {
@@ -306,6 +307,7 @@ impl NativeCodeRevision {
     fn push_slot(&mut self, module: &crate::NamespaceRuntime, function: usize) {
         let definition = &module.funcs[function];
         let candidate = function_is_candidate(module, definition);
+        let prefers_interpreter = function_prefers_interpreter(module, definition);
         let word = function / 64;
         let bit = function % 64;
         if Arc::make_mut(&mut self.candidates).len() <= word {
@@ -317,6 +319,7 @@ impl NativeCodeRevision {
         let slot = Arc::new(NativeSlot::new(
             definition,
             candidate,
+            prefers_interpreter,
             Arc::clone(&self.budget),
             Arc::clone(&self.compiled),
         ));
@@ -337,12 +340,14 @@ pub(super) struct NativeSlot {
     productivity: AtomicU32,
     profile_work: AtomicU64,
     call_promotable: bool,
+    prefers_interpreter: bool,
 }
 
 impl NativeSlot {
     fn new(
         function: &lm_bytecode::Func,
         candidate: bool,
+        prefers_interpreter: bool,
         budget: Arc<CodeBudget>,
         compiled: Arc<AtomicUsize>,
     ) -> NativeSlot {
@@ -352,7 +357,7 @@ impl NativeSlot {
             .map(Vec::len)
             .sum::<usize>()
             .clamp(1, u32::MAX as usize) as u32;
-        let call_promotable = true;
+        let call_promotable = !prefers_interpreter;
         NativeSlot {
             verdict: OnceLock::new(),
             compiling: AtomicBool::new(false),
@@ -365,6 +370,7 @@ impl NativeSlot {
             productivity: AtomicU32::new(0),
             profile_work: AtomicU64::new(0),
             call_promotable,
+            prefers_interpreter,
         }
     }
 
@@ -444,7 +450,8 @@ impl NativeSlot {
     }
 
     pub(super) fn ready_for_auto(&self) -> bool {
-        self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
+        !self.prefers_interpreter
+            && self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
             && matches!(
                 self.tier.load(Ordering::Acquire),
                 AUTO_COMPILE_WORK | TIER_COMPILED
@@ -452,6 +459,11 @@ impl NativeSlot {
     }
 
     fn enter_frame(&self, work_scale: u32) -> TierDecision {
+        if self.prefers_interpreter {
+            return TierDecision {
+                enter_native: false,
+            };
+        }
         let state = if work_scale != 0 {
             self.add_work(work_scale)
         } else {
@@ -464,7 +476,8 @@ impl NativeSlot {
     }
 
     fn note_event(&self, work_scale: u32) -> bool {
-        self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
+        !self.prefers_interpreter
+            && self.productivity.load(Ordering::Relaxed) != PRODUCTIVITY_DENIED
             && matches!(self.add_work(work_scale), AUTO_COMPILE_WORK | TIER_COMPILED)
     }
 
@@ -499,7 +512,9 @@ impl NativeSlot {
     }
 
     fn promote(&self) {
-        if !self.call_promotable || self.productivity.load(Ordering::Relaxed) == PRODUCTIVITY_DENIED
+        if self.prefers_interpreter
+            || !self.call_promotable
+            || self.productivity.load(Ordering::Relaxed) == PRODUCTIVITY_DENIED
         {
             return;
         }
@@ -583,6 +598,137 @@ fn function_is_candidate(module: &crate::NamespaceRuntime, function: &lm_bytecod
         })
 }
 
+fn function_prefers_interpreter(
+    module: &crate::NamespaceRuntime,
+    function: &lm_bytecode::Func,
+) -> bool {
+    effect_cycle_prefers_interpreter(function, |op| {
+        module
+            .bundle()
+            .op(op)
+            .is_some_and(|operation| operation.kind == lm_abi::OpKind::VmControl)
+    })
+}
+
+fn effect_cycle_prefers_interpreter(
+    function: &lm_bytecode::Func,
+    mut expensive_effect: impl FnMut(u32) -> bool,
+) -> bool {
+    let block_count = function.blocks.len();
+    let effect_blocks: Vec<usize> = function
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(block, instructions)| {
+            instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        lm_bytecode::Instr::Perform { .. }
+                            | lm_bytecode::Instr::PerformValue { .. }
+                    )
+                })
+                .then_some(block)
+        })
+        .collect();
+    if effect_blocks.is_empty() {
+        return false;
+    }
+    let mut successors = vec![Vec::new(); block_count];
+    let mut predecessors = vec![Vec::new(); block_count];
+    for (block, instructions) in function.blocks.iter().enumerate() {
+        for instruction in instructions {
+            let target = match instruction {
+                lm_bytecode::Instr::Jump(target)
+                | lm_bytecode::Instr::JumpIfFalse(target)
+                | lm_bytecode::Instr::JumpIfTrue(target) => Some(*target as usize),
+                _ => None,
+            };
+            let Some(target) = target.filter(|target| *target < block_count) else {
+                continue;
+            };
+            if !successors[block].contains(&target) {
+                successors[block].push(target);
+                predecessors[target].push(block);
+            }
+        }
+    }
+    let mut visited = vec![false; block_count];
+    let mut reverse_visited = vec![false; block_count];
+    let mut stack = Vec::new();
+    for effect_block in effect_blocks {
+        reachable_blocks(effect_block, &successors, &mut visited, &mut stack);
+        reachable_blocks(
+            effect_block,
+            &predecessors,
+            &mut reverse_visited,
+            &mut stack,
+        );
+        let members: Vec<usize> = (0..block_count)
+            .filter(|block| visited[*block] && reverse_visited[*block])
+            .collect();
+        let self_loop = successors[effect_block].contains(&effect_block);
+        if members.len() == 1 && !self_loop {
+            continue;
+        }
+        let internal_edges = members
+            .iter()
+            .map(|block| {
+                successors[*block]
+                    .iter()
+                    .filter(|target| visited[**target] && reverse_visited[**target])
+                    .count()
+            })
+            .sum::<usize>();
+        if internal_edges != members.len() {
+            continue;
+        }
+        let mut effect_count = 0usize;
+        let mut instruction_count = 0usize;
+        let mut expensive = false;
+        for block in members {
+            instruction_count = instruction_count.saturating_add(function.blocks[block].len());
+            for instruction in &function.blocks[block] {
+                match instruction {
+                    lm_bytecode::Instr::Perform { op, .. } => {
+                        effect_count = effect_count.saturating_add(1);
+                        expensive |= expensive_effect(*op);
+                    }
+                    lm_bytecode::Instr::PerformValue { .. } => {
+                        effect_count = effect_count.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if expensive
+            || effect_count != 0
+                && instruction_count <= effect_count.saturating_mul(MAX_DENSE_EFFECT_CYCLE_COST)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn reachable_blocks(
+    start: usize,
+    edges: &[Vec<usize>],
+    visited: &mut [bool],
+    stack: &mut Vec<usize>,
+) {
+    visited.fill(false);
+    stack.clear();
+    stack.push(start);
+    while let Some(block) = stack.pop() {
+        if std::mem::replace(&mut visited[block], true) {
+            continue;
+        }
+        stack.extend(edges[block].iter().copied());
+    }
+}
+
 fn type_is_candidate(module: &crate::NamespaceRuntime, ty: u32) -> bool {
     module
         .types
@@ -651,6 +797,22 @@ fn add_reason(reasons: &mut BTreeMap<String, u32>, reason: String) {
 mod tests {
     use super::*;
 
+    fn function(blocks: Vec<Vec<lm_bytecode::Instr>>) -> lm_bytecode::Func {
+        lm_bytecode::Func {
+            name: "effect-loop".to_string(),
+            param_names: Vec::new(),
+            type_params: 0,
+            effect_params: 0,
+            params: Vec::new(),
+            param_muts: Vec::new(),
+            ret: 0,
+            row: Vec::new(),
+            captures: Vec::new(),
+            local_types: Vec::new(),
+            blocks,
+        }
+    }
+
     #[test]
     fn code_budget_uses_bytes_and_reopens_after_release() {
         let budget = CodeBudget::new(100);
@@ -660,5 +822,61 @@ mod tests {
         budget.release(60);
         assert_ne!(budget.epoch(), epoch);
         assert!(budget.reserve(50));
+    }
+
+    #[test]
+    fn one_dense_effect_cycle_prefers_the_interpreter() {
+        let function = function(vec![vec![
+            lm_bytecode::Instr::Perform {
+                op: lm_abi::OP_CLOCK_NOW,
+                argc: 0,
+                reply_ty: 0,
+            },
+            lm_bytecode::Instr::Pop,
+            lm_bytecode::Instr::Jump(0),
+        ]]);
+        assert!(effect_cycle_prefers_interpreter(&function, |_| false));
+    }
+
+    #[test]
+    fn nested_work_keeps_a_sparse_effect_cycle_native() {
+        let function = function(vec![
+            vec![
+                lm_bytecode::Instr::Perform {
+                    op: lm_abi::OP_CLOCK_NOW,
+                    argc: 0,
+                    reply_ty: 0,
+                },
+                lm_bytecode::Instr::Pop,
+                lm_bytecode::Instr::Jump(1),
+            ],
+            vec![
+                lm_bytecode::Instr::ConstBool(true),
+                lm_bytecode::Instr::JumpIfFalse(0),
+                lm_bytecode::Instr::Jump(2),
+            ],
+            vec![lm_bytecode::Instr::Jump(1)],
+        ]);
+        assert!(!effect_cycle_prefers_interpreter(&function, |_| false));
+    }
+
+    #[test]
+    fn one_vm_control_cycle_prefers_the_interpreter() {
+        let mut instructions = Vec::new();
+        for _ in 0..32 {
+            instructions.push(lm_bytecode::Instr::ConstUnit);
+            instructions.push(lm_bytecode::Instr::Pop);
+        }
+        instructions.push(lm_bytecode::Instr::Perform {
+            op: lm_abi::OP_VM_DRIVE,
+            argc: 0,
+            reply_ty: 0,
+        });
+        instructions.push(lm_bytecode::Instr::Pop);
+        instructions.push(lm_bytecode::Instr::Jump(0));
+        assert!(effect_cycle_prefers_interpreter(
+            &function(vec![instructions]),
+            |op| op == lm_abi::OP_VM_DRIVE
+        ));
     }
 }

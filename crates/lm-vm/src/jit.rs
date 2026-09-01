@@ -40,6 +40,17 @@ pub(crate) struct NativeContinuation {
     root_local: usize,
     root_operand: usize,
     exit: lm_jit::ExecutionExit,
+    effect: Option<NativeEffectContinuation>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeEffectContinuation {
+    reply_ty: u32,
+    environment: TypeEnvId,
+    consumed: usize,
+    block: u32,
+    instruction: u32,
+    reply_kind: ScalarKind,
 }
 
 #[derive(Default)]
@@ -104,6 +115,27 @@ impl CanonicalStack {
 }
 
 impl NativeContinuation {
+    pub(crate) fn effect_reply_type(&self) -> Option<(u32, TypeEnvId)> {
+        self.effect
+            .map(|effect| (effect.reply_ty, effect.environment))
+    }
+
+    pub(crate) fn install_effect_reply(&mut self, value: Value) -> Result<bool, ()> {
+        let Some(effect) = self.effect else {
+            return Ok(false);
+        };
+        let (tag, bits) = scalar_parts(effect.reply_kind, value).ok_or(())?;
+        let stack_len = self
+            .scratch
+            .activation
+            .finish_effect(effect.consumed, effect.block, effect.instruction, tag, bits)
+            .map_err(|_| ())?;
+        self.exit
+            .resume_at(effect.block, effect.instruction, stack_len);
+        self.effect = None;
+        Ok(true)
+    }
+
     pub(crate) fn extend_gc_roots(&self, roots: &mut Vec<ObjRef>) {
         for frame in &self.canonical.frames {
             if let Some(crate::machine::FrameCapture::Closure(reference)) = frame.closure {
@@ -138,7 +170,7 @@ impl NativeContinuation {
             .map(|(depth, frame)| lm_heap::FaultSite {
                 function: frame.function(),
                 block: frame.block(),
-                instruction: if next_top && depth == 0 {
+                instruction: if depth == 0 && (self.effect.is_some() || next_top) {
                     frame.instruction()
                 } else {
                     frame.instruction().saturating_sub(1)
@@ -1280,6 +1312,54 @@ impl JitEngine {
             }
         }
         machine.vm.fuel -= exit.retired();
+        let retain_effect = exit.kind() == ExitKind::Effect
+            && retired < instruction_limit
+            && exit.retired() < original_fuel;
+        if retain_effect {
+            let retained = continuation_regions(
+                native,
+                &root_region,
+                &scratch.activation,
+                &mut scratch.continuation_regions,
+            )
+            .ok()
+            .and_then(|()| scratch.continuation_regions.last())
+            .and_then(|region| {
+                native_effect_request(module, region.as_ref(), &scratch.activation, exit)
+            });
+            if let Some(request) = retained {
+                let Some(retired) = retired.checked_add(1) else {
+                    return malformed_native_exit(retired);
+                };
+                machine.vm.fuel -= 1;
+                let state = NativeContinuation {
+                    scratch: std::mem::take(scratch),
+                    canonical: CanonicalStack::take(machine),
+                    root_frame,
+                    root_local: base,
+                    root_operand: operand_base,
+                    exit,
+                    effect: Some(request.continuation),
+                };
+                let held = if let Some(mut held) = continuation {
+                    *held = state;
+                    held
+                } else {
+                    Box::new(state)
+                };
+                machine.set_native_continuation(held);
+                metrics.note_native_retired(u64::from(retired));
+                metrics.note_native_effect_exit();
+                metrics.note_native_continuation_suspend();
+                return NativeAttempt::Complete {
+                    outcome: Ok(Some(ExecOutcome::Perform {
+                        op: request.op,
+                        args: request.args,
+                    })),
+                    retired,
+                };
+            }
+        }
         let retain_continuation = exit.kind() == ExitKind::Fuel
             && exit.retired() == batch_fuel
             && batch_fuel == u64::from(instruction_limit)
@@ -1307,6 +1387,7 @@ impl JitEngine {
                 root_local: base,
                 root_operand: operand_base,
                 exit,
+                effect: None,
             };
             let held = if let Some(mut held) = continuation {
                 *held = state;
@@ -1807,6 +1888,7 @@ pub(crate) fn materialize_native_continuation(machine: &mut Machine) -> Result<b
         return Ok(false);
     };
     let continuation = *continuation;
+    let effect = continuation.effect;
     continuation.canonical.restore(machine);
     materialize_native_frames(
         machine,
@@ -1817,7 +1899,31 @@ pub(crate) fn materialize_native_continuation(machine: &mut Machine) -> Result<b
         continuation.root_local,
         continuation.root_operand,
     )?;
+    if let Some(effect) = effect {
+        finish_materialized_effect(machine, effect)?;
+    }
     Ok(true)
+}
+
+fn finish_materialized_effect(
+    machine: &mut Machine,
+    effect: NativeEffectContinuation,
+) -> Result<(), ()> {
+    let frame = machine.vm.frames.last().ok_or(())?;
+    if frame.block != effect.block
+        || frame.ip.checked_add(1) != Some(effect.instruction)
+        || machine.vm.operands.len() < effect.consumed
+    {
+        return Err(());
+    }
+    let operand_len = machine.vm.operands.len() - effect.consumed;
+    if operand_len < frame.base_operand as usize {
+        return Err(());
+    }
+    machine.vm.operands.truncate(operand_len);
+    let frame = machine.vm.frames.last_mut().ok_or(())?;
+    frame.ip = effect.instruction;
+    Ok(())
 }
 
 fn reject_native_continuation(
@@ -1970,6 +2076,89 @@ fn materialize_native_frames(
         .get(1..)
         .and_then(|children| children.last())
         .cloned())
+}
+
+struct NativeEffectRequest {
+    op: u32,
+    args: Vec<Value>,
+    continuation: NativeEffectContinuation,
+}
+
+fn native_effect_request(
+    module: &NamespaceRuntime,
+    region: &lm_jit::CompiledRegion,
+    activation: &lm_jit::NativeActivation,
+    exit: lm_jit::ExecutionExit,
+) -> Option<NativeEffectRequest> {
+    let frame = activation.top_frame()?;
+    if frame.block() != exit.block()
+        || frame.instruction() != exit.instruction()
+        || frame.operands().len() != exit.stack_len() as usize
+    {
+        return None;
+    }
+    let instruction = module
+        .funcs
+        .get(frame.function() as usize)?
+        .blocks
+        .get(exit.block() as usize)?
+        .get(exit.instruction() as usize)?;
+    let (fixed_op, argc, reply_ty, dynamic) = match instruction {
+        lm_bytecode::Instr::Perform { op, argc, reply_ty } => {
+            (Some(*op), *argc as usize, *reply_ty, false)
+        }
+        lm_bytecode::Instr::PerformValue { argc, reply_ty } => {
+            (None, *argc as usize, *reply_ty, true)
+        }
+        _ => return None,
+    };
+    let kinds =
+        region.materialization_operand_kinds(ExitKind::Effect, exit.block(), exit.instruction())?;
+    if kinds.len() != frame.operands().len() || kinds.len() != frame.operand_tags().len() {
+        return None;
+    }
+    let consumed = argc.checked_add(usize::from(dynamic))?;
+    let prefix = kinds.len().checked_sub(consumed)?;
+    let args_at = kinds.len().checked_sub(argc)?;
+    let mut args = Vec::new();
+    args.try_reserve_exact(argc).ok()?;
+    for ((kind, bits), tag) in kinds[args_at..]
+        .iter()
+        .copied()
+        .zip(frame.operands()[args_at..].iter().copied())
+        .zip(frame.operand_tags()[args_at..].iter().copied())
+    {
+        args.push(materialized_value(kind, tag, bits)?);
+    }
+    let op = match fixed_op {
+        Some(op) => op,
+        None => match materialized_value(
+            *kinds.get(prefix)?,
+            *frame.operand_tags().get(prefix)?,
+            *frame.operands().get(prefix)?,
+        )? {
+            Value::Op(op) => op,
+            _ => return None,
+        },
+    };
+    let instruction = exit.instruction().checked_add(1)?;
+    let entry = region.resume_plan(exit.block(), instruction)?;
+    if entry.operand_kinds().len() != prefix.checked_add(1)? {
+        return None;
+    }
+    let reply_kind = *entry.operand_kinds().last()?;
+    Some(NativeEffectRequest {
+        op,
+        args,
+        continuation: NativeEffectContinuation {
+            reply_ty,
+            environment: TypeEnvId(frame.environment()),
+            consumed,
+            block: exit.block(),
+            instruction,
+            reply_kind,
+        },
+    })
 }
 
 fn materialized_value(kind: ScalarKind, stored_tag: u64, bits: u64) -> Option<Value> {

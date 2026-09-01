@@ -301,7 +301,17 @@ Leased machines report state through their scoped barrier.
 
 Inspection and interpreter entry also materialize native state.
 
-Faults, effects, and terminal returns always materialize native state.
+Faults and terminal returns always materialize native state.
+
+An effect can retain native state while policy routing handles its request.
+
+The request stores canonical argument values outside the activation.
+
+A reply updates the retained top frame through verified scalar metadata.
+
+A snapshot, inspection, fault, recall, or engine change forces materialization.
+
+A canonical stack mutation also forces materialization.
 
 ## 7. Region plans
 
@@ -659,13 +669,23 @@ The JIT does not add a stub only to increase a coverage number.
 
 ## 15. Effects and safepoints
 
-An effect always materializes canonical state.
-
-The interpreter retires the effect instruction.
+Native code retires an effect after it stores canonical request values.
 
 Policy and host handling remain outside generated code.
 
-A reply can enter native code through the normal guard.
+A synchronous reply can update one retained native activation.
+
+A waiting host operation can also retain its native activation.
+
+A mock or guest driver can route the canonical request without frame inspection.
+
+The retained activation supplies all collection roots while the request waits.
+
+A reply uses the verified effect result type and exact resume position.
+
+Materialization removes request operands and advances the canonical frame.
+
+A snapshot restore materializes before it reserves and installs its reply slot.
 
 Recall, pause, capture, and debugging require canonical state.
 
@@ -716,6 +736,18 @@ The exhaustive opcode ledger prevents a missing instruction treatment.
 Rejected functions use no hotness counter and cause no compiler probe.
 
 Auto samples direct calls and loop backedges before it compiles one region.
+
+Static entry policy runs before hotness sampling.
+
+One simple cycle prefers the interpreter when direct effects dominate its instructions.
+
+One simple VM control cycle also prefers the interpreter.
+
+Nested work cycles remain native candidates because their dynamic effect density can be low.
+
+Forced Native bypasses this preference for differential tests.
+
+An AOT driver must apply the static entry policy.
 
 Each sample adds an estimated retired-instruction count to one relaxed counter.
 
@@ -1311,7 +1343,9 @@ Scheduler continuation landed before broader collection access.
 
 It retains native frames across ordinary deterministic and parallel quanta.
 
-Recall, snapshots, faults, effects, and engine changes force materialization.
+Recall, snapshots, faults, and engine changes force materialization.
+
+An effect retains native state when routing does not inspect the machine.
 
 ## 23. Retained baseline
 
@@ -3576,6 +3610,56 @@ The JIT unit suite passed 17 tests.
 The benchmark target compiled without warnings.
 
 The full workspace suite passed.
+
+### Stage F69: Retain native effects and distribute native procs
+
+- distribute worker leases after any bounded slice retires at least its requested quantum;
+- retain native activations across synchronous and waiting effects;
+- keep effect request arguments as canonical values;
+- store the verified reply type and exact resume position;
+- install scalar replies directly into retained native storage;
+- keep retained object values visible to collection;
+- retain effect continuations in worker reports;
+- materialize only when another operation observes machine state;
+- prefer interpretation for one simple effect-dense cycle;
+- keep nested sparse-effect cycles eligible for native execution;
+- bypass the static preference in forced Native mode.
+
+The scheduler defect compared native retired work with the quantum for exact equality.
+
+A native segment can pass that quantum before it reaches its deterministic poll boundary.
+
+The coordinator now starts worker distribution after either exact or greater retirement.
+
+| Native proc row | One worker | Eight workers | Gain |
+| --- | ---: | ---: | ---: |
+| Before | 69.696 ms | 69.417 ms | 1.004 times |
+| Current | 65.028 ms | 4.199 ms | 15.486 times |
+
+The row runs six pure compute procs with ten million loop iterations each.
+
+All six procs held worker leases in the current run.
+
+| Effect row | Interpreter | Auto | Forced Native | Auto gain | Native gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Dense clock | 2.608 ms | 2.625 ms | 5.923 ms | 0.99 times | 0.44 times |
+| Dense print | 28.704 ms | 24.227 ms | 24.330 ms | 1.18 times | 1.18 times |
+| Sparse clock | 30.944 ms | 0.446 ms | 0.394 ms | 69.46 times | 78.62 times |
+| Guest driver | 1.387 ms | 1.445 ms | 7.759 ms | 0.96 times | 0.18 times |
+
+Forced Native remains a correctness mode.
+
+It bypasses static entry policy and exposes the remaining transition ceiling.
+
+Auto applies the static policy without runtime demotion for simple dense cycles.
+
+Future AOT execution must apply the same static policy.
+
+Focused effect, worker, sparse-cycle, and VM control tests passed.
+
+The direct and scheduled corpus differential passed after the retained-effect change.
+
+The full workspace suite passed in 73.75 seconds.
 
 ## 24. Rejected designs
 

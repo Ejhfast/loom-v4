@@ -48,6 +48,30 @@ fn bench_parallel_cpu_scaling() {
 
 #[test]
 #[ignore]
+fn bench_parallel_native_cpu_scaling() {
+    let (source, expected) = parallel_cpu_source(6, 10_000_000);
+    let (serial, serial_stats) =
+        time_parallel_world_engine(&source, 1, &expected, EngineMode::Native);
+    let (parallel, parallel_stats) =
+        time_parallel_world_engine(&source, 8, &expected, EngineMode::Native);
+    let speedup = serial.as_secs_f64() / parallel.as_secs_f64();
+    println!("LOOM\tcase\ttasks\tworkers\tserial_ms\tparallel_ms\tspeedup");
+    println!(
+        "LOOM\tparallel_native_cpu\t6\t8\t{:.3}\t{:.3}\t{speedup:.3}",
+        serial.as_secs_f64() * 1e3,
+        parallel.as_secs_f64() * 1e3,
+    );
+    println!("LOOM\tparallel_native_serial\t{serial_stats:?}");
+    println!("LOOM\tparallel_native_parallel\t{parallel_stats:?}");
+    assert_eq!(parallel_stats.max_active_leases, 6, "{parallel_stats:?}");
+    assert!(
+        speedup >= 4.0,
+        "six native tasks reached {speedup:.3}x on eight workers"
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_parallel_allocating_scaling() {
     let (source, expected) = parallel_allocating_source(8, 250_000);
     let serial = time_parallel_world(&source, 1, &expected);

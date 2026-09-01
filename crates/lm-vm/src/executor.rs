@@ -537,8 +537,11 @@ impl ExecutionLease {
     }
 
     fn into_report(mut self, mut stop: ExecutionStop) -> ExecutionReport {
-        if !matches!(stop, ExecutionStop::QuantumExpired) && self.machine.has_native_continuation()
-        {
+        let retains_native_state = matches!(
+            stop,
+            ExecutionStop::QuantumExpired | ExecutionStop::Boundary(ExecOutcome::Perform { .. })
+        );
+        if !retains_native_state && self.machine.has_native_continuation() {
             if let Err(code) = self.engine.materialize_native_state(&mut self.machine) {
                 stop = ExecutionStop::Fault(code);
             }
@@ -1263,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn a_native_worker_returns_one_materialized_effect_boundary() {
+    fn a_native_worker_retains_one_effect_boundary() {
         let module = crate::unit_from_module_for_test(Module {
             strings: vec![],
             bytes: vec![],
@@ -1337,19 +1340,30 @@ mod tests {
         let report = std::thread::spawn(move || execute(lease))
             .join()
             .expect("the effect worker returns one report");
-        let (_, machine, _, _, stop, retired) = report.into_parts(reservation);
+        let (_, mut machine, _, _, stop, retired) = report.into_parts(reservation);
         assert_eq!(retired, 1);
         assert!(matches!(
             stop,
             ExecutionStop::Boundary(ExecOutcome::Perform { op, args })
                 if op == lm_abi::OP_CLOCK_NOW && args.is_empty()
         ));
+        assert!(machine.has_native_continuation());
+        assert_eq!(
+            machine.native_effect_reply_type(),
+            Some((2, TypeEnvId::EMPTY))
+        );
+        assert!(machine
+            .install_native_effect_reply(Value::Int(42))
+            .expect("the native reply installs"));
+        assert!(crate::jit::materialize_native_continuation(&mut machine)
+            .expect("the retained effect materializes"));
         let frame = machine.vm.frames.last().expect("the effect frame remains");
         assert_eq!((frame.block, frame.ip), (0, 1));
-        assert!(machine.vm.operands.is_empty());
+        assert_eq!(machine.vm.operands, vec![Value::Int(42)]);
         let metrics = engine.metrics();
         assert_eq!(metrics.compiled_effect_sites, 1);
         assert_eq!(metrics.native_effect_exits, 1);
+        assert_eq!(metrics.native_continuation_materializations, 0);
     }
 
     #[test]

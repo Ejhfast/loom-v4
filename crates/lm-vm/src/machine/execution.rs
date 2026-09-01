@@ -24,6 +24,21 @@ impl Machine {
         self.native_continuation.is_some()
     }
 
+    pub(crate) fn native_effect_reply_type(&self) -> Option<(u32, TypeEnvId)> {
+        self.native_continuation
+            .as_deref()
+            .and_then(crate::jit::NativeContinuation::effect_reply_type)
+    }
+
+    pub(crate) fn install_native_effect_reply(&mut self, value: Value) -> Result<bool, FaultCode> {
+        let Some(continuation) = self.native_continuation.as_deref_mut() else {
+            return Ok(false);
+        };
+        continuation
+            .install_effect_reply(value)
+            .map_err(|()| FaultCode::MalformedState)
+    }
+
     /// Execute until a boundary or an instruction count expires.
     ///
     /// `None` means the count expired after `retired` instructions.

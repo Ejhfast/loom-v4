@@ -601,6 +601,9 @@ impl World {
     /// mailbox receive, the pending call reply, the spawn result, the
     /// mock reply, and the restore result together.
     pub(super) fn reply_type(&self, vm: VmId) -> Result<(u32, TypeEnvId), FaultCode> {
+        if let Some(found) = self.machines[vm as usize].native_effect_reply_type() {
+            return Ok(found);
+        }
         let frame = self.machines[vm as usize]
             .vm
             .frames
@@ -786,6 +789,7 @@ impl World {
             }
             return;
         }
+        let native_reply = self.machines[vm as usize].install_native_effect_reply(value);
         let m = &mut self.machines[vm as usize];
         // A completed request closes the host attachment it opened.
         if let Some(pending) = &m.vm.pending {
@@ -793,10 +797,20 @@ impl World {
             m.resources.close_by_ordinal(ordinal);
         }
         m.vm.pending = None;
-        if let Err(code) = m.push(value) {
-            m.set_fault(code, "", None);
-        } else if m.vm.state != MachineState::Running {
-            m.vm.state = MachineState::Ready;
+        match native_reply {
+            Ok(true) => {
+                if m.vm.state != MachineState::Running {
+                    m.vm.state = MachineState::Ready;
+                }
+            }
+            Ok(false) => {
+                if let Err(code) = m.push(value) {
+                    m.set_fault(code, "", None);
+                } else if m.vm.state != MachineState::Running {
+                    m.vm.state = MachineState::Ready;
+                }
+            }
+            Err(code) => m.set_fault(code, "the native effect reply did not resume", None),
         }
         if let Some(resource) = closing {
             self.retire_resource(resource, close_host);

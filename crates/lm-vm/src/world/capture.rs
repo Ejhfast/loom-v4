@@ -710,6 +710,7 @@ impl World {
 
     /// Reserve the operand slot for one prepared restore reply.
     pub(super) fn reserve_restore_reply_slot(&mut self, vm: VmId) -> Result<(), FaultCode> {
+        self.materialize_native_machine(vm)?;
         let machine = &mut self.machines[vm as usize];
         let stack = machine
             .vm
@@ -731,6 +732,7 @@ impl World {
     /// Install a checked reply after restore commit.
     pub(super) fn install_prepared_restore_reply(&mut self, vm: VmId, reply: PreparedRestoreReply) {
         let machine = &mut self.machines[vm as usize];
+        debug_assert!(!machine.has_native_continuation());
         if let Some(ordinal) = machine.vm.pending.as_ref().map(|pending| pending.ordinal) {
             machine.resources.close_by_ordinal(ordinal);
         }
