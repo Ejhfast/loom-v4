@@ -193,7 +193,6 @@ pub enum ExitKind {
     TypeMismatch,
     UninitializedField,
     Call,
-    Allocation,
     HeapLimit,
     Effect,
     StackLimit,

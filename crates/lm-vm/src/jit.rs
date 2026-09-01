@@ -1262,7 +1262,6 @@ impl JitEngine {
                 ExitKind::Fuel
                 | ExitKind::Return
                 | ExitKind::Replay
-                | ExitKind::Allocation
                 | ExitKind::Effect
                 | ExitKind::Boundary => true,
                 ExitKind::Call => u32::try_from(exit.result())
@@ -1366,7 +1365,6 @@ impl JitEngine {
             | ExitKind::InterfaceCall
             | ExitKind::GenericVirtualCall
             | ExitKind::CallbackCall
-            | ExitKind::Allocation
             | ExitKind::Effect
             | ExitKind::Boundary => {
                 if exit.kind() == ExitKind::Poll {
@@ -1422,7 +1420,6 @@ impl JitEngine {
                     exit.kind(),
                     ExitKind::GrowRoots
                         | ExitKind::GrowActivation
-                        | ExitKind::Allocation
                         | ExitKind::Effect
                         | ExitKind::TypeResolution
                         | ExitKind::TypeEnvironment
@@ -1431,9 +1428,6 @@ impl JitEngine {
                         | ExitKind::CallbackCall
                         | ExitKind::Boundary
                 ) {
-                    if matches!(exit.kind(), ExitKind::Allocation) {
-                        metrics.note_native_allocation_exit();
-                    }
                     if matches!(exit.kind(), ExitKind::Effect) {
                         metrics.note_native_effect_exit();
                     }

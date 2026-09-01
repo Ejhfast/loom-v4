@@ -3544,6 +3544,39 @@ The direct and scheduled corpus differential passed in 24.34 seconds.
 
 The full workspace suite passed in 73.69 seconds after a partial rebuild.
 
+### Stage F68: Separate JIT implementation domains
+
+- split backend emission by calls, maps, heap access, allocation, builders, lists, exits, text, numeric operations, and memory access;
+- keep the exhaustive opcode match in one dispatcher;
+- delegate each opcode body to one emission domain;
+- split planning into calls, contracts, flow analysis, and segment construction;
+- split runtime helpers by the same operation domains;
+- split machine execution by state, stack, calls, heap access, collections, syntax, and interpreter dispatch;
+- split JIT tests and benchmarks by runtime topic;
+- remove the obsolete allocation exit and its unused counter.
+
+The cleanup changes no guest behavior or container format.
+
+The dispatcher module now has 811 lines.
+
+Its largest instruction domain has 1,216 lines.
+
+The machine root now has 1,065 lines.
+
+The planning root now has 1,150 lines.
+
+The runtime-helper root now has 714 lines.
+
+The JIT test root now has 250 lines.
+
+The focused JIT suite passed 167 tests.
+
+The JIT unit suite passed 17 tests.
+
+The benchmark target compiled without warnings.
+
+The full workspace suite passed.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

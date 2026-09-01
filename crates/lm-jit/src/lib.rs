@@ -18,7 +18,6 @@ const EXIT_INVALID_ENTRY: u32 = 6;
 const EXIT_TYPE_MISMATCH: u32 = 7;
 const EXIT_UNINITIALIZED_FIELD: u32 = 8;
 const EXIT_CALL: u32 = 9;
-const EXIT_ALLOCATION: u32 = 10;
 const EXIT_HEAP_LIMIT: u32 = 11;
 const EXIT_EFFECT: u32 = 12;
 const EXIT_STACK_LIMIT: u32 = 13;
@@ -731,7 +730,6 @@ fn decode_exit_kind(kind: u32) -> Option<ExitKind> {
         EXIT_TYPE_MISMATCH => ExitKind::TypeMismatch,
         EXIT_UNINITIALIZED_FIELD => ExitKind::UninitializedField,
         EXIT_CALL => ExitKind::Call,
-        EXIT_ALLOCATION => ExitKind::Allocation,
         EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
         EXIT_EFFECT => ExitKind::Effect,
         EXIT_STACK_LIMIT => ExitKind::StackLimit,

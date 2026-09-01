@@ -50,7 +50,6 @@ pub struct EngineMetrics {
     pub native_activation_grows: u64,
     pub unproductive_native_demotions: u64,
     pub native_fault_exits: u64,
-    pub native_allocation_exits: u64,
     /// Canonical heap allocations completed during native execution.
     pub native_heap_allocations: u64,
     /// Allocation instructions completed during native execution.
@@ -139,7 +138,6 @@ struct EngineCounters {
     native_activation_grows: AtomicU64,
     unproductive_native_demotions: AtomicU64,
     native_fault_exits: AtomicU64,
-    native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
     native_inline_allocations: AtomicU64,
     pending_instance_allocations: AtomicU64,
@@ -195,7 +193,6 @@ impl EngineCounters {
             native_activation_grows: read(&self.native_activation_grows),
             unproductive_native_demotions: read(&self.unproductive_native_demotions),
             native_fault_exits: read(&self.native_fault_exits),
-            native_allocation_exits: read(&self.native_allocation_exits),
             native_heap_allocations: native_allocations
                 .saturating_sub(pending_instance_allocations)
                 .saturating_add(pending_instance_materializations),
@@ -240,7 +237,6 @@ impl EngineCounters {
         reset(&self.native_activation_grows);
         reset(&self.unproductive_native_demotions);
         reset(&self.native_fault_exits);
-        reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
         reset(&self.native_inline_allocations);
         reset(&self.pending_instance_allocations);
@@ -303,10 +299,6 @@ impl EngineCounters {
             values.unproductive_native_demotions,
         );
         add(&self.native_fault_exits, values.native_fault_exits);
-        add(
-            &self.native_allocation_exits,
-            values.native_allocation_exits,
-        );
         add(&self.native_allocations, values.native_allocations);
         add(
             &self.native_inline_allocations,
@@ -464,10 +456,6 @@ impl EngineTurnMetrics<'_> {
 
     pub(crate) fn note_native_fault_exit(&mut self) {
         self.values.native_fault_exits += 1;
-    }
-
-    pub(crate) fn note_native_allocation_exit(&mut self) {
-        self.values.native_allocation_exits += 1;
     }
 
     pub(crate) fn note_native_allocations(&mut self, allocations: u64) {
