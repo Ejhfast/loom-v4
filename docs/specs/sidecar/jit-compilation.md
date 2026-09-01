@@ -3193,6 +3193,37 @@ The direct and scheduled corpus differential passed.
 | JSON parser | 1,362,052 bytes | 1,323,196 bytes | 2.9 percent smaller |
 | 301 functions | 1,797,425 bytes | 1,747,344 bytes | 2.8 percent smaller |
 
+### Stage F61: Share reservation exit materialization
+
+- route fuel and requested-poll exits through one cold block per segment;
+- pass the exit kind as one block value;
+- materialize the segment-entry state once;
+- retain exact fuel, poll, frame, and operand state;
+- keep the reservation decision outside the hot path;
+- move canonical instruction stack effects into `lm-bytecode`.
+
+Fuel and poll exits have the same program position and operand shape.
+
+The shared block removes one complete state marshal from each reservation head.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed.
+
+| Cold release row | Stage F60 | Stage F61 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.903 ms | 1.982 ms | within variance |
+| JSON compile and run | 369.192 ms | 357.067 ms | 3.3 percent faster |
+| 301-function compile and run | 537.286 ms | 497.778 ms | 7.4 percent faster |
+
+| Compiled code set | Stage F60 | Stage F61 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,734 bytes | 2,455 bytes | 10.2 percent smaller |
+| JSON parser | 1,323,196 bytes | 1,237,654 bytes | 6.5 percent smaller |
+| 301 functions | 1,747,344 bytes | 1,550,129 bytes | 11.3 percent smaller |
+
+Warm representative results stayed within measurement variance.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

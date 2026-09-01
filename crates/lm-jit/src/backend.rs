@@ -1288,6 +1288,17 @@ fn emit_entry_exit(
     segment: &Segment,
     kind: u32,
 ) -> Result<(), CompileError> {
+    let kind_value = builder.ins().iconst(types::I32, i64::from(kind));
+    emit_entry_exit_with_kind(builder, values, segment, kind, kind_value)
+}
+
+fn emit_entry_exit_with_kind(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    segment: &Segment,
+    shape_kind: u32,
+    kind: ir::Value,
+) -> Result<(), CompileError> {
     let stack = values
         .stack
         .iter()
@@ -1303,12 +1314,13 @@ fn emit_entry_exit(
         .collect::<Result<Vec<_>, CompileError>>()?;
     let retired = emit_retired(builder, values);
     let zero = builder.ins().iconst(types::I64, 0);
-    emit_exit(
+    let locals = capture_local_values(builder, values)?;
+    emit_exit_with_locals_and_kind(
         builder,
         values,
         ExitEmission {
             retired,
-            kind,
+            kind: shape_kind,
             block: segment.block,
             instruction: segment.start,
             result: NativeValue {
@@ -1316,6 +1328,8 @@ fn emit_entry_exit(
                 tag: zero,
             },
         },
+        kind,
+        &locals,
         &stack,
     )
 }
@@ -7061,12 +7075,15 @@ fn emit_reservation_boundary(
     let rearm = builder.create_block();
     let fuel_exit = builder.create_block();
     let poll_exit = builder.create_block();
+    let yield_exit = builder.create_block();
+    builder.append_block_param(yield_exit, types::I32);
     builder.set_cold_block(check_poll);
     builder.set_cold_block(check_request);
     builder.set_cold_block(load_request);
     builder.set_cold_block(rearm);
     builder.set_cold_block(fuel_exit);
     builder.set_cold_block(poll_exit);
+    builder.set_cold_block(yield_exit);
     let retired = emit_retired(builder, values);
     let hard_fuel = load_activation_u64(builder, values, RawActivationField::HardFuel)?;
     let hard_remaining = builder.ins().isub(hard_fuel, retired);
@@ -7080,7 +7097,8 @@ fn emit_reservation_boundary(
         .brif(has_hard_fuel, check_poll, &[], fuel_exit, &[]);
 
     builder.switch_to_block(fuel_exit);
-    emit_entry_exit(builder, values, segment, EXIT_FUEL)?;
+    let fuel_kind = builder.ins().iconst(types::I32, i64::from(EXIT_FUEL));
+    builder.ins().jump(yield_exit, &[fuel_kind.into()]);
 
     builder.switch_to_block(check_poll);
     let deadline = load_activation_u64(builder, values, RawActivationField::PollDeadline)?;
@@ -7108,7 +7126,12 @@ fn emit_reservation_boundary(
     builder.ins().jump(continuation, &[]);
 
     builder.switch_to_block(poll_exit);
-    emit_entry_exit(builder, values, segment, EXIT_POLL)
+    let poll_kind = builder.ins().iconst(types::I32, i64::from(EXIT_POLL));
+    builder.ins().jump(yield_exit, &[poll_kind.into()]);
+
+    builder.switch_to_block(yield_exit);
+    let kind = builder.block_params(yield_exit)[0];
+    emit_entry_exit_with_kind(builder, values, segment, EXIT_FUEL, kind)
 }
 
 fn emit_native_poll_rearm_values(
@@ -13892,6 +13915,18 @@ fn emit_exit_with_locals(
     locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
+    let kind = builder.ins().iconst(types::I32, i64::from(exit.kind));
+    emit_exit_with_locals_and_kind(builder, values, exit, kind, locals, stack)
+}
+
+fn emit_exit_with_locals_and_kind(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    exit: ExitEmission,
+    kind: ir::Value,
+    locals: &[NativeValue],
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
     let storage = reload_active_frame_storage(builder, values)?;
     let stack_kinds = crate::decode_exit_kind(exit.kind)
         .and_then(|kind| {
@@ -13915,11 +13950,11 @@ fn emit_exit_with_locals(
         mem::offset_of!(RawExit, retired),
         exit.retired,
     )?;
-    store_i32_constant(
+    store_i32_value(
         builder,
         values.exit_pointer,
         mem::offset_of!(RawExit, kind),
-        exit.kind,
+        kind,
     )?;
     store_i32_constant(
         builder,
