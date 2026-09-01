@@ -1,6 +1,9 @@
 //! Forced-native differential coverage for shipped standalone programs.
+//!
+//! The test compares results, host actions, and retirement counts.
+//! Unreachable heap entries are not language state.
 
-use lm_vm::{Engine, EngineMode, Outcome, RecordingHost, Vm, VmConfig, World};
+use lm_vm::{Engine, EngineMode, RecordingHost, Vm, VmConfig, World};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,7 +15,7 @@ const GRANTS: &[&str] = &[
     "Proc", "Rand", "Reflect", "Signal", "Tcp", "Tls", "Tty", "Udp", "Vm", "Wait",
 ];
 
-type ObservedRun = (Outcome, String, Vec<u8>, Vec<u8>, Vec<u32>, u64);
+type ObservedRun = (String, Vec<u8>, Vec<u8>, Vec<u32>, u64);
 
 fn rejection_counts(metrics: &lm_vm::EngineMetrics) -> String {
     format!(
@@ -41,11 +44,11 @@ fn run_direct(
     arena: lm_link::CodeArena,
     namespace: lm_link::NamespaceId,
     engine: Arc<Engine>,
-) -> ((Outcome, String), lm_vm::EngineMetrics) {
+) -> (String, lm_vm::EngineMetrics) {
     let mut vm = Vm::new_with_engine(arena, namespace, VmConfig::default(), Arc::clone(&engine));
     let outcome = vm.run();
-    let dump = vm.dump_live(&outcome);
-    ((outcome, dump), engine.metrics())
+    let observed = vm.show_outcome(&outcome);
+    (observed, engine.metrics())
 }
 
 fn run_scheduled(
@@ -70,12 +73,11 @@ fn run_scheduled(
     )
     .run(&mut world)
     .expect("the corpus scheduler runs");
-    let dump = world.dump_live(&outcome);
+    let observed = world.show_outcome(&outcome);
     let retired = world.metrics().retired_instructions;
     let host = host.borrow();
     let observed = (
-        outcome,
-        dump,
+        observed,
         host.written_bytes.clone(),
         host.written_error_bytes.clone(),
         host.operations.clone(),

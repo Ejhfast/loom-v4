@@ -369,6 +369,12 @@ pub(super) struct Segment {
     /// Locals that one internal path can change before this segment exits.
     pub(super) dirty_locals: Vec<bool>,
     pub(super) entry_stack: Vec<ScalarKind>,
+    /// Locals that can contain one pending native instance at entry.
+    pub(super) virtual_locals_in: Vec<bool>,
+    /// Operands that can contain one pending native instance at entry.
+    pub(super) virtual_stack_in: Vec<bool>,
+    /// Instructions that materialize pending instances before replay.
+    pub(super) virtual_barriers: Vec<u32>,
     pub(super) call_contract: Option<CallContract>,
     pub(super) exit_stack: Vec<ScalarKind>,
     pub(super) boundary_stack: Vec<ScalarKind>,
@@ -543,10 +549,14 @@ pub(super) enum OptionTarget {
 #[derive(Debug, Clone)]
 pub(super) struct CallContract {
     pub(super) params: Vec<ScalarKind>,
+    /// Parameters that can receive one pending instance.
+    pub(super) virtual_params: Vec<bool>,
     pub(super) local_count: Option<usize>,
     pub(super) result: ScalarKind,
     pub(super) receiver: Option<VirtualReceiver>,
     pub(super) value_target: Option<ValueCallTarget>,
+    /// True when this call can return one transient instance.
+    pub(super) virtual_result: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,8 +582,18 @@ enum CallValueKind {
 #[derive(Debug, Clone)]
 struct CallSignature {
     params: Vec<CallValueKind>,
+    virtual_params: Vec<bool>,
     local_count: usize,
     result: CallValueKind,
+    virtual_constructor: Option<VirtualConstructor>,
+}
+
+/// One generated constructor that can keep its fields in native storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VirtualConstructor {
+    pub(super) class: u32,
+    pub(super) field_count: u32,
+    pub(super) object_local: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +604,7 @@ pub(super) struct RegionPlan {
     /// Parameters whose list data stays fixed for this native call.
     pub(super) preloaded_list_data: Vec<bool>,
     pub(super) result_kind: ScalarKind,
+    pub(super) virtual_constructor: Option<VirtualConstructor>,
     pub(super) max_stack: usize,
     pub(super) max_stack_values: usize,
     pub(super) max_roots: usize,
@@ -820,6 +841,13 @@ impl RegionPlan {
             .collect::<Result<Vec<_>, _>>()?;
         let result_kind = scalar_kind(source, source_func.ret)?;
         let call_contracts = call_contracts(input)?;
+        let virtual_constructor = call_contracts
+            .get(&input.root.function)
+            .and_then(|signature| signature.virtual_constructor);
+        let virtual_parameters = call_contracts
+            .get(&input.root.function)
+            .map(|signature| signature.virtual_params.as_slice())
+            .unwrap_or(&[]);
         let entries: std::collections::HashMap<(u32, u32), usize> = segments
             .iter()
             .enumerate()
@@ -962,6 +990,23 @@ impl RegionPlan {
         }
         compute_liveness(&mut segments, local_kinds.len());
         compute_dirty_locals(&mut segments, local_kinds.len());
+        select_virtual_results(
+            runtime,
+            source,
+            source_func,
+            &mut segments,
+            local_kinds.len(),
+            virtual_constructor,
+        )?;
+        compute_virtual_flow(
+            runtime,
+            source,
+            source_func,
+            &mut segments,
+            local_kinds.len(),
+            virtual_constructor,
+            virtual_parameters,
+        )?;
         for segment in &mut segments {
             segment.defer_integer_overflow = can_defer_integer_overflow(runtime, segment);
             if segment.defer_integer_overflow
@@ -1009,6 +1054,7 @@ impl RegionPlan {
             cached_list_data,
             preloaded_list_data,
             result_kind,
+            virtual_constructor,
             max_stack,
             max_stack_values,
             max_roots,
@@ -1060,13 +1106,119 @@ fn call_contracts(
         contracts.insert(
             definition.function,
             CallSignature {
+                virtual_params: virtual_parameters(definition),
                 params,
                 local_count: source_func.local_types.len(),
                 result,
+                virtual_constructor: virtual_constructor(definition),
             },
         );
     }
     Ok(contracts)
+}
+
+fn virtual_parameters(definition: FunctionDefinition<'_>) -> Vec<bool> {
+    let mut parameters = vec![false; definition.runtime.params.len()];
+    if source_accepts_virtual_receiver(definition.source, definition.source_function)
+        && !parameters.is_empty()
+    {
+        parameters[0] = true;
+    }
+    parameters
+}
+
+fn source_accepts_virtual_receiver(source: &Module, function: u32) -> bool {
+    source.bindings.iter().any(|binding| {
+        if binding.func != function || binding.class != lm_bytecode::NO_CLASS {
+            return false;
+        }
+        let Some(class_key) = binding.key.strip_suffix(".init") else {
+            return false;
+        };
+        source
+            .classes
+            .iter()
+            .any(|class| class.key == class_key && class.has_init)
+    })
+}
+
+fn virtual_constructor(definition: FunctionDefinition<'_>) -> Option<VirtualConstructor> {
+    let binding = definition.source.bindings.iter().find(|binding| {
+        binding.func == definition.source_function && binding.class != lm_bytecode::NO_CLASS
+    })?;
+    let source_class = definition.source.classes.get(binding.class as usize)?;
+    let field_count = u32::try_from(source_class.fields.len()).ok()?;
+    if field_count == 0 || field_count as usize > crate::activation::VIRTUAL_INSTANCE_FIELDS {
+        return None;
+    }
+    let class = relocate_class(binding.class, definition.class_relocation).ok()?;
+    let function = definition.runtime;
+    let source_function = definition
+        .source
+        .funcs
+        .get(definition.source_function as usize)?;
+    let object_local = u32::try_from(function.params.len()).ok()?;
+    if function.local_types.len() != function.params.len().checked_add(1)? {
+        return None;
+    }
+    let [block] = function.blocks.as_slice() else {
+        return None;
+    };
+    let [source_block] = source_function.blocks.as_slice() else {
+        return None;
+    };
+    if source_block.len() != block.len() {
+        return None;
+    }
+    for (instruction, source_instruction) in block.iter().zip(source_block) {
+        match instruction {
+            Instr::Call(_) | Instr::CallG { .. } => {
+                let target = match source_instruction {
+                    Instr::Call(target) | Instr::CallG { func: target, .. } => *target,
+                    _ => return None,
+                };
+                if !source_accepts_virtual_receiver(definition.source, target) {
+                    return None;
+                }
+            }
+            instruction
+                if matches!(
+                    crate::instruction_treatment(instruction).class(),
+                    crate::TreatmentClass::Call
+                ) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let creates_class = match block.first()? {
+        Instr::New(created) | Instr::NewG { class: created, .. } => *created == class,
+        _ => false,
+    };
+    if !creates_class {
+        return None;
+    }
+    if block.get(1) != Some(&Instr::StoreLocal(object_local)) {
+        return None;
+    }
+    if block.last() != Some(&Instr::Return) {
+        return None;
+    }
+    let returns_object = block.get(block.len().checked_sub(2)?);
+    let returns_object = if returns_object == Some(&Instr::Extended(ExtendedInstr::SealInstance)) {
+        block.get(block.len().checked_sub(3)?)
+    } else {
+        returns_object
+    };
+    if returns_object != Some(&Instr::LoadLocal(object_local)) {
+        return None;
+    }
+    Some(VirtualConstructor {
+        class,
+        field_count,
+        object_local,
+    })
 }
 
 fn call_value_kind(module: &Module, ty: u32) -> Result<CallValueKind, UnsupportedReason> {
@@ -1107,10 +1259,12 @@ fn instantiate_call(
             .copied()
             .map(instantiate)
             .collect::<Result<Vec<_>, _>>()?,
+        virtual_params: signature.virtual_params.clone(),
         local_count: Some(signature.local_count),
         result: instantiate(signature.result)?,
         receiver: None,
         value_target: None,
+        virtual_result: signature.virtual_constructor.is_some(),
     })
 }
 
@@ -1294,6 +1448,9 @@ fn empty_segment(block: usize, start: usize, end: usize, exit: SegmentExit) -> S
         live_in: Vec::new(),
         dirty_locals: Vec::new(),
         entry_stack: Vec::new(),
+        virtual_locals_in: Vec::new(),
+        virtual_stack_in: Vec::new(),
+        virtual_barriers: Vec::new(),
         call_contract: None,
         exit_stack: Vec::new(),
         boundary_stack: Vec::new(),
@@ -2578,11 +2735,13 @@ fn analyze_segment(
                 stack_limit.remove(callee);
                 fault_stacks.push((next, stack_limit));
                 call_contract = Some(CallContract {
+                    virtual_params: vec![false; params.len()],
                     params,
                     local_count: None,
                     result: result_kind,
                     receiver: None,
                     value_target: Some(value_target),
+                    virtual_result: false,
                 });
             }
             Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
@@ -2607,11 +2766,13 @@ fn analyze_segment(
                     .ok_or(UnsupportedReason::InvalidStack)?;
                 boundary_stack = before.stack.clone();
                 call_contract = Some(CallContract {
+                    virtual_params: vec![false; params.len()],
                     params,
                     local_count: None,
                     result,
                     receiver: Some(virtual_receiver(context, receiver)?),
                     value_target: None,
+                    virtual_result: false,
                 });
             }
             Instr::CallInterface { .. } => {
@@ -2639,11 +2800,13 @@ fn analyze_segment(
                     .ok_or(UnsupportedReason::InvalidStack)?;
                 boundary_stack = before.stack.clone();
                 call_contract = Some(CallContract {
+                    virtual_params: vec![false; params.len()],
                     params,
                     local_count: None,
                     result,
                     receiver: None,
                     value_target: None,
+                    virtual_result: false,
                 });
             }
             Instr::Extended(ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. }) => {
@@ -2681,10 +2844,12 @@ fn analyze_segment(
                 boundary_stack = before.stack.clone();
                 call_contract = Some(CallContract {
                     params: before.stack[parameter_start..].to_vec(),
+                    virtual_params: vec![false; before.stack.len() - parameter_start],
                     local_count: None,
                     result,
                     receiver: None,
                     value_target: None,
+                    virtual_result: false,
                 });
             }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {
@@ -3114,6 +3279,402 @@ fn uses_equal_representation(left: ScalarKind, right: ScalarKind) -> bool {
                 | (ScalarKind::Tagged(_), ScalarKind::Tagged(_))
                 | (ScalarKind::Callback(_), ScalarKind::Callback(_))
         )
+}
+
+#[derive(Clone)]
+struct VirtualFlowState {
+    locals: Vec<bool>,
+    stack: Vec<bool>,
+}
+
+fn select_virtual_results(
+    runtime: &Func,
+    source: &Module,
+    source_func: &Func,
+    segments: &mut [Segment],
+    local_count: usize,
+    constructor: Option<VirtualConstructor>,
+) -> Result<(), UnsupportedReason> {
+    let candidates: Vec<usize> = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| {
+            segment
+                .call_contract
+                .as_ref()
+                .is_some_and(|contract| contract.virtual_result)
+                .then_some(index)
+        })
+        .collect();
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| UnsupportedReason::RegionLimit)?;
+    for candidate in candidates {
+        if virtual_result_dies_locally(
+            runtime,
+            source,
+            source_func,
+            segments,
+            local_count,
+            constructor,
+            candidate,
+        )? {
+            selected.push(candidate);
+        }
+    }
+    for segment in segments.iter_mut() {
+        if let Some(contract) = &mut segment.call_contract {
+            contract.virtual_result = false;
+        }
+    }
+    for candidate in selected {
+        let contract = segments[candidate]
+            .call_contract
+            .as_mut()
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        contract.virtual_result = true;
+    }
+    Ok(())
+}
+
+fn virtual_result_dies_locally(
+    runtime: &Func,
+    source: &Module,
+    source_func: &Func,
+    segments: &[Segment],
+    local_count: usize,
+    constructor: Option<VirtualConstructor>,
+    candidate: usize,
+) -> Result<bool, UnsupportedReason> {
+    let Some(successor) = segments[candidate].successors.first().copied() else {
+        return Ok(false);
+    };
+    let mut entries: Vec<Option<VirtualFlowState>> = segments.iter().map(|_| None).collect();
+    let mut initial = VirtualFlowState {
+        locals: vec![false; local_count],
+        stack: vec![false; segments[successor].entry_stack.len()],
+    };
+    let Some(result) = initial.stack.last_mut() else {
+        return Ok(false);
+    };
+    *result = true;
+    entries[successor] = Some(initial);
+    let mut work = VecDeque::from([successor]);
+    let mut queued = vec![false; segments.len()];
+    queued[successor] = true;
+    while let Some(index) = work.pop_front() {
+        queued[index] = false;
+        let mut state = entries[index]
+            .clone()
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        let segment = &segments[index];
+        let runtime_code = runtime
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        let source_code = source_func
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        if runtime_code.len() != source_code.len() {
+            return Err(UnsupportedReason::InvalidControlFlow);
+        }
+        for (instruction, source_instruction) in runtime_code
+            .iter()
+            .copied()
+            .zip(source_code.iter().copied())
+        {
+            let call = matches!(instruction, Instr::Call(_) | Instr::CallG { .. })
+                .then_some(segment.call_contract.as_ref())
+                .flatten();
+            if virtual_barrier_required(instruction, call, false, constructor, &state, true) {
+                return Ok(false);
+            }
+            if matches!(instruction, Instr::Call(_) | Instr::CallG { .. }) {
+                let contract = call.ok_or(UnsupportedReason::InvalidControlFlow)?;
+                if state.stack.len() < contract.params.len() {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                state
+                    .stack
+                    .truncate(state.stack.len() - contract.params.len());
+                state.stack.push(false);
+            } else {
+                transfer_virtual_instruction(
+                    source,
+                    source_instruction,
+                    instruction,
+                    call,
+                    false,
+                    &mut state.locals,
+                    &mut state.stack,
+                )?;
+            }
+        }
+        for successor in segment.successors.iter().copied() {
+            let changed = merge_virtual_state(&mut entries[successor], &state)?;
+            if changed && !queued[successor] {
+                queued[successor] = true;
+                work.push_back(successor);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn compute_virtual_flow(
+    runtime: &Func,
+    source: &Module,
+    source_func: &Func,
+    segments: &mut [Segment],
+    local_count: usize,
+    constructor: Option<VirtualConstructor>,
+    virtual_parameters: &[bool],
+) -> Result<(), UnsupportedReason> {
+    for segment in segments.iter_mut() {
+        segment.virtual_locals_in = vec![false; local_count];
+        segment.virtual_stack_in = vec![false; segment.entry_stack.len()];
+        segment.virtual_barriers.clear();
+    }
+    let entry = segments
+        .iter_mut()
+        .find(|segment| segment.block == 0 && segment.start == 0)
+        .ok_or(UnsupportedReason::InvalidControlFlow)?;
+    if virtual_parameters.len() > entry.virtual_locals_in.len() {
+        return Err(UnsupportedReason::InvalidControlFlow);
+    }
+    entry.virtual_locals_in[..virtual_parameters.len()].copy_from_slice(virtual_parameters);
+    let mut work: VecDeque<usize> = (0..segments.len()).collect();
+    let mut queued = vec![true; segments.len()];
+    while let Some(index) = work.pop_front() {
+        queued[index] = false;
+        let segment = &segments[index];
+        let mut state = VirtualFlowState {
+            locals: segment.virtual_locals_in.clone(),
+            stack: segment.virtual_stack_in.clone(),
+        };
+        let mut barriers = Vec::new();
+        let runtime_code = runtime
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        let source_code = source_func
+            .blocks
+            .get(segment.block as usize)
+            .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+            .ok_or(UnsupportedReason::InvalidControlFlow)?;
+        if runtime_code.len() != source_code.len() {
+            return Err(UnsupportedReason::InvalidControlFlow);
+        }
+        for (offset, (instruction, source_instruction)) in runtime_code
+            .iter()
+            .copied()
+            .zip(source_code.iter().copied())
+            .enumerate()
+        {
+            let position = segment
+                .start
+                .checked_add(u32::try_from(offset).map_err(|_| UnsupportedReason::RegionLimit)?)
+                .ok_or(UnsupportedReason::RegionLimit)?;
+            let call = matches!(instruction, Instr::Call(_) | Instr::CallG { .. })
+                .then_some(segment.call_contract.as_ref())
+                .flatten();
+            let virtual_new = constructor.is_some_and(|constructor| match instruction {
+                Instr::New(class) | Instr::NewG { class, .. } => class == constructor.class,
+                _ => false,
+            });
+            if virtual_barrier_required(instruction, call, virtual_new, constructor, &state, false)
+            {
+                barriers.push(position);
+                state.locals.fill(false);
+                state.stack.fill(false);
+            }
+            transfer_virtual_instruction(
+                source,
+                source_instruction,
+                instruction,
+                call,
+                virtual_new,
+                &mut state.locals,
+                &mut state.stack,
+            )?;
+        }
+        if barriers.iter().any(|barrier| {
+            !segments[index]
+                .virtual_barriers
+                .iter()
+                .any(|known| known == barrier)
+        }) {
+            segments[index].virtual_barriers.extend(barriers);
+            segments[index].virtual_barriers.sort_unstable();
+            segments[index].virtual_barriers.dedup();
+        }
+        let successors = segments[index].successors.clone();
+        for successor in successors {
+            let mut known = Some(VirtualFlowState {
+                locals: std::mem::take(&mut segments[successor].virtual_locals_in),
+                stack: std::mem::take(&mut segments[successor].virtual_stack_in),
+            });
+            let changed = merge_virtual_state(&mut known, &state)?;
+            let known = known.ok_or(UnsupportedReason::InvalidControlFlow)?;
+            segments[successor].virtual_locals_in = known.locals;
+            segments[successor].virtual_stack_in = known.stack;
+            if changed && !queued[successor] {
+                queued[successor] = true;
+                work.push_back(successor);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn virtual_barrier_required(
+    instruction: Instr,
+    call: Option<&CallContract>,
+    virtual_new: bool,
+    constructor: Option<VirtualConstructor>,
+    state: &VirtualFlowState,
+    exit_materializes: bool,
+) -> bool {
+    let any_pending = state.locals.iter().chain(&state.stack).any(|value| *value);
+    let blocked_argument = call.is_some_and(|contract| {
+        state
+            .stack
+            .get(state.stack.len().saturating_sub(contract.params.len())..)
+            .is_none_or(|arguments| {
+                arguments
+                    .iter()
+                    .copied()
+                    .zip(contract.virtual_params.iter().copied())
+                    .any(|(pending, accepted)| pending && !accepted)
+            })
+    });
+    let stored_pending =
+        matches!(instruction, Instr::StoreField(_)) && state.stack.last().copied().unwrap_or(false);
+    let wrapped_pending = matches!(
+        instruction,
+        Instr::Extended(ExtendedInstr::OptionSome { .. })
+    ) && state.stack.last().copied().unwrap_or(false);
+    let returned_pending = matches!(instruction, Instr::Return)
+        && constructor.is_none()
+        && state.stack.last().copied().unwrap_or(false);
+    let class_barrier = match crate::instruction_treatment(&instruction).class() {
+        crate::TreatmentClass::Helper => any_pending,
+        crate::TreatmentClass::FastPath => any_pending && !virtual_new,
+        crate::TreatmentClass::Call => {
+            if call.is_some_and(|contract| {
+                contract.virtual_result || contract.virtual_params.iter().any(|accepted| *accepted)
+            }) {
+                blocked_argument
+            } else {
+                any_pending
+            }
+        }
+        crate::TreatmentClass::Exit => exit_materializes && any_pending,
+        crate::TreatmentClass::Inline | crate::TreatmentClass::Guarded => false,
+    };
+    class_barrier || stored_pending || wrapped_pending || returned_pending
+}
+
+fn merge_virtual_state(
+    known: &mut Option<VirtualFlowState>,
+    incoming: &VirtualFlowState,
+) -> Result<bool, UnsupportedReason> {
+    let Some(known) = known else {
+        *known = Some(incoming.clone());
+        return Ok(true);
+    };
+    if known.locals.len() != incoming.locals.len() || known.stack.len() != incoming.stack.len() {
+        return Err(UnsupportedReason::InvalidControlFlow);
+    }
+    let mut changed = false;
+    for (known, incoming) in known.locals.iter_mut().zip(incoming.locals.iter().copied()) {
+        let merged = *known || incoming;
+        changed |= merged != *known;
+        *known = merged;
+    }
+    for (known, incoming) in known.stack.iter_mut().zip(incoming.stack.iter().copied()) {
+        let merged = *known || incoming;
+        changed |= merged != *known;
+        *known = merged;
+    }
+    Ok(changed)
+}
+
+pub(super) fn transfer_virtual_instruction(
+    source: &Module,
+    source_instruction: Instr,
+    instruction: Instr,
+    call: Option<&CallContract>,
+    virtual_new: bool,
+    locals: &mut [bool],
+    stack: &mut Vec<bool>,
+) -> Result<(), UnsupportedReason> {
+    match instruction {
+        Instr::LoadLocal(slot) => {
+            let value = locals
+                .get(slot as usize)
+                .copied()
+                .ok_or(UnsupportedReason::InvalidControlFlow)?;
+            stack.push(value);
+        }
+        Instr::StoreLocal(slot) => {
+            let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+            let local = locals
+                .get_mut(slot as usize)
+                .ok_or(UnsupportedReason::InvalidControlFlow)?;
+            *local = value;
+        }
+        Instr::Pop => {
+            stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+        }
+        Instr::LoadField(_) | Instr::IsType(_) => {
+            stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+            stack.push(false);
+        }
+        Instr::StoreField(_) => {
+            if stack.len() < 2 {
+                return Err(UnsupportedReason::InvalidStack);
+            }
+            stack.truncate(stack.len() - 2);
+        }
+        Instr::CastType(_) | Instr::Extended(ExtendedInstr::SealInstance) => {
+            let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+            stack.push(value);
+        }
+        Instr::EqRef | Instr::NeRef => {
+            if stack.len() < 2 {
+                return Err(UnsupportedReason::InvalidStack);
+            }
+            stack.truncate(stack.len() - 2);
+            stack.push(false);
+        }
+        Instr::New(_) | Instr::NewG { .. } => stack.push(virtual_new),
+        Instr::Call(_) | Instr::CallG { .. } => {
+            let contract = call.ok_or(UnsupportedReason::InvalidControlFlow)?;
+            if stack.len() < contract.params.len() {
+                return Err(UnsupportedReason::InvalidStack);
+            }
+            stack.truncate(stack.len() - contract.params.len());
+            stack.push(contract.virtual_result);
+        }
+        Instr::Return => {
+            stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+        }
+        _ => {
+            let (pops, pushes) = lm_bytecode::stack_effect(source, &source_instruction);
+            if stack.len() < pops {
+                return Err(UnsupportedReason::InvalidStack);
+            }
+            stack.truncate(stack.len() - pops);
+            stack.extend(std::iter::repeat_n(false, pushes));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn compute_liveness(segments: &mut [Segment], locals: usize) {

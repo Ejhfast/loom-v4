@@ -1035,6 +1035,76 @@ impl Heap {
         self.digests.remove(&slot);
     }
 
+    /// Reserve canonical slots for precharged native instances.
+    pub fn reserve_precharged_slots(&mut self, count: usize) -> bool {
+        let unused = self
+            .pages
+            .len()
+            .saturating_mul(PAGE_SLOTS)
+            .saturating_sub(self.slots);
+        let mut available = self.free.len().saturating_add(unused);
+        while available < count {
+            if !self.try_add_page() {
+                return false;
+            }
+            available = available.saturating_add(PAGE_SLOTS);
+        }
+        true
+    }
+
+    /// Install one instance whose native storage owns its heap charge.
+    pub fn materialize_precharged_instance(
+        &mut self,
+        class: u32,
+        fields: ValueArray,
+        environment: u32,
+        frozen: bool,
+    ) -> ObjRef {
+        let object = Object::Instance {
+            class,
+            fields,
+            env: Witness(lm_value::TypeEnvId(environment)),
+        };
+        let header = Header {
+            frozen: u8::from(frozen),
+            reserved: [0; 7],
+            bytes: object.heap_base_cost(),
+            shared: SharedKey::NONE,
+        };
+        if let Some(slot) = self.free.pop() {
+            let entry = self.entry_mut(slot);
+            debug_assert!(!entry.is_live());
+            let generation = entry.generation;
+            entry.replace(header, object);
+            return ObjRef { slot, generation };
+        }
+
+        debug_assert!(self.slots < self.pages.len().saturating_mul(PAGE_SLOTS));
+        let slot = self.slots;
+        let entry = self.entry_mut(slot as u32);
+        debug_assert!(!entry.is_live());
+        let generation = entry.generation;
+        entry.replace(header, object);
+        self.slots = slot + 1;
+        ObjRef {
+            slot: slot as u32,
+            generation,
+        }
+    }
+
+    /// Release native instance charges that have no canonical slots.
+    pub fn release_precharged_instances(&mut self, bytes: usize, objects: usize) -> bool {
+        let Some(used_bytes) = self.used_bytes.checked_sub(bytes) else {
+            return false;
+        };
+        let Some(live) = self.live.checked_sub(objects) else {
+            return false;
+        };
+        self.used_bytes = used_bytes;
+        self.live = live;
+        true
+    }
+
     /// Register a host root. Pop it later in LIFO order.
     pub fn push_host_root(&mut self, r: ObjRef) {
         self.host_roots.push(r);
@@ -1473,6 +1543,34 @@ mod tests {
                 JIT_OBJECT_INSTANCE
             );
         }
+    }
+
+    #[test]
+    fn precharged_native_instances_keep_exact_heap_counts() {
+        let mut heap = Heap::new(1 << 20);
+        let fields: ValueArray = vec![Value::Int(4), Value::Bool(true)].into();
+        let object = Object::Instance {
+            class: 17,
+            fields: fields.clone(),
+            env: Witness(lm_value::TypeEnvId(9)),
+        };
+        let bytes = object.heap_base_cost();
+        heap.used_bytes = bytes * 2;
+        heap.live = 2;
+
+        assert!(heap.reserve_precharged_slots(1));
+        let reference = heap.materialize_precharged_instance(17, fields, 9, true);
+        assert_eq!(heap.live_count(), 2);
+        assert_eq!(heap.used_bytes(), bytes * 2);
+        assert!(heap.is_frozen(reference));
+        assert_eq!(heap.get(reference), &object);
+
+        assert!(heap.release_precharged_instances(bytes, 1));
+        assert_eq!(heap.live_count(), 1);
+        assert_eq!(heap.used_bytes(), bytes);
+        heap.free(reference);
+        assert_eq!(heap.live_count(), 0);
+        assert_eq!(heap.used_bytes(), 0);
     }
 
     #[test]

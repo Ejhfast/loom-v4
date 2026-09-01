@@ -119,6 +119,9 @@ pub(super) struct MachineRuntime<'a> {
     pub(super) base_operand: usize,
     pub(super) allocations: u64,
     pub(super) inline_allocations: u64,
+    pub(super) pending_instance_allocations: u64,
+    pub(super) pending_instance_releases: u64,
+    pub(super) pending_instance_materializations: u64,
     pub(super) collection_slow_paths: u64,
 }
 
@@ -743,6 +746,13 @@ impl NativeRuntime for MachineRuntime<'_> {
     fn record_inline_allocations(&mut self, count: u64) {
         self.allocations = self.allocations.saturating_add(count);
         self.inline_allocations = self.inline_allocations.saturating_add(count);
+    }
+
+    fn record_pending_instances(&mut self, allocations: u64, releases: u64) {
+        self.pending_instance_allocations = self
+            .pending_instance_allocations
+            .saturating_add(allocations);
+        self.pending_instance_releases = self.pending_instance_releases.saturating_add(releases);
     }
 
     fn allocate_instance(

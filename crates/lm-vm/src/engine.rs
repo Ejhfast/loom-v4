@@ -53,6 +53,9 @@ pub struct EngineMetrics {
     pub native_allocation_exits: u64,
     pub native_allocations: u64,
     pub native_inline_allocations: u64,
+    pub pending_instance_allocations: u64,
+    pub pending_instance_releases: u64,
+    pub pending_instance_materializations: u64,
     pub native_collection_slow_paths: u64,
     pub native_effect_exits: u64,
     pub native_type_environment_exits: u64,
@@ -135,6 +138,9 @@ struct EngineCounters {
     native_allocation_exits: AtomicU64,
     native_allocations: AtomicU64,
     native_inline_allocations: AtomicU64,
+    pending_instance_allocations: AtomicU64,
+    pending_instance_releases: AtomicU64,
+    pending_instance_materializations: AtomicU64,
     native_collection_slow_paths: AtomicU64,
     native_effect_exits: AtomicU64,
     native_type_environment_exits: AtomicU64,
@@ -184,6 +190,9 @@ impl EngineCounters {
             native_allocation_exits: read(&self.native_allocation_exits),
             native_allocations: read(&self.native_allocations),
             native_inline_allocations: read(&self.native_inline_allocations),
+            pending_instance_allocations: read(&self.pending_instance_allocations),
+            pending_instance_releases: read(&self.pending_instance_releases),
+            pending_instance_materializations: read(&self.pending_instance_materializations),
             native_collection_slow_paths: read(&self.native_collection_slow_paths),
             native_effect_exits: read(&self.native_effect_exits),
             native_type_environment_exits: read(&self.native_type_environment_exits),
@@ -222,6 +231,9 @@ impl EngineCounters {
         reset(&self.native_allocation_exits);
         reset(&self.native_allocations);
         reset(&self.native_inline_allocations);
+        reset(&self.pending_instance_allocations);
+        reset(&self.pending_instance_releases);
+        reset(&self.pending_instance_materializations);
         reset(&self.native_collection_slow_paths);
         reset(&self.native_effect_exits);
         reset(&self.native_type_environment_exits);
@@ -286,6 +298,18 @@ impl EngineCounters {
         add(
             &self.native_inline_allocations,
             values.native_inline_allocations,
+        );
+        add(
+            &self.pending_instance_allocations,
+            values.pending_instance_allocations,
+        );
+        add(
+            &self.pending_instance_releases,
+            values.pending_instance_releases,
+        );
+        add(
+            &self.pending_instance_materializations,
+            values.pending_instance_materializations,
         );
         add(
             &self.native_collection_slow_paths,
@@ -438,6 +462,26 @@ impl EngineTurnMetrics<'_> {
             .values
             .native_inline_allocations
             .saturating_add(allocations);
+    }
+
+    pub(crate) fn note_pending_instance_activity(
+        &mut self,
+        allocations: u64,
+        releases: u64,
+        materializations: u64,
+    ) {
+        self.values.pending_instance_allocations = self
+            .values
+            .pending_instance_allocations
+            .saturating_add(allocations);
+        self.values.pending_instance_releases = self
+            .values
+            .pending_instance_releases
+            .saturating_add(releases);
+        self.values.pending_instance_materializations = self
+            .values
+            .pending_instance_materializations
+            .saturating_add(materializations);
     }
 
     pub(crate) fn note_native_collection_slow_paths(&mut self, paths: u64) {

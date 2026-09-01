@@ -3474,10 +3474,20 @@ fn frozen_instance_sealing_stays_native() {
     );
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
     let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
-    assert_eq!(native, interpreted);
-    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(
+        native, interpreted,
+        "{metrics:?}\n{native_dump}\n{interpreted_dump}"
+    );
+    // Unreachable garbage is not part of a terminal snapshot.
+    assert!(native_dump.contains("frames: 0 active"));
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(499_500)));
     assert!(metrics.native_allocations >= 1000, "{metrics:?}");
+    assert!(metrics.pending_instance_allocations >= 900, "{metrics:?}");
+    assert_eq!(
+        metrics.pending_instance_releases, metrics.pending_instance_allocations,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.pending_instance_materializations, 0, "{metrics:?}");
     assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
 }
 
@@ -3492,14 +3502,223 @@ fn native_class_initialization_releases_each_call_frame() {
         "end\ns\n",
     );
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, native_metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(
+        native, interpreted,
+        "{native_metrics:?}\n{native_dump}\n{interpreted_dump}"
+    );
+    // Scalar replacement can remove objects that no live value can reach.
+    assert!(native_dump.contains("frames: 0 active"));
+    assert!(
+        native_metrics.pending_instance_allocations > 40_000,
+        "{native_metrics:?}"
+    );
+    assert_eq!(
+        native_metrics.pending_instance_releases, native_metrics.pending_instance_allocations,
+        "{native_metrics:?}"
+    );
+    assert_eq!(
+        native_metrics.pending_instance_materializations, 0,
+        "{native_metrics:?}"
+    );
+    let (automatic, automatic_metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
+    assert_eq!(
+        automatic, interpreted,
+        "{automatic_metrics:?}\n{automatic_dump}"
+    );
+    assert!(automatic_dump.contains("frames: 0 active"));
+    assert!(
+        automatic_metrics.pending_instance_allocations > 40_000,
+        "{automatic_metrics:?}"
+    );
+    assert_eq!(
+        automatic_metrics.pending_instance_releases, automatic_metrics.pending_instance_allocations,
+        "{automatic_metrics:?}"
+    );
+    assert!(
+        automatic_metrics.native_retired_instructions > 500_000,
+        "{automatic_metrics:?}"
+    );
+}
+
+#[test]
+fn escaping_constructor_results_keep_canonical_payloads() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "def make(x: Int, y: Int): Point\n  Point(x, y)\nend\n",
+        "point = make(20, 22)\npoint.x + point.y\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(
+        native, interpreted,
+        "{metrics:?}\n{native_dump}\n{interpreted_dump}"
+    );
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(42)));
+    assert_eq!(metrics.pending_instance_allocations, 0, "{metrics:?}");
+    assert!(metrics.native_allocations > 0, "{metrics:?}");
+}
+
+#[test]
+fn pending_instance_aliases_release_one_object() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "i = 0\nsum = 0\nwhile i < 1000\n",
+        "  point = Point(i, i + 1)\n",
+        "  left = point\n  right = left\n",
+        "  sum = sum + point.x + left.y + right.x\n",
+        "  i = i + 1\nend\nsum\n",
+    );
+    let (interpreted, _, _) = run(source, EngineMode::Interpreter, u64::MAX);
     let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
     assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1_499_500)));
+    assert!(metrics.pending_instance_allocations >= 900, "{metrics:?}");
+    assert_eq!(
+        metrics.pending_instance_releases, metrics.pending_instance_allocations,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.pending_instance_materializations, 0, "{metrics:?}");
+}
+
+#[test]
+fn pending_instances_materialize_at_fuel_boundaries() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "first = Point(1, 2)\n",
+        "point = Point(20, 22)\n",
+        "i = 0\nwhile i < 20\n  i = i + 1\nend\n",
+        "point.x + point.y + i\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-pending-fuel.lm", source)
+        .expect("the pending instance fuel case compiles");
+    let mut materialized = false;
+    for fuel in 0..=240 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        if metrics.pending_instance_materializations > 0 {
+            materialized = true;
+            assert_eq!(native_dump, interpreted_dump, "fuel {fuel}: {metrics:?}");
+        }
+    }
+    assert!(
+        materialized,
+        "no fuel boundary materialized the pending object"
+    );
+}
+
+#[test]
+fn pending_instances_materialize_at_scheduler_polls() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "first = Point(1, 2)\n",
+        "point = Point(20, 22)\n",
+        "i = 0\nwhile i < 1000\n  i = i + 1\nend\n",
+        "point.x + point.y + i\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-pending-poll.lm", source)
+        .expect("the pending instance poll case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the pending instance poll case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let root = lm_vm::TaskKey {
+        vm: 0,
+        generation: 0,
+    };
+    let control = lm_vm::ExecutionControl::new();
+    control.request_yield();
+    let mut metrics = engine.metrics();
+    for _ in 0..16 {
+        assert!(matches!(
+            world.drive_slice_polled(root, u32::MAX, 64, &control),
+            Some(lm_vm::SliceExit::Yielded)
+        ));
+        metrics = engine.metrics();
+        if metrics.pending_instance_materializations > 0 {
+            break;
+        }
+    }
+    assert!(metrics.pending_instance_allocations > 0, "{metrics:?}");
+    assert!(metrics.pending_instance_materializations > 0, "{metrics:?}");
+    control.clear_yield();
+    assert_eq!(world.run_root(), Outcome::Done(lm_value::Value::Int(1042)));
+}
+
+#[test]
+fn pending_instance_allocation_preserves_the_heap_limit() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "Point(20, 22).x\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-pending-limit.lm", source)
+        .expect("the pending instance heap-limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(
+        native, interpreted,
+        "{metrics:?}\n{native_dump}\n{interpreted_dump}"
+    );
     assert_eq!(native_dump, interpreted_dump);
-    let (automatic, metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
-    assert_eq!(automatic, interpreted, "{metrics:?}\n{automatic_dump}");
-    assert_eq!(automatic_dump, interpreted_dump);
-    assert!(metrics.native_allocations > 40_000, "{metrics:?}");
-    assert!(metrics.native_retired_instructions > 500_000, "{metrics:?}");
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+    assert_eq!(metrics.pending_instance_allocations, 0, "{metrics:?}");
+}
+
+#[test]
+fn pending_instance_pool_exhaustion_materializes_live_objects() {
+    let mut source = concat!(
+        "class Point\n  x: Int = 0\n",
+        "  def init(mut self, x: Int)\n    self.x = x\n  end\nend\n",
+    )
+    .to_string();
+    for value in 0..80 {
+        source.push_str(&format!("point_{value} = Point({value})\n"));
+    }
+    source.push_str("sum = 0\n");
+    for value in 0..80 {
+        source.push_str(&format!("sum = sum + point_{value}.x\n"));
+    }
+    source.push_str("sum\n");
+
+    let (interpreted, _, _) = run(&source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(&source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(3160)));
+    assert!(metrics.pending_instance_allocations >= 64, "{metrics:?}");
+    assert!(metrics.pending_instance_materializations > 0, "{metrics:?}");
+    assert_eq!(
+        metrics.pending_instance_allocations,
+        metrics
+            .pending_instance_materializations
+            .saturating_add(metrics.pending_instance_releases),
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.backend_unavailable_fallbacks, 0, "{metrics:?}");
 }
 
 #[test]

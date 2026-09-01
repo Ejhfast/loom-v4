@@ -3,14 +3,15 @@
 use crate::activation::{
     NativeDispatchRow, NativeFunction, NativeImageSlot, RawExit, RawNativeActivation,
     RawNativeFrame, RawNativeFunctions, RawResolvedCallCacheEntry, RawTypeEnvironmentCacheEntry,
-    IMAGE_SLOT_CLASS, IMAGE_SLOT_EMPTY, IMAGE_SLOT_FUNCTION, RESOLVED_CALL_CACHE_WAYS,
-    RUNTIME_COLLECTION_REQUIRED, RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT,
-    RUNTIME_OK, RUNTIME_STACK_LIMIT, TYPE_ENVIRONMENT_CACHE_WAYS,
+    RawVirtualInstance, IMAGE_SLOT_CLASS, IMAGE_SLOT_EMPTY, IMAGE_SLOT_FUNCTION,
+    PENDING_INSTANCE_SLOT_BASE, RESOLVED_CALL_CACHE_WAYS, RUNTIME_COLLECTION_REQUIRED,
+    RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
+    TYPE_ENVIRONMENT_CACHE_WAYS, VIRTUAL_INSTANCE_COUNT, VIRTUAL_INSTANCE_FIELDS,
 };
 use crate::plan::{
-    bypasses_fuel_check, is_root_kind, CallContract, HeapAccessKind, ObjectContract,
-    OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit, UnsupportedReason,
-    ValueCallTarget, ValueContract, VirtualReceiver,
+    bypasses_fuel_check, is_root_kind, transfer_virtual_instruction, CallContract, HeapAccessKind,
+    ObjectContract, OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit,
+    UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -459,6 +460,20 @@ struct StoreFieldEmission<'a> {
     receiver_class: u32,
     contract: ValueContract,
     exit: HeapExitEmission<'a>,
+}
+
+struct LoadFieldEmission<'a> {
+    field: u32,
+    receiver_class: u32,
+    contract: ValueContract,
+    allow_pending: bool,
+    exit: HeapExitEmission<'a>,
+}
+
+struct InstanceAllocationEmission<'a> {
+    roots: &'a [NativeRoot],
+    allow_pending: bool,
+    exit: ReplayEmission<'a>,
 }
 
 struct ListOptionEmission<'a> {
@@ -1433,7 +1448,7 @@ fn emit_segment(
     } else {
         None
     };
-    emit_segment_body(builder, emission, stack)?;
+    emit_segment_body(builder, emission, stack, segment.virtual_stack_in.clone())?;
     if let Some(replay) = replay_exit {
         let used = values
             .replay_blocks
@@ -1475,6 +1490,7 @@ fn emit_segment_body(
     builder: &mut FunctionBuilder<'_>,
     emission: SegmentEmission<'_, '_>,
     mut stack: Vec<NativeValue>,
+    mut virtual_stack: Vec<bool>,
 ) -> Result<(), CompileError> {
     let SegmentEmission {
         bytecode,
@@ -1506,6 +1522,10 @@ fn emit_segment_body(
     // The entry guard initializes each live local in canonical state storage.
     // A store only initializes a slot that was dormant at this entry.
     let mut initialized_locals = segment.live_in.clone();
+    let mut virtual_locals = segment.virtual_locals_in.clone();
+    if virtual_stack.len() != stack.len() || virtual_locals.len() != plan.local_kinds.len() {
+        return Err(CompileError::Backend);
+    }
     let code =
         &bytecode.blocks[segment.block as usize][segment.start as usize..segment.end as usize];
     for (within, instruction) in code.iter().copied().enumerate() {
@@ -1516,6 +1536,30 @@ fn emit_segment_body(
         let prior_prefix = reserved_prefix_cost
             .checked_add(prefix - 1)
             .ok_or(CompileError::Backend)?;
+        let position = segment.start + within as u32;
+        let source_instruction = input
+            .root
+            .source
+            .funcs
+            .get(input.root.source_function as usize)
+            .and_then(|function| function.blocks.get(segment.block as usize))
+            .and_then(|block| block.get(position as usize))
+            .copied()
+            .ok_or(CompileError::Backend)?;
+        if segment.virtual_barriers.binary_search(&position).is_ok() {
+            emit_pending_instance_barrier(
+                builder,
+                values,
+                FaultPoint {
+                    block: segment.block,
+                    instruction: position,
+                    prefix: prior_prefix,
+                },
+                &stack,
+            )?;
+            virtual_locals.fill(false);
+            virtual_stack.fill(false);
+        }
         match instruction {
             Instr::ConstUnit => {
                 let value = builder.ins().iconst(types::I64, 0);
@@ -1719,14 +1763,19 @@ fn emit_segment_body(
                     class,
                     instance_field_count(input, class),
                     environment,
-                    &roots,
-                    ReplayEmission {
-                        point: FaultPoint {
-                            block: segment.block,
-                            instruction: position + 1,
-                            prefix: fault_prefix,
+                    InstanceAllocationEmission {
+                        roots: &roots,
+                        allow_pending: plan
+                            .virtual_constructor
+                            .is_some_and(|constructor| constructor.class == class),
+                        exit: ReplayEmission {
+                            point: FaultPoint {
+                                block: segment.block,
+                                instruction: position + 1,
+                                prefix: fault_prefix,
+                            },
+                            deopt_stack: &stack,
                         },
-                        deopt_stack: &stack,
                     },
                 )?;
                 push_static(builder, &mut stack, ScalarKind::Object(0), value)?;
@@ -1790,6 +1839,9 @@ fn emit_segment_body(
             Instr::LoadLocal(slot) => {
                 let slot = slot as usize;
                 let bits = builder.use_var(values.locals[slot]);
+                if virtual_locals[slot] {
+                    emit_retain_pending_instance(builder, values, bits)?;
+                }
                 if values.local_heap_caches[slot].is_some() {
                     values
                         .heap_translations
@@ -1803,6 +1855,10 @@ fn emit_segment_body(
             }
             Instr::StoreLocal(slot) => {
                 let slot = slot as usize;
+                if virtual_locals[slot] {
+                    let old = builder.use_var(values.locals[slot]);
+                    emit_release_pending_instance(builder, values, old)?;
+                }
                 let value = pop_value(&mut stack)?;
                 builder.def_var(values.locals[slot], value.bits);
                 define_slot_tag(
@@ -1822,6 +1878,10 @@ fn emit_segment_body(
                 clear_local_heap_cache(builder, values, slot);
             }
             Instr::Pop => {
+                if virtual_stack.last().copied().unwrap_or(false) {
+                    let value = stack.last().copied().ok_or(CompileError::Backend)?;
+                    emit_release_pending_instance(builder, values, value.bits)?;
+                }
                 pop_native(&mut stack)?;
             }
             Instr::LoadCapture(index) => {
@@ -1854,6 +1914,7 @@ fn emit_segment_body(
             }
             Instr::LoadField(field) => {
                 let deopt_stack = stack.clone();
+                let allow_pending = virtual_stack.last().copied().unwrap_or(false);
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
                 let access = segment
@@ -1873,23 +1934,35 @@ fn emit_segment_body(
                     builder,
                     values,
                     reference,
-                    field,
-                    receiver_class,
-                    value,
-                    HeapExitEmission {
-                        point: FaultPoint {
-                            block: segment.block,
-                            instruction: instruction + 1,
-                            prefix: fault_prefix,
+                    LoadFieldEmission {
+                        field,
+                        receiver_class,
+                        contract: value,
+                        allow_pending,
+                        exit: HeapExitEmission {
+                            point: FaultPoint {
+                                block: segment.block,
+                                instruction: instruction + 1,
+                                prefix: fault_prefix,
+                            },
+                            fault_stack: &stack,
+                            deopt_stack: &deopt_stack,
                         },
-                        fault_stack: &stack,
-                        deopt_stack: &deopt_stack,
                     },
                 )?;
+                if allow_pending {
+                    emit_release_pending_instance(builder, values, reference)?;
+                }
                 stack.push(value);
             }
             Instr::StoreField(field) => {
                 let deopt_stack = stack.clone();
+                let allow_pending = virtual_stack
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| virtual_stack.get(index))
+                    .copied()
+                    .unwrap_or(false);
                 let stored = pop_value(&mut stack)?;
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
@@ -1911,6 +1984,7 @@ fn emit_segment_body(
                     values,
                     reference,
                     stored,
+                    allow_pending,
                     StoreFieldEmission {
                         field,
                         receiver_class,
@@ -1926,6 +2000,9 @@ fn emit_segment_body(
                         },
                     },
                 )?;
+                if allow_pending {
+                    emit_release_pending_instance(builder, values, reference)?;
+                }
             }
             Instr::TupleGet(index) => {
                 let deopt_stack = stack.clone();
@@ -2207,6 +2284,7 @@ fn emit_segment_body(
             }
             Instr::IsType(_) | Instr::CastType(_) => {
                 let deopt_stack = stack.clone();
+                let allow_pending = virtual_stack.last().copied().unwrap_or(false);
                 let value = pop_value(&mut stack)?;
                 let instruction_index = segment.start + within as u32;
                 let option = segment
@@ -2240,6 +2318,9 @@ fn emit_segment_body(
                     };
                     if matches!(instruction, Instr::IsType(_)) {
                         let result = builder.ins().uextend(types::I64, matches);
+                        if allow_pending {
+                            emit_release_pending_instance(builder, values, value.bits)?;
+                        }
                         push_static(builder, &mut stack, ScalarKind::Bool, result)?;
                     } else {
                         let mismatch = builder.ins().bxor_imm(matches, 1);
@@ -2273,18 +2354,34 @@ fn emit_segment_body(
                         instruction: instruction_index + 1,
                         prefix: fault_prefix,
                     };
-                    let entry = emit_object_entry(
-                        builder,
-                        values,
-                        value.bits,
-                        JIT_OBJECT_INSTANCE,
-                        point,
-                        ObjectGuard::Replay(&deopt_stack),
-                    )?;
-                    let actual = load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+                    let actual = if allow_pending {
+                        emit_instance_storage(
+                            builder,
+                            values,
+                            value.bits,
+                            None,
+                            point,
+                            ObjectGuard::Replay(&deopt_stack),
+                            ObjectGuard::Replay(&deopt_stack),
+                        )?
+                        .actual_class
+                    } else {
+                        let entry = emit_object_entry(
+                            builder,
+                            values,
+                            value.bits,
+                            JIT_OBJECT_INSTANCE,
+                            point,
+                            ObjectGuard::Replay(&deopt_stack),
+                        )?;
+                        load_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?
+                    };
                     let matches = emit_class_matches(builder, values, actual, target_class)?;
                     if matches!(instruction, Instr::IsType(_)) {
                         let result = builder.ins().uextend(types::I64, matches);
+                        if allow_pending {
+                            emit_release_pending_instance(builder, values, value.bits)?;
+                        }
                         push_static(builder, &mut stack, ScalarKind::Bool, result)?;
                     } else {
                         let mismatch = builder.ins().bxor_imm(matches, 1);
@@ -3533,6 +3630,7 @@ fn emit_segment_body(
             }
             Instr::Extended(ExtendedInstr::SealInstance) => {
                 let deopt_stack = stack.clone();
+                let allow_pending = virtual_stack.last().copied().unwrap_or(false);
                 let reference = pop_native(&mut stack)?;
                 let instruction = segment.start + within as u32;
                 let access = segment
@@ -3549,6 +3647,7 @@ fn emit_segment_body(
                     values,
                     reference,
                     class,
+                    allow_pending,
                     FaultPoint {
                         block: segment.block,
                         instruction: instruction + 1,
@@ -4954,6 +5053,13 @@ fn emit_segment_body(
                 push_static(builder, &mut stack, result_kind, result)?;
             }
             Instr::EqRef | Instr::NeRef => {
+                let release_right = virtual_stack.last().copied().unwrap_or(false);
+                let release_left = virtual_stack
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| virtual_stack.get(index))
+                    .copied()
+                    .unwrap_or(false);
                 let right = pop_native(&mut stack)?;
                 let left = pop_native(&mut stack)?;
                 let condition = if matches!(instruction, Instr::EqRef) {
@@ -4962,6 +5068,12 @@ fn emit_segment_body(
                     IntCC::NotEqual
                 };
                 let compared = builder.ins().icmp(condition, left, right);
+                if release_right {
+                    emit_release_pending_instance(builder, values, right)?;
+                }
+                if release_left {
+                    emit_release_pending_instance(builder, values, left)?;
+                }
                 let result = builder.ins().uextend(types::I64, compared);
                 push_static(builder, &mut stack, ScalarKind::Bool, result)?;
             }
@@ -5026,6 +5138,41 @@ fn emit_segment_body(
         ) {
             values.heap_translations.borrow_mut().clear();
         }
+        let exit_handles_stack = within + 1 == code.len()
+            && matches!(
+                segment.exit,
+                SegmentExit::Conditional { .. }
+                    | SegmentExit::Call { .. }
+                    | SegmentExit::VirtualCall { .. }
+                    | SegmentExit::ValueCall { .. }
+                    | SegmentExit::GenericVirtualCall { .. }
+                    | SegmentExit::InterfaceCall { .. }
+                    | SegmentExit::SlotCall { .. }
+                    | SegmentExit::Effect { .. }
+                    | SegmentExit::Boundary { .. }
+                    | SegmentExit::Return
+            );
+        if !exit_handles_stack {
+            let call = matches!(instruction, Instr::Call(_) | Instr::CallG { .. })
+                .then_some(segment.call_contract.as_ref())
+                .flatten();
+            let virtual_new =
+                plan.virtual_constructor
+                    .is_some_and(|constructor| match instruction {
+                        Instr::New(class) | Instr::NewG { class, .. } => class == constructor.class,
+                        _ => false,
+                    });
+            transfer_virtual_instruction(
+                input.root.source,
+                source_instruction,
+                instruction,
+                call,
+                virtual_new,
+                &mut virtual_locals,
+                &mut virtual_stack,
+            )?;
+        }
+        debug_assert_eq!(virtual_stack.len(), stack.len());
     }
 
     if let Some(deferred) = deferred_integer_overflow {
@@ -5431,6 +5578,12 @@ fn emit_segment_body(
         SegmentExit::Return => {
             emit_segment_charge(builder, values, fast_segment_cost);
             let result = pop_value(&mut stack)?;
+            for (slot, pending) in virtual_locals.iter().copied().enumerate() {
+                if pending {
+                    let local = builder.use_var(values.locals[slot]);
+                    emit_release_pending_instance(builder, values, local)?;
+                }
+            }
             emit_function_return(builder, values, segment.block, segment.end, result, &stack)?;
         }
     }
@@ -6694,6 +6847,15 @@ fn emit_native_call(
         RawActivationField::FrameLen,
         next_frame_len,
     )?;
+    if contract.virtual_result {
+        let request = builder.ins().iconst(types::I32, 1);
+        store_i32_value(
+            builder,
+            values.activation_pointer,
+            mem::offset_of!(RawNativeActivation, virtual_request),
+            request,
+        )?;
+    }
     let caller_retired = emit_retired(builder, values);
     let zero_entry = builder.ins().iconst(types::I32, 0);
     builder.ins().call_indirect(
@@ -7302,30 +7464,54 @@ fn emit_load_field(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,
-    field: u32,
-    receiver_class: u32,
-    result: ValueContract,
-    exit: HeapExitEmission<'_>,
+    emission: LoadFieldEmission<'_>,
 ) -> Result<NativeValue, CompileError> {
-    let (entry, _) = emit_instance_entry(
-        builder,
-        values,
-        reference,
+    let LoadFieldEmission {
+        field,
         receiver_class,
-        exit.point,
-        ObjectGuard::Fault(exit.fault_stack),
-        ObjectGuard::Replay(exit.deopt_stack),
-    )?;
-    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
-    let value = emit_array_element(
-        builder,
-        values,
-        entry,
-        JIT_INSTANCE_FIELDS_OFFSET,
-        field_index,
-        exit.point,
-        exit.fault_stack,
-    )?;
+        contract,
+        allow_pending,
+        exit,
+    } = emission;
+    let value = if allow_pending {
+        let storage = emit_instance_storage(
+            builder,
+            values,
+            reference,
+            Some(receiver_class),
+            exit.point,
+            ObjectGuard::Fault(exit.fault_stack),
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?;
+        emit_instance_storage_field(
+            builder,
+            values,
+            storage,
+            field,
+            exit.point,
+            exit.fault_stack,
+        )?
+    } else {
+        let (entry, _) = emit_instance_entry(
+            builder,
+            values,
+            reference,
+            receiver_class,
+            exit.point,
+            ObjectGuard::Fault(exit.fault_stack),
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?;
+        let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
+        emit_array_element(
+            builder,
+            values,
+            entry,
+            JIT_INSTANCE_FIELDS_OFFSET,
+            field_index,
+            exit.point,
+            exit.fault_stack,
+        )?
+    };
     let tag = load_value(builder, types::I64, value, VALUE_TAG_OFFSET)?;
     let uninitialized = builder
         .ins()
@@ -7338,7 +7524,14 @@ fn emit_load_field(
         exit.point,
         exit.fault_stack,
     )?;
-    emit_loaded_value(builder, values, value, result, exit.point, exit.deopt_stack)
+    emit_loaded_value(
+        builder,
+        values,
+        value,
+        contract,
+        exit.point,
+        exit.deopt_stack,
+    )
 }
 
 fn emit_load_capture(
@@ -7386,6 +7579,7 @@ fn emit_store_field(
     values: NativeValues<'_>,
     reference: ir::Value,
     stored: NativeValue,
+    allow_pending: bool,
     emission: StoreFieldEmission<'_>,
 ) -> Result<(), CompileError> {
     let StoreFieldEmission {
@@ -7402,26 +7596,47 @@ fn emit_store_field(
         exit.point,
         exit.deopt_stack,
     )?;
-    let (entry, _) = emit_instance_entry(
-        builder,
-        values,
-        reference,
-        receiver_class,
-        exit.point,
-        ObjectGuard::Fault(exit.fault_stack),
-        ObjectGuard::Replay(exit.deopt_stack),
-    )?;
-    emit_mutable_guard(builder, values, entry, exit)?;
-    let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
-    let address = emit_array_element(
-        builder,
-        values,
-        entry,
-        JIT_INSTANCE_FIELDS_OFFSET,
-        field_index,
-        exit.point,
-        exit.fault_stack,
-    )?;
+    let address = if allow_pending {
+        let storage = emit_instance_storage(
+            builder,
+            values,
+            reference,
+            Some(receiver_class),
+            exit.point,
+            ObjectGuard::Fault(exit.fault_stack),
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?;
+        emit_mutable_flag_guard(builder, values, storage.frozen, exit)?;
+        emit_instance_storage_field(
+            builder,
+            values,
+            storage,
+            field,
+            exit.point,
+            exit.fault_stack,
+        )?
+    } else {
+        let (entry, _) = emit_instance_entry(
+            builder,
+            values,
+            reference,
+            receiver_class,
+            exit.point,
+            ObjectGuard::Fault(exit.fault_stack),
+            ObjectGuard::Replay(exit.deopt_stack),
+        )?;
+        emit_mutable_guard(builder, values, entry, exit)?;
+        let field_index = builder.ins().iconst(values.pointer_type, i64::from(field));
+        emit_array_element(
+            builder,
+            values,
+            entry,
+            JIT_INSTANCE_FIELDS_OFFSET,
+            field_index,
+            exit.point,
+            exit.fault_stack,
+        )?
+    };
     emit_store_value(builder, address, stored, contract.kind)
 }
 
@@ -7579,20 +7794,39 @@ fn emit_seal_instance(
     values: NativeValues<'_>,
     reference: ir::Value,
     class: u32,
+    allow_pending: bool,
     point: FaultPoint,
     deopt_stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    let (entry, _) = emit_instance_entry(
-        builder,
-        values,
-        reference,
-        class,
-        point,
-        ObjectGuard::Replay(deopt_stack),
-        ObjectGuard::Replay(deopt_stack),
-    )?;
+    let entry = if allow_pending {
+        emit_instance_storage(
+            builder,
+            values,
+            reference,
+            Some(class),
+            point,
+            ObjectGuard::Replay(deopt_stack),
+            ObjectGuard::Replay(deopt_stack),
+        )?
+        .frozen
+    } else {
+        emit_instance_entry(
+            builder,
+            values,
+            reference,
+            class,
+            point,
+            ObjectGuard::Replay(deopt_stack),
+            ObjectGuard::Replay(deopt_stack),
+        )?
+        .0
+    };
     let frozen = builder.ins().iconst(types::I8, 1);
-    store_i8_value(builder, entry, JIT_ENTRY_FROZEN_OFFSET, frozen)
+    if allow_pending {
+        store_i8_value(builder, entry, 0, frozen)
+    } else {
+        store_i8_value(builder, entry, JIT_ENTRY_FROZEN_OFFSET, frozen)
+    }
 }
 
 fn emit_list_at(
@@ -10048,7 +10282,20 @@ fn emit_mutable_guard(
     entry: ir::Value,
     exit: HeapExitEmission<'_>,
 ) -> Result<(), CompileError> {
-    let frozen = load_heap_value(builder, types::I8, entry, JIT_ENTRY_FROZEN_OFFSET)?;
+    let frozen = builder.ins().iadd_imm(
+        entry,
+        i64::try_from(JIT_ENTRY_FROZEN_OFFSET).map_err(|_| CompileError::Backend)?,
+    );
+    emit_mutable_flag_guard(builder, values, frozen, exit)
+}
+
+fn emit_mutable_flag_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    frozen: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let frozen = load_heap_value(builder, types::I8, frozen, 0)?;
     let frozen = builder.ins().icmp_imm(IntCC::NotEqual, frozen, 0);
     emit_interpreter_replay(builder, values, frozen, exit.point, exit.deopt_stack)
 }
@@ -10597,6 +10844,358 @@ fn emit_instance_entry(
         )?
     };
     Ok((entry, actual))
+}
+
+#[derive(Clone, Copy)]
+struct NativeInstanceStorage {
+    frozen: ir::Value,
+    actual_class: ir::Value,
+    data: ir::Value,
+    len: ir::Value,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRecordLookup {
+    record: ir::Value,
+    record_index: ir::Value,
+}
+
+fn emit_pending_record_lookup(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    miss: ir::Block,
+) -> Result<PendingRecordLookup, CompileError> {
+    let check_record = builder.create_block();
+    let use_record = builder.create_block();
+    let slot = builder.ins().ireduce(types::I32, reference);
+    let slot_index = builder.ins().uextend(values.pointer_type, slot);
+    let slot_count = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_slot_count),
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, slot_index, slot_count);
+    let marker = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        slot,
+        i64::from(PENDING_INSTANCE_SLOT_BASE),
+    );
+    let pending = builder.ins().band(outside, marker);
+    builder.ins().brif(pending, check_record, &[], miss, &[]);
+
+    builder.switch_to_block(check_record);
+    let maximum = builder.ins().iconst(types::I32, i64::from(u32::MAX));
+    let record_index = builder.ins().isub(maximum, slot);
+    let record_outside = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        record_index,
+        i64::try_from(VIRTUAL_INSTANCE_COUNT).map_err(|_| CompileError::Backend)?,
+    );
+    let record_index_pointer = builder.ins().uextend(values.pointer_type, record_index);
+    let records = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_instances),
+    )?;
+    let record_offset = builder.ins().imul_imm(
+        record_index_pointer,
+        i64::try_from(mem::size_of::<RawVirtualInstance>()).map_err(|_| CompileError::Backend)?,
+    );
+    let record = builder.ins().iadd(records, record_offset);
+    builder
+        .ins()
+        .brif(record_outside, miss, &[], use_record, &[]);
+
+    builder.switch_to_block(use_record);
+    let active = load_value(
+        builder,
+        types::I32,
+        record,
+        mem::offset_of!(RawVirtualInstance, active),
+    )?;
+    let record_bits = load_value(
+        builder,
+        types::I64,
+        record,
+        mem::offset_of!(RawVirtualInstance, object_bits),
+    )?;
+    let inactive = builder.ins().icmp_imm(IntCC::Equal, active, 0);
+    let wrong_record = builder.ins().icmp(IntCC::NotEqual, record_bits, reference);
+    let invalid_record = builder.ins().bor(inactive, wrong_record);
+    let valid_record = builder.create_block();
+    builder
+        .ins()
+        .brif(invalid_record, miss, &[], valid_record, &[]);
+    builder.switch_to_block(valid_record);
+    Ok(PendingRecordLookup {
+        record,
+        record_index,
+    })
+}
+
+fn emit_retain_pending_instance(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+) -> Result<(), CompileError> {
+    let done = builder.create_block();
+    let lookup = emit_pending_record_lookup(builder, values, reference, done)?;
+    let references = load_value(
+        builder,
+        types::I32,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, references),
+    )?;
+    let next = builder.ins().iadd_imm(references, 1);
+    store_i32_value(
+        builder,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, references),
+        next,
+    )?;
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(done);
+    Ok(())
+}
+
+fn emit_release_pending_instance(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+) -> Result<(), CompileError> {
+    let done = builder.create_block();
+    let lookup = emit_pending_record_lookup(builder, values, reference, done)?;
+    let references = load_value(
+        builder,
+        types::I32,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, references),
+    )?;
+    let next = builder.ins().iadd_imm(references, -1);
+    store_i32_value(
+        builder,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, references),
+        next,
+    )?;
+    let retained = builder.ins().icmp_imm(IntCC::NotEqual, next, 0);
+    let release = builder.create_block();
+    builder.ins().brif(retained, done, &[], release, &[]);
+
+    builder.switch_to_block(release);
+    let field_count = load_value(
+        builder,
+        types::I32,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, field_count),
+    )?;
+    let field_count = builder.ins().uextend(values.pointer_type, field_count);
+    let bytes = builder.ins().imul_imm(
+        field_count,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let bytes = builder.ins().iadd_imm(
+        bytes,
+        i64::try_from(MIN_OBJECT_COST).map_err(|_| CompileError::Backend)?,
+    );
+    let dead = builder.ins().iconst(types::I32, 0);
+    let used_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+    let next_used = builder.ins().isub(used, bytes);
+    store_heap_value(builder, used_pointer, 0, next_used)?;
+    let live_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_live),
+    )?;
+    let live = load_heap_value(builder, values.pointer_type, live_pointer, 0)?;
+    let next_live = builder.ins().iadd_imm(live, -1);
+    store_heap_value(builder, live_pointer, 0, next_live)?;
+
+    store_i32_value(
+        builder,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, active),
+        dead,
+    )?;
+    let available = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+    )?;
+    let one = builder.ins().iconst(types::I64, 1);
+    let record_index = builder.ins().uextend(types::I64, lookup.record_index);
+    let bit = builder.ins().ishl(one, record_index);
+    let available = builder.ins().bor(available, bit);
+    let available_offset = i32::try_from(mem::offset_of!(RawNativeActivation, virtual_available))
+        .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        available,
+        values.activation_pointer,
+        available_offset,
+    );
+    let releases = load_vmctx_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, pending_instance_releases),
+    )?;
+    let releases = builder.ins().iadd_imm(releases, 1);
+    let releases_offset = i32::try_from(mem::offset_of!(
+        RawNativeActivation,
+        pending_instance_releases
+    ))
+    .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        releases,
+        values.activation_pointer,
+        releases_offset,
+    );
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(done);
+    Ok(())
+}
+
+fn emit_instance_storage(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    class: Option<u32>,
+    point: FaultPoint,
+    object_guard: ObjectGuard<'_>,
+    class_guard: ObjectGuard<'_>,
+) -> Result<NativeInstanceStorage, CompileError> {
+    let canonical = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.append_block_param(done, values.pointer_type);
+    builder.append_block_param(done, values.pointer_type);
+    builder.append_block_param(done, values.pointer_type);
+
+    let lookup = emit_pending_record_lookup(builder, values, reference, canonical)?;
+    let actual = load_value(
+        builder,
+        types::I32,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, class),
+    )?;
+    let len = load_value(
+        builder,
+        types::I32,
+        lookup.record,
+        mem::offset_of!(RawVirtualInstance, field_count),
+    )?;
+    let len = builder.ins().uextend(values.pointer_type, len);
+    let fields = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_values),
+    )?;
+    let record_index = builder
+        .ins()
+        .uextend(values.pointer_type, lookup.record_index);
+    let data_offset = builder.ins().imul_imm(
+        record_index,
+        i64::try_from(VIRTUAL_INSTANCE_FIELDS.saturating_mul(VALUE_SIZE))
+            .map_err(|_| CompileError::Backend)?,
+    );
+    let data = builder.ins().iadd(fields, data_offset);
+    let frozen = builder.ins().iadd_imm(
+        lookup.record,
+        i64::try_from(mem::offset_of!(RawVirtualInstance, frozen))
+            .map_err(|_| CompileError::Backend)?,
+    );
+    builder.ins().jump(
+        done,
+        &[actual.into(), data.into(), len.into(), frozen.into()],
+    );
+
+    builder.switch_to_block(canonical);
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_INSTANCE,
+        point,
+        object_guard,
+    )?;
+    let actual = load_heap_value(builder, types::I32, entry, JIT_INSTANCE_CLASS_OFFSET)?;
+    let data = load_heap_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_DATA_OFFSET,
+    )?;
+    let len = load_heap_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_INSTANCE_FIELDS_OFFSET + VALUE_ARRAY_LEN_OFFSET,
+    )?;
+    let frozen = builder.ins().iadd_imm(
+        entry,
+        i64::try_from(JIT_ENTRY_FROZEN_OFFSET).map_err(|_| CompileError::Backend)?,
+    );
+    builder.ins().jump(
+        done,
+        &[actual.into(), data.into(), len.into(), frozen.into()],
+    );
+
+    builder.switch_to_block(done);
+    let actual_class = builder.block_params(done)[0];
+    if let Some(class) = class {
+        let matches = emit_class_matches(builder, values, actual_class, class)?;
+        let mismatch = builder.ins().bxor_imm(matches, 1);
+        emit_object_guard(builder, values, mismatch, point, class_guard)?;
+    }
+    Ok(NativeInstanceStorage {
+        frozen: builder.block_params(done)[3],
+        actual_class,
+        data: builder.block_params(done)[1],
+        len: builder.block_params(done)[2],
+    })
+}
+
+fn emit_instance_storage_field(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    storage: NativeInstanceStorage,
+    field: u32,
+    point: FaultPoint,
+    fault_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let index = builder.ins().iconst(values.pointer_type, i64::from(field));
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, storage.len);
+    emit_fault_check(
+        builder,
+        values,
+        outside,
+        EXIT_TYPE_MISMATCH,
+        point,
+        fault_stack,
+    )?;
+    let offset = builder.ins().imul_imm(
+        index,
+        i64::try_from(VALUE_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    Ok(builder.ins().iadd(storage.data, offset))
 }
 
 fn emit_instance_entry_miss(
@@ -11264,11 +11863,18 @@ fn emit_allocate_instance(
     class: u32,
     field_count: Option<u32>,
     environment: ir::Value,
-    roots: &[NativeRoot],
-    exit: ReplayEmission<'_>,
+    emission: InstanceAllocationEmission<'_>,
 ) -> Result<ir::Value, CompileError> {
-    let (status, result) =
-        emit_instance_allocation(builder, values, class, field_count, environment, roots)?;
+    let InstanceAllocationEmission {
+        roots,
+        allow_pending,
+        exit,
+    } = emission;
+    let (status, result) = if allow_pending {
+        emit_requested_instance_allocation(builder, values, class, field_count, environment, roots)?
+    } else {
+        emit_instance_allocation(builder, values, class, field_count, environment, roots)?
+    };
     let heap_limit = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
@@ -11294,6 +11900,272 @@ fn instance_field_count(input: &FunctionInput<'_>, class: u32) -> Option<u32> {
     };
     let count = input.root.source.classes.get(source_class)?.fields.len();
     u32::try_from(count).ok()
+}
+
+fn emit_requested_instance_allocation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    class: u32,
+    field_count: Option<u32>,
+    environment: ir::Value,
+    roots: &[NativeRoot],
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let request = load_value(
+        builder,
+        types::I32,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_request),
+    )?;
+    let zero = builder.ins().iconst(types::I32, 0);
+    store_i32_value(
+        builder,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_request),
+        zero,
+    )?;
+    let requested = builder.ins().icmp_imm(IntCC::NotEqual, request, 0);
+    let pending = builder.create_block();
+    let canonical = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(requested, pending, &[], canonical, &[]);
+
+    builder.switch_to_block(pending);
+    let (status, result) = match field_count {
+        Some(field_count) if field_count as usize <= VIRTUAL_INSTANCE_FIELDS => {
+            emit_pending_instance_allocation(builder, values, class, field_count, environment)?
+        }
+        _ => {
+            let status = builder
+                .ins()
+                .iconst(types::I32, i64::from(RUNTIME_COLLECTION_REQUIRED));
+            let result = builder.ins().iconst(types::I64, 0);
+            (status, result)
+        }
+    };
+    builder.ins().jump(done, &[status.into(), result.into()]);
+
+    builder.switch_to_block(canonical);
+    let (status, result) =
+        emit_instance_allocation(builder, values, class, field_count, environment, roots)?;
+    builder.ins().jump(done, &[status.into(), result.into()]);
+
+    builder.switch_to_block(done);
+    Ok((builder.block_params(done)[0], builder.block_params(done)[1]))
+}
+
+fn emit_pending_instance_allocation(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    class: u32,
+    field_count: u32,
+    environment: ir::Value,
+) -> Result<(ir::Value, ir::Value), CompileError> {
+    let cost = (field_count as usize)
+        .checked_mul(VALUE_SIZE)
+        .and_then(|fields| MIN_OBJECT_COST.checked_add(fields))
+        .ok_or(CompileError::Backend)?;
+    let cost = i64::try_from(cost).map_err(|_| CompileError::Backend)?;
+    let used_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+    let next_used = builder.ins().iadd_imm(used, cost);
+    let charge_overflow = builder.ins().icmp(IntCC::UnsignedLessThan, next_used, used);
+    let threshold = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_collection_threshold),
+    )?;
+    let collection_due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, next_used, threshold);
+    let charge_blocked = builder.ins().bor(charge_overflow, collection_due);
+
+    let available = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+    )?;
+    let has_record = builder.ins().icmp_imm(IntCC::NotEqual, available, 0);
+    let charge_ready = builder.ins().bxor_imm(charge_blocked, 1);
+    let ready = builder.ins().band(has_record, charge_ready);
+
+    let allocate = builder.create_block();
+    let unavailable = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.append_block_param(done, types::I64);
+    builder.ins().brif(ready, allocate, &[], unavailable, &[]);
+
+    builder.switch_to_block(unavailable);
+    let status = builder
+        .ins()
+        .iconst(types::I32, i64::from(RUNTIME_COLLECTION_REQUIRED));
+    let result = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(done, &[status.into(), result.into()]);
+
+    builder.switch_to_block(allocate);
+    let record_index = builder.ins().ctz(available);
+    let next_available = builder.ins().iadd_imm(available, -1);
+    let next_available = builder.ins().band(available, next_available);
+    let available_offset = i32::try_from(mem::offset_of!(RawNativeActivation, virtual_available))
+        .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        next_available,
+        values.activation_pointer,
+        available_offset,
+    );
+    let instances = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_instances),
+    )?;
+    let record_offset = builder.ins().imul_imm(
+        record_index,
+        i64::try_from(mem::size_of::<RawVirtualInstance>()).map_err(|_| CompileError::Backend)?,
+    );
+    let record = builder.ins().iadd(instances, record_offset);
+    let fields = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_values),
+    )?;
+    let field_record_offset = builder.ins().imul_imm(
+        record_index,
+        i64::try_from(VIRTUAL_INSTANCE_FIELDS.saturating_mul(VALUE_SIZE))
+            .map_err(|_| CompileError::Backend)?,
+    );
+    let field_data = builder.ins().iadd(fields, field_record_offset);
+    let uninit = builder
+        .ins()
+        .iconst(types::I64, ValueTag::Uninit as u64 as i64);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    for field in 0..field_count as usize {
+        let offset =
+            i32::try_from(field.saturating_mul(VALUE_SIZE)).map_err(|_| CompileError::Backend)?;
+        store_i64(
+            builder,
+            field_data,
+            offset as usize + VALUE_TAG_OFFSET,
+            uninit,
+        )?;
+        store_i64(
+            builder,
+            field_data,
+            offset as usize + VALUE_PAYLOAD_OFFSET,
+            zero_i64,
+        )?;
+    }
+    let record_i32 = builder.ins().ireduce(types::I32, record_index);
+    let maximum = builder.ins().iconst(types::I32, i64::from(u32::MAX));
+    let token = builder.ins().isub(maximum, record_i32);
+    let result = builder.ins().uextend(types::I64, token);
+    let class_value = builder.ins().iconst(types::I32, i64::from(class));
+    store_heap_value(builder, used_pointer, 0, next_used)?;
+    let live_pointer = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_live),
+    )?;
+    let live = load_heap_value(builder, values.pointer_type, live_pointer, 0)?;
+    let next_live = builder.ins().iadd_imm(live, 1);
+    store_heap_value(builder, live_pointer, 0, next_live)?;
+    let allocations = load_vmctx_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, inline_allocations),
+    )?;
+    let allocations = builder.ins().iadd_imm(allocations, 1);
+    let allocations_offset =
+        i32::try_from(mem::offset_of!(RawNativeActivation, inline_allocations))
+            .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        allocations,
+        values.activation_pointer,
+        allocations_offset,
+    );
+    let pending_allocations = load_vmctx_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, pending_instance_allocations),
+    )?;
+    let pending_allocations = builder.ins().iadd_imm(pending_allocations, 1);
+    let pending_allocations_offset = i32::try_from(mem::offset_of!(
+        RawNativeActivation,
+        pending_instance_allocations
+    ))
+    .map_err(|_| CompileError::Backend)?;
+    builder.ins().store(
+        vmctx_mem_flags(),
+        pending_allocations,
+        values.activation_pointer,
+        pending_allocations_offset,
+    );
+
+    let one_i32 = builder.ins().iconst(types::I32, 1);
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, active),
+        one_i32,
+    )?;
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, references),
+        one_i32,
+    )?;
+    store_i64(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, object_bits),
+        result,
+    )?;
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, class),
+        class_value,
+    )?;
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, environment),
+        environment,
+    )?;
+    let count = builder.ins().iconst(types::I32, i64::from(field_count));
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, field_count),
+        count,
+    )?;
+    let zero_i32 = builder.ins().iconst(types::I32, 0);
+    store_i32_value(
+        builder,
+        record,
+        mem::offset_of!(RawVirtualInstance, frozen),
+        zero_i32,
+    )?;
+    let status = builder.ins().iconst(types::I32, i64::from(RUNTIME_OK));
+    builder.ins().jump(done, &[status.into(), result.into()]);
+
+    builder.switch_to_block(done);
+    Ok((builder.block_params(done)[0], builder.block_params(done)[1]))
 }
 
 fn emit_instance_allocation(
@@ -13935,6 +14807,22 @@ fn emit_interpreter_replay(
         .brif(replay, replay_block.block, &[], success, &[]);
     builder.switch_to_block(success);
     Ok(())
+}
+
+fn emit_pending_instance_barrier(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    point: FaultPoint,
+    stack: &[NativeValue],
+) -> Result<(), CompileError> {
+    let available = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+    )?;
+    let pending = builder.ins().icmp_imm(IntCC::NotEqual, available, -1);
+    emit_interpreter_replay(builder, values, pending, point, stack)
 }
 
 fn emit_numeric_instruction(

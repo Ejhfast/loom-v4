@@ -3403,6 +3403,61 @@ The direct and scheduled corpus differential passed.
 
 The full workspace suite passed.
 
+### Stage F66: Replace nonescaping instances with transient scalar storage
+
+- identify constructor results that cannot reach a helper, field, return, or observable exit;
+- request transient construction only at those call sites;
+- keep transient fields in fixed activation storage;
+- charge exact bytes and live object counts at allocation;
+- use transient tokens only inside generated native code;
+- retain and release native aliases in generated code;
+- materialize live tokens into reserved canonical entries before every engine exit;
+- rewrite all aliases before canonical frame materialization;
+- keep escaping and zero-field classes on the canonical allocation path;
+- make `ValueArray` the only field owner after materialization.
+
+The escape analysis is conservative.
+
+It tracks each candidate through locals, operands, control-flow joins, and accepted constructor receivers.
+
+A helper, field store, wrapper, ordinary return, or incompatible call rejects scalar replacement.
+
+Generated code stores fields in 64 fixed records.
+
+Each record holds at most 16 fields.
+
+Pool exhaustion and collection requests materialize live records before replay.
+
+Released records remove their precharged bytes and live count without creating a heap entry.
+
+Materialized records create one `ValueArray` and one canonical entry at the observer boundary.
+
+An external snapshot cannot contain a transient token.
+
+Exact fuel and poll tests compare canonical state after materialization.
+
+The measurements used isolated release tests with one test thread.
+
+| Warm release row | Stage F65 | Stage F66 | Change |
+| --- | ---: | ---: | ---: |
+| Plain allocation, native | 0.983 ms | 0.983 ms | unchanged |
+| Generic allocation, native | 1.962 ms | 1.935 ms | within variance |
+| Class initialization, native | 22.951 ms | 18.341 ms | 20.1 percent faster |
+| JSON parse, native | 14.432 ms | 14.457 ms | within variance |
+| JSON encode, native | 6.963 ms | 7.197 ms | within variance |
+| HTTP parse, native | 16.406 ms | 16.430 ms | within variance |
+| HTTP encode, native | 5.439 ms | 5.416 ms | within variance |
+
+The cold JSON row measured 321.366 milliseconds.
+
+Stage F63 measured 321.257 milliseconds.
+
+The focused JIT suite passed 164 tests.
+
+The direct and scheduled corpus differential passed in 24.22 seconds.
+
+The warm debug workspace suite passed in 63.59 seconds.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
@@ -3440,5 +3495,7 @@ Generated code cannot serialize process-local heap addresses.
 A runtime library cannot select one process-global allocator.
 
 A second payload owner cannot mirror `ValueArray` ownership.
+
+A transient token cannot cross a helper or engine boundary.
 
 These designs remain rejected even when local differential tests pass.

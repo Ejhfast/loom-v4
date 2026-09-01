@@ -1,8 +1,8 @@
 //! Native activation storage and typed slow-path boundaries.
 
 use crate::Failure;
-use lm_heap::JitHeapView;
-use lm_value::{ObjRef, Value, ValueTag};
+use lm_heap::{JitHeapView, MIN_OBJECT_COST};
+use lm_value::{ObjRef, Value, ValueTag, VALUE_SIZE};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -16,6 +16,9 @@ pub(super) const RUNTIME_COLLECTION_REQUIRED: u32 = 5;
 
 const INITIAL_NATIVE_SCALARS: usize = 4_096;
 const INITIAL_NATIVE_FRAMES: usize = 256;
+pub(super) const VIRTUAL_INSTANCE_COUNT: usize = 64;
+pub(super) const VIRTUAL_INSTANCE_FIELDS: usize = 16;
+pub(super) const PENDING_INSTANCE_SLOT_BASE: u32 = u32::MAX - VIRTUAL_INSTANCE_COUNT as u32 + 1;
 pub(super) const TYPE_ENVIRONMENT_CACHE_WAYS: usize = 4;
 const INITIAL_TYPE_ENVIRONMENT_CACHE_SETS: usize = 16;
 const MAX_TYPE_ENVIRONMENT_CACHE_SETS: usize = 1_024;
@@ -66,6 +69,19 @@ pub(super) struct RawNativeFrame {
     pub(super) caller_stack_values: u32,
 }
 
+/// One transient instance whose fields stay in native scalar storage.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct RawVirtualInstance {
+    pub(super) active: u32,
+    pub(super) references: u32,
+    pub(super) object_bits: u64,
+    pub(super) class: u32,
+    pub(super) environment: u32,
+    pub(super) field_count: u32,
+    pub(super) frozen: u32,
+}
+
 #[repr(C)]
 pub(super) struct RawNativeActivation {
     pub(super) scalars: *mut u64,
@@ -77,6 +93,11 @@ pub(super) struct RawNativeActivation {
     pub(super) frame_len: u32,
     pub(super) frame_capacity: u32,
     pub(super) changed_from: u32,
+    pub(super) virtual_instances: *mut RawVirtualInstance,
+    pub(super) virtual_values: *mut Value,
+    pub(super) virtual_available: u64,
+    pub(super) virtual_request: u32,
+    pub(super) virtual_reserved: u32,
     pub(super) root_code: usize,
     pub(super) entries: *const usize,
     pub(super) entry_count: u32,
@@ -93,6 +114,8 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_used_bytes: *mut usize,
     pub(super) heap_collection_threshold: usize,
     pub(super) inline_allocations: u64,
+    pub(super) pending_instance_allocations: u64,
+    pub(super) pending_instance_releases: u64,
     pub(super) lookup_hash_key: u64,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
@@ -681,9 +704,55 @@ pub struct NativeActivation {
     pub(super) tags: Vec<u64>,
     pub(super) states: Vec<u8>,
     pub(super) frames: Vec<RawNativeFrame>,
+    pub(super) virtual_instances: Vec<RawVirtualInstance>,
+    pub(super) virtual_values: Vec<Value>,
     pub(super) scalar_len: usize,
     pub(super) frame_len: usize,
     pub(super) changed_from: usize,
+}
+
+/// One immutable transient instance view.
+#[derive(Debug, Clone, Copy)]
+pub struct NativePendingInstance<'a> {
+    record: RawVirtualInstance,
+    fields: &'a [Value],
+}
+
+impl<'a> NativePendingInstance<'a> {
+    /// Return the transient object token.
+    pub fn object_bits(self) -> u64 {
+        self.record.object_bits
+    }
+
+    /// Return the relocated class index.
+    pub fn class(self) -> u32 {
+        self.record.class
+    }
+
+    /// Return the closed type environment.
+    pub fn environment(self) -> u32 {
+        self.record.environment
+    }
+
+    /// Return the number of native aliases.
+    pub fn references(self) -> u32 {
+        self.record.references
+    }
+
+    /// Return true when the constructor sealed this instance.
+    pub fn frozen(self) -> bool {
+        self.record.frozen != 0
+    }
+
+    /// Return the logical byte charge.
+    pub fn byte_cost(self) -> usize {
+        MIN_OBJECT_COST.saturating_add(self.fields.len().saturating_mul(VALUE_SIZE))
+    }
+
+    /// Return the canonical field values.
+    pub fn fields(self) -> &'a [Value] {
+        self.fields
+    }
 }
 
 /// One machine-local cache of environment-dependent type metadata.
@@ -1054,6 +1123,18 @@ impl NativeActivation {
                 .frames
                 .try_reserve(frame_capacity.saturating_sub(self.frames.len()))
                 .is_err()
+            || self
+                .virtual_instances
+                .try_reserve(VIRTUAL_INSTANCE_COUNT.saturating_sub(self.virtual_instances.len()))
+                .is_err()
+            || self
+                .virtual_values
+                .try_reserve(
+                    VIRTUAL_INSTANCE_COUNT
+                        .saturating_mul(VIRTUAL_INSTANCE_FIELDS)
+                        .saturating_sub(self.virtual_values.len()),
+                )
+                .is_err()
         {
             return Err(Failure::BackendUnavailable);
         }
@@ -1062,6 +1143,12 @@ impl NativeActivation {
         self.states.resize(scalar_capacity, 0);
         self.frames
             .resize(frame_capacity, RawNativeFrame::default());
+        self.virtual_instances
+            .resize(VIRTUAL_INSTANCE_COUNT, RawVirtualInstance::default());
+        self.virtual_values.resize(
+            VIRTUAL_INSTANCE_COUNT.saturating_mul(VIRTUAL_INSTANCE_FIELDS),
+            Value::Uninit,
+        );
         self.scalars[..window].fill(0);
         self.tags[..window].fill(0);
         self.states[..window].fill(0);
@@ -1085,7 +1172,59 @@ impl NativeActivation {
         self.scalar_len = window;
         self.frame_len = 1;
         self.changed_from = 0;
+        self.clear_pending_instances();
         Ok(())
+    }
+
+    /// Return all transient instances that native code has not released.
+    pub fn pending_instances(&self) -> impl Iterator<Item = NativePendingInstance<'_>> {
+        self.virtual_instances
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.active != 0)
+            .map(|(index, record)| {
+                let start = index.saturating_mul(VIRTUAL_INSTANCE_FIELDS);
+                let end = start.saturating_add(record.field_count as usize);
+                NativePendingInstance {
+                    record: *record,
+                    fields: &self.virtual_values[start..end],
+                }
+            })
+    }
+
+    /// Forget all transient records after the heap consumes them.
+    pub fn clear_pending_instances(&mut self) {
+        for record in &mut self.virtual_instances {
+            record.active = 0;
+            record.references = 0;
+        }
+    }
+
+    /// Replace one transient token with one canonical object reference.
+    pub fn replace_pending_reference(&mut self, token: u64, reference: ObjRef) {
+        let replacement = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
+        for (bits, tag) in self.scalars[..self.scalar_len]
+            .iter_mut()
+            .zip(&self.tags[..self.scalar_len])
+        {
+            if *tag == ValueTag::Obj as u64 && *bits == token {
+                *bits = replacement;
+            }
+        }
+        for frame in &mut self.frames[..self.frame_len] {
+            if frame.capture_tag == ValueTag::Obj as u64 && frame.capture_bits == token {
+                frame.capture_bits = replacement;
+            }
+        }
+        for value in &mut self.virtual_values {
+            let Value::Obj(held) = value else {
+                continue;
+            };
+            let held_bits = u64::from(held.slot) | (u64::from(held.generation) << 32);
+            if held_bits == token {
+                *held = reference;
+            }
+        }
     }
 
     /// Return all mutable root buffers.
@@ -1778,6 +1917,9 @@ pub struct DigestRequest<'a> {
 pub trait NativeRuntime {
     /// Record allocations completed without a runtime call.
     fn record_inline_allocations(&mut self, _count: u64) {}
+
+    /// Record transient instance allocations and releases.
+    fn record_pending_instances(&mut self, _allocations: u64, _releases: u64) {}
 
     /// Allocate one instance with its exact environment and active roots.
     fn allocate_instance(

@@ -45,9 +45,9 @@ pub use activation::{
     HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
     ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
     MapPutProbeResult, NativeActivation, NativeDispatchRow, NativeExecution, NativeFrameView,
-    NativeImageSlot, NativeImageSlotView, NativeLiteralView, NativePoll, NativePreparation,
-    NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers, NativeRootBuffersMut,
-    NativeRootError, NativeRoots, NativeRuntime, NativeTypeEnvironmentCache,
+    NativeImageSlot, NativeImageSlotView, NativeLiteralView, NativePendingInstance, NativePoll,
+    NativePreparation, NativeResolvedCallCache, NativeResolvedCallView, NativeRootBuffers,
+    NativeRootBuffersMut, NativeRootError, NativeRoots, NativeRuntime, NativeTypeEnvironmentCache,
     NativeTypeEnvironmentView, PollSchedule, RuntimeUnitResult, RuntimeValueResult,
     ValueArrayAllocationRequest, LOCAL_INITIALIZED,
 };
@@ -588,6 +588,16 @@ impl CompiledRegion {
         let mut exit = RawExit::default();
         let mut runtime_result = [0u64; 4];
         let runtime_functions: &'static _ = &NativeRuntimeFunctions::<R>::TABLE;
+        let virtual_available = activation.virtual_instances.iter().enumerate().fold(
+            0u64,
+            |available, (index, record)| {
+                if record.active == 0 {
+                    available | (1u64 << index)
+                } else {
+                    available
+                }
+            },
+        );
         let mut raw_activation = RawNativeActivation {
             runtime_context: std::ptr::null_mut(),
             runtime_functions: std::ptr::from_ref(runtime_functions),
@@ -608,6 +618,11 @@ impl CompiledRegion {
             frame_capacity,
             changed_from: u32::try_from(activation.changed_from)
                 .map_err(|_| Failure::BackendUnavailable)?,
+            virtual_instances: activation.virtual_instances.as_mut_ptr(),
+            virtual_values: activation.virtual_values.as_mut_ptr(),
+            virtual_available,
+            virtual_request: 0,
+            virtual_reserved: 0,
             root_code: self.call_entry,
             entries: entries.as_ptr(),
             entry_count: u32::try_from(entries.len()).map_err(|_| Failure::BackendUnavailable)?,
@@ -625,6 +640,8 @@ impl CompiledRegion {
             heap_used_bytes: heap.used_bytes,
             heap_collection_threshold: heap.collection_threshold,
             inline_allocations: 0,
+            pending_instance_allocations: 0,
+            pending_instance_releases: 0,
             lookup_hash_key: heap.lookup_hash_key,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
@@ -659,6 +676,10 @@ impl CompiledRegion {
         // The generated function uses the exact `NativeFunction` C ABI.
         unsafe { (self.entry)(&mut raw_activation, entry) }
         runtime.record_inline_allocations(raw_activation.inline_allocations);
+        runtime.record_pending_instances(
+            raw_activation.pending_instance_allocations,
+            raw_activation.pending_instance_releases,
+        );
         if raw_activation.scalar_len > raw_activation.scalar_capacity
             || raw_activation.frame_len > raw_activation.frame_capacity
             || raw_activation.frame_len == 0

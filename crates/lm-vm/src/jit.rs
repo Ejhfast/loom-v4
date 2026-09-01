@@ -3,7 +3,7 @@
 use crate::engine::EngineTurnMetrics;
 use crate::machine::{ExecError, ExecOutcome, Frame, FrameCapture, ImageSlotTarget, Machine};
 use crate::NamespaceRuntime;
-use lm_heap::Object;
+use lm_heap::{Object, ValueArray};
 use lm_jit::{
     ExitKind, Failure, FunctionInput, NativeExecution, NativePreparation, ScalarKind,
     LOCAL_INITIALIZED,
@@ -675,7 +675,15 @@ impl JitEngine {
                 scratch.image_slots.len(),
             )
         };
-        let (exit, allocations, inline_allocations, collection_slow_paths) = {
+        let (
+            exit,
+            allocations,
+            inline_allocations,
+            pending_instance_allocations,
+            pending_instance_releases,
+            pending_instance_materializations,
+            collection_slow_paths,
+        ) = {
             let type_environments = std::mem::take(&mut machine.native_type_environments);
             let resolved_calls = std::mem::take(&mut machine.native_resolved_calls);
             let mut runtime = MachineRuntime {
@@ -688,6 +696,9 @@ impl JitEngine {
                 base_operand: operand_base,
                 allocations: 0,
                 inline_allocations: 0,
+                pending_instance_allocations: 0,
+                pending_instance_releases: 0,
+                pending_instance_materializations: 0,
                 collection_slow_paths: 0,
             };
             let mut active_region = active_region;
@@ -745,6 +756,16 @@ impl JitEngine {
                     Ok(exit) => exit,
                     Err(error) => break Err(error),
                 };
+                let (materializations, releases) =
+                    match materialize_pending_instances(runtime.machine, &mut scratch.activation) {
+                        Ok(activity) => activity,
+                        Err(()) => break Err(Failure::BackendUnavailable),
+                    };
+                runtime.pending_instance_materializations = runtime
+                    .pending_instance_materializations
+                    .saturating_add(materializations);
+                runtime.pending_instance_releases =
+                    runtime.pending_instance_releases.saturating_add(releases);
                 if exit.kind() == ExitKind::GrowRoots {
                     let Ok(required) = usize::try_from(exit.result()) else {
                         break Err(Failure::BackendUnavailable);
@@ -1151,11 +1172,19 @@ impl JitEngine {
                 result,
                 runtime.allocations,
                 runtime.inline_allocations,
+                runtime.pending_instance_allocations,
+                runtime.pending_instance_releases,
+                runtime.pending_instance_materializations,
                 runtime.collection_slow_paths,
             )
         };
         metrics.note_native_allocations(allocations);
         metrics.note_native_inline_allocations(inline_allocations);
+        metrics.note_pending_instance_activity(
+            pending_instance_allocations,
+            pending_instance_releases,
+            pending_instance_materializations,
+        );
         metrics.note_native_collection_slow_paths(collection_slow_paths);
         let exit = match exit {
             Ok(exit) => exit,
@@ -1480,6 +1509,97 @@ impl JitEngine {
             .and_modify(|count| *count = count.saturating_add(1))
             .or_insert(1);
     }
+}
+
+struct PendingInstanceMaterialization {
+    token: u64,
+    class: u32,
+    environment: u32,
+    frozen: bool,
+    fields: ValueArray,
+}
+
+fn materialize_pending_instances(
+    machine: &mut Machine,
+    activation: &mut lm_jit::NativeActivation,
+) -> Result<(u64, u64), ()> {
+    let count = activation.pending_instances().count();
+    if count == 0 {
+        return Ok((0, 0));
+    }
+    let mut pending_materializations = Vec::new();
+    pending_materializations
+        .try_reserve_exact(count)
+        .map_err(|_| ())?;
+    let mut released_bytes = 0usize;
+    let mut releases = 0usize;
+    for pending in activation.pending_instances() {
+        if pending.references() == 0 {
+            released_bytes = released_bytes.checked_add(pending.byte_cost()).ok_or(())?;
+            releases = releases.checked_add(1).ok_or(())?;
+            continue;
+        }
+        let mut fields =
+            ValueArray::try_repeated(Value::Uninit, pending.fields().len()).map_err(|_| ())?;
+        fields.as_mut_slice().copy_from_slice(pending.fields());
+        pending_materializations.push(PendingInstanceMaterialization {
+            token: pending.object_bits(),
+            class: pending.class(),
+            environment: pending.environment(),
+            frozen: pending.frozen(),
+            fields,
+        });
+    }
+    if machine.vm.heap.used_bytes() < released_bytes || machine.vm.heap.live_count() < releases {
+        return Err(());
+    }
+
+    let mut replacements = Vec::new();
+    replacements
+        .try_reserve_exact(pending_materializations.len())
+        .map_err(|_| ())?;
+    if !machine
+        .vm
+        .heap
+        .reserve_precharged_slots(pending_materializations.len())
+        || (releases != 0
+            && !machine
+                .vm
+                .heap
+                .release_precharged_instances(released_bytes, releases))
+    {
+        return Err(());
+    }
+    for pending in pending_materializations {
+        let reference = machine.vm.heap.materialize_precharged_instance(
+            pending.class,
+            pending.fields,
+            pending.environment,
+            pending.frozen,
+        );
+        replacements.push((pending.token, reference));
+    }
+    for (token, reference) in replacements.iter().copied() {
+        activation.replace_pending_reference(token, reference);
+    }
+    for (_, reference) in replacements.iter().copied() {
+        let Object::Instance { fields, .. } = machine.vm.heap.get_mut(reference) else {
+            unreachable!("precharged materialization creates an instance");
+        };
+        for value in fields.as_mut_slice() {
+            let Value::Obj(held) = value else {
+                continue;
+            };
+            let held_bits = u64::from(held.slot) | (u64::from(held.generation) << 32);
+            if let Some((_, replacement)) =
+                replacements.iter().find(|(token, _)| *token == held_bits)
+            {
+                *held = *replacement;
+            }
+        }
+    }
+    activation.clear_pending_instances();
+    Ok((replacements.len() as u64, releases as u64))
 }
 
 fn continuation_regions(
