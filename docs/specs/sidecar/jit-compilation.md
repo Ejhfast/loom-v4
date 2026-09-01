@@ -3167,6 +3167,32 @@ The direct and scheduled corpus differential passed.
 
 Warm representative results stayed within measurement variance.
 
+### Stage F60: Derive static operand tags
+
+- use one exit-shape lookup in the compiler and materializer;
+- omit operand-tag stores for static verified kinds;
+- retain stored tags for tagged and callback values;
+- derive static receiver tags during call resolution;
+- retain complete parent-frame tags before native calls.
+
+The call resolver no longer treats a static tag as stored runtime data.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed.
+
+| Cold release row | Stage F59 | Stage F60 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 2.044 ms | 1.903 ms | within variance |
+| JSON compile and run | 382.573 ms | 369.192 ms | 3.5 percent faster |
+| 301-function compile and run | 558.511 ms | 537.286 ms | 3.8 percent faster |
+
+| Compiled code set | Stage F59 | Stage F60 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,734 bytes | 2,734 bytes | unchanged |
+| JSON parser | 1,362,052 bytes | 1,323,196 bytes | 2.9 percent smaller |
+| 301 functions | 1,797,425 bytes | 1,747,344 bytes | 2.8 percent smaller |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

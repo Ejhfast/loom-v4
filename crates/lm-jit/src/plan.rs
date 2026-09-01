@@ -640,6 +640,129 @@ pub(super) struct AllocationSite {
 }
 
 impl RegionPlan {
+    pub(super) fn operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
+        if let Some(index) = self.entries.get(&(block, instruction)).copied() {
+            return Some(&self.segments[index].entry_stack);
+        }
+        self.segments
+            .iter()
+            .find(|segment| {
+                segment.block == block
+                    && segment.end.checked_sub(1) == Some(instruction)
+                    && matches!(
+                        segment.exit,
+                        SegmentExit::Call { .. }
+                            | SegmentExit::VirtualCall { .. }
+                            | SegmentExit::ValueCall { .. }
+                            | SegmentExit::GenericVirtualCall { .. }
+                            | SegmentExit::InterfaceCall { .. }
+                            | SegmentExit::SlotCall { .. }
+                            | SegmentExit::Effect { .. }
+                            | SegmentExit::Boundary { .. }
+                    )
+            })
+            .map(|segment| segment.boundary_stack.as_slice())
+            .or_else(|| {
+                self.segments.iter().find_map(|segment| {
+                    segment
+                        .fuel_stacks
+                        .iter()
+                        .find(|(at, _)| segment.block == block && *at == instruction)
+                        .map(|(_, stack)| stack.as_slice())
+                })
+            })
+            .or_else(|| {
+                self.segments.iter().find_map(|segment| {
+                    segment
+                        .replay_stacks
+                        .iter()
+                        .find(|(at, _)| segment.block == block && *at == instruction)
+                        .map(|(_, stack)| stack.as_slice())
+                })
+            })
+    }
+
+    pub(super) fn fault_operand_kinds(
+        &self,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&[ScalarKind]> {
+        self.segments.iter().find_map(|segment| {
+            segment
+                .fault_stacks
+                .iter()
+                .find(|(at, _)| segment.block == block && *at == instruction)
+                .map(|(_, stack)| stack.as_slice())
+        })
+    }
+
+    pub(super) fn replay_operand_kinds(
+        &self,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&[ScalarKind]> {
+        self.segments.iter().find_map(|segment| {
+            segment
+                .replay_stacks
+                .iter()
+                .find(|(at, _)| segment.block == block && *at == instruction)
+                .map(|(_, stack)| stack.as_slice())
+        })
+    }
+
+    pub(super) fn suspended_operand_kinds(
+        &self,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&[ScalarKind]> {
+        self.segments.iter().find_map(|segment| {
+            let fallthrough_ip = match segment.exit {
+                SegmentExit::Call { fallthrough_ip, .. }
+                | SegmentExit::VirtualCall { fallthrough_ip, .. }
+                | SegmentExit::ValueCall { fallthrough_ip }
+                | SegmentExit::GenericVirtualCall { fallthrough_ip, .. }
+                | SegmentExit::InterfaceCall { fallthrough_ip, .. }
+                | SegmentExit::SlotCall { fallthrough_ip, .. } => fallthrough_ip,
+                _ => return None,
+            };
+            if segment.block != block || fallthrough_ip != instruction {
+                return None;
+            }
+            let parameters = segment.call_contract.as_ref()?.params.len();
+            let callable = usize::from(matches!(segment.exit, SegmentExit::ValueCall { .. }));
+            let prefix = segment
+                .boundary_stack
+                .len()
+                .checked_sub(parameters.checked_add(callable)?)?;
+            Some(&segment.boundary_stack[..prefix])
+        })
+    }
+
+    pub(super) fn materialization_operand_kinds(
+        &self,
+        kind: ExitKind,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&[ScalarKind]> {
+        match kind {
+            ExitKind::Return => Some(&[]),
+            ExitKind::Replay => self.replay_operand_kinds(block, instruction),
+            ExitKind::IntegerOverflow
+            | ExitKind::DivideByZero
+            | ExitKind::TypeMismatch
+            | ExitKind::UninitializedField
+            | ExitKind::HeapLimit
+            | ExitKind::Unreachable
+            | ExitKind::GuestFault => self.fault_operand_kinds(block, instruction),
+            ExitKind::StackLimit => self.fault_operand_kinds(block, instruction).or_else(|| {
+                instruction
+                    .checked_sub(1)
+                    .and_then(|at| self.operand_kinds(block, at))
+            }),
+            _ => self.operand_kinds(block, instruction),
+        }
+    }
+
     pub(super) fn for_function(input: &FunctionInput<'_>) -> Result<RegionPlan, UnsupportedReason> {
         let runtime = input.root.runtime;
         let instructions = runtime

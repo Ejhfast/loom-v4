@@ -451,95 +451,35 @@ impl CompiledRegion {
     /// Return the operand representations at one exact entry.
     #[inline(always)]
     pub fn operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        if let Some(index) = self.plan.entries.get(&(block, instruction)).copied() {
-            return Some(&self.plan.segments[index].entry_stack);
-        }
-        self.plan
-            .segments
-            .iter()
-            .find(|segment| {
-                segment.block == block
-                    && segment.end.checked_sub(1) == Some(instruction)
-                    && matches!(
-                        segment.exit,
-                        SegmentExit::Call { .. }
-                            | SegmentExit::VirtualCall { .. }
-                            | SegmentExit::ValueCall { .. }
-                            | SegmentExit::GenericVirtualCall { .. }
-                            | SegmentExit::InterfaceCall { .. }
-                            | SegmentExit::SlotCall { .. }
-                            | SegmentExit::Effect { .. }
-                            | SegmentExit::Boundary { .. }
-                    )
-            })
-            .map(|segment| segment.boundary_stack.as_slice())
-            .or_else(|| {
-                self.plan.segments.iter().find_map(|segment| {
-                    segment
-                        .fuel_stacks
-                        .iter()
-                        .find(|(at, _)| segment.block == block && *at == instruction)
-                        .map(|(_, stack)| stack.as_slice())
-                })
-            })
-            .or_else(|| {
-                self.plan.segments.iter().find_map(|segment| {
-                    segment
-                        .replay_stacks
-                        .iter()
-                        .find(|(at, _)| segment.block == block && *at == instruction)
-                        .map(|(_, stack)| stack.as_slice())
-                })
-            })
+        self.plan.operand_kinds(block, instruction)
     }
 
     /// Return operand representations for one native fault exit.
     #[inline(always)]
     pub fn fault_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        self.plan.segments.iter().find_map(|segment| {
-            segment
-                .fault_stacks
-                .iter()
-                .find(|(at, _)| segment.block == block && *at == instruction)
-                .map(|(_, stack)| stack.as_slice())
-        })
+        self.plan.fault_operand_kinds(block, instruction)
     }
 
     /// Return operand representations for one guarded interpreter replay.
     #[inline(always)]
     pub fn replay_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        self.plan.segments.iter().find_map(|segment| {
-            segment
-                .replay_stacks
-                .iter()
-                .find(|(at, _)| segment.block == block && *at == instruction)
-                .map(|(_, stack)| stack.as_slice())
-        })
+        self.plan.replay_operand_kinds(block, instruction)
     }
 
     /// Return operand representations for one suspended native caller.
     pub fn suspended_operand_kinds(&self, block: u32, instruction: u32) -> Option<&[ScalarKind]> {
-        self.plan.segments.iter().find_map(|segment| {
-            let fallthrough_ip = match segment.exit {
-                SegmentExit::Call { fallthrough_ip, .. }
-                | SegmentExit::VirtualCall { fallthrough_ip, .. }
-                | SegmentExit::ValueCall { fallthrough_ip }
-                | SegmentExit::GenericVirtualCall { fallthrough_ip, .. }
-                | SegmentExit::InterfaceCall { fallthrough_ip, .. }
-                | SegmentExit::SlotCall { fallthrough_ip, .. } => fallthrough_ip,
-                _ => return None,
-            };
-            if segment.block != block || fallthrough_ip != instruction {
-                return None;
-            }
-            let parameters = segment.call_contract.as_ref()?.params.len();
-            let callable = usize::from(matches!(segment.exit, SegmentExit::ValueCall { .. }));
-            let prefix = segment
-                .boundary_stack
-                .len()
-                .checked_sub(parameters.checked_add(callable)?)?;
-            Some(&segment.boundary_stack[..prefix])
-        })
+        self.plan.suspended_operand_kinds(block, instruction)
+    }
+
+    /// Return operand representations for one exact materialization exit.
+    pub fn materialization_operand_kinds(
+        &self,
+        kind: ExitKind,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&[ScalarKind]> {
+        self.plan
+            .materialization_operand_kinds(kind, block, instruction)
     }
 
     /// Return the type application of one environment site.
@@ -765,34 +705,7 @@ impl CompiledRegion {
         activation.scalar_len = raw_activation.scalar_len as usize;
         activation.frame_len = raw_activation.frame_len as usize;
         activation.changed_from = raw_activation.changed_from as usize;
-        let kind = match exit.kind {
-            EXIT_FUEL => ExitKind::Fuel,
-            EXIT_RETURN => ExitKind::Return,
-            EXIT_INTEGER_OVERFLOW => ExitKind::IntegerOverflow,
-            EXIT_DIVIDE_BY_ZERO => ExitKind::DivideByZero,
-            EXIT_TYPE_MISMATCH => ExitKind::TypeMismatch,
-            EXIT_UNINITIALIZED_FIELD => ExitKind::UninitializedField,
-            EXIT_CALL => ExitKind::Call,
-            EXIT_ALLOCATION => ExitKind::Allocation,
-            EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
-            EXIT_EFFECT => ExitKind::Effect,
-            EXIT_STACK_LIMIT => ExitKind::StackLimit,
-            EXIT_GROW_ACTIVATION => ExitKind::GrowActivation,
-            EXIT_TYPE_RESOLUTION => ExitKind::TypeResolution,
-            EXIT_REPLAY => ExitKind::Replay,
-            EXIT_LITERAL => ExitKind::Literal,
-            EXIT_UNREACHABLE => ExitKind::Unreachable,
-            EXIT_TYPE_ENVIRONMENT => ExitKind::TypeEnvironment,
-            EXIT_INTERFACE_CALL => ExitKind::InterfaceCall,
-            EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
-            EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
-            EXIT_GUEST_FAULT => ExitKind::GuestFault,
-            EXIT_GROW_ROOTS => ExitKind::GrowRoots,
-            EXIT_BOUNDARY => ExitKind::Boundary,
-            EXIT_POLL => ExitKind::Poll,
-            EXIT_INVALID_ENTRY => return Err(Failure::BackendUnavailable),
-            _ => return Err(Failure::BackendUnavailable),
-        };
+        let kind = decode_exit_kind(exit.kind).ok_or(Failure::BackendUnavailable)?;
         Ok(ExecutionExit {
             retired: exit.retired,
             kind,
@@ -807,11 +720,42 @@ impl CompiledRegion {
 
 mod plan;
 
+use plan::RegionPlan;
 pub use plan::{
     type_has_native_representation, CompilerMetrics, EntryPlan, ExecutionExit, ExitKind,
     FunctionInput, ScalarKind, UnsupportedReason,
 };
-use plan::{RegionPlan, SegmentExit};
+
+fn decode_exit_kind(kind: u32) -> Option<ExitKind> {
+    Some(match kind {
+        EXIT_FUEL => ExitKind::Fuel,
+        EXIT_RETURN => ExitKind::Return,
+        EXIT_INTEGER_OVERFLOW => ExitKind::IntegerOverflow,
+        EXIT_DIVIDE_BY_ZERO => ExitKind::DivideByZero,
+        EXIT_TYPE_MISMATCH => ExitKind::TypeMismatch,
+        EXIT_UNINITIALIZED_FIELD => ExitKind::UninitializedField,
+        EXIT_CALL => ExitKind::Call,
+        EXIT_ALLOCATION => ExitKind::Allocation,
+        EXIT_HEAP_LIMIT => ExitKind::HeapLimit,
+        EXIT_EFFECT => ExitKind::Effect,
+        EXIT_STACK_LIMIT => ExitKind::StackLimit,
+        EXIT_GROW_ACTIVATION => ExitKind::GrowActivation,
+        EXIT_TYPE_RESOLUTION => ExitKind::TypeResolution,
+        EXIT_REPLAY => ExitKind::Replay,
+        EXIT_LITERAL => ExitKind::Literal,
+        EXIT_UNREACHABLE => ExitKind::Unreachable,
+        EXIT_TYPE_ENVIRONMENT => ExitKind::TypeEnvironment,
+        EXIT_INTERFACE_CALL => ExitKind::InterfaceCall,
+        EXIT_GENERIC_VIRTUAL_CALL => ExitKind::GenericVirtualCall,
+        EXIT_CALLBACK_CALL => ExitKind::CallbackCall,
+        EXIT_GUEST_FAULT => ExitKind::GuestFault,
+        EXIT_GROW_ROOTS => ExitKind::GrowRoots,
+        EXIT_BOUNDARY => ExitKind::Boundary,
+        EXIT_POLL => ExitKind::Poll,
+        EXIT_INVALID_ENTRY => return None,
+        _ => return None,
+    })
+}
 impl JitEngine {
     /// Compile one verified function for its current arena layout.
     #[cold]

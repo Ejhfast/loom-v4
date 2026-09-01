@@ -1,5 +1,7 @@
 use super::*;
-use crate::plan::{compute_dirty_locals, compute_liveness, split_segments, RegionPlan, Segment};
+use crate::plan::{
+    compute_dirty_locals, compute_liveness, split_segments, RegionPlan, Segment, SegmentExit,
+};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
 use lm_heap::{Heap, JitHeapView, Object, SharedBytes};
 use lm_value::{Value, ValueTag, Witness};

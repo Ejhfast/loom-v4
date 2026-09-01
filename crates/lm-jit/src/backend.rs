@@ -338,6 +338,7 @@ fn emit_entry_wrapper(
 
 #[derive(Clone, Copy)]
 struct NativeValues<'a> {
+    plan: &'a RegionPlan,
     locals: &'a [Variable],
     local_kinds: &'a [ScalarKind],
     dirty_locals: Option<&'a [bool]>,
@@ -1057,6 +1058,7 @@ fn emit_region(
     let zero = builder.ins().iconst(types::I64, 0);
     let heap_translations = RefCell::new(HeapTranslationCache::default());
     let values = NativeValues {
+        plan,
         locals: &locals,
         local_kinds: &plan.local_kinds,
         dirty_locals: None,
@@ -13891,6 +13893,13 @@ fn emit_exit_with_locals(
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let storage = reload_active_frame_storage(builder, values)?;
+    let stack_kinds = crate::decode_exit_kind(exit.kind)
+        .and_then(|kind| {
+            values
+                .plan
+                .materialization_operand_kinds(kind, exit.block, exit.instruction)
+        })
+        .filter(|kinds| kinds.len() == stack.len());
     emit_spill_frame_values(
         builder,
         storage,
@@ -13898,6 +13907,7 @@ fn emit_exit_with_locals(
         exit.instruction,
         locals,
         stack,
+        stack_kinds,
     )?;
     store_i64(
         builder,
@@ -14221,9 +14231,19 @@ fn emit_spill_frame_values(
     instruction: u32,
     locals: &[NativeValue],
     stack: &[NativeValue],
+    stack_kinds: Option<&[ScalarKind]>,
 ) -> Result<(), CompileError> {
     let frame = emit_current_frame_pointer(builder, values)?;
-    emit_spill_frame_values_to(builder, values, frame, block, instruction, locals, stack)
+    emit_spill_frame_values_to(
+        builder,
+        values,
+        frame,
+        block,
+        instruction,
+        locals,
+        stack,
+        stack_kinds,
+    )
 }
 
 fn emit_spill_frame_roots(
@@ -14286,7 +14306,20 @@ fn emit_spill_frame_to(
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
     let locals = capture_local_values(builder, values)?;
-    emit_spill_frame_values_to(builder, values, frame, block, instruction, &locals, stack)
+    let stack_kinds = values
+        .plan
+        .suspended_operand_kinds(block, instruction)
+        .filter(|kinds| kinds.len() == stack.len());
+    emit_spill_frame_values_to(
+        builder,
+        values,
+        frame,
+        block,
+        instruction,
+        &locals,
+        stack,
+        stack_kinds,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14298,6 +14331,7 @@ fn emit_spill_frame_values_to(
     instruction: u32,
     locals: &[NativeValue],
     stack: &[NativeValue],
+    stack_kinds: Option<&[ScalarKind]>,
 ) -> Result<(), CompileError> {
     if locals.len() != values.locals.len()
         || values
@@ -14342,9 +14376,15 @@ fn emit_spill_frame_values_to(
         builder
             .ins()
             .store(MemFlags::new(), value.bits, values.stack_pointer, offset);
-        builder
-            .ins()
-            .store(MemFlags::new(), value.tag, values.stack_tag_pointer, offset);
+        if stack_kinds
+            .and_then(|kinds| kinds.get(slot).copied())
+            .and_then(value_tag)
+            .is_none()
+        {
+            builder
+                .ins()
+                .store(MemFlags::new(), value.tag, values.stack_tag_pointer, offset);
+        }
     }
     store_i32_constant(
         builder,

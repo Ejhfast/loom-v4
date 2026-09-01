@@ -973,7 +973,8 @@ impl JitEngine {
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
-                    let Some(receiver) = parts_value(receiver_kind, receiver_tag, receiver_bits)
+                    let Some(receiver) =
+                        materialized_value(receiver_kind, receiver_tag, receiver_bits)
                     else {
                         break Err(Failure::BackendUnavailable);
                     };
@@ -1576,28 +1577,11 @@ fn frame_operand_kinds<'a>(
     frame: &lm_jit::NativeFrameView<'_>,
     exit: Option<lm_jit::ExecutionExit>,
 ) -> Result<&'a [ScalarKind], ()> {
-    let kinds = match exit.map(|exit| exit.kind()) {
+    let kinds = match exit {
         None => region.suspended_operand_kinds(frame.block(), frame.instruction()),
-        Some(ExitKind::Return) => Some(&[][..]),
-        Some(ExitKind::Replay) => region.replay_operand_kinds(frame.block(), frame.instruction()),
-        Some(
-            ExitKind::IntegerOverflow
-            | ExitKind::DivideByZero
-            | ExitKind::TypeMismatch
-            | ExitKind::UninitializedField
-            | ExitKind::HeapLimit
-            | ExitKind::Unreachable
-            | ExitKind::GuestFault,
-        ) => region.fault_operand_kinds(frame.block(), frame.instruction()),
-        Some(ExitKind::StackLimit) => region
-            .fault_operand_kinds(frame.block(), frame.instruction())
-            .or_else(|| {
-                frame
-                    .instruction()
-                    .checked_sub(1)
-                    .and_then(|instruction| region.operand_kinds(frame.block(), instruction))
-            }),
-        Some(_) => region.operand_kinds(frame.block(), frame.instruction()),
+        Some(exit) => {
+            region.materialization_operand_kinds(exit.kind(), frame.block(), frame.instruction())
+        }
     };
     kinds.ok_or(())
 }
