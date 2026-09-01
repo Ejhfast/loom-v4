@@ -2,7 +2,7 @@
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
 use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr, NumericInstr};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// One scalar representation used by the native ABI.
@@ -366,6 +366,8 @@ pub(super) struct Segment {
     pub(super) definitions: Vec<bool>,
     pub(super) successors: Vec<usize>,
     pub(super) live_in: Vec<bool>,
+    /// Locals that one internal path can change before this segment exits.
+    pub(super) dirty_locals: Vec<bool>,
     pub(super) entry_stack: Vec<ScalarKind>,
     pub(super) call_contract: Option<CallContract>,
     pub(super) exit_stack: Vec<ScalarKind>,
@@ -850,6 +852,7 @@ impl RegionPlan {
             return Err(UnsupportedReason::RegionLimit);
         }
         compute_liveness(&mut segments, local_kinds.len());
+        compute_dirty_locals(&mut segments, local_kinds.len());
         for segment in &mut segments {
             segment.defer_integer_overflow = can_defer_integer_overflow(runtime, segment);
             if segment.defer_integer_overflow
@@ -1172,6 +1175,7 @@ fn empty_segment(block: usize, start: usize, end: usize, exit: SegmentExit) -> S
         definitions: Vec::new(),
         successors: Vec::new(),
         live_in: Vec::new(),
+        dirty_locals: Vec::new(),
         entry_stack: Vec::new(),
         call_contract: None,
         exit_stack: Vec::new(),
@@ -3023,6 +3027,30 @@ pub(super) fn compute_liveness(segments: &mut [Segment], locals: usize) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+pub(super) fn compute_dirty_locals(segments: &mut [Segment], locals: usize) {
+    let mut work = VecDeque::new();
+    for (segment_index, segment) in segments.iter_mut().enumerate() {
+        debug_assert_eq!(segment.definitions.len(), locals);
+        segment.dirty_locals = segment.definitions.clone();
+        for (slot, dirty) in segment.dirty_locals.iter().copied().enumerate() {
+            if dirty {
+                work.push_back((segment_index, slot));
+            }
+        }
+    }
+
+    while let Some((segment_index, slot)) = work.pop_front() {
+        let successor_count = segments[segment_index].successors.len();
+        for successor_index in 0..successor_count {
+            let successor = segments[segment_index].successors[successor_index];
+            if !segments[successor].dirty_locals[slot] {
+                segments[successor].dirty_locals[slot] = true;
+                work.push_back((successor, slot));
+            }
         }
     }
 }

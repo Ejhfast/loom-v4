@@ -3134,6 +3134,39 @@ The full workspace suite passed.
 
 Warm representative results stayed within measurement variance.
 
+### Stage F59: Spill modified local payloads
+
+- compute one forward dirty-local set for each segment;
+- mark each local after its first native `StoreLocal`;
+- propagate that mark through internal successor edges;
+- retain canonical storage for every unchanged local;
+- spill all locals when no segment plan applies;
+- keep root spills before native calls unchanged.
+
+Each dirty bit can enter each segment once.
+
+An external entry starts with canonical activation storage.
+
+A conservative dirty bit can store an unchanged value safely.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed.
+
+| Cold release row | Stage F58 | Stage F59 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.909 ms | 2.044 ms | within variance |
+| JSON compile and run | 423.891 ms | 382.573 ms | 9.7 percent faster |
+| 301-function compile and run | 561.679 ms | 558.511 ms | within variance |
+
+| Compiled code set | Stage F58 | Stage F59 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,734 bytes | 2,734 bytes | unchanged |
+| JSON parser | 1,746,192 bytes | 1,362,052 bytes | 22.0 percent smaller |
+| 301 functions | 1,822,625 bytes | 1,797,425 bytes | 1.4 percent smaller |
+
+Warm representative results stayed within measurement variance.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

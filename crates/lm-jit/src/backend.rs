@@ -340,6 +340,7 @@ fn emit_entry_wrapper(
 struct NativeValues<'a> {
     locals: &'a [Variable],
     local_kinds: &'a [ScalarKind],
+    dirty_locals: Option<&'a [bool]>,
     local_tags: &'a [Option<Variable>],
     local_heap_caches: &'a [Option<LocalHeapCache>],
     stack: &'a [Variable],
@@ -1058,6 +1059,7 @@ fn emit_region(
     let values = NativeValues {
         locals: &locals,
         local_kinds: &plan.local_kinds,
+        dirty_locals: None,
         local_tags: &local_tags,
         local_heap_caches: &local_heap_caches,
         stack: &stack,
@@ -1154,15 +1156,24 @@ fn emit_region(
 
         for (index, segment) in plan.segments.iter().enumerate() {
             builder.switch_to_block(preload_boundary_blocks[index]);
-            emit_preload_boundary(&mut builder, values, segment)?;
+            let segment_values = NativeValues {
+                dirty_locals: Some(&segment.dirty_locals),
+                ..values
+            };
+            emit_preload_boundary(&mut builder, segment_values, segment)?;
         }
     }
 
     for (index, segment) in plan.segments.iter().enumerate() {
         builder.switch_to_block(blocks[index]);
         let body = body_blocks[index];
+        let segment_values = NativeValues {
+            dirty_locals: Some(&segment.dirty_locals),
+            replay_blocks: &replay_blocks[index],
+            ..values
+        };
         if segment.carries_reserved_prefix {
-            emit_entry_exit(&mut builder, values, segment, EXIT_BOUNDARY)?;
+            emit_entry_exit(&mut builder, segment_values, segment, EXIT_BOUNDARY)?;
         } else {
             let fuel_boundary = builder.create_block();
             builder.set_cold_block(fuel_boundary);
@@ -1175,14 +1186,10 @@ fn emit_region(
             builder.ins().brif(enough, body, &[], fuel_boundary, &[]);
 
             builder.switch_to_block(fuel_boundary);
-            emit_reservation_boundary(&mut builder, values, segment, body)?;
+            emit_reservation_boundary(&mut builder, segment_values, segment, body)?;
         }
 
         builder.switch_to_block(body);
-        let segment_values = NativeValues {
-            replay_blocks: &replay_blocks[index],
-            ..values
-        };
         let fast_successors: Vec<ir::Block> = segment
             .successors
             .iter()
@@ -14292,7 +14299,11 @@ fn emit_spill_frame_values_to(
     locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
-    if locals.len() != values.locals.len() {
+    if locals.len() != values.locals.len()
+        || values
+            .dirty_locals
+            .is_some_and(|dirty_locals| dirty_locals.len() != locals.len())
+    {
         return Err(CompileError::Backend);
     }
     for (slot, (kind, value)) in values
@@ -14302,6 +14313,12 @@ fn emit_spill_frame_values_to(
         .zip(locals.iter().copied())
         .enumerate()
     {
+        if values
+            .dirty_locals
+            .is_some_and(|dirty_locals| !dirty_locals[slot])
+        {
+            continue;
+        }
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
         builder.ins().store(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::plan::{compute_liveness, split_segments, RegionPlan, Segment};
+use crate::plan::{compute_dirty_locals, compute_liveness, split_segments, RegionPlan, Segment};
 use lm_bytecode::{BcClass, BcClassKind, BcType, Func, Instr, Module, NativeInstr, NO_PARENT};
 use lm_heap::{Heap, JitHeapView, Object, SharedBytes};
 use lm_value::{Value, ValueTag, Witness};
@@ -336,7 +336,32 @@ fn poll_schedule_keeps_one_phase_at_boundaries() {
 
 #[test]
 fn liveness_ignores_a_local_replaced_before_use() {
-    let mut segments = vec![Segment {
+    let mut segments = vec![analysis_segment(
+        vec![false, true],
+        vec![true, false],
+        vec![],
+    )];
+    compute_liveness(&mut segments, 2);
+    assert_eq!(segments[0].live_in, vec![false, true]);
+}
+
+#[test]
+fn dirty_locals_follow_merges_and_loops() {
+    let mut segments = vec![
+        analysis_segment(vec![false; 3], vec![true, false, false], vec![1, 2]),
+        analysis_segment(vec![false; 3], vec![false, true, false], vec![3]),
+        analysis_segment(vec![false; 3], vec![false, false, false], vec![3]),
+        analysis_segment(vec![false; 3], vec![false, false, false], vec![1]),
+    ];
+    compute_dirty_locals(&mut segments, 3);
+    assert_eq!(segments[0].dirty_locals, vec![true, false, false]);
+    assert_eq!(segments[1].dirty_locals, vec![true, true, false]);
+    assert_eq!(segments[2].dirty_locals, vec![true, false, false]);
+    assert_eq!(segments[3].dirty_locals, vec![true, true, false]);
+}
+
+fn analysis_segment(uses: Vec<bool>, definitions: Vec<bool>, successors: Vec<usize>) -> Segment {
+    Segment {
         block: 0,
         start: 0,
         end: 3,
@@ -348,10 +373,11 @@ fn liveness_ignores_a_local_replaced_before_use() {
         retry_entry: false,
         defer_integer_overflow: false,
         exit: SegmentExit::Return,
-        uses: vec![false, true],
-        definitions: vec![true, false],
-        successors: vec![],
+        uses,
+        definitions,
+        successors,
         live_in: vec![],
+        dirty_locals: vec![],
         entry_stack: vec![],
         call_contract: None,
         exit_stack: vec![],
@@ -362,9 +388,7 @@ fn liveness_ignores_a_local_replaced_before_use() {
         replay_stacks: vec![],
         fault_stacks: vec![],
         allocations: vec![],
-    }];
-    compute_liveness(&mut segments, 2);
-    assert_eq!(segments[0].live_in, vec![false, true]);
+    }
 }
 
 #[test]
