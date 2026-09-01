@@ -2,6 +2,10 @@
 
 Status: Native calls, the heap ABI, sampled tiering, growable activations, hybrid fuel landing, and demand-driven polls are implemented.
 
+Physical stack rollovers retain the logical native frame table.
+
+Bounded inline calls retain their parent re-entry across scheduler turns.
+
 All scheduler tasks use one measured 16,384-instruction quantum.
 
 Generated code rearms idle scheduler polls without materializing machine state.
@@ -277,9 +281,13 @@ A compiled frame larger than this budget uses the interpreter.
 
 An excess call exits before it retires.
 
-The VM then creates the guest frame in canonical heap storage.
+The exit unwinds only the current host call chain.
+
+The logical native frame table remains live.
 
 Native execution resumes with a fresh physical stack budget.
+
+Execution retries the unchanged call from the same native activation.
 
 This rollover does not change the guest frame limit.
 
@@ -794,6 +802,8 @@ The engine samples retired work after native entry.
 Repeated quick exits disable later native entry for that function.
 
 A quick exit includes an observable boundary or an unavailable callee.
+
+A bounded inline-call bridge does not record an unproductive exit.
 
 Forced Native mode reports this decision without hiding it.
 
@@ -3745,9 +3755,19 @@ The inliner uses `emit_segment_body` for both parent and child instructions.
 
 It does not contain a second opcode match.
 
-Each child reservation boundary can replay the unchanged call through the interpreter.
+Each inline call reserves the call cost and the child's maximum path cost.
 
-This rule preserves exact fuel when the remaining budget ends inside the child.
+Insufficient fuel exits at the unchanged parent call.
+
+The interpreter completes the bounded call.
+
+The parent return depth remains an engine hint across scheduler turns.
+
+The VM re-enters native code when the child returns to that depth.
+
+This boundary does not record replay or unproductive execution.
+
+These rules preserve exact fuel when a quantum ends inside the child.
 
 Frame-limit failures remain native faults at the post-call position.
 
@@ -3793,6 +3813,62 @@ The direct and scheduled corpus differential passed in 23.22 seconds.
 Clippy passed for the complete workspace.
 
 The full workspace suite passed in 65.58 seconds.
+
+### Stage F72: Retain bounded native chains
+
+- retain the logical native frame table across a physical stack rollover;
+- unwind only the current host call chain;
+- reset the cumulative physical byte count at rollover re-entry;
+- retry the unchanged native call from the same activation;
+- reserve each bounded inline child's maximum path cost before entry;
+- interpret a bounded call when the current quantum cannot cover it;
+- retain the parent return depth across scheduler turns;
+- re-enter native code when the bounded child returns;
+- exclude this bridge from replay and productivity metrics.
+
+The old rollover path materialized every native frame into canonical heap frames.
+
+The first rollover therefore caused one engine entry for each later recursive return.
+
+The retained path now needs three entries and three materializations for 60,000 recursion levels.
+
+The same program completes on a 1 MiB host stack.
+
+The guest frame limit still reports a clean `StackLimit` fault.
+
+The inline-call row executes three million calls through the default scheduler.
+
+| Inline-call row | Before F72 | Stage F72 |
+| --- | ---: | ---: |
+| Auto time | 64.518 ms | 6.424 ms |
+| Native time | 9.757 ms | 6.406 ms |
+| Auto gain | 3.09 times | 31.70 times |
+| Native gain | 20.44 times | 31.79 times |
+| Auto native coverage | 71.65 percent | 99.96 percent |
+| Auto replay exits | 16,686 | 0 |
+| Native replay exits | 23,067 | 0 |
+| Auto missing-entry fallbacks | 6,597 | 0 |
+
+Representative release rows remained healthy.
+
+| Warm representative row | Auto gain | Native gain |
+| --- | ---: | ---: |
+| Deep recursion | 4.81 times | 4.81 times |
+| Branching direct call | 26.28 times | 26.39 times |
+| Class initialization | 68.30 times | 67.00 times |
+| List sort | 6.30 times | 6.35 times |
+| JSON parse | 3.12 times | 3.13 times |
+| JSON encode | 2.80 times | 2.87 times |
+| HTTP parse | 2.84 times | 2.77 times |
+| HTTP encode | 4.15 times | 4.14 times |
+
+The focused JIT suite passed 174 tests.
+
+The direct and scheduled corpus differential passed in 22.85 seconds.
+
+Clippy passed for every workspace target.
+
+The full workspace suite passed.
 
 ## 24. Rejected designs
 

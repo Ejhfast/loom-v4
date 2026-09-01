@@ -104,6 +104,58 @@ fn direct_scalar_calls_match_at_each_fuel_boundary() {
 }
 
 #[test]
+fn auto_inline_leaf_reenters_after_each_quantum() {
+    let source = concat!(
+        "def step(value: Int): Int\n  next = value + 1\n  next\nend\n",
+        "i = 0\n",
+        "while i < 200000\n  i = step(i)\nend\n",
+        "i\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-inline-auto.lm", source)
+        .expect("the inline leaf case compiles");
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact).expect("the inline leaf case publishes");
+    let run = |engine: Arc<Engine>| {
+        let mut world = World::new_with_engine(
+            arena.clone(),
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::clone(&engine),
+        );
+        let outcome = fixed_scheduler()
+            .run(&mut world)
+            .expect("the inline leaf case runs");
+        (outcome, world.dump_live(&outcome), engine.metrics())
+    };
+    let interpreted = run(Arc::new(Engine::new(EngineMode::Interpreter)));
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    let warmup = run(Arc::clone(&engine));
+    assert_eq!(warmup.2.compiled_inlined_call_sites, 1, "{:?}", warmup.2);
+    engine.reset_metrics();
+    let automatic = run(engine);
+    assert_eq!(automatic.0, interpreted.0, "{:?}", automatic.2);
+    assert_eq!(automatic.1, interpreted.1);
+    assert_eq!(automatic.0, Outcome::Done(lm_value::Value::Int(200_000)));
+    assert_eq!(automatic.2.native_replay_exits, 0, "{:?}", automatic.2);
+    assert!(
+        automatic.2.missing_entry_fallbacks < 512,
+        "{:?}",
+        automatic.2
+    );
+    assert_eq!(
+        automatic.2.unproductive_native_demotions, 0,
+        "{:?}",
+        automatic.2
+    );
+    assert!(
+        automatic.2.native_retired_instructions > 2_900_000,
+        "{:?}",
+        automatic.2
+    );
+}
+
+#[test]
 fn generic_calls_preserve_each_exact_type_environment() {
     let source = concat!(
         "def identity[T](value: T): T\n  value\nend\n",
@@ -563,8 +615,8 @@ fn deep_recursion_rolls_over_before_the_host_stack_limit() {
     assert_eq!(native, interpreted);
     assert_eq!(native_dump, interpreted_dump);
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(60_000)));
-    assert!(metrics.native_entries > 3, "{metrics:?}");
-    assert!(metrics.materializations > 3, "{metrics:?}");
+    assert!(metrics.native_entries <= 4, "{metrics:?}");
+    assert!(metrics.materializations <= 4, "{metrics:?}");
     assert_eq!(metrics.native_fault_exits, 0, "{metrics:?}");
     assert_eq!(metrics.backend_unavailable_fallbacks, 0, "{metrics:?}");
 }

@@ -595,6 +595,9 @@ pub(crate) enum ExecError {
 pub(crate) enum NativeResume<'a> {
     Disabled,
     EveryDirectCall,
+    ReturnToDepth {
+        depth: usize,
+    },
     Tiered {
         state: &'a crate::jit::NativeCodeState,
         resume_depth: Option<usize>,
@@ -629,6 +632,7 @@ impl<'a> InterpreterNative<'a> {
         match self.policy {
             NativeResume::Disabled => false,
             NativeResume::EveryDirectCall => true,
+            NativeResume::ReturnToDepth { .. } => false,
             NativeResume::Tiered { state, profile, .. } => {
                 let sampled = sample_tier_event(&mut self.sample);
                 if self.check_native_calls {
@@ -651,6 +655,7 @@ impl<'a> InterpreterNative<'a> {
         match self.policy {
             NativeResume::Disabled => false,
             NativeResume::EveryDirectCall => true,
+            NativeResume::ReturnToDepth { depth: target } => target == depth,
             NativeResume::Tiered { resume_depth, .. } => resume_depth == Some(depth),
         }
     }
@@ -804,6 +809,10 @@ pub struct Machine {
     ///
     /// Snapshots exclude this process-local execution state.
     native_continuation: Option<Box<crate::jit::NativeContinuation>>,
+    /// Parent depth for one bounded interpreter bridge.
+    ///
+    /// Snapshots exclude this process-local execution hint.
+    native_return_depth: Option<usize>,
     /// Derived type environments used only by native execution.
     ///
     /// Snapshots exclude this process-local cache.

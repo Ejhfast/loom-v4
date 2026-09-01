@@ -19,6 +19,25 @@ fn bench_jit_hot_scalar_loop() {
 
 #[test]
 #[ignore]
+fn bench_jit_inline_leaf_scheduler() {
+    report_jit_representative(
+        "jit_inline_leaf_scheduler",
+        concat!(
+            "def step(value: Int): Int\n",
+            "  mixed = value * 1664525 + 1013904223\n",
+            "  mixed & 1048575\n",
+            "end\n",
+            "i = 0\nvalue = 1\n",
+            "while i < 3000000\n",
+            "  value = step(value)\n",
+            "  i = i + 1\n",
+            "end\nvalue\n",
+        ),
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_jit_scalar_regions() {
     println!(
         "LOOM_JIT\tcase\tinterpreter_ms\tnative_cold_ms\tnative_warm_ms\tspeedup\tentries\tguards\tcalls\talloc_sites\tallocations"

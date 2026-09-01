@@ -219,6 +219,8 @@ pub enum ExitKind {
     HeapLimit,
     Effect,
     StackLimit,
+    StackRollover,
+    InlineCall,
     Replay,
     Literal,
     Unreachable,
@@ -686,6 +688,7 @@ pub(super) struct VirtualConstructor {
 #[derive(Debug, Clone)]
 pub(super) struct InlineFunctionPlan {
     pub(super) plan: Box<RegionPlan>,
+    pub(super) max_path_cost: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1297,9 +1300,9 @@ fn select_inline_functions(
         {
             continue;
         }
-        if acyclic_max_path_cost(&plan).is_none() {
+        let Some(max_path_cost) = acyclic_max_path_cost(&plan) else {
             continue;
-        }
+        };
         for segment in &mut plan.segments {
             segment.live_in.fill(true);
         }
@@ -1310,6 +1313,7 @@ fn select_inline_functions(
             target,
             InlineFunctionPlan {
                 plan: Box::new(plan),
+                max_path_cost,
             },
         );
         ensure_inline_replay(segment);

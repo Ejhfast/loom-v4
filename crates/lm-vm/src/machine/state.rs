@@ -347,6 +347,7 @@ impl Machine {
             preparing_wait: None,
             execution_metrics: MachineExecutionMetrics::default(),
             native_continuation: None,
+            native_return_depth: None,
             native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
             native_resolved_calls: lm_jit::NativeResolvedCallCache::default(),
         }

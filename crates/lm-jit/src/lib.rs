@@ -38,6 +38,8 @@ const EXIT_GUEST_FAULT: u32 = 23;
 const EXIT_GROW_ROOTS: u32 = 24;
 const EXIT_BOUNDARY: u32 = 25;
 const EXIT_POLL: u32 = 26;
+const EXIT_STACK_ROLLOVER: u32 = 27;
+const EXIT_INLINE_CALL: u32 = 28;
 
 mod activation;
 mod opcode;
@@ -760,6 +762,8 @@ fn decode_exit_kind(kind: u32) -> Option<ExitKind> {
         EXIT_GROW_ROOTS => ExitKind::GrowRoots,
         EXIT_BOUNDARY => ExitKind::Boundary,
         EXIT_POLL => ExitKind::Poll,
+        EXIT_STACK_ROLLOVER => ExitKind::StackRollover,
+        EXIT_INLINE_CALL => ExitKind::InlineCall,
         EXIT_INVALID_ENTRY => return None,
         _ => return None,
     })

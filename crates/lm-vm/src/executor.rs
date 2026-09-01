@@ -834,6 +834,7 @@ fn run_engine_turn(
         };
     }
     if context.engine.mode() == EngineMode::Interpreter {
+        machine.clear_native_return_depth();
         if let Err(code) = context.engine.materialize_native_state(machine) {
             return engine_turn_result(Err(ExecError::Fault(code)), 0, false);
         }
@@ -862,6 +863,44 @@ fn run_engine_turn(
     let mut retired_total = 0;
     loop {
         let remaining = instruction_limit - retired_total;
+        if remaining == 0 {
+            return engine_turn_result(Ok(None), retired_total, false);
+        }
+        if let Some(depth) = machine.native_return_depth() {
+            if machine.vm.frames.len() <= depth {
+                machine.clear_native_return_depth();
+                continue;
+            }
+            let current = poll_cap(context.poll, retired_total, remaining);
+            let (outcome, interpreted) = run_interpreter_turn_with_policy(
+                machine,
+                current,
+                &mut context,
+                crate::machine::NativeResume::ReturnToDepth { depth },
+            );
+            let Some(next) = checked_retired(retired_total, interpreted, instruction_limit) else {
+                machine.clear_native_return_depth();
+                return malformed_engine_turn(retired_total);
+            };
+            retired_total = next;
+            if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
+                machine.clear_native_return_depth();
+                continue;
+            }
+            if outcome.is_err() || machine.vm.frames.len() <= depth {
+                machine.clear_native_return_depth();
+            }
+            if let Some(result) = finish_interpreter_step(
+                outcome,
+                retired_total,
+                instruction_limit,
+                context.poll,
+                interpreted != 0,
+            ) {
+                return result;
+            }
+            continue;
+        }
         let mut native_context = crate::jit::NativeExecutionContext {
             module: context.module,
             envs: &mut *context.envs,
@@ -966,6 +1005,50 @@ fn run_engine_turn(
                     instruction_limit,
                     context.poll,
                     interpreted == 1,
+                ) {
+                    return result;
+                }
+                continue;
+            }
+            crate::jit::NativeAttempt::InterpretInlineCall { retired } => {
+                let Some(next) = checked_retired(retired_total, retired, instruction_limit) else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if poll_requests_yield(context.poll, retired_total, instruction_limit) {
+                    return engine_turn_result(Ok(None), retired_total, true);
+                }
+                let remaining = instruction_limit - retired_total;
+                if remaining == 0 {
+                    return engine_turn_result(Ok(None), retired_total, false);
+                }
+                let depth = machine.vm.frames.len();
+                machine.set_native_return_depth(depth);
+                let current = poll_cap(context.poll, retired_total, remaining);
+                let (outcome, interpreted) = run_interpreter_turn_with_policy(
+                    machine,
+                    current,
+                    &mut context,
+                    crate::machine::NativeResume::ReturnToDepth { depth },
+                );
+                let Some(next) = checked_retired(retired_total, interpreted, instruction_limit)
+                else {
+                    return malformed_engine_turn(retired_total);
+                };
+                retired_total = next;
+                if matches!(outcome, Ok(Some(ExecOutcome::Continue))) {
+                    machine.clear_native_return_depth();
+                    continue;
+                }
+                if outcome.is_err() || machine.vm.frames.len() <= depth {
+                    machine.clear_native_return_depth();
+                }
+                if let Some(result) = finish_interpreter_step(
+                    outcome,
+                    retired_total,
+                    instruction_limit,
+                    context.poll,
+                    interpreted != 0,
                 ) {
                     return result;
                 }
@@ -1086,6 +1169,15 @@ fn run_interpreter_turn(
         },
         EngineMode::Native => crate::machine::NativeResume::EveryDirectCall,
     };
+    run_interpreter_turn_with_policy(machine, instruction_limit, context, native)
+}
+
+fn run_interpreter_turn_with_policy(
+    machine: &mut Machine,
+    instruction_limit: u32,
+    context: &mut EngineTurnContext<'_>,
+    native: crate::machine::NativeResume<'_>,
+) -> (Result<Option<ExecOutcome>, ExecError>, u32) {
     if context.restricted_world {
         machine.exec_for_quantum_restricted(
             context.module,

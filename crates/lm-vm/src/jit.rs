@@ -196,6 +196,9 @@ pub(crate) enum NativeAttempt {
     InterpretOne {
         retired: u32,
     },
+    InterpretInlineCall {
+        retired: u32,
+    },
     Reenter {
         retired: u32,
     },
@@ -832,6 +835,29 @@ impl JitEngine {
                     .saturating_add(materializations);
                 runtime.pending_instance_releases =
                     runtime.pending_instance_releases.saturating_add(releases);
+                if exit.kind() == ExitKind::StackRollover {
+                    let Some(next_retired) = prior_retired.checked_add(exit.retired()) else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(rollover_region) = scratch
+                        .activation
+                        .top_frame()
+                        .and_then(|frame| native.slot(frame.function()))
+                        .and_then(|slot| slot.compiled())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    let Some(resume) = rollover_region
+                        .resume_plan(exit.block(), exit.instruction())
+                        .map(|entry| entry.index())
+                    else {
+                        break Err(Failure::BackendUnavailable);
+                    };
+                    prior_retired = next_retired;
+                    active_region = rollover_region;
+                    active_entry = resume;
+                    continue;
+                }
                 if exit.kind() == ExitKind::GrowRoots {
                     let Ok(required) = usize::try_from(exit.result()) else {
                         break Err(Failure::BackendUnavailable);
@@ -1586,6 +1612,8 @@ impl JitEngine {
                     retired,
                 }
             }
+            ExitKind::StackRollover => malformed_native_exit(retired),
+            ExitKind::InlineCall => NativeAttempt::InterpretInlineCall { retired },
         }
     }
 

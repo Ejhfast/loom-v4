@@ -807,6 +807,7 @@ pub(super) fn emit_native_call(
     let fuel_exit = builder.create_block();
     let lookup = builder.create_block();
     let fallback = builder.create_block();
+    let stack_rollover = builder.create_block();
     let root_check = builder.create_block();
     let grow_roots = contract
         .behavior
@@ -827,6 +828,7 @@ pub(super) fn emit_native_call(
     builder.set_cold_block(hard_check);
     builder.set_cold_block(fuel_exit);
     builder.set_cold_block(preflight_exit);
+    builder.set_cold_block(stack_rollover);
     let fuel = builder.use_var(values.fuel);
     let has_fuel = builder
         .ins()
@@ -1001,7 +1003,16 @@ pub(super) fn emit_native_call(
         .bor(native_stack_wrapped, native_stack_exceeded);
     builder
         .ins()
-        .brif(native_stack_blocked, fallback, &[], stack_check, &[]);
+        .brif(native_stack_blocked, stack_rollover, &[], stack_check, &[]);
+
+    builder.switch_to_block(stack_rollover);
+    let kind = builder
+        .ins()
+        .iconst(types::I32, i64::from(EXIT_STACK_ROLLOVER));
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(preflight_exit, &[kind.into(), zero.into(), zero.into()]);
 
     builder.switch_to_block(stack_check);
     let caller_prefix = load_cell_u32(
@@ -1481,6 +1492,7 @@ pub(super) fn emit_inline_call(
         values,
         InlineCallPreflight {
             plan,
+            max_path_cost: inline.max_path_cost,
             parameter_count: contract.params.len(),
             boundary_len,
             block,
@@ -1673,6 +1685,7 @@ pub(super) fn emit_inline_call(
 
 struct InlineCallPreflight<'a> {
     plan: &'a RegionPlan,
+    max_path_cost: u32,
     parameter_count: usize,
     boundary_len: usize,
     block: u32,
@@ -1687,28 +1700,45 @@ fn emit_inline_call_preflight(
 ) -> Result<(), CompileError> {
     let InlineCallPreflight {
         plan,
+        max_path_cost,
         parameter_count,
         boundary_len,
         block,
         instruction,
         stack,
     } = preflight;
+    let required_fuel = max_path_cost.checked_add(1).ok_or(CompileError::Backend)?;
+    let inline = builder.create_block();
+    let boundary = builder.create_block();
+    builder.set_cold_block(boundary);
     let poll_remaining = builder.use_var(values.fuel);
-    let can_start = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, poll_remaining, 1);
-    let replay = builder.ins().bxor_imm(can_start, 1);
-    emit_interpreter_replay(
+    let can_start = builder.ins().icmp_imm(
+        IntCC::SignedGreaterThanOrEqual,
+        poll_remaining,
+        i64::from(required_fuel),
+    );
+    builder.ins().brif(can_start, inline, &[], boundary, &[]);
+
+    builder.switch_to_block(boundary);
+    let retired = emit_retired(builder, values);
+    let zero = builder.ins().iconst(types::I64, 0);
+    emit_exit(
         builder,
         values,
-        replay,
-        FaultPoint {
+        ExitEmission {
+            retired,
+            kind: EXIT_INLINE_CALL,
             block,
             instruction,
-            prefix: 0,
+            result: NativeValue {
+                bits: zero,
+                tag: zero,
+            },
         },
         stack,
     )?;
+
+    builder.switch_to_block(inline);
 
     let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
     let base_frames = load_activation_u32(builder, values, RawActivationField::BaseFrames)?;

@@ -3,6 +3,18 @@
 use super::*;
 
 impl Machine {
+    pub(crate) fn native_return_depth(&self) -> Option<usize> {
+        self.native_return_depth
+    }
+
+    pub(crate) fn set_native_return_depth(&mut self, depth: usize) {
+        self.native_return_depth = Some(depth);
+    }
+
+    pub(crate) fn clear_native_return_depth(&mut self) {
+        self.native_return_depth = None;
+    }
+
     pub(crate) fn take_native_continuation(
         &mut self,
     ) -> Option<Box<crate::jit::NativeContinuation>> {
