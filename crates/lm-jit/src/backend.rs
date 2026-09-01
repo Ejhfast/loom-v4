@@ -6,12 +6,14 @@ use crate::activation::{
     RawVirtualInstance, IMAGE_SLOT_CLASS, IMAGE_SLOT_EMPTY, IMAGE_SLOT_FUNCTION,
     PENDING_INSTANCE_SLOT_BASE, RESOLVED_CALL_CACHE_WAYS, RUNTIME_COLLECTION_REQUIRED,
     RUNTIME_FAULT_FLAG, RUNTIME_HEAP_LIMIT, RUNTIME_MAP_VACANT, RUNTIME_OK, RUNTIME_STACK_LIMIT,
-    TYPE_ENVIRONMENT_CACHE_WAYS, VIRTUAL_INSTANCE_COUNT, VIRTUAL_INSTANCE_FIELDS,
+    SCALAR_INSTANCE_SLOT_BASE, TYPE_ENVIRONMENT_CACHE_WAYS, VIRTUAL_INSTANCE_COUNT,
+    VIRTUAL_INSTANCE_FIELDS,
 };
 use crate::plan::{
     bypasses_fuel_check, is_root_kind, transfer_virtual_instruction, CallContract, HeapAccessKind,
-    ObjectContract, OptionAccessKind, OptionTarget, RegionPlan, Segment, SegmentExit,
-    UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
+    ObjectContract, OptionAccessKind, OptionTarget, RegionPlan, ScalarFieldSource,
+    ScalarReplacement, Segment, SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract,
+    VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -323,6 +325,7 @@ struct NativeValues<'a> {
     dirty_locals: Option<&'a [bool]>,
     local_tags: &'a [Option<Variable>],
     local_heap_caches: &'a [Option<LocalHeapCache>],
+    scalar_instances: &'a [ScalarInstanceValues],
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
     fuel: Variable,
@@ -362,6 +365,18 @@ struct NativeValues<'a> {
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
     heap_translations: &'a RefCell<HeapTranslationCache>,
+}
+
+struct ScalarInstanceValues {
+    token: u64,
+    active: Variable,
+    fields: Vec<ScalarFieldValues>,
+}
+
+#[derive(Clone, Copy)]
+struct ScalarFieldValues {
+    bits: Variable,
+    tag: Variable,
 }
 
 /// These variables carry one validated local reference across native backedges.
@@ -1097,6 +1112,35 @@ fn emit_region(
             Some(cache)
         })
         .collect();
+    let scalar_instances = plan
+        .scalar_instances
+        .iter()
+        .enumerate()
+        .map(|(site, instance)| {
+            let site = u32::try_from(site).map_err(|_| CompileError::Backend)?;
+            let token = u64::from(
+                SCALAR_INSTANCE_SLOT_BASE
+                    .checked_sub(site)
+                    .ok_or(CompileError::Backend)?,
+            );
+            let active = builder.declare_var(types::I64);
+            builder.def_var(active, zero_i64);
+            let fields = (0..instance.field_count)
+                .map(|_| {
+                    let bits = builder.declare_var(types::I64);
+                    let tag = builder.declare_var(types::I64);
+                    builder.def_var(bits, zero_i64);
+                    builder.def_var(tag, zero_i64);
+                    Ok(ScalarFieldValues { bits, tag })
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?;
+            Ok(ScalarInstanceValues {
+                token,
+                active,
+                fields,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
     let mut stack = Vec::with_capacity(plan.max_stack);
     let mut stack_tags = Vec::with_capacity(plan.max_stack);
     let dynamic_stack_tags: Vec<bool> = (0..plan.max_stack)
@@ -1146,6 +1190,7 @@ fn emit_region(
         dirty_locals: None,
         local_tags: &local_tags,
         local_heap_caches: &local_heap_caches,
+        scalar_instances: &scalar_instances,
         stack: &stack,
         stack_tags: &stack_tags,
         fuel,
@@ -6360,6 +6405,26 @@ fn emit_native_call(
     } else {
         boundary_stack.clone()
     };
+    if let Some(scalar) = contract.scalar_result.as_ref() {
+        let scalar_path = builder.create_block();
+        let native_path = builder.create_block();
+        let ready = emit_scalar_replacement_guard(builder, values, scalar)?;
+        builder
+            .ins()
+            .brif(ready, scalar_path, &[], native_path, &[]);
+
+        builder.switch_to_block(scalar_path);
+        emit_scalar_replacement(
+            builder,
+            values,
+            scalar,
+            &arguments,
+            &caller_stack,
+            successor,
+        )?;
+
+        builder.switch_to_block(native_path);
+    }
     let hard_check = builder.create_block();
     let fuel_exit = builder.create_block();
     let lookup = builder.create_block();
@@ -6986,6 +7051,194 @@ fn emit_clear_local_states(
     builder.switch_to_block(done);
 }
 
+fn emit_scalar_replacement_guard(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    scalar: &ScalarReplacement,
+) -> Result<ir::Value, CompileError> {
+    let instance = values
+        .scalar_instances
+        .get(scalar.site as usize)
+        .ok_or(CompileError::Backend)?;
+    let active = builder.use_var(instance.active);
+    let active = builder.ins().icmp_imm(IntCC::NotEqual, active, 0);
+    let frame_len = load_activation_u32(builder, values, RawActivationField::FrameLen)?;
+    let base_frames = load_activation_u32(builder, values, RawActivationField::BaseFrames)?;
+    let frames = builder.ins().iadd(base_frames, frame_len);
+    let frames = builder
+        .ins()
+        .iadd_imm(frames, i64::from(scalar.frame_count));
+    let max_frames = load_activation_u32(builder, values, RawActivationField::MaxFrames)?;
+    let frames_fit = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, frames, max_frames);
+
+    let scalar_len = load_activation_u32(builder, values, RawActivationField::ScalarLen)?;
+    let required_values = builder
+        .ins()
+        .iadd_imm(scalar_len, i64::from(scalar.stack_values));
+    let max_values = load_activation_u32(builder, values, RawActivationField::MaxStackValues)?;
+    let values_fit =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, required_values, max_values);
+
+    let cost = scalar_instance_cost(scalar.fields.len())?;
+    let used_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+    let cost_value = builder.ins().iconst(values.pointer_type, cost);
+    let zero = builder.ins().iconst(values.pointer_type, 0);
+    let additional = builder.ins().select(active, zero, cost_value);
+    let next = builder.ins().iadd(used, additional);
+    let no_overflow = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, next, used);
+    let threshold = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_collection_threshold),
+    )?;
+    let heap_fits = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, next, threshold);
+    let heap_ready = builder.ins().bor(active, heap_fits);
+    let available = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+    )?;
+    let record_bit = 1u64.checked_shl(scalar.site).ok_or(CompileError::Backend)?;
+    let record = builder.ins().band_imm(available, record_bit as i64);
+    let record = builder.ins().icmp_imm(IntCC::NotEqual, record, 0);
+    let record_ready = builder.ins().bor(active, record);
+    let limits_fit = builder.ins().band(frames_fit, values_fit);
+    let heap_ready = builder.ins().band(no_overflow, heap_ready);
+    let ready = builder.ins().band(heap_ready, record_ready);
+    Ok(builder.ins().band(limits_fit, ready))
+}
+
+fn emit_scalar_replacement(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    scalar: &ScalarReplacement,
+    arguments: &[NativeValue],
+    caller_stack: &[NativeValue],
+    successor: ir::Block,
+) -> Result<(), CompileError> {
+    let instance = values
+        .scalar_instances
+        .get(scalar.site as usize)
+        .ok_or(CompileError::Backend)?;
+    if instance.fields.len() != scalar.fields.len() {
+        return Err(CompileError::Backend);
+    }
+    let active = builder.use_var(instance.active);
+    let active = builder.ins().icmp_imm(IntCC::NotEqual, active, 0);
+    let ready = builder.create_block();
+    let reserve = builder.create_block();
+    builder.ins().brif(active, ready, &[], reserve, &[]);
+
+    builder.switch_to_block(reserve);
+    let available = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+    )?;
+    let record_bit = 1u64.checked_shl(scalar.site).ok_or(CompileError::Backend)?;
+    let available = builder.ins().band_imm(available, !(record_bit as i64));
+    store_i64(
+        builder,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_available),
+        available,
+    )?;
+    let cost = scalar_instance_cost(scalar.fields.len())?;
+    let used_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+    let used = builder.ins().iadd_imm(used, cost);
+    store_heap_value(builder, used_pointer, 0, used)?;
+    let live_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_live),
+    )?;
+    let live = load_heap_value(builder, values.pointer_type, live_pointer, 0)?;
+    let live = builder.ins().iadd_imm(live, 1);
+    store_heap_value(builder, live_pointer, 0, live)?;
+    let one = builder.ins().iconst(types::I64, 1);
+    builder.def_var(instance.active, one);
+    builder.ins().jump(ready, &[]);
+
+    builder.switch_to_block(ready);
+    for (target, source) in instance.fields.iter().zip(&scalar.fields) {
+        let value = match source {
+            ScalarFieldSource::Parameter(parameter) => arguments
+                .get(*parameter as usize)
+                .copied()
+                .ok_or(CompileError::Backend)?,
+            ScalarFieldSource::Constant(value) => NativeValue {
+                bits: builder.ins().iconst(types::I64, value.bits as i64),
+                tag: builder.ins().iconst(types::I64, value.tag as i64),
+            },
+        };
+        builder.def_var(target.bits, value.bits);
+        builder.def_var(target.tag, value.tag);
+    }
+    let count = load_value(
+        builder,
+        types::I64,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, scalar_replaced_allocations),
+    )?;
+    let count = builder.ins().iadd_imm(count, 1);
+    store_i64(
+        builder,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, scalar_replaced_allocations),
+        count,
+    )?;
+    emit_charge(
+        builder,
+        values,
+        scalar
+            .retired_cost
+            .checked_add(1)
+            .ok_or(CompileError::Backend)?,
+    );
+    let mut stack = caller_stack.to_vec();
+    stack.push(NativeValue {
+        bits: builder.ins().iconst(types::I64, instance.token as i64),
+        tag: builder
+            .ins()
+            .iconst(types::I64, ValueTag::Obj as u64 as i64),
+    });
+    define_stack(builder, values, &stack)?;
+    builder.ins().jump(successor, &[]);
+    Ok(())
+}
+
+fn scalar_instance_cost(field_count: usize) -> Result<i64, CompileError> {
+    let cost = field_count
+        .checked_mul(VALUE_SIZE)
+        .and_then(|fields| MIN_OBJECT_COST.checked_add(fields))
+        .ok_or(CompileError::Backend)?;
+    i64::try_from(cost).map_err(|_| CompileError::Backend)
+}
+
 fn emit_virtual_target(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
@@ -7473,6 +7726,93 @@ fn emit_load_field(
         allow_pending,
         exit,
     } = emission;
+    let scalar_sites = values
+        .plan
+        .scalar_instances
+        .iter()
+        .enumerate()
+        .filter_map(|(site, instance)| {
+            (instance.class == receiver_class && field < instance.field_count).then_some(site)
+        })
+        .collect::<Vec<_>>();
+    if !scalar_sites.is_empty() {
+        let fallback = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, types::I64);
+        builder.append_block_param(done, types::I64);
+        let mut test = None;
+        for site in scalar_sites {
+            if let Some(test) = test {
+                builder.switch_to_block(test);
+            }
+            let scalar = values
+                .scalar_instances
+                .get(site)
+                .ok_or(CompileError::Backend)?;
+            let matched = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, reference, scalar.token as i64);
+            let hit = builder.create_block();
+            let miss = builder.create_block();
+            builder.ins().brif(matched, hit, &[], miss, &[]);
+
+            builder.switch_to_block(hit);
+            let value = scalar
+                .fields
+                .get(field as usize)
+                .ok_or(CompileError::Backend)?;
+            let bits = builder.use_var(value.bits);
+            let tag = builder.use_var(value.tag);
+            builder.ins().jump(done, &[bits.into(), tag.into()]);
+            test = Some(miss);
+        }
+        builder.switch_to_block(test.ok_or(CompileError::Backend)?);
+        builder.ins().jump(fallback, &[]);
+
+        builder.switch_to_block(fallback);
+        let value = emit_regular_load_field(
+            builder,
+            values,
+            reference,
+            field,
+            receiver_class,
+            contract,
+            allow_pending,
+            exit,
+        )?;
+        builder
+            .ins()
+            .jump(done, &[value.bits.into(), value.tag.into()]);
+
+        builder.switch_to_block(done);
+        return Ok(NativeValue {
+            bits: builder.block_params(done)[0],
+            tag: builder.block_params(done)[1],
+        });
+    }
+    emit_regular_load_field(
+        builder,
+        values,
+        reference,
+        field,
+        receiver_class,
+        contract,
+        allow_pending,
+        exit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_regular_load_field(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    field: u32,
+    receiver_class: u32,
+    contract: ValueContract,
+    allow_pending: bool,
+    exit: HeapExitEmission<'_>,
+) -> Result<NativeValue, CompileError> {
     let value = if allow_pending {
         let storage = emit_instance_storage(
             builder,
@@ -15136,6 +15476,11 @@ fn emit_exit_with_locals_and_kind(
     locals: &[NativeValue],
     stack: &[NativeValue],
 ) -> Result<(), CompileError> {
+    if exit.kind == EXIT_RETURN {
+        emit_release_scalar_charges(builder, values)?;
+    } else {
+        emit_scalar_deopt_records(builder, values)?;
+    }
     let storage = reload_active_frame_storage(builder, values)?;
     let stack_kinds = crate::decode_exit_kind(exit.kind)
         .and_then(|kind| {
@@ -15196,6 +15541,156 @@ fn emit_exit_with_locals_and_kind(
         exit.result.bits,
     )?;
     builder.ins().return_(&[]);
+    Ok(())
+}
+
+fn emit_scalar_deopt_records(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+) -> Result<(), CompileError> {
+    if values.scalar_instances.is_empty() {
+        return Ok(());
+    }
+    let records = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_instances),
+    )?;
+    let field_values = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, virtual_values),
+    )?;
+    for (site, (plan, instance)) in values
+        .plan
+        .scalar_instances
+        .iter()
+        .zip(values.scalar_instances)
+        .enumerate()
+    {
+        if plan.field_count as usize != instance.fields.len() {
+            return Err(CompileError::Backend);
+        }
+        let active = builder.use_var(instance.active);
+        let active = builder.ins().icmp_imm(IntCC::NotEqual, active, 0);
+        let write = builder.create_block();
+        let next = builder.create_block();
+        builder.ins().brif(active, write, &[], next, &[]);
+
+        builder.switch_to_block(write);
+        let record_offset = site
+            .checked_mul(mem::size_of::<RawVirtualInstance>())
+            .and_then(|offset| i64::try_from(offset).ok())
+            .ok_or(CompileError::Backend)?;
+        let record = builder.ins().iadd_imm(records, record_offset);
+        let values_offset = site
+            .checked_mul(VIRTUAL_INSTANCE_FIELDS)
+            .and_then(|offset| offset.checked_mul(VALUE_SIZE))
+            .and_then(|offset| i64::try_from(offset).ok())
+            .ok_or(CompileError::Backend)?;
+        let fields = builder.ins().iadd_imm(field_values, values_offset);
+        for (field, value) in instance.fields.iter().enumerate() {
+            let offset = field.checked_mul(VALUE_SIZE).ok_or(CompileError::Backend)?;
+            let bits = builder.use_var(value.bits);
+            let tag = builder.use_var(value.tag);
+            store_i64(builder, fields, offset + VALUE_PAYLOAD_OFFSET, bits)?;
+            store_i64(builder, fields, offset + VALUE_TAG_OFFSET, tag)?;
+        }
+        let one = builder.ins().iconst(types::I32, 1);
+        let zero = builder.ins().iconst(types::I32, 0);
+        let token = builder.ins().iconst(types::I64, instance.token as i64);
+        let class = builder.ins().iconst(types::I32, i64::from(plan.class));
+        let field_count = builder
+            .ins()
+            .iconst(types::I32, i64::from(plan.field_count));
+        let frozen = if plan.frozen { one } else { zero };
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, references),
+            one,
+        )?;
+        store_i64(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, object_bits),
+            token,
+        )?;
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, class),
+            class,
+        )?;
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, environment),
+            zero,
+        )?;
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, field_count),
+            field_count,
+        )?;
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, frozen),
+            frozen,
+        )?;
+        store_i32_value(
+            builder,
+            record,
+            mem::offset_of!(RawVirtualInstance, active),
+            one,
+        )?;
+        builder.ins().jump(next, &[]);
+        builder.switch_to_block(next);
+    }
+    Ok(())
+}
+
+fn emit_release_scalar_charges(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+) -> Result<(), CompileError> {
+    if values.scalar_instances.is_empty() {
+        return Ok(());
+    }
+    let used_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_used_bytes),
+    )?;
+    let live_pointer = load_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        mem::offset_of!(RawNativeActivation, heap_live),
+    )?;
+    for instance in values.scalar_instances {
+        let active = builder.use_var(instance.active);
+        let active = builder.ins().icmp_imm(IntCC::NotEqual, active, 0);
+        let release = builder.create_block();
+        let next = builder.create_block();
+        builder.ins().brif(active, release, &[], next, &[]);
+
+        builder.switch_to_block(release);
+        let used = load_heap_value(builder, values.pointer_type, used_pointer, 0)?;
+        let cost = scalar_instance_cost(instance.fields.len())?;
+        let used = builder.ins().iadd_imm(used, -cost);
+        store_heap_value(builder, used_pointer, 0, used)?;
+        let live = load_heap_value(builder, values.pointer_type, live_pointer, 0)?;
+        let live = builder.ins().iadd_imm(live, -1);
+        store_heap_value(builder, live_pointer, 0, live)?;
+        builder.ins().jump(next, &[]);
+        builder.switch_to_block(next);
+    }
     Ok(())
 }
 

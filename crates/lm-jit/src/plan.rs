@@ -2,6 +2,7 @@
 
 use crate::{Failure, MAX_REGION_INSTRUCTIONS, MAX_REGION_LOCALS, MAX_REGION_STACK};
 use lm_bytecode::{BcType, ExtendedInstr, Func, Instr, Module, NativeInstr, NumericInstr};
+use lm_value::ValueTag;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -130,6 +131,12 @@ impl<'a> FunctionInput<'a> {
     pub(super) fn runtime_string_count(&self) -> usize {
         self.runtime_string_count
     }
+
+    fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
+        std::iter::once(self.root)
+            .chain(self.direct_callees.iter().copied())
+            .find(|definition| definition.function == function)
+    }
 }
 
 /// Clock-free native compilation counters.
@@ -251,6 +258,14 @@ impl ExecutionExit {
     #[inline(always)]
     pub fn result(&self) -> u64 {
         self.result
+    }
+
+    /// Replace one transient object result before detached return handling.
+    pub fn replace_object_result(&mut self, token: u64, reference: lm_value::ObjRef) {
+        if self.result_tag != ValueTag::Obj as u64 || self.result != token {
+            return;
+        }
+        self.result = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
     }
 
     /// Add retired instructions from an earlier detached frame.
@@ -557,6 +572,42 @@ pub(super) struct CallContract {
     pub(super) value_target: Option<ValueCallTarget>,
     /// True when this call can return one transient instance.
     pub(super) virtual_result: bool,
+    /// One constructor result that can stay in SSA values.
+    pub(super) scalar_result: Option<ScalarReplacement>,
+}
+
+/// One constant field value in a scalar-replaced instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ScalarConstant {
+    pub(super) bits: u64,
+    pub(super) tag: u64,
+}
+
+/// One source for a scalar-replaced field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScalarFieldSource {
+    Parameter(u32),
+    Constant(ScalarConstant),
+}
+
+/// One direct constructor that can produce SSA field values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScalarReplacement {
+    pub(super) site: u32,
+    pub(super) class: u32,
+    pub(super) frozen: bool,
+    pub(super) fields: Vec<ScalarFieldSource>,
+    pub(super) retired_cost: u32,
+    pub(super) frame_count: u32,
+    pub(super) stack_values: u32,
+}
+
+/// One SSA instance shape used by generated field loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ScalarInstance {
+    pub(super) class: u32,
+    pub(super) field_count: u32,
+    pub(super) frozen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +656,7 @@ pub(super) struct RegionPlan {
     pub(super) preloaded_list_data: Vec<bool>,
     pub(super) result_kind: ScalarKind,
     pub(super) virtual_constructor: Option<VirtualConstructor>,
+    pub(super) scalar_instances: Vec<ScalarInstance>,
     pub(super) max_stack: usize,
     pub(super) max_stack_values: usize,
     pub(super) max_roots: usize,
@@ -973,7 +1025,6 @@ impl RegionPlan {
             max_stack_values = max_stack_values.max(analysis.max_stack_values);
             debug_assert_eq!(index, entries[&(segment.block, segment.start)]);
         }
-        compute_fuel_reserves(&mut segments)?;
         compute_reserved_costs(&mut segments)?;
         for segment in &segments {
             for successor in &segment.successors {
@@ -990,7 +1041,8 @@ impl RegionPlan {
         }
         compute_liveness(&mut segments, local_kinds.len());
         compute_dirty_locals(&mut segments, local_kinds.len());
-        select_virtual_results(
+        let scalar_instances = select_virtual_results(
+            input,
             runtime,
             source,
             source_func,
@@ -1007,6 +1059,7 @@ impl RegionPlan {
             virtual_constructor,
             virtual_parameters,
         )?;
+        compute_fuel_reserves(&mut segments)?;
         for segment in &mut segments {
             segment.defer_integer_overflow = can_defer_integer_overflow(runtime, segment);
             if segment.defer_integer_overflow
@@ -1055,6 +1108,7 @@ impl RegionPlan {
             preloaded_list_data,
             result_kind,
             virtual_constructor,
+            scalar_instances,
             max_stack,
             max_stack_values,
             max_roots,
@@ -1221,6 +1275,258 @@ fn virtual_constructor(definition: FunctionDefinition<'_>) -> Option<VirtualCons
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstructorSymbol {
+    Unknown,
+    Parameter(u32),
+    Constant(ScalarConstant),
+    Object,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConstructorExecution {
+    result: ConstructorSymbol,
+    retired_cost: u32,
+    frame_count: u32,
+    stack_values: u32,
+}
+
+fn scalar_constructor_summary(
+    input: &FunctionInput<'_>,
+    target: u32,
+) -> Result<Option<ScalarReplacement>, UnsupportedReason> {
+    let Some(definition) = input.definition(target) else {
+        return Ok(None);
+    };
+    let Some(constructor) = virtual_constructor(definition) else {
+        return Ok(None);
+    };
+    let Some(binding) = definition.source.bindings.iter().find(|binding| {
+        binding.func == definition.source_function && binding.class != lm_bytecode::NO_CLASS
+    }) else {
+        return Ok(None);
+    };
+    let Some(source_class) = definition.source.classes.get(binding.class as usize) else {
+        return Ok(None);
+    };
+    if source_class.type_params != 0 {
+        return Ok(None);
+    }
+    let arguments = (0..definition.runtime.params.len())
+        .map(|index| {
+            u32::try_from(index)
+                .map(ConstructorSymbol::Parameter)
+                .map_err(|_| UnsupportedReason::RegionLimit)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut fields = vec![ConstructorSymbol::Unknown; constructor.field_count as usize];
+    let mut active = Vec::new();
+    let Some(execution) = execute_scalar_constructor(
+        input,
+        definition,
+        &arguments,
+        &mut fields,
+        &mut active,
+        Some(constructor.class),
+    )?
+    else {
+        return Ok(None);
+    };
+    if execution.result != ConstructorSymbol::Object {
+        return Ok(None);
+    }
+    let fields = fields
+        .into_iter()
+        .map(|field| match field {
+            ConstructorSymbol::Parameter(parameter) => Ok(ScalarFieldSource::Parameter(parameter)),
+            ConstructorSymbol::Constant(value) => Ok(ScalarFieldSource::Constant(value)),
+            ConstructorSymbol::Unknown | ConstructorSymbol::Object => {
+                Err(UnsupportedReason::InvalidControlFlow)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(ScalarReplacement {
+        site: 0,
+        class: constructor.class,
+        frozen: source_class.is_frozen,
+        fields,
+        retired_cost: execution.retired_cost,
+        frame_count: execution.frame_count,
+        stack_values: execution.stack_values,
+    }))
+}
+
+fn execute_scalar_constructor(
+    input: &FunctionInput<'_>,
+    definition: FunctionDefinition<'_>,
+    arguments: &[ConstructorSymbol],
+    fields: &mut [ConstructorSymbol],
+    active: &mut Vec<u32>,
+    new_class: Option<u32>,
+) -> Result<Option<ConstructorExecution>, UnsupportedReason> {
+    if active.contains(&definition.function) || active.len() >= 8 {
+        return Ok(None);
+    }
+    let [code] = definition.runtime.blocks.as_slice() else {
+        return Ok(None);
+    };
+    if arguments.len() != definition.runtime.params.len() {
+        return Err(UnsupportedReason::InvalidControlFlow);
+    }
+    active.push(definition.function);
+    let mut locals = vec![ConstructorSymbol::Unknown; definition.runtime.local_types.len()];
+    locals[..arguments.len()].copy_from_slice(arguments);
+    let mut stack = Vec::new();
+    let mut max_stack = 0usize;
+    let mut nested_cost = 0u32;
+    let mut nested_frames = 0u32;
+    let mut nested_values = 0u32;
+    let mut returned = None;
+    for instruction in code.iter().copied() {
+        match instruction {
+            Instr::ConstUnit => stack.push(constant_symbol(ValueTag::Unit, 0)),
+            Instr::ConstBool(value) => {
+                stack.push(constant_symbol(ValueTag::Bool, u64::from(value)))
+            }
+            Instr::ConstInt(value) => stack.push(constant_symbol(ValueTag::Int, value as u64)),
+            Instr::ConstFloat(value) => stack.push(constant_symbol(ValueTag::Float, value)),
+            Instr::ConstChar(value) => {
+                stack.push(constant_symbol(ValueTag::Char, u64::from(value)))
+            }
+            Instr::LoadLocal(slot) => {
+                let value = locals
+                    .get(slot as usize)
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                if value == ConstructorSymbol::Unknown {
+                    active.pop();
+                    return Ok(None);
+                }
+                stack.push(value);
+            }
+            Instr::StoreLocal(slot) => {
+                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                let local = locals
+                    .get_mut(slot as usize)
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                *local = value;
+            }
+            Instr::Pop => {
+                stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+            }
+            Instr::New(class) if Some(class) == new_class => {
+                stack.push(ConstructorSymbol::Object);
+            }
+            Instr::LoadField(field) => {
+                if stack.pop() != Some(ConstructorSymbol::Object) {
+                    active.pop();
+                    return Ok(None);
+                }
+                let value = fields
+                    .get(field as usize)
+                    .copied()
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                if value == ConstructorSymbol::Unknown {
+                    active.pop();
+                    return Ok(None);
+                }
+                stack.push(value);
+            }
+            Instr::StoreField(field) => {
+                let value = stack.pop().ok_or(UnsupportedReason::InvalidStack)?;
+                if stack.pop() != Some(ConstructorSymbol::Object) {
+                    active.pop();
+                    return Ok(None);
+                }
+                let target = fields
+                    .get_mut(field as usize)
+                    .ok_or(UnsupportedReason::InvalidControlFlow)?;
+                *target = value;
+            }
+            Instr::Extended(ExtendedInstr::SealInstance) => {
+                if stack.last() != Some(&ConstructorSymbol::Object) {
+                    active.pop();
+                    return Ok(None);
+                }
+            }
+            Instr::Call(target) => {
+                let Some(callee) = input.definition(target) else {
+                    active.pop();
+                    return Ok(None);
+                };
+                if !source_accepts_virtual_receiver(callee.source, callee.source_function) {
+                    active.pop();
+                    return Ok(None);
+                }
+                let count = callee.runtime.params.len();
+                if stack.len() < count {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                let call_arguments = stack.split_off(stack.len() - count);
+                let Some(execution) = execute_scalar_constructor(
+                    input,
+                    callee,
+                    &call_arguments,
+                    fields,
+                    active,
+                    None,
+                )?
+                else {
+                    active.pop();
+                    return Ok(None);
+                };
+                nested_cost = nested_cost
+                    .checked_add(execution.retired_cost)
+                    .ok_or(UnsupportedReason::RegionLimit)?;
+                nested_frames = nested_frames.max(execution.frame_count);
+                nested_values = nested_values.max(execution.stack_values);
+                stack.push(execution.result);
+            }
+            Instr::Return => {
+                returned = stack.pop();
+                break;
+            }
+            _ => {
+                active.pop();
+                return Ok(None);
+            }
+        }
+        max_stack = max_stack.max(stack.len());
+    }
+    active.pop();
+    let Some(result) = returned else {
+        return Ok(None);
+    };
+    let own_values = definition
+        .runtime
+        .local_types
+        .len()
+        .checked_add(max_stack)
+        .ok_or(UnsupportedReason::RegionLimit)?;
+    let own_values = u32::try_from(own_values).map_err(|_| UnsupportedReason::RegionLimit)?;
+    let retired_cost = u32::try_from(code.len())
+        .map_err(|_| UnsupportedReason::RegionLimit)?
+        .checked_add(nested_cost)
+        .ok_or(UnsupportedReason::RegionLimit)?;
+    Ok(Some(ConstructorExecution {
+        result,
+        retired_cost,
+        frame_count: 1u32
+            .checked_add(nested_frames)
+            .ok_or(UnsupportedReason::RegionLimit)?,
+        stack_values: own_values
+            .checked_add(nested_values)
+            .ok_or(UnsupportedReason::RegionLimit)?,
+    }))
+}
+
+fn constant_symbol(tag: ValueTag, bits: u64) -> ConstructorSymbol {
+    ConstructorSymbol::Constant(ScalarConstant {
+        bits,
+        tag: tag as u64,
+    })
+}
+
 fn call_value_kind(module: &Module, ty: u32) -> Result<CallValueKind, UnsupportedReason> {
     match module.types.get(ty as usize) {
         Some(BcType::Var(variable)) => Ok(CallValueKind::Variable(*variable)),
@@ -1265,6 +1571,7 @@ fn instantiate_call(
         receiver: None,
         value_target: None,
         virtual_result: signature.virtual_constructor.is_some(),
+        scalar_result: None,
     })
 }
 
@@ -1537,12 +1844,18 @@ fn can_defer_integer_overflow(func: &Func, segment: &Segment) -> bool {
 
 pub(super) fn bypasses_fuel_check(segments: &[Segment], index: usize, successor: usize) -> bool {
     let segment = &segments[index];
-    successor > index
-        && !segments[successor].retry_entry
-        && matches!(
-            segment.exit,
-            SegmentExit::Jump { .. } | SegmentExit::Conditional { .. }
-        )
+    let scalar_call = segment
+        .call_contract
+        .as_ref()
+        .is_some_and(|contract| contract.scalar_result.is_some())
+        && segment.successors.first() == Some(&successor);
+    !segments[successor].retry_entry
+        && ((successor > index
+            && matches!(
+                segment.exit,
+                SegmentExit::Jump { .. } | SegmentExit::Conditional { .. }
+            ))
+            || scalar_call)
 }
 
 fn compute_fuel_reserves(segments: &mut [Segment]) -> Result<(), UnsupportedReason> {
@@ -1555,8 +1868,15 @@ fn compute_fuel_reserves(segments: &mut [Segment]) -> Result<(), UnsupportedReas
             .map(|successor| segments[successor].fuel_reserve)
             .max()
             .unwrap_or(0);
+        let scalar_cost = segments[index]
+            .call_contract
+            .as_ref()
+            .and_then(|contract| contract.scalar_result.as_ref())
+            .map_or(0, |scalar| scalar.retired_cost.saturating_add(1));
         segments[index].fuel_reserve = segments[index]
             .cost
+            .checked_add(scalar_cost)
+            .ok_or(UnsupportedReason::RegionLimit)?
             .checked_add(tail)
             .ok_or(UnsupportedReason::RegionLimit)?;
     }
@@ -2742,6 +3062,7 @@ fn analyze_segment(
                     receiver: None,
                     value_target: Some(value_target),
                     virtual_result: false,
+                    scalar_result: None,
                 });
             }
             Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
@@ -2773,6 +3094,7 @@ fn analyze_segment(
                     receiver: Some(virtual_receiver(context, receiver)?),
                     value_target: None,
                     virtual_result: false,
+                    scalar_result: None,
                 });
             }
             Instr::CallInterface { .. } => {
@@ -2807,6 +3129,7 @@ fn analyze_segment(
                     receiver: None,
                     value_target: None,
                     virtual_result: false,
+                    scalar_result: None,
                 });
             }
             Instr::Extended(ExtendedInstr::CallSlot { .. } | ExtendedInstr::NewSlot { .. }) => {
@@ -2850,6 +3173,7 @@ fn analyze_segment(
                     receiver: None,
                     value_target: None,
                     virtual_result: false,
+                    scalar_result: None,
                 });
             }
             Instr::Perform { .. } | Instr::PerformValue { .. } => {
@@ -3288,13 +3612,14 @@ struct VirtualFlowState {
 }
 
 fn select_virtual_results(
+    input: &FunctionInput<'_>,
     runtime: &Func,
     source: &Module,
     source_func: &Func,
     segments: &mut [Segment],
     local_count: usize,
     constructor: Option<VirtualConstructor>,
-) -> Result<(), UnsupportedReason> {
+) -> Result<Vec<ScalarInstance>, UnsupportedReason> {
     let candidates: Vec<usize> = segments
         .iter()
         .enumerate()
@@ -3326,16 +3651,95 @@ fn select_virtual_results(
     for segment in segments.iter_mut() {
         if let Some(contract) = &mut segment.call_contract {
             contract.virtual_result = false;
+            contract.scalar_result = None;
         }
     }
+    let mut scalar_instances = Vec::new();
     for candidate in selected {
+        let scalar = match segments[candidate].exit {
+            SegmentExit::Call {
+                target, app: None, ..
+            } if scalar_result_is_local(runtime, segments, candidate) => {
+                scalar_constructor_summary(input, target)?
+            }
+            _ => None,
+        };
         let contract = segments[candidate]
             .call_contract
             .as_mut()
             .ok_or(UnsupportedReason::InvalidControlFlow)?;
         contract.virtual_result = true;
+        if let Some(mut scalar) = scalar {
+            let site = u32::try_from(scalar_instances.len())
+                .map_err(|_| UnsupportedReason::RegionLimit)?;
+            if site < crate::activation::SCALAR_INSTANCE_COUNT as u32 {
+                scalar.site = site;
+                scalar_instances.push(ScalarInstance {
+                    class: scalar.class,
+                    field_count: u32::try_from(scalar.fields.len())
+                        .map_err(|_| UnsupportedReason::RegionLimit)?,
+                    frozen: scalar.frozen,
+                });
+                contract.scalar_result = Some(scalar);
+            }
+        }
     }
-    Ok(())
+    Ok(scalar_instances)
+}
+
+fn scalar_result_is_local(runtime: &Func, segments: &[Segment], candidate: usize) -> bool {
+    let Some(successor) = segments[candidate].successors.first().copied() else {
+        return false;
+    };
+    let Some(segment) = segments.get(successor) else {
+        return false;
+    };
+    let Some(code) = runtime
+        .blocks
+        .get(segment.block as usize)
+        .and_then(|block| block.get(segment.start as usize..segment.end as usize))
+    else {
+        return false;
+    };
+    let Some(Instr::StoreLocal(local)) = code.first().copied() else {
+        return false;
+    };
+    if segment.successors.iter().any(|successor| {
+        segments
+            .get(*successor)
+            .and_then(|next| next.live_in.get(local as usize))
+            .copied()
+            .unwrap_or(true)
+    }) {
+        return false;
+    }
+    let mut field_reads = 0usize;
+    for (index, instruction) in code.iter().copied().enumerate().skip(1) {
+        match instruction {
+            Instr::LoadLocal(slot) if slot == local => {
+                if !matches!(code.get(index + 1), Some(Instr::LoadField(_))) {
+                    return false;
+                }
+                field_reads += 1;
+            }
+            Instr::StoreLocal(slot) if slot == local => return false,
+            _ => {}
+        }
+    }
+    if field_reads == 0 {
+        return false;
+    }
+    code.iter().all(scalar_projection_instruction)
+}
+
+fn scalar_projection_instruction(instruction: &Instr) -> bool {
+    matches!(
+        crate::instruction_treatment(instruction).class(),
+        crate::TreatmentClass::Inline | crate::TreatmentClass::Guarded
+    ) && !matches!(
+        instruction,
+        Instr::StoreField(_) | Instr::New(_) | Instr::NewG { .. }
+    )
 }
 
 fn virtual_result_dies_locally(

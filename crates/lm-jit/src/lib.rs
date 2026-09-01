@@ -642,6 +642,7 @@ impl CompiledRegion {
             inline_allocations: 0,
             pending_instance_allocations: 0,
             pending_instance_releases: 0,
+            scalar_replaced_allocations: 0,
             lookup_hash_key: heap.lookup_hash_key,
             class_parents: class_parents.as_ptr(),
             class_count: class_parents.len(),
@@ -680,6 +681,7 @@ impl CompiledRegion {
             raw_activation.pending_instance_allocations,
             raw_activation.pending_instance_releases,
         );
+        runtime.record_scalar_replacements(raw_activation.scalar_replaced_allocations);
         if raw_activation.scalar_len > raw_activation.scalar_capacity
             || raw_activation.frame_len > raw_activation.frame_capacity
             || raw_activation.frame_len == 0

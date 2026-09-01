@@ -19,6 +19,9 @@ const INITIAL_NATIVE_FRAMES: usize = 256;
 pub(super) const VIRTUAL_INSTANCE_COUNT: usize = 64;
 pub(super) const VIRTUAL_INSTANCE_FIELDS: usize = 16;
 pub(super) const PENDING_INSTANCE_SLOT_BASE: u32 = u32::MAX - VIRTUAL_INSTANCE_COUNT as u32 + 1;
+pub(super) const SCALAR_INSTANCE_COUNT: usize = 64;
+pub(super) const SCALAR_INSTANCE_SLOT_BASE: u32 =
+    PENDING_INSTANCE_SLOT_BASE - SCALAR_INSTANCE_COUNT as u32;
 pub(super) const TYPE_ENVIRONMENT_CACHE_WAYS: usize = 4;
 const INITIAL_TYPE_ENVIRONMENT_CACHE_SETS: usize = 16;
 const MAX_TYPE_ENVIRONMENT_CACHE_SETS: usize = 1_024;
@@ -116,6 +119,7 @@ pub(super) struct RawNativeActivation {
     pub(super) inline_allocations: u64,
     pub(super) pending_instance_allocations: u64,
     pub(super) pending_instance_releases: u64,
+    pub(super) scalar_replaced_allocations: u64,
     pub(super) lookup_hash_key: u64,
     pub(super) class_parents: *const u32,
     pub(super) class_count: usize,
@@ -1010,6 +1014,11 @@ pub struct NativeFrameView<'a> {
 }
 
 impl NativeFrameView<'_> {
+    /// Return the first scalar slot of this frame.
+    pub fn scalar_base(&self) -> usize {
+        self.frame.scalar_base as usize
+    }
+
     /// Return the namespace function slot.
     pub fn function(&self) -> u32 {
         self.frame.function
@@ -1224,6 +1233,16 @@ impl NativeActivation {
             if held_bits == token {
                 *held = reference;
             }
+        }
+    }
+
+    /// Replace one typed object slot without dynamic tag storage.
+    pub fn replace_pending_object_slot(&mut self, slot: usize, token: u64, reference: ObjRef) {
+        let Some(bits) = self.scalars.get_mut(slot) else {
+            return;
+        };
+        if *bits == token {
+            *bits = u64::from(reference.slot) | (u64::from(reference.generation) << 32);
         }
     }
 
@@ -1920,6 +1939,9 @@ pub trait NativeRuntime {
 
     /// Record transient instance allocations and releases.
     fn record_pending_instances(&mut self, _allocations: u64, _releases: u64) {}
+
+    /// Record constructor instances represented through scalar fields.
+    fn record_scalar_replacements(&mut self, _allocations: u64) {}
 
     /// Allocate one instance with its exact environment and active roots.
     fn allocate_instance(

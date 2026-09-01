@@ -398,7 +398,8 @@ impl JitEngine {
                     }
                 }
             }
-            for callee in callees {
+            let mut callee_index = 0usize;
+            while let Some(callee) = callees.get(callee_index).copied() {
                 let callee_runtime =
                     context
                         .module
@@ -427,6 +428,21 @@ impl JitEngine {
                     callee_local,
                     callee_relocation.classes(),
                 );
+                let is_constructor = callee_unit.module().bindings.iter().any(|binding| {
+                    binding.func == callee_local && binding.class != lm_bytecode::NO_CLASS
+                });
+                if is_constructor {
+                    for instruction in callee_runtime.blocks.iter().flatten() {
+                        if let lm_bytecode::Instr::Call(nested)
+                        | lm_bytecode::Instr::CallG { func: nested, .. } = instruction
+                        {
+                            if !callees.contains(nested) {
+                                callees.push(*nested);
+                            }
+                        }
+                    }
+                }
+                callee_index += 1;
             }
             Ok(input)
         }) {
@@ -682,6 +698,7 @@ impl JitEngine {
             pending_instance_allocations,
             pending_instance_releases,
             pending_instance_materializations,
+            scalar_replaced_allocations,
             collection_slow_paths,
         ) = {
             let type_environments = std::mem::take(&mut machine.native_type_environments);
@@ -699,6 +716,7 @@ impl JitEngine {
                 pending_instance_allocations: 0,
                 pending_instance_releases: 0,
                 pending_instance_materializations: 0,
+                scalar_replaced_allocations: 0,
                 collection_slow_paths: 0,
             };
             let mut active_region = active_region;
@@ -727,7 +745,7 @@ impl JitEngine {
                 };
                 let type_store_id = runtime.envs.canonical_store_id();
                 let heap = runtime.machine.vm.heap.jit_view();
-                let exit = match active_region.execute(
+                let mut exit = match active_region.execute(
                     &mut runtime,
                     &mut scratch.activation,
                     NativeExecution {
@@ -756,11 +774,26 @@ impl JitEngine {
                     Ok(exit) => exit,
                     Err(error) => break Err(error),
                 };
-                let (materializations, releases) =
-                    match materialize_pending_instances(runtime.machine, &mut scratch.activation) {
-                        Ok(activity) => activity,
-                        Err(()) => break Err(Failure::BackendUnavailable),
-                    };
+                if scratch.activation.pending_instances().next().is_some()
+                    && continuation_regions(
+                        native,
+                        &root_region,
+                        &scratch.activation,
+                        &mut scratch.continuation_regions,
+                    )
+                    .is_err()
+                {
+                    break Err(Failure::BackendUnavailable);
+                }
+                let (materializations, releases) = match materialize_pending_instances(
+                    runtime.machine,
+                    &mut scratch.activation,
+                    &scratch.continuation_regions,
+                    &mut exit,
+                ) {
+                    Ok(activity) => activity,
+                    Err(()) => break Err(Failure::BackendUnavailable),
+                };
                 runtime.pending_instance_materializations = runtime
                     .pending_instance_materializations
                     .saturating_add(materializations);
@@ -1175,6 +1208,7 @@ impl JitEngine {
                 runtime.pending_instance_allocations,
                 runtime.pending_instance_releases,
                 runtime.pending_instance_materializations,
+                runtime.scalar_replaced_allocations,
                 runtime.collection_slow_paths,
             )
         };
@@ -1185,6 +1219,7 @@ impl JitEngine {
             pending_instance_releases,
             pending_instance_materializations,
         );
+        metrics.note_scalar_replacements(scalar_replaced_allocations);
         metrics.note_native_collection_slow_paths(collection_slow_paths);
         let exit = match exit {
             Ok(exit) => exit,
@@ -1522,11 +1557,14 @@ struct PendingInstanceMaterialization {
 fn materialize_pending_instances(
     machine: &mut Machine,
     activation: &mut lm_jit::NativeActivation,
+    regions: &[Arc<lm_jit::CompiledRegion>],
+    exit: &mut lm_jit::ExecutionExit,
 ) -> Result<(u64, u64), ()> {
     let count = activation.pending_instances().count();
     if count == 0 {
         return Ok((0, 0));
     }
+    let object_slots = pending_object_slots(activation, regions, *exit)?;
     let mut pending_materializations = Vec::new();
     pending_materializations
         .try_reserve_exact(count)
@@ -1581,6 +1619,10 @@ fn materialize_pending_instances(
     }
     for (token, reference) in replacements.iter().copied() {
         activation.replace_pending_reference(token, reference);
+        for slot in object_slots.iter().copied() {
+            activation.replace_pending_object_slot(slot, token, reference);
+        }
+        exit.replace_object_result(token, reference);
     }
     for (_, reference) in replacements.iter().copied() {
         let Object::Instance { fields, .. } = machine.vm.heap.get_mut(reference) else {
@@ -1600,6 +1642,59 @@ fn materialize_pending_instances(
     }
     activation.clear_pending_instances();
     Ok((replacements.len() as u64, releases as u64))
+}
+
+fn pending_object_slots(
+    activation: &lm_jit::NativeActivation,
+    regions: &[Arc<lm_jit::CompiledRegion>],
+    exit: lm_jit::ExecutionExit,
+) -> Result<Vec<usize>, ()> {
+    let frames: Vec<_> = activation.frames().collect();
+    if frames.len() != regions.len() {
+        return Err(());
+    }
+    let mut slots = Vec::new();
+    for (index, (frame, region)) in frames.iter().zip(regions).enumerate() {
+        if frame.locals().len() != region.local_kinds().len() {
+            return Err(());
+        }
+        let local_base = frame.scalar_base();
+        for (slot, (kind, tag)) in region
+            .local_kinds()
+            .iter()
+            .copied()
+            .zip(frame.local_tags().iter().copied())
+            .enumerate()
+        {
+            if scalar_slot_holds_object(kind, tag) {
+                slots.push(local_base.checked_add(slot).ok_or(())?);
+            }
+        }
+        let top = index + 1 == frames.len();
+        let operand_kinds = frame_operand_kinds(region, frame, top.then_some(exit))?;
+        if operand_kinds.len() != frame.operands().len()
+            || operand_kinds.len() != frame.operand_tags().len()
+        {
+            return Err(());
+        }
+        let operand_base = local_base.checked_add(frame.locals().len()).ok_or(())?;
+        for (slot, (kind, tag)) in operand_kinds
+            .iter()
+            .copied()
+            .zip(frame.operand_tags().iter().copied())
+            .enumerate()
+        {
+            if scalar_slot_holds_object(kind, tag) {
+                slots.push(operand_base.checked_add(slot).ok_or(())?);
+            }
+        }
+    }
+    Ok(slots)
+}
+
+fn scalar_slot_holds_object(kind: ScalarKind, tag: u64) -> bool {
+    matches!(kind, ScalarKind::Object(_))
+        || matches!(kind, ScalarKind::Tagged(_)) && tag == ValueTag::Obj as u64
 }
 
 fn continuation_regions(

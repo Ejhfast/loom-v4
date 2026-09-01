@@ -122,6 +122,7 @@ pub(super) struct MachineRuntime<'a> {
     pub(super) pending_instance_allocations: u64,
     pub(super) pending_instance_releases: u64,
     pub(super) pending_instance_materializations: u64,
+    pub(super) scalar_replaced_allocations: u64,
     pub(super) collection_slow_paths: u64,
 }
 
@@ -753,6 +754,11 @@ impl NativeRuntime for MachineRuntime<'_> {
             .pending_instance_allocations
             .saturating_add(allocations);
         self.pending_instance_releases = self.pending_instance_releases.saturating_add(releases);
+    }
+
+    fn record_scalar_replacements(&mut self, allocations: u64) {
+        self.scalar_replaced_allocations =
+            self.scalar_replaced_allocations.saturating_add(allocations);
     }
 
     fn allocate_instance(

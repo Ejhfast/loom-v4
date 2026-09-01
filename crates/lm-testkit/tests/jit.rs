@@ -76,6 +76,36 @@ fn run_artifact_with_config(
     (outcome, engine.metrics(), dump)
 }
 
+fn run_artifact_and_capture(
+    artifact: &lm_bytecode::artifact::Artifact,
+    mode: EngineMode,
+    fuel: u64,
+) -> (
+    Outcome,
+    lm_vm::EngineMetrics,
+    lm_vm::snapshot::SnapshotImage,
+) {
+    let (arena, namespace) =
+        lm_testkit::publish_compiled_artifact(artifact.clone()).expect("the JIT case publishes");
+    let engine = Arc::new(Engine::new(mode));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig {
+            fuel,
+            ..VmConfig::default()
+        },
+        Box::new(RecordingHost::new(1)),
+        Arc::clone(&engine),
+    );
+    let outcome = world.run_root();
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the stopped JIT state captures");
+    (outcome, engine.metrics(), image)
+}
+
 fn run_with_shared_engine(source: &str, engine: Arc<Engine>) -> String {
     let artifact =
         lm_testkit::compile_text("jit-cache.lm", source).expect("the cache case compiles");
@@ -3481,14 +3511,11 @@ fn frozen_instance_sealing_stays_native() {
     // Unreachable garbage is not part of a terminal snapshot.
     assert!(native_dump.contains("frames: 0 active"));
     assert_eq!(native, Outcome::Done(lm_value::Value::Int(499_500)));
-    assert!(metrics.native_allocations >= 1000, "{metrics:?}");
-    assert!(metrics.pending_instance_allocations >= 900, "{metrics:?}");
-    assert_eq!(
-        metrics.pending_instance_releases, metrics.pending_instance_allocations,
-        "{metrics:?}"
-    );
+    assert_eq!(metrics.native_allocations, 0, "{metrics:?}");
+    assert!(metrics.scalar_replaced_allocations >= 1000, "{metrics:?}");
+    assert_eq!(metrics.pending_instance_allocations, 0, "{metrics:?}");
     assert_eq!(metrics.pending_instance_materializations, 0, "{metrics:?}");
-    assert!(metrics.compiled_heap_write_sites >= 2, "{metrics:?}");
+    assert_eq!(metrics.compiled_heap_write_sites, 0, "{metrics:?}");
 }
 
 #[test]
@@ -3498,7 +3525,7 @@ fn native_class_initialization_releases_each_call_frame() {
         "  def init(mut self, x: Int, y: Int)\n",
         "    self.x = x\n    self.y = y\n  end\nend\n",
         "i = 0\ns = 0\nwhile i < 50000\n",
-        "  p = Point(i, i)\n  s = s + p.x\n  i = i + 1\n",
+        "  p = Point(i, i + 1)\n  s = s + p.x\n  i = i + 1\n",
         "end\ns\n",
     );
     let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
@@ -3507,18 +3534,15 @@ fn native_class_initialization_releases_each_call_frame() {
         native, interpreted,
         "{native_metrics:?}\n{native_dump}\n{interpreted_dump}"
     );
-    // Scalar replacement can remove objects that no live value can reach.
+    // Scalar replacement keeps fields in generated SSA values.
     assert!(native_dump.contains("frames: 0 active"));
+    assert_eq!(native_metrics.native_allocations, 0, "{native_metrics:?}");
+    assert_eq!(
+        native_metrics.pending_instance_allocations, 0,
+        "{native_metrics:?}"
+    );
     assert!(
-        native_metrics.pending_instance_allocations > 40_000,
-        "{native_metrics:?}"
-    );
-    assert_eq!(
-        native_metrics.pending_instance_releases, native_metrics.pending_instance_allocations,
-        "{native_metrics:?}"
-    );
-    assert_eq!(
-        native_metrics.pending_instance_materializations, 0,
+        native_metrics.scalar_replaced_allocations > 40_000,
         "{native_metrics:?}"
     );
     let (automatic, automatic_metrics, automatic_dump) = run(source, EngineMode::Auto, u64::MAX);
@@ -3527,18 +3551,97 @@ fn native_class_initialization_releases_each_call_frame() {
         "{automatic_metrics:?}\n{automatic_dump}"
     );
     assert!(automatic_dump.contains("frames: 0 active"));
-    assert!(
-        automatic_metrics.pending_instance_allocations > 40_000,
+    assert_eq!(
+        automatic_metrics.native_allocations, 0,
         "{automatic_metrics:?}"
     );
-    assert_eq!(
-        automatic_metrics.pending_instance_releases, automatic_metrics.pending_instance_allocations,
+    assert!(
+        automatic_metrics.scalar_replaced_allocations > 40_000,
         "{automatic_metrics:?}"
     );
     assert!(
         automatic_metrics.native_retired_instructions > 500_000,
         "{automatic_metrics:?}"
     );
+}
+
+#[test]
+fn scalar_replaced_construction_matches_each_fuel_boundary() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "i = 0\ns = 0\nwhile i < 3\n",
+        "  p = Point(i, i + 1)\n  x = p.x\n  y = p.y\n",
+        "  s = s + x + y\n  i = i + 1\n",
+        "end\ns\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-scalar-instance-fuel.lm", source)
+        .expect("the scalar instance case compiles");
+    for fuel in 0..=160 {
+        let (interpreted, _, interpreted_image) =
+            run_artifact_and_capture(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_image) =
+            run_artifact_and_capture(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(
+            lm_vm::snapshot::dump::diff(&native_image, &interpreted_image),
+            None,
+            "fuel {fuel}: {metrics:?}"
+        );
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(9)));
+    assert_eq!(metrics.native_heap_allocations, 0, "{metrics:?}");
+    assert_eq!(metrics.native_allocations, 0, "{metrics:?}");
+    assert_eq!(metrics.scalar_replaced_allocations, 3, "{metrics:?}");
+}
+
+#[test]
+fn scalar_replacement_preserves_the_heap_limit() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n  y: Int = 0\n",
+        "  def init(mut self, x: Int, y: Int)\n",
+        "    self.x = x\n    self.y = y\n  end\nend\n",
+        "point = Point(20, 22)\npoint.x\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-scalar-instance-limit.lm", source)
+        .expect("the scalar instance limit case compiles");
+    let config = VmConfig {
+        heap_bytes: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::HeapLimit));
+    assert_eq!(metrics.scalar_replaced_allocations, 0, "{metrics:?}");
+}
+
+#[test]
+fn scalar_replacement_preserves_the_frame_limit() {
+    let source = concat!(
+        "class Point\n  x: Int = 0\n",
+        "  def init(mut self, x: Int)\n    self.x = x\n  end\nend\n",
+        "point = Point(42)\npoint.x\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-scalar-instance-frame-limit.lm", source)
+        .expect("the scalar instance frame-limit case compiles");
+    let config = VmConfig {
+        max_frames: 1,
+        ..VmConfig::default()
+    };
+    let (interpreted, _, interpreted_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Interpreter, config);
+    let (native, metrics, native_dump) =
+        run_artifact_with_config(&artifact, EngineMode::Native, config);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::StackLimit));
+    assert_eq!(metrics.scalar_replaced_allocations, 0, "{metrics:?}");
 }
 
 #[test]

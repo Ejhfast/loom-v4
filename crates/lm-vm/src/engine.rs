@@ -51,11 +51,15 @@ pub struct EngineMetrics {
     pub unproductive_native_demotions: u64,
     pub native_fault_exits: u64,
     pub native_allocation_exits: u64,
+    /// Canonical heap allocations completed during native execution.
+    pub native_heap_allocations: u64,
+    /// Allocation instructions completed during native execution.
     pub native_allocations: u64,
     pub native_inline_allocations: u64,
     pub pending_instance_allocations: u64,
     pub pending_instance_releases: u64,
     pub pending_instance_materializations: u64,
+    pub scalar_replaced_allocations: u64,
     pub native_collection_slow_paths: u64,
     pub native_effect_exits: u64,
     pub native_type_environment_exits: u64,
@@ -141,6 +145,7 @@ struct EngineCounters {
     pending_instance_allocations: AtomicU64,
     pending_instance_releases: AtomicU64,
     pending_instance_materializations: AtomicU64,
+    scalar_replaced_allocations: AtomicU64,
     native_collection_slow_paths: AtomicU64,
     native_effect_exits: AtomicU64,
     native_type_environment_exits: AtomicU64,
@@ -164,6 +169,9 @@ struct EngineCounters {
 impl EngineCounters {
     fn read(&self, compiler: lm_jit::CompilerMetrics) -> EngineMetrics {
         let read = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        let native_allocations = read(&self.native_allocations);
+        let pending_instance_allocations = read(&self.pending_instance_allocations);
+        let pending_instance_materializations = read(&self.pending_instance_materializations);
         EngineMetrics {
             compilation_attempts: compiler.compilation_attempts,
             compiled_regions: compiler.compiled_regions,
@@ -188,11 +196,15 @@ impl EngineCounters {
             unproductive_native_demotions: read(&self.unproductive_native_demotions),
             native_fault_exits: read(&self.native_fault_exits),
             native_allocation_exits: read(&self.native_allocation_exits),
-            native_allocations: read(&self.native_allocations),
+            native_heap_allocations: native_allocations
+                .saturating_sub(pending_instance_allocations)
+                .saturating_add(pending_instance_materializations),
+            native_allocations,
             native_inline_allocations: read(&self.native_inline_allocations),
-            pending_instance_allocations: read(&self.pending_instance_allocations),
+            pending_instance_allocations,
             pending_instance_releases: read(&self.pending_instance_releases),
-            pending_instance_materializations: read(&self.pending_instance_materializations),
+            pending_instance_materializations,
+            scalar_replaced_allocations: read(&self.scalar_replaced_allocations),
             native_collection_slow_paths: read(&self.native_collection_slow_paths),
             native_effect_exits: read(&self.native_effect_exits),
             native_type_environment_exits: read(&self.native_type_environment_exits),
@@ -234,6 +246,7 @@ impl EngineCounters {
         reset(&self.pending_instance_allocations);
         reset(&self.pending_instance_releases);
         reset(&self.pending_instance_materializations);
+        reset(&self.scalar_replaced_allocations);
         reset(&self.native_collection_slow_paths);
         reset(&self.native_effect_exits);
         reset(&self.native_type_environment_exits);
@@ -310,6 +323,10 @@ impl EngineCounters {
         add(
             &self.pending_instance_materializations,
             values.pending_instance_materializations,
+        );
+        add(
+            &self.scalar_replaced_allocations,
+            values.scalar_replaced_allocations,
         );
         add(
             &self.native_collection_slow_paths,
@@ -482,6 +499,13 @@ impl EngineTurnMetrics<'_> {
             .values
             .pending_instance_materializations
             .saturating_add(materializations);
+    }
+
+    pub(crate) fn note_scalar_replacements(&mut self, allocations: u64) {
+        self.values.scalar_replaced_allocations = self
+            .values
+            .scalar_replaced_allocations
+            .saturating_add(allocations);
     }
 
     pub(crate) fn note_native_collection_slow_paths(&mut self, paths: u64) {

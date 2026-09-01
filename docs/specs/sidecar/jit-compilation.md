@@ -3403,7 +3403,7 @@ The direct and scheduled corpus differential passed.
 
 The full workspace suite passed.
 
-### Stage F66: Replace nonescaping instances with transient scalar storage
+### Stage F66: Defer nonescaping instance payloads
 
 - identify constructor results that cannot reach a helper, field, return, or observable exit;
 - request transient construction only at those call sites;
@@ -3438,6 +3438,14 @@ Exact fuel and poll tests compare canonical state after materialization.
 
 The measurements used isolated release tests with one test thread.
 
+This stage did not replace instances with SSA values.
+
+Each construction still used one transient activation record.
+
+The `native_allocations` counter counted these logical allocation instructions.
+
+It did not distinguish transient records from canonical heap allocations.
+
 | Warm release row | Stage F65 | Stage F66 | Change |
 | --- | ---: | ---: | ---: |
 | Plain allocation, native | 0.983 ms | 0.983 ms | unchanged |
@@ -3457,6 +3465,84 @@ The focused JIT suite passed 164 tests.
 The direct and scheduled corpus differential passed in 24.22 seconds.
 
 The warm debug workspace suite passed in 63.59 seconds.
+
+### Stage F67: Replace constructor instances with SSA fields
+
+- identify one-use constructor results before code generation;
+- evaluate each accepted constructor and nested initializer symbolically;
+- map each instance field to one argument or constant;
+- keep all accepted fields in Cranelift SSA values;
+- replace accepted field reads with direct SSA uses;
+- preserve exact retired costs for skipped constructor frames;
+- preserve frame, stack, and heap limit checks;
+- reserve one cold materialization record for each active site;
+- reconstruct one canonical object before each non-return engine exit;
+- release the precharged object before a terminal return;
+- derive static object slots from verified frame kinds;
+- patch dynamic object slots and detached object results;
+- count logical replacements and canonical heap allocations separately.
+
+The analysis accepts one non-generic constructor with a direct initializer.
+
+The result must enter one local and leave only through accepted field reads.
+
+A field store, unrelated allocation, helper, or incompatible use rejects the candidate.
+
+The hot path creates no activation record and no `ValueArray`.
+
+It reserves the exact heap charge for one live logical object.
+
+Repeated constructions at one site replace the SSA fields and reuse that charge.
+
+A cold engine exit writes one pending record with the current SSA fields.
+
+The host then creates one canonical object and replaces every matching token.
+
+Verified frame kinds identify statically tagged object slots without redundant runtime tags.
+
+This repair also fixes an older pending-token snapshot fault.
+
+The exact test sweeps fuel limits from 0 through 160.
+
+It compares canonical snapshots after every interpreter and native stop.
+
+Heap-limit and frame-limit tests also exercise the replacement path.
+
+The release measurement used nine warm scheduled rounds.
+
+| Class initialization result | Value |
+| --- | ---: |
+| Interpreter | 96.093 ms |
+| Auto | 1.468 ms |
+| Native | 1.454 ms |
+| Auto gain | 65.44 times |
+| Native gain | 66.11 times |
+| Scalar replacements | 4,500,000 |
+| Native heap allocations | 0 |
+| Pending-record allocations | 0 |
+| Compiled regions | 1 |
+| Compiled code | 9,790 bytes |
+
+Stage F66 measured 18.341 milliseconds in Native mode for this row.
+
+Stage F67 reduces that time by 92.1 percent.
+
+The old path compiled three regions and emitted 20,618 bytes.
+
+Representative Auto gains remained stable after this change.
+
+| Warm release row | Auto gain |
+| --- | ---: |
+| JSON parse | 3.00 times |
+| JSON encode | 2.94 times |
+| HTTP parse | 2.62 times |
+| HTTP encode | 4.15 times |
+
+The focused JIT suite passed 167 tests.
+
+The direct and scheduled corpus differential passed in 24.34 seconds.
+
+The full workspace suite passed in 73.69 seconds after a partial rebuild.
 
 ## 24. Rejected designs
 
@@ -3497,5 +3583,7 @@ A runtime library cannot select one process-global allocator.
 A second payload owner cannot mirror `ValueArray` ownership.
 
 A transient token cannot cross a helper or engine boundary.
+
+A pending allocation record cannot count as scalar replacement.
 
 These designs remain rejected even when local differential tests pass.
