@@ -13,7 +13,7 @@
 //!   artifact summary; `--live` runs a program and dumps the machine.
 
 use lm_source::SourceFile;
-use lm_vm::{VmConfig, World, WorldLimits};
+use lm_vm::{Engine, EngineMode, VmConfig, World, WorldLimits};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
@@ -56,6 +56,7 @@ const USAGE: &str = "usage:
          [--max-machines N] [--max-images N]
          [--max-children N] [--max-waits N]
          [--scheduler deterministic|parallel] [--threads N]
+         [--engine interpreter|auto|native]
          [file.lm | file.lma | package directory] [-- arguments...]
   (`lm build` and `lm run` default to the current directory)
   lm disasm <file.lm | file.lma>
@@ -168,8 +169,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             if options.live {
                 let (arena, namespace) = load_artifact(&options.file)?;
                 let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-                let mut world =
-                    World::new_with_limits(arena, namespace, options.config, options.limits, host);
+                let mut world = World::new_with_limits_and_engine(
+                    arena,
+                    namespace,
+                    options.config,
+                    options.limits,
+                    host,
+                    std::sync::Arc::new(Engine::new(options.engine)),
+                );
                 for grant in &options.allow {
                     world
                         .allow(grant)
@@ -284,7 +291,14 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
         .ok_or_else(|| format!("error: `lm snapshot save` needs an output file\n{USAGE}\n"))?;
     let (arena, namespace) = load_artifact(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new_with_limits(arena, namespace, options.config, options.limits, host);
+    let mut world = World::new_with_limits_and_engine(
+        arena,
+        namespace,
+        options.config,
+        options.limits,
+        host,
+        std::sync::Arc::new(Engine::new(options.engine)),
+    );
     for grant in &options.allow {
         world
             .allow(grant)
@@ -318,7 +332,14 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     let (arena, namespace) = runtime_core()?;
     let bytes = read_bytes(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new_with_limits(arena, namespace, options.config, options.limits, host);
+    let mut world = World::new_with_limits_and_engine(
+        arena,
+        namespace,
+        options.config,
+        options.limits,
+        host,
+        std::sync::Arc::new(Engine::new(options.engine)),
+    );
     // The external byte path decodes and admits the container once.
     // The restore below reads the admitted image and repeats nothing.
     let image = world
@@ -451,7 +472,8 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
     let arguments = options.command_args;
-    let result = lm_proc::run_on_worker_with_scheduler_and_limits(
+    let engine = std::sync::Arc::new(Engine::new(options.engine));
+    let result = lm_proc::run_on_worker_with_engine(
         arena,
         namespace,
         options.config,
@@ -459,6 +481,7 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
         options.scheduler,
         &grants,
         Box::new(move || Box::new(lm_host::CliHost::with_args(seed, arguments))),
+        engine,
     )
     .map_err(|e| format!("error: {e}\n"))?;
     let (faulted, text, fault_context) = (result.faulted, result.text, result.fault_context);
@@ -588,6 +611,8 @@ struct Options {
     config: VmConfig,
     limits: WorldLimits,
     scheduler: lm_proc::SchedulerConfig,
+    /// The execution engine mode for guest code.
+    engine: EngineMode,
     /// The tokens after the `lm run` separator.
     command_args: Vec<String>,
 }
@@ -624,6 +649,7 @@ fn parse_options_mode(
     let mut limits = WorldLimits::default();
     let mut scheduler_mode = None;
     let mut threads = None;
+    let mut engine = EngineMode::Interpreter;
     let mut command_args = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -672,6 +698,12 @@ fn parse_options_mode(
                 }
                 threads = Some(flag_value(&mut iter, "--threads")?);
             }
+            "--engine" => {
+                let value = iter.next().ok_or_else(|| {
+                    "error: `--engine` needs `interpreter`, `auto`, or `native`\n".to_string()
+                })?;
+                engine = parse_engine_mode(value)?;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("error: unknown option `{other}`\n{USAGE}\n"));
             }
@@ -705,8 +737,21 @@ fn parse_options_mode(
         config,
         limits,
         scheduler,
+        engine,
         command_args,
     })
+}
+
+/// Parse one `--engine` value into an engine mode.
+fn parse_engine_mode(value: &str) -> Result<EngineMode, String> {
+    match value {
+        "interpreter" => Ok(EngineMode::Interpreter),
+        "auto" => Ok(EngineMode::Auto),
+        "native" => Ok(EngineMode::Native),
+        other => Err(format!(
+            "error: `--engine` takes `interpreter`, `auto`, or `native`, found `{other}`\n{USAGE}\n"
+        )),
+    }
 }
 
 fn parse_scheduler_options(
@@ -830,6 +875,33 @@ mod tests {
                 workers: default_parallel_workers()
             }
         );
+    }
+
+    #[test]
+    fn run_options_select_the_engine() {
+        let auto = [
+            "--engine".to_string(),
+            "auto".to_string(),
+            "p.lm".to_string(),
+        ];
+        let native = [
+            "--engine".to_string(),
+            "native".to_string(),
+            "p.lm".to_string(),
+        ];
+        let bad = [
+            "--engine".to_string(),
+            "fast".to_string(),
+            "p.lm".to_string(),
+        ];
+        let unset = ["p.lm".to_string()];
+        let auto = parse_run_options(&auto, None).expect("the auto engine parses");
+        assert_eq!(auto.engine, EngineMode::Auto);
+        let native = parse_run_options(&native, None).expect("the native engine parses");
+        assert_eq!(native.engine, EngineMode::Native);
+        let unset = parse_run_options(&unset, None).expect("the default engine parses");
+        assert_eq!(unset.engine, EngineMode::Interpreter);
+        assert!(parse_run_options(&bad, None).is_err());
     }
 
     #[test]

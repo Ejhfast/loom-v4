@@ -1013,11 +1013,42 @@ pub fn run_on_worker_with_scheduler_and_limits(
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
+    run_on_worker_with_engine(
+        arena,
+        namespace,
+        config,
+        limits,
+        scheduler_config,
+        grants,
+        host,
+        std::sync::Arc::new(lm_vm::Engine::default()),
+    )
+}
+
+/// Run one program with an explicit execution engine.
+#[allow(clippy::too_many_arguments)]
+pub fn run_on_worker_with_engine(
+    arena: lm_vm::CodeArena,
+    namespace: lm_vm::NamespaceId,
+    config: lm_vm::VmConfig,
+    limits: lm_vm::WorldLimits,
+    scheduler_config: SchedulerConfig,
+    grants: &[&str],
+    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
+    engine: std::sync::Arc<lm_vm::Engine>,
+) -> Result<WorkerOutcome, String> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
             .spawn_scoped(scope, move || {
-                let mut world = World::new_with_limits(arena, namespace, config, limits, host());
+                let mut world = World::new_with_limits_and_engine(
+                    arena,
+                    namespace,
+                    config,
+                    limits,
+                    host(),
+                    engine,
+                );
                 for grant in grants {
                     world
                         .allow(grant)
