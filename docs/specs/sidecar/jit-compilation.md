@@ -3279,6 +3279,45 @@ The full workspace suite passed in 57.02 seconds.
 | Interface call | 6.80 times |
 | Generic direct call | 6.90 times |
 
+### Stage F63: Resume detached returns through the host loop
+
+- remove generated tail calls from detached continuation returns;
+- let the host execution loop finish one detached return;
+- select the compiled parent through the namespace cache;
+- use the host calling convention for native function bodies;
+- stop preserving one native frame pointer;
+- keep ordinary nested calls and returns inside native code.
+
+Cranelift requires a frame pointer for its generated tail-call instruction.
+
+Loom used that instruction only after a scheduler resumed a detached call stack.
+
+The host execution loop already handles the same return state.
+
+The new path removes duplicate generated continuation logic.
+
+The focused JIT suite passed 158 tests.
+
+The direct and scheduled corpus differential passed in 21.96 seconds.
+
+The full workspace suite passed in 69.45 seconds.
+
+| Cold release row | Stage F62 | Stage F63 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.872 ms | 1.733 ms | 7.4 percent faster |
+| JSON compile and run | 336.882 ms | 321.257 ms | 4.6 percent faster |
+| 301-function compile and run | 442.455 ms | 396.878 ms | 10.3 percent faster |
+
+| Compiled code set | Stage F62 | Stage F63 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 1,969 bytes | 1,705 bytes | 13.4 percent smaller |
+| JSON parser | 1,090,122 bytes | 1,036,324 bytes | 4.9 percent smaller |
+| 301 functions | 1,243,211 bytes | 1,158,149 bytes | 6.8 percent smaller |
+
+Warm representative times stayed within variance or improved.
+
+The scheduled deep-recursion gain increased from 4.53 to 4.73 times.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
