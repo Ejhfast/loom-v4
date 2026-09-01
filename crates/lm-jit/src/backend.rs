@@ -14295,7 +14295,13 @@ fn emit_spill_frame_values_to(
     if locals.len() != values.locals.len() {
         return Err(CompileError::Backend);
     }
-    for (slot, value) in locals.iter().copied().enumerate() {
+    for (slot, (kind, value)) in values
+        .local_kinds
+        .iter()
+        .copied()
+        .zip(locals.iter().copied())
+        .enumerate()
+    {
         let local_offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)
             .map_err(|_| CompileError::Backend)?;
         builder.ins().store(
@@ -14304,12 +14310,14 @@ fn emit_spill_frame_values_to(
             values.local_pointer,
             local_offset,
         );
-        builder.ins().store(
-            MemFlags::new(),
-            value.tag,
-            values.local_tag_pointer,
-            local_offset,
-        );
+        if value_tag(kind).is_none() {
+            builder.ins().store(
+                MemFlags::new(),
+                value.tag,
+                values.local_tag_pointer,
+                local_offset,
+            );
+        }
     }
     for (slot, value) in stack.iter().copied().enumerate() {
         let offset = i32::try_from(slot.checked_mul(8).ok_or(CompileError::Backend)?)

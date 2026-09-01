@@ -3104,6 +3104,36 @@ Remaining cold exits still spill all initialized locals and operands.
 
 The next stage must reduce those spill sets.
 
+### Stage F58: Derive static local tags
+
+- omit static local-tag stores from cold materialization paths;
+- derive each omitted tag from the verified local kind;
+- retain dynamic tags for unions and callbacks;
+- retain all parent-frame root tags before native calls;
+- retain operand-tag stores until each value has exact kind metadata.
+
+The canonical materializer owns static tag selection.
+
+Generated code still stores every local payload.
+
+The focused JIT suite passed 158 tests.
+
+The full workspace suite passed.
+
+| Cold release row | Stage F57 | Stage F58 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar compile and run | 1.907 ms | 1.909 ms | within variance |
+| JSON compile and run | 464.755 ms | 423.891 ms | 8.8 percent faster |
+| 301-function compile and run | 568.077 ms | 561.679 ms | 1.1 percent faster |
+
+| Compiled code set | Stage F57 | Stage F58 | Change |
+| --- | ---: | ---: | ---: |
+| Scalar loop | 2,966 bytes | 2,734 bytes | 7.8 percent smaller |
+| JSON parser | 2,200,070 bytes | 1,746,192 bytes | 20.6 percent smaller |
+| 301 functions | 1,897,130 bytes | 1,822,625 bytes | 3.9 percent smaller |
+
+Warm representative results stayed within measurement variance.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

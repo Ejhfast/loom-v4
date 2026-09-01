@@ -1543,7 +1543,7 @@ fn extend_native_roots(
             .zip(frame.states().iter().copied())
         {
             if state & LOCAL_INITIALIZED != 0 {
-                if let Some(Value::Obj(reference)) = parts_value(kind, tag, bits) {
+                if let Some(Value::Obj(reference)) = materialized_value(kind, tag, bits) {
                     roots.push(reference);
                 }
             }
@@ -1564,7 +1564,7 @@ fn extend_native_roots(
             .zip(frame.operands().iter().copied())
             .zip(frame.operand_tags().iter().copied())
         {
-            if let Some(Value::Obj(reference)) = parts_value(kind, tag, bits) {
+            if let Some(Value::Obj(reference)) = materialized_value(kind, tag, bits) {
                 roots.push(reference);
             }
         }
@@ -1705,7 +1705,7 @@ fn materialize_native_frames(
         if index == 0 {
             for (slot, state) in frame.states().iter().copied().enumerate() {
                 if state & LOCAL_INITIALIZED != 0 {
-                    machine.vm.locals[root_base + slot] = parts_value(
+                    machine.vm.locals[root_base + slot] = materialized_value(
                         region.local_kinds()[slot],
                         frame.local_tags()[slot],
                         frame.locals()[slot],
@@ -1730,7 +1730,7 @@ fn materialize_native_frames(
                 let value = if state & LOCAL_INITIALIZED == 0 {
                     Value::Uninit
                 } else {
-                    parts_value(kind, tag, bits).ok_or(())?
+                    materialized_value(kind, tag, bits).ok_or(())?
                 };
                 machine.vm.locals.push(value);
             }
@@ -1756,7 +1756,7 @@ fn materialize_native_frames(
             machine
                 .vm
                 .operands
-                .push(parts_value(kind, tag, bits).ok_or(())?);
+                .push(materialized_value(kind, tag, bits).ok_or(())?);
         }
     }
     let top = frames.last().ok_or(())?;
@@ -1770,6 +1770,22 @@ fn materialize_native_frames(
         .get(1..)
         .and_then(|children| children.last())
         .cloned())
+}
+
+fn materialized_value(kind: ScalarKind, stored_tag: u64, bits: u64) -> Option<Value> {
+    let tag = match kind {
+        ScalarKind::Unit => ValueTag::Unit,
+        ScalarKind::Bool => ValueTag::Bool,
+        ScalarKind::Int => ValueTag::Int,
+        ScalarKind::Float => ValueTag::Float,
+        ScalarKind::Char => ValueTag::Char,
+        ScalarKind::Object(_) => ValueTag::Obj,
+        ScalarKind::Tagged(_) | ScalarKind::Callback(_) => {
+            return parts_value(kind, stored_tag, bits);
+        }
+        ScalarKind::Operation => ValueTag::Op,
+    };
+    parts_value(kind, tag as u64, bits)
 }
 
 fn malformed_native_exit(retired: u32) -> NativeAttempt {
