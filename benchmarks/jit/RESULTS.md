@@ -66,6 +66,18 @@ The CSV and JSON pipeline rows sit within 13 percent of CPython.
 
 ## Reproduction
 
+Reproduce the Loom columns with the warm suite:
+
+```sh
+nix-shell --run "cargo test --release -p lm-testkit --test bench -- bench_jit_application_programs --ignored --nocapture"
+```
+
+Run the probe sentinels:
+
+```sh
+nix-shell --run "cargo test --release -p lm-testkit --test bench -- bench_jit_probe_programs --ignored --nocapture"
+```
+
 Run the end-to-end harness:
 
 ```sh

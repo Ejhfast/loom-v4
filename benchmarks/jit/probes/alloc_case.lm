@@ -1,0 +1,11 @@
+total = 0
+i = 0
+while i < 2000000
+  v = Some(i)
+  case v
+  in Some(x) then total = (total + x).bit_and(268435455)
+  in None then total = total
+  end
+  i = i + 1
+end
+total

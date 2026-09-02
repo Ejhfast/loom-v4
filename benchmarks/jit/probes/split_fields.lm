@@ -1,0 +1,9 @@
+line = "north,ore,12,500"
+pieces = 0
+i = 0
+while i < 100000
+  fields = line.split(",")
+  pieces = pieces + fields.len()
+  i = i + 1
+end
+pieces

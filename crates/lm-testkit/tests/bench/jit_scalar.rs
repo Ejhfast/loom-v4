@@ -546,6 +546,34 @@ fn bench_jit_scalar_regions() {
         ),
         36_000,
     );
+    report_jit_effect(
+        "jit_effect_dense_clock",
+        concat!(
+            "def go(): Int with Clock.Now\n",
+            "  observed = 0\n  i = 0\n",
+            "  while i < 200000\n",
+            "    observed = sys.clock.now()\n",
+            "    i = i + 1\n",
+            "  end\n  observed\nend\n",
+            "go()\n",
+        ),
+        100_000,
+    );
+    report_jit_effect(
+        "jit_effect_wrapped_clock",
+        concat!(
+            "def tick(): Int with Clock.Now\n",
+            "  sys.clock.now()\nend\n",
+            "def go(): Int with Clock.Now\n",
+            "  observed = 0\n  i = 0\n",
+            "  while i < 200000\n",
+            "    observed = tick()\n",
+            "    i = i + 1\n",
+            "  end\n  observed\nend\n",
+            "go()\n",
+        ),
+        100_000,
+    );
     report_jit_sliced(
         "jit_int_loop_sliced",
         "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",

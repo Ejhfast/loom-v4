@@ -422,4 +422,119 @@ fn bench_jit_application_programs() {
     report_jit_representative("jit_app_csv_report", JIT_CSV_REPORT_SOURCE);
     report_jit_representative("jit_app_json_pipeline", JIT_JSON_PIPELINE_SOURCE);
     report_jit_representative("jit_app_json_parse_large", JIT_JSON_PARSE_LARGE_SOURCE);
+    report_jit_representative("jit_app_scalar_nodiv", JIT_SCALAR_NODIV_SOURCE);
+    report_jit_representative("jit_app_image_luma", JIT_IMAGE_LUMA_SOURCE);
+    report_jit_representative("jit_app_top_level_loop", JIT_TOP_LEVEL_LOOP_SOURCE);
+    report_jit_representative("jit_app_matmul", JIT_MATMUL_SOURCE);
+    report_jit_representative("jit_app_sort_search", JIT_SORT_SEARCH_SOURCE);
+    report_jit_representative("jit_app_expr_interpreter", JIT_EXPR_INTERPRETER_SOURCE);
+    report_jit_representative("jit_app_particles", JIT_PARTICLES_SOURCE);
+    report_jit_representative("jit_app_graph_bfs", JIT_GRAPH_BFS_SOURCE);
+    report_jit_representative("jit_app_pipeline_style", JIT_PIPELINE_STYLE_SOURCE);
+    report_jit_representative("jit_app_many_functions", JIT_MANY_FUNCTIONS_SOURCE);
+    report_jit_representative("jit_app_gcx_churn_low", JIT_GCX_CHURN_LOW_SOURCE);
+    report_jit_representative("jit_app_gcx_churn_high", JIT_GCX_CHURN_HIGH_SOURCE);
+    report_jit_representative("jit_app_gcx_retained", JIT_GCX_RETAINED_SOURCE);
+    report_jit_representative("jit_app_gcx_alloc_burst", JIT_GCX_ALLOC_BURST_SOURCE);
+}
+
+const JIT_SCALAR_NODIV_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/scalar_nodiv.lm"
+));
+const JIT_IMAGE_LUMA_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/image_luma.lm"
+));
+const JIT_TOP_LEVEL_LOOP_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/top_level_loop.lm"
+));
+const JIT_MATMUL_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/matmul.lm"
+));
+const JIT_SORT_SEARCH_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/sort_search.lm"
+));
+const JIT_EXPR_INTERPRETER_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/expr_interpreter.lm"
+));
+const JIT_PARTICLES_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/particles.lm"
+));
+const JIT_GRAPH_BFS_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/graph_bfs.lm"
+));
+const JIT_PIPELINE_STYLE_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/pipeline_style.lm"
+));
+const JIT_MANY_FUNCTIONS_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/many_functions.lm"
+));
+const JIT_GCX_CHURN_LOW_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/gcx_churn_low.lm"
+));
+const JIT_GCX_CHURN_HIGH_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/gcx_churn_high.lm"
+));
+const JIT_GCX_RETAINED_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/gcx_retained.lm"
+));
+const JIT_GCX_ALLOC_BURST_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/gcx_alloc_burst.lm"
+));
+
+const JIT_PROBE_ALLOC_CASE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/alloc_case.lm"
+));
+const JIT_PROBE_MAP_STR: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/map_str.lm"
+));
+const JIT_PROBE_SPLIT_BULK: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/split_bulk.lm"
+));
+const JIT_PROBE_SPLIT_FIELDS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/split_fields.lm"
+));
+const JIT_PROBE_HELPER_FLOOR: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/helper_floor.lm"
+));
+const JIT_PROBE_TOSTRING: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/tostring.lm"
+));
+const JIT_PROBE_BYTESCAN: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/probes/bytescan.lm"
+));
+
+#[test]
+#[ignore]
+fn bench_jit_probe_programs() {
+    println!(
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits\tauto_env_exits\tnative_env_exits\tnative_env_fallbacks"
+    );
+    report_jit_representative("jit_probe_alloc_case", JIT_PROBE_ALLOC_CASE);
+    report_jit_representative("jit_probe_map_str", JIT_PROBE_MAP_STR);
+    report_jit_representative("jit_probe_split_bulk", JIT_PROBE_SPLIT_BULK);
+    report_jit_representative("jit_probe_split_fields", JIT_PROBE_SPLIT_FIELDS);
+    report_jit_representative("jit_probe_helper_floor", JIT_PROBE_HELPER_FLOOR);
+    report_jit_representative("jit_probe_tostring", JIT_PROBE_TOSTRING);
+    report_jit_representative("jit_probe_bytescan", JIT_PROBE_BYTESCAN);
 }

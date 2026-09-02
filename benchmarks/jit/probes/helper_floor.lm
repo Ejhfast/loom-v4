@@ -1,0 +1,10 @@
+line = "north,ore,12,500"
+total = 0
+i = 0
+while i < 1000000
+  if line.contains(",")
+    total = total + 1
+  end
+  i = i + 1
+end
+total

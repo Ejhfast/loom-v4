@@ -1,0 +1,15 @@
+builder = StringBuilder()
+i = 0
+while i < 20000
+  builder.append("word ")
+  i = i + 1
+end
+doc = builder.build()
+pieces = 0
+rep = 0
+while rep < 50
+  words = doc.split(" ")
+  pieces = pieces + words.len()
+  rep = rep + 1
+end
+pieces

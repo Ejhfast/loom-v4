@@ -1,0 +1,18 @@
+builder = StringBuilder()
+i = 0
+while i < 20000
+  builder.append("word ")
+  i = i + 1
+end
+bytes = builder.build().bytes()
+total = 0
+rep = 0
+while rep < 20
+  j = 0
+  while j < bytes.len()
+    total = (total + bytes.at(j)).bit_and(268435455)
+    j = j + 1
+  end
+  rep = rep + 1
+end
+total

@@ -1,0 +1,9 @@
+s = "benchmark"
+total = 0
+i = 0
+while i < 1000000
+  copy = s.to_string()
+  total = total + copy.len()
+  i = i + 1
+end
+total

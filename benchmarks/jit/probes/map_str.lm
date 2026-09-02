@@ -1,0 +1,16 @@
+vocab = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+counts = Map[String, Int]()
+i = 0
+while i < 1000000
+  key = vocab[i.bit_and(7)].to_string()
+  current = case counts.get(key)
+  in Some(value) then value
+  in None then 0
+  end
+  counts.put(key, current + 1)
+  i = i + 1
+end
+case counts.get("alpha".to_string())
+in Some(value) then value
+in None then 0
+end
