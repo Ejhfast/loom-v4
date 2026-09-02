@@ -12,7 +12,7 @@ use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
 use lm_bytecode::{ExtendedInstr, Instr, Module as CompiledModulePayload, NumericInstr};
 use lm_heap::{
     process_lookup_hash, FaultSite, Heap, MapEntry, MapIndex, NativeByteBuffer,
-    NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
+    NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch, TextRef,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::fmt::Write as _;

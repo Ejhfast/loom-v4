@@ -281,7 +281,7 @@ impl World {
         let order =
             lm_graph::snapshot_ordinals(&mut image.heap, &value_roots, &image.config.graph)?;
         for reference in order {
-            if let Object::NativeHandle { proc, generation } = image.heap.get(reference) {
+            if let Some(Object::NativeHandle { proc, generation }) = image.heap.try_get(reference) {
                 let live = self.machines.get(*proc as usize).is_some_and(|machine| {
                     machine.generation() == *generation && machine.is_live()
                 });
@@ -504,14 +504,14 @@ impl World {
                 )?
             };
             for reference in objects {
-                match self.machines[vm as usize].vm.heap.get(reference) {
-                    Object::NativeVm { image, generation }
-                    | Object::NativeCodeHandle {
+                match self.machines[vm as usize].vm.heap.try_get(reference) {
+                    Some(Object::NativeVm { image, generation })
+                    | Some(Object::NativeCodeHandle {
                         image, generation, ..
-                    }
-                    | Object::NativeSlotChange {
+                    })
+                    | Some(Object::NativeSlotChange {
                         image, generation, ..
-                    } => {
+                    }) => {
                         self.append_image_key(
                             VmImageKey {
                                 image: *image,
@@ -737,7 +737,7 @@ impl World {
         if record.slots.is_empty()
             && record.slot_versions.is_empty()
             && record.heap.live_count() == 0
-            && record.heap.slot_count() == 0
+            && record.heap.reference_slot_count() == 0
             && record.instances.is_empty()
         {
             return Ok(ImageVm {
@@ -766,12 +766,18 @@ impl World {
         .map_err(|code| {
             SnapshotFail::Fault(code, "a VM value-slot graph passed a limit".to_string())
         })?;
-        let mut ordinals = vec![u32::MAX; self.vm_images[key.image as usize].heap.slot_count()];
+        let heap = &self.vm_images[key.image as usize].heap;
+        let mut ordinals = vec![u32::MAX; heap.reference_slot_count()];
         for (ordinal, reference) in order.iter().enumerate() {
-            ordinals[reference.slot as usize] = ordinal as u32;
+            let index = heap
+                .reference_index(*reference)
+                .ok_or(SnapshotFail::LimitExceeded)?;
+            ordinals[index] = ordinal as u32;
         }
         let map = |reference: ObjRef| ObjRef {
-            slot: ordinals[reference.slot as usize],
+            slot: ordinals[heap
+                .reference_index(reference)
+                .expect("a snapshot reference is live")],
             generation: 0,
         };
         let map_value = |value: Value| match value {
@@ -781,7 +787,16 @@ impl World {
         let record = &self.vm_images[key.image as usize];
         let mut objects = Vec::with_capacity(order.len());
         for reference in &order {
-            let source = record.heap.get(*reference);
+            let compact;
+            let source = if let Some(source) = record.heap.try_get(*reference) {
+                source
+            } else {
+                compact = record
+                    .heap
+                    .try_clone_object(*reference)
+                    .ok_or(SnapshotFail::LimitExceeded)?;
+                &compact
+            };
             if source.shape().boundary == lm_heap::BoundaryPolicy::HolderLocal {
                 return Err(SnapshotFail::Fault(
                     FaultCode::BoundaryViolation,
@@ -1062,13 +1077,19 @@ impl World {
         };
         // The ordinal table is one entry per heap slot, so the
         // remapping never searches.
-        let mut slot_ordinal: Vec<u32> = vec![u32::MAX; self.heap_of(vm).slot_count()];
+        let heap = self.heap_of(vm);
+        let mut slot_ordinal: Vec<u32> = vec![u32::MAX; heap.reference_slot_count()];
         for (ordinal, r) in order.iter().enumerate() {
-            slot_ordinal[r.slot as usize] = ordinal as u32;
+            let index = heap
+                .reference_index(*r)
+                .ok_or(SnapshotFail::LimitExceeded)?;
+            slot_ordinal[index] = ordinal as u32;
         }
         let map = |r: ObjRef| -> ObjRef {
             ObjRef {
-                slot: slot_ordinal[r.slot as usize],
+                slot: slot_ordinal[heap
+                    .reference_index(r)
+                    .expect("a snapshot reference is live")],
                 generation: 0,
             }
         };
@@ -1093,7 +1114,16 @@ impl World {
         let mut objects: Vec<ImageObject> = Vec::with_capacity(order.len());
         for r in &order {
             let frozen = self.heap_of(vm).is_frozen(*r);
-            let source = self.heap_of(vm).get(*r);
+            let compact;
+            let source = if let Some(source) = self.heap_of(vm).try_get(*r) {
+                source
+            } else {
+                compact = self
+                    .heap_of(vm)
+                    .try_clone_object(*r)
+                    .ok_or(SnapshotFail::LimitExceeded)?;
+                &compact
+            };
             let object = match source {
                 Object::NativeVm { image, generation } => {
                     let key = VmImageKey {

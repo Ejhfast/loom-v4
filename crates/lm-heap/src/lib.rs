@@ -14,6 +14,7 @@
 mod byte_array;
 pub mod shape;
 mod shared;
+mod text_views;
 mod value_array;
 
 use lm_value::{ObjRef, Value, Witness};
@@ -27,7 +28,7 @@ pub use shape::{
 };
 pub use shared::{
     keyed_lookup_hash, process_lookup_hash, process_lookup_key, NativeByteBuffer,
-    NativeStringBuilder, SharedBytes, SharedText,
+    NativeStringBuilder, SharedBytes, SharedText, TextRef, TextViewBatch,
 };
 use shared::{
     BYTE_BUFFER_ACTIVE_OFFSET, BYTE_BUFFER_CAPACITY_OFFSET, BYTE_BUFFER_DATA_OFFSET,
@@ -36,9 +37,17 @@ use shared::{
     SHARED_TEXT_BYTE_LEN_OFFSET, SHARED_TEXT_DATA_OFFSET, SHARED_TEXT_LOOKUP_HASH_OFFSET,
     SHARED_TEXT_SCALAR_LEN_OFFSET, SHARED_TEXT_SEMANTIC_HASH_OFFSET, STRING_BUILDER_ACTIVE_OFFSET,
     STRING_BUILDER_ASCII_OFFSET, STRING_BUILDER_BYTE_LEN_OFFSET, STRING_BUILDER_CAPACITY_OFFSET,
-    STRING_BUILDER_DATA_OFFSET, STRING_BUILDER_SCALAR_LEN_OFFSET,
+    STRING_BUILDER_DATA_OFFSET, STRING_BUILDER_SCALAR_LEN_OFFSET, TEXT_VIEW_BYTE_LEN_OFFSET,
+    TEXT_VIEW_DATA_OFFSET, TEXT_VIEW_LOOKUP_HASH_OFFSET, TEXT_VIEW_SCALAR_LEN_OFFSET,
+    TEXT_VIEW_SEMANTIC_HASH_OFFSET,
 };
 use std::hash::{BuildHasherDefault, Hasher};
+use text_views::TextViewTable;
+pub use text_views::{
+    JIT_TEXT_VIEW_ENTRY_SIZE, JIT_TEXT_VIEW_GENERATION_OFFSET, JIT_TEXT_VIEW_PAGE_MASK,
+    JIT_TEXT_VIEW_PAGE_SHIFT, JIT_TEXT_VIEW_PAYLOAD_OFFSET, JIT_TEXT_VIEW_ROOT_OFFSET,
+    TEXT_VIEW_GENERATION_TAG,
+};
 pub use value_array::{
     OwnedArray, OwnedSlice, ValueArray, OWNED_ARRAY_CAPACITY_OFFSET, OWNED_ARRAY_DATA_OFFSET,
     OWNED_ARRAY_LEN_OFFSET, OWNED_ARRAY_SIZE, OWNED_SLICE_DATA_OFFSET, OWNED_SLICE_LEN_OFFSET,
@@ -48,6 +57,7 @@ pub use value_array::{
 
 /// Object-table slots per page.
 const PAGE_SLOTS: usize = 1024;
+const OBJECT_GENERATION_MASK: u32 = 0x7fff_ffff;
 /// The first collection point for a heap with a larger hard limit.
 const INITIAL_COLLECTION_BYTES: usize = 4 << 20;
 
@@ -63,6 +73,9 @@ pub struct JitHeapView {
     pub pages: *const usize,
     pub page_count: usize,
     pub slot_count: usize,
+    pub text_view_pages: *const usize,
+    pub text_view_page_count: usize,
+    pub text_view_slot_count: usize,
     pub slots: *mut usize,
     pub free: *mut OwnedArray<u32>,
     pub live: *mut usize,
@@ -77,6 +90,9 @@ impl JitHeapView {
         pages: std::ptr::null(),
         page_count: 0,
         slot_count: 0,
+        text_view_pages: std::ptr::null(),
+        text_view_page_count: 0,
+        text_view_slot_count: 0,
         slots: std::ptr::null_mut(),
         free: std::ptr::null_mut(),
         live: std::ptr::null_mut(),
@@ -508,6 +524,16 @@ pub const JIT_TEXT_SEMANTIC_HASH_OFFSET: usize =
 /// Byte offset of the cached text lookup hash.
 pub const JIT_TEXT_LOOKUP_HASH_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + SHARED_TEXT_LOOKUP_HASH_OFFSET;
+/// Byte offset of data inside a normalized text payload.
+pub const JIT_TEXT_PAYLOAD_DATA_OFFSET: usize = TEXT_VIEW_DATA_OFFSET;
+/// Byte offset of byte length inside a normalized text payload.
+pub const JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET: usize = TEXT_VIEW_BYTE_LEN_OFFSET;
+/// Byte offset of scalar length inside a normalized text payload.
+pub const JIT_TEXT_PAYLOAD_SCALAR_LEN_OFFSET: usize = TEXT_VIEW_SCALAR_LEN_OFFSET;
+/// Byte offset of semantic hash inside a normalized text payload.
+pub const JIT_TEXT_PAYLOAD_SEMANTIC_HASH_OFFSET: usize = TEXT_VIEW_SEMANTIC_HASH_OFFSET;
+/// Byte offset of lookup hash inside a normalized text payload.
+pub const JIT_TEXT_PAYLOAD_LOOKUP_HASH_OFFSET: usize = TEXT_VIEW_LOOKUP_HASH_OFFSET;
 /// Byte offset of the graph digest bytes.
 pub const JIT_DIGEST_BYTES_OFFSET: usize = JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET;
 
@@ -537,6 +563,7 @@ pub struct HeapStats {
 #[derive(Debug, Default)]
 pub struct GraphScratch {
     epoch: u32,
+    normal_slots: usize,
     seen: Vec<u32>,
     ordinal: Vec<u32>,
     /// Reached objects in canonical first-encounter order. The index
@@ -547,11 +574,13 @@ pub struct GraphScratch {
 impl GraphScratch {
     /// Start one walk over a table of `slots` slots. The epoch step
     /// invalidates the previous walk without touching the tables.
-    pub fn begin(&mut self, slots: usize) {
+    pub fn begin(&mut self, normal_slots: usize, text_view_slots: usize) {
+        let slots = normal_slots.saturating_add(text_view_slots);
         if self.seen.len() < slots {
             self.seen.resize(slots, 0);
             self.ordinal.resize(slots, 0);
         }
+        self.normal_slots = normal_slots;
         self.epoch = self.epoch.wrapping_add(1);
         if self.epoch == 0 {
             // The epoch wrapped. One clearing pass restarts the
@@ -564,8 +593,8 @@ impl GraphScratch {
 
     /// True when the current walk already reached this slot.
     #[inline]
-    pub fn seen(&self, slot: u32) -> bool {
-        self.seen[slot as usize] == self.epoch
+    pub fn seen(&self, reference: ObjRef) -> bool {
+        self.seen[self.index(reference)] == self.epoch
     }
 
     /// Record the first encounter of one slot and return its
@@ -573,17 +602,23 @@ impl GraphScratch {
     #[inline]
     pub fn record(&mut self, r: ObjRef) -> u32 {
         let ordinal = self.order.len() as u32;
-        self.seen[r.slot as usize] = self.epoch;
-        self.ordinal[r.slot as usize] = ordinal;
+        let index = self.index(r);
+        self.seen[index] = self.epoch;
+        self.ordinal[index] = ordinal;
         self.order.push(r);
         ordinal
     }
 
     /// The canonical traversal ordinal of one reached slot.
     #[inline]
-    pub fn ordinal(&self, slot: u32) -> u32 {
-        debug_assert!(self.seen(slot), "the walk reached this slot");
-        self.ordinal[slot as usize]
+    pub fn ordinal(&self, reference: ObjRef) -> u32 {
+        debug_assert!(self.seen(reference), "the walk reached this slot");
+        self.ordinal[self.index(reference)]
+    }
+
+    /// Get the work-table index of one reference.
+    pub fn index_of(&self, reference: ObjRef) -> usize {
+        self.index(reference)
     }
 
     /// The reached objects in canonical first-encounter order.
@@ -599,6 +634,14 @@ impl GraphScratch {
         self.ordinal.shrink_to(slots);
         self.order.clear();
         self.order.shrink_to(slots);
+    }
+
+    fn index(&self, reference: ObjRef) -> usize {
+        if TextViewTable::is_reference(reference) {
+            self.normal_slots + reference.slot as usize
+        } else {
+            reference.slot as usize
+        }
     }
 }
 
@@ -637,10 +680,12 @@ pub struct Heap {
     /// The reusable graph work tables. `lm-graph` borrows them for
     /// the length of one walk and returns them afterwards.
     scratch: GraphScratch,
-    /// Canonical digests of frozen objects, keyed by slot and type.
-    digests: std::collections::HashMap<u32, DigestCacheEntry>,
+    /// Canonical digests of frozen objects, keyed by reference and type.
+    digests: std::collections::HashMap<ObjRef, DigestCacheEntry>,
     /// Shared immutable allocations referenced by this heap.
     shared_allocations: SharedAllocations,
+    /// Compact canonical storage for immutable text views.
+    text_views: TextViewTable,
 }
 
 impl Heap {
@@ -660,15 +705,16 @@ impl Heap {
             scratch: GraphScratch::default(),
             digests: std::collections::HashMap::new(),
             shared_allocations: SharedAllocations::default(),
+            text_views: TextViewTable::default(),
         }
     }
 
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             live: self.live,
-            slots: self.slot_count(),
-            pages: self.pages.len(),
-            free: self.free.len(),
+            slots: self.reference_slot_count(),
+            pages: self.pages.len() + self.text_views.page_count(),
+            free: self.free.len() + self.text_views.free_count(),
             used_bytes: self.used_bytes,
             cap_bytes: self.cap_bytes,
             collections: self.collections,
@@ -692,12 +738,44 @@ impl Heap {
         self.slots
     }
 
+    /// Get the total number of slots in both storage classes.
+    pub fn reference_slot_count(&self) -> usize {
+        self.slots.saturating_add(self.text_views.slot_count())
+    }
+
+    /// Get the number of compact text-view slots.
+    pub fn text_view_slot_count(&self) -> usize {
+        self.text_views.slot_count()
+    }
+
+    /// Map one reference to a graph work-table index.
+    pub fn reference_index(&self, reference: ObjRef) -> Option<usize> {
+        if TextViewTable::is_reference(reference) {
+            self.text_views.get(reference)?;
+            self.slots.checked_add(reference.slot as usize)
+        } else {
+            self.try_get(reference).map(|_| reference.slot as usize)
+        }
+    }
+
+    /// Test whether one reference names live canonical storage.
+    pub fn is_live_reference(&self, reference: ObjRef) -> bool {
+        if TextViewTable::is_reference(reference) {
+            self.text_views.get(reference).is_some()
+        } else {
+            self.try_get(reference).is_some()
+        }
+    }
+
     /// Return one native view of the canonical object table.
     pub fn jit_view(&mut self) -> JitHeapView {
         JitHeapView {
             pages: self.page_addresses.as_ptr(),
             page_count: self.page_addresses.len(),
             slot_count: self.slot_count(),
+            text_view_pages: self.text_views.page_addresses(),
+            text_view_page_count: self.text_views.page_count(),
+            text_view_slot_count: self.text_views.slot_count(),
             slots: std::ptr::from_mut(&mut self.slots),
             free: std::ptr::from_mut(&mut self.free),
             live: std::ptr::from_mut(&mut self.live),
@@ -884,6 +962,15 @@ impl Heap {
     /// Append one string object to one distinct string builder.
     /// The caller reserves growth and recharges the builder.
     pub fn append_string(&mut self, builder: ObjRef, source: ObjRef) -> bool {
+        if TextViewTable::is_reference(source) {
+            let Some(source) = self.text_views.get(source).map(TextRef::to_shared) else {
+                return false;
+            };
+            return match self.try_get_mut(builder) {
+                Some(Object::StrBuilder(builder)) => builder.append(&source),
+                _ => false,
+            };
+        }
         let Some((builder_entry, source_entry)) = self.two_entries_mut(builder.slot, source.slot)
         else {
             return false;
@@ -954,21 +1041,11 @@ impl Heap {
     }
 
     /// Allocate shared text views and their list as one heap batch.
-    pub fn try_alloc_text_view_list(&mut self, views: Vec<SharedText>) -> Option<ObjRef> {
-        let count = views.len();
+    pub fn try_alloc_text_view_list(&mut self, batch: TextViewBatch) -> Option<ObjRef> {
+        let count = batch.len();
         let base = Self::text_view_list_base_cost(count)?;
         let object_count = count.checked_add(1)?;
-        let shared = views
-            .first()
-            .map(|view| (view.allocation_key(), view.retained_capacity()));
-        if let Some((key, capacity)) = shared {
-            if views
-                .iter()
-                .any(|view| view.allocation_key() != key || view.retained_capacity() != capacity)
-            {
-                return None;
-            }
-        }
+        let shared = batch.shared_allocation();
         let shared_cost = shared
             .filter(|(key, _)| !self.shared_allocations.contains_key(key))
             .map(|(_, capacity)| capacity)
@@ -978,7 +1055,9 @@ impl Heap {
             return None;
         }
         let mut values = Vec::new();
-        if values.try_reserve_exact(count).is_err() || !self.reserve_precharged_slots(object_count)
+        if values.try_reserve_exact(count).is_err()
+            || !self.reserve_precharged_slots(1)
+            || !self.text_views.try_reserve_batch(count)
         {
             return None;
         }
@@ -987,17 +1066,7 @@ impl Heap {
         let view_base = count * MIN_OBJECT_COST;
         self.used_bytes += view_base + charged_shared;
         self.live += count;
-        for view in views {
-            let object = Object::Substring(view);
-            let header = Header {
-                frozen: u8::from(object.shape().born_frozen),
-                reserved: [0; 7],
-                bytes: MIN_OBJECT_COST,
-                shared: SharedKey::new(shared.map(|(key, _)| key)),
-            };
-            let reference = self.install_entry(header, object);
-            values.push(Value::Obj(reference));
-        }
+        self.text_views.install_batch(batch, &mut values);
         Some(self.alloc(Object::List {
             items: values.into(),
             epoch: StructuralEpoch::default(),
@@ -1020,6 +1089,9 @@ impl Heap {
 
     /// Read an object. Return `None` for a stale or dead reference.
     pub fn try_get(&self, r: ObjRef) -> Option<&Object> {
+        if TextViewTable::is_reference(r) {
+            return None;
+        }
         let entry = self
             .pages
             .get(r.slot as usize / PAGE_SLOTS)?
@@ -1032,14 +1104,57 @@ impl Heap {
 
     /// Read an object. The reference must be live and current.
     pub fn get(&self, r: ObjRef) -> &Object {
+        assert!(
+            !TextViewTable::is_reference(r),
+            "use Heap::text for a compact text view"
+        );
         let entry = self.entry(r.slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
         entry.object().expect("object reference is live")
     }
 
+    /// Read one String or Substring from either storage class.
+    pub fn text(&self, reference: ObjRef) -> Option<TextRef<'_>> {
+        if TextViewTable::is_reference(reference) {
+            return self.text_views.get(reference);
+        }
+        match self.try_get(reference)? {
+            Object::Str(text) | Object::Substring(text) => Some(text.text_ref()),
+            _ => None,
+        }
+    }
+
+    /// Clone one object from either storage class.
+    pub fn try_clone_object(&self, reference: ObjRef) -> Option<Object> {
+        if let Some(text) = self.text_views.get(reference) {
+            return Some(Object::Substring(text.to_shared()));
+        }
+        self.try_get(reference).cloned()
+    }
+
+    /// Test whether a reference names one compact text view.
+    pub fn is_compact_text(&self, reference: ObjRef) -> bool {
+        self.text_views.get(reference).is_some()
+    }
+
     /// Write access to an object. The caller must check the frozen bit
     /// first and must recompute the charged bytes after growth with
     /// `recharge`.
+    pub fn try_get_mut(&mut self, r: ObjRef) -> Option<&mut Object> {
+        if TextViewTable::is_reference(r) {
+            return None;
+        }
+        let entry = self
+            .pages
+            .get_mut(r.slot as usize / PAGE_SLOTS)?
+            .get_mut(r.slot as usize % PAGE_SLOTS)?;
+        if entry.generation != r.generation {
+            return None;
+        }
+        entry.object_mut()
+    }
+
+    /// Write one live object. The caller must check its frozen bit.
     pub fn get_mut(&mut self, r: ObjRef) -> &mut Object {
         let entry = self.entry_mut(r.slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
@@ -1048,6 +1163,9 @@ impl Heap {
 
     /// True when the object carries the frozen bit.
     pub fn is_frozen(&self, r: ObjRef) -> bool {
+        if TextViewTable::is_reference(r) {
+            return self.text_views.get(r).is_some();
+        }
         let entry = self.entry(r.slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
         entry.live().is_some_and(|(header, _)| header.frozen != 0)
@@ -1056,6 +1174,10 @@ impl Heap {
     /// Set the frozen bit of one object. Freezing is monotonic, and
     /// only `lm-graph` calls this after a whole graph validates.
     pub fn set_frozen(&mut self, r: ObjRef) {
+        if TextViewTable::is_reference(r) {
+            assert!(self.text_views.get(r).is_some(), "live text-view reference");
+            return;
+        }
         let entry = self.entry_mut(r.slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
         let (header, _) = entry.live_mut().expect("live object");
@@ -1110,18 +1232,26 @@ impl Heap {
     /// allocated, so the destination heap keeps its earlier live
     /// count and byte count.
     pub fn free(&mut self, r: ObjRef) {
+        if TextViewTable::is_reference(r) {
+            let key = self.text_views.free(r);
+            let shared = remove_shared_references(&mut self.shared_allocations, key, 1);
+            self.used_bytes -= MIN_OBJECT_COST + shared;
+            self.live -= 1;
+            self.digests.remove(&r);
+            return;
+        }
         let slot = r.slot;
         let entry = self.entry_mut(slot);
         assert_eq!(entry.generation, r.generation, "stale object reference");
         let (header, _) = entry.take().expect("live object");
-        entry.generation = entry.generation.wrapping_add(1);
+        entry.generation = entry.generation.wrapping_add(1) & OBJECT_GENERATION_MASK;
         self.generations[slot as usize] = entry.generation;
         let shared = self.remove_shared(header.shared.get());
         let released = header.bytes + shared;
         self.used_bytes -= released;
         self.live -= 1;
         self.free.push(slot);
-        self.digests.remove(&slot);
+        self.digests.remove(&r);
     }
 
     /// Reserve canonical slots for precharged native instances.
@@ -1237,7 +1367,7 @@ impl Heap {
     }
 
     fn cached_digest_for(&self, r: ObjRef, ty: Option<u32>) -> Option<[u8; 32]> {
-        match self.digests.get(&r.slot) {
+        match self.digests.get(&r) {
             Some(entry) if entry.generation == r.generation => entry
                 .values
                 .iter()
@@ -1260,13 +1390,10 @@ impl Heap {
 
     fn cache_digest_for(&mut self, r: ObjRef, ty: Option<u32>, digest: [u8; 32]) {
         debug_assert!(self.is_frozen(r), "only a frozen object caches a digest");
-        let entry = self
-            .digests
-            .entry(r.slot)
-            .or_insert_with(|| DigestCacheEntry {
-                generation: r.generation,
-                values: Vec::new(),
-            });
+        let entry = self.digests.entry(r).or_insert_with(|| DigestCacheEntry {
+            generation: r.generation,
+            values: Vec::new(),
+        });
         if entry.generation != r.generation {
             entry.generation = r.generation;
             entry.values.clear();
@@ -1288,7 +1415,7 @@ impl Heap {
     ///
     /// `lm-graph` marks the reachable set first and passes the test
     /// here. The heap never decides reachability.
-    pub fn sweep(&mut self, keep: impl Fn(u32) -> bool) {
+    pub fn sweep(&mut self, mut keep: impl FnMut(ObjRef) -> bool) {
         self.collections = self.collections.saturating_add(1);
         let mut freed_bytes = 0usize;
         let mut freed = 0usize;
@@ -1301,7 +1428,11 @@ impl Heap {
         for (page_idx, page) in self.pages.iter_mut().enumerate() {
             for (idx, entry) in page.iter_mut().enumerate() {
                 let slot = (page_idx * PAGE_SLOTS + idx) as u32;
-                if !entry.is_live() || keep(slot) {
+                let reference = ObjRef {
+                    slot,
+                    generation: entry.generation,
+                };
+                if !entry.is_live() || keep(reference) {
                     continue;
                 }
                 let (header, _) = entry.take().expect("live object");
@@ -1325,16 +1456,27 @@ impl Heap {
                     }
                 }
                 freed += 1;
-                entry.generation = entry.generation.wrapping_add(1);
+                entry.generation = entry.generation.wrapping_add(1) & OBJECT_GENERATION_MASK;
                 self.generations[slot as usize] = entry.generation;
                 free.push(slot);
                 if has_digests {
-                    self.digests.remove(&slot);
+                    self.digests.remove(&reference);
                 }
             }
         }
         if let Some((key, references)) = pending_shared {
             freed_bytes += remove_shared_references(shared_allocations, key, references);
+        }
+        let compact = self.text_views.sweep(&mut keep, |key, references| {
+            remove_shared_references(shared_allocations, key, references)
+        });
+        freed += compact.objects;
+        freed_bytes += compact.objects * MIN_OBJECT_COST + compact.bytes;
+        if has_digests && compact.objects != 0 {
+            self.digests.retain(|reference, _| {
+                !TextViewTable::is_reference(*reference)
+                    || self.text_views.get(*reference).is_some()
+            });
         }
         drop(free);
         self.used_bytes -= freed_bytes;
@@ -1358,7 +1500,8 @@ impl Heap {
         }
         self.free.retain(|slot| (*slot as usize) < self.slots);
         self.free.shrink_to_fit();
-        self.scratch.trim(self.slots);
+        self.text_views.trim_free_pages();
+        self.scratch.trim(self.reference_slot_count());
     }
 
     /// Rebuild all live objects into a dense table.
@@ -1383,7 +1526,7 @@ impl Heap {
                 .generations
                 .get(slot as usize)
                 .copied()
-                .map(|held| held.wrapping_add(1))
+                .map(|held| held.wrapping_add(1) & OBJECT_GENERATION_MASK)
                 .unwrap_or(0);
             mapping.insert(*reference, ObjRef { slot, generation });
         }
@@ -1410,7 +1553,8 @@ impl Heap {
         for (reference, frozen) in &order {
             let mut missing = false;
             let object = self
-                .get(*reference)
+                .try_clone_object(*reference)
+                .ok_or(CompactError::InvalidReference)?
                 .try_clone_remapped(|child| match mapping.get(&child).copied() {
                     Some(mapped) => mapped,
                     None => {
@@ -1448,6 +1592,7 @@ impl Heap {
         self.scratch = std::mem::take(&mut compacted.scratch);
         self.digests = std::mem::take(&mut compacted.digests);
         self.shared_allocations = std::mem::take(&mut compacted.shared_allocations);
+        self.text_views = std::mem::take(&mut compacted.text_views);
         self.set_next_collection_threshold();
         roots.copy_from_slice(&mapped_roots);
         Ok(())
@@ -1466,6 +1611,10 @@ impl Heap {
                 }
             }
         }
+        self.text_views.for_each_live(|reference, text| {
+            let object = Object::Substring(text.to_shared());
+            f(reference, true, &object);
+        });
     }
 }
 
@@ -1551,10 +1700,7 @@ mod tests {
         let capacity = text.retained_capacity();
         let source = heap.alloc(Object::Str(text.clone()));
         let source_cost = MIN_OBJECT_COST + capacity;
-        let views = vec![
-            text.slice(0, 5).expect("the first range is valid"),
-            text.slice(6, 10).expect("the second range is valid"),
-        ];
+        let views = text.try_split_view_batch(" ").expect("the text ranges fit");
         let list = heap
             .try_alloc_text_view_list(views)
             .expect("the text range batch fits");
@@ -1572,17 +1718,98 @@ mod tests {
             let Value::Obj(reference) = value else {
                 panic!("the batch returns object values");
             };
-            let Object::Substring(piece) = heap.get(*reference) else {
-                panic!("the batch allocates substrings");
-            };
+            let piece = heap
+                .text(*reference)
+                .expect("the batch allocates text views");
             assert_eq!(piece.as_str(), expected);
         }
 
-        heap.sweep(|slot| slot == source.slot);
+        heap.sweep(|reference| reference == source);
         assert_eq!(heap.live_count(), 1);
         assert_eq!(heap.used_bytes(), source_cost);
         heap.free(source);
         assert_eq!(heap.used_bytes(), 0);
+    }
+
+    #[test]
+    fn text_view_slots_reject_stale_generations() {
+        let mut heap = Heap::new(1 << 20);
+        let first = SharedText::from("alpha beta")
+            .try_split_view_batch(" ")
+            .expect("the first batch fits");
+        let first_list = heap
+            .try_alloc_text_view_list(first)
+            .expect("the first batch allocates");
+        let first_views = match heap.get(first_list) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("a split result is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("a split returns one list"),
+        };
+        for reference in &first_views {
+            heap.free(*reference);
+            assert!(heap.text(*reference).is_none());
+        }
+        heap.free(first_list);
+
+        let second = SharedText::from("gamma delta")
+            .try_split_view_batch(" ")
+            .expect("the second batch fits");
+        let second_list = heap
+            .try_alloc_text_view_list(second)
+            .expect("the second batch allocates");
+        let second_views = match heap.get(second_list) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("a split result is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("a split returns one list"),
+        };
+        for current in second_views {
+            let stale = first_views
+                .iter()
+                .find(|reference| reference.slot == current.slot)
+                .expect("the compact table reuses its free slots");
+            assert_ne!(current.generation, stale.generation);
+            assert!(heap.is_compact_text(current));
+        }
+    }
+
+    #[test]
+    fn compaction_materializes_compact_text_views() {
+        let mut heap = Heap::new(1 << 20);
+        let batch = SharedText::from("alpha beta")
+            .try_split_view_batch(" ")
+            .expect("the text ranges fit");
+        let mut list = heap
+            .try_alloc_text_view_list(batch)
+            .expect("the text ranges allocate");
+
+        heap.compact_live(std::slice::from_mut(&mut list))
+            .expect("the compact heap compacts");
+
+        let views = match heap.get(list) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("a split result is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("a split returns one list"),
+        };
+        assert_eq!(heap.live_count(), 3);
+        assert_eq!(heap.text_view_slot_count(), 0);
+        assert_eq!(
+            heap.text(views[0])
+                .expect("the first view is live")
+                .as_str(),
+            "alpha"
+        );
+        assert_eq!(
+            heap.text(views[1])
+                .expect("the second view is live")
+                .as_str(),
+            "beta"
+        );
     }
 
     #[test]
@@ -2049,16 +2276,16 @@ mod tests {
     #[test]
     fn the_scratch_epoch_separates_two_walks() {
         let mut scratch = GraphScratch::default();
-        scratch.begin(4);
+        scratch.begin(4, 0);
         let a = ObjRef {
             slot: 1,
             generation: 0,
         };
-        assert!(!scratch.seen(a.slot));
+        assert!(!scratch.seen(a));
         assert_eq!(scratch.record(a), 0);
-        assert!(scratch.seen(a.slot));
-        scratch.begin(4);
-        assert!(!scratch.seen(a.slot));
+        assert!(scratch.seen(a));
+        scratch.begin(4, 0);
+        assert!(!scratch.seen(a));
         assert!(scratch.order().is_empty());
     }
 
@@ -2101,7 +2328,7 @@ mod tests {
             heap.alloc(str_obj("dead"));
         }
         let mut root = heap.alloc(str_obj("live"));
-        heap.sweep(|slot| slot == root.slot);
+        heap.sweep(|reference| reference == root);
         assert_eq!(heap.live_count(), 1);
         assert!(heap.slot_count() > 1);
         let bytes = heap.used_bytes();

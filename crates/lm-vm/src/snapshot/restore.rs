@@ -559,7 +559,7 @@ impl World {
                 && same_image_slots(&target.slots, &source.slots, code_map)
                 && target.slot_versions == source.slot_versions
                 && target.heap.live_count() == 0
-                && target.heap.slot_count() == 0
+                && target.heap.reference_slot_count() == 0
                 && target.instances.is_empty()
                 && source.objects.is_empty()
                 && source.instances.is_empty();

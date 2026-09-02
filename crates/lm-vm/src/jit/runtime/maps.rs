@@ -896,15 +896,11 @@ impl MachineRuntime<'_> {
     pub(super) fn runtime_compare_text(&mut self, left: u64, right: u64) -> RuntimeValueResult {
         let left = object_reference(left);
         let right = object_reference(right);
-        let (left, right) = match (
-            self.machine.vm.heap.try_get(left),
-            self.machine.vm.heap.try_get(right),
-        ) {
-            (
-                Some(crate::Object::Str(left) | crate::Object::Substring(left)),
-                Some(crate::Object::Str(right) | crate::Object::Substring(right)),
-            ) => (left, right),
-            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        let (Some(left), Some(right)) = (
+            self.machine.vm.heap.text(left),
+            self.machine.vm.heap.text(right),
+        ) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
         };
         runtime_ordering(left.as_str().cmp(right.as_str()))
     }
@@ -924,10 +920,10 @@ impl MachineRuntime<'_> {
 
     pub(super) fn runtime_hash_text(&mut self, reference: u64) -> RuntimeValueResult {
         let reference = object_reference(reference);
-        let hash = match self.machine.vm.heap.try_get(reference) {
-            Some(crate::Object::Str(text) | crate::Object::Substring(text)) => text.semantic_hash(),
-            _ => return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch),
+        let Some(text) = self.machine.vm.heap.text(reference) else {
+            return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
         };
+        let hash = text.semantic_hash();
         runtime_int(hash as i64)
     }
 
@@ -942,7 +938,7 @@ impl MachineRuntime<'_> {
 
     pub(super) fn runtime_freeze_graph(&mut self, reference: u64) -> RuntimeValueResult {
         let reference = object_reference(reference);
-        if self.machine.vm.heap.try_get(reference).is_none() {
+        if !self.machine.vm.heap.is_live_reference(reference) {
             return RuntimeValueResult::Fault(crate::FaultCode::TypeMismatch);
         }
         match lm_graph::freeze(
@@ -957,7 +953,7 @@ impl MachineRuntime<'_> {
 
     pub(super) fn runtime_digest_value(&mut self, request: DigestRequest<'_>) -> AllocationResult {
         let reference = object_reference(request.reference);
-        if self.machine.vm.heap.try_get(reference).is_none() {
+        if !self.machine.vm.heap.is_live_reference(reference) {
             return AllocationResult::Interpreter;
         }
         let bytes = crate::world::digest_typed_value(

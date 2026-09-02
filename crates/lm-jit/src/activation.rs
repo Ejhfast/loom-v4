@@ -112,6 +112,9 @@ pub(super) struct RawNativeActivation {
     pub(super) heap_pages: *const usize,
     pub(super) heap_page_count: usize,
     pub(super) heap_slot_count: usize,
+    pub(super) text_view_pages: *const usize,
+    pub(super) text_view_page_count: usize,
+    pub(super) text_view_slot_count: usize,
     pub(super) heap_slots: *mut usize,
     pub(super) heap_free: *mut c_void,
     pub(super) heap_live: *mut usize,
@@ -2787,6 +2790,9 @@ unsafe fn update_heap_view(activation: *mut RawNativeActivation, heap: JitHeapVi
         (*activation).heap_pages = heap.pages;
         (*activation).heap_page_count = heap.page_count;
         (*activation).heap_slot_count = heap.slot_count;
+        (*activation).text_view_pages = heap.text_view_pages;
+        (*activation).text_view_page_count = heap.text_view_page_count;
+        (*activation).text_view_slot_count = heap.text_view_slot_count;
         (*activation).heap_slots = heap.slots;
         (*activation).heap_free = heap.free.cast();
         (*activation).heap_live = heap.live;

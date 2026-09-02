@@ -113,9 +113,9 @@ impl MachineRuntime<'_> {
     ) -> HeapOperationResult {
         let builder = object_reference(request.first);
         let source = object_reference(request.second);
-        let text_len = match self.machine.vm.heap.try_get(source) {
-            Some(crate::Object::Str(text) | crate::Object::Substring(text)) => text.len(),
-            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        let text_len = match self.machine.vm.heap.text(source) {
+            Some(text) => text.len(),
+            None => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
         };
         let growth = match self.string_builder_growth(builder, text_len, &request) {
             Ok(growth) => growth,

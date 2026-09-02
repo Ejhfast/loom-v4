@@ -1063,18 +1063,18 @@ impl World {
             let order = self.snapshot_object_order(machine)?;
             let heap = &self.machines[machine as usize].vm.heap;
             for reference in order {
-                let resource = match heap.get(reference) {
-                    Object::NativeFileHandle { resource }
-                    | Object::NativeResourceHandle { resource, .. }
-                    | Object::NativeTcpStream { resource }
-                    | Object::NativeTcpListener { resource } => *resource,
-                    Object::NativeTlsStream { resource }
-                    | Object::NativeRawMode { resource }
-                    | Object::NativeSignalStream { resource } => *resource,
-                    Object::NativePipeReader { resource }
-                    | Object::NativePipeWriter { resource }
-                    | Object::NativeChild { resource } => *resource,
-                    Object::NativeUdpSocket { resource } => *resource,
+                let resource = match heap.try_get(reference) {
+                    Some(Object::NativeFileHandle { resource })
+                    | Some(Object::NativeResourceHandle { resource, .. })
+                    | Some(Object::NativeTcpStream { resource })
+                    | Some(Object::NativeTcpListener { resource }) => *resource,
+                    Some(Object::NativeTlsStream { resource })
+                    | Some(Object::NativeRawMode { resource })
+                    | Some(Object::NativeSignalStream { resource }) => *resource,
+                    Some(Object::NativePipeReader { resource })
+                    | Some(Object::NativePipeWriter { resource })
+                    | Some(Object::NativeChild { resource }) => *resource,
+                    Some(Object::NativeUdpSocket { resource }) => *resource,
                     _ => continue,
                 };
                 if self.bound_resources.contains_key(&resource) {

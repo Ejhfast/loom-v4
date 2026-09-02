@@ -27,7 +27,7 @@ pub fn collect(heap: &mut Heap, roots: impl IntoIterator<Item = ObjRef>) {
     let mut scratch = heap.take_scratch();
     walk(heap, &mut scratch, &all, &GraphLimits::UNBOUNDED, &mut ())
         .expect("the mark mode has no limit and no rejecting visitor");
-    heap.sweep(|slot| scratch.seen(slot));
+    heap.sweep(|reference| scratch.seen(reference));
     heap.put_scratch(scratch);
     heap.trim_free_pages();
 }
@@ -300,7 +300,11 @@ fn copy_passes_within(
         // admitted sendable shapes alone, so the test never fires.
         // The test states the rule instead of asserting it, so a
         // future shape without a shell faults the machine.
-        let Some(shell) = heap.get(*r).shell() else {
+        let Some(source) = heap.try_clone_object(*r) else {
+            result = Err(FaultCode::BoundaryViolation);
+            break;
+        };
+        let Some(shell) = source.shell() else {
             result = Err(FaultCode::UnsendableValue);
             break;
         };
@@ -321,8 +325,9 @@ fn copy_passes_within(
         // Pass 3: patch children through the identity table.
         for (old, new) in order.iter().zip(new_refs.iter()) {
             let patched = heap
-                .get(*old)
-                .remap(|child| new_refs[scratch.ordinal(child.slot) as usize]);
+                .try_clone_object(*old)
+                .ok_or(FaultCode::BoundaryViolation)?
+                .remap(|child| new_refs[scratch.ordinal(child) as usize]);
             if let Some(patched) = patched {
                 *heap.get_mut(*new) = patched;
                 heap.recharge(*new);
@@ -346,7 +351,7 @@ fn copy_passes_within(
             heap.set_frozen(*new);
         }
     }
-    Ok(Value::Obj(new_refs[scratch.ordinal(root.slot) as usize]))
+    Ok(Value::Obj(new_refs[scratch.ordinal(root) as usize]))
 }
 
 /// Passes 2 and 3: allocate the destination shells, then patch every
@@ -365,7 +370,11 @@ fn copy_passes(
     for r in order {
         // See `copy_passes_within`: pass 1 admitted sendable shapes
         // alone, and every sendable shape has a shell.
-        let Some(shell) = src.get(*r).shell() else {
+        let Some(source) = src.try_clone_object(*r) else {
+            result = Err(FaultCode::BoundaryViolation);
+            break;
+        };
+        let Some(shell) = source.shell() else {
             result = Err(FaultCode::UnsendableValue);
             break;
         };
@@ -389,8 +398,9 @@ fn copy_passes(
         // Pass 3: patch children through the identity table.
         for (old, new) in order.iter().zip(new_refs.iter()) {
             if let Some(patched) = src
-                .get(*old)
-                .remap(|child| new_refs[scratch.ordinal(child.slot) as usize])
+                .try_clone_object(*old)
+                .ok_or(FaultCode::BoundaryViolation)?
+                .remap(|child| new_refs[scratch.ordinal(child) as usize])
             {
                 *dst.get_mut(*new) = patched;
                 dst.recharge(*new);
@@ -415,7 +425,7 @@ fn copy_passes(
             dst.set_frozen(*new);
         }
     }
-    Ok(Value::Obj(new_refs[scratch.ordinal(root.slot) as usize]))
+    Ok(Value::Obj(new_refs[scratch.ordinal(root) as usize]))
 }
 
 // ---------------------------------------------------------------
@@ -585,6 +595,45 @@ mod tests {
         assert_eq!(heap.live_count(), 2);
         assert!(heap.try_get(keep).is_some());
         assert!(heap.try_get(drop).is_none());
+    }
+
+    #[test]
+    fn collect_traces_compact_text_views_from_their_list() {
+        let mut heap = Heap::new(1 << 20);
+        let batch = lm_heap::SharedText::from("alpha beta")
+            .try_split_view_batch(" ")
+            .expect("the text ranges fit");
+        let list = heap
+            .try_alloc_text_view_list(batch)
+            .expect("the text ranges allocate");
+        let views = match heap.get(list) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("a split result is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("a split returns one list"),
+        };
+
+        collect(&mut heap, [list]);
+        assert_eq!(heap.live_count(), 3);
+        assert_eq!(
+            heap.text(views[0])
+                .expect("the first view is live")
+                .as_str(),
+            "alpha"
+        );
+        assert_eq!(
+            heap.text(views[1])
+                .expect("the second view is live")
+                .as_str(),
+            "beta"
+        );
+
+        collect(&mut heap, []);
+        assert_eq!(heap.live_count(), 0);
+        assert!(views
+            .iter()
+            .all(|reference| !heap.is_live_reference(*reference)));
     }
 
     #[test]
@@ -790,6 +839,40 @@ mod tests {
         assert!(dst.is_frozen(new_inner), "the subgraph stays frozen");
     }
 
+    #[test]
+    fn transfer_materializes_compact_text_views() {
+        let mut src = Heap::new(1 << 20);
+        let mut dst = Heap::new(1 << 20);
+        let batch = lm_heap::SharedText::from("alpha beta")
+            .try_split_view_batch(" ")
+            .expect("the text ranges fit");
+        let list = src
+            .try_alloc_text_view_list(batch)
+            .expect("the text ranges allocate");
+        freeze(&mut src, list, &limits()).expect("the list freezes");
+
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(list), &limits())
+            .expect("the text graph crosses");
+        let moved = moved.as_obj().expect("the copied value is a list");
+        let views = match dst.get(moved) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("a copied result is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("the copied value is a list"),
+        };
+        assert_eq!(
+            dst.text(views[0]).expect("the first view crossed").as_str(),
+            "alpha"
+        );
+        assert_eq!(
+            dst.text(views[1])
+                .expect("the second view crossed")
+                .as_str(),
+            "beta"
+        );
+    }
+
     /// A one-heap copy applies the same rule and makes a second
     /// graph, so the source and the copy never share one object.
     #[test]
@@ -989,6 +1072,30 @@ mod tests {
         let dc =
             digest_value(&mut second, Value::Obj(c), &mut Slots, &limits()).expect("c digests");
         assert_ne!(da, dc);
+    }
+
+    #[test]
+    fn compact_and_regular_text_views_have_the_same_digest() {
+        let mut heap = Heap::new(1 << 20);
+        let source = lm_heap::SharedText::from("alpha beta");
+        let batch = source
+            .try_split_view_batch(" ")
+            .expect("the text ranges fit");
+        let list = heap
+            .try_alloc_text_view_list(batch)
+            .expect("the text ranges allocate");
+        let compact = match heap.get(list) {
+            Object::List { items, .. } => items[0].as_obj().expect("the first result is text"),
+            _ => panic!("a split returns one list"),
+        };
+        let regular = heap.alloc(Object::Substring(
+            source.slice(0, 5).expect("the regular range is valid"),
+        ));
+        let compact_digest = digest_value(&mut heap, Value::Obj(compact), &mut Slots, &limits())
+            .expect("the compact view digests");
+        let regular_digest = digest_value(&mut heap, Value::Obj(regular), &mut Slots, &limits())
+            .expect("the regular view digests");
+        assert_eq!(compact_digest, regular_digest);
     }
 
     /// Sharing and cycles are part of the encoding: a shared child and

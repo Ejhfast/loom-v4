@@ -15,12 +15,12 @@ impl BorrowedStringKey<'_> {
     /// Get the stable semantic hash for this query.
     pub(crate) fn semantic_hash(self, machine: &Machine) -> Result<i64, FaultCode> {
         match self {
-            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
-                Some(Object::Str(text) | Object::Substring(text)) => {
-                    Ok(text.semantic_hash() as i64)
-                }
-                _ => Err(BAD_TYPE),
-            },
+            Self::Value(Value::Obj(reference)) => machine
+                .vm
+                .heap
+                .text(reference)
+                .map(|text| text.semantic_hash() as i64)
+                .ok_or(BAD_TYPE),
             Self::Value(_) => Err(BAD_TYPE),
             Self::Text(text) => Ok(text.semantic_hash() as i64),
         }
@@ -29,10 +29,12 @@ impl BorrowedStringKey<'_> {
     /// Get the private lookup hash for this query.
     fn index_hash(self, machine: &Machine) -> Result<u64, FaultCode> {
         match self {
-            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
-                Some(Object::Str(text) | Object::Substring(text)) => Ok(text.lookup_hash()),
-                _ => Err(BAD_TYPE),
-            },
+            Self::Value(Value::Obj(reference)) => machine
+                .vm
+                .heap
+                .text(reference)
+                .map(|text| text.lookup_hash())
+                .ok_or(BAD_TYPE),
             Self::Value(_) => Err(BAD_TYPE),
             Self::Text(text) => Ok(text.lookup_hash()),
         }
@@ -47,10 +49,12 @@ impl BorrowedStringKey<'_> {
             return Err(BAD_TYPE);
         };
         match self {
-            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
-                Some(Object::Str(text) | Object::Substring(text)) => Ok(stored == text),
-                _ => Err(BAD_TYPE),
-            },
+            Self::Value(Value::Obj(reference)) => machine
+                .vm
+                .heap
+                .text(reference)
+                .map(|text| stored.as_str() == text.as_str())
+                .ok_or(BAD_TYPE),
             Self::Value(_) => Err(BAD_TYPE),
             Self::Text(text) => Ok(stored == text),
         }
@@ -59,13 +63,14 @@ impl BorrowedStringKey<'_> {
     /// Prepare one owned String object after a lookup miss.
     pub(crate) fn owned_object(self, machine: &Machine) -> Result<Option<Object>, FaultCode> {
         let text = match self {
-            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
-                Some(Object::Str(_)) => return Ok(None),
-                Some(Object::Substring(text)) => text,
-                _ => return Err(BAD_TYPE),
-            },
+            Self::Value(Value::Obj(reference)) => {
+                if matches!(machine.vm.heap.try_get(reference), Some(Object::Str(_))) {
+                    return Ok(None);
+                }
+                machine.vm.heap.text(reference).ok_or(BAD_TYPE)?
+            }
             Self::Value(_) => return Err(BAD_TYPE),
-            Self::Text(text) => text,
+            Self::Text(text) => text.text_ref(),
         };
         text.try_bounded()
             .map(Object::Str)
@@ -365,11 +370,13 @@ impl Machine {
                 if x == y {
                     return true;
                 }
+                if let (Some(left), Some(right)) = (self.vm.heap.text(x), self.vm.heap.text(y)) {
+                    return left == right;
+                }
+                if self.vm.heap.is_compact_text(x) || self.vm.heap.is_compact_text(y) {
+                    return false;
+                }
                 match (self.vm.heap.get(x), self.vm.heap.get(y)) {
-                    (Object::Str(s1), Object::Str(s2))
-                    | (Object::Str(s1), Object::Substring(s2))
-                    | (Object::Substring(s1), Object::Str(s2))
-                    | (Object::Substring(s1), Object::Substring(s2)) => s1 == s2,
                     (Object::Bytes(b1), Object::Bytes(b2)) => b1 == b2,
                     _ => false,
                 }
@@ -385,11 +392,15 @@ impl Machine {
             Value::Int(value) => Ok(value),
             Value::Float(bits) => Ok(float_hash(bits)),
             Value::Char(value) => Ok(i64::from(u32::from(value))),
-            Value::Obj(r) => match self.vm.heap.get(r) {
-                Object::Str(text) | Object::Substring(text) => Ok(text.semantic_hash() as i64),
-                Object::Bytes(bytes) => Ok(bytes.semantic_hash() as i64),
-                _ => Err(BAD_TYPE),
-            },
+            Value::Obj(r) => {
+                if let Some(text) = self.vm.heap.text(r) {
+                    return Ok(text.semantic_hash() as i64);
+                }
+                match self.vm.heap.get(r) {
+                    Object::Bytes(bytes) => Ok(bytes.semantic_hash() as i64),
+                    _ => Err(BAD_TYPE),
+                }
+            }
             _ => Err(BAD_TYPE),
         }
     }
@@ -416,11 +427,15 @@ impl Machine {
             Value::Int(value) => Ok(Self::map_index_hash(value)),
             Value::Float(bits) => Ok(Self::map_index_hash(float_hash(bits))),
             Value::Char(value) => Ok(Self::map_index_hash(i64::from(u32::from(value)))),
-            Value::Obj(r) => match self.vm.heap.get(r) {
-                Object::Str(text) | Object::Substring(text) => Ok(text.lookup_hash()),
-                Object::Bytes(bytes) => Ok(bytes.lookup_hash()),
-                _ => Err(BAD_TYPE),
-            },
+            Value::Obj(r) => {
+                if let Some(text) = self.vm.heap.text(r) {
+                    return Ok(text.lookup_hash());
+                }
+                match self.vm.heap.get(r) {
+                    Object::Bytes(bytes) => Ok(bytes.lookup_hash()),
+                    _ => Err(BAD_TYPE),
+                }
+            }
             _ => Err(BAD_TYPE),
         }
     }
@@ -1132,55 +1147,59 @@ impl Machine {
                     if x == y {
                         continue;
                     }
-                    match (self.vm.heap.get(x), self.vm.heap.get(y)) {
-                        (Object::Str(s), Object::Str(t))
-                        | (Object::Str(s), Object::Substring(t))
-                        | (Object::Substring(s), Object::Str(t))
-                        | (Object::Substring(s), Object::Substring(t)) => s == t,
-                        (Object::Bytes(s), Object::Bytes(t)) => s == t,
-                        (Object::NativeDigest(s), Object::NativeDigest(t)) => s == t,
-                        (
-                            Object::Instance {
-                                class: ac,
-                                fields: af,
-                                ..
-                            },
-                            Object::Instance {
-                                class: bc,
-                                fields: bf,
-                                ..
-                            },
-                        ) => {
-                            // An ordinary class keeps reference
-                            // identity, so only an enum case walks.
-                            let is_case = module
-                                .classes
-                                .get(*ac as usize)
-                                .map(|c| c.kind == lm_bytecode::BcClassKind::Case)
-                                .unwrap_or(false);
-                            if !is_case || ac != bc || af.len() != bf.len() {
-                                false
-                            } else {
-                                for (x, y) in af.iter().zip(bf.iter()) {
-                                    if matches!(x, Value::Uninit) || matches!(y, Value::Uninit) {
-                                        return Err(FaultCode::UninitializedField);
+                    if let (Some(left), Some(right)) = (self.vm.heap.text(x), self.vm.heap.text(y))
+                    {
+                        left == right
+                    } else if self.vm.heap.is_compact_text(x) || self.vm.heap.is_compact_text(y) {
+                        false
+                    } else {
+                        match (self.vm.heap.get(x), self.vm.heap.get(y)) {
+                            (Object::Bytes(s), Object::Bytes(t)) => s == t,
+                            (Object::NativeDigest(s), Object::NativeDigest(t)) => s == t,
+                            (
+                                Object::Instance {
+                                    class: ac,
+                                    fields: af,
+                                    ..
+                                },
+                                Object::Instance {
+                                    class: bc,
+                                    fields: bf,
+                                    ..
+                                },
+                            ) => {
+                                // An ordinary class keeps reference
+                                // identity, so only an enum case walks.
+                                let is_case = module
+                                    .classes
+                                    .get(*ac as usize)
+                                    .map(|c| c.kind == lm_bytecode::BcClassKind::Case)
+                                    .unwrap_or(false);
+                                if !is_case || ac != bc || af.len() != bf.len() {
+                                    false
+                                } else {
+                                    for (x, y) in af.iter().zip(bf.iter()) {
+                                        if matches!(x, Value::Uninit) || matches!(y, Value::Uninit)
+                                        {
+                                            return Err(FaultCode::UninitializedField);
+                                        }
+                                        work.push((*x, *y));
                                     }
-                                    work.push((*x, *y));
+                                    continue;
                                 }
-                                continue;
                             }
-                        }
-                        (Object::Tuple { items: ai }, Object::Tuple { items: bi }) => {
-                            if ai.len() != bi.len() {
-                                false
-                            } else {
-                                for (x, y) in ai.iter().zip(bi.iter()) {
-                                    work.push((*x, *y));
+                            (Object::Tuple { items: ai }, Object::Tuple { items: bi }) => {
+                                if ai.len() != bi.len() {
+                                    false
+                                } else {
+                                    for (x, y) in ai.iter().zip(bi.iter()) {
+                                        work.push((*x, *y));
+                                    }
+                                    continue;
                                 }
-                                continue;
                             }
+                            _ => self.references_equal(module, x, y),
                         }
-                        _ => self.references_equal(module, x, y),
                     }
                 }
                 _ => false,

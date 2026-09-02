@@ -262,6 +262,368 @@ struct TextRoot {
     metadata: TextMetadata,
 }
 
+/// One heap-owned reference to shared text storage.
+pub(crate) struct TextOwner {
+    root: Arc<TextRoot>,
+}
+
+impl TextOwner {
+    pub(crate) fn allocation_key(&self) -> usize {
+        self.root.allocation_key()
+    }
+
+    pub(crate) fn retained_capacity(&self) -> usize {
+        self.root.retained_capacity()
+    }
+}
+
+/// One immutable range inside a shared text root.
+#[repr(C)]
+pub(crate) struct TextView {
+    data: usize,
+    byte_len: usize,
+    scalar_start: usize,
+    scalar_len: usize,
+    semantic_hash: AtomicU64,
+    lookup_hash: AtomicU64,
+}
+
+pub(crate) const TEXT_VIEW_DATA_OFFSET: usize = std::mem::offset_of!(TextView, data);
+pub(crate) const TEXT_VIEW_BYTE_LEN_OFFSET: usize = std::mem::offset_of!(TextView, byte_len);
+pub(crate) const TEXT_VIEW_SCALAR_LEN_OFFSET: usize = std::mem::offset_of!(TextView, scalar_len);
+pub(crate) const TEXT_VIEW_SEMANTIC_HASH_OFFSET: usize =
+    std::mem::offset_of!(TextView, semantic_hash);
+pub(crate) const TEXT_VIEW_LOOKUP_HASH_OFFSET: usize = std::mem::offset_of!(TextView, lookup_hash);
+
+impl TextView {
+    fn new(data: usize, byte_len: usize, scalar_start: usize, scalar_len: usize) -> TextView {
+        TextView {
+            data,
+            byte_len,
+            scalar_start,
+            scalar_len,
+            semantic_hash: AtomicU64::new(0),
+            lookup_hash: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn empty() -> TextView {
+        TextView::new(0, 0, 0, 0)
+    }
+}
+
+/// One batch of text views over one shared root.
+pub struct TextViewBatch {
+    pub(crate) owner: TextOwner,
+    pub(crate) views: Vec<TextView>,
+}
+
+impl TextViewBatch {
+    /// Get the number of views in this batch.
+    pub fn len(&self) -> usize {
+        self.views.len()
+    }
+
+    /// Test whether this batch contains no views.
+    pub fn is_empty(&self) -> bool {
+        self.views.is_empty()
+    }
+
+    pub(crate) fn shared_allocation(&self) -> Option<(usize, usize)> {
+        (!self.views.is_empty())
+            .then(|| (self.owner.allocation_key(), self.owner.retained_capacity()))
+    }
+}
+
+/// One borrowed text value from either heap storage class.
+#[derive(Clone, Copy)]
+pub struct TextRef<'a> {
+    root: &'a Arc<TextRoot>,
+    view: TextRefView<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum TextRefView<'a> {
+    Shared(&'a SharedText),
+    Compact(&'a TextView),
+}
+
+impl<'a> TextRef<'a> {
+    fn shared(text: &'a SharedText) -> TextRef<'a> {
+        TextRef {
+            root: &text.root,
+            view: TextRefView::Shared(text),
+        }
+    }
+
+    pub(crate) fn compact(owner: &'a TextOwner, view: &'a TextView) -> TextRef<'a> {
+        TextRef {
+            root: &owner.root,
+            view: TextRefView::Compact(view),
+        }
+    }
+
+    fn data(self) -> usize {
+        match self.view {
+            TextRefView::Shared(text) => text.data,
+            TextRefView::Compact(view) => view.data,
+        }
+    }
+
+    /// Get the visible UTF-8 byte length.
+    pub fn len(self) -> usize {
+        match self.view {
+            TextRefView::Shared(text) => text.byte_len,
+            TextRefView::Compact(view) => view.byte_len,
+        }
+    }
+
+    /// Test whether the visible text is empty.
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get the visible Unicode scalar count.
+    pub fn char_count(self) -> usize {
+        match self.view {
+            TextRefView::Shared(text) => text.scalar_len,
+            TextRefView::Compact(view) => view.scalar_len,
+        }
+    }
+
+    fn scalar_start(self) -> usize {
+        match self.view {
+            TextRefView::Shared(text) => text.scalar_start,
+            TextRefView::Compact(view) => view.scalar_start,
+        }
+    }
+
+    fn semantic_hash_cell(self) -> &'a AtomicU64 {
+        match self.view {
+            TextRefView::Shared(text) => &text.semantic_hash,
+            TextRefView::Compact(view) => &view.semantic_hash,
+        }
+    }
+
+    fn lookup_hash_cell(self) -> &'a AtomicU64 {
+        match self.view {
+            TextRefView::Shared(text) => &text.lookup_hash,
+            TextRefView::Compact(view) => &view.lookup_hash,
+        }
+    }
+
+    fn byte_start(self) -> usize {
+        self.data()
+            .checked_sub(self.root.as_str().as_ptr() as usize)
+            .expect("a text view stays inside its root")
+    }
+
+    /// Get the visible text.
+    pub fn as_str(self) -> &'a str {
+        let start = self.byte_start();
+        let end = start + self.len();
+        &self.root.as_str()[start..end]
+    }
+
+    /// Test whether all visible text bytes are ASCII.
+    pub fn is_ascii(self) -> bool {
+        self.root.metadata.ascii || self.as_str().is_ascii()
+    }
+
+    /// Get the retained byte allocation capacity.
+    pub fn retained_capacity(self) -> usize {
+        self.root.retained_capacity()
+    }
+
+    /// Test the durable String backing limit.
+    pub fn has_bounded_retention(self) -> bool {
+        self.retained_capacity() <= SharedText::retention_limit(self.len())
+    }
+
+    /// Make an owned handle to the same text range.
+    pub fn to_shared(self) -> SharedText {
+        SharedText {
+            root: self.root.clone(),
+            data: self.data(),
+            byte_len: self.len(),
+            scalar_start: self.scalar_start(),
+            scalar_len: self.char_count(),
+            semantic_hash: AtomicU64::new(self.semantic_hash_cell().load(Ordering::Relaxed)),
+            lookup_hash: AtomicU64::new(self.lookup_hash_cell().load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Get the stable semantic hash.
+    pub fn semantic_hash(self) -> u64 {
+        let cached = self.semantic_hash_cell().load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let hash = semantic_hash_bytes(self.as_str().as_bytes());
+        if hash != 0 {
+            self.semantic_hash_cell().store(hash, Ordering::Relaxed);
+        }
+        hash
+    }
+
+    /// Get the private process lookup hash.
+    pub fn lookup_hash(self) -> u64 {
+        let cached = self.lookup_hash_cell().load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let hash = process_lookup_hash(self.semantic_hash() as i64);
+        if hash != 0 {
+            self.lookup_hash_cell().store(hash, Ordering::Relaxed);
+        }
+        hash
+    }
+
+    /// Make bounded String storage with a fallible copy.
+    pub fn try_bounded(self) -> Result<SharedText, TryReserveError> {
+        if self.has_bounded_retention() {
+            return Ok(self.to_shared());
+        }
+        SharedText::try_from_str(self.as_str())
+    }
+
+    /// Make a shared byte range.
+    pub fn slice(self, start: usize, end: usize) -> Option<SharedText> {
+        if start > end || end > self.len() {
+            return None;
+        }
+        let text = self.as_str();
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return None;
+        }
+        let root_start = self.byte_start().checked_add(start)?;
+        let root_end = self.byte_start().checked_add(end)?;
+        let scalar_start = self.root.scalar_of_byte(root_start)?;
+        let scalar_end = self.root.scalar_of_byte(root_end)?;
+        Some(SharedText {
+            root: self.root.clone(),
+            data: self.data().checked_add(start)?,
+            byte_len: end - start,
+            scalar_start,
+            scalar_len: scalar_end - scalar_start,
+            semantic_hash: AtomicU64::new(0),
+            lookup_hash: AtomicU64::new(0),
+        })
+    }
+
+    /// Make a shared range from Unicode scalar positions.
+    pub fn scalar_slice(self, start: usize, length: usize) -> Option<SharedText> {
+        let end = start.checked_add(length)?;
+        if end > self.char_count() {
+            return None;
+        }
+        let root_start = self.scalar_start().checked_add(start)?;
+        let root_end = root_start.checked_add(length)?;
+        let byte_start = self.root.byte_of_scalar(root_start)?;
+        let byte_end = self.root.byte_of_scalar(root_end)?;
+        Some(SharedText {
+            root: self.root.clone(),
+            data: self.root.as_str().as_ptr() as usize + byte_start,
+            byte_len: byte_end - byte_start,
+            scalar_start: root_start,
+            scalar_len: length,
+            semantic_hash: AtomicU64::new(0),
+            lookup_hash: AtomicU64::new(0),
+        })
+    }
+
+    /// Read one Unicode scalar at a scalar position.
+    pub fn scalar_at(self, index: usize) -> Option<char> {
+        if index >= self.char_count() {
+            return None;
+        }
+        if self.root.metadata.ascii {
+            return Some(char::from(self.as_str().as_bytes()[index]));
+        }
+        let root_index = self.scalar_start().checked_add(index)?;
+        let byte = self.root.byte_of_scalar(root_index)?;
+        self.root.as_str()[byte..].chars().next()
+    }
+
+    /// Read one Unicode scalar at a UTF-8 byte boundary.
+    pub fn scalar_at_byte(self, index: usize) -> Option<char> {
+        if index >= self.len() || !self.as_str().is_char_boundary(index) {
+            return None;
+        }
+        self.as_str()[index..].chars().next()
+    }
+
+    /// Test one visible byte position as a UTF-8 boundary.
+    pub fn is_char_boundary(self, index: usize) -> bool {
+        index <= self.len() && self.as_str().is_char_boundary(index)
+    }
+
+    /// Find text and return its scalar position.
+    pub fn find_scalar(self, needle: TextRef<'_>) -> Option<usize> {
+        let byte = self.as_str().find(needle.as_str())?;
+        let root_byte = self.byte_start().checked_add(byte)?;
+        self.root
+            .scalar_of_byte(root_byte)?
+            .checked_sub(self.scalar_start())
+    }
+
+    /// Find text and return its byte position.
+    pub fn find_byte(self, needle: TextRef<'_>) -> Option<usize> {
+        self.as_str().find(needle.as_str())
+    }
+
+    /// Share this text allocation as immutable bytes.
+    pub fn bytes(self) -> SharedBytes {
+        let start = self.byte_start();
+        let end = start
+            .checked_add(self.len())
+            .expect("a text view stays inside its root");
+        let span = self
+            .root
+            .byte_span(start, end)
+            .expect("a text view stays inside its root");
+        SharedBytes {
+            span,
+            semantic_hash: AtomicU64::new(0),
+            lookup_hash: AtomicU64::new(0),
+            utf8_state: AtomicU8::new(UTF8_VALID),
+        }
+    }
+
+    /// Join two values in new bounded storage.
+    pub fn try_concat(self, other: TextRef<'_>) -> Result<SharedText, TryReserveError> {
+        let mut text = String::new();
+        text.try_reserve_exact(self.len().saturating_add(other.len()))?;
+        text.push_str(self.as_str());
+        text.push_str(other.as_str());
+        let scalar_count = self.char_count().saturating_add(other.char_count());
+        let ascii = text.is_ascii();
+        SharedText::try_from_string_parts(text, scalar_count, ascii)
+    }
+}
+
+impl PartialEq for TextRef<'_> {
+    fn eq(&self, other: &TextRef<'_>) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for TextRef<'_> {}
+
+impl AsRef<str> for TextRef<'_> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for TextRef<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl TextRoot {
     fn from_valid_parts(data: Vec<u8>, scalar_count: usize, ascii: bool) -> TextRoot {
         TextRoot {
@@ -425,6 +787,114 @@ impl SharedText {
         STRING_RETENTION_FLOOR.max(visible_len.saturating_mul(2))
     }
 
+    /// Borrow this text without cloning its shared owner.
+    pub fn text_ref(&self) -> TextRef<'_> {
+        TextRef::shared(self)
+    }
+
+    fn compact_view(&self, start: usize, end: usize) -> Option<TextView> {
+        if start > end || end > self.byte_len {
+            return None;
+        }
+        let text = self.as_str();
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return None;
+        }
+        let root_start = self.byte_start().checked_add(start)?;
+        let root_end = self.byte_start().checked_add(end)?;
+        let scalar_start = self.root.scalar_of_byte(root_start)?;
+        let scalar_end = self.root.scalar_of_byte(root_end)?;
+        Some(TextView::new(
+            self.data.checked_add(start)?,
+            end - start,
+            scalar_start,
+            scalar_end - scalar_start,
+        ))
+    }
+
+    fn try_split_items<T>(
+        &self,
+        separator: &str,
+        mut make: impl FnMut(usize, usize) -> T,
+    ) -> Result<Vec<T>, TryReserveError> {
+        let mut items = Vec::new();
+        if separator.is_empty() {
+            items.try_reserve_exact(self.char_count().saturating_add(2))?;
+            items.push(make(0, 0));
+            let mut end = 0;
+            for (at, scalar) in self.as_str().char_indices() {
+                end = at + scalar.len_utf8();
+                items.push(make(at, end));
+            }
+            items.push(make(end, self.len()));
+            return Ok(items);
+        }
+
+        let visible = self.as_str();
+        let mut start = 0;
+        while let Some(relative) = visible[start..].find(separator) {
+            let at = start + relative;
+            items.try_reserve(1)?;
+            items.push(make(start, at));
+            start = at + separator.len();
+        }
+        items.try_reserve(1)?;
+        items.push(make(start, visible.len()));
+        Ok(items)
+    }
+
+    fn try_line_items<T>(
+        &self,
+        mut make: impl FnMut(usize, usize) -> T,
+    ) -> Result<Vec<T>, TryReserveError> {
+        let visible = self.as_str();
+        let mut items = Vec::new();
+        let mut start = 0;
+        while start < visible.len() {
+            let end = visible[start..]
+                .find('\n')
+                .map(|relative| start + relative)
+                .unwrap_or(visible.len());
+            let stop = if visible[start..end].ends_with('\r') {
+                end - 1
+            } else {
+                end
+            };
+            items.try_reserve(1)?;
+            items.push(make(start, stop));
+            start = end + 1;
+        }
+        Ok(items)
+    }
+
+    /// Split this text into one compact descriptor batch.
+    pub fn try_split_view_batch(&self, separator: &str) -> Result<TextViewBatch, TryReserveError> {
+        let views = self.try_split_items(separator, |start, end| {
+            self.compact_view(start, end)
+                .expect("a split range has valid boundaries")
+        })?;
+        Ok(TextViewBatch {
+            owner: TextOwner {
+                root: self.root.clone(),
+            },
+            views,
+        })
+    }
+
+    /// Split this text into one compact line descriptor batch.
+    pub fn try_line_view_batch(&self) -> Result<TextViewBatch, TryReserveError> {
+        let views = self.try_line_items(|start, end| {
+            self.compact_view(start, end)
+                .expect("a line range has valid boundaries")
+        })?;
+        Ok(TextViewBatch {
+            owner: TextOwner {
+                root: self.root.clone(),
+            },
+            views,
+        })
+    }
+
     /// Make bounded text from an owned UTF-8 buffer.
     pub fn try_from_string(text: String) -> Result<SharedText, TryReserveError> {
         let ascii = text.is_ascii();
@@ -562,67 +1032,18 @@ impl SharedText {
 
     /// Split this text into shared views with one scan.
     pub fn try_split_views(&self, separator: &str) -> Result<Vec<SharedText>, TryReserveError> {
-        let mut pieces = Vec::new();
-        if separator.is_empty() {
-            pieces.try_reserve_exact(self.char_count().saturating_add(2))?;
-            pieces.push(self.slice(0, 0).expect("zero is one valid boundary"));
-            let mut end = 0;
-            for (at, scalar) in self.as_str().char_indices() {
-                end = at + scalar.len_utf8();
-                pieces.push(
-                    self.slice(at, end)
-                        .expect("one decoded scalar has valid boundaries"),
-                );
-            }
-            pieces.push(
-                self.slice(end, self.len())
-                    .expect("the text end is one valid boundary"),
-            );
-            return Ok(pieces);
-        }
-
-        let visible = self.as_str();
-        let mut start = 0;
-        while let Some(relative) = visible[start..].find(separator) {
-            let at = start + relative;
-            pieces.try_reserve(1)?;
-            pieces.push(
-                self.slice(start, at)
-                    .expect("a text match has valid boundaries"),
-            );
-            start = at + separator.len();
-        }
-        pieces.try_reserve(1)?;
-        pieces.push(
-            self.slice(start, visible.len())
-                .expect("the remaining text has valid boundaries"),
-        );
-        Ok(pieces)
+        self.try_split_items(separator, |start, end| {
+            self.slice(start, end)
+                .expect("a split range has valid boundaries")
+        })
     }
 
     /// Split this text into line views with one scan.
     pub fn try_line_views(&self) -> Result<Vec<SharedText>, TryReserveError> {
-        let visible = self.as_str();
-        let mut pieces = Vec::new();
-        let mut start = 0;
-        while start < visible.len() {
-            let end = visible[start..]
-                .find('\n')
-                .map(|relative| start + relative)
-                .unwrap_or(visible.len());
-            let stop = if visible[start..end].ends_with('\r') {
-                end - 1
-            } else {
-                end
-            };
-            pieces.try_reserve(1)?;
-            pieces.push(
-                self.slice(start, stop)
-                    .expect("one text line has valid boundaries"),
-            );
-            start = end + 1;
-        }
-        Ok(pieces)
+        self.try_line_items(|start, end| {
+            self.slice(start, end)
+                .expect("a line range has valid boundaries")
+        })
     }
 
     /// Make a shared range from Unicode scalar positions.

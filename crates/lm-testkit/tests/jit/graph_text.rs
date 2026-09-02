@@ -54,6 +54,34 @@ fn text_metadata_and_hash_mix_stay_native() {
 }
 
 #[test]
+fn compact_split_views_support_native_text_consumers() {
+    let source = concat!(
+        "pieces = \"alpha,beta,gamma\".split(\",\")\n",
+        "piece = pieces.at(1)\n",
+        "builder = StringBuilder()\n",
+        "builder.append(piece)\n",
+        "table = {\"beta\": 7}\n",
+        "i = 0\ntotal = 0\n",
+        "while i < 1000\n",
+        "  if piece == \"beta\"\n",
+        "    total = total + piece.byte_len() + table.get(piece).value_or(0)\n",
+        "  end\n",
+        "  i = i + 1\n",
+        "end\n",
+        "(builder.finish(), total, hash_of(piece))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-compact-text.lm", source)
+        .expect("the compact text case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
 fn map_metadata_and_digest_comparison_stay_native() {
     let source = concat!(
         "left = [1, 2, 3]\nleft.freeze()\n",

@@ -868,13 +868,16 @@ pub(super) fn emit_direct_map_key(
                     exit.point,
                     ObjectGuard::Replay(exit.deopt_stack),
                 )?,
-                DirectMapKeyKind::Text => emit_text_entry(
-                    builder,
-                    values,
-                    key.bits,
-                    exit.point,
-                    ObjectGuard::Replay(exit.deopt_stack),
-                )?,
+                DirectMapKeyKind::Text => {
+                    emit_text_entry(
+                        builder,
+                        values,
+                        key.bits,
+                        exit.point,
+                        ObjectGuard::Replay(exit.deopt_stack),
+                    )?
+                    .payload
+                }
                 DirectMapKeyKind::Bytes => emit_object_entry(
                     builder,
                     values,
@@ -886,12 +889,14 @@ pub(super) fn emit_direct_map_key(
                 DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
             };
             let offset = match kind {
-                DirectMapKeyKind::Str | DirectMapKeyKind::Text => JIT_TEXT_LOOKUP_HASH_OFFSET,
+                DirectMapKeyKind::Str => JIT_TEXT_LOOKUP_HASH_OFFSET,
+                DirectMapKeyKind::Text => JIT_TEXT_PAYLOAD_LOOKUP_HASH_OFFSET,
                 DirectMapKeyKind::Bytes => JIT_BYTES_LOOKUP_HASH_OFFSET,
                 DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
             };
             let semantic_offset = match kind {
-                DirectMapKeyKind::Str | DirectMapKeyKind::Text => JIT_TEXT_SEMANTIC_HASH_OFFSET,
+                DirectMapKeyKind::Str => JIT_TEXT_SEMANTIC_HASH_OFFSET,
+                DirectMapKeyKind::Text => JIT_TEXT_PAYLOAD_SEMANTIC_HASH_OFFSET,
                 DirectMapKeyKind::Bytes => JIT_BYTES_SEMANTIC_HASH_OFFSET,
                 DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
             };
@@ -1193,13 +1198,16 @@ pub(super) fn emit_object_map_key_equal(
             exit.point,
             ObjectGuard::Replay(exit.deopt_stack),
         )?,
-        DirectMapKeyKind::Text => emit_text_entry(
-            builder,
-            values,
-            stored_bits,
-            exit.point,
-            ObjectGuard::Replay(exit.deopt_stack),
-        )?,
+        DirectMapKeyKind::Text => {
+            emit_text_entry(
+                builder,
+                values,
+                stored_bits,
+                exit.point,
+                ObjectGuard::Replay(exit.deopt_stack),
+            )?
+            .payload
+        }
         DirectMapKeyKind::Bytes => emit_object_entry(
             builder,
             values,
@@ -1211,9 +1219,11 @@ pub(super) fn emit_object_map_key_equal(
         DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
     };
     let (data_offset, length_offset) = match direct_key.kind {
-        DirectMapKeyKind::Str | DirectMapKeyKind::Text => {
-            (JIT_TEXT_DATA_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET)
-        }
+        DirectMapKeyKind::Str => (JIT_TEXT_DATA_OFFSET, JIT_TEXT_BYTE_LEN_OFFSET),
+        DirectMapKeyKind::Text => (
+            JIT_TEXT_PAYLOAD_DATA_OFFSET,
+            JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
+        ),
         DirectMapKeyKind::Bytes => (JIT_BYTES_DATA_OFFSET, JIT_BYTES_LEN_OFFSET),
         DirectMapKeyKind::Scalar(_) => return Err(CompileError::Backend),
     };

@@ -148,7 +148,7 @@ pub fn compute(
     walk(heap, scratch, &roots, limits, &mut DigestCheck { heap })?;
     let order = scratch.order();
     let mut out: Vec<u8> = Vec::with_capacity(DOMAIN.len() + 64 + order.len() * 16);
-    let mut expected_by_slot = vec![None; heap.slot_count()];
+    let mut expected_by_slot = vec![None; heap.reference_slot_count()];
     out.extend_from_slice(DOMAIN);
     encode_value(
         &mut out,
@@ -160,15 +160,31 @@ pub fn compute(
     )?;
     count(&mut out, order.len())?;
     for r in order {
-        let expected = expected_by_slot.get(r.slot as usize).copied().flatten();
-        encode_object(
-            &mut out,
-            heap.get(*r),
-            expected,
-            &mut expected_by_slot,
-            scratch,
-            codes,
-        )?;
+        let expected = expected_by_slot
+            .get(scratch.index_of(*r))
+            .copied()
+            .flatten();
+        if let Some(object) = heap.try_get(*r) {
+            encode_object(
+                &mut out,
+                object,
+                expected,
+                &mut expected_by_slot,
+                scratch,
+                codes,
+            )?;
+        } else {
+            let text = heap.text(*r).ok_or(FaultCode::BoundaryViolation)?;
+            let object = Object::Substring(text.to_shared());
+            encode_object(
+                &mut out,
+                &object,
+                expected,
+                &mut expected_by_slot,
+                scratch,
+                codes,
+            )?;
+        }
     }
     Ok(hash(&out))
 }
@@ -221,10 +237,10 @@ fn encode_value(
         }
         Value::Obj(r) => {
             out.push(V_REF);
-            out.extend_from_slice(&scratch.ordinal(r.slot).to_le_bytes());
+            out.extend_from_slice(&scratch.ordinal(r).to_le_bytes());
             if let Some(expected) = expected {
                 let slot = expected_by_slot
-                    .get_mut(r.slot as usize)
+                    .get_mut(scratch.index_of(r))
                     .ok_or(FaultCode::BoundaryViolation)?;
                 if slot.is_none() {
                     *slot = Some(expected);

@@ -50,6 +50,14 @@ impl Machine {
                     Ok(class)
                 }
             }
+            Value::Obj(reference) if self.vm.heap.is_compact_text(reference) => {
+                let class = module.core_roles[lm_bytecode::corepin::ROLE_SUBSTRING];
+                if class == lm_bytecode::NO_ROLE {
+                    Err(BAD_TYPE)
+                } else {
+                    Ok(class)
+                }
+            }
             Value::Obj(reference) => match self.vm.heap.get(reference) {
                 Object::Instance { class, .. } => Ok(*class),
                 Object::Str(_) => {

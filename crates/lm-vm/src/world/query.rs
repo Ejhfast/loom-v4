@@ -221,7 +221,9 @@ impl World {
         let mut out: Vec<VmId> = Vec::new();
         let mut images: Vec<VmImageKey> = self.machines[vm as usize].image.into_iter().collect();
         for r in order {
-            let object = heap.get(r);
+            let Some(object) = heap.try_get(r) else {
+                continue;
+            };
             if let Object::NativeVm { image, generation } = object {
                 let key = VmImageKey {
                     image: *image,
@@ -278,7 +280,7 @@ impl World {
             };
             let image = &self.vm_images[key.image as usize];
             for reference in order {
-                if let Object::NativeHandle { proc, .. } = image.heap.get(reference) {
+                if let Some(Object::NativeHandle { proc, .. }) = image.heap.try_get(reference) {
                     if !out.contains(proc) {
                         out.push(*proc);
                     }
@@ -330,7 +332,7 @@ impl World {
         let heap = &self.machines[vm as usize].vm.heap;
         let mut out: Vec<u32> = Vec::new();
         for r in order {
-            if let Object::NativeSnapshotRef { image } = heap.get(r) {
+            if let Some(Object::NativeSnapshotRef { image }) = heap.try_get(r) {
                 if !out.contains(image) {
                     out.push(*image);
                 }
@@ -390,15 +392,15 @@ impl World {
         let order = self.snapshot_object_order(vm)?;
         let heap = &self.machines[vm as usize].vm.heap;
         for reference in &order {
-            let resource = match heap.get(*reference) {
-                Object::NativeFileHandle { resource }
-                | Object::NativeResourceHandle { resource, .. }
-                | Object::NativeTcpStream { resource }
-                | Object::NativeTcpListener { resource }
-                | Object::NativePipeReader { resource }
-                | Object::NativePipeWriter { resource }
-                | Object::NativeChild { resource }
-                | Object::NativeUdpSocket { resource } => Some(*resource),
+            let resource = match heap.try_get(*reference) {
+                Some(Object::NativeFileHandle { resource })
+                | Some(Object::NativeResourceHandle { resource, .. })
+                | Some(Object::NativeTcpStream { resource })
+                | Some(Object::NativeTcpListener { resource })
+                | Some(Object::NativePipeReader { resource })
+                | Some(Object::NativePipeWriter { resource })
+                | Some(Object::NativeChild { resource })
+                | Some(Object::NativeUdpSocket { resource }) => Some(*resource),
                 _ => None,
             };
             if resource.is_some_and(|resource| self.bound_resources.contains_key(&resource)) {
@@ -454,19 +456,19 @@ impl World {
         let order = self.snapshot_object_order(vm).ok()?;
         let heap = &self.machines[vm as usize].vm.heap;
         order.into_iter().find_map(|reference| {
-            let resource = match heap.get(reference) {
-                Object::NativeFileHandle { resource }
-                | Object::NativeResourceHandle { resource, .. }
-                | Object::NativeTcpStream { resource }
-                | Object::NativeTcpListener { resource } => *resource,
-                Object::NativeTlsStream { resource }
-                | Object::NativeRawMode { resource }
-                | Object::NativeSignalStream { resource }
-                | Object::NativePipeReader { resource }
-                | Object::NativePipeWriter { resource }
-                | Object::NativeChild { resource }
-                | Object::NativeUdpSocket { resource }
-                | Object::NativeHostResource { resource, .. } => *resource,
+            let resource = match heap.try_get(reference) {
+                Some(Object::NativeFileHandle { resource })
+                | Some(Object::NativeResourceHandle { resource, .. })
+                | Some(Object::NativeTcpStream { resource })
+                | Some(Object::NativeTcpListener { resource }) => *resource,
+                Some(Object::NativeTlsStream { resource })
+                | Some(Object::NativeRawMode { resource })
+                | Some(Object::NativeSignalStream { resource })
+                | Some(Object::NativePipeReader { resource })
+                | Some(Object::NativePipeWriter { resource })
+                | Some(Object::NativeChild { resource })
+                | Some(Object::NativeUdpSocket { resource })
+                | Some(Object::NativeHostResource { resource, .. }) => *resource,
                 _ => return None,
             };
             self.bound_resources

@@ -218,6 +218,10 @@ fn check_one(
             let Value::Obj(reference) = value else {
                 return Err(FaultCode::TypeMismatch);
             };
+            if heap.is_compact_text(reference) {
+                let text_match = matches!(kind, Kind::Text | Kind::Substring);
+                return text_match.then_some(()).ok_or(FaultCode::TypeMismatch);
+            }
             let object = heap.get(reference);
             let found = kind_of(object);
             let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);

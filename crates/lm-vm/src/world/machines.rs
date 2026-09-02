@@ -298,9 +298,10 @@ impl World {
                 }
             };
             for reference in order {
-                if let Object::NativeVm { image, generation } =
-                    self.machines[id as usize].vm.heap.get(reference)
-                {
+                let Some(object) = self.machines[id as usize].vm.heap.try_get(reference) else {
+                    continue;
+                };
+                if let Object::NativeVm { image, generation } = object {
                     self.mark_live_image(
                         VmImageKey {
                             image: *image,

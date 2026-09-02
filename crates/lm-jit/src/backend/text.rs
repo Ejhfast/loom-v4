@@ -39,7 +39,8 @@ pub(super) fn emit_text_len(
         reference,
         point,
         ObjectGuard::Replay(deopt_stack),
-    )?;
+    )?
+    .payload;
     let len = load_value(builder, values.pointer_type, entry, offset)?;
     Ok(if values.pointer_type == types::I64 {
         len
@@ -62,7 +63,8 @@ pub(super) fn emit_text_at_byte(
         reference,
         point,
         ObjectGuard::Replay(deopt_stack),
-    )?;
+    )?
+    .payload;
     let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
     let native_index = if values.pointer_type == types::I64 {
         index
@@ -73,14 +75,19 @@ pub(super) fn emit_text_at_byte(
         builder,
         values.pointer_type,
         entry,
-        JIT_TEXT_BYTE_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
     )?;
     let outside = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, native_index, len);
     let invalid = builder.ins().bor(negative, outside);
     emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
-    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_PAYLOAD_DATA_OFFSET,
+    )?;
     let address = builder.ins().iadd(data, native_index);
     let first = builder
         .ins()
@@ -106,13 +113,14 @@ pub(super) fn emit_text_at(
         reference,
         point,
         ObjectGuard::Replay(deopt_stack),
-    )?;
+    )?
+    .payload;
     let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
     let scalar_len = load_value(
         builder,
         values.pointer_type,
         entry,
-        JIT_TEXT_SCALAR_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_SCALAR_LEN_OFFSET,
     )?;
     let native_index = if values.pointer_type == types::I64 {
         index
@@ -125,12 +133,17 @@ pub(super) fn emit_text_at(
     let invalid = builder.ins().bor(negative, outside);
     emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
 
-    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_PAYLOAD_DATA_OFFSET,
+    )?;
     let byte_len = load_value(
         builder,
         values.pointer_type,
         entry,
-        JIT_TEXT_BYTE_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
     )?;
     let ascii = builder.ins().icmp(IntCC::Equal, byte_len, scalar_len);
     let ascii_block = builder.create_block();
@@ -272,7 +285,8 @@ pub(super) fn emit_text_is_boundary(
         reference,
         point,
         ObjectGuard::Replay(deopt_stack),
-    )?;
+    )?
+    .payload;
     let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
     emit_interpreter_replay(builder, values, negative, point, deopt_stack)?;
     let native_index = if values.pointer_type == types::I64 {
@@ -284,7 +298,7 @@ pub(super) fn emit_text_is_boundary(
         builder,
         values.pointer_type,
         entry,
-        JIT_TEXT_BYTE_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
     )?;
     let inside = builder
         .ins()
@@ -296,7 +310,12 @@ pub(super) fn emit_text_is_boundary(
     builder.ins().brif(inside, inspect, &[], outside, &[]);
 
     builder.switch_to_block(inspect);
-    let data = load_value(builder, values.pointer_type, entry, JIT_TEXT_DATA_OFFSET)?;
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_TEXT_PAYLOAD_DATA_OFFSET,
+    )?;
     let address = builder.ins().iadd(data, native_index);
     let byte = builder
         .ins()

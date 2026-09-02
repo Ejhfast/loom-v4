@@ -560,8 +560,8 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                 .copied()
                 .ok_or(CompileError::Backend)?;
             let offset = match access.kind {
-                HeapAccessKind::TextByteLen => JIT_TEXT_BYTE_LEN_OFFSET,
-                HeapAccessKind::TextScalarLen => JIT_TEXT_SCALAR_LEN_OFFSET,
+                HeapAccessKind::TextByteLen => JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
+                HeapAccessKind::TextScalarLen => JIT_TEXT_PAYLOAD_SCALAR_LEN_OFFSET,
                 _ => return Err(CompileError::Backend),
             };
             let value = emit_text_len(

@@ -110,11 +110,8 @@ impl Machine {
     }
 
     /// Get immutable text from a String or Substring object.
-    pub(super) fn text_value(&self, reference: ObjRef) -> Result<&SharedText, FaultCode> {
-        match self.vm.heap.get(reference) {
-            Object::Str(text) | Object::Substring(text) => Ok(text),
-            _ => Err(BAD_TYPE),
-        }
+    pub(super) fn text_value(&self, reference: ObjRef) -> Result<TextRef<'_>, FaultCode> {
+        self.vm.heap.text(reference).ok_or(BAD_TYPE)
     }
 
     /// Read two integer operands and preserve successful input.

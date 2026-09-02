@@ -584,9 +584,11 @@ impl World {
                 if visited.contains(&r) {
                     return "<cycle>".to_string();
                 }
+                if let Some(text) = heap.text(r) {
+                    return render_string(text.as_str());
+                }
                 match heap.get(r) {
-                    Object::Str(text) => render_string(text),
-                    Object::Substring(text) => render_string(text),
+                    Object::Str(text) | Object::Substring(text) => render_string(text),
                     Object::List { items, .. } => {
                         visited.push(r);
                         let element = expected.and_then(|ty| self.show_list_element(code, ty));
@@ -929,10 +931,9 @@ impl World {
             );
         }
         let _ = writeln!(out, "objects:");
-        m.vm.heap.for_each_live(|r, frozen, _object| {
+        m.vm.heap.for_each_live(|r, frozen, object| {
             let state = if frozen { "frozen" } else { "mutable" };
             let mut visited = Vec::new();
-            let object = m.vm.heap.get(r);
             let _ = writeln!(
                 out,
                 "  obj {} gen {} {} {} {}",

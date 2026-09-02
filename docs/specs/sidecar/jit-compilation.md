@@ -16,6 +16,8 @@ The interpreter lands exact hard-fuel stops within one partial reservation.
 
 Direct instance, tuple, list, and byte access use the canonical heap layout.
 
+Split text views use a separate canonical descriptor table.
+
 Stable list parameters and locals retain their canonical data pointer across safe loop backedges.
 
 One reserved acyclic path can charge several segments with one fuel update.
@@ -4079,6 +4081,46 @@ The warm JSON parse changed from 76.831 ms to 76.578 ms.
 Each program compiled one fewer region. Both programs retained complete native coverage.
 
 Best end-to-end Auto times were 447 ms and 253 ms.
+
+### Stage F80: Store split text views in descriptor pages
+
+- allocate one shared owner for each split or line batch;
+- store each immutable range in one fixed descriptor;
+- tag compact references without changing the `ObjRef` ABI;
+- keep descriptor addresses stable in fixed pages;
+- preserve generation checks for every view;
+- teach collection, graph, snapshot, display, and native paths about both storage classes;
+- materialize ordinary `Substring` objects during transfer, compaction, and snapshot encoding.
+
+Each logical view still has one object reference.
+
+The result list therefore keeps normal `Value::Obj` elements.
+
+One descriptor uses 56 bytes instead of one 112-byte general object entry.
+
+The descriptor contains no `Arc` and no general object header.
+
+One root record owns the shared text allocation for the complete batch.
+
+The heap keeps the prior logical charge of 32 bytes for each view.
+
+This rule preserves heap-limit behavior across both storage classes.
+
+The split scanner now serves compact batches and ordinary shared views.
+
+The release helper row creates one million split pieces.
+
+| Split helper row | Stage F79 | Stage F80 | Change |
+| --- | ---: | ---: | ---: |
+| Interpreter time | 56.066 ms | 38.810 ms | 30.8 percent faster |
+| Auto time | 51.748 ms | 35.752 ms | 30.9 percent faster |
+| Native time | 51.721 ms | 36.219 ms | 30.0 percent faster |
+
+The CSV Auto row changed from 5.193 milliseconds to 4.902 milliseconds.
+
+The other application rows stayed within five percent.
+
+Focused tests cover collection, stale generations, compaction, transfer, snapshots, native text operations, and exact fuel boundaries.
 
 ## 24. Rejected designs
 

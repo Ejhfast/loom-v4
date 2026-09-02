@@ -1276,7 +1276,66 @@ pub(super) fn emit_instance_entry_miss(
     Ok((entry, actual))
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct NativeTextEntry {
+    pub(super) payload: ir::Value,
+    pub(super) is_string: ir::Value,
+}
+
 pub(super) fn emit_text_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<NativeTextEntry, CompileError> {
+    let generation = builder.ins().ushr_imm(reference, 32);
+    let generation = builder.ins().ireduce(types::I32, generation);
+    let storage_tag = builder
+        .ins()
+        .band_imm(generation, i64::from(TEXT_VIEW_GENERATION_TAG));
+    let compact = builder.ins().icmp_imm(IntCC::NotEqual, storage_tag, 0);
+    let normal_block = builder.create_block();
+    let compact_block = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, values.pointer_type);
+    builder.append_block_param(done, types::I8);
+    builder
+        .ins()
+        .brif(compact, compact_block, &[], normal_block, &[]);
+
+    builder.switch_to_block(normal_block);
+    let entry = emit_normal_text_entry(builder, values, reference, point, guard)?;
+    let kind = load_heap_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
+    let is_string = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, kind, i64::from(JIT_OBJECT_STR));
+    let payload_offset = JIT_TEXT_DATA_OFFSET
+        .checked_sub(JIT_TEXT_PAYLOAD_DATA_OFFSET)
+        .ok_or(CompileError::Backend)?;
+    let payload = builder.ins().iadd_imm(
+        entry,
+        i64::try_from(payload_offset).map_err(|_| CompileError::Backend)?,
+    );
+    builder
+        .ins()
+        .jump(done, &[payload.into(), is_string.into()]);
+
+    builder.switch_to_block(compact_block);
+    let payload = emit_compact_text_entry(builder, values, reference, generation, point, guard)?;
+    let is_string = builder.ins().iconst(types::I8, 0);
+    builder
+        .ins()
+        .jump(done, &[payload.into(), is_string.into()]);
+
+    builder.switch_to_block(done);
+    Ok(NativeTextEntry {
+        payload: builder.block_params(done)[0],
+        is_string: builder.block_params(done)[1],
+    })
+}
+
+fn emit_normal_text_entry(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,
@@ -1314,7 +1373,7 @@ pub(super) fn emit_text_entry(
     Ok(entry)
 }
 
-pub(super) fn emit_text_entry_miss(
+fn emit_text_entry_miss(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,
     reference: ir::Value,
@@ -1333,6 +1392,72 @@ pub(super) fn emit_text_entry_miss(
     let invalid = builder.ins().bxor_imm(valid, 1);
     emit_object_guard(builder, values, invalid, point, guard)?;
     Ok(entry)
+}
+
+fn emit_compact_text_entry(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    expected_generation: ir::Value,
+    point: FaultPoint,
+    guard: ObjectGuard<'_>,
+) -> Result<ir::Value, CompileError> {
+    let slot = builder.ins().ireduce(types::I32, reference);
+    let slot_index = builder.ins().uextend(values.pointer_type, slot);
+    let slot_count = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        std_mem::offset_of!(RawNativeActivation, text_view_slot_count),
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, slot_index, slot_count);
+    emit_object_guard(builder, values, outside, point, guard)?;
+
+    let pages = load_vmctx_value(
+        builder,
+        values.pointer_type,
+        values.activation_pointer,
+        std_mem::offset_of!(RawNativeActivation, text_view_pages),
+    )?;
+    let page_index = builder
+        .ins()
+        .ushr_imm(slot_index, i64::from(JIT_TEXT_VIEW_PAGE_SHIFT));
+    let page_offset = builder.ins().imul_imm(
+        page_index,
+        i64::try_from(std_mem::size_of::<usize>()).map_err(|_| CompileError::Backend)?,
+    );
+    let page_address = builder.ins().iadd(pages, page_offset);
+    let page = builder
+        .ins()
+        .load(values.pointer_type, table_mem_flags(), page_address, 0);
+    let within_page = builder
+        .ins()
+        .band_imm(slot_index, i64::from(JIT_TEXT_VIEW_PAGE_MASK));
+    let entry_offset = builder.ins().imul_imm(
+        within_page,
+        i64::try_from(JIT_TEXT_VIEW_ENTRY_SIZE).map_err(|_| CompileError::Backend)?,
+    );
+    let entry = builder.ins().iadd(page, entry_offset);
+    let expected_generation = builder.ins().band_imm(
+        expected_generation,
+        i64::from(u32::MAX ^ TEXT_VIEW_GENERATION_TAG),
+    );
+    let generation = load_heap_value(builder, types::I32, entry, JIT_TEXT_VIEW_GENERATION_OFFSET)?;
+    let root = load_heap_value(builder, types::I32, entry, JIT_TEXT_VIEW_ROOT_OFFSET)?;
+    let stale = builder
+        .ins()
+        .icmp(IntCC::NotEqual, generation, expected_generation);
+    let dead = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, root, i64::from(u32::MAX));
+    let invalid = builder.ins().bor(stale, dead);
+    emit_object_guard(builder, values, invalid, point, guard)?;
+    Ok(builder.ins().iadd_imm(
+        entry,
+        i64::try_from(JIT_TEXT_VIEW_PAYLOAD_OFFSET).map_err(|_| CompileError::Backend)?,
+    ))
 }
 
 pub(super) fn emit_heap_entry(

@@ -98,8 +98,8 @@ impl Machine {
             Instr::Native(lm_bytecode::NativeInstr::StrConcat) => {
                 let other = self.pop_obj()?;
                 let string = self.pop_obj()?;
-                let string_text = self.text_value(string)?.clone();
-                let other_text = self.text_value(other)?.clone();
+                let string_text = self.text_value(string)?.to_shared();
+                let other_text = self.text_value(other)?.to_shared();
                 let len = string_text
                     .len()
                     .checked_add(other_text.len())
@@ -343,11 +343,11 @@ impl Machine {
             ) => {
                 let width = self.pop_int()?;
                 let text = self.pop_obj()?;
-                let source = self.text_value(text)?.clone();
+                let source = self.text_value(text)?.to_shared();
                 let scalar_len =
                     i64::try_from(source.char_count()).map_err(|_| FaultCode::IntegerOverflow)?;
                 let padding = width.saturating_sub(scalar_len);
-                if padding <= 0 && matches!(self.vm.heap.get(text), Object::Str(_)) {
+                if padding <= 0 && matches!(self.vm.heap.try_get(text), Some(Object::Str(_))) {
                     self.push(Value::Obj(text))?;
                     return Ok(());
                 }
@@ -401,14 +401,11 @@ impl Machine {
             }
             Instr::Native(lm_bytecode::NativeInstr::TextToString) => {
                 let source = self.pop_obj()?;
-                let text = match self.vm.heap.get(source) {
-                    Object::Str(_) => {
-                        self.push(Value::Obj(source))?;
-                        return Ok(());
-                    }
-                    Object::Substring(text) => text.clone(),
-                    _ => return Err(BAD_TYPE),
-                };
+                if matches!(self.vm.heap.try_get(source), Some(Object::Str(_))) {
+                    self.push(Value::Obj(source))?;
+                    return Ok(());
+                }
+                let text = self.text_value(source)?.to_shared();
                 if !text.has_bounded_retention() {
                     self.reserve(text.len(), &[Value::Obj(source)])?;
                 }
@@ -471,10 +468,7 @@ impl Machine {
                 let string = self.pop_obj()?;
                 let builder = self.pop_obj()?;
                 self.frozen_guard(builder)?;
-                let text_len = match self.vm.heap.get(string) {
-                    Object::Str(text) | Object::Substring(text) => text.len(),
-                    _ => return Err(BAD_TYPE),
-                };
+                let text_len = self.text_value(string)?.len();
                 let growth = match self.vm.heap.get(builder) {
                     Object::StrBuilder(builder) => builder.reserve_growth(text_len),
                     _ => return Err(BAD_TYPE),
@@ -934,13 +928,13 @@ impl Machine {
                 let split = matches!(instr, Instr::Native(lm_bytecode::NativeInstr::TextSplit));
                 let separator = if split { Some(self.pop_obj()?) } else { None };
                 let text = self.pop_obj()?;
-                let source = self.text_value(text)?.clone();
+                let source = self.text_value(text)?.to_shared();
                 let pieces = match separator {
                     Some(reference) => {
-                        let separator = self.text_value(reference)?.clone();
-                        source.try_split_views(separator.as_str())
+                        let separator = self.text_value(reference)?.to_shared();
+                        source.try_split_view_batch(separator.as_str())
                     }
-                    None => source.try_line_views(),
+                    None => source.try_line_view_batch(),
                 }
                 .map_err(|_| FaultCode::HeapLimit)?;
                 // One Substring object and one list slot per piece.

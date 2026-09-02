@@ -33,7 +33,8 @@ pub(super) fn emit_string_builder_append_text(
         source,
         exit.point,
         ObjectGuard::Fault(exit.fault_stack),
-    )?;
+    )?
+    .payload;
     let target_len = load_value(
         builder,
         values.pointer_type,
@@ -60,7 +61,7 @@ pub(super) fn emit_string_builder_append_text(
         builder,
         values.pointer_type,
         source_entry,
-        JIT_TEXT_BYTE_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_BYTE_LEN_OFFSET,
     )?;
     let next_len = builder.ins().iadd(target_len, source_len);
     let overflow = builder
@@ -97,7 +98,7 @@ pub(super) fn emit_string_builder_append_text(
         builder,
         values.pointer_type,
         source_entry,
-        JIT_TEXT_DATA_OFFSET,
+        JIT_TEXT_PAYLOAD_DATA_OFFSET,
     )?;
     builder.call_memmove(values.frontend_config, destination, source_data, source_len);
     builder.ins().jump(copied_block, &[]);
@@ -119,7 +120,7 @@ pub(super) fn emit_string_builder_append_text(
         builder,
         values.pointer_type,
         source_entry,
-        JIT_TEXT_SCALAR_LEN_OFFSET,
+        JIT_TEXT_PAYLOAD_SCALAR_LEN_OFFSET,
     )?;
     let next_scalars = builder.ins().iadd(target_scalars, source_scalars);
     store_native_value(

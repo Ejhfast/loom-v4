@@ -46,16 +46,21 @@ impl MachineRuntime<'_> {
     ) -> Result<(SharedText, SharedText), HeapOperationResult> {
         let first = object_reference(first);
         let second = object_reference(second);
-        match (
-            self.machine.vm.heap.try_get(first),
-            self.machine.vm.heap.try_get(second),
-        ) {
-            (
-                Some(crate::Object::Str(first) | crate::Object::Substring(first)),
-                Some(crate::Object::Str(second) | crate::Object::Substring(second)),
-            ) => Ok((first.clone(), second.clone())),
-            _ => Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch)),
-        }
+        let first = self
+            .machine
+            .vm
+            .heap
+            .text(first)
+            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?
+            .to_shared();
+        let second = self
+            .machine
+            .vm
+            .heap
+            .text(second)
+            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?
+            .to_shared();
+        Ok((first, second))
     }
 
     pub(super) fn bytes_pair(
@@ -78,10 +83,12 @@ impl MachineRuntime<'_> {
 
     pub(super) fn text_value(&self, reference: u64) -> Result<SharedText, HeapOperationResult> {
         let reference = object_reference(reference);
-        match self.machine.vm.heap.try_get(reference) {
-            Some(crate::Object::Str(text) | crate::Object::Substring(text)) => Ok(text.clone()),
-            _ => Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch)),
-        }
+        self.machine
+            .vm
+            .heap
+            .text(reference)
+            .map(|text| text.to_shared())
+            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))
     }
 
     pub(super) fn bytes_value(&self, reference: u64) -> Result<SharedBytes, HeapOperationResult> {
@@ -298,9 +305,9 @@ impl MachineRuntime<'_> {
         before: bool,
     ) -> HeapOperationResult {
         let reference = object_reference(request.first);
-        let text = match self.machine.vm.heap.try_get(reference) {
-            Some(crate::Object::Str(text) | crate::Object::Substring(text)) => text.clone(),
-            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        let text = match self.machine.vm.heap.text(reference) {
+            Some(text) => text.to_shared(),
+            None => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
         };
         let scalar_length = match i64::try_from(text.char_count()) {
             Ok(length) => length,
@@ -391,8 +398,8 @@ impl MachineRuntime<'_> {
             None
         };
         let pieces = match separator.as_ref() {
-            Some(separator) => text.try_split_views(separator.as_str()),
-            None => text.try_line_views(),
+            Some(separator) => text.try_split_view_batch(separator.as_str()),
+            None => text.try_line_view_batch(),
         };
         let pieces = match pieces {
             Ok(pieces) => pieces,
@@ -464,10 +471,15 @@ impl MachineRuntime<'_> {
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
         let reference = object_reference(request.first);
-        let text = match self.machine.vm.heap.try_get(reference) {
-            Some(crate::Object::Str(_)) => return heap_bits(request.first),
-            Some(crate::Object::Substring(text)) => text.clone(),
-            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        if matches!(
+            self.machine.vm.heap.try_get(reference),
+            Some(crate::Object::Str(_))
+        ) {
+            return heap_bits(request.first);
+        }
+        let text = match self.machine.vm.heap.text(reference) {
+            Some(text) => text.to_shared(),
+            None => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
         };
         if !text.has_bounded_retention() {
             if let Err(result) = self.reserve_heap_growth(text.len(), &request) {

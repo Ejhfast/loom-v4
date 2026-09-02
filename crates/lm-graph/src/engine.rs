@@ -97,7 +97,7 @@ pub fn walk(
     limits: &GraphLimits,
     visitor: &mut impl Visitor,
 ) -> Result<GraphCost, FaultCode> {
-    scratch.begin(heap.slot_count());
+    scratch.begin(heap.slot_count(), heap.text_view_slot_count());
     let mut stack: Vec<ObjRef> = Vec::with_capacity(roots.len());
     let mut children: Vec<ObjRef> = Vec::new();
     let mut cost = GraphCost::default();
@@ -108,10 +108,18 @@ pub fn walk(
         if cost.work > limits.max_work {
             return Err(FaultCode::BoundaryLimit);
         }
-        if scratch.seen(r.slot) {
+        if scratch.seen(r) {
             continue;
         }
-        let object = heap.get(r);
+        let compact;
+        let object = if let Some(object) = heap.try_get(r) {
+            object
+        } else if let Some(text) = heap.text(r) {
+            compact = Object::Substring(text.to_shared());
+            &compact
+        } else {
+            return Err(FaultCode::BoundaryViolation);
+        };
         cost.objects += 1;
         cost.bytes += object.cost() as u64;
         if cost.objects > limits.max_objects || cost.bytes > limits.max_bytes {
@@ -177,7 +185,7 @@ mod tests {
         )
         .expect("the walk finishes");
         assert_eq!(seen.0, vec![root.slot, left.slot, right.slot]);
-        assert_eq!(scratch.ordinal(right.slot), 2);
+        assert_eq!(scratch.ordinal(right), 2);
     }
 
     /// A cycle terminates, and a shared node takes one ordinal.

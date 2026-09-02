@@ -240,6 +240,28 @@ bytes = byte_builder.append(195).append(169).finish()
     assert_eq!(run_restored(&mut restored, root), expected);
 }
 
+#[test]
+fn compact_split_views_round_trip_as_snapshot_objects() {
+    let loaded = program("pieces = \"alpha,beta,,gamma\".split(\",\")\n(pieces, pieces.at(2))\n");
+    let mut world = world_of(&loaded, &[]);
+    let outcome = drive(&mut world);
+    let expected = world.show_outcome(&outcome);
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the compact text snapshot captures");
+    let admitted = loaded
+        .load_snapshot(
+            image.bytes().expect("the image encodes"),
+            LoadLimits::default(),
+        )
+        .expect("the compact text snapshot loads");
+    let again = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
+    assert_eq!(&again, image.bytes().expect("the image encodes").as_ref());
+    let (mut restored, root) = restore_into(&loaded, &image);
+    assert_eq!(run_restored(&mut restored, root), expected);
+}
+
 // ---------------------------------------------------------------
 // Gate: machine ordinals are deterministic and independent from
 // scheduler identifiers.

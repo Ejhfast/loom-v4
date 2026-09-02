@@ -1916,13 +1916,9 @@ pub(super) fn emit_virtual_target(
                 guard_point,
                 ObjectGuard::Replay(deopt_stack),
             )?;
-            let tag = load_value(builder, types::I32, entry, JIT_ENTRY_OBJECT_TAG_OFFSET)?;
-            let is_string = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, tag, i64::from(JIT_OBJECT_STR));
             let string = builder.ins().iconst(types::I32, i64::from(string));
             let substring = builder.ins().iconst(types::I32, i64::from(substring));
-            builder.ins().select(is_string, string, substring)
+            builder.ins().select(entry.is_string, string, substring)
         }
     };
 
