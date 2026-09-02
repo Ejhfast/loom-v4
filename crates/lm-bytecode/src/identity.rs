@@ -114,7 +114,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 50 adds pin-only imports and character literals.
 /// Version 51 lowers borrowed Text insertion into String maps.
 /// Version 52 lowers direct UTF-8 String construction from a byte range.
-pub const COMPILER_ABI_VERSION: u32 = 52;
+/// Version 53 lowers allocate-on-miss byte-range text interning.
+pub const COMPILER_ABI_VERSION: u32 = 53;
 
 /// The refinement work budget of one component.
 ///
@@ -1191,6 +1192,7 @@ fn preflight_extended(
         }
         ExtendedInstr::AsCallback
         | ExtendedInstr::CodeDefinition
+        | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch
@@ -2358,6 +2360,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ListGet { .. } => 0xba,
             ExtendedInstr::MapGet { .. } => 0xbb,
             ExtendedInstr::MapPutText { .. } => 0x102,
+            ExtendedInstr::MapInternTextRange => 0x104,
             ExtendedInstr::ListEpoch => 0xbd,
             ExtendedInstr::ListIterLen => 0xbe,
             ExtendedInstr::MapEpoch => 0xbf,
@@ -2764,6 +2767,7 @@ impl<'a> Resolver<'a> {
             }
             ExtendedInstr::AsCallback
             | ExtendedInstr::CodeDefinition
+            | ExtendedInstr::MapInternTextRange
             | ExtendedInstr::ListEpoch
             | ExtendedInstr::ListIterLen
             | ExtendedInstr::MapEpoch

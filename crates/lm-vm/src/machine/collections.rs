@@ -44,6 +44,54 @@ impl Machine {
         self.exec_map_put_inner(module, envs, ty, discard, true)
     }
 
+    /// Intern one UTF-8 byte range in an owned String map.
+    #[inline(never)]
+    pub(super) fn exec_map_intern_text_range(&mut self) -> Result<(), FaultCode> {
+        let length = self.pop_int()?;
+        let start = self.pop_int()?;
+        let source = self.pop_obj()?;
+        let map = self.pop_obj()?;
+        self.frozen_guard(map)?;
+
+        let start = usize::try_from(start).map_err(|_| FaultCode::IndexOutOfBounds)?;
+        let length = usize::try_from(length).map_err(|_| FaultCode::IndexOutOfBounds)?;
+        let end = start
+            .checked_add(length)
+            .ok_or(FaultCode::IndexOutOfBounds)?;
+        let bytes = match self.vm.heap.get(source) {
+            Object::Bytes(bytes) => bytes.slice(start, end).ok_or(FaultCode::IndexOutOfBounds)?,
+            _ => return Err(BAD_TYPE),
+        };
+        let text = bytes.utf8_view().ok_or(FaultCode::BadCast)?;
+        if let Some(key) = self.map_lookup_text(map, &text)? {
+            return self.push(key);
+        }
+
+        let text = text.try_bounded().map_err(|_| FaultCode::HeapLimit)?;
+        let object = Object::Str(text);
+        let growth = 40usize
+            .checked_add(self.vm.heap.allocation_cost(&object))
+            .ok_or(FaultCode::HeapLimit)?;
+        self.reserve(growth, &[Value::Obj(map), Value::Obj(source)])?;
+        let key = Value::Obj(self.vm.heap.alloc(object));
+        let semantic_hash = self.key_semantic_hash(key)?;
+        match self.vm.heap.get_mut(map) {
+            Object::Map { entries, index } => {
+                index.epoch.bump()?;
+                let position = entries.len() as u32;
+                entries.push(MapEntry {
+                    key,
+                    value: key,
+                    semantic_hash,
+                });
+                index.push_live(Self::map_index_hash(semantic_hash), position);
+            }
+            _ => return Err(BAD_TYPE),
+        }
+        self.vm.heap.recharge(map);
+        self.push(key)
+    }
+
     fn exec_map_put_inner(
         &mut self,
         module: &NamespaceRuntime,

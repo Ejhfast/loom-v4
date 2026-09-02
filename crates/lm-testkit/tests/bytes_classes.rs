@@ -1,8 +1,8 @@
 use lm_bytecode::{
     corepin::{ROLE_BYTES, ROLE_BYTE_BUFFER, ROLE_STRING_BUILDER},
-    BcType, Instr,
+    BcType, ExtendedInstr, Instr,
 };
-use lm_testkit::{compile_module_text, run_text, run_world};
+use lm_testkit::{compile_module_text, compile_verifier_fixture_text, run_text, run_world};
 use lm_vm::{Vm, VmConfig};
 
 #[test]
@@ -160,6 +160,77 @@ fn bytes_text_range_checks_bounds_and_encoding() {
         .unwrap(),
         "Fault(BadCast)"
     );
+}
+
+#[test]
+fn bytes_text_ranges_intern_owned_strings_only_on_misses() {
+    let source = r#"
+bytes = Bytes("_key_key_new_")
+pool = Map[String, String]()
+first = bytes.intern_text_range(pool, 1, 3)
+second = bytes.intern_text_range(pool, 5, 3)
+third = bytes.intern_text_range(pool, 9, 3)
+(first, second, third, pool.len(), pool.keys_list())
+"#;
+    assert_eq!(
+        run_text("bytes_range_intern.lm", source, VmConfig::default()).unwrap(),
+        "Done((\"key\", \"key\", \"new\", 2, [\"key\", \"new\"]))"
+    );
+}
+
+#[test]
+fn bytes_text_range_interning_checks_bounds_and_encoding() {
+    assert_eq!(
+        run_text(
+            "bytes_range_intern_bounds.lm",
+            "pool = Map[String, String]()\nBytes(\"abc\").intern_text_range(pool, 2, 2)\n",
+            VmConfig::default(),
+        )
+        .unwrap(),
+        "Fault(IndexOutOfBounds)"
+    );
+    assert_eq!(
+        run_text(
+            "bytes_range_intern_utf8.lm",
+            "pool = Map[String, String]()\nb\"\\xff\".intern_text_range(pool, 0, 1)\n",
+            VmConfig::default(),
+        )
+        .unwrap(),
+        "Fault(BadCast)"
+    );
+}
+
+#[test]
+fn the_verifier_checks_text_range_interning_operands() {
+    let mut module = compile_verifier_fixture_text(
+        "bytes_range_intern_verify.lm",
+        "pool = Map[String, String]()\nBytes(\"abc\").intern_text_range(pool, 0, 2)\n",
+    )
+    .expect("the valid range interning compiles");
+    let (function, block, instruction) = module
+        .funcs
+        .iter()
+        .enumerate()
+        .find_map(|(function, func)| {
+            func.blocks
+                .iter()
+                .enumerate()
+                .find_map(|(block, instructions)| {
+                    instructions
+                        .iter()
+                        .position(|instruction| {
+                            matches!(
+                                instruction,
+                                Instr::Extended(ExtendedInstr::MapInternTextRange)
+                            )
+                        })
+                        .map(|instruction| (function, block, instruction))
+                })
+        })
+        .expect("the range interning lowers");
+    module.funcs[function].blocks[block][instruction - 1] = Instr::ConstBool(false);
+    let error = lm_verify::verify_module(&module).expect_err("the wrong operand type rejects");
+    assert!(error.to_string().contains("expected type"), "{error}");
 }
 
 #[test]

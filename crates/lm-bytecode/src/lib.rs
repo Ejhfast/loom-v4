@@ -722,6 +722,9 @@ pub enum ExtendedInstr {
     /// Pop a value, a Text key, and a Map[String, value].
     /// Insert an owned String only when the key is absent.
     MapPutText { ty: u32, discard: bool },
+    /// Pop a byte range and a Map[String, String].
+    /// Push the existing or newly allocated String.
+    MapInternTextRange,
     /// Pop a list and push its structural epoch.
     ListEpoch,
     /// Pop an epoch and a list. Push the length after an epoch check.
@@ -1872,7 +1875,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 60 adds pin-only imports and character literals.
 /// Version 61 adds borrowed Text insertion into String maps.
 /// Version 62 adds direct UTF-8 String construction from a byte range.
-pub const VERSION: u16 = 62;
+/// Version 63 adds allocate-on-miss byte-range text interning.
+pub const VERSION: u16 = 63;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2108,6 +2112,7 @@ const EXT_TEXT_PAD_START: u8 = 0;
 const EXT_TEXT_PAD_END: u8 = 1;
 const EXT_MAP_PUT_TEXT: u8 = 2;
 const EXT_BYTES_TEXT_RANGE: u8 = 3;
+const EXT_MAP_INTERN_TEXT_RANGE: u8 = 4;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -3044,6 +3049,10 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(EXT_MAP_PUT_TEXT);
             write_u32(out, ty);
             out.push(u8::from(discard));
+        }
+        ExtendedInstr::MapInternTextRange => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_MAP_INTERN_TEXT_RANGE);
         }
         ExtendedInstr::ListEpoch => out.push(OP_LIST_EPOCH),
         ExtendedInstr::ListIterLen => out.push(OP_LIST_ITER_LEN),
@@ -4247,6 +4256,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
                 discard: cur.flag()?,
             }),
             EXT_BYTES_TEXT_RANGE => Instr::Native(NativeInstr::BytesTextRange),
+            EXT_MAP_INTERN_TEXT_RANGE => Instr::Extended(ExtendedInstr::MapInternTextRange),
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
@@ -4968,6 +4978,7 @@ mod tests {
                 discard: true,
             }),
             Instr::Native(NativeInstr::BytesTextRange),
+            Instr::Extended(ExtendedInstr::MapInternTextRange),
             Instr::Extended(ExtendedInstr::ListEpoch),
             Instr::Extended(ExtendedInstr::ListIterLen),
             Instr::Extended(ExtendedInstr::MapEpoch),

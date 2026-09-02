@@ -4093,6 +4093,7 @@ utf8() -> Result[String,Utf8Error]
 utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
 text_range(start: Int, length: Int) -> String
+intern_text_range(pool: Map[String,String], start: Int, length: Int) -> String
 __add__(other: Bytes) -> Bytes
 __and__(other: Bytes) -> Bytes
 __or__(other: Bytes) -> Bytes
@@ -4130,6 +4131,12 @@ It faults with `IndexOutOfBounds` for an invalid range.
 It faults with `BadCast` for invalid UTF-8.
 
 It creates one bounded String without an intermediate Bytes object.
+
+`intern_text_range` probes an owned String pool with one validated UTF-8 byte range.
+
+A hit returns the stored String without a guest allocation.
+
+A miss creates one bounded String and stores it as both key and value.
 
 `+`, the bitwise operators, equality, and ordering use the paired-underscore `Bytes` methods.
 

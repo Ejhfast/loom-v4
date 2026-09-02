@@ -453,6 +453,8 @@ pub(super) type RawMapPutCommit =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64, u64, u32, u32, u32) -> u32;
 pub(super) type RawMapPutDiscard =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u32, u32) -> u32;
+pub(super) type RawMapInternTextRange =
+    unsafe extern "C" fn(*mut c_void, u64, u64, i64, i64, u32, *mut u64) -> u32;
 pub(super) type RawMapInsertHashed =
     unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, i64, i64, u32) -> u32;
 pub(super) type RawBytesEqual = unsafe extern "C" fn(*const u8, *const u8, usize) -> u32;
@@ -489,6 +491,7 @@ pub(super) struct RawNativeFunctions {
     pub(super) map_put_discard: RawMapPutDiscard,
     pub(super) map_put_probe: RawMapLookup,
     pub(super) map_put_commit: RawMapPutCommit,
+    pub(super) map_intern_text_range: RawMapInternTextRange,
     pub(super) bytes_equal: RawBytesEqual,
     pub(super) value_equal: RawValueEqual,
     pub(super) text_compare: RawObjectBinary,
@@ -605,6 +608,7 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         map_put_discard: map_put_discard::<R>,
         map_put_probe: map_put_probe::<R>,
         map_put_commit: map_put_commit::<R>,
+        map_intern_text_range: map_intern_text_range::<R>,
         bytes_equal,
         value_equal: values_equal::<R>,
         text_compare: text_compare::<R>,
@@ -2089,6 +2093,12 @@ pub trait NativeRuntime {
     /// Commit one previously probed map insertion.
     fn map_put_commit(&mut self, request: MapPutCommitRequest<'_>) -> RuntimeUnitResult;
 
+    /// Intern one byte range as an owned String map key.
+    fn map_intern_text_range(
+        &mut self,
+        request: MapInternTextRangeRequest<'_>,
+    ) -> HeapOperationResult;
+
     /// Compare two canonical values with structural value equality.
     fn values_equal(
         &mut self,
@@ -2429,6 +2439,16 @@ pub struct MapPutDiscardRequest<'a> {
     pub value_bits: u64,
     pub value_tag: u64,
     pub own_text_key: bool,
+    pub roots: NativeRoots<'a>,
+    pub allow_collection: bool,
+}
+
+/// One byte-range String interning request.
+pub struct MapInternTextRangeRequest<'a> {
+    pub map: u64,
+    pub source: u64,
+    pub start: i64,
+    pub length: i64,
     pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
@@ -3631,4 +3651,39 @@ pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
         RuntimeUnitResult::Fault(fault) => runtime_fault_status(fault),
         RuntimeUnitResult::Interpreter => RUNTIME_INTERPRETER,
     }
+}
+
+pub(super) unsafe extern "C" fn map_intern_text_range<R: NativeRuntime>(
+    context: *mut c_void,
+    map: u64,
+    source: u64,
+    start: i64,
+    length: i64,
+    root_count: u32,
+    result: *mut u64,
+) -> u32 {
+    if context.is_null() || result.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: `CompiledRegion::execute` passes one live context for this call.
+    let context = unsafe { &mut *context.cast::<RawRuntimeContext<R>>() };
+    if context.runtime.is_null() || context.activation.is_null() {
+        return RUNTIME_INTERPRETER;
+    }
+    // SAFETY: The native caller supplies one bounded root count.
+    let Some(roots) = (unsafe { runtime_roots(std::ptr::from_ref(context), root_count as usize) })
+    else {
+        return RUNTIME_INTERPRETER;
+    };
+    // SAFETY: The context retains one live runtime during this call.
+    let runtime = unsafe { &mut *context.runtime };
+    let response = runtime.map_intern_text_range(MapInternTextRangeRequest {
+        map,
+        source,
+        start,
+        length,
+        roots,
+        allow_collection: true,
+    });
+    finish_heap_operation(context.activation, result, response)
 }

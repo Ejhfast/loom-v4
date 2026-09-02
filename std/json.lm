@@ -32,6 +32,7 @@ final class JsonParser
   source: Bytes
   cursor: Int = 0
   items: Int = 0
+  keys: Map[String, String] = Map[String, String]()
   max_depth: Int
   max_items: Int
 
@@ -217,6 +218,49 @@ final class JsonParser
     Err(self.invalid("the JSON string is incomplete"))
   end
 
+  def escaped_key(
+    mut self,
+    mut output: ByteBuffer
+  ): Result[String, JsonError]
+    key = self.escaped_string(output)?
+    case self.keys.get(key)
+    in Some(existing) then Ok(existing)
+    in None
+      self.keys.put(key, key)
+      Ok(key)
+    end
+  end
+
+  def key(mut self): Result[String, JsonError]
+    if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
+      return Err(self.invalid("a JSON string needs an opening quote"))
+    end
+    self.cursor = self.cursor + 1
+    start = self.cursor
+    while self.cursor < self.source.len()
+      byte = self.source.at(self.cursor)
+      self.cursor = self.cursor + 1
+      if byte == 34
+        return Ok(self.source.intern_text_range(
+          self.keys,
+          start,
+          self.cursor - start - 1
+        ))
+      elsif byte == 92
+        output = ByteBuffer()
+        index = start
+        while index < self.cursor - 1
+          output.append(self.source.at(index))
+          index = index + 1
+        end
+        return self.escaped_key(output)
+      elsif byte < 32
+        return Err(self.invalid("a JSON string contains a control byte"))
+      end
+    end
+    Err(self.invalid("the JSON string is incomplete"))
+  end
+
   def number(mut self): Result[Json, JsonError]
     start = self.cursor
     if self.source.at(self.cursor) == 45
@@ -330,7 +374,7 @@ final class JsonParser
       return Ok(Json.Object(values))
     end
     loop do
-      key = self.string()?
+      key = self.key()?
       self.skip_space()
       if self.cursor >= self.source.len() or self.source.at(self.cursor) != 58
         return Err(self.invalid("a JSON object member needs a colon"))

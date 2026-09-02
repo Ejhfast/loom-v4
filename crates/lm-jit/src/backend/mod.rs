@@ -360,6 +360,7 @@ struct NativeValues<'a> {
     map_lookup_signature: ir::SigRef,
     map_put_discard_signature: ir::SigRef,
     map_put_commit_signature: ir::SigRef,
+    map_intern_text_range_signature: ir::SigRef,
     map_insert_hashed_signature: ir::SigRef,
     bytes_equal_signature: ir::SigRef,
     value_equal_signature: ir::SigRef,
@@ -813,6 +814,25 @@ fn emit_region(
         .returns
         .push(AbiParam::new(types::I32));
     let map_put_discard_signature = builder.import_signature(map_put_discard_signature);
+    let mut map_intern_text_range_signature = ir::Signature::new(host_call_conv);
+    map_intern_text_range_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    for _ in 0..4 {
+        map_intern_text_range_signature
+            .params
+            .push(AbiParam::new(types::I64));
+    }
+    map_intern_text_range_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_intern_text_range_signature
+        .params
+        .push(AbiParam::new(pointer_type));
+    map_intern_text_range_signature
+        .returns
+        .push(AbiParam::new(types::I32));
+    let map_intern_text_range_signature = builder.import_signature(map_intern_text_range_signature);
     let mut map_put_commit_signature = ir::Signature::new(host_call_conv);
     map_put_commit_signature
         .params
@@ -1262,6 +1282,7 @@ fn emit_region(
         map_lookup_signature,
         map_put_discard_signature,
         map_put_commit_signature,
+        map_intern_text_range_signature,
         map_insert_hashed_signature,
         bytes_equal_signature,
         value_equal_signature,

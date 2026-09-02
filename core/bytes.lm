@@ -107,6 +107,15 @@ final class Bytes implements Hashable, Comparable, Add
     intrinsic("bytes.text_range", self, start, length)
   end
 
+  def intern_text_range(
+    self,
+    mut pool: Map[String, String],
+    start: Int,
+    length: Int
+  ): String
+    intrinsic("map.intern_text_range", pool, self, start, length)
+  end
+
   def __add__(self, other: Bytes): Bytes
     intrinsic("bytes.concat", self, other)
   end

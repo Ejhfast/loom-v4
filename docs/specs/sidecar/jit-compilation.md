@@ -3936,6 +3936,10 @@ A compact `Substring` entry reduced one entry from 112 bytes to 72 bytes.
 
 That experiment did not reduce lifecycle time. It also slowed representative rows, so this branch removed it.
 
+The experiment retained the general entry lifecycle and shared-storage traffic.
+
+It did not test descriptor pages with a separate storage class.
+
 Borrowed insertion removes one String allocation from each repeated map hit.
 
 The word-count program now creates owned keys only for unique words.
@@ -3988,6 +3992,38 @@ The direct and scheduled corpus differential passed in 23.42 seconds.
 Clippy passed for every workspace target.
 
 The full workspace suite passed.
+
+### Stage F76: Intern JSON keys from byte ranges
+
+- probe owned String keys through a validated UTF-8 byte range;
+- return the stored String without a guest allocation;
+- allocate one bounded String only after a miss;
+- store that String as both the pool key and value;
+- preserve escaped-key parsing through the builder path;
+- verify interpreter and native behavior at fuel boundaries.
+
+The JSON parser owns one key pool.
+
+Unescaped keys use their source byte ranges for the first probe.
+
+Escaped keys probe the same pool after escape decoding.
+
+The operation keeps all output map keys owned.
+
+Repeated unescaped keys allocate no additional guest String.
+
+| Warm application row | Stage F75 | Stage F76 | Change |
+| --- | ---: | ---: | ---: |
+| Word count, Auto | 4.054 ms | 4.062 ms | within 1 percent |
+| CSV report, Auto | 5.004 ms | 4.999 ms | within 1 percent |
+| JSON pipeline, Auto | 32.329 ms | 29.622 ms | 8.4 percent faster |
+| JSON parse, Auto | 20.677 ms | 18.314 ms | 11.4 percent faster |
+
+All four rows retained complete native coverage.
+
+Focused source tests cover hits, misses, bounds, UTF-8, and verifier rejection.
+
+The native tests cover allocation counts and every tested fuel boundary.
 
 ## 24. Rejected designs
 

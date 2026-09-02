@@ -85,6 +85,53 @@ fn borrowed_text_map_put_matches_both_engines() {
 }
 
 #[test]
+fn text_range_interning_allocates_only_for_misses() {
+    let source = concat!(
+        "source = Bytes(\"key,key,key,new\")\n",
+        "pool = Map[String, String]()\n",
+        "i = 0\nresult = \"\"\n",
+        "while i < 1000\n",
+        "  result = source.intern_text_range(pool, 0, 3)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "other = source.intern_text_range(pool, 12, 3)\n",
+        "(result, other, pool.len())\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-text-range-intern.lm", source)
+        .expect("the text range interning case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert!(matches!(native, Outcome::Done(_)));
+    assert!(native_dump.contains("(\"key\", \"new\", 2)"));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert!(metrics.native_allocations < 16, "{metrics:?}");
+}
+
+#[test]
+fn text_range_interning_matches_each_fuel_boundary() {
+    let source = concat!(
+        "source = Bytes(\"key,key\")\n",
+        "pool = Map[String, String]()\n",
+        "first = source.intern_text_range(pool, 0, 3)\n",
+        "second = source.intern_text_range(pool, 4, 3)\n",
+        "(first, second, pool.len())\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-text-range-intern-fuel.lm", source)
+        .expect("the text range interning fuel case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+}
+
+#[test]
 fn byte_map_hits_compare_distinct_storage() {
     let source = concat!(
         "stored = Bytes(\"key\")\nlookup = Bytes(\"key\")\n",

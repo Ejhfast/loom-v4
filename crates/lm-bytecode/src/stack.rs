@@ -302,6 +302,7 @@ fn extended_stack_effect(
         | ExtendedInstr::MapProbe
         | ExtendedInstr::MapProbeSetValue => (3, 1),
         ExtendedInstr::MapPutText { discard: true, .. } => (3, 0),
+        ExtendedInstr::MapInternTextRange => (4, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
         ExtendedInstr::CodeSource { .. }

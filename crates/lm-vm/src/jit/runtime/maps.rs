@@ -3,6 +3,111 @@
 use super::*;
 
 impl MachineRuntime<'_> {
+    pub(super) fn runtime_map_intern_text_range(
+        &mut self,
+        request: MapInternTextRangeRequest<'_>,
+    ) -> HeapOperationResult {
+        let map = object_reference(request.map);
+        let source = object_reference(request.source);
+        if !matches!(
+            self.machine.vm.heap.try_get(map),
+            Some(crate::Object::Map { .. })
+        ) {
+            return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
+        }
+        if self.machine.vm.heap.is_frozen(map) {
+            return HeapOperationResult::Fault(crate::FaultCode::FrozenWrite);
+        }
+        let start = match usize::try_from(request.start) {
+            Ok(start) => start,
+            Err(_) => return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds),
+        };
+        let length = match usize::try_from(request.length) {
+            Ok(length) => length,
+            Err(_) => return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds),
+        };
+        let end = match start.checked_add(length) {
+            Some(end) => end,
+            None => return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds),
+        };
+        let bytes = match self.machine.vm.heap.try_get(source) {
+            Some(crate::Object::Bytes(bytes)) => match bytes.slice(start, end) {
+                Some(bytes) => bytes,
+                None => {
+                    return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds);
+                }
+            },
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        };
+        let Some(text) = bytes.utf8_view() else {
+            return HeapOperationResult::Fault(crate::FaultCode::BadCast);
+        };
+        match self.machine.map_lookup_text(map, &text) {
+            Ok(Some(Value::Obj(reference))) => return Self::heap_object_value(reference),
+            Ok(Some(_)) => {
+                return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
+            }
+            Ok(None) => {}
+            Err(fault) => return HeapOperationResult::Fault(fault),
+        }
+
+        let text = match text.try_bounded() {
+            Ok(text) => text,
+            Err(_) => return HeapOperationResult::HeapLimit,
+        };
+        let object = crate::Object::Str(text);
+        let Some(growth) = 40usize.checked_add(self.machine.vm.heap.allocation_cost(&object))
+        else {
+            return HeapOperationResult::HeapLimit;
+        };
+        let heap_request = HeapOperationRequest {
+            first: request.map,
+            second: request.source,
+            third: 0,
+            roots: request.roots,
+            allow_collection: request.allow_collection,
+        };
+        if let Err(result) = self.reserve_heap_growth(growth, &heap_request) {
+            return result;
+        }
+        match self.machine.vm.heap.get_mut(map) {
+            crate::Object::Map { entries, index } => {
+                if entries.try_reserve(1).is_err() {
+                    return HeapOperationResult::HeapLimit;
+                }
+                if let Err(fault) = index.epoch.bump() {
+                    return HeapOperationResult::Fault(fault);
+                }
+            }
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        }
+        let reference = self.machine.vm.heap.alloc(object);
+        self.allocations = self.allocations.saturating_add(1);
+        let key = Value::Obj(reference);
+        let semantic_hash = match self.machine.key_semantic_hash(key) {
+            Ok(hash) => hash,
+            Err(fault) => return HeapOperationResult::Fault(fault),
+        };
+        match self.machine.vm.heap.get_mut(map) {
+            crate::Object::Map { entries, index } => {
+                let position = entries.len() as u32;
+                entries.push(MapEntry {
+                    key,
+                    value: key,
+                    semantic_hash,
+                });
+                index.push_live(Machine::map_index_hash(semantic_hash), position);
+            }
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
+        }
+        self.machine.vm.heap.recharge_local(map);
+        HeapOperationResult::Value {
+            bits: object_bits(reference),
+            heap: (reference.slot & lm_heap::JIT_PAGE_MASK == 0)
+                .then(|| self.machine.vm.heap.jit_view()),
+        }
+    }
+
     pub(super) fn insert_map_entry(&mut self, request: MapInsertRequest<'_>) -> RuntimeUnitResult {
         let MapInsertRequest {
             reference,

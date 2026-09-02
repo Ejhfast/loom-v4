@@ -442,6 +442,41 @@ impl Machine {
         Ok(None)
     }
 
+    /// Find one owned String key through a borrowed text value.
+    pub(crate) fn map_lookup_text(
+        &mut self,
+        r: ObjRef,
+        text: &lm_heap::SharedText,
+    ) -> Result<Option<Value>, FaultCode> {
+        self.ensure_map_index(r)?;
+        let hash = Self::map_index_hash(text.semantic_hash() as i64);
+        let (entries, candidates, dense) = match self.vm.heap.get(r) {
+            Object::Map { entries, index, .. } => (
+                entries,
+                index.candidates(hash),
+                index.live_len() == entries.len(),
+            ),
+            _ => return Err(BAD_TYPE),
+        };
+        for position in candidates {
+            let Some(entry) = entries.get(position as usize) else {
+                continue;
+            };
+            if !dense && !entry.is_live() {
+                continue;
+            }
+            let Value::Obj(reference) = entry.key else {
+                return Err(BAD_TYPE);
+            };
+            match self.vm.heap.get(reference) {
+                Object::Str(key) if key == text => return Ok(Some(entry.key)),
+                Object::Str(_) => {}
+                _ => return Err(BAD_TYPE),
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve one live probe token to its map entry.
     pub(crate) fn map_token_entry(
         &self,

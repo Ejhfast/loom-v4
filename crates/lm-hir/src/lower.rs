@@ -2510,6 +2510,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_TEXT_RANGE => {
                 Instr::Native(lm_bytecode::NativeInstr::BytesTextRange)
             }
+            lm_abi::INTRINSIC_MAP_INTERN_TEXT_RANGE => extended(ExtendedInstr::MapInternTextRange),
             lm_abi::INTRINSIC_BYTES_EQ => Instr::Native(lm_bytecode::NativeInstr::EqBytes),
             lm_abi::INTRINSIC_BYTES_NE => Instr::Native(lm_bytecode::NativeInstr::NeBytes),
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
@@ -4191,6 +4192,7 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::MapPutText { ty, discard } => {
             format!("MapPutText ty{ty} discard {discard}")
         }
+        ExtendedInstr::MapInternTextRange => "MapInternTextRange".to_string(),
         ExtendedInstr::ListEpoch => "ListEpoch".to_string(),
         ExtendedInstr::ListIterLen => "ListIterLen".to_string(),
         ExtendedInstr::MapEpoch => "MapEpoch".to_string(),

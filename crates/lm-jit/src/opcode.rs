@@ -304,6 +304,11 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::MapPutText { .. } => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::MapInternTextRange => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(4))
+        }
         ExtendedInstr::MapProbe => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),

@@ -1188,6 +1188,26 @@ pub(super) fn analyze_segment(
                     stack: before.stack.clone(),
                 });
             }
+            Instr::Extended(ExtendedInstr::MapInternTextRange) => {
+                let receiver = stack_from_end(&before.stack, 3)?;
+                let (key, value) = map_type(context, receiver)?;
+                if !matches!(
+                    value_contract(context, key)?.object,
+                    Some(ObjectContract::Str)
+                ) || !matches!(
+                    value_contract(context, value)?.object,
+                    Some(ObjectContract::Str)
+                ) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                bytes_type(context, stack_from_end(&before.stack, 2)?)?;
+                expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
             Instr::Native(NativeInstr::BytesConcat)
             | Instr::Numeric(
                 NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor,

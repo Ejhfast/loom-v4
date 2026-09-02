@@ -255,6 +255,40 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                 stack.push(result);
             }
         }
+        Instr::Extended(ExtendedInstr::MapInternTextRange) => {
+            let position = segment.start + within as u32;
+            let site = segment
+                .allocations
+                .iter()
+                .find(|site| site.instruction == position)
+                .ok_or(CompileError::Backend)?;
+            let deopt_stack = stack.clone();
+            let roots =
+                collect_native_roots(builder, values, &plan.local_kinds, &site.stack, stack)?;
+            let length = pop_native(stack)?;
+            let start = pop_native(stack)?;
+            let source = pop_native(stack)?;
+            let map = pop_native(stack)?;
+            let result = emit_map_intern_text_range(
+                builder,
+                values,
+                map,
+                source,
+                start,
+                length,
+                &roots,
+                HeapExitEmission {
+                    point: FaultPoint {
+                        block: segment.block,
+                        instruction: position + 1,
+                        prefix: fault_prefix,
+                    },
+                    fault_stack: stack,
+                    deopt_stack: &deopt_stack,
+                },
+            )?;
+            push_static(builder, stack, ScalarKind::Object(0), result)?;
+        }
         Instr::ListAt => {
             let deopt_stack = stack.clone();
             let index = pop_native(stack)?;

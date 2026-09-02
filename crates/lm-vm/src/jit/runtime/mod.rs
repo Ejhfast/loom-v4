@@ -12,9 +12,9 @@ use lm_jit::{
     AllocationResult, CallbackAllocationRequest, CallbackAllocationResult,
     ClosureAllocationRequest, CollectionReserveRequest, CollectionReserveResult, DigestRequest,
     HeapOperationRequest, HeapOperationResult, ListGrowthRequest, ListGrowthResult,
-    ListInsertRequest, MapInsertHashedRequest, MapPutCommitRequest, MapPutDiscardRequest,
-    MapPutProbeResult, NativeResolvedCallCache, NativeRootError, NativeRoots, NativeRuntime,
-    NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
+    ListInsertRequest, MapInsertHashedRequest, MapInternTextRangeRequest, MapPutCommitRequest,
+    MapPutDiscardRequest, MapPutProbeResult, NativeResolvedCallCache, NativeRootError, NativeRoots,
+    NativeRuntime, NativeTypeEnvironmentCache, RuntimeUnitResult, RuntimeValueResult, ScalarKind,
     ValueArrayAllocationRequest,
 };
 use lm_value::{canonical_float_bits, CallbackRef, ObjRef, TypeEnvId, Value, ValueTag, Witness};
@@ -332,6 +332,13 @@ impl NativeRuntime for MachineRuntime<'_> {
 
     fn map_put_commit(&mut self, request: MapPutCommitRequest<'_>) -> RuntimeUnitResult {
         self.runtime_map_put_commit(request)
+    }
+
+    fn map_intern_text_range(
+        &mut self,
+        request: MapInternTextRangeRequest<'_>,
+    ) -> HeapOperationResult {
+        self.runtime_map_intern_text_range(request)
     }
 
     fn grow_list(&mut self, request: ListGrowthRequest<'_>) -> ListGrowthResult {

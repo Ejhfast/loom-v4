@@ -1220,6 +1220,22 @@ pub(crate) fn step(
                 push(state, *ty)?;
             }
         }
+        Instr::Extended(ExtendedInstr::MapInternTextRange) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("text range on non-bytes type {bytes}")));
+            }
+            let map = pop(state)?;
+            let (key, value) = as_map(map)?;
+            if ctx.ty(key) != BcType::Str || ctx.ty(value) != BcType::Str {
+                return Err(fail(
+                    "text range interning needs Map[String, String]".to_string(),
+                ));
+            }
+            push(state, TY_STR)?;
+        }
         Instr::Extended(ExtendedInstr::ListEpoch) => {
             let list = pop(state)?;
             as_list(list)?;

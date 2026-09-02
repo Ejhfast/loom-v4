@@ -728,6 +728,13 @@ impl NativeRuntime for TestRuntime {
         RuntimeUnitResult::Interpreter
     }
 
+    fn map_intern_text_range(
+        &mut self,
+        _request: MapInternTextRangeRequest<'_>,
+    ) -> HeapOperationResult {
+        HeapOperationResult::Interpreter
+    }
+
     interpreter_heap_operations!(
         fault_code,
         fault_denied,

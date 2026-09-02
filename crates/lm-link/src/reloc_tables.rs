@@ -881,6 +881,7 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
             slot: reloc.slots[*slot as usize],
         },
         ExtendedInstr::AsCallback
+        | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch

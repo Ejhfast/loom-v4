@@ -1190,6 +1190,7 @@ fn extended_edges(
         }
         ExtendedInstr::DynRender => role_edges(module, offsets, &["DynValue"], edges),
         ExtendedInstr::AsCallback
+        | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch

@@ -144,6 +144,9 @@ pub(super) fn emit_segment_body(
                 Instr::Extended(ExtendedInstr::MapPutText { .. }) => {
                     collections::emit(&mut emission)?
                 }
+                Instr::Extended(ExtendedInstr::MapInternTextRange) => {
+                    collections::emit(&mut emission)?
+                }
                 Instr::MapPut { discard, .. } => collections::emit(&mut emission)?,
                 Instr::ListAt => collections::emit(&mut emission)?,
                 Instr::Extended(ExtendedInstr::ListSet) => collections::emit(&mut emission)?,

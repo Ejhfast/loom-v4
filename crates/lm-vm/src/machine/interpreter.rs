@@ -39,6 +39,9 @@ impl Machine {
             ExtendedInstr::MapPutText { ty, discard } => {
                 self.exec_map_put_text(module, envs, ty, discard)?;
             }
+            ExtendedInstr::MapInternTextRange => {
+                self.exec_map_intern_text_range()?;
+            }
             ExtendedInstr::ListEpoch => {
                 self.exec_collection_iteration(CollectionIterationOp::ListEpoch)?;
             }

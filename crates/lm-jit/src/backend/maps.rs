@@ -1362,6 +1362,65 @@ pub(super) fn emit_runtime_value_lookup(
     Ok(NativeValue { bits, tag })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_map_intern_text_range(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    map: ir::Value,
+    source: ir::Value,
+    start: ir::Value,
+    length: ir::Value,
+    roots: &[NativeRoot],
+    exit: HeapExitEmission<'_>,
+) -> Result<ir::Value, CompileError> {
+    let root_count = emit_runtime_roots(builder, values, roots)?;
+    let function = load_value(
+        builder,
+        values.pointer_type,
+        values.runtime_functions,
+        std_mem::offset_of!(RawNativeFunctions, map_intern_text_range),
+    )?;
+    let call = builder.ins().call_indirect(
+        values.map_intern_text_range_signature,
+        function,
+        &[
+            values.runtime_context,
+            map,
+            source,
+            start,
+            length,
+            root_count,
+            values.allocation_result_pointer,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let heap_limit = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, status, i64::from(RUNTIME_HEAP_LIMIT));
+    emit_fault_check(
+        builder,
+        values,
+        heap_limit,
+        EXIT_HEAP_LIMIT,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    emit_runtime_status(
+        builder,
+        values,
+        status,
+        exit.point,
+        exit.fault_stack,
+        exit.deopt_stack,
+    )?;
+    Ok(builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        values.allocation_result_pointer,
+        0,
+    ))
+}
+
 pub(super) fn emit_value_equal(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,

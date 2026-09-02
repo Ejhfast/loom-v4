@@ -64,7 +64,8 @@ pub use hash::{hash256, hash256_hex};
 /// Version 36 adds answered in-memory run branches.
 /// Version 37 adds dynamic run restoration and run stack inspection.
 /// Version 38 adds direct byte-range text construction.
-pub const ABI_VERSION: u32 = 38;
+/// Version 39 adds allocate-on-miss byte-range text interning.
+pub const ABI_VERSION: u32 = 39;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -699,7 +700,8 @@ impl AbiType {
 /// Version 22 adds exact fault re-raising.
 /// Version 23 makes text-to-string conversion accept all Text values.
 /// Version 24 adds direct byte-range text construction.
-pub const INTRINSIC_ABI_VERSION: u32 = 24;
+/// Version 25 adds allocate-on-miss byte-range text interning.
+pub const INTRINSIC_ABI_VERSION: u32 = 25;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -897,9 +899,10 @@ pub const INTRINSIC_TEXT_PARSE_FLOAT_VALUE: IntrinsicSlot = 179;
 pub const INTRINSIC_FLOAT_FIXED: IntrinsicSlot = 180;
 pub const INTRINSIC_RAISE_FAULT: IntrinsicSlot = 181;
 pub const INTRINSIC_BYTES_TEXT_RANGE: IntrinsicSlot = 182;
+pub const INTRINSIC_MAP_INTERN_TEXT_RANGE: IntrinsicSlot = 183;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 183] = [
+pub const INTRINSICS: [IntrinsicDef; 184] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2039,6 +2042,17 @@ pub const INTRINSICS: [IntrinsicDef; 183] = [
     IntrinsicDef {
         name: "bytes.text_range",
         params: &[AbiType::BYTES, AbiType::INT, AbiType::INT],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.intern_text_range",
+        params: &[
+            AbiType::Map(&AbiType::STR, &AbiType::STR),
+            AbiType::BYTES,
+            AbiType::INT,
+            AbiType::INT,
+        ],
         reply: AbiType::STR,
         semantic_revision: 1,
     },
