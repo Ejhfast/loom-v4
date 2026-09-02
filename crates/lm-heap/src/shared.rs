@@ -540,6 +540,7 @@ impl<'a> TextRef<'a> {
     }
 
     /// Get the visible text.
+    #[inline]
     pub fn as_str(self) -> &'a str {
         let start = self.byte_start();
         let end = start + self.len();
@@ -1332,6 +1333,7 @@ impl SharedBytes {
     }
 
     /// Get the visible bytes.
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         self.span.as_slice()
     }
@@ -1896,14 +1898,14 @@ impl NativeByteBuffer {
     }
 
     /// Find immutable bytes at or after one active-buffer position.
-    pub fn find_from(&self, needle: &SharedBytes, start: usize) -> Option<usize> {
+    pub fn find_from(&self, needle: &[u8], start: usize) -> Option<usize> {
         let bytes = self.buffer()?;
         let tail = bytes.get(start..)?;
         if needle.is_empty() {
             return Some(start);
         }
         tail.windows(needle.len())
-            .position(|window| window == needle.as_slice())
+            .position(|window| window == needle)
             .and_then(|position| start.checked_add(position))
     }
 

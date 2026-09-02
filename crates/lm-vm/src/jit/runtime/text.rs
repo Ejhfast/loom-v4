@@ -39,11 +39,11 @@ impl MachineRuntime<'_> {
         self.allocate_heap_object(crate::Object::Bytes(SharedBytes::from(output)), &request)
     }
 
-    pub(super) fn text_pair(
+    pub(super) fn text_pair_ref(
         &self,
         first: u64,
         second: u64,
-    ) -> Result<(SharedText, SharedText), HeapOperationResult> {
+    ) -> Result<(lm_heap::TextRef<'_>, lm_heap::TextRef<'_>), HeapOperationResult> {
         let first = object_reference(first);
         let second = object_reference(second);
         let first = self
@@ -51,23 +51,21 @@ impl MachineRuntime<'_> {
             .vm
             .heap
             .text(first)
-            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?
-            .to_shared();
+            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?;
         let second = self
             .machine
             .vm
             .heap
             .text(second)
-            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?
-            .to_shared();
+            .ok_or(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch))?;
         Ok((first, second))
     }
 
-    pub(super) fn bytes_pair(
+    pub(super) fn bytes_pair_ref(
         &self,
         first: u64,
         second: u64,
-    ) -> Result<(SharedBytes, SharedBytes), HeapOperationResult> {
+    ) -> Result<(&SharedBytes, &SharedBytes), HeapOperationResult> {
         let first = object_reference(first);
         let second = object_reference(second);
         match (
@@ -75,10 +73,19 @@ impl MachineRuntime<'_> {
             self.machine.vm.heap.try_get(second),
         ) {
             (Some(crate::Object::Bytes(first)), Some(crate::Object::Bytes(second))) => {
-                Ok((first.clone(), second.clone()))
+                Ok((first, second))
             }
             _ => Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch)),
         }
+    }
+
+    pub(super) fn text_pair(
+        &self,
+        first: u64,
+        second: u64,
+    ) -> Result<(SharedText, SharedText), HeapOperationResult> {
+        let (first, second) = self.text_pair_ref(first, second)?;
+        Ok((first.to_shared(), second.to_shared()))
     }
 
     pub(super) fn text_value(&self, reference: u64) -> Result<SharedText, HeapOperationResult> {
@@ -120,31 +127,33 @@ impl MachineRuntime<'_> {
         self.allocate_heap_object(crate::Object::Str(text), &request)
     }
 
-    pub(super) fn text_predicate_operation(
+    pub(super) fn text_predicate_operation<F>(
         &self,
         request: HeapOperationRequest<'_>,
-        predicate: fn(&str, &str) -> bool,
-    ) -> HeapOperationResult {
-        let (text, argument) = match self.text_pair(request.first, request.second) {
+        predicate: F,
+    ) -> HeapOperationResult
+    where
+        F: FnOnce(&str, &str) -> bool,
+    {
+        let (text, argument) = match self.text_pair_ref(request.first, request.second) {
             Ok(pair) => pair,
             Err(result) => return result,
         };
         heap_bool(predicate(text.as_str(), argument.as_str()))
     }
 
-    pub(super) fn text_find_operation(
+    pub(super) fn text_find_operation<const SCALAR: bool>(
         &self,
         request: HeapOperationRequest<'_>,
-        scalar: bool,
     ) -> HeapOperationResult {
-        let (text, needle) = match self.text_pair(request.first, request.second) {
+        let (text, needle) = match self.text_pair_ref(request.first, request.second) {
             Ok(pair) => pair,
             Err(result) => return result,
         };
-        let found = if scalar {
-            text.find_scalar(&needle)
+        let found = if SCALAR {
+            text.find_scalar(needle)
         } else {
-            text.find_byte(&needle)
+            text.find_byte(needle)
         };
         let value = match found {
             Some(index) => match i64::try_from(index) {
@@ -271,23 +280,21 @@ impl MachineRuntime<'_> {
         self.allocate_heap_object(crate::Object::Str(output), &request)
     }
 
-    pub(super) fn text_parse_int_operation(
+    pub(super) fn text_parse_int_operation<const STATUS: bool>(
         &self,
         request: HeapOperationRequest<'_>,
-        status: bool,
     ) -> HeapOperationResult {
-        let text = match self.text_value(request.first) {
-            Ok(text) => text,
-            Err(result) => return result,
+        let Some(text) = self.machine.vm.heap.text(object_reference(request.first)) else {
+            return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
         };
         let radix = u32::try_from(request.second as i64)
             .ok()
             .filter(|radix| (2..=36).contains(radix));
         let Some(radix) = radix else {
-            return heap_int(if status { 3 } else { 0 });
+            return heap_int(if STATUS { 3 } else { 0 });
         };
         let parsed = i64::from_str_radix(text.as_str(), radix);
-        let answer = match (status, parsed) {
+        let answer = match (STATUS, parsed) {
             (true, Ok(_)) => 0,
             (true, Err(error)) => match error.kind() {
                 std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => 2,
@@ -350,12 +357,15 @@ impl MachineRuntime<'_> {
         self.allocate_heap_object(crate::Object::Str(output), &request)
     }
 
-    pub(super) fn bytes_predicate_operation(
+    pub(super) fn bytes_predicate_operation<F>(
         &self,
         request: HeapOperationRequest<'_>,
-        predicate: fn(&[u8], &[u8]) -> bool,
-    ) -> HeapOperationResult {
-        let (bytes, argument) = match self.bytes_pair(request.first, request.second) {
+        predicate: F,
+    ) -> HeapOperationResult
+    where
+        F: FnOnce(&[u8], &[u8]) -> bool,
+    {
+        let (bytes, argument) = match self.bytes_pair_ref(request.first, request.second) {
             Ok(pair) => pair,
             Err(result) => return result,
         };
@@ -366,7 +376,7 @@ impl MachineRuntime<'_> {
         &self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        let (bytes, needle) = match self.bytes_pair(request.first, request.second) {
+        let (bytes, needle) = match self.bytes_pair_ref(request.first, request.second) {
             Ok(pair) => pair,
             Err(result) => return result,
         };
@@ -562,7 +572,7 @@ impl MachineRuntime<'_> {
         &self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        let (bytes, needle) = match self.bytes_pair(request.first, request.second) {
+        let (bytes, needle) = match self.bytes_pair_ref(request.first, request.second) {
             Ok(pair) => pair,
             Err(result) => return result,
         };
@@ -621,24 +631,23 @@ impl MachineRuntime<'_> {
         &self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        let bytes = match self.bytes_value(request.first) {
-            Ok(bytes) => bytes,
-            Err(result) => return result,
+        let reference = object_reference(request.first);
+        let bytes = match self.machine.vm.heap.try_get(reference) {
+            Some(crate::Object::Bytes(bytes)) => bytes,
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
         };
         heap_bool(bytes.is_utf8())
     }
 
-    pub(super) fn text_parse_float_operation(
+    pub(super) fn text_parse_float_operation<const STATUS: bool>(
         &self,
         request: HeapOperationRequest<'_>,
-        status: bool,
     ) -> HeapOperationResult {
-        let text = match self.text_value(request.first) {
-            Ok(text) => text,
-            Err(result) => return result,
+        let Some(text) = self.machine.vm.heap.text(object_reference(request.first)) else {
+            return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
         };
         let parsed = parse_float_text(text.as_str());
-        if status {
+        if STATUS {
             heap_int(parsed.err().unwrap_or(0))
         } else {
             heap_bits(canonical_float_bits(parsed.unwrap_or(0.0).to_bits()))
@@ -854,14 +863,14 @@ impl MachineRuntime<'_> {
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_find_operation(request, true)
+        self.text_find_operation::<true>(request)
     }
 
     pub(super) fn runtime_text_find_byte(
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_find_operation(request, false)
+        self.text_find_operation::<false>(request)
     }
 
     pub(super) fn runtime_text_trim(
@@ -910,14 +919,14 @@ impl MachineRuntime<'_> {
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_parse_int_operation(request, true)
+        self.text_parse_int_operation::<true>(request)
     }
 
     pub(super) fn runtime_text_parse_int_value(
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_parse_int_operation(request, false)
+        self.text_parse_int_operation::<false>(request)
     }
 
     pub(super) fn runtime_text_pad_start(
@@ -1036,14 +1045,14 @@ impl MachineRuntime<'_> {
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_parse_float_operation(request, true)
+        self.text_parse_float_operation::<true>(request)
     }
 
     pub(super) fn runtime_text_parse_float_value(
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        self.text_parse_float_operation(request, false)
+        self.text_parse_float_operation::<false>(request)
     }
 
     pub(super) fn runtime_float_fixed(

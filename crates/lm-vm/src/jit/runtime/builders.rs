@@ -78,9 +78,14 @@ impl MachineRuntime<'_> {
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
         let buffer = object_reference(request.first);
-        let needle = match self.bytes_value(request.second) {
-            Ok(bytes) => bytes,
-            Err(result) => return result,
+        let needle = match self
+            .machine
+            .vm
+            .heap
+            .try_get(object_reference(request.second))
+        {
+            Some(crate::Object::Bytes(bytes)) => bytes,
+            _ => return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch),
         };
         let bytes = match self.machine.vm.heap.try_get(buffer) {
             Some(crate::Object::ByteBuf(bytes)) if bytes.buffer().is_some() => bytes,
@@ -91,7 +96,7 @@ impl MachineRuntime<'_> {
         };
         let found = usize::try_from(request.third as i64)
             .ok()
-            .and_then(|start| bytes.find_from(&needle, start))
+            .and_then(|start| bytes.find_from(needle.as_slice(), start))
             .and_then(|index| i64::try_from(index).ok())
             .unwrap_or(-1);
         heap_int(found)

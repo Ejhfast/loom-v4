@@ -1114,6 +1114,7 @@ impl Heap {
     }
 
     /// Read an object. Return `None` for a stale or dead reference.
+    #[inline]
     pub fn try_get(&self, r: ObjRef) -> Option<&Object> {
         if TextViewTable::is_reference(r) {
             return None;
@@ -1140,6 +1141,7 @@ impl Heap {
     }
 
     /// Read one String or Substring from either storage class.
+    #[inline]
     pub fn text(&self, reference: ObjRef) -> Option<TextRef<'_>> {
         if TextViewTable::is_reference(reference) {
             return self.text_views.get(reference);

@@ -4181,6 +4181,48 @@ The compiled region count changed from 36 to 33.
 
 The parse-only row stayed within two percent.
 
+### Stage F83: Borrow read-only helper inputs
+
+- measure the helper path before changing its ABI;
+- borrow immutable text and byte inputs;
+- keep owned inputs across operations that can collect;
+- specialize fixed helper choices at compile time;
+- permit cross-crate inlining for small heap accessors.
+
+The profile used five million `Text.starts_with` calls.
+
+An empty helper kept the complete native call path.
+
+It took 16.335 milliseconds, or at most 3.3 nanoseconds for each iteration.
+
+This bound includes the loop and call-site work.
+
+The original predicate took 231.002 milliseconds.
+
+The borrowed and specialized predicate took 72.843 milliseconds.
+
+Thus, the 40-nanosecond estimate did not measure the helper ABI.
+
+Reference-count changes and internal function dispatch caused most measured cost.
+
+Read-only text predicates, searches, and numeric parsers now borrow heap values.
+
+Read-only byte predicates and searches use the same rule.
+
+`ByteBuffer.find_from` and syntax metadata access also borrow their inputs.
+
+Allocating helpers retain owned values across possible collection points.
+
+| Row | Stage F82 | Stage F83 | Change |
+| --- | ---: | ---: | ---: |
+| Read-only helper probe, Native | 231.002 ms | 72.843 ms | 68.5 percent faster |
+| Text search, Native | 47.930 ms | 25.688 ms | 46.4 percent faster |
+| Numeric conversion, Native | 21.334 ms | 18.900 ms | 11.4 percent faster |
+| CSV report, Auto | 4.916 ms | 4.453 ms | 9.4 percent faster |
+| Word count, Auto | 4.106 ms | 4.105 ms | unchanged |
+
+The JSON rows stayed within three percent.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

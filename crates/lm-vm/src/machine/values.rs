@@ -782,7 +782,7 @@ impl Machine {
                 let needle = self.pop_obj()?;
                 let buffer = self.pop_obj()?;
                 let needle = match self.vm.heap.get(needle) {
-                    Object::Bytes(bytes) => bytes.clone(),
+                    Object::Bytes(bytes) => bytes,
                     _ => return Err(BAD_TYPE),
                 };
                 let bytes = match self.vm.heap.get(buffer) {
@@ -792,7 +792,7 @@ impl Machine {
                 };
                 let found = usize::try_from(start)
                     .ok()
-                    .and_then(|start| bytes.find_from(&needle, start))
+                    .and_then(|start| bytes.find_from(needle.as_slice(), start))
                     .and_then(|index| i64::try_from(index).ok())
                     .unwrap_or(-1);
                 self.push(Value::Int(found))?;

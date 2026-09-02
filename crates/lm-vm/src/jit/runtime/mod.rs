@@ -207,6 +207,14 @@ struct SyntaxElementParts {
     index: u32,
 }
 
+struct SyntaxElementRefs<'a> {
+    source: Value,
+    records: Value,
+    text: &'a SharedText,
+    data: &'a SharedBytes,
+    index: u32,
+}
+
 mod alloc;
 mod builders;
 mod lists;

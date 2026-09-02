@@ -63,6 +63,23 @@ impl MachineRuntime<'_> {
         token: u32,
         trivia: u32,
     ) -> Result<SyntaxElementParts, HeapOperationResult> {
+        let parts = self.syntax_element_refs(reference, node, token, trivia)?;
+        Ok(SyntaxElementParts {
+            source: parts.source,
+            records: parts.records,
+            text: parts.text.clone(),
+            data: parts.data.clone(),
+            index: parts.index,
+        })
+    }
+
+    pub(super) fn syntax_element_refs(
+        &self,
+        reference: u64,
+        node: u32,
+        token: u32,
+        trivia: u32,
+    ) -> Result<SyntaxElementRefs<'_>, HeapOperationResult> {
         let reference = object_reference(reference);
         let Some(crate::Object::Instance { class, fields, .. }) =
             self.machine.vm.heap.try_get(reference)
@@ -85,14 +102,14 @@ impl MachineRuntime<'_> {
             return Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch));
         };
         let text = match self.machine.vm.heap.try_get(source_ref) {
-            Some(crate::Object::Str(text)) => text.clone(),
+            Some(crate::Object::Str(text)) => text,
             _ => return Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch)),
         };
         let data = match self.machine.vm.heap.try_get(records_ref) {
-            Some(crate::Object::Bytes(data)) => data.clone(),
+            Some(crate::Object::Bytes(data)) => data,
             _ => return Err(HeapOperationResult::Fault(crate::FaultCode::TypeMismatch)),
         };
-        Ok(SyntaxElementParts {
+        Ok(SyntaxElementRefs {
             source: *source,
             records: *records,
             text,
@@ -106,7 +123,7 @@ impl MachineRuntime<'_> {
         reference: u64,
     ) -> Result<lm_abi::syntax::SyntaxRecord, HeapOperationResult> {
         let [_, node, token, trivia, _] = self.syntax_roles()?;
-        let parts = self.syntax_element_parts(reference, node, token, trivia)?;
+        let parts = self.syntax_element_refs(reference, node, token, trivia)?;
         let view = lm_abi::syntax::SyntaxView::new(parts.data.as_slice(), parts.text.len())
             .map_err(|_| HeapOperationResult::Fault(crate::FaultCode::BadCast))?;
         view.record(parts.index)

@@ -94,6 +94,7 @@ pub(crate) struct TextViewSweep {
 }
 
 impl TextViewTable {
+    #[inline]
     pub(crate) fn is_reference(reference: ObjRef) -> bool {
         reference.generation & TEXT_VIEW_GENERATION_TAG != 0
     }
@@ -119,6 +120,7 @@ impl TextViewTable {
         self.page_addresses.as_ptr()
     }
 
+    #[inline]
     fn entry(&self, slot: u32) -> Option<&TextViewEntry> {
         self.pages
             .get(slot as usize / PAGE_SLOTS)?
@@ -279,6 +281,7 @@ impl TextViewTable {
         self.live += count;
     }
 
+    #[inline]
     pub(crate) fn get(&self, reference: ObjRef) -> Option<TextRef<'_>> {
         if !Self::is_reference(reference) {
             return None;
