@@ -424,8 +424,12 @@ pub enum NativeOp {
     MapHas,
     MapAt,
     MapPut,
+    /// Insert through the closed Text-to-String relation.
+    MapPutText,
     /// Non-faulting lookup returning core `Option[V]`.
     MapGet,
+    /// Remove one entry through a borrowed lookup key.
+    MapRemove,
     BytesNew,
     Freeze,
     /// The canonical digest of one frozen graph.

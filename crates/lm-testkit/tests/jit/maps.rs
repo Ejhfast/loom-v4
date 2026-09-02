@@ -85,6 +85,24 @@ fn borrowed_text_map_put_matches_both_engines() {
 }
 
 #[test]
+fn borrowed_text_map_remove_matches_each_fuel_boundary() {
+    let source = concat!(
+        "source = \"_key_\"\nview = source.slice(1, 3).expect(\"view\")\n",
+        "table: Map[String, Int] = {\"key\": 7}\n",
+        "(table.remove(view), table.has(view), table.keys_list())\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-borrowed-map-remove.lm", source)
+        .expect("the borrowed map-remove case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}: {metrics:?}");
+    }
+}
+
+#[test]
 fn text_range_interning_allocates_only_for_misses() {
     let source = concat!(
         "source = Bytes(\"key,key,key,new\")\n",

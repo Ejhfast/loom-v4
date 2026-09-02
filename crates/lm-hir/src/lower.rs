@@ -2035,18 +2035,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 args,
             } => self.lower_map_get(expr, args),
             HExprKind::Native { op, args } => {
-                let borrowed_text_put = if matches!(op, NativeOp::MapPut) {
-                    match self.m.store.get(args[0].ty) {
-                        Type::Map(key, _) => *key == STRING && args[1].ty != STRING,
-                        _ => false,
-                    }
-                } else {
-                    false
-                };
                 let map_action = match op {
                     NativeOp::MapHas => Some(MapAction::Has),
                     NativeOp::MapAt => Some(MapAction::At),
-                    NativeOp::MapPut => Some(MapAction::Put),
+                    NativeOp::MapPut | NativeOp::MapPutText => Some(MapAction::Put),
+                    NativeOp::MapRemove => Some(MapAction::Remove),
                     _ => None,
                 };
                 if let Some(action) = map_action {
@@ -2070,7 +2063,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::MapLen => Instr::MapLen,
                     NativeOp::MapHas => Instr::MapHas,
                     NativeOp::MapAt => Instr::MapAt,
-                    NativeOp::MapPut if borrowed_text_put => extended(ExtendedInstr::MapPutText {
+                    NativeOp::MapPutText => extended(ExtendedInstr::MapPutText {
                         ty: self.m.bc_ty(expr.ty),
                         discard: false,
                     }),
@@ -2078,6 +2071,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         ty: self.m.bc_ty(expr.ty),
                         discard: false,
                     },
+                    NativeOp::MapRemove => extended(ExtendedInstr::MapRemove {
+                        ty: self.m.bc_ty(expr.ty),
+                    }),
                     NativeOp::BytesNew => {
                         self.m.intern_type(BcType::Bytes);
                         Instr::Native(lm_bytecode::NativeInstr::BytesNew)

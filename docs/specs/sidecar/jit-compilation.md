@@ -4025,6 +4025,32 @@ Focused source tests cover hits, misses, bounds, UTF-8, and verifier rejection.
 
 The native tests cover allocation counts and every tested fuel boundary.
 
+### Stage F77: Name the closed borrowed-key relation
+
+- define one closed borrowed-key relation in the language specification;
+- centralize source checking for map key parameters;
+- carry actual borrowed insertion as one HIR operation;
+- accept borrowed Text for map removal;
+- keep source checking and bytecode verification independent;
+- keep iteration and snapshots on the declared key type.
+
+The relation covers lookup, insertion, removal, and byte-range pool interning.
+
+Programs cannot add relation entries.
+
+Borrowed removal uses the existing map probe and removal instruction.
+
+It stores no borrowed input and allocates no guest object on a hit.
+
+The application benchmark stayed stable after the checker generalization.
+
+| Case | Interpreter | Auto | Native | Auto gain | Native coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| word count | 235.892 ms | 21.188 ms | 21.173 ms | 11.13x | 100% |
+| CSV report | 141.919 ms | 29.399 ms | 29.383 ms | 4.83x | 100% |
+| JSON pipeline | 1,852.011 ms | 122.796 ms | 122.082 ms | 15.08x | 100% |
+| JSON parse | 1,144.758 ms | 76.192 ms | 75.780 ms | 15.03x | 100% |
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

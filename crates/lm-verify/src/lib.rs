@@ -323,7 +323,8 @@ use tables::verify_tables;
 /// Version 37 permits capture contracts on imported closure bodies.
 /// Version 38 verifies ABI operation and group slots in effect rows.
 /// Version 39 verifies typed constant exports and constant pins.
-pub const VERIFIER_VERSION: u32 = 39;
+/// Version 40 verifies borrowed keys for map removal.
+pub const VERIFIER_VERSION: u32 = 40;
 
 /// Verify a full module. Every table and every function must pass.
 ///

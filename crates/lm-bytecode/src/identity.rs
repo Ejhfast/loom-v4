@@ -115,7 +115,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 51 lowers borrowed Text insertion into String maps.
 /// Version 52 lowers direct UTF-8 String construction from a byte range.
 /// Version 53 lowers allocate-on-miss byte-range text interning.
-pub const COMPILER_ABI_VERSION: u32 = 53;
+/// Version 54 lowers borrowed Text removal from text maps.
+pub const COMPILER_ABI_VERSION: u32 = 54;
 
 /// The refinement work budget of one component.
 ///

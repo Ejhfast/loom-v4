@@ -377,15 +377,11 @@ impl<'o> FnChecker<'o> {
                 self.check_control_method(ctx, recv_h, name, name_span, type_args, args, span)?;
             return Ok(out.expect("control receivers resolve or fail"));
         }
-        // Text map queries accept every Text subtype.
-        // String map insertion also accepts borrowed Text.
+        // The closed borrowed-key relation applies to named map methods.
         if let Type::Map(key, _) = ctx.store.get(recv_ty).clone() {
-            let accepted_key = if name == "put" {
-                map_put_key_type(ctx, key)
-            } else {
-                map_query_key_type(ctx, key)
-            };
-            if accepted_key != key && matches!(name, "has" | "at" | "get" | "put") {
+            let parameter =
+                MapKeyUse::for_method(name).map(|usage| map_key_parameter(ctx, key, usage));
+            if parameter.is_some_and(MapKeyParameter::is_borrowed) {
                 if !type_args.is_empty() {
                     return Err(Diagnostic::new(
                         "E1024",
@@ -790,35 +786,45 @@ impl<'o> FnChecker<'o> {
             (Type::Map(_, _), "len") => native(NativeOp::MapLen, vec![], NO_NAMES, INT, false),
             (Type::Map(k, _), "has") => native(
                 NativeOp::MapHas,
-                vec![map_query_key_type(ctx, *k)],
+                vec![map_key_parameter(ctx, *k, MapKeyUse::Lookup).ty],
                 &["key"],
                 BOOL,
                 false,
             ),
             (Type::Map(k, v), "at") => native(
                 NativeOp::MapAt,
-                vec![map_query_key_type(ctx, *k)],
+                vec![map_key_parameter(ctx, *k, MapKeyUse::Lookup).ty],
                 &["key"],
                 *v,
                 false,
             ),
-            (Type::Map(k, v), "put") => native(
-                NativeOp::MapPut,
-                vec![map_put_key_type(ctx, *k), *v],
-                &["key", "value"],
-                ctx.option_of(*v),
-                true,
-            ),
+            (Type::Map(k, v), "put") => {
+                let parameter = map_key_parameter(ctx, *k, MapKeyUse::Insert);
+                native(
+                    NativeOp::MapPut,
+                    vec![parameter.ty, *v],
+                    &["key", "value"],
+                    ctx.option_of(*v),
+                    true,
+                )
+            }
             (Type::Map(k, v), "get") => {
                 let ret = ctx.option_of(*v);
                 native(
                     NativeOp::MapGet,
-                    vec![map_query_key_type(ctx, *k)],
+                    vec![map_key_parameter(ctx, *k, MapKeyUse::Lookup).ty],
                     &["key"],
                     ret,
                     false,
                 )
             }
+            (Type::Map(k, v), "remove") => native(
+                NativeOp::MapRemove,
+                vec![map_key_parameter(ctx, *k, MapKeyUse::Lookup).ty],
+                &["key"],
+                ctx.option_of(*v),
+                true,
+            ),
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
             }
@@ -854,6 +860,14 @@ impl<'o> FnChecker<'o> {
         let mut all_args = vec![recv_h];
         let checked = self.check_args_simple(ctx, args, &params, &muts, names, name, span)?;
         all_args.extend(checked);
+        let op = match (&store_ty, op) {
+            (Type::Map(key, _), NativeOp::MapPut)
+                if !ctx.store.compatible(*key, all_args[1].ty) =>
+            {
+                NativeOp::MapPutText
+            }
+            _ => op,
+        };
         // Element reads keep the receiver capability.
         let mutable = match op {
             NativeOp::ListAt | NativeOp::MapAt | NativeOp::ListGet | NativeOp::MapGet => {
@@ -1206,7 +1220,7 @@ impl<'o> FnChecker<'o> {
             }
             Type::Map(k, v) => {
                 let (k, v) = (*k, *v);
-                let query_key = map_query_key_type(ctx, k);
+                let query_key = map_key_parameter(ctx, k, MapKeyUse::Lookup).ty;
                 let key = self.check_expr(ctx, index, query_key)?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {

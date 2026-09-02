@@ -899,7 +899,8 @@ pub(super) fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key_type, value_type) = map_type(context, receiver)?;
+                let (_, value_type) = map_type(context, receiver)?;
+                let key_type = stack_type_from_end(&before.stack_types, 0)?;
                 let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(

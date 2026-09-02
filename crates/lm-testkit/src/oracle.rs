@@ -2304,7 +2304,7 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(self.option_value(found))
             }
-            NativeOp::MapPut => {
+            NativeOp::MapPut | NativeOp::MapPutText => {
                 let obj = self.as_obj(&values[0])?;
                 frozen_guard(&obj)?;
                 let previous = match &mut obj.borrow_mut().kind {
@@ -2317,6 +2317,18 @@ impl<'m> Oracle<'m> {
                             }
                         }
                     }
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                Ok(self.option_value(previous))
+            }
+            NativeOp::MapRemove => {
+                let obj = self.as_obj(&values[0])?;
+                frozen_guard(&obj)?;
+                let previous = match &mut obj.borrow_mut().kind {
+                    OKind::Map(entries) => entries
+                        .iter()
+                        .position(|(key, _)| self.key_eq(key, &values[1]))
+                        .map(|position| entries.remove(position).1),
                     _ => return Err(Stop::Limit("map op on a non-map")),
                 };
                 Ok(self.option_value(previous))

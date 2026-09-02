@@ -149,6 +149,70 @@ table.put(key, 1)
 }
 
 #[test]
+fn borrowed_text_covers_every_map_key_parameter() {
+    let source = r#"
+source = "_key_"
+key = source.slice(1, 3).expect("the view exists")
+table: Map[String, Int] = {"key": 4}
+before = (table.has(key), table.get(key), table.at(key), table[key])
+replaced = table.put(key, 7)
+removed = table.remove(key)
+(before, replaced, removed, table.has(key), table.keys_list())
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done(((true, Some(4), 4, 4), Some(4), Some(7), false, []))"
+    );
+}
+
+#[test]
+fn borrowed_text_remove_rejects_non_text_maps() {
+    let message = error(
+        r#"
+source = "_1_"
+key = source.slice(1, 1).expect("the view exists")
+table: Map[Int, Int] = {1: 2}
+table.remove(key)
+"#,
+    );
+    assert!(message.contains("expected Int"), "{message}");
+}
+
+#[test]
+fn borrowed_text_remove_uses_the_verified_map_operation() {
+    let mut module = compile_module_text(
+        "collections.lm",
+        r#"
+source = "_key_"
+key = source.slice(1, 3).expect("the view exists")
+table: Map[String, Int] = {"key": 1}
+table.remove(key)
+"#,
+    )
+    .expect("the source compiles");
+    let entry = &mut module.funcs[module.entry as usize];
+    let (block, operation) = entry
+        .blocks
+        .iter_mut()
+        .find_map(|block| {
+            block
+                .iter()
+                .position(|instruction| {
+                    matches!(
+                        instruction,
+                        Instr::Extended(ExtendedInstr::MapRemove { .. })
+                    )
+                })
+                .map(|operation| (block, operation))
+        })
+        .expect("the borrowed removal exists");
+    assert!(operation > 0);
+    block[operation - 1] = Instr::ConstInt(1);
+    let error = lm_verify::verify_module(&module).expect_err("the forged key rejects");
+    assert!(error.message.contains("map remove key type"), "{error}");
+}
+
+#[test]
 fn verifier_rejects_a_wrong_borrowed_text_put_result() {
     let mut module = compile_module_text(
         "collections.lm",

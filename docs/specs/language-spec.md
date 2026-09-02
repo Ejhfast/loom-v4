@@ -1097,9 +1097,30 @@ They do not create an implicit `PartialEq` conformance.
 
 Text map keys use their visible UTF-8 content. A `String` key and a `Substring` key match when their visible content matches.
 
-`has`, `get`, `at`, and map indexing accept Text for any text-keyed map.
+The specification uses `BorrowedKey[K,use]` as metanotation for one closed key relation.
 
-`Map[String,V].put` also accepts Text. A hit retains the stored key. A miss creates one bounded String key.
+It is not a source interface. Programs cannot add relation entries.
+
+| Input | Declared key | Use |
+| --- | --- | --- |
+| a subtype of `K` | `K` | every key use |
+| `Text` | any text type | lookup |
+| `Text` | `String` | insertion |
+| one validated UTF-8 `Bytes` range | `String` | pool interning |
+
+`has`, `get`, `at`, `remove`, and map indexing use `BorrowedKey[K,lookup]`.
+
+`put` uses `BorrowedKey[K,insertion]`.
+
+A borrowed lookup never changes the stored key. A hit allocates no guest object.
+
+A borrowed String insertion retains the stored key after a hit.
+
+A miss creates one bounded String key.
+
+Iteration, `keys_list`, and snapshots expose the declared key type `K`.
+
+They never expose the borrowed input.
 
 Other map insertions require the declared key type.
 
@@ -4132,7 +4153,9 @@ It faults with `BadCast` for invalid UTF-8.
 
 It creates one bounded String without an intermediate Bytes object.
 
-`intern_text_range` probes an owned String pool with one validated UTF-8 byte range.
+`intern_text_range` implements the byte-range entry in the closed `BorrowedKey` relation.
+
+It probes an owned String pool with one validated UTF-8 byte range.
 
 A hit returns the stored String without a guest allocation.
 

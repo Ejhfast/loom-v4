@@ -13,11 +13,14 @@ mod body;
 mod call;
 mod expr;
 mod flow;
+mod map_key;
 mod member;
 mod operator;
 mod pattern;
 mod scope;
 mod sysabi;
+
+use map_key::{map_key_parameter, MapKeyParameter, MapKeyUse};
 
 use crate::check::{
     camel_member, check_key_type, resolve_param_type, resolve_row, resolve_type, snake_member,
@@ -355,28 +358,6 @@ fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
     ctx.store
         .nominal_class(ty)
         .map(|(class, args)| (class.0, args))
-}
-
-/// Return Text for a query on any text-keyed map.
-fn map_query_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
-    let Some(text_class) = ctx.core_types.get("Text").copied() else {
-        return key;
-    };
-    let text = ctx.classes[text_class as usize].self_ty;
-    if ctx.store.compatible(text, key) {
-        text
-    } else {
-        key
-    }
-}
-
-/// Return Text for insertion into a String-keyed map.
-fn map_put_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
-    if key == STRING {
-        map_query_key_type(ctx, key)
-    } else {
-        key
-    }
 }
 
 /// Collect the type-variable indices inside one type.

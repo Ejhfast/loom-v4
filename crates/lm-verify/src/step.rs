@@ -1103,7 +1103,7 @@ pub(crate) fn step(
             let m = pop(state)?;
             let (k, _) = as_map(m)?;
             native_map_key(k)?;
-            if !ctx.accepts_map_query_key(key, k) {
+            if !ctx.accepts_map_lookup_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
             push(state, TY_BOOL)?;
@@ -1113,7 +1113,7 @@ pub(crate) fn step(
             let m = pop(state)?;
             let (k, v) = as_map(m)?;
             native_map_key(k)?;
-            if !ctx.accepts_map_query_key(key, k) {
+            if !ctx.accepts_map_lookup_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
             push(state, v)?;
@@ -1187,7 +1187,7 @@ pub(crate) fn step(
             let map = pop(state)?;
             let (expected_key, found) = as_map(map)?;
             native_map_key(expected_key)?;
-            if !ctx.accepts_map_query_key(key, expected_key) {
+            if !ctx.accepts_map_lookup_key(key, expected_key) {
                 return Err(fail(format!(
                     "map key expects type {expected_key}, found type {key}"
                 )));
@@ -1203,7 +1203,7 @@ pub(crate) fn step(
             let map = pop(state)?;
             let (expected_key, expected_value) = as_map(map)?;
             if ctx.ty(expected_key) != BcType::Str
-                || !ctx.accepts_map_query_key(key, expected_key)
+                || !ctx.accepts_map_lookup_key(key, expected_key)
                 || !ctx.is_subtype(value, expected_value)
             {
                 return Err(fail(
@@ -1420,7 +1420,7 @@ pub(crate) fn step(
             let map = pop(state)?;
             let (expected_key, value) = as_map(map)?;
             native_map_key(expected_key)?;
-            if !ctx.is_subtype(key, expected_key) {
+            if !ctx.accepts_map_lookup_key(key, expected_key) {
                 return Err(fail("map remove key type does not match".to_string()));
             }
             let want = ctx

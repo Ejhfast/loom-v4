@@ -953,8 +953,8 @@ impl<'m> Ctx<'m> {
         true
     }
 
-    /// Test one key for a map query.
-    pub(crate) fn accepts_map_query_key(&self, found: u32, expected: u32) -> bool {
+    /// Test the closed borrowed-key relation for one map lookup.
+    pub(crate) fn accepts_map_lookup_key(&self, found: u32, expected: u32) -> bool {
         if self.is_subtype(found, expected) {
             return true;
         }
