@@ -111,6 +111,17 @@ pub(super) fn stack_from_end(
         .ok_or(UnsupportedReason::InvalidStack)
 }
 
+pub(super) fn stack_type_from_end(stack: &[u32], offset: usize) -> Result<u32, UnsupportedReason> {
+    let index = offset
+        .checked_add(1)
+        .and_then(|count| stack.len().checked_sub(count))
+        .ok_or(UnsupportedReason::InvalidStack)?;
+    stack
+        .get(index)
+        .copied()
+        .ok_or(UnsupportedReason::InvalidStack)
+}
+
 pub(super) fn field_contract(
     context: &SegmentAnalysisContext<'_>,
     receiver: ScalarKind,

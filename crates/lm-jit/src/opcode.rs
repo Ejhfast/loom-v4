@@ -301,6 +301,9 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::MapGet { .. } => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(2)),
+        ExtendedInstr::MapPutText { .. } => dedicated(Helper)
+            .with_replay()
+            .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::MapProbe => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),

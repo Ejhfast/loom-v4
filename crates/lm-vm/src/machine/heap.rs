@@ -322,6 +322,22 @@ impl Machine {
         }
     }
 
+    /// Prepare an owned String object for one borrowed map key.
+    pub(crate) fn owned_string_map_key(&self, key: Value) -> Result<Option<Object>, FaultCode> {
+        let Value::Obj(reference) = key else {
+            return Err(BAD_TYPE);
+        };
+        match self.vm.heap.try_get(reference) {
+            Some(Object::Str(_)) => Ok(None),
+            Some(Object::Substring(text)) => text
+                .try_bounded()
+                .map(Object::Str)
+                .map(Some)
+                .map_err(|_| FaultCode::HeapLimit),
+            _ => Err(BAD_TYPE),
+        }
+    }
+
     /// Mix one semantic hash with the private process hash key.
     pub(crate) fn map_index_hash(hash: i64) -> u64 {
         process_lookup_hash(hash)

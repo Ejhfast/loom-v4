@@ -1197,6 +1197,29 @@ pub(crate) fn step(
             }
             push(state, *ty)?;
         }
+        Instr::Extended(ExtendedInstr::MapPutText { ty, discard }) => {
+            let value = pop(state)?;
+            let key = pop(state)?;
+            let map = pop(state)?;
+            let (expected_key, expected_value) = as_map(map)?;
+            if ctx.ty(expected_key) != BcType::Str
+                || !ctx.accepts_map_query_key(key, expected_key)
+                || !ctx.is_subtype(value, expected_value)
+            {
+                return Err(fail(
+                    "borrowed map insertion types do not match".to_string(),
+                ));
+            }
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if want != expected_value {
+                return Err(fail("map put option type does not match".to_string()));
+            }
+            if !discard {
+                push(state, *ty)?;
+            }
+        }
         Instr::Extended(ExtendedInstr::ListEpoch) => {
             let list = pop(state)?;
             as_list(list)?;

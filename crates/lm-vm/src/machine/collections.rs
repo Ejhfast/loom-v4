@@ -29,8 +29,31 @@ impl Machine {
         ty: u32,
         discard: bool,
     ) -> Result<(), FaultCode> {
+        self.exec_map_put_inner(module, envs, ty, discard, false)
+    }
+
+    /// Insert into a String map through one borrowed Text key.
+    #[inline(never)]
+    pub(super) fn exec_map_put_text(
+        &mut self,
+        module: &NamespaceRuntime,
+        envs: &mut TypeEnvs,
+        ty: u32,
+        discard: bool,
+    ) -> Result<(), FaultCode> {
+        self.exec_map_put_inner(module, envs, ty, discard, true)
+    }
+
+    fn exec_map_put_inner(
+        &mut self,
+        module: &NamespaceRuntime,
+        envs: &mut TypeEnvs,
+        ty: u32,
+        discard: bool,
+        own_text_key: bool,
+    ) -> Result<(), FaultCode> {
         let value = self.pop()?;
-        let key = self.pop()?;
+        let mut key = self.pop()?;
         let r = self.pop_obj()?;
         self.frozen_guard(r)?;
         let pos = self.map_lookup(r, key)?;
@@ -49,7 +72,20 @@ impl Machine {
             },
             None => {
                 let hash = self.key_semantic_hash(key)?;
-                self.reserve(40, &[Value::Obj(r), key, value])?;
+                let owned_key = if own_text_key {
+                    self.owned_string_map_key(key)?
+                } else {
+                    None
+                };
+                let key_cost = owned_key
+                    .as_ref()
+                    .map(|object| self.vm.heap.allocation_cost(object))
+                    .unwrap_or(0);
+                let growth = 40usize.checked_add(key_cost).ok_or(FaultCode::HeapLimit)?;
+                self.reserve(growth, &[Value::Obj(r), key, value])?;
+                if let Some(object) = owned_key {
+                    key = Value::Obj(self.vm.heap.alloc(object));
+                }
                 match self.vm.heap.get_mut(r) {
                     Object::Map { entries, index } => {
                         index.epoch.bump()?;

@@ -61,6 +61,30 @@ fn text_map_hits_match_string_and_substring_keys() {
 }
 
 #[test]
+fn borrowed_text_map_put_matches_both_engines() {
+    let source = concat!(
+        "stored_source = \"_key_\"\nstored = stored_source.slice(1, 3).expect(\"view\")\n",
+        "other_source = \"_other_\"\nother = other_source.slice(1, 5).expect(\"view\")\n",
+        "table = Map[String, Int]()\nfirst = table.put(stored, 1)\n",
+        "i = 0\nsum = 0\nwhile i < 1000\n",
+        "  case table.put(stored, i)\n",
+        "  in Some(previous) then sum = sum + previous\n",
+        "  in None then sum = sum - 10000\n",
+        "  end\n  i = i + 1\nend\n",
+        "table.put(other, 7)\n(first, sum, table.at(\"key\"), table.at(\"other\"))\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-borrowed-map-put.lm", source)
+        .expect("the borrowed map-put case compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}\n{native_dump}");
+    assert_eq!(native_dump, interpreted_dump, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+}
+
+#[test]
 fn byte_map_hits_compare_distinct_storage() {
     let source = concat!(
         "stored = Bytes(\"key\")\nlookup = Bytes(\"key\")\n",

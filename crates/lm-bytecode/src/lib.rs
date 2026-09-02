@@ -719,6 +719,9 @@ pub enum ExtendedInstr {
     ListGet { ty: u32 },
     /// Pop a key and a map, then push `Option[value]`.
     MapGet { ty: u32 },
+    /// Pop a value, a Text key, and a Map[String, value].
+    /// Insert an owned String only when the key is absent.
+    MapPutText { ty: u32, discard: bool },
     /// Pop a list and push its structural epoch.
     ListEpoch,
     /// Pop an epoch and a list. Push the length after an epoch check.
@@ -1865,7 +1868,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 58 stores effect rows with ABI operation and group slots.
 /// Version 59 stores typed constants in the module export section.
 /// Version 60 adds pin-only imports and character literals.
-pub const VERSION: u16 = 60;
+/// Version 61 adds borrowed Text insertion into String maps.
+pub const VERSION: u16 = 61;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2094,11 +2098,12 @@ const OP_SEAL_INSTANCE: u8 = 0xfa;
 const OP_NUMERIC: u8 = 0xfb;
 const OP_CONST_FLOAT: u8 = 0xfc;
 const OP_CONST_BYTES: u8 = 0xfd;
-const OP_TEXT_EXTENSION: u8 = 0xfe;
+const OP_EXTENSION: u8 = 0xfe;
 const OP_PREPARE_WAIT: u8 = 0xff;
 
-const TEXT_EXT_PAD_START: u8 = 0;
-const TEXT_EXT_PAD_END: u8 = 1;
+const EXT_TEXT_PAD_START: u8 = 0;
+const EXT_TEXT_PAD_END: u8 = 1;
+const EXT_MAP_PUT_TEXT: u8 = 2;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2759,12 +2764,12 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::TextParseIntStatus) => out.push(OP_TEXT_PARSE_INT_STATUS),
         Instr::Native(NativeInstr::TextParseIntValue) => out.push(OP_TEXT_PARSE_INT_VALUE),
         Instr::Native(NativeInstr::TextPadStart) => {
-            out.push(OP_TEXT_EXTENSION);
-            out.push(TEXT_EXT_PAD_START);
+            out.push(OP_EXTENSION);
+            out.push(EXT_TEXT_PAD_START);
         }
         Instr::Native(NativeInstr::TextPadEnd) => {
-            out.push(OP_TEXT_EXTENSION);
-            out.push(TEXT_EXT_PAD_END);
+            out.push(OP_EXTENSION);
+            out.push(EXT_TEXT_PAD_END);
         }
         Instr::Native(NativeInstr::BytesEndsWith) => out.push(OP_BYTES_ENDS_WITH),
         Instr::Native(NativeInstr::BytesContains) => out.push(OP_BYTES_CONTAINS),
@@ -3025,6 +3030,12 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::MapGet { ty } => {
             out.push(OP_MAP_GET);
             write_u32(out, ty);
+        }
+        ExtendedInstr::MapPutText { ty, discard } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_MAP_PUT_TEXT);
+            write_u32(out, ty);
+            out.push(u8::from(discard));
         }
         ExtendedInstr::ListEpoch => out.push(OP_LIST_EPOCH),
         ExtendedInstr::ListIterLen => out.push(OP_LIST_ITER_LEN),
@@ -4220,10 +4231,14 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_TEXT_REPLACE => Instr::Native(NativeInstr::TextReplace),
         OP_TEXT_PARSE_INT_STATUS => Instr::Native(NativeInstr::TextParseIntStatus),
         OP_TEXT_PARSE_INT_VALUE => Instr::Native(NativeInstr::TextParseIntValue),
-        OP_TEXT_EXTENSION => match cur.u8()? {
-            TEXT_EXT_PAD_START => Instr::Native(NativeInstr::TextPadStart),
-            TEXT_EXT_PAD_END => Instr::Native(NativeInstr::TextPadEnd),
-            _ => return Err(DecodeError::BadOpcode(OP_TEXT_EXTENSION)),
+        OP_EXTENSION => match cur.u8()? {
+            EXT_TEXT_PAD_START => Instr::Native(NativeInstr::TextPadStart),
+            EXT_TEXT_PAD_END => Instr::Native(NativeInstr::TextPadEnd),
+            EXT_MAP_PUT_TEXT => Instr::Extended(ExtendedInstr::MapPutText {
+                ty: cur.u32()?,
+                discard: cur.flag()?,
+            }),
+            _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
         OP_BYTES_CONTAINS => Instr::Native(NativeInstr::BytesContains),
@@ -4935,6 +4950,14 @@ mod tests {
             Instr::Extended(ExtendedInstr::OptionPayload { ty: 0 }),
             Instr::Extended(ExtendedInstr::ListGet { ty: 0 }),
             Instr::Extended(ExtendedInstr::MapGet { ty: 0 }),
+            Instr::Extended(ExtendedInstr::MapPutText {
+                ty: 0,
+                discard: false,
+            }),
+            Instr::Extended(ExtendedInstr::MapPutText {
+                ty: 0,
+                discard: true,
+            }),
             Instr::Extended(ExtendedInstr::ListEpoch),
             Instr::Extended(ExtendedInstr::ListIterLen),
             Instr::Extended(ExtendedInstr::MapEpoch),

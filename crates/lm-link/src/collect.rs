@@ -1131,6 +1131,7 @@ fn extended_edges(
         | ExtendedInstr::OptionPayload { ty }
         | ExtendedInstr::ListGet { ty }
         | ExtendedInstr::MapGet { ty }
+        | ExtendedInstr::MapPutText { ty, .. }
         | ExtendedInstr::ListPop { ty }
         | ExtendedInstr::MapRemove { ty }
         | ExtendedInstr::PrepareWait { reply_ty: ty, .. } => edges.push(offsets.ty(*ty)),

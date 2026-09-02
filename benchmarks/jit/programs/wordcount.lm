@@ -23,12 +23,11 @@ while rep < 2
   counts = Map[String, Int]()
   for word in words
     if word.len() > 0
-      key = word.to_string()
-      current = case counts.get(key)
+      current = case counts.get(word)
       in Some(value) then value
       in None then 0
       end
-      counts.put(key, current + 1)
+      counts.put(word, current + 1)
       total_words = total_words + 1
     end
   end

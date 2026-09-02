@@ -86,6 +86,106 @@ fn an_unused_map_put_discards_its_option_result() {
 }
 
 #[test]
+fn string_map_put_accepts_borrowed_text() {
+    let source = r#"
+stored_source = "_é猫_"
+stored = stored_source.slice(1, 2).expect("the view exists")
+other_source = "_new_"
+other = other_source.slice(1, 3).expect("the view exists")
+table: Map[String, Int] = {"é猫": 1}
+replaced = table.put(stored, 2)
+inserted = table.put(other, 3)
+keys = table.keys_list()
+(
+  replaced,
+  inserted,
+  table.at("é猫"),
+  table.at("new"),
+  keys
+)
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done((Some(1), None, 2, 3, [\"é猫\", \"new\"]))"
+    );
+}
+
+#[test]
+fn borrowed_text_map_put_uses_one_bytecode_operation() {
+    let module = compile_module_text(
+        "collections.lm",
+        r#"
+source = "_key_"
+key = source.slice(1, 3).expect("the view exists")
+table = Map[String, Int]()
+table.put(key, 1)
+table.put(key, 2)
+"#,
+    )
+    .expect("the source compiles");
+    let puts: Vec<bool> = module.funcs[module.entry as usize]
+        .blocks
+        .iter()
+        .flatten()
+        .filter_map(|instruction| match instruction {
+            Instr::Extended(ExtendedInstr::MapPutText { discard, .. }) => Some(*discard),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(puts, vec![true, false]);
+}
+
+#[test]
+fn borrowed_text_map_put_rejects_non_string_maps() {
+    let message = error(
+        r#"
+source = "_1_"
+key = source.slice(1, 1).expect("the view exists")
+table = Map[Int, Int]()
+table.put(key, 1)
+"#,
+    );
+    assert!(message.contains("expected Int"), "{message}");
+}
+
+#[test]
+fn verifier_rejects_a_wrong_borrowed_text_put_result() {
+    let mut module = compile_module_text(
+        "collections.lm",
+        r#"
+source = "_key_"
+key = source.slice(1, 3).expect("the view exists")
+table = Map[String, Int]()
+unused: Option[String] = None
+(table.put(key, 1), unused)
+"#,
+    )
+    .expect("the source compiles");
+    let option = lm_bytecode::corepin::declared_layout(&module)
+        .option
+        .expect("the core declares Option");
+    let wrong = module
+        .types
+        .iter()
+        .position(|ty| {
+            matches!(ty, BcType::Inst(class, args) if *class == option && args == &[lm_verify::TY_STR])
+        })
+        .expect("the String option type exists") as u32;
+    let operation = module.funcs[module.entry as usize]
+        .blocks
+        .iter_mut()
+        .flatten()
+        .find_map(|instruction| match instruction {
+            Instr::Extended(ExtendedInstr::MapPutText { ty, .. }) => Some(ty),
+            _ => None,
+        })
+        .expect("the borrowed insertion exists");
+    *operation = wrong;
+    let error = lm_verify::verify_module(&module).expect_err("the forged operation rejects");
+    assert!(error.message.contains("map put option type"), "{error}");
+}
+
+#[test]
 fn interface_contracts_cross_module_boundaries() {
     let library = compile_module(
         "lib.metrics",

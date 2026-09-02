@@ -294,11 +294,13 @@ fn extended_stack_effect(
         ExtendedInstr::MapNextIndex
         | ExtendedInstr::ListSet
         | ExtendedInstr::ListInsert
+        | ExtendedInstr::MapPutText { discard: false, .. }
         | ExtendedInstr::SyntaxBuildToken
         | ExtendedInstr::SyntaxBuildTrivia
         | ExtendedInstr::SyntaxBuildNode
         | ExtendedInstr::MapProbe
         | ExtendedInstr::MapProbeSetValue => (3, 1),
+        ExtendedInstr::MapPutText { discard: true, .. } => (3, 0),
         ExtendedInstr::MakeCallback { captures, .. } => (captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
         ExtendedInstr::CodeSource { .. }

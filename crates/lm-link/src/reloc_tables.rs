@@ -840,6 +840,10 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         ExtendedInstr::MapGet { ty } => ExtendedInstr::MapGet {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::MapPutText { ty, discard } => ExtendedInstr::MapPutText {
+            ty: reloc.types[*ty as usize],
+            discard: *discard,
+        },
         ExtendedInstr::ListPop { ty } => ExtendedInstr::ListPop {
             ty: reloc.types[*ty as usize],
         },

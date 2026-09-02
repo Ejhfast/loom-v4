@@ -36,6 +36,9 @@ impl Machine {
             ExtendedInstr::MapGet { ty } => {
                 self.exec_option_collection(module, envs, OptionCollectionOp::MapGet(ty))?;
             }
+            ExtendedInstr::MapPutText { ty, discard } => {
+                self.exec_map_put_text(module, envs, ty, discard)?;
+            }
             ExtendedInstr::ListEpoch => {
                 self.exec_collection_iteration(CollectionIterationOp::ListEpoch)?;
             }

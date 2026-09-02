@@ -100,6 +100,7 @@ pub(super) fn requires_retry_entry(instruction: &Instr) -> bool {
                     | ExtendedInstr::ListGet { .. }
                     | ExtendedInstr::ListPop { .. }
                     | ExtendedInstr::MapGet { .. }
+                    | ExtendedInstr::MapPutText { .. }
                     | ExtendedInstr::MapRemove { .. }
             )
     )
@@ -672,7 +673,8 @@ pub(super) fn analyze_segment(
             }
             Instr::MapHas => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key, _) = map_type(context, receiver)?;
+                map_type(context, receiver)?;
+                let key = stack_type_from_end(&before.stack_types, 0)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapHas {
@@ -682,7 +684,8 @@ pub(super) fn analyze_segment(
             }
             Instr::MapAt => {
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key, value) = map_type(context, receiver)?;
+                let (_, value) = map_type(context, receiver)?;
+                let key = stack_type_from_end(&before.stack_types, 0)?;
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::MapAt {
@@ -697,7 +700,8 @@ pub(super) fn analyze_segment(
                     return Err(UnsupportedReason::InvalidControlFlow);
                 };
                 let receiver = stack_from_end(&before.stack, 1)?;
-                let (key_type, value_type) = map_type(context, receiver)?;
+                let (_, value_type) = map_type(context, receiver)?;
+                let key_type = stack_type_from_end(&before.stack_types, 0)?;
                 let option_value = option_argument_type(context, source_ty)?;
                 let value = value_contract(context, value_type)?;
                 if !uses_equal_representation(
@@ -718,12 +722,15 @@ pub(super) fn analyze_segment(
                     },
                 });
             }
-            Instr::MapPut { ty, discard } => {
+            Instr::MapPut { ty, discard }
+            | Instr::Extended(ExtendedInstr::MapPutText { ty, discard }) => {
                 let receiver = stack_from_end(&before.stack, 2)?;
-                let (key_type, value_type) = map_type(context, receiver)?;
+                let (_, value_type) = map_type(context, receiver)?;
+                let key_type = stack_type_from_end(&before.stack_types, 1)?;
                 let value = value_contract(context, value_type)?;
                 let source_type = match source_instruction {
-                    Instr::MapPut { ty, .. } => ty,
+                    Instr::MapPut { ty, .. }
+                    | Instr::Extended(ExtendedInstr::MapPutText { ty, .. }) => ty,
                     _ => return Err(UnsupportedReason::InvalidControlFlow),
                 };
                 let option_value = option_argument_type(context, source_type)?;

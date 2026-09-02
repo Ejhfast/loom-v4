@@ -378,14 +378,18 @@ impl<'o> FnChecker<'o> {
             return Ok(out.expect("control receivers resolve or fail"));
         }
         // Text map queries accept every Text subtype.
-        // The native path keeps one lookup probe.
+        // String map insertion also accepts borrowed Text.
         if let Type::Map(key, _) = ctx.store.get(recv_ty).clone() {
-            let query = map_query_key_type(ctx, key);
-            if query != key && matches!(name, "has" | "at" | "get") {
+            let accepted_key = if name == "put" {
+                map_put_key_type(ctx, key)
+            } else {
+                map_query_key_type(ctx, key)
+            };
+            if accepted_key != key && matches!(name, "has" | "at" | "get" | "put") {
                 if !type_args.is_empty() {
                     return Err(Diagnostic::new(
                         "E1024",
-                        "a map query does not take type arguments",
+                        "a native map operation does not take type arguments",
                         name_span,
                     ));
                 }
@@ -800,7 +804,7 @@ impl<'o> FnChecker<'o> {
             ),
             (Type::Map(k, v), "put") => native(
                 NativeOp::MapPut,
-                vec![*k, *v],
+                vec![map_put_key_type(ctx, *k), *v],
                 &["key", "value"],
                 ctx.option_of(*v),
                 true,

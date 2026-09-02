@@ -527,6 +527,7 @@ pub(crate) fn verify_func(
                     | ExtendedInstr::OptionPayload { ty }
                     | ExtendedInstr::ListGet { ty }
                     | ExtendedInstr::MapGet { ty }
+                    | ExtendedInstr::MapPutText { ty, .. }
                     | ExtendedInstr::ListPop { ty }
                     | ExtendedInstr::MapRemove { ty }
                     | ExtendedInstr::DynPack { ty }

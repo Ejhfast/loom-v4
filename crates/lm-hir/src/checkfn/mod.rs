@@ -370,6 +370,15 @@ fn map_query_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
     }
 }
 
+/// Return Text for insertion into a String-keyed map.
+fn map_put_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
+    if key == STRING {
+        map_query_key_type(ctx, key)
+    } else {
+        key
+    }
+}
+
 /// Collect the type-variable indices inside one type.
 fn collect_vars(ctx: &Ctx, ty: TypeId, out: &mut HashSet<u32>) {
     match ctx.store.get(ty) {

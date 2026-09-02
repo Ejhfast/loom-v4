@@ -12,6 +12,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots,
             allow_collection,
+            own_text_key,
         } = request;
         let can_grow = match self.machine.vm.heap.try_get(reference) {
             Some(crate::Object::Map { entries, index }) if entries.len() == entry_count => {
@@ -23,7 +24,22 @@ impl MachineRuntime<'_> {
         if let Err(fault) = can_grow {
             return RuntimeUnitResult::Fault(fault);
         }
-        if self.machine.vm.heap.collection_due(40) && !allow_collection {
+        let owned_key = if own_text_key {
+            match self.machine.owned_string_map_key(key) {
+                Ok(key) => key,
+                Err(fault) => return RuntimeUnitResult::Fault(fault),
+            }
+        } else {
+            None
+        };
+        let key_cost = owned_key
+            .as_ref()
+            .map(|object| self.machine.vm.heap.allocation_cost(object))
+            .unwrap_or(0);
+        let Some(growth) = 40usize.checked_add(key_cost) else {
+            return RuntimeUnitResult::Fault(crate::FaultCode::HeapLimit);
+        };
+        if self.machine.vm.heap.collection_due(growth) && !allow_collection {
             return RuntimeUnitResult::Interpreter;
         }
         let roots = match decode_root_objects(roots) {
@@ -35,10 +51,13 @@ impl MachineRuntime<'_> {
         };
         if let Err(fault) =
             self.machine
-                .reserve_native(40, self.base_local, self.base_operand, &roots)
+                .reserve_native(growth, self.base_local, self.base_operand, &roots)
         {
             return RuntimeUnitResult::Fault(fault);
         }
+        let key = owned_key
+            .map(|object| Value::Obj(self.machine.vm.heap.alloc(object)))
+            .unwrap_or(key);
         match self.machine.vm.heap.get_mut(reference) {
             crate::Object::Map { entries, index } if entries.len() == entry_count => {
                 if entries.try_reserve(1).is_err() {
@@ -483,6 +502,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
+            own_text_key: false,
         })
     }
 
@@ -606,6 +626,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
+            own_text_key: request.own_text_key,
         })
     }
 
@@ -663,6 +684,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
+            own_text_key: request.own_text_key,
         })
     }
 

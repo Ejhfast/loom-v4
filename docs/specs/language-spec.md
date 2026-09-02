@@ -1097,7 +1097,11 @@ They do not create an implicit `PartialEq` conformance.
 
 Text map keys use their visible UTF-8 content. A `String` key and a `Substring` key match when their visible content matches.
 
-`has`, `get`, `at`, and map indexing accept Text for any text-keyed map. `put` still requires the declared key type.
+`has`, `get`, `at`, and map indexing accept Text for any text-keyed map.
+
+`Map[String,V].put` also accepts Text. A hit retains the stored key. A miss creates one bounded String key.
+
+Other map insertions require the declared key type.
 
 Other classes use reference identity for direct equality unless they implement `PartialEq`.
 
@@ -3884,7 +3888,11 @@ It implements `PartialEq` and `Hashable` when `V` implements each protocol.
 
 It implements `Copyable` for every value type.
 
-For a text key type, `has`, `get`, `at`, and indexing accept Text. Insertion still requires K.
+For a text key type, `has`, `get`, `at`, and indexing accept Text.
+
+`Map[String,V].put` accepts Text. It creates one bounded String only for a missing key.
+
+Other map insertions require K.
 
 Core defines `Set[T: Hashable]` as an ordinary final class over `Map[T,()]`.
 

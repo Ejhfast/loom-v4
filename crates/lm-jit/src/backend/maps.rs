@@ -1538,6 +1538,7 @@ pub(super) fn emit_map_put(
     option_family: Option<ir::Value>,
     previous_contract: ValueContract,
     roots: &[NativeRoot],
+    own_text_key: bool,
     exit: HeapExitEmission<'_>,
 ) -> Result<Option<NativeValue>, CompileError> {
     let Some(key_kind) = direct_map_key_kind(key_contract) else {
@@ -1550,6 +1551,7 @@ pub(super) fn emit_map_put(
             option_family,
             previous_contract,
             roots,
+            own_text_key,
             exit,
         );
     };
@@ -1734,6 +1736,9 @@ pub(super) fn emit_map_put(
     fast = builder.ins().band(fast, object_charge_ready);
     fast = builder.ins().band(fast, heap_charge_ready);
     fast = builder.ins().band(fast, below_threshold);
+    if own_text_key {
+        fast = builder.ins().iconst(types::I8, 0);
+    }
     let commit = builder.create_block();
     builder.ins().brif(fast, commit, &[], slow, &[]);
 
@@ -1811,6 +1816,7 @@ pub(super) fn emit_map_put(
         option_family,
         previous_contract,
         roots,
+        own_text_key,
         exit,
     )?;
     if let Some(result) = result {
@@ -1838,10 +1844,14 @@ pub(super) fn emit_map_put_slow(
     option_family: Option<ir::Value>,
     previous_contract: ValueContract,
     roots: &[NativeRoot],
+    own_text_key: bool,
     exit: HeapExitEmission<'_>,
 ) -> Result<Option<NativeValue>, CompileError> {
     let Some(option_family) = option_family else {
         let root_count = emit_runtime_roots(builder, values, roots)?;
+        let own_text_key = builder
+            .ins()
+            .iconst(types::I32, i64::from(u8::from(own_text_key)));
         let discard = load_value(
             builder,
             values.pointer_type,
@@ -1858,6 +1868,7 @@ pub(super) fn emit_map_put_slow(
                 key.tag,
                 stored.bits,
                 stored.tag,
+                own_text_key,
                 root_count,
             ],
         );
@@ -1964,6 +1975,9 @@ pub(super) fn emit_map_put_slow(
     };
 
     let root_count = emit_runtime_roots(builder, values, roots)?;
+    let own_text_key = builder
+        .ins()
+        .iconst(types::I32, i64::from(u8::from(own_text_key)));
     let commit = load_value(
         builder,
         values.pointer_type,
@@ -1986,6 +2000,7 @@ pub(super) fn emit_map_put_slow(
             token,
             entry_count,
             vacant,
+            own_text_key,
             root_count,
         ],
     );

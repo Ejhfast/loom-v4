@@ -112,7 +112,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 48 encodes effect rows with ABI operation and group slots.
 /// Version 49 adds compile-time constants to module surfaces.
 /// Version 50 adds pin-only imports and character literals.
-pub const COMPILER_ABI_VERSION: u32 = 50;
+/// Version 51 lowers borrowed Text insertion into String maps.
+pub const COMPILER_ABI_VERSION: u32 = 51;
 
 /// The refinement work budget of one component.
 ///
@@ -1170,6 +1171,7 @@ fn preflight_extended(
         | ExtendedInstr::OptionPayload { ty }
         | ExtendedInstr::ListGet { ty }
         | ExtendedInstr::MapGet { ty }
+        | ExtendedInstr::MapPutText { ty, .. }
         | ExtendedInstr::ListPop { ty }
         | ExtendedInstr::MapRemove { ty }
         | ExtendedInstr::DynPack { ty }
@@ -1481,6 +1483,7 @@ impl Graph {
                             | ExtendedInstr::OptionPayload { ty }
                             | ExtendedInstr::ListGet { ty }
                             | ExtendedInstr::MapGet { ty }
+                            | ExtendedInstr::MapPutText { ty, .. }
                             | ExtendedInstr::ListPop { ty }
                             | ExtendedInstr::MapRemove { ty }
                             | ExtendedInstr::CodeSource { ty }
@@ -2351,6 +2354,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::OptionPayload { .. } => 0xd1,
             ExtendedInstr::ListGet { .. } => 0xba,
             ExtendedInstr::MapGet { .. } => 0xbb,
+            ExtendedInstr::MapPutText { .. } => 0x102,
             ExtendedInstr::ListEpoch => 0xbd,
             ExtendedInstr::ListIterLen => 0xbe,
             ExtendedInstr::MapEpoch => 0xbf,
@@ -2749,6 +2753,10 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::FaultSite { ty }
             | ExtendedInstr::FaultTrace { ty } => {
                 out.extend_from_slice(&self.type_digest(*ty));
+            }
+            ExtendedInstr::MapPutText { ty, discard } => {
+                out.extend_from_slice(&self.type_digest(*ty));
+                out.push(u8::from(*discard));
             }
             ExtendedInstr::AsCallback
             | ExtendedInstr::CodeDefinition

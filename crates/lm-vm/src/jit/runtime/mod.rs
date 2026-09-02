@@ -180,6 +180,7 @@ struct MapInsertRequest<'a> {
     entry_count: usize,
     roots: NativeRoots<'a>,
     allow_collection: bool,
+    own_text_key: bool,
 }
 
 struct SyntaxTreeParts {

@@ -829,11 +829,17 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             _ => {}
         }
         if matches!(instr, Instr::Pop) {
-            if let Some(Instr::MapPut { discard, .. }) = self.blocks[self.cur].last_mut() {
-                if !*discard {
-                    *discard = true;
+            let discard = match self.blocks[self.cur].last_mut() {
+                Some(Instr::MapPut { discard, .. })
+                | Some(Instr::Extended(ExtendedInstr::MapPutText { discard, .. })) => discard,
+                _ => {
+                    self.blocks[self.cur].push(instr);
                     return;
                 }
+            };
+            if !*discard {
+                *discard = true;
+                return;
             }
         }
         self.blocks[self.cur].push(instr);
@@ -2029,6 +2035,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 args,
             } => self.lower_map_get(expr, args),
             HExprKind::Native { op, args } => {
+                let borrowed_text_put = if matches!(op, NativeOp::MapPut) {
+                    match self.m.store.get(args[0].ty) {
+                        Type::Map(key, _) => *key == STRING && args[1].ty != STRING,
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
                 let map_action = match op {
                     NativeOp::MapHas => Some(MapAction::Has),
                     NativeOp::MapAt => Some(MapAction::At),
@@ -2056,6 +2070,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::MapLen => Instr::MapLen,
                     NativeOp::MapHas => Instr::MapHas,
                     NativeOp::MapAt => Instr::MapAt,
+                    NativeOp::MapPut if borrowed_text_put => extended(ExtendedInstr::MapPutText {
+                        ty: self.m.bc_ty(expr.ty),
+                        discard: false,
+                    }),
                     NativeOp::MapPut => Instr::MapPut {
                         ty: self.m.bc_ty(expr.ty),
                         discard: false,
@@ -4166,6 +4184,9 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::OptionPayload { ty } => format!("OptionPayload ty{ty}"),
         ExtendedInstr::ListGet { ty } => format!("ListGet ty{ty}"),
         ExtendedInstr::MapGet { ty } => format!("MapGet ty{ty}"),
+        ExtendedInstr::MapPutText { ty, discard } => {
+            format!("MapPutText ty{ty} discard {discard}")
+        }
         ExtendedInstr::ListEpoch => "ListEpoch".to_string(),
         ExtendedInstr::ListIterLen => "ListIterLen".to_string(),
         ExtendedInstr::MapEpoch => "MapEpoch".to_string(),

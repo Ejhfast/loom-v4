@@ -170,7 +170,12 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             )?;
             stack.push(result);
         }
-        Instr::MapPut { discard, .. } => {
+        Instr::MapPut { .. } | Instr::Extended(ExtendedInstr::MapPutText { .. }) => {
+            let (discard, own_text_key) = match instruction {
+                Instr::MapPut { discard, .. } => (discard, false),
+                Instr::Extended(ExtendedInstr::MapPutText { discard, .. }) => (discard, true),
+                _ => return Err(CompileError::Backend),
+            };
             let deopt_stack = stack.clone();
             let stored = pop_value(stack)?;
             let key = pop_value(stack)?;
@@ -235,6 +240,7 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                 family,
                 previous_contract,
                 &roots,
+                own_text_key,
                 HeapExitEmission {
                     point: FaultPoint {
                         block: segment.block,

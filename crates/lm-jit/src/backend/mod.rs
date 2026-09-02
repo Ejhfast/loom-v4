@@ -807,6 +807,9 @@ fn emit_region(
         .params
         .push(AbiParam::new(types::I32));
     map_put_discard_signature
+        .params
+        .push(AbiParam::new(types::I32));
+    map_put_discard_signature
         .returns
         .push(AbiParam::new(types::I32));
     let map_put_discard_signature = builder.import_signature(map_put_discard_signature);
@@ -819,6 +822,9 @@ fn emit_region(
             .params
             .push(AbiParam::new(types::I64));
     }
+    map_put_commit_signature
+        .params
+        .push(AbiParam::new(types::I32));
     map_put_commit_signature
         .params
         .push(AbiParam::new(types::I32));

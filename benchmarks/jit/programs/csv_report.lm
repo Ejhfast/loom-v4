@@ -36,7 +36,7 @@ while rep < 3
       in Ok(value) then value
       in Err(_) then 0
       end
-      key = fields.at(0).to_string()
+      key = fields.at(0)
       current = case revenue.get(key)
       in Some(value) then value
       in None then 0

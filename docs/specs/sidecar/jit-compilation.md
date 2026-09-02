@@ -3923,6 +3923,39 @@ Clippy passed for every workspace target.
 
 The full workspace suite passed.
 
+### Stage F74: Borrow Text during String map insertion
+
+- accept `Text` in `Map[String,V].put`;
+- retain the existing String key after a hit;
+- create one bounded String after a miss;
+- keep borrowed lookups on the direct map probe;
+- verify the dedicated bytecode operation independently;
+- preserve exact interpreter and native behavior.
+
+A compact `Substring` entry reduced one entry from 112 bytes to 72 bytes.
+
+That experiment did not reduce lifecycle time. It also slowed representative rows, so this branch removed it.
+
+Borrowed insertion removes one String allocation from each repeated map hit.
+
+The word-count program now creates owned keys only for unique words.
+
+The CSV program now creates owned keys only for unique regions.
+
+| Warm application row | Before F74 | Stage F74 | Change |
+| --- | ---: | ---: | ---: |
+| Word count, Auto | 7.186 ms | 4.036 ms | 43.8 percent faster |
+| CSV report, Auto | 6.010 ms | 4.922 ms | 18.1 percent faster |
+| JSON pipeline, Auto | 36.188 ms | 36.843 ms | within 2 percent |
+
+Both changed programs retained 100 percent native coverage.
+
+The focused source, verifier, bytecode, and native tests passed.
+
+Clippy passed for every workspace target.
+
+The full workspace suite passed.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
