@@ -21,6 +21,23 @@ end
 total
 "#;
 
+const JIT_WORDCOUNT_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/wordcount.lm"
+));
+const JIT_CSV_REPORT_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/csv_report.lm"
+));
+const JIT_JSON_PIPELINE_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/json_pipeline.lm"
+));
+const JIT_JSON_PARSE_LARGE_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/json_parse_large.lm"
+));
+
 #[test]
 #[ignore]
 fn bench_jit_cold_start_and_cache_pressure() {
@@ -393,4 +410,16 @@ end
 total
 "#,
     );
+}
+
+#[test]
+#[ignore]
+fn bench_jit_application_programs() {
+    println!(
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits\tauto_env_exits\tnative_env_exits\tnative_env_fallbacks"
+    );
+    report_jit_representative("jit_app_wordcount", JIT_WORDCOUNT_SOURCE);
+    report_jit_representative("jit_app_csv_report", JIT_CSV_REPORT_SOURCE);
+    report_jit_representative("jit_app_json_pipeline", JIT_JSON_PIPELINE_SOURCE);
+    report_jit_representative("jit_app_json_parse_large", JIT_JSON_PARSE_LARGE_SOURCE);
 }
