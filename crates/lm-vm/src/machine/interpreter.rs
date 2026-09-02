@@ -1116,7 +1116,8 @@ impl Machine {
                 let value = self.pop_float()?;
                 let builder = self.pop_obj()?;
                 self.frozen_guard(builder)?;
-                self.sb_append(builder, &float_text(value))?;
+                let text = float_text(value).map_err(|_| FaultCode::HeapLimit)?;
+                self.sb_append(builder, text.as_str())?;
             }
             NumericInstr::BytesBitAnd | NumericInstr::BytesBitOr | NumericInstr::BytesBitXor => {
                 let right_ref = self.pop_obj()?;

@@ -231,8 +231,10 @@ impl MachineRuntime<'_> {
         &mut self,
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
-        let text = float_text(f64::from_bits(request.second));
-        self.append_builder_text(request, &text)
+        let Ok(text) = float_text(f64::from_bits(request.second)) else {
+            return HeapOperationResult::HeapLimit;
+        };
+        self.append_builder_text(request, text.as_str())
     }
 
     pub(super) fn runtime_string_builder_build(

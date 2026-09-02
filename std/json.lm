@@ -411,7 +411,7 @@ final class JsonParser
 end
 
 final class JsonWriter
-  output: ByteBuffer = ByteBuffer()
+  output: StringBuilder = StringBuilder()
   items: Int = 0
   max_depth: Int
   max_items: Int
@@ -422,41 +422,48 @@ final class JsonWriter
   end
 
   def text(mut self, value: Text)
-    self.output.append(34)
+    self.output.append("\"")
     bytes = value.bytes()
-    hex = b"0123456789abcdef"
+    hex = "0123456789abcdef"
+    start = 0
     index = 0
     while index < bytes.len()
       byte = bytes.at(index)
-      if byte == 34 or byte == 92
-        self.output.append(92)
-        self.output.append(byte)
-      elsif byte == 8
-        self.output.append(92)
-        self.output.append(98)
-      elsif byte == 9
-        self.output.append(92)
-        self.output.append(116)
-      elsif byte == 10
-        self.output.append(92)
-        self.output.append(110)
-      elsif byte == 12
-        self.output.append(92)
-        self.output.append(102)
-      elsif byte == 13
-        self.output.append(92)
-        self.output.append(114)
-      elsif byte < 32
-        self.output.append(92)
-        self.output.extend(b"u00")
-        self.output.append(hex.at(byte >> 4))
-        self.output.append(hex.at(byte & 15))
-      else
-        self.output.append(byte)
+      if byte == 34 or byte == 92 or byte < 32
+        if index > start
+          part = value.slice_bytes(start, index - start).expect("the JSON text range is valid")
+          self.output.append(part)
+        end
+        if byte == 34
+          self.output.append("\\\"")
+        elsif byte == 92
+          self.output.append("\\\\")
+        elsif byte == 8
+          self.output.append("\\b")
+        elsif byte == 9
+          self.output.append("\\t")
+        elsif byte == 10
+          self.output.append("\\n")
+        elsif byte == 12
+          self.output.append("\\f")
+        elsif byte == 13
+          self.output.append("\\r")
+        else
+          self.output.append("\\u00")
+          self.output.push_char(hex.at(byte >> 4).expect("the JSON hex index is valid"))
+          self.output.push_char(hex.at(byte & 15).expect("the JSON hex index is valid"))
+        end
+        start = index + 1
       end
       index = index + 1
     end
-    self.output.append(34)
+    if start == 0
+      self.output.append(value)
+    elsif start < bytes.len()
+      tail = value.slice_bytes(start, bytes.len() - start).expect("the JSON text range is valid")
+      self.output.append(tail)
+    end
+    self.output.append("\"")
   end
 
   def value(mut self, value: Json, depth: Int): Result[(), JsonError]
@@ -469,51 +476,51 @@ final class JsonWriter
     end
     case value
     in Json.Null
-      self.output.extend(b"null")
+      self.output.append("null")
     in Json.Boolean(flag)
       if flag
-        self.output.extend(b"true")
+        self.output.append("true")
       else
-        self.output.extend(b"false")
+        self.output.append("false")
       end
     in Json.Number(number)
       if number.is_nan() or (number - number).is_nan()
         return Err(JsonError.NonFiniteNumber)
       end
-      self.output.extend(display(number).bytes())
+      self.output.append_float(number)
     in Json.Text(text)
       self.text(text)
     in Json.ListValue(values)
-      self.output.append(91)
+      self.output.append("[")
       index = 0
       for item in values
         if index > 0
-          self.output.append(44)
+          self.output.append(",")
         end
         self.value(item, depth + 1)?
         index = index + 1
       end
-      self.output.append(93)
+      self.output.append("]")
     in Json.Object(values)
-      self.output.append(123)
+      self.output.append("{")
       index = 0
       for key, item in values
         if index > 0
-          self.output.append(44)
+          self.output.append(",")
         end
         self.text(key)
-        self.output.append(58)
+        self.output.append(":")
         self.value(item, depth + 1)?
         index = index + 1
       end
-      self.output.append(125)
+      self.output.append("}")
     end
     Ok(())
   end
 
   def finish(mut self, value: Json): Result[String, JsonError]
     self.value(value, 0)?
-    Ok(self.output.finish().text())
+    Ok(self.output.finish())
   end
 end
 

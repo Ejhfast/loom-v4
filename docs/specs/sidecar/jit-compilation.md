@@ -4155,6 +4155,32 @@ The other application rows stayed within five percent.
 
 One focused test proves that nested batches share one root record.
 
+### Stage F82: Write JSON through one text builder
+
+- replace the JSON writer byte buffer with a `StringBuilder`;
+- scan each text value once for required escapes;
+- append one complete text value when it needs no escapes;
+- append safe text ranges around required escapes;
+- append numbers directly to the destination builder;
+- format each Float in one fixed stack buffer;
+- return the finished String without an intermediate Bytes value.
+
+The Float path keeps the exact standard display form.
+
+It allocates no temporary Rust String.
+
+The standard codec tests cover escapes, Unicode text, finite numbers, and nonfinite rejection.
+
+| JSON pipeline | Stage F81 | Stage F82 | Change |
+| --- | ---: | ---: | ---: |
+| Interpreter time | 122.957 ms | 111.784 ms | 9.1 percent faster |
+| Auto time | 29.273 ms | 28.710 ms | 1.9 percent faster |
+| Native time | 28.824 ms | 28.381 ms | 1.5 percent faster |
+
+The compiled region count changed from 36 to 33.
+
+The parse-only row stayed within two percent.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -130,6 +130,25 @@ fn integer_text_lengths_cover_signed_bounds() {
 }
 
 #[test]
+fn float_text_uses_the_standard_form_without_allocation() {
+    for value in [
+        0.0,
+        -0.0,
+        1.5,
+        f64::MIN,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::EPSILON,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ] {
+        let text = float_text(value).expect("every Float fits the fixed buffer");
+        assert_eq!(text.as_str(), value.to_string());
+    }
+}
+
+#[test]
 fn request_ordinal_exhaustion_does_not_wrap() {
     let mut machine = Machine::empty(VmConfig::default(), None);
     machine.vm.next_ordinal = u64::MAX;

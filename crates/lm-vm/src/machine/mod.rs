@@ -959,8 +959,37 @@ fn float_fits_int(value: f64) -> bool {
     value >= i64::MIN as f64 && value < 9_223_372_036_854_775_808.0
 }
 
-pub(crate) fn float_text(value: f64) -> String {
-    value.to_string()
+const FLOAT_TEXT_CAPACITY: usize = 400;
+
+pub(crate) struct FloatText {
+    bytes: [u8; FLOAT_TEXT_CAPACITY],
+    len: usize,
+}
+
+impl FloatText {
+    pub(crate) fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len])
+            .expect("float formatting always produces valid UTF-8")
+    }
+}
+
+impl std::fmt::Write for FloatText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        let target = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        target.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+pub(crate) fn float_text(value: f64) -> Result<FloatText, std::fmt::Error> {
+    let mut text = FloatText {
+        bytes: [0; FLOAT_TEXT_CAPACITY],
+        len: 0,
+    };
+    write!(&mut text, "{value}")?;
+    Ok(text)
 }
 
 /// Parse one Float text form. Status 1 means invalid text.
