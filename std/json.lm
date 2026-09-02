@@ -173,14 +173,23 @@ final class JsonParser
 
   def escaped_string(
     mut self,
-    mut output: ByteBuffer
+    mut output: ByteBuffer,
+    intern: Bool
   ): Result[String, JsonError]
     self.append_escape(output)?
     while self.cursor < self.source.len()
       byte = self.source.at(self.cursor)
       self.cursor = self.cursor + 1
       if byte == 34
-        return Ok(output.finish().text())
+        text = output.finish().text()
+        if intern
+          case self.keys.get(text)
+          in Some(existing) then return Ok(existing)
+          in None
+            self.keys.put(text, text)
+          end
+        end
+        return Ok(text)
       elsif byte == 92
         self.append_escape(output)?
       elsif byte < 32
@@ -192,7 +201,7 @@ final class JsonParser
     Err(self.invalid("the JSON string is incomplete"))
   end
 
-  def string(mut self): Result[String, JsonError]
+  def string(mut self, intern: Bool): Result[String, JsonError]
     if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
       return Err(self.invalid("a JSON string needs an opening quote"))
     end
@@ -202,7 +211,11 @@ final class JsonParser
       byte = self.source.at(self.cursor)
       self.cursor = self.cursor + 1
       if byte == 34
-        return Ok(self.source.text_range(start, self.cursor - start - 1))
+        length = self.cursor - start - 1
+        if intern
+          return Ok(self.source.intern_text_range(self.keys, start, length))
+        end
+        return Ok(self.source.text_range(start, length))
       elsif byte == 92
         output = ByteBuffer()
         index = start
@@ -210,50 +223,7 @@ final class JsonParser
           output.append(self.source.at(index))
           index = index + 1
         end
-        return self.escaped_string(output)
-      elsif byte < 32
-        return Err(self.invalid("a JSON string contains a control byte"))
-      end
-    end
-    Err(self.invalid("the JSON string is incomplete"))
-  end
-
-  def escaped_key(
-    mut self,
-    mut output: ByteBuffer
-  ): Result[String, JsonError]
-    key = self.escaped_string(output)?
-    case self.keys.get(key)
-    in Some(existing) then Ok(existing)
-    in None
-      self.keys.put(key, key)
-      Ok(key)
-    end
-  end
-
-  def key(mut self): Result[String, JsonError]
-    if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
-      return Err(self.invalid("a JSON string needs an opening quote"))
-    end
-    self.cursor = self.cursor + 1
-    start = self.cursor
-    while self.cursor < self.source.len()
-      byte = self.source.at(self.cursor)
-      self.cursor = self.cursor + 1
-      if byte == 34
-        return Ok(self.source.intern_text_range(
-          self.keys,
-          start,
-          self.cursor - start - 1
-        ))
-      elsif byte == 92
-        output = ByteBuffer()
-        index = start
-        while index < self.cursor - 1
-          output.append(self.source.at(index))
-          index = index + 1
-        end
-        return self.escaped_key(output)
+        return self.escaped_string(output, intern)
       elsif byte < 32
         return Err(self.invalid("a JSON string contains a control byte"))
       end
@@ -374,7 +344,7 @@ final class JsonParser
       return Ok(Json.Object(values))
     end
     loop do
-      key = self.key()?
+      key = self.string(true)?
       self.skip_space()
       if self.cursor >= self.source.len() or self.source.at(self.cursor) != 58
         return Err(self.invalid("a JSON object member needs a colon"))
@@ -418,7 +388,7 @@ final class JsonParser
     elsif byte == 102
       self.keyword(b"false", Json.Boolean(false))
     elsif byte == 34
-      Ok(Json.Text(self.string()?))
+      Ok(Json.Text(self.string(false)?))
     elsif byte == 91
       self.array(depth)
     elsif byte == 123

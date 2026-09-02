@@ -4065,6 +4065,21 @@ One integration test uses each form to find a key inserted by the other form.
 
 No JIT treatment changed. All four application rows retained complete native coverage.
 
+### Stage F79: Consolidate JSON string scanning
+
+- use one parser method for JSON values and object keys;
+- pass one key-interning choice through the escaped continuation;
+- preserve byte-range construction and key interning;
+- remove the duplicate key scanning loop.
+
+The warm JSON pipeline changed from 122.262 ms to 121.297 ms.
+
+The warm JSON parse changed from 76.831 ms to 76.578 ms.
+
+Each program compiled one fewer region. Both programs retained complete native coverage.
+
+Best end-to-end Auto times were 447 ms and 253 ms.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.
