@@ -2426,7 +2426,7 @@ pub struct MapPutCommitRequest<'a> {
     pub token: u64,
     pub entry_count: u64,
     pub vacant: bool,
-    pub own_text_key: bool,
+    pub borrowed_string_key: bool,
     pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
@@ -2438,7 +2438,7 @@ pub struct MapPutDiscardRequest<'a> {
     pub key_tag: u64,
     pub value_bits: u64,
     pub value_tag: u64,
-    pub own_text_key: bool,
+    pub borrowed_string_key: bool,
     pub roots: NativeRoots<'a>,
     pub allow_collection: bool,
 }
@@ -3575,10 +3575,10 @@ pub(super) unsafe extern "C" fn map_put_commit<R: NativeRuntime>(
     token: u64,
     entry_count: u64,
     vacant: u32,
-    own_text_key: u32,
+    borrowed_string_key: u32,
     root_count: u32,
 ) -> u32 {
-    if context.is_null() || vacant > 1 || own_text_key > 1 {
+    if context.is_null() || vacant > 1 || borrowed_string_key > 1 {
         return RUNTIME_INTERPRETER;
     }
     // SAFETY: `CompiledRegion::execute` passes one live context for this call.
@@ -3602,7 +3602,7 @@ pub(super) unsafe extern "C" fn map_put_commit<R: NativeRuntime>(
         token,
         entry_count,
         vacant: vacant != 0,
-        own_text_key: own_text_key != 0,
+        borrowed_string_key: borrowed_string_key != 0,
         roots,
         allow_collection: true,
     }) {
@@ -3619,10 +3619,10 @@ pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
     key_tag: u64,
     value_bits: u64,
     value_tag: u64,
-    own_text_key: u32,
+    borrowed_string_key: u32,
     root_count: u32,
 ) -> u32 {
-    if context.is_null() || own_text_key > 1 {
+    if context.is_null() || borrowed_string_key > 1 {
         return RUNTIME_INTERPRETER;
     }
     // SAFETY: `CompiledRegion::execute` passes one live context for this call.
@@ -3643,7 +3643,7 @@ pub(super) unsafe extern "C" fn map_put_discard<R: NativeRuntime>(
         key_tag,
         value_bits,
         value_tag,
-        own_text_key: own_text_key != 0,
+        borrowed_string_key: borrowed_string_key != 0,
         roots,
         allow_collection: true,
     }) {

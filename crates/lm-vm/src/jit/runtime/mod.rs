@@ -180,7 +180,16 @@ struct MapInsertRequest<'a> {
     entry_count: usize,
     roots: NativeRoots<'a>,
     allow_collection: bool,
-    own_text_key: bool,
+    key_storage: MapInsertKeyStorage,
+}
+
+/// Select how one runtime map insertion stores its key.
+#[derive(Clone, Copy)]
+enum MapInsertKeyStorage {
+    /// Store the supplied declared key.
+    Declared,
+    /// Store one owned String for a borrowed text key.
+    BorrowedString,
 }
 
 struct SyntaxTreeParts {

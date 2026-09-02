@@ -4051,6 +4051,20 @@ The application benchmark stayed stable after the checker generalization.
 | JSON pipeline | 1,852.011 ms | 122.796 ms | 122.082 ms | 15.08x | 100% |
 | JSON parse | 1,144.758 ms | 76.192 ms | 75.780 ms | 15.03x | 100% |
 
+### Stage F78: Unify borrowed String-key execution
+
+- represent guest Text and validated byte ranges with one `BorrowedStringKey`;
+- use one semantic hash and equality path;
+- create one owned String only after a miss;
+- use a typed storage policy inside each map insertion path;
+- keep bytecode operations specialized for their source form.
+
+The common path serves source Text insertion and byte-range pool interning.
+
+One integration test uses each form to find a key inserted by the other form.
+
+No JIT treatment changed. All four application rows retained complete native coverage.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -42,8 +42,9 @@ impl MachineRuntime<'_> {
         let Some(text) = bytes.utf8_view() else {
             return HeapOperationResult::Fault(crate::FaultCode::BadCast);
         };
-        match self.machine.map_lookup_text(map, &text) {
-            Ok(Some(Value::Obj(reference))) => return Self::heap_object_value(reference),
+        let query = crate::machine::BorrowedStringKey::Text(&text);
+        match self.machine.map_lookup_borrowed_string(map, query) {
+            Ok(Some((_, Value::Obj(reference)))) => return Self::heap_object_value(reference),
             Ok(Some(_)) => {
                 return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
             }
@@ -51,11 +52,18 @@ impl MachineRuntime<'_> {
             Err(fault) => return HeapOperationResult::Fault(fault),
         }
 
-        let text = match text.try_bounded() {
-            Ok(text) => text,
-            Err(_) => return HeapOperationResult::HeapLimit,
+        let object = match query.owned_object(self.machine) {
+            Ok(Some(object)) => object,
+            Ok(None) => {
+                return HeapOperationResult::Fault(crate::FaultCode::MalformedState);
+            }
+            Err(crate::FaultCode::HeapLimit) => return HeapOperationResult::HeapLimit,
+            Err(fault) => return HeapOperationResult::Fault(fault),
         };
-        let object = crate::Object::Str(text);
+        let semantic_hash = match query.semantic_hash(self.machine) {
+            Ok(hash) => hash,
+            Err(fault) => return HeapOperationResult::Fault(fault),
+        };
         let Some(growth) = 40usize.checked_add(self.machine.vm.heap.allocation_cost(&object))
         else {
             return HeapOperationResult::HeapLimit;
@@ -84,10 +92,6 @@ impl MachineRuntime<'_> {
         let reference = self.machine.vm.heap.alloc(object);
         self.allocations = self.allocations.saturating_add(1);
         let key = Value::Obj(reference);
-        let semantic_hash = match self.machine.key_semantic_hash(key) {
-            Ok(hash) => hash,
-            Err(fault) => return HeapOperationResult::Fault(fault),
-        };
         match self.machine.vm.heap.get_mut(map) {
             crate::Object::Map { entries, index } => {
                 let position = entries.len() as u32;
@@ -117,7 +121,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots,
             allow_collection,
-            own_text_key,
+            key_storage,
         } = request;
         let can_grow = match self.machine.vm.heap.try_get(reference) {
             Some(crate::Object::Map { entries, index }) if entries.len() == entry_count => {
@@ -129,13 +133,14 @@ impl MachineRuntime<'_> {
         if let Err(fault) = can_grow {
             return RuntimeUnitResult::Fault(fault);
         }
-        let owned_key = if own_text_key {
-            match self.machine.owned_string_map_key(key) {
-                Ok(key) => key,
-                Err(fault) => return RuntimeUnitResult::Fault(fault),
+        let owned_key = match key_storage {
+            MapInsertKeyStorage::BorrowedString => {
+                match crate::machine::BorrowedStringKey::Value(key).owned_object(self.machine) {
+                    Ok(key) => key,
+                    Err(fault) => return RuntimeUnitResult::Fault(fault),
+                }
             }
-        } else {
-            None
+            MapInsertKeyStorage::Declared => None,
         };
         let key_cost = owned_key
             .as_ref()
@@ -607,7 +612,7 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
-            own_text_key: false,
+            key_storage: MapInsertKeyStorage::Declared,
         })
     }
 
@@ -731,7 +736,11 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
-            own_text_key: request.own_text_key,
+            key_storage: if request.borrowed_string_key {
+                MapInsertKeyStorage::BorrowedString
+            } else {
+                MapInsertKeyStorage::Declared
+            },
         })
     }
 
@@ -789,7 +798,11 @@ impl MachineRuntime<'_> {
             entry_count,
             roots: request.roots,
             allow_collection: request.allow_collection,
-            own_text_key: request.own_text_key,
+            key_storage: if request.borrowed_string_key {
+                MapInsertKeyStorage::BorrowedString
+            } else {
+                MapInsertKeyStorage::Declared
+            },
         })
     }
 

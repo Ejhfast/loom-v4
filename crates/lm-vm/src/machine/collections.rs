@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Select how one map insertion stores its key.
+#[derive(Clone, Copy)]
+enum MapKeyStorage {
+    /// Store the supplied declared key.
+    Declared,
+    /// Store one owned String for a borrowed text key.
+    BorrowedString,
+}
+
 impl Machine {
     /// Read one list element outside the main dispatch body.
     #[inline(never)]
@@ -29,7 +38,7 @@ impl Machine {
         ty: u32,
         discard: bool,
     ) -> Result<(), FaultCode> {
-        self.exec_map_put_inner(module, envs, ty, discard, false)
+        self.exec_map_put_inner(module, envs, ty, discard, MapKeyStorage::Declared)
     }
 
     /// Insert into a String map through one borrowed Text key.
@@ -41,7 +50,7 @@ impl Machine {
         ty: u32,
         discard: bool,
     ) -> Result<(), FaultCode> {
-        self.exec_map_put_inner(module, envs, ty, discard, true)
+        self.exec_map_put_inner(module, envs, ty, discard, MapKeyStorage::BorrowedString)
     }
 
     /// Intern one UTF-8 byte range in an owned String map.
@@ -63,18 +72,18 @@ impl Machine {
             _ => return Err(BAD_TYPE),
         };
         let text = bytes.utf8_view().ok_or(FaultCode::BadCast)?;
-        if let Some(key) = self.map_lookup_text(map, &text)? {
+        let query = BorrowedStringKey::Text(&text);
+        if let Some((_, key)) = self.map_lookup_borrowed_string(map, query)? {
             return self.push(key);
         }
 
-        let text = text.try_bounded().map_err(|_| FaultCode::HeapLimit)?;
-        let object = Object::Str(text);
+        let object = query.owned_object(self)?.ok_or(BAD_STATE)?;
+        let semantic_hash = query.semantic_hash(self)?;
         let growth = 40usize
             .checked_add(self.vm.heap.allocation_cost(&object))
             .ok_or(FaultCode::HeapLimit)?;
         self.reserve(growth, &[Value::Obj(map), Value::Obj(source)])?;
         let key = Value::Obj(self.vm.heap.alloc(object));
-        let semantic_hash = self.key_semantic_hash(key)?;
         match self.vm.heap.get_mut(map) {
             Object::Map { entries, index } => {
                 index.epoch.bump()?;
@@ -98,13 +107,22 @@ impl Machine {
         envs: &mut TypeEnvs,
         ty: u32,
         discard: bool,
-        own_text_key: bool,
+        key_storage: MapKeyStorage,
     ) -> Result<(), FaultCode> {
         let value = self.pop()?;
         let mut key = self.pop()?;
         let r = self.pop_obj()?;
         self.frozen_guard(r)?;
-        let pos = self.map_lookup(r, key)?;
+        let borrowed_key = match key_storage {
+            MapKeyStorage::Declared => None,
+            MapKeyStorage::BorrowedString => Some(BorrowedStringKey::Value(key)),
+        };
+        let pos = match borrowed_key {
+            Some(query) => self
+                .map_lookup_borrowed_string(r, query)?
+                .map(|(position, _)| position),
+            None => self.map_lookup(r, key)?,
+        };
         let previous = match pos {
             Some(pos) => match self.vm.heap.get_mut(r) {
                 Object::Map { entries, .. } => {
@@ -119,11 +137,13 @@ impl Machine {
                 _ => return Err(BAD_TYPE),
             },
             None => {
-                let hash = self.key_semantic_hash(key)?;
-                let owned_key = if own_text_key {
-                    self.owned_string_map_key(key)?
-                } else {
-                    None
+                let hash = match borrowed_key {
+                    Some(query) => query.semantic_hash(self)?,
+                    None => self.key_semantic_hash(key)?,
+                };
+                let owned_key = match borrowed_key {
+                    Some(query) => query.owned_object(self)?,
+                    None => None,
                 };
                 let key_cost = owned_key
                     .as_ref()

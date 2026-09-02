@@ -179,6 +179,29 @@ third = bytes.intern_text_range(pool, 9, 3)
 }
 
 #[test]
+fn borrowed_string_key_forms_share_one_map_relation() {
+    let source = r#"
+bytes = Bytes("_key_")
+text = "_key_"
+view = text.slice(1, 3).expect("the view exists")
+
+left = Map[String, String]()
+left.put(view, "value")
+left_hit = bytes.intern_text_range(left, 1, 3)
+
+right = Map[String, String]()
+right_first = bytes.intern_text_range(right, 1, 3)
+right_previous = right.put(view, "other")
+
+(left_hit, left.len(), left.at("key"), right_first, right_previous, right.keys_list())
+"#;
+    assert_eq!(
+        run_text("borrowed_string_key_forms.lm", source, VmConfig::default()).unwrap(),
+        "Done((\"key\", 1, \"value\", \"key\", Some(\"key\"), [\"key\"]))"
+    );
+}
+
+#[test]
 fn bytes_text_range_interning_checks_bounds_and_encoding() {
     assert_eq!(
         run_text(

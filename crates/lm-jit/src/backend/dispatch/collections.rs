@@ -171,7 +171,7 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             stack.push(result);
         }
         Instr::MapPut { .. } | Instr::Extended(ExtendedInstr::MapPutText { .. }) => {
-            let (discard, own_text_key) = match instruction {
+            let (discard, borrowed_string_key) = match instruction {
                 Instr::MapPut { discard, .. } => (discard, false),
                 Instr::Extended(ExtendedInstr::MapPutText { discard, .. }) => (discard, true),
                 _ => return Err(CompileError::Backend),
@@ -240,7 +240,7 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                 family,
                 previous_contract,
                 &roots,
-                own_text_key,
+                borrowed_string_key,
                 HeapExitEmission {
                     point: FaultPoint {
                         block: segment.block,

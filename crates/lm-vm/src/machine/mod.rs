@@ -915,6 +915,7 @@ mod calls;
 mod collections;
 mod execution;
 mod heap;
+pub(crate) use heap::BorrowedStringKey;
 mod interpreter;
 mod stack;
 mod state;

@@ -2,6 +2,78 @@
 
 use super::*;
 
+/// One String-map query that can borrow visible text content.
+#[derive(Clone, Copy)]
+pub(crate) enum BorrowedStringKey<'a> {
+    /// Read visible text from one live guest value.
+    Value(Value),
+    /// Read visible text from runtime-owned metadata.
+    Text(&'a SharedText),
+}
+
+impl BorrowedStringKey<'_> {
+    /// Get the stable semantic hash for this query.
+    pub(crate) fn semantic_hash(self, machine: &Machine) -> Result<i64, FaultCode> {
+        match self {
+            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
+                Some(Object::Str(text) | Object::Substring(text)) => {
+                    Ok(text.semantic_hash() as i64)
+                }
+                _ => Err(BAD_TYPE),
+            },
+            Self::Value(_) => Err(BAD_TYPE),
+            Self::Text(text) => Ok(text.semantic_hash() as i64),
+        }
+    }
+
+    /// Get the private lookup hash for this query.
+    fn index_hash(self, machine: &Machine) -> Result<u64, FaultCode> {
+        match self {
+            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
+                Some(Object::Str(text) | Object::Substring(text)) => Ok(text.lookup_hash()),
+                _ => Err(BAD_TYPE),
+            },
+            Self::Value(_) => Err(BAD_TYPE),
+            Self::Text(text) => Ok(text.lookup_hash()),
+        }
+    }
+
+    /// Compare this query with one stored String key.
+    fn matches(self, machine: &Machine, stored: Value) -> Result<bool, FaultCode> {
+        let Value::Obj(stored) = stored else {
+            return Err(BAD_TYPE);
+        };
+        let Some(Object::Str(stored)) = machine.vm.heap.try_get(stored) else {
+            return Err(BAD_TYPE);
+        };
+        match self {
+            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
+                Some(Object::Str(text) | Object::Substring(text)) => Ok(stored == text),
+                _ => Err(BAD_TYPE),
+            },
+            Self::Value(_) => Err(BAD_TYPE),
+            Self::Text(text) => Ok(stored == text),
+        }
+    }
+
+    /// Prepare one owned String object after a lookup miss.
+    pub(crate) fn owned_object(self, machine: &Machine) -> Result<Option<Object>, FaultCode> {
+        let text = match self {
+            Self::Value(Value::Obj(reference)) => match machine.vm.heap.try_get(reference) {
+                Some(Object::Str(_)) => return Ok(None),
+                Some(Object::Substring(text)) => text,
+                _ => return Err(BAD_TYPE),
+            },
+            Self::Value(_) => return Err(BAD_TYPE),
+            Self::Text(text) => text,
+        };
+        text.try_bounded()
+            .map(Object::Str)
+            .map(Some)
+            .map_err(|_| FaultCode::HeapLimit)
+    }
+}
+
 impl Machine {
     /// Collect garbage now. `extra` holds additional roots that are
     /// not yet stored in the arenas.
@@ -322,22 +394,6 @@ impl Machine {
         }
     }
 
-    /// Prepare an owned String object for one borrowed map key.
-    pub(crate) fn owned_string_map_key(&self, key: Value) -> Result<Option<Object>, FaultCode> {
-        let Value::Obj(reference) = key else {
-            return Err(BAD_TYPE);
-        };
-        match self.vm.heap.try_get(reference) {
-            Some(Object::Str(_)) => Ok(None),
-            Some(Object::Substring(text)) => text
-                .try_bounded()
-                .map(Object::Str)
-                .map(Some)
-                .map_err(|_| FaultCode::HeapLimit),
-            _ => Err(BAD_TYPE),
-        }
-    }
-
     /// Mix one semantic hash with the private process hash key.
     pub(crate) fn map_index_hash(hash: i64) -> u64 {
         process_lookup_hash(hash)
@@ -410,6 +466,28 @@ impl Machine {
     pub(crate) fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
         self.ensure_map_index(r)?;
         let hash = self.key_index_hash(key)?;
+        self.map_lookup_indexed(r, hash, |machine, stored| Ok(machine.key_eq(stored, key)))
+            .map(|found| found.map(|(position, _)| position))
+    }
+
+    /// Find one String entry through a borrowed text query.
+    pub(crate) fn map_lookup_borrowed_string(
+        &mut self,
+        r: ObjRef,
+        key: BorrowedStringKey<'_>,
+    ) -> Result<Option<(usize, Value)>, FaultCode> {
+        self.ensure_map_index(r)?;
+        let hash = key.index_hash(self)?;
+        self.map_lookup_indexed(r, hash, |machine, stored| key.matches(machine, stored))
+    }
+
+    /// Search one prepared map-index bucket.
+    fn map_lookup_indexed(
+        &self,
+        r: ObjRef,
+        hash: u64,
+        mut matches: impl FnMut(&Self, Value) -> Result<bool, FaultCode>,
+    ) -> Result<Option<(usize, Value)>, FaultCode> {
         let (entries, candidates, dense) = match self.vm.heap.get(r) {
             Object::Map { entries, index, .. } => (
                 entries,
@@ -423,8 +501,8 @@ impl Machine {
                 let Some(entry) = entries.get(i as usize) else {
                     continue;
                 };
-                if self.key_eq(entry.key, key) {
-                    return Ok(Some(i as usize));
+                if matches(self, entry.key)? {
+                    return Ok(Some((i as usize, entry.key)));
                 }
             }
             return Ok(None);
@@ -435,43 +513,8 @@ impl Machine {
                 None => continue,
                 Some(_) => continue,
             };
-            if self.key_eq(k, key) {
-                return Ok(Some(i as usize));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Find one owned String key through a borrowed text value.
-    pub(crate) fn map_lookup_text(
-        &mut self,
-        r: ObjRef,
-        text: &lm_heap::SharedText,
-    ) -> Result<Option<Value>, FaultCode> {
-        self.ensure_map_index(r)?;
-        let hash = Self::map_index_hash(text.semantic_hash() as i64);
-        let (entries, candidates, dense) = match self.vm.heap.get(r) {
-            Object::Map { entries, index, .. } => (
-                entries,
-                index.candidates(hash),
-                index.live_len() == entries.len(),
-            ),
-            _ => return Err(BAD_TYPE),
-        };
-        for position in candidates {
-            let Some(entry) = entries.get(position as usize) else {
-                continue;
-            };
-            if !dense && !entry.is_live() {
-                continue;
-            }
-            let Value::Obj(reference) = entry.key else {
-                return Err(BAD_TYPE);
-            };
-            match self.vm.heap.get(reference) {
-                Object::Str(key) if key == text => return Ok(Some(entry.key)),
-                Object::Str(_) => {}
-                _ => return Err(BAD_TYPE),
+            if matches(self, k)? {
+                return Ok(Some((i as usize, k)));
             }
         }
         Ok(None)
