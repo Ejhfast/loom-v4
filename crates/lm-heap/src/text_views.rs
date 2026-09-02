@@ -1,6 +1,6 @@
 //! Compact canonical storage for immutable text views.
 
-use crate::shared::{TextOwner, TextRef, TextView, TextViewBatch};
+use crate::shared::{TextOwner, TextRef, TextView, TextViewBatch, TextViewBatchOwner};
 use crate::OwnedArray;
 use lm_value::{ObjRef, Value};
 
@@ -110,6 +110,11 @@ impl TextViewTable {
         self.pages.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn root_count(&self) -> usize {
+        self.roots.iter().filter(|root| root.is_some()).count()
+    }
+
     pub(crate) fn page_addresses(&self) -> *const usize {
         self.page_addresses.as_ptr()
     }
@@ -176,15 +181,17 @@ impl TextViewTable {
         self.free.len().saturating_add(unused)
     }
 
-    pub(crate) fn try_reserve_batch(&mut self, count: usize) -> bool {
+    pub(crate) fn try_reserve_batch(&mut self, count: usize, needs_root: bool) -> bool {
         if count == 0 {
             return true;
         }
-        if self.roots.len() >= u32::MAX as usize && self.free_roots.is_empty() {
-            return false;
-        }
-        if self.roots.try_reserve(1).is_err() || self.free_roots.try_reserve(1).is_err() {
-            return false;
+        if needs_root {
+            if self.roots.len() >= u32::MAX as usize && self.free_roots.is_empty() {
+                return false;
+            }
+            if self.roots.try_reserve(1).is_err() || self.free_roots.try_reserve(1).is_err() {
+                return false;
+            }
         }
         while self.available_slots() < count {
             if !self.try_add_page() {
@@ -206,15 +213,51 @@ impl TextViewTable {
         index
     }
 
+    fn existing_root(&self, reference: ObjRef) -> Option<u32> {
+        if !Self::is_reference(reference) {
+            return None;
+        }
+        let entry = self.entry(reference.slot)?;
+        let generation = reference.generation & GENERATION_MASK;
+        if !entry.is_live() || entry.generation != generation {
+            return None;
+        }
+        self.roots.get(entry.root as usize)?.as_ref()?;
+        Some(entry.root)
+    }
+
+    pub(crate) fn can_install_batch(&self, batch: &TextViewBatch) -> bool {
+        match &batch.owner {
+            TextViewBatchOwner::New(_) => true,
+            TextViewBatchOwner::Existing(reference) => self.existing_root(*reference).is_some(),
+        }
+    }
+
     pub(crate) fn install_batch(&mut self, batch: TextViewBatch, values: &mut Vec<Value>) {
-        let count = batch.views.len();
+        let TextViewBatch { owner, views, .. } = batch;
+        let count = views.len();
         if count == 0 {
             return;
         }
         debug_assert!(self.available_slots() >= count);
         debug_assert!(values.capacity().saturating_sub(values.len()) >= count);
-        let root = self.install_root(batch.owner, count);
-        for view in batch.views {
+        let root = match owner {
+            TextViewBatchOwner::New(owner) => self.install_root(owner, count),
+            TextViewBatchOwner::Existing(reference) => {
+                let root = self
+                    .existing_root(reference)
+                    .expect("a validated compact owner stays live");
+                let owner = self.roots[root as usize]
+                    .as_mut()
+                    .expect("a compact source owner is live");
+                owner.references = owner
+                    .references
+                    .checked_add(count)
+                    .expect("the text-view reference count fits");
+                root
+            }
+        };
+        for view in views {
             let slot = if let Some(slot) = self.free.pop() {
                 slot
             } else {

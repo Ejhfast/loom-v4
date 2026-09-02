@@ -3,6 +3,7 @@
 use crate::byte_array::{
     ByteArray, BYTE_ARRAY_CAPACITY_OFFSET, BYTE_ARRAY_DATA_OFFSET, BYTE_ARRAY_LEN_OFFSET,
 };
+use lm_value::ObjRef;
 use std::collections::hash_map::RandomState;
 use std::collections::TryReserveError;
 use std::fmt;
@@ -271,10 +272,11 @@ impl TextOwner {
     pub(crate) fn allocation_key(&self) -> usize {
         self.root.allocation_key()
     }
+}
 
-    pub(crate) fn retained_capacity(&self) -> usize {
-        self.root.retained_capacity()
-    }
+pub(crate) enum TextViewBatchOwner {
+    New(TextOwner),
+    Existing(ObjRef),
 }
 
 /// One immutable range inside a shared text root.
@@ -314,7 +316,8 @@ impl TextView {
 
 /// One batch of text views over one shared root.
 pub struct TextViewBatch {
-    pub(crate) owner: TextOwner,
+    pub(crate) owner: TextViewBatchOwner,
+    pub(crate) shared_allocation: (usize, usize),
     pub(crate) views: Vec<TextView>,
 }
 
@@ -330,8 +333,11 @@ impl TextViewBatch {
     }
 
     pub(crate) fn shared_allocation(&self) -> Option<(usize, usize)> {
-        (!self.views.is_empty())
-            .then(|| (self.owner.allocation_key(), self.owner.retained_capacity()))
+        (!self.views.is_empty()).then_some(self.shared_allocation)
+    }
+
+    pub(crate) fn needs_new_owner(&self) -> bool {
+        matches!(self.owner, TextViewBatchOwner::New(_))
     }
 }
 
@@ -416,6 +422,121 @@ impl<'a> TextRef<'a> {
         self.data()
             .checked_sub(self.root.as_str().as_ptr() as usize)
             .expect("a text view stays inside its root")
+    }
+
+    fn compact_view(self, start: usize, end: usize) -> Option<TextView> {
+        if start > end || end > self.len() {
+            return None;
+        }
+        let text = self.as_str();
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return None;
+        }
+        let root_start = self.byte_start().checked_add(start)?;
+        let root_end = self.byte_start().checked_add(end)?;
+        let scalar_start = self.root.scalar_of_byte(root_start)?;
+        let scalar_end = self.root.scalar_of_byte(root_end)?;
+        Some(TextView::new(
+            self.data().checked_add(start)?,
+            end - start,
+            scalar_start,
+            scalar_end - scalar_start,
+        ))
+    }
+
+    fn try_split_items<T>(
+        self,
+        separator: &str,
+        mut make: impl FnMut(usize, usize) -> T,
+    ) -> Result<Vec<T>, TryReserveError> {
+        let mut items = Vec::new();
+        if separator.is_empty() {
+            items.try_reserve_exact(self.char_count().saturating_add(2))?;
+            items.push(make(0, 0));
+            let mut end = 0;
+            for (at, scalar) in self.as_str().char_indices() {
+                end = at + scalar.len_utf8();
+                items.push(make(at, end));
+            }
+            items.push(make(end, self.len()));
+            return Ok(items);
+        }
+
+        let visible = self.as_str();
+        let mut start = 0;
+        while let Some(relative) = visible[start..].find(separator) {
+            let at = start + relative;
+            items.try_reserve(1)?;
+            items.push(make(start, at));
+            start = at + separator.len();
+        }
+        items.try_reserve(1)?;
+        items.push(make(start, visible.len()));
+        Ok(items)
+    }
+
+    fn try_line_items<T>(
+        self,
+        mut make: impl FnMut(usize, usize) -> T,
+    ) -> Result<Vec<T>, TryReserveError> {
+        let visible = self.as_str();
+        let mut items = Vec::new();
+        let mut start = 0;
+        while start < visible.len() {
+            let end = visible[start..]
+                .find('\n')
+                .map(|relative| start + relative)
+                .unwrap_or(visible.len());
+            let stop = if visible[start..end].ends_with('\r') {
+                end - 1
+            } else {
+                end
+            };
+            items.try_reserve(1)?;
+            items.push(make(start, stop));
+            start = end + 1;
+        }
+        Ok(items)
+    }
+
+    pub(crate) fn try_split_view_batch(
+        self,
+        separator: &str,
+        source: Option<ObjRef>,
+    ) -> Result<TextViewBatch, TryReserveError> {
+        let views = self.try_split_items(separator, |start, end| {
+            self.compact_view(start, end)
+                .expect("a split range has valid boundaries")
+        })?;
+        Ok(self.view_batch(source, views))
+    }
+
+    pub(crate) fn try_line_view_batch(
+        self,
+        source: Option<ObjRef>,
+    ) -> Result<TextViewBatch, TryReserveError> {
+        let views = self.try_line_items(|start, end| {
+            self.compact_view(start, end)
+                .expect("a line range has valid boundaries")
+        })?;
+        Ok(self.view_batch(source, views))
+    }
+
+    fn view_batch(self, source: Option<ObjRef>, views: Vec<TextView>) -> TextViewBatch {
+        let shared_allocation = (self.root.allocation_key(), self.root.retained_capacity());
+        let owner = source.map_or_else(
+            || {
+                TextViewBatchOwner::New(TextOwner {
+                    root: self.root.clone(),
+                })
+            },
+            TextViewBatchOwner::Existing,
+        );
+        TextViewBatch {
+            owner,
+            shared_allocation,
+            views,
+        }
     }
 
     /// Get the visible text.
@@ -792,107 +913,14 @@ impl SharedText {
         TextRef::shared(self)
     }
 
-    fn compact_view(&self, start: usize, end: usize) -> Option<TextView> {
-        if start > end || end > self.byte_len {
-            return None;
-        }
-        let text = self.as_str();
-        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-            return None;
-        }
-        let root_start = self.byte_start().checked_add(start)?;
-        let root_end = self.byte_start().checked_add(end)?;
-        let scalar_start = self.root.scalar_of_byte(root_start)?;
-        let scalar_end = self.root.scalar_of_byte(root_end)?;
-        Some(TextView::new(
-            self.data.checked_add(start)?,
-            end - start,
-            scalar_start,
-            scalar_end - scalar_start,
-        ))
-    }
-
-    fn try_split_items<T>(
-        &self,
-        separator: &str,
-        mut make: impl FnMut(usize, usize) -> T,
-    ) -> Result<Vec<T>, TryReserveError> {
-        let mut items = Vec::new();
-        if separator.is_empty() {
-            items.try_reserve_exact(self.char_count().saturating_add(2))?;
-            items.push(make(0, 0));
-            let mut end = 0;
-            for (at, scalar) in self.as_str().char_indices() {
-                end = at + scalar.len_utf8();
-                items.push(make(at, end));
-            }
-            items.push(make(end, self.len()));
-            return Ok(items);
-        }
-
-        let visible = self.as_str();
-        let mut start = 0;
-        while let Some(relative) = visible[start..].find(separator) {
-            let at = start + relative;
-            items.try_reserve(1)?;
-            items.push(make(start, at));
-            start = at + separator.len();
-        }
-        items.try_reserve(1)?;
-        items.push(make(start, visible.len()));
-        Ok(items)
-    }
-
-    fn try_line_items<T>(
-        &self,
-        mut make: impl FnMut(usize, usize) -> T,
-    ) -> Result<Vec<T>, TryReserveError> {
-        let visible = self.as_str();
-        let mut items = Vec::new();
-        let mut start = 0;
-        while start < visible.len() {
-            let end = visible[start..]
-                .find('\n')
-                .map(|relative| start + relative)
-                .unwrap_or(visible.len());
-            let stop = if visible[start..end].ends_with('\r') {
-                end - 1
-            } else {
-                end
-            };
-            items.try_reserve(1)?;
-            items.push(make(start, stop));
-            start = end + 1;
-        }
-        Ok(items)
-    }
-
     /// Split this text into one compact descriptor batch.
     pub fn try_split_view_batch(&self, separator: &str) -> Result<TextViewBatch, TryReserveError> {
-        let views = self.try_split_items(separator, |start, end| {
-            self.compact_view(start, end)
-                .expect("a split range has valid boundaries")
-        })?;
-        Ok(TextViewBatch {
-            owner: TextOwner {
-                root: self.root.clone(),
-            },
-            views,
-        })
+        self.text_ref().try_split_view_batch(separator, None)
     }
 
     /// Split this text into one compact line descriptor batch.
     pub fn try_line_view_batch(&self) -> Result<TextViewBatch, TryReserveError> {
-        let views = self.try_line_items(|start, end| {
-            self.compact_view(start, end)
-                .expect("a line range has valid boundaries")
-        })?;
-        Ok(TextViewBatch {
-            owner: TextOwner {
-                root: self.root.clone(),
-            },
-            views,
-        })
+        self.text_ref().try_line_view_batch(None)
     }
 
     /// Make bounded text from an owned UTF-8 buffer.
@@ -1032,7 +1060,7 @@ impl SharedText {
 
     /// Split this text into shared views with one scan.
     pub fn try_split_views(&self, separator: &str) -> Result<Vec<SharedText>, TryReserveError> {
-        self.try_split_items(separator, |start, end| {
+        self.text_ref().try_split_items(separator, |start, end| {
             self.slice(start, end)
                 .expect("a split range has valid boundaries")
         })
@@ -1040,7 +1068,7 @@ impl SharedText {
 
     /// Split this text into line views with one scan.
     pub fn try_line_views(&self) -> Result<Vec<SharedText>, TryReserveError> {
-        self.try_line_items(|start, end| {
+        self.text_ref().try_line_items(|start, end| {
             self.slice(start, end)
                 .expect("a line range has valid boundaries")
         })

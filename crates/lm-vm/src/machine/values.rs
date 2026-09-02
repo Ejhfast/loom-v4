@@ -928,13 +928,19 @@ impl Machine {
                 let split = matches!(instr, Instr::Native(lm_bytecode::NativeInstr::TextSplit));
                 let separator = if split { Some(self.pop_obj()?) } else { None };
                 let text = self.pop_obj()?;
-                let source = self.text_value(text)?.to_shared();
                 let pieces = match separator {
                     Some(reference) => {
-                        let separator = self.text_value(reference)?.to_shared();
-                        source.try_split_view_batch(separator.as_str())
+                        let separator = self.text_value(reference)?;
+                        self.vm
+                            .heap
+                            .try_split_text_view_batch(text, separator.as_str())
+                            .ok_or(BAD_TYPE)?
                     }
-                    None => source.try_line_view_batch(),
+                    None => self
+                        .vm
+                        .heap
+                        .try_line_text_view_batch(text)
+                        .ok_or(BAD_TYPE)?,
                 }
                 .map_err(|_| FaultCode::HeapLimit)?;
                 // One Substring object and one list slot per piece.

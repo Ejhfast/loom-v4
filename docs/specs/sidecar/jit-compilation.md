@@ -4122,6 +4122,39 @@ The other application rows stayed within five percent.
 
 Focused tests cover collection, stale generations, compaction, transfer, snapshots, native text operations, and exact fuel boundaries.
 
+### Stage F81: Reuse compact text owners
+
+- scan split sources through a borrowed `TextRef`;
+- retain the source root record for nested compact views;
+- validate the source generation before the heap charge;
+- create a new root record only for a noncompact source;
+- preserve one shared-allocation charge for each logical view.
+
+The source `ObjRef` identifies the exact root record.
+
+The design needs no allocation-key lookup table.
+
+A nested batch now increments the existing root reference count.
+
+It does not clone the root `Arc` or append another root record.
+
+The controlled release comparison used Stage F80 from a separate worktree.
+
+| Row | Stage F80 | Stage F81 | Change |
+| --- | ---: | ---: | ---: |
+| Split helper Auto | 34.993 ms | 33.268 ms | 4.9 percent faster |
+| CSV Auto | 4.902 ms | 4.871 ms | 0.6 percent faster |
+
+Owner records use inline vector storage.
+
+They do not cause one allocator call for each batch.
+
+Thus, owner reuse removes retained metadata but gives only a small CSV latency gain.
+
+The other application rows stayed within five percent.
+
+One focused test proves that nested batches share one root record.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

@@ -1040,11 +1040,35 @@ impl Heap {
             .checked_add(MIN_OBJECT_COST)
     }
 
+    /// Split one text reference into compact descriptors with its current owner.
+    pub fn try_split_text_view_batch(
+        &self,
+        source: ObjRef,
+        separator: &str,
+    ) -> Option<Result<TextViewBatch, std::collections::TryReserveError>> {
+        let text = self.text(source)?;
+        let owner = TextViewTable::is_reference(source).then_some(source);
+        Some(text.try_split_view_batch(separator, owner))
+    }
+
+    /// Split one text reference into compact line descriptors with its current owner.
+    pub fn try_line_text_view_batch(
+        &self,
+        source: ObjRef,
+    ) -> Option<Result<TextViewBatch, std::collections::TryReserveError>> {
+        let text = self.text(source)?;
+        let owner = TextViewTable::is_reference(source).then_some(source);
+        Some(text.try_line_view_batch(owner))
+    }
+
     /// Allocate shared text views and their list as one heap batch.
     pub fn try_alloc_text_view_list(&mut self, batch: TextViewBatch) -> Option<ObjRef> {
         let count = batch.len();
         let base = Self::text_view_list_base_cost(count)?;
         let object_count = count.checked_add(1)?;
+        if !self.text_views.can_install_batch(&batch) {
+            return None;
+        }
         let shared = batch.shared_allocation();
         let shared_cost = shared
             .filter(|(key, _)| !self.shared_allocations.contains_key(key))
@@ -1057,7 +1081,9 @@ impl Heap {
         let mut values = Vec::new();
         if values.try_reserve_exact(count).is_err()
             || !self.reserve_precharged_slots(1)
-            || !self.text_views.try_reserve_batch(count)
+            || !self
+                .text_views
+                .try_reserve_batch(count, batch.needs_new_owner())
         {
             return None;
         }
@@ -1729,6 +1755,48 @@ mod tests {
         assert_eq!(heap.used_bytes(), source_cost);
         heap.free(source);
         assert_eq!(heap.used_bytes(), 0);
+    }
+
+    #[test]
+    fn nested_text_view_batches_reuse_one_owner_record() {
+        let mut heap = Heap::new(1 << 20);
+        let text = SharedText::from("alpha,beta;gamma,delta");
+        let outer = text
+            .try_split_view_batch(";")
+            .expect("the outer ranges fit");
+        let outer_list = heap
+            .try_alloc_text_view_list(outer)
+            .expect("the outer batch allocates");
+        let first = match heap.get(outer_list) {
+            Object::List { items, .. } => items[0].as_obj().expect("the first item is text"),
+            _ => panic!("a split returns one list"),
+        };
+        let inner = heap
+            .try_split_text_view_batch(first, ",")
+            .expect("the compact source is text")
+            .expect("the inner ranges fit");
+        let inner_list = heap
+            .try_alloc_text_view_list(inner)
+            .expect("the inner batch allocates");
+
+        assert_eq!(heap.text_views.root_count(), 1);
+        let inner_views = match heap.get(inner_list) {
+            Object::List { items, .. } => items
+                .iter()
+                .map(|value| value.as_obj().expect("an inner item is text"))
+                .collect::<Vec<_>>(),
+            _ => panic!("a split returns one list"),
+        };
+        assert_eq!(
+            inner_views
+                .iter()
+                .map(|reference| heap.text(*reference).expect("the view is live").as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+
+        heap.sweep(|_| false);
+        assert_eq!(heap.text_views.root_count(), 0);
     }
 
     #[test]

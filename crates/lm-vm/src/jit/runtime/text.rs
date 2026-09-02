@@ -385,21 +385,26 @@ impl MachineRuntime<'_> {
         request: HeapOperationRequest<'_>,
         split: bool,
     ) -> HeapOperationResult {
-        let text = match self.text_value(request.first) {
-            Ok(text) => text,
-            Err(result) => return result,
-        };
-        let separator = if split {
-            match self.text_value(request.second) {
-                Ok(separator) => Some(separator),
-                Err(result) => return result,
-            }
+        let source = object_reference(request.first);
+        let pieces = if split {
+            let separator = object_reference(request.second);
+            let Some(separator) = self.machine.vm.heap.text(separator) else {
+                return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
+            };
+            let Some(pieces) = self
+                .machine
+                .vm
+                .heap
+                .try_split_text_view_batch(source, separator.as_str())
+            else {
+                return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
+            };
+            pieces
         } else {
-            None
-        };
-        let pieces = match separator.as_ref() {
-            Some(separator) => text.try_split_view_batch(separator.as_str()),
-            None => text.try_line_view_batch(),
+            let Some(pieces) = self.machine.vm.heap.try_line_text_view_batch(source) else {
+                return HeapOperationResult::Fault(crate::FaultCode::TypeMismatch);
+            };
+            pieces
         };
         let pieces = match pieces {
             Ok(pieces) => pieces,
