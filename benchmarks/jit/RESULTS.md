@@ -5,7 +5,7 @@ It also compares Loom against CPython on the same workloads.
 
 ## Method
 
-- The tree is branch `jit-compilation-heap-abi` at commit `311b8c5`.
+- The tree is branch `jit-compilation-heap-abi` at commit `41880de`.
 - The host uses an AMD Ryzen 9 9950X processor.
 - The Loom columns come from the warm in-process suite on the scheduled path.
 - Warm means the native code set is stable before the measured rounds.
@@ -13,6 +13,7 @@ It also compares Loom against CPython on the same workloads.
 - The CPython version is 3.13.
 - The JSON cases bypass the C `_json` accelerator.
 - They run the pure-Python implementation that the standard library ships.
+- The word-count and CSV programs pass borrowed `Text` keys to their maps.
 - `run.sh` reports end-to-end process times instead. Those include compilation.
 
 ## Modes
@@ -25,28 +26,34 @@ It also compares Loom against CPython on the same workloads.
 
 | program | interp ms | auto ms | native ms | auto gain | CPython ms | auto vs CPython |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| scalar_nodiv | 230.2 | 8.1 | 8.1 | 28.4x | 176.7 | 21.8x |
-| image_luma | 398.0 | 20.5 | 20.5 | 19.4x | 275.9 | 13.5x |
-| top_level_loop | 259.0 | 13.9 | 14.0 | 18.6x | 346.5 | 24.9x |
-| matmul | 45.0 | 1.9 | 1.9 | 24.0x | 22.1 | 11.6x |
-| sort_search | 86.2 | 5.2 | 5.2 | 16.4x | 52.3 | 10.1x |
-| graph_bfs | 63.0 | 3.8 | 3.8 | 16.5x | 13.3 | 3.5x |
-| particles | 44.8 | 4.1 | 4.1 | 10.9x | 13.7 | 3.3x |
-| pipeline_style | 108.6 | 15.6 | 15.2 | 7.0x | 45.8 | 2.9x |
-| expr_interpreter | 24.5 | 3.6 | 3.6 | 6.8x | 6.3 | 1.7x |
-| many_functions | 328.1 | 92.7 | 92.9 | 3.5x | 421.8 | 4.6x |
-| json_pipeline | 127.6 | 47.6 | 46.1 | 2.7x | 27.6 | 0.58x |
-| json_parse_large | 86.3 | 33.9 | 33.0 | 2.5x | 22.0 | 0.65x |
-| wordcount | 21.0 | 9.2 | 9.2 | 2.3x | 5.6 | 0.60x |
-| csv_report | 12.9 | 7.4 | 7.4 | 1.7x | 4.1 | 0.55x |
-| gcx_churn_low | 72.3 | 1.2 | 1.2 | 59.2x | 38.7 | 32.3x |
-| gcx_churn_high | 92.5 | 32.3 | 32.7 | 2.9x | 53.8 | 1.7x |
-| gcx_retained | 99.5 | 34.4 | 34.5 | 2.9x | 62.3 | 1.8x |
-| gcx_alloc_burst | 34.4 | 7.1 | 7.1 | 4.9x | 23.7 | 3.3x |
+| scalar_nodiv | 258.9 | 8.1 | 8.1 | 32.1x | 177.5 | 21.9x |
+| top_level_loop | 254.6 | 13.9 | 13.9 | 18.3x | 354.9 | 25.5x |
+| image_luma | 401.9 | 20.2 | 20.1 | 19.9x | 272.9 | 13.5x |
+| matmul | 51.9 | 1.9 | 1.9 | 27.7x | 22.0 | 11.6x |
+| sort_search | 84.0 | 5.3 | 5.2 | 16.0x | 52.1 | 9.8x |
+| graph_bfs | 61.4 | 3.9 | 3.9 | 15.9x | 13.0 | 3.3x |
+| particles | 45.3 | 4.1 | 4.1 | 10.9x | 13.6 | 3.3x |
+| pipeline_style | 115.8 | 16.1 | 15.8 | 7.2x | 42.5 | 2.6x |
+| expr_interpreter | 25.0 | 3.6 | 3.6 | 7.0x | 6.4 | 1.8x |
+| many_functions | 303.9 | 94.2 | 91.4 | 3.2x | 421.9 | 4.5x |
+| wordcount | 15.7 | 3.7 | 3.7 | 4.3x | 5.6 | 1.52x |
+| json_parse_large | 76.5 | 19.3 | 19.4 | 4.0x | 22.5 | 1.16x |
+| json_pipeline | 113.2 | 31.0 | 30.7 | 3.7x | 27.9 | 0.90x |
+| csv_report | 11.3 | 4.7 | 4.6 | 2.4x | 4.1 | 0.87x |
+| gcx_churn_low | 72.9 | 1.2 | 1.2 | 60.1x | 39.1 | 32.6x |
+| gcx_churn_high | 93.0 | 31.6 | 31.6 | 2.9x | 53.5 | 1.7x |
+| gcx_retained | 101.4 | 31.5 | 31.4 | 3.2x | 61.0 | 1.9x |
+| gcx_alloc_burst | 33.9 | 6.9 | 6.8 | 4.9x | 22.3 | 3.2x |
 
-The `auto` geo-mean gain over the interpreter is 7.6x on the core ten rows.
-Loom `auto` leads CPython 2.8x geo-mean on the same ten rows.
-Native matches auto on every row within noise.
+Ratios move with interpreter-side timing noise.
+Compare absolute Auto milliseconds for small deltas.
+Native matches Auto on every row within noise.
+
+The `auto` geo-mean gain over the interpreter is 8.8x on the core ten rows.
+Loom `auto` leads CPython 3.3x geo-mean on the same ten rows.
+The four library rows lead CPython 1.08x geo-mean together.
+Word count and JSON parsing lead CPython directly.
+The CSV and JSON pipeline rows sit within 13 percent of CPython.
 
 ## Notes
 
