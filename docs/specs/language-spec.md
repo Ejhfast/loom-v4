@@ -4092,6 +4092,7 @@ Bytes.from_hex(text: Text) -> Result[Bytes,HexError]
 utf8() -> Result[String,Utf8Error]
 utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
+text_range(start: Int, length: Int) -> String
 __add__(other: Bytes) -> Bytes
 __and__(other: Bytes) -> Bytes
 __or__(other: Bytes) -> Bytes
@@ -4121,6 +4122,14 @@ It returns `HexError.OddLength` or `HexError.InvalidDigit(index)` for invalid te
 `utf8_view` reports invalid encoding through its result. It returns a shared Substring without a content copy.
 
 `text` is a compatibility conversion that faults with `BadCast`. It returns a bounded String after successful validation.
+
+`text_range` validates one byte range and its UTF-8 encoding.
+
+It faults with `IndexOutOfBounds` for an invalid range.
+
+It faults with `BadCast` for invalid UTF-8.
+
+It creates one bounded String without an intermediate Bytes object.
 
 `+`, the bitwise operators, equality, and ordering use the paired-underscore `Bytes` methods.
 

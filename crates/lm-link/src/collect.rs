@@ -1025,6 +1025,7 @@ fn native_edges(
         | NativeInstr::BytesNew
         | NativeInstr::BytesLen
         | NativeInstr::BytesText
+        | NativeInstr::BytesTextRange
         | NativeInstr::BytesAt
         | NativeInstr::BytesGet
         | NativeInstr::BytesSlice

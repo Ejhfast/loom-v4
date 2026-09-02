@@ -84,6 +84,7 @@ fn bytes_and_builder_intrinsics_use_native_instructions() {
         Instr::Native(lm_bytecode::NativeInstr::BytesHex),
         Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8),
         Instr::Native(lm_bytecode::NativeInstr::BytesText),
+        Instr::Native(lm_bytecode::NativeInstr::BytesTextRange),
         Instr::Native(lm_bytecode::NativeInstr::EqBytes),
         Instr::Native(lm_bytecode::NativeInstr::NeBytes),
         Instr::Native(lm_bytecode::NativeInstr::SbLen),
@@ -128,14 +129,61 @@ bytes = Bytes("é")
   bytes.compact() == bytes,
   bytes.utf8(),
   bytes.utf8_view(),
+  Bytes("xéz").text_range(1, 2),
   Bytes("a") < Bytes("b"),
   Bytes("b") >= Bytes("b")
 )
 "#;
     assert_eq!(
         run_text("bytes_views.lm", source, VmConfig::default()).unwrap(),
-        "Done((\"é\", (1, 2), \"é\", \"00ff\", \"00ff\", true, Ok(\"é\"), Ok(\"é\"), true, true))"
+        "Done((\"é\", (1, 2), \"é\", \"00ff\", \"00ff\", true, Ok(\"é\"), Ok(\"é\"), \"é\", true, true))"
     );
+}
+
+#[test]
+fn bytes_text_range_checks_bounds_and_encoding() {
+    assert_eq!(
+        run_text(
+            "bytes_text_range_bounds.lm",
+            "Bytes(\"abc\").text_range(2, 2)\n",
+            VmConfig::default(),
+        )
+        .unwrap(),
+        "Fault(IndexOutOfBounds)"
+    );
+    assert_eq!(
+        run_text(
+            "bytes_text_range_utf8.lm",
+            "b\"\\xff\".text_range(0, 1)\n",
+            VmConfig::default(),
+        )
+        .unwrap(),
+        "Fault(BadCast)"
+    );
+}
+
+#[test]
+fn the_verifier_checks_bytes_text_range_operands() {
+    let mut module = compile_module_text(
+        "bytes_text_range_verify.lm",
+        "Bytes(\"abc\").text_range(0, 2)\n",
+    )
+    .expect("the valid range conversion compiles");
+    let entry = module.entry as usize;
+    let block = &mut module.funcs[entry].blocks[0];
+    let length = block
+        .iter()
+        .position(|instruction| {
+            matches!(
+                instruction,
+                Instr::Native(lm_bytecode::NativeInstr::BytesTextRange)
+            )
+        })
+        .expect("the range conversion lowers")
+        - 1;
+    block[length] = Instr::ConstBool(false);
+    let error = lm_verify::verify_module(&module).expect_err("the wrong operand type rejects");
+    assert!(error.to_string().contains("expected type"), "{error}");
 }
 
 #[test]

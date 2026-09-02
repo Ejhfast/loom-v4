@@ -3956,6 +3956,39 @@ Clippy passed for every workspace target.
 
 The full workspace suite passed.
 
+### Stage F75: Construct String values from byte ranges
+
+- add one verified `Bytes.text_range` operation;
+- validate bounds and UTF-8 before allocation;
+- create one bounded String without an intermediate Bytes object;
+- keep escaped JSON strings on the existing builder path;
+- use the direct path for JSON strings without escapes.
+
+The operation has independent bytecode, verifier, interpreter, and native treatments.
+
+The JSON parser scans each string before it chooses its construction path.
+
+An unescaped string now shares bounded source storage or makes one exact copy.
+
+An escaped string copies its prefix once and keeps the existing escape semantics.
+
+| Warm application row | Stage F74 | Stage F75 | Change |
+| --- | ---: | ---: | ---: |
+| Word count, Auto | 4.036 ms | 4.054 ms | within 1 percent |
+| CSV report, Auto | 4.922 ms | 5.004 ms | within 2 percent |
+| JSON pipeline, Auto | 36.843 ms | 32.329 ms | 12.3 percent faster |
+| JSON parse, Auto | 27.027 ms | 20.677 ms | 23.5 percent faster |
+
+All four rows retained complete native coverage.
+
+The focused JIT suite passed 175 tests.
+
+The direct and scheduled corpus differential passed in 23.42 seconds.
+
+Clippy passed for every workspace target.
+
+The full workspace suite passed.
+
 ## 24. Rejected designs
 
 A generic callback dispatcher cannot implement common heap instructions.

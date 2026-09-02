@@ -113,7 +113,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 49 adds compile-time constants to module surfaces.
 /// Version 50 adds pin-only imports and character literals.
 /// Version 51 lowers borrowed Text insertion into String maps.
-pub const COMPILER_ABI_VERSION: u32 = 51;
+/// Version 52 lowers direct UTF-8 String construction from a byte range.
+pub const COMPILER_ABI_VERSION: u32 = 52;
 
 /// The refinement work budget of one component.
 ///
@@ -975,6 +976,7 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
+        | Instr::Native(NativeInstr::BytesTextRange)
         | Instr::Native(NativeInstr::BytesAt)
         | Instr::Native(NativeInstr::BytesGet)
         | Instr::Native(NativeInstr::BytesSlice)
@@ -2297,6 +2299,7 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BytesNew) => 0x5a,
             Instr::Native(NativeInstr::BytesLen) => 0x5b,
             Instr::Native(NativeInstr::BytesText) => 0x5c,
+            Instr::Native(NativeInstr::BytesTextRange) => 0x103,
             Instr::Native(NativeInstr::BytesAt) => 0x6e,
             Instr::Native(NativeInstr::BytesGet) => 0x6f,
             Instr::Native(NativeInstr::BytesSlice) => 0x7b,
@@ -2664,6 +2667,7 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BytesNew)
             | Instr::Native(NativeInstr::BytesLen)
             | Instr::Native(NativeInstr::BytesText)
+            | Instr::Native(NativeInstr::BytesTextRange)
             | Instr::Native(NativeInstr::BytesAt)
             | Instr::Native(NativeInstr::BytesGet)
             | Instr::Native(NativeInstr::BytesSlice)

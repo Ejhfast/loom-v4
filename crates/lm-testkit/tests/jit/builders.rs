@@ -27,12 +27,13 @@ fn builders_and_byte_construction_use_dedicated_paths() {
         "in Ok(value) then value.byte_len()\n",
         "in Err(_) then 0\n",
         "end\n",
+        "range_size = Bytes(\"xéz\").text_range(1, 2).byte_len()\n",
         "left = b\"\\x0f\\xf0\"\n",
         "right = b\"\\x33\\x55\"\n",
         "bits = (left & right).len() + (left | right).len()\n",
         "bits = bits + (left ^ right).len() + (~left).len()\n",
         "(built_text.byte_len(), text_size, finished_text.byte_len(), byte, ",
-        "byte_size, finished_bytes.len(), slice_size, compact.len(), view_size, bits)\n",
+        "byte_size, finished_bytes.len(), slice_size, compact.len(), view_size, range_size, bits)\n",
     );
     let artifact = lm_testkit::compile_text("jit-builders.lm", source)
         .expect("the builder construction case compiles");
@@ -345,7 +346,8 @@ fn text_algorithms_match_each_fuel_boundary() {
         "text = \"  abc,def  \"\n",
         "bytes = text.trim().to_string().bytes()\n",
         "parts = text.split(\",\")\n",
-        "(text.replace(\"abc\", \"ABC\"), bytes.hex(), parts, 1.25.fixed(3))\n",
+        "range = Bytes(\"xéz\").text_range(1, 2)\n",
+        "(text.replace(\"abc\", \"ABC\"), bytes.hex(), parts, range, 1.25.fixed(3))\n",
     );
     let artifact =
         lm_testkit::compile_text("jit-text-fuel.lm", source).expect("the text fuel case compiles");
@@ -363,6 +365,11 @@ fn text_conversion_faults_match_the_interpreter() {
     let cases = [
         ("1.5.fixed(-1)\n", lm_vm::FaultCode::InvalidPrecision),
         ("b\"\\xff\".text()\n", lm_vm::FaultCode::BadCast),
+        (
+            "Bytes(\"abc\").text_range(2, 2)\n",
+            lm_vm::FaultCode::IndexOutOfBounds,
+        ),
+        ("b\"\\xff\".text_range(0, 1)\n", lm_vm::FaultCode::BadCast),
     ];
     for (source, expected) in cases {
         let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);

@@ -792,6 +792,7 @@ impl NativeRuntime for TestRuntime {
         text_bytes,
         text_to_string,
         bytes_text,
+        bytes_text_range,
         byte_buffer_find_from,
         bytes_starts_with,
         bytes_find_index,

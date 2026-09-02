@@ -560,6 +560,7 @@ pub(super) struct RawNativeFunctions {
     pub(super) text_bytes: RawHeapOperation,
     pub(super) text_to_string: RawHeapOperation,
     pub(super) bytes_text: RawHeapOperation,
+    pub(super) bytes_text_range: RawHeapOperation,
     pub(super) byte_buffer_find_from: RawHeapOperation,
     pub(super) bytes_starts_with: RawHeapOperation,
     pub(super) bytes_find_index: RawHeapOperation,
@@ -675,6 +676,7 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         text_bytes: text_bytes::<R>,
         text_to_string: text_to_string::<R>,
         bytes_text: bytes_text::<R>,
+        bytes_text_range: bytes_text_range::<R>,
         byte_buffer_find_from: byte_buffer_find_from::<R>,
         bytes_starts_with: bytes_starts_with::<R>,
         bytes_find_index: bytes_find_index::<R>,
@@ -2318,6 +2320,8 @@ pub trait NativeRuntime {
     /// Decode immutable UTF-8 bytes as a string.
     fn bytes_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 
+    fn bytes_text_range(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
     /// Find immutable bytes in one byte buffer.
     fn byte_buffer_find_from(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 
@@ -3379,6 +3383,7 @@ heap_operation_entry!(text_slice_bytes, text_slice_bytes);
 heap_operation_entry!(text_bytes, text_bytes);
 heap_operation_entry!(text_to_string, text_to_string);
 heap_operation_entry!(bytes_text, bytes_text);
+heap_operation_entry!(bytes_text_range, bytes_text_range);
 heap_operation_entry!(byte_buffer_find_from, byte_buffer_find_from);
 heap_operation_entry!(bytes_starts_with, bytes_starts_with);
 heap_operation_entry!(bytes_find_index, bytes_find_index);

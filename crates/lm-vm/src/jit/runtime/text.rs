@@ -504,6 +504,43 @@ impl MachineRuntime<'_> {
         self.allocate_heap_object(crate::Object::Str(text), &request)
     }
 
+    pub(super) fn bytes_text_range_operation(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult {
+        let bytes = match self.bytes_value(request.first) {
+            Ok(bytes) => bytes,
+            Err(result) => return result,
+        };
+        let start = match usize::try_from(request.second as i64) {
+            Ok(start) => start,
+            Err(_) => return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds),
+        };
+        let length = match usize::try_from(request.third as i64) {
+            Ok(length) => length,
+            Err(_) => return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds),
+        };
+        let Some(slice) = start
+            .checked_add(length)
+            .and_then(|end| bytes.slice(start, end))
+        else {
+            return HeapOperationResult::Fault(crate::FaultCode::IndexOutOfBounds);
+        };
+        let Some(text) = slice.utf8_view() else {
+            return HeapOperationResult::Fault(crate::FaultCode::BadCast);
+        };
+        if !text.has_bounded_retention() {
+            if let Err(result) = self.reserve_heap_growth(text.len(), &request) {
+                return result;
+            }
+        }
+        let text = match text.try_bounded() {
+            Ok(text) => text,
+            Err(_) => return HeapOperationResult::HeapLimit,
+        };
+        self.allocate_heap_object(crate::Object::Str(text), &request)
+    }
+
     pub(super) fn bytes_find_operation(
         &self,
         request: HeapOperationRequest<'_>,
@@ -941,6 +978,13 @@ impl MachineRuntime<'_> {
         request: HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
         self.bytes_text_operation(request)
+    }
+
+    pub(super) fn runtime_bytes_text_range(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult {
+        self.bytes_text_range_operation(request)
     }
 
     pub(super) fn runtime_bytes_starts_with(

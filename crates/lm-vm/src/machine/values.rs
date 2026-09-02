@@ -835,6 +835,29 @@ impl Machine {
                 let value = self.alloc(Object::Str(text))?;
                 self.push(value)?;
             }
+            Instr::Native(lm_bytecode::NativeInstr::BytesTextRange) => {
+                let length = self.pop_int()?;
+                let start = self.pop_int()?;
+                let bytes_ref = self.pop_obj()?;
+                let start = usize::try_from(start).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let length = usize::try_from(length).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(FaultCode::IndexOutOfBounds)?;
+                let bytes = match self.vm.heap.get(bytes_ref) {
+                    Object::Bytes(bytes) => {
+                        bytes.slice(start, end).ok_or(FaultCode::IndexOutOfBounds)?
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                let view = bytes.utf8_view().ok_or(FaultCode::BadCast)?;
+                if !view.has_bounded_retention() {
+                    self.reserve(view.len(), &[Value::Obj(bytes_ref)])?;
+                }
+                let text = view.try_bounded().map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(text))?;
+                self.push(value)?;
+            }
             Instr::Native(lm_bytecode::NativeInstr::BytesAt) => {
                 let index = self.pop_int()?;
                 let bytes = self.pop_obj()?;

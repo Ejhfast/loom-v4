@@ -125,60 +125,93 @@ final class JsonParser
     Ok(())
   end
 
-  def string(mut self): Result[String, JsonError]
-    if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
-      return Err(self.invalid("a JSON string needs an opening quote"))
+  def append_escape(
+    mut self,
+    mut output: ByteBuffer
+  ): Result[(), JsonError]
+    if self.cursor >= self.source.len()
+      return Err(self.invalid("the JSON escape is incomplete"))
     end
+    escape = self.source.at(self.cursor)
     self.cursor = self.cursor + 1
-    output = ByteBuffer()
+    if escape == 34 or escape == 47 or escape == 92
+      output.append(escape)
+    elsif escape == 98
+      output.append(8)
+    elsif escape == 102
+      output.append(12)
+    elsif escape == 110
+      output.append(10)
+    elsif escape == 114
+      output.append(13)
+    elsif escape == 116
+      output.append(9)
+    elsif escape == 117
+      value = self.hex_quad()?
+      if value >= 55296 and value <= 56319
+        if self.cursor + 2 > self.source.len() or
+          self.source.at(self.cursor) != 92 or
+          self.source.at(self.cursor + 1) != 117
+          return Err(self.invalid("a high surrogate needs a low surrogate"))
+        end
+        self.cursor = self.cursor + 2
+        low = self.hex_quad()?
+        if low < 56320 or low > 57343
+          return Err(self.invalid("a high surrogate needs a low surrogate"))
+        end
+        value = 65536 + ((value - 55296) << 10) + (low - 56320)
+      elsif value >= 56320 and value <= 57343
+        return Err(self.invalid("a low surrogate needs a high surrogate"))
+      end
+      self.append_codepoint(output, value)?
+    else
+      return Err(self.invalid("the JSON escape is invalid"))
+    end
+    Ok(())
+  end
+
+  def escaped_string(
+    mut self,
+    mut output: ByteBuffer
+  ): Result[String, JsonError]
+    self.append_escape(output)?
     while self.cursor < self.source.len()
       byte = self.source.at(self.cursor)
       self.cursor = self.cursor + 1
       if byte == 34
         return Ok(output.finish().text())
       elsif byte == 92
-        if self.cursor >= self.source.len()
-          return Err(self.invalid("the JSON escape is incomplete"))
-        end
-        escape = self.source.at(self.cursor)
-        self.cursor = self.cursor + 1
-        if escape == 34 or escape == 47 or escape == 92
-          output.append(escape)
-        elsif escape == 98
-          output.append(8)
-        elsif escape == 102
-          output.append(12)
-        elsif escape == 110
-          output.append(10)
-        elsif escape == 114
-          output.append(13)
-        elsif escape == 116
-          output.append(9)
-        elsif escape == 117
-          value = self.hex_quad()?
-          if value >= 55296 and value <= 56319
-            if self.cursor + 2 > self.source.len() or
-              self.source.at(self.cursor) != 92 or
-              self.source.at(self.cursor + 1) != 117
-              return Err(self.invalid("a high surrogate needs a low surrogate"))
-            end
-            self.cursor = self.cursor + 2
-            low = self.hex_quad()?
-            if low < 56320 or low > 57343
-              return Err(self.invalid("a high surrogate needs a low surrogate"))
-            end
-            value = 65536 + ((value - 55296) << 10) + (low - 56320)
-          elsif value >= 56320 and value <= 57343
-            return Err(self.invalid("a low surrogate needs a high surrogate"))
-          end
-          self.append_codepoint(output, value)?
-        else
-          return Err(self.invalid("the JSON escape is invalid"))
-        end
+        self.append_escape(output)?
       elsif byte < 32
         return Err(self.invalid("a JSON string contains a control byte"))
       else
         output.append(byte)
+      end
+    end
+    Err(self.invalid("the JSON string is incomplete"))
+  end
+
+  def string(mut self): Result[String, JsonError]
+    if self.cursor >= self.source.len() or self.source.at(self.cursor) != 34
+      return Err(self.invalid("a JSON string needs an opening quote"))
+    end
+    self.cursor = self.cursor + 1
+    start = self.cursor
+    while self.cursor < self.source.len()
+      byte = self.source.at(self.cursor)
+      self.cursor = self.cursor + 1
+      if byte == 34
+        return Ok(self.source.text_range(start, self.cursor - start - 1))
+      elsif byte == 92
+        output = ByteBuffer()
+        index = start
+        while index < self.cursor - 1
+          output.append(self.source.at(index))
+          index = index + 1
+        end
+        return self.escaped_string(output)
+      elsif byte < 32
+        return Err(self.invalid("a JSON string contains a control byte"))
       end
     end
     Err(self.invalid("the JSON string is incomplete"))

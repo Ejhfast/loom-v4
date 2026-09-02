@@ -2507,6 +2507,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_HEX => Instr::Native(lm_bytecode::NativeInstr::BytesHex),
             lm_abi::INTRINSIC_BYTES_IS_UTF8 => Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8),
             lm_abi::INTRINSIC_BYTES_TEXT => Instr::Native(lm_bytecode::NativeInstr::BytesText),
+            lm_abi::INTRINSIC_BYTES_TEXT_RANGE => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesTextRange)
+            }
             lm_abi::INTRINSIC_BYTES_EQ => Instr::Native(lm_bytecode::NativeInstr::EqBytes),
             lm_abi::INTRINSIC_BYTES_NE => Instr::Native(lm_bytecode::NativeInstr::NeBytes),
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
@@ -4093,6 +4096,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BytesNew) => "BytesNew".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesLen) => "BytesLen".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesText) => "BytesText".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesTextRange) => "BytesTextRange".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesAt) => "BytesAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesGet) => "BytesGet".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => "BytesSlice".to_string(),

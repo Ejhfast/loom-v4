@@ -1179,7 +1179,7 @@ pub(super) fn analyze_segment(
                 byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
                 expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
             }
-            Instr::Native(NativeInstr::BytesSlice) => {
+            Instr::Native(NativeInstr::BytesSlice | NativeInstr::BytesTextRange) => {
                 bytes_type(context, stack_from_end(&before.stack, 2)?)?;
                 expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
                 expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;

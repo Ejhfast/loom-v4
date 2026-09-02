@@ -194,6 +194,7 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             | NativeInstr::BbFinish
             | NativeInstr::BytesNew
             | NativeInstr::BytesSlice
+            | NativeInstr::BytesTextRange
             | NativeInstr::BytesConcat
             | NativeInstr::BytesCompact
             | NativeInstr::BytesTextView,
@@ -305,6 +306,15 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                     (
                         [source, start, length],
                         std_mem::offset_of!(RawNativeFunctions, bytes_slice),
+                    )
+                }
+                Instr::Native(NativeInstr::BytesTextRange) => {
+                    let length = pop_native(stack)?;
+                    let start = pop_native(stack)?;
+                    let source = pop_native(stack)?;
+                    (
+                        [source, start, length],
+                        std_mem::offset_of!(RawNativeFunctions, bytes_text_range),
                     )
                 }
                 Instr::Native(NativeInstr::BytesConcat) => {

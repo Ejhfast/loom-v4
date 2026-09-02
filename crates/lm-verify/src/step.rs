@@ -1779,6 +1779,15 @@ pub(crate) fn step(
             }
             push(state, TY_STR)?;
         }
+        Instr::Native(lm_bytecode::NativeInstr::BytesTextRange) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("text range on non-bytes type {bytes}")));
+            }
+            push(state, TY_STR)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::BytesTextView) => {
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {

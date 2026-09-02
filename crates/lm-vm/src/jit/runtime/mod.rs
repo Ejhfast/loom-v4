@@ -651,6 +651,10 @@ impl NativeRuntime for MachineRuntime<'_> {
         self.runtime_bytes_text(request)
     }
 
+    fn bytes_text_range(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_bytes_text_range(request)
+    }
+
     fn byte_buffer_find_from(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
         self.runtime_byte_buffer_find_from(request)
     }

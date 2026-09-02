@@ -204,6 +204,7 @@ pub(super) fn emit_segment_body(
                     | NativeInstr::BbFinish
                     | NativeInstr::BytesNew
                     | NativeInstr::BytesSlice
+                    | NativeInstr::BytesTextRange
                     | NativeInstr::BytesConcat
                     | NativeInstr::BytesCompact
                     | NativeInstr::BytesTextView,

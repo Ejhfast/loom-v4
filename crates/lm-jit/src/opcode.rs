@@ -483,7 +483,7 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
                 .with_replay()
                 .with_fault_stack(FaultStack::Pop(1))
         }
-        NativeInstr::BytesSlice => {
+        NativeInstr::BytesSlice | NativeInstr::BytesTextRange => {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
                 .with_replay()
                 .with_fault_stack(FaultStack::Pop(3))

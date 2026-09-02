@@ -103,6 +103,10 @@ final class Bytes implements Hashable, Comparable, Add
     intrinsic("bytes.text", self)
   end
 
+  def text_range(self, start: Int, length: Int): String
+    intrinsic("bytes.text_range", self, start, length)
+  end
+
   def __add__(self, other: Bytes): Bytes
     intrinsic("bytes.concat", self, other)
   end

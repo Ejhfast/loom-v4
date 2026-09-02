@@ -175,6 +175,7 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::BbAppend) => (2, 1),
         Instr::MapPut { discard: false, .. }
         | Instr::Native(NativeInstr::BytesSlice)
+        | Instr::Native(NativeInstr::BytesTextRange)
         | Instr::Native(NativeInstr::TextSlice)
         | Instr::Native(NativeInstr::TextSliceBytes)
         | Instr::Native(NativeInstr::TextReplace)
