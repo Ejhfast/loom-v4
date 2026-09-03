@@ -1,0 +1,21 @@
+use std.digest.crc32
+use std.digest.md5
+use std.digest.sha256
+
+builder = ByteBuffer()
+index = 0
+while index < 512
+  builder.append((index * 131 + 17) & 255)
+  index = index + 1
+end
+input = builder.finish()
+
+round = 0
+result = 0
+while round < 16
+  sha = sha256(input)
+  legacy = md5(input)
+  result = result ^ sha.at(round) ^ legacy.at(round) ^ crc32(input)
+  round = round + 1
+end
+result

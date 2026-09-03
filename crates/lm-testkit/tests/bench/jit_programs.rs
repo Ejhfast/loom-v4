@@ -37,6 +37,10 @@ const JIT_JSON_PARSE_LARGE_SOURCE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../benchmarks/jit/programs/json_parse_large.lm"
 ));
+const JIT_DIGEST_WORKLOAD_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../benchmarks/jit/programs/digest_workload.lm"
+));
 
 #[test]
 #[ignore]
@@ -422,6 +426,7 @@ fn bench_jit_application_programs() {
     report_jit_representative("jit_app_csv_report", JIT_CSV_REPORT_SOURCE);
     report_jit_representative("jit_app_json_pipeline", JIT_JSON_PIPELINE_SOURCE);
     report_jit_representative("jit_app_json_parse_large", JIT_JSON_PARSE_LARGE_SOURCE);
+    report_jit_representative("jit_app_digest", JIT_DIGEST_WORKLOAD_SOURCE);
     report_jit_representative("jit_app_scalar_nodiv", JIT_SCALAR_NODIV_SOURCE);
     report_jit_representative("jit_app_image_luma", JIT_IMAGE_LUMA_SOURCE);
     report_jit_representative("jit_app_top_level_loop", JIT_TOP_LEVEL_LOOP_SOURCE);

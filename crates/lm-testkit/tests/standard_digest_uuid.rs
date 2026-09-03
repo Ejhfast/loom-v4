@@ -1,6 +1,7 @@
 //! Standard digest and UUID values.
 
 use lm_testkit::run_allowed;
+use std::fmt::Write;
 
 fn run(source: &str, grants: &[&str]) -> String {
     run_allowed("standard-digest-uuid.lm", source, grants).expect("the program runs")
@@ -32,6 +33,122 @@ use std.digest.sha256_hex
             "3421780262))"
         )
     );
+}
+
+#[test]
+fn digest_states_support_chunks_copies_and_reset() {
+    let source = r#"
+use std.digest.Crc32
+use std.digest.Md5
+use std.digest.Sha256
+use std.digest.crc32
+use std.digest.md5
+use std.digest.sha256
+
+sha = Sha256()
+sha.update(b"a")
+sha_copy = sha.copy()
+first_sha = sha.finish()
+sha.update(b"bc")
+sha_copy.update(b"x")
+sha_result = sha.finish()
+sha_again = sha.finish()
+sha.reset()
+sha.update(b"abc")
+
+md = Md5()
+md.update(b"a")
+md_copy = md.copy()
+md.update(b"bc")
+md_copy.update(b"x")
+md.reset()
+md.update(b"abc")
+
+crc = Crc32()
+crc.update(b"1")
+crc_copy = crc.copy()
+crc.update(b"23456789")
+crc_copy.update(b"x")
+crc.reset()
+crc.update(b"123456789")
+
+(
+  first_sha == sha256(b"a"),
+  sha_result == sha256(b"abc"),
+  sha_again == sha_result,
+  sha_copy.finish() == sha256(b"ax"),
+  sha.finish() == sha256(b"abc"),
+  md.finish() == md5(b"abc"),
+  md_copy.finish() == md5(b"ax"),
+  crc.finish() == crc32(b"123456789"),
+  crc_copy.finish() == crc32(b"1x")
+)
+"#;
+
+    assert_eq!(
+        run(source, &[]),
+        "Done((true, true, true, true, true, true, true, true, true))"
+    );
+}
+
+fn byte_literal(bytes: &[u8]) -> String {
+    let mut result = String::from("b\"");
+    for byte in bytes {
+        write!(result, "\\x{byte:02x}").expect("a byte escape fits");
+    }
+    result.push('"');
+    result
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(result, "{byte:02x}").expect("a hex byte fits");
+    }
+    result
+}
+
+#[test]
+fn digest_algorithms_match_the_reference_at_block_boundaries() {
+    for length in [
+        0, 1, 7, 55, 56, 57, 63, 64, 65, 119, 120, 121, 127, 128, 129, 1024,
+    ] {
+        let bytes: Vec<u8> = (0..length)
+            .map(|index| ((index * 131 + length * 17) & 255) as u8)
+            .collect();
+        let source = format!(
+            concat!(
+                "use std.digest.Crc32\n",
+                "use std.digest.Md5\n",
+                "use std.digest.Sha256\n",
+                "use std.digest.crc32\n",
+                "use std.digest.md5_hex\n",
+                "use std.digest.sha256_hex\n",
+                "value = {}\n",
+                "sha = Sha256()\nmd = Md5()\ncrc = Crc32()\n",
+                "offset = 0\n",
+                "while offset < value.len()\n",
+                "  count = ((offset * 7 + 3) % 71) + 1\n",
+                "  if count > value.len() - offset\n",
+                "    count = value.len() - offset\n",
+                "  end\n",
+                "  part = value.slice(offset, count).expect(\"the test range is valid\")\n",
+                "  sha.update(part)\nmd.update(part)\ncrc.update(part)\n",
+                "  offset = offset + count\n",
+                "end\n",
+                "(sha.finish().hex(), md.finish().hex(), crc.finish(), ",
+                "sha256_hex(value), md5_hex(value), crc32(value))\n",
+            ),
+            byte_literal(&bytes)
+        );
+        let expected = format!(
+            "Done((\"{sha}\", \"{md5}\", {crc}, \"{sha}\", \"{md5}\", {crc}))",
+            sha = hex(&lm_digest::sha256(&bytes)),
+            md5 = hex(&lm_digest::md5(&bytes)),
+            crc = lm_digest::crc32(&bytes)
+        );
+        assert_eq!(run(&source, &[]), expected, "length {length}");
+    }
 }
 
 #[test]
