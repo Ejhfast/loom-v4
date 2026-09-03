@@ -1,0 +1,8 @@
+[package]
+name = "lm-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libm = { version = "=0.2.16", default-features = false }

@@ -8,6 +8,7 @@ members = [
     "crates/lm-hir",
     "crates/lm-bytecode",
     "crates/lm-verify",
+    "crates/lm-math",
     "crates/lm-jit",
     "crates/lm-link",
     "crates/lm-value",
