@@ -83,3 +83,91 @@ go()
 
     assert_eq!(run(source, &["Clock.Sleep"]), "Done(\"negative\")");
 }
+
+#[test]
+fn calendar_validation_uses_the_proleptic_gregorian_calendar() {
+    let source = r#"
+use std.time.TimeError
+use std.time.Date
+use std.time.date
+use std.time.days_in_month
+use std.time.is_leap_year
+
+def valid(value: Result[Date, TimeError]): Bool
+  case value
+  in Ok(_) then true
+  in Err(_) then false
+  end
+end
+
+(
+  is_leap_year(2000),
+  is_leap_year(1900),
+  days_in_month(2024, 2).expect("February is valid"),
+  valid(date(2024, 2, 29)),
+  valid(date(2023, 2, 29)),
+  display(date(1, 1, 1).expect("the first year is valid"))
+)
+"#;
+
+    assert_eq!(
+        run(source, &[]),
+        "Done((true, false, 29, true, false, \"0001-01-01\"))"
+    );
+}
+
+#[test]
+fn rfc3339_parsing_and_formatting_preserve_instants() {
+    let source = r#"
+use std.time.TimeError
+use std.time.format_rfc3339
+use std.time.parse_rfc3339
+
+def parse_nanos(text: Text): Int
+  parse_rfc3339(text).expect("valid RFC 3339").timestamp().expect("the date fits").nanoseconds
+end
+
+def invalid(text: Text): Bool
+  case parse_rfc3339(text)
+  in Err(TimeError.InvalidRfc3339) then true
+  in _ then false
+  end
+end
+
+first = parse_rfc3339("2000-02-29T12:34:56.123400000+05:30").expect("valid leap date")
+(
+  parse_nanos("1970-01-01T00:00:00Z"),
+  parse_nanos("1969-12-31T23:59:59.5Z"),
+  parse_nanos("1970-01-01T01:00:00+01:00"),
+  format_rfc3339(first).expect("the value formats"),
+  invalid("2023-02-29T00:00:00Z"),
+  invalid("2024-01-01T00:00:00.1234567890Z"),
+  invalid("2024-01-01T00:00:60Z")
+)
+"#;
+
+    assert_eq!(
+        run(source, &[]),
+        "Done((0, -500000000, 0, \"2000-02-29T12:34:56.1234+05:30\", true, true, true))"
+    );
+}
+
+#[test]
+fn timestamp_conversion_handles_negative_epoch_values() {
+    let source = r#"
+use std.time.Timestamp
+use std.time.UtcOffset
+use std.time.format_rfc3339
+use std.time.from_timestamp
+
+(
+  format_rfc3339(from_timestamp(Timestamp(-1), UtcOffset(0)).expect("the timestamp fits")).expect("the value formats"),
+  format_rfc3339(from_timestamp(Timestamp(0), UtcOffset(-28800)).expect("the timestamp fits")).expect("the value formats")
+)
+"#;
+
+    assert_eq!(
+        run(source, &[]),
+        "Done((\"1969-12-31T23:59:59.999999999Z\", \"1969-12-31T16:00:00-08:00\"))"
+    );
+}

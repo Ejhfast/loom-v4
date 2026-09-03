@@ -8,14 +8,46 @@ enum TimeError implements Error
   Overflow
   NegativeDuration
   ReversedInstant
+  InvalidDate
+  InvalidTime
+  InvalidOffset
+  InvalidRfc3339
 
   def append_to(self, mut builder: StringBuilder)
     text = case self
     in Overflow         then "the time value is outside the Int range"
     in NegativeDuration then "the duration is negative"
     in ReversedInstant  then "the earlier instant follows the later instant"
+    in InvalidDate      then "the calendar date is invalid"
+    in InvalidTime      then "the clock time is invalid"
+    in InvalidOffset    then "the UTC offset is invalid"
+    in InvalidRfc3339   then "the text is not a valid RFC 3339 timestamp"
     end
     builder.append(text)
+  end
+end
+
+def _floor_div(value: Int, divisor: Int): Int
+  quotient = value / divisor
+  if value % divisor < 0
+    quotient - 1
+  else
+    quotient
+  end
+end
+
+def _append_padded(mut builder: StringBuilder, value: Int, width: Int)
+  divisor = 1
+  remaining = width - 1
+  while remaining > 0
+    divisor = divisor * 10
+    remaining = remaining - 1
+  end
+  remaining = width
+  while remaining > 0
+    builder.append_int((value / divisor) % 10)
+    divisor = divisor / 10
+    remaining = remaining - 1
   end
 end
 
@@ -162,6 +194,378 @@ frozen class Instant implements Hashable, Comparable
       _checked_subtract(self.nanoseconds, earlier.nanoseconds).map() { |value: Int| Duration(value) }
     end
   end
+end
+
+frozen class Date implements Display, Hashable, Comparable
+  year: Int
+  month: Int
+  day: Int
+
+  def init(mut self, year: Int, month: Int, day: Int)
+    self.year = year
+    self.month = month
+    self.day = day
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    _append_padded(builder, self.year, 4)
+    builder.append("-")
+    _append_padded(builder, self.month, 2)
+    builder.append("-")
+    _append_padded(builder, self.day, 2)
+  end
+
+  def __eq__(self, other: Date): Bool
+    self.year == other.year and self.month == other.month and self.day == other.day
+  end
+
+  def __hash__(self): Int
+    hash_combine(hash_combine(self.year, self.month), self.day)
+  end
+
+  def compare(self, other: Date): Ordering
+    if self.year != other.year
+      self.year.compare(other.year)
+    elsif self.month != other.month
+      self.month.compare(other.month)
+    else
+      self.day.compare(other.day)
+    end
+  end
+end
+
+frozen class TimeOfDay implements Display, Hashable, Comparable
+  hour: Int
+  minute: Int
+  second: Int
+  nanosecond: Int
+
+  def init(mut self, hour: Int, minute: Int, second: Int, nanosecond: Int)
+    self.hour = hour
+    self.minute = minute
+    self.second = second
+    self.nanosecond = nanosecond
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    _append_padded(builder, self.hour, 2)
+    builder.append(":")
+    _append_padded(builder, self.minute, 2)
+    builder.append(":")
+    _append_padded(builder, self.second, 2)
+    if self.nanosecond != 0
+      builder.append(".")
+      value = self.nanosecond
+      width = 9
+      while value % 10 == 0
+        value = value / 10
+        width = width - 1
+      end
+      _append_padded(builder, value, width)
+    end
+  end
+
+  def __eq__(self, other: TimeOfDay): Bool
+    self.hour == other.hour and self.minute == other.minute and
+      self.second == other.second and self.nanosecond == other.nanosecond
+  end
+
+  def __hash__(self): Int
+    value = hash_combine(self.hour, self.minute)
+    hash_combine(hash_combine(value, self.second), self.nanosecond)
+  end
+
+  def compare(self, other: TimeOfDay): Ordering
+    if self.hour != other.hour
+      self.hour.compare(other.hour)
+    elsif self.minute != other.minute
+      self.minute.compare(other.minute)
+    elsif self.second != other.second
+      self.second.compare(other.second)
+    else
+      self.nanosecond.compare(other.nanosecond)
+    end
+  end
+end
+
+frozen class UtcOffset implements Display, Hashable, Comparable
+  seconds: Int
+
+  def init(mut self, seconds: Int)
+    self.seconds = seconds
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    if self.seconds == 0
+      builder.append("Z")
+    else
+      value = self.seconds
+      if value < 0
+        builder.append("-")
+        value = -value
+      else
+        builder.append("+")
+      end
+      _append_padded(builder, value / 3600, 2)
+      builder.append(":")
+      _append_padded(builder, (value % 3600) / 60, 2)
+    end
+  end
+
+  def __eq__(self, other: UtcOffset): Bool
+    self.seconds == other.seconds
+  end
+
+  def __hash__(self): Int
+    self.seconds
+  end
+
+  def compare(self, other: UtcOffset): Ordering
+    self.seconds.compare(other.seconds)
+  end
+end
+
+frozen class DateTime implements Display, Hashable
+  date: Date
+  time: TimeOfDay
+  offset: UtcOffset
+
+  def init(mut self, date: Date, time: TimeOfDay, offset: UtcOffset)
+    self.date = date
+    self.time = time
+    self.offset = offset
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    self.date.append_to(builder)
+    builder.append("T")
+    self.time.append_to(builder)
+    self.offset.append_to(builder)
+  end
+
+  def __eq__(self, other: DateTime): Bool
+    self.date == other.date and self.time == other.time and self.offset == other.offset
+  end
+
+  def __hash__(self): Int
+    hash_combine(hash_combine(hash_of(self.date), hash_of(self.time)), hash_of(self.offset))
+  end
+
+  def timestamp(self): Result[Timestamp, TimeError]
+    valid_date = date(self.date.year, self.date.month, self.date.day)?
+    valid_time = time_of_day(
+      self.time.hour,
+      self.time.minute,
+      self.time.second,
+      self.time.nanosecond
+    )?
+    valid_offset = utc_offset_seconds(self.offset.seconds)?
+    _timestamp_from_parts(valid_date, valid_time, valid_offset)
+  end
+end
+
+def is_leap_year(year: Int): Bool
+  year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+end
+
+def days_in_month(year: Int, month: Int): Result[Int, TimeError]
+  if year < 1 or year > 9999 or month < 1 or month > 12
+    return Err(TimeError.InvalidDate)
+  end
+  days = if month == 2
+    if is_leap_year(year) then 29 else 28 end
+  elsif month == 4 or month == 6 or month == 9 or month == 11
+    30
+  else
+    31
+  end
+  Ok(days)
+end
+
+def date(year: Int, month: Int, day: Int): Result[Date, TimeError]
+  days = days_in_month(year, month)?
+  if day < 1 or day > days
+    Err(TimeError.InvalidDate)
+  else
+    Ok(Date(year, month, day))
+  end
+end
+
+def time_of_day(
+  hour: Int,
+  minute: Int,
+  second: Int,
+  nanosecond: Int
+): Result[TimeOfDay, TimeError]
+  if hour < 0 or hour > 23 or minute < 0 or minute > 59 or
+    second < 0 or second > 59 or nanosecond < 0 or nanosecond >= NANOS_PER_SECOND
+    Err(TimeError.InvalidTime)
+  else
+    Ok(TimeOfDay(hour, minute, second, nanosecond))
+  end
+end
+
+def utc_offset_seconds(seconds: Int): Result[UtcOffset, TimeError]
+  if seconds < -86340 or seconds > 86340 or seconds % 60 != 0
+    Err(TimeError.InvalidOffset)
+  else
+    Ok(UtcOffset(seconds))
+  end
+end
+
+def _days_from_date(value: Date): Int
+  year = value.year
+  if value.month <= 2
+    year = year - 1
+  end
+  era = _floor_div(year, 400)
+  year_of_era = year - era * 400
+  month_index = if value.month > 2 then value.month - 3 else value.month + 9 end
+  day_of_year = (153 * month_index + 2) / 5 + value.day - 1
+  day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year
+  era * 146097 + day_of_era - 719468
+end
+
+def _date_from_days(days: Int): Result[Date, TimeError]
+  shifted = days + 719468
+  era = _floor_div(shifted, 146097)
+  day_of_era = shifted - era * 146097
+  year_of_era = (
+    day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096
+  ) / 365
+  year = year_of_era + era * 400
+  day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100)
+  month_index = (5 * day_of_year + 2) / 153
+  day = day_of_year - (153 * month_index + 2) / 5 + 1
+  month = if month_index < 10 then month_index + 3 else month_index - 9 end
+  if month <= 2
+    year = year + 1
+  end
+  date(year, month, day)
+end
+
+def _timestamp_from_parts(
+  date: Date,
+  time: TimeOfDay,
+  offset: UtcOffset
+): Result[Timestamp, TimeError]
+  days = _days_from_date(date)
+  if days < -106751 or days > 106751
+    return Err(TimeError.Overflow)
+  end
+  value = days * 86400000000000
+  second_count = time.hour * 3600 + time.minute * 60 + time.second
+  value = _checked_add(value, second_count * NANOS_PER_SECOND)?
+  value = _checked_add(value, time.nanosecond)?
+  value = _checked_subtract(value, offset.seconds * NANOS_PER_SECOND)?
+  Ok(Timestamp(value))
+end
+
+def from_timestamp(
+  timestamp: Timestamp,
+  offset: UtcOffset
+): Result[DateTime, TimeError]
+  valid_offset = utc_offset_seconds(offset.seconds)?
+  local = _checked_add(timestamp.nanoseconds, valid_offset.seconds * NANOS_PER_SECOND)?
+  days = _floor_div(local, 86400000000000)
+  within_day = local - days * 86400000000000
+  date_value = _date_from_days(days)?
+  second_count = within_day / NANOS_PER_SECOND
+  time_value = TimeOfDay(
+    second_count / 3600,
+    (second_count % 3600) / 60,
+    second_count % 60,
+    within_day % NANOS_PER_SECOND
+  )
+  Ok(DateTime(date_value, time_value, valid_offset))
+end
+
+def _parse_digits(source: Bytes, start: Int, count: Int): Result[Int, TimeError]
+  if start < 0 or count < 1 or start + count > source.len()
+    return Err(TimeError.InvalidRfc3339)
+  end
+  value = 0
+  index = 0
+  while index < count
+    byte = source.at(start + index)
+    if byte < 48 or byte > 57
+      return Err(TimeError.InvalidRfc3339)
+    end
+    value = value * 10 + byte - 48
+    index = index + 1
+  end
+  Ok(value)
+end
+
+def parse_rfc3339(text: Text): Result[DateTime, TimeError]
+  source = text.bytes()
+  if source.len() < 20 or source.at(4) != 45 or source.at(7) != 45 or
+    (source.at(10) != 84 and source.at(10) != 116) or source.at(13) != 58 or
+    source.at(16) != 58
+    return Err(TimeError.InvalidRfc3339)
+  end
+  date_value = case date(
+    _parse_digits(source, 0, 4)?,
+    _parse_digits(source, 5, 2)?,
+    _parse_digits(source, 8, 2)?
+  )
+  in Ok(value) then value
+  in Err(_) then return Err(TimeError.InvalidRfc3339)
+  end
+  hour = _parse_digits(source, 11, 2)?
+  minute = _parse_digits(source, 14, 2)?
+  second = _parse_digits(source, 17, 2)?
+  index = 19
+  nanosecond = 0
+  if index < source.len() and source.at(index) == 46
+    index = index + 1
+    digits = 0
+    while index < source.len() and source.at(index) >= 48 and source.at(index) <= 57
+      if digits == 9
+        return Err(TimeError.InvalidRfc3339)
+      end
+      nanosecond = nanosecond * 10 + source.at(index) - 48
+      digits = digits + 1
+      index = index + 1
+    end
+    if digits == 0
+      return Err(TimeError.InvalidRfc3339)
+    end
+    while digits < 9
+      nanosecond = nanosecond * 10
+      digits = digits + 1
+    end
+  end
+  time_value = case time_of_day(hour, minute, second, nanosecond)
+  in Ok(value) then value
+  in Err(_) then return Err(TimeError.InvalidRfc3339)
+  end
+  offset = if index < source.len() and (source.at(index) == 90 or source.at(index) == 122)
+    if index + 1 != source.len()
+      return Err(TimeError.InvalidRfc3339)
+    end
+    UtcOffset(0)
+  elsif index + 6 == source.len() and
+    (source.at(index) == 43 or source.at(index) == 45) and source.at(index + 3) == 58
+    offset_hours = _parse_digits(source, index + 1, 2)?
+    offset_minutes = _parse_digits(source, index + 4, 2)?
+    if offset_hours > 23 or offset_minutes > 59
+      return Err(TimeError.InvalidRfc3339)
+    end
+    value = offset_hours * 3600 + offset_minutes * 60
+    if source.at(index) == 45
+      value = -value
+    end
+    UtcOffset(value)
+  else
+    return Err(TimeError.InvalidRfc3339)
+  end
+  Ok(DateTime(date_value, time_value, offset))
+end
+
+def format_rfc3339(value: DateTime): Result[String, TimeError]
+  value.timestamp()?
+  Ok(display(value))
 end
 
 def nanoseconds(value: Int): Duration

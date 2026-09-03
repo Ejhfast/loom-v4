@@ -5105,6 +5105,14 @@ Programs compare instant readings from the same provider. `elapsed_since` reject
 
 `sleep` performs `Clock.Sleep`. It rejects a negative duration before it performs the operation.
 
+`Date`, `TimeOfDay`, `UtcOffset`, and `DateTime` use the proleptic Gregorian calendar.
+
+Calendar years range from 1 through 9999. UTC offsets have minute precision and cannot exceed 23:59.
+
+`parse_rfc3339` accepts uppercase or lowercase time and UTC markers. It accepts one through nine fractional digits.
+
+The parser rejects leap seconds. `format_rfc3339` emits the shortest exact fractional part and preserves the stored offset.
+
 `std.random` provides bytes, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
 
 Core network code defines DNS, TCP, and native TLS stream operations.
