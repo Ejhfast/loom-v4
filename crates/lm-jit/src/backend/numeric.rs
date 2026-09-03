@@ -34,6 +34,27 @@ pub(super) fn emit_numeric_instruction(
             let value = builder.ins().bnot(value);
             push_static(builder, stack, ScalarKind::Int, value)?;
         }
+        NumericInstr::IntCountOnes
+        | NumericInstr::IntLeadingZeros
+        | NumericInstr::IntTrailingZeros => {
+            let value = pop_native(stack)?;
+            let value = match operation {
+                NumericInstr::IntCountOnes => builder.ins().popcnt(value),
+                NumericInstr::IntLeadingZeros => builder.ins().clz(value),
+                NumericInstr::IntTrailingZeros => builder.ins().ctz(value),
+                _ => unreachable!(),
+            };
+            push_static(builder, stack, ScalarKind::Int, value)?;
+        }
+        NumericInstr::IntSignum => {
+            let value = pop_native(stack)?;
+            let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value, 0);
+            let positive = builder.ins().icmp_imm(IntCC::SignedGreaterThan, value, 0);
+            let negative = builder.ins().uextend(types::I64, negative);
+            let positive = builder.ins().uextend(types::I64, positive);
+            let value = builder.ins().isub(positive, negative);
+            push_static(builder, stack, ScalarKind::Int, value)?;
+        }
         NumericInstr::IntShl
         | NumericInstr::IntShr
         | NumericInstr::IntUshr
@@ -67,6 +88,25 @@ pub(super) fn emit_numeric_instruction(
             let value = canonical_float(builder, value);
             push_static(builder, stack, ScalarKind::Float, value)?;
         }
+        NumericInstr::FloatAbs
+        | NumericInstr::FloatSqrt
+        | NumericInstr::FloatFloor
+        | NumericInstr::FloatCeil
+        | NumericInstr::FloatRound
+        | NumericInstr::FloatTrunc => {
+            let value = float_value(builder, pop_native(stack)?);
+            let value = match operation {
+                NumericInstr::FloatAbs => builder.ins().fabs(value),
+                NumericInstr::FloatSqrt => builder.ins().sqrt(value),
+                NumericInstr::FloatFloor => builder.ins().floor(value),
+                NumericInstr::FloatCeil => builder.ins().ceil(value),
+                NumericInstr::FloatRound => builder.ins().nearest(value),
+                NumericInstr::FloatTrunc => builder.ins().trunc(value),
+                _ => unreachable!(),
+            };
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
+        }
         NumericInstr::FloatAdd
         | NumericInstr::FloatSub
         | NumericInstr::FloatMul
@@ -81,6 +121,17 @@ pub(super) fn emit_numeric_instruction(
                 NumericInstr::FloatMul => builder.ins().fmul(left, right),
                 NumericInstr::FloatDiv => builder.ins().fdiv(left, right),
                 _ => unreachable!(),
+            };
+            let value = canonical_float(builder, value);
+            push_static(builder, stack, ScalarKind::Float, value)?;
+        }
+        NumericInstr::FloatMin | NumericInstr::FloatMax => {
+            let right = float_value(builder, pop_native(stack)?);
+            let left = float_value(builder, pop_native(stack)?);
+            let value = if matches!(operation, NumericInstr::FloatMin) {
+                builder.ins().fmin(left, right)
+            } else {
+                builder.ins().fmax(left, right)
             };
             let value = canonical_float(builder, value);
             push_static(builder, stack, ScalarKind::Float, value)?;
@@ -123,6 +174,24 @@ pub(super) fn emit_numeric_instruction(
             let value = float_value(builder, pop_native(stack)?);
             let is_nan = builder.ins().fcmp(FloatCC::Unordered, value, value);
             let value = builder.ins().uextend(types::I64, is_nan);
+            push_static(builder, stack, ScalarKind::Bool, value)?;
+        }
+        NumericInstr::FloatIsFinite | NumericInstr::FloatIsInfinite => {
+            let bits = pop_native(stack)?;
+            let finite = float_is_finite(builder, bits);
+            let value = if matches!(operation, NumericInstr::FloatIsFinite) {
+                finite
+            } else {
+                let exponent = builder.ins().band_imm(bits, 0x7ff0_0000_0000_0000);
+                let full_exponent =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, exponent, 0x7ff0_0000_0000_0000);
+                let mantissa = builder.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
+                let zero_mantissa = builder.ins().icmp_imm(IntCC::Equal, mantissa, 0);
+                builder.ins().band(full_exponent, zero_mantissa)
+            };
+            let value = builder.ins().uextend(types::I64, value);
             push_static(builder, stack, ScalarKind::Bool, value)?;
         }
         NumericInstr::FloatHash => {

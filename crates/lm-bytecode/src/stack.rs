@@ -223,9 +223,21 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
 fn numeric_stack_effect(instruction: NumericInstr) -> (usize, usize) {
     match instruction {
         NumericInstr::IntBitNot
+        | NumericInstr::IntCountOnes
+        | NumericInstr::IntLeadingZeros
+        | NumericInstr::IntTrailingZeros
+        | NumericInstr::IntSignum
         | NumericInstr::IntToFloat
         | NumericInstr::FloatNeg
+        | NumericInstr::FloatAbs
+        | NumericInstr::FloatSqrt
+        | NumericInstr::FloatFloor
+        | NumericInstr::FloatCeil
+        | NumericInstr::FloatRound
+        | NumericInstr::FloatTrunc
         | NumericInstr::FloatIsNan
+        | NumericInstr::FloatIsFinite
+        | NumericInstr::FloatIsInfinite
         | NumericInstr::FloatHash
         | NumericInstr::FloatBits
         | NumericInstr::FloatFromBits
@@ -255,6 +267,8 @@ fn numeric_stack_effect(instruction: NumericInstr) -> (usize, usize) {
         | NumericInstr::FloatLe
         | NumericInstr::FloatGt
         | NumericInstr::FloatGe
+        | NumericInstr::FloatMin
+        | NumericInstr::FloatMax
         | NumericInstr::FloatFixed
         | NumericInstr::SbAppendFloat
         | NumericInstr::BytesBitAnd

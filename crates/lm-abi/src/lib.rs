@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 39;
+pub const ABI_VERSION: u32 = 40;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -641,7 +641,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 25;
+pub const INTRINSIC_ABI_VERSION: u32 = 26;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -840,9 +840,23 @@ pub const INTRINSIC_FLOAT_FIXED: IntrinsicSlot = 180;
 pub const INTRINSIC_RAISE_FAULT: IntrinsicSlot = 181;
 pub const INTRINSIC_BYTES_TEXT_RANGE: IntrinsicSlot = 182;
 pub const INTRINSIC_MAP_INTERN_TEXT_RANGE: IntrinsicSlot = 183;
+pub const INTRINSIC_INT_COUNT_ONES: IntrinsicSlot = 184;
+pub const INTRINSIC_INT_LEADING_ZEROS: IntrinsicSlot = 185;
+pub const INTRINSIC_INT_TRAILING_ZEROS: IntrinsicSlot = 186;
+pub const INTRINSIC_INT_SIGNUM: IntrinsicSlot = 187;
+pub const INTRINSIC_FLOAT_ABS: IntrinsicSlot = 188;
+pub const INTRINSIC_FLOAT_MIN: IntrinsicSlot = 189;
+pub const INTRINSIC_FLOAT_MAX: IntrinsicSlot = 190;
+pub const INTRINSIC_FLOAT_SQRT: IntrinsicSlot = 191;
+pub const INTRINSIC_FLOAT_FLOOR: IntrinsicSlot = 192;
+pub const INTRINSIC_FLOAT_CEIL: IntrinsicSlot = 193;
+pub const INTRINSIC_FLOAT_ROUND: IntrinsicSlot = 194;
+pub const INTRINSIC_FLOAT_TRUNC: IntrinsicSlot = 195;
+pub const INTRINSIC_FLOAT_IS_FINITE: IntrinsicSlot = 196;
+pub const INTRINSIC_FLOAT_IS_INFINITE: IntrinsicSlot = 197;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 184] = [
+pub const INTRINSICS: [IntrinsicDef; 198] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1994,6 +2008,90 @@ pub const INTRINSICS: [IntrinsicDef; 184] = [
             AbiType::INT,
         ],
         reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.count_ones",
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.leading_zeros",
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.trailing_zeros",
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.signum",
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.abs",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.min",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.max",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.sqrt",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.floor",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.ceil",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.round",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.trunc",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.is_finite",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.is_infinite",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
 ];

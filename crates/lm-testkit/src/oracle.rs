@@ -1284,10 +1284,51 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_INT_TO_FLOAT => {
                 Ok(OV::Float((self.as_int(&values[0])? as f64).to_bits()))
             }
+            lm_abi::INTRINSIC_INT_COUNT_ONES => {
+                Ok(OV::Int(self.as_int(&values[0])?.count_ones() as i64))
+            }
+            lm_abi::INTRINSIC_INT_LEADING_ZEROS => {
+                Ok(OV::Int(self.as_int(&values[0])?.leading_zeros() as i64))
+            }
+            lm_abi::INTRINSIC_INT_TRAILING_ZEROS => {
+                Ok(OV::Int(self.as_int(&values[0])?.trailing_zeros() as i64))
+            }
+            lm_abi::INTRINSIC_INT_SIGNUM => Ok(OV::Int(self.as_int(&values[0])?.signum())),
             lm_abi::INTRINSIC_FLOAT_NEG => Ok(OV::Float(lm_value::canonical_float_bits(
                 (-self.as_float(&values[0])?).to_bits(),
             ))),
+            lm_abi::INTRINSIC_FLOAT_ABS
+            | lm_abi::INTRINSIC_FLOAT_SQRT
+            | lm_abi::INTRINSIC_FLOAT_FLOOR
+            | lm_abi::INTRINSIC_FLOAT_CEIL
+            | lm_abi::INTRINSIC_FLOAT_ROUND
+            | lm_abi::INTRINSIC_FLOAT_TRUNC => {
+                let value = self.as_float(&values[0])?;
+                let result = match intrinsic {
+                    lm_abi::INTRINSIC_FLOAT_ABS => value.abs(),
+                    lm_abi::INTRINSIC_FLOAT_SQRT => value.sqrt(),
+                    lm_abi::INTRINSIC_FLOAT_FLOOR => value.floor(),
+                    lm_abi::INTRINSIC_FLOAT_CEIL => value.ceil(),
+                    lm_abi::INTRINSIC_FLOAT_ROUND => value.round_ties_even(),
+                    lm_abi::INTRINSIC_FLOAT_TRUNC => value.trunc(),
+                    _ => unreachable!(),
+                };
+                Ok(OV::Float(lm_value::canonical_float_bits(result.to_bits())))
+            }
+            lm_abi::INTRINSIC_FLOAT_MIN | lm_abi::INTRINSIC_FLOAT_MAX => {
+                let left = self.as_float(&values[0])?;
+                let right = self.as_float(&values[1])?;
+                let result =
+                    oracle_float_min_max(left, right, intrinsic == lm_abi::INTRINSIC_FLOAT_MIN);
+                Ok(OV::Float(lm_value::canonical_float_bits(result.to_bits())))
+            }
             lm_abi::INTRINSIC_FLOAT_IS_NAN => Ok(OV::Bool(self.as_float(&values[0])?.is_nan())),
+            lm_abi::INTRINSIC_FLOAT_IS_FINITE => {
+                Ok(OV::Bool(self.as_float(&values[0])?.is_finite()))
+            }
+            lm_abi::INTRINSIC_FLOAT_IS_INFINITE => {
+                Ok(OV::Bool(self.as_float(&values[0])?.is_infinite()))
+            }
             lm_abi::INTRINSIC_FLOAT_HASH => Ok(OV::Int(oracle_float_hash(match values[0] {
                 OV::Float(bits) => bits,
                 _ => return Err(Stop::Limit("expected a Float value")),
@@ -2519,6 +2560,25 @@ fn oracle_float_hash(bits: u64) -> i64 {
         0
     } else {
         bits as i64
+    }
+}
+
+fn oracle_float_min_max(left: f64, right: f64, minimum: bool) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        return f64::NAN;
+    }
+    if left == right && left == 0.0 {
+        let bits = if minimum {
+            left.to_bits() | right.to_bits()
+        } else {
+            left.to_bits() & right.to_bits()
+        };
+        return f64::from_bits(bits);
+    }
+    if (minimum && left < right) || (!minimum && left > right) {
+        left
+    } else {
+        right
     }
 }
 

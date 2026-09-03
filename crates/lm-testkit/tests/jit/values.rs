@@ -72,6 +72,38 @@ fn simple_numeric_operations_stay_native() {
 }
 
 #[test]
+fn numeric_utility_operations_stay_native() {
+    let source = concat!(
+        "i = 0\ntotal = 0\nsame = true\n",
+        "infinity = 1.0 / 0.0\nnan = (-1.0).sqrt()\n",
+        "while i < 10000\n",
+        "  value = (i - 5000).signum()\n",
+        "  total = total + i.count_ones() + i.leading_zeros() + i.trailing_zeros()\n",
+        "  float = i.to_float() + 0.5\n",
+        "  same = same and float.abs().sqrt().is_finite()\n",
+        "  same = same and float.floor().max(0.0) <= float.ceil().min(10000.0)\n",
+        "  same = same and float.round().trunc().is_finite()\n",
+        "  same = same and (-1.25).floor() == -2.0 and (-1.25).ceil() == -1.0\n",
+        "  same = same and 2.5.round() == 2.0 and 3.5.round() == 4.0\n",
+        "  same = same and (-0.0).min(0.0).bits() == (-1 << 63)\n",
+        "  same = same and (-0.0).max(0.0).bits() == 0\n",
+        "  same = same and nan.min(1.0).is_nan() and nan.max(1.0).is_nan()\n",
+        "  same = same and not infinity.is_finite() and infinity.is_infinite()\n",
+        "  same = same and nan.is_nan() and not nan.is_infinite()\n",
+        "  total = total + value\n",
+        "  i = i + 1\n",
+        "end\n",
+        "if same then total else -1 end\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 500_000, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
 fn invalid_shift_amounts_replay_one_instruction() {
     for source in ["1 << 64\n", "1 >> -1\n", "1.rotate_left(64)\n"] {
         let artifact = lm_testkit::compile_text("jit-shift-fault.lm", source)

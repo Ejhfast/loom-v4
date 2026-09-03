@@ -1,0 +1,22 @@
+nan = (-1.0).sqrt()
+infinity = 1.0 / 0.0
+negative_zero = -0.0
+positive_zero = 0.0
+
+(
+  (-9.5).abs(),
+  negative_zero.abs().bits(),
+  negative_zero.min(positive_zero).bits(),
+  negative_zero.max(positive_zero).bits(),
+  81.0.sqrt(),
+  nan.is_nan(),
+  (-1.25).floor(),
+  (-1.25).ceil(),
+  (2.5.round(), 3.5.round(), (-2.5).round()),
+  (-1.75).trunc(),
+  (1.0.is_finite(), infinity.is_finite(), nan.is_finite()),
+  (infinity.is_infinite(), nan.is_infinite()),
+  ((-1).count_ones(), 0.leading_zeros(), 0.trailing_zeros()),
+  (8.leading_zeros(), 8.trailing_zeros()),
+  ((-42).signum(), 0.signum(), 42.signum())
+)

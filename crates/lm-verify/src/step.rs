@@ -174,7 +174,11 @@ pub(crate) fn step(
                     pop_expect(state, TY_INT)?;
                     push(state, TY_INT)?;
                 }
-                NumericInstr::IntBitNot => {
+                NumericInstr::IntBitNot
+                | NumericInstr::IntCountOnes
+                | NumericInstr::IntLeadingZeros
+                | NumericInstr::IntTrailingZeros
+                | NumericInstr::IntSignum => {
                     pop_expect(state, TY_INT)?;
                     push(state, TY_INT)?;
                 }
@@ -182,7 +186,13 @@ pub(crate) fn step(
                     pop_expect(state, TY_INT)?;
                     push(state, float)?;
                 }
-                NumericInstr::FloatNeg => {
+                NumericInstr::FloatNeg
+                | NumericInstr::FloatAbs
+                | NumericInstr::FloatSqrt
+                | NumericInstr::FloatFloor
+                | NumericInstr::FloatCeil
+                | NumericInstr::FloatRound
+                | NumericInstr::FloatTrunc => {
                     pop_expect(state, float)?;
                     push(state, float)?;
                 }
@@ -190,6 +200,11 @@ pub(crate) fn step(
                 | NumericInstr::FloatSub
                 | NumericInstr::FloatMul
                 | NumericInstr::FloatDiv => {
+                    pop_expect(state, float)?;
+                    pop_expect(state, float)?;
+                    push(state, float)?;
+                }
+                NumericInstr::FloatMin | NumericInstr::FloatMax => {
                     pop_expect(state, float)?;
                     pop_expect(state, float)?;
                     push(state, float)?;
@@ -204,7 +219,9 @@ pub(crate) fn step(
                     pop_expect(state, float)?;
                     push(state, TY_BOOL)?;
                 }
-                NumericInstr::FloatIsNan => {
+                NumericInstr::FloatIsNan
+                | NumericInstr::FloatIsFinite
+                | NumericInstr::FloatIsInfinite => {
                     pop_expect(state, float)?;
                     push(state, TY_BOOL)?;
                 }

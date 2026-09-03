@@ -2427,6 +2427,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_INT_ROTATE_RIGHT => {
                 Instr::Numeric(lm_bytecode::NumericInstr::IntRotateRight)
             }
+            lm_abi::INTRINSIC_INT_COUNT_ONES => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntCountOnes)
+            }
+            lm_abi::INTRINSIC_INT_LEADING_ZEROS => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntLeadingZeros)
+            }
+            lm_abi::INTRINSIC_INT_TRAILING_ZEROS => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntTrailingZeros)
+            }
+            lm_abi::INTRINSIC_INT_SIGNUM => Instr::Numeric(lm_bytecode::NumericInstr::IntSignum),
             lm_abi::INTRINSIC_INT_TO_FLOAT => Instr::Numeric(lm_bytecode::NumericInstr::IntToFloat),
             lm_abi::INTRINSIC_FLOAT_NEG => Instr::Numeric(lm_bytecode::NumericInstr::FloatNeg),
             lm_abi::INTRINSIC_FLOAT_ADD => Instr::Numeric(lm_bytecode::NumericInstr::FloatAdd),
@@ -2439,7 +2449,21 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_FLOAT_LE => Instr::Numeric(lm_bytecode::NumericInstr::FloatLe),
             lm_abi::INTRINSIC_FLOAT_GT => Instr::Numeric(lm_bytecode::NumericInstr::FloatGt),
             lm_abi::INTRINSIC_FLOAT_GE => Instr::Numeric(lm_bytecode::NumericInstr::FloatGe),
+            lm_abi::INTRINSIC_FLOAT_ABS => Instr::Numeric(lm_bytecode::NumericInstr::FloatAbs),
+            lm_abi::INTRINSIC_FLOAT_MIN => Instr::Numeric(lm_bytecode::NumericInstr::FloatMin),
+            lm_abi::INTRINSIC_FLOAT_MAX => Instr::Numeric(lm_bytecode::NumericInstr::FloatMax),
+            lm_abi::INTRINSIC_FLOAT_SQRT => Instr::Numeric(lm_bytecode::NumericInstr::FloatSqrt),
+            lm_abi::INTRINSIC_FLOAT_FLOOR => Instr::Numeric(lm_bytecode::NumericInstr::FloatFloor),
+            lm_abi::INTRINSIC_FLOAT_CEIL => Instr::Numeric(lm_bytecode::NumericInstr::FloatCeil),
+            lm_abi::INTRINSIC_FLOAT_ROUND => Instr::Numeric(lm_bytecode::NumericInstr::FloatRound),
+            lm_abi::INTRINSIC_FLOAT_TRUNC => Instr::Numeric(lm_bytecode::NumericInstr::FloatTrunc),
             lm_abi::INTRINSIC_FLOAT_IS_NAN => Instr::Numeric(lm_bytecode::NumericInstr::FloatIsNan),
+            lm_abi::INTRINSIC_FLOAT_IS_FINITE => {
+                Instr::Numeric(lm_bytecode::NumericInstr::FloatIsFinite)
+            }
+            lm_abi::INTRINSIC_FLOAT_IS_INFINITE => {
+                Instr::Numeric(lm_bytecode::NumericInstr::FloatIsInfinite)
+            }
             lm_abi::INTRINSIC_FLOAT_HASH => Instr::Numeric(lm_bytecode::NumericInstr::FloatHash),
             lm_abi::INTRINSIC_FLOAT_BITS => Instr::Numeric(lm_bytecode::NumericInstr::FloatBits),
             lm_abi::INTRINSIC_FLOAT_FROM_BITS => {

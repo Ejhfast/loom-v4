@@ -995,6 +995,20 @@ impl Machine {
                 let value = self.pop_int()?;
                 self.push(Value::Int(!value))?;
             }
+            NumericInstr::IntCountOnes
+            | NumericInstr::IntLeadingZeros
+            | NumericInstr::IntTrailingZeros
+            | NumericInstr::IntSignum => {
+                let value = self.pop_int()?;
+                let result = match instr {
+                    NumericInstr::IntCountOnes => value.count_ones() as i64,
+                    NumericInstr::IntLeadingZeros => value.leading_zeros() as i64,
+                    NumericInstr::IntTrailingZeros => value.trailing_zeros() as i64,
+                    NumericInstr::IntSignum => value.signum(),
+                    _ => unreachable!(),
+                };
+                self.push(Value::Int(result))?;
+            }
             NumericInstr::IntToFloat => {
                 let value = self.pop_int()?;
                 self.push(Value::Float((value as f64).to_bits()))?;
@@ -1002,6 +1016,24 @@ impl Machine {
             NumericInstr::FloatNeg => {
                 let value = self.pop_float()?;
                 self.push_float(-value)?;
+            }
+            NumericInstr::FloatAbs
+            | NumericInstr::FloatSqrt
+            | NumericInstr::FloatFloor
+            | NumericInstr::FloatCeil
+            | NumericInstr::FloatRound
+            | NumericInstr::FloatTrunc => {
+                let value = self.pop_float()?;
+                let result = match instr {
+                    NumericInstr::FloatAbs => value.abs(),
+                    NumericInstr::FloatSqrt => value.sqrt(),
+                    NumericInstr::FloatFloor => value.floor(),
+                    NumericInstr::FloatCeil => value.ceil(),
+                    NumericInstr::FloatRound => value.round_ties_even(),
+                    NumericInstr::FloatTrunc => value.trunc(),
+                    _ => unreachable!(),
+                };
+                self.push_float(result)?;
             }
             NumericInstr::FloatAdd
             | NumericInstr::FloatSub
@@ -1015,6 +1047,31 @@ impl Machine {
                     NumericInstr::FloatMul => left * right,
                     NumericInstr::FloatDiv => left / right,
                     _ => unreachable!(),
+                };
+                self.push_float(value)?;
+            }
+            NumericInstr::FloatMin | NumericInstr::FloatMax => {
+                let right = self.pop_float()?;
+                let left = self.pop_float()?;
+                let value = if left.is_nan() || right.is_nan() {
+                    f64::NAN
+                } else if left == right && left == 0.0 {
+                    let bits = if matches!(instr, NumericInstr::FloatMin) {
+                        left.to_bits() | right.to_bits()
+                    } else {
+                        left.to_bits() & right.to_bits()
+                    };
+                    f64::from_bits(bits)
+                } else if matches!(instr, NumericInstr::FloatMin) {
+                    if left < right {
+                        left
+                    } else {
+                        right
+                    }
+                } else if left > right {
+                    left
+                } else {
+                    right
                 };
                 self.push_float(value)?;
             }
@@ -1042,6 +1099,15 @@ impl Machine {
             NumericInstr::FloatIsNan => {
                 let value = self.pop_float()?;
                 self.push(Value::Bool(value.is_nan()))?;
+            }
+            NumericInstr::FloatIsFinite | NumericInstr::FloatIsInfinite => {
+                let value = self.pop_float()?;
+                let result = if matches!(instr, NumericInstr::FloatIsFinite) {
+                    value.is_finite()
+                } else {
+                    value.is_infinite()
+                };
+                self.push(Value::Bool(result))?;
             }
             NumericInstr::FloatHash => {
                 let value = self.pop_float_bits()?;

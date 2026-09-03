@@ -231,11 +231,23 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::IntBitOr
         | NumericInstr::IntBitXor
         | NumericInstr::IntBitNot
+        | NumericInstr::IntCountOnes
+        | NumericInstr::IntLeadingZeros
+        | NumericInstr::IntTrailingZeros
+        | NumericInstr::IntSignum
         | NumericInstr::IntWrappingAdd
         | NumericInstr::IntWrappingSub
         | NumericInstr::IntWrappingMul
         | NumericInstr::IntToFloat
         | NumericInstr::FloatNeg
+        | NumericInstr::FloatAbs
+        | NumericInstr::FloatMin
+        | NumericInstr::FloatMax
+        | NumericInstr::FloatSqrt
+        | NumericInstr::FloatFloor
+        | NumericInstr::FloatCeil
+        | NumericInstr::FloatRound
+        | NumericInstr::FloatTrunc
         | NumericInstr::FloatAdd
         | NumericInstr::FloatSub
         | NumericInstr::FloatMul
@@ -247,6 +259,8 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::FloatGt
         | NumericInstr::FloatGe
         | NumericInstr::FloatIsNan
+        | NumericInstr::FloatIsFinite
+        | NumericInstr::FloatIsInfinite
         | NumericInstr::FloatHash
         | NumericInstr::FloatBits
         | NumericInstr::FloatFromBits

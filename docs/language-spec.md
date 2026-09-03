@@ -1146,6 +1146,12 @@ An invalid shift amount faults with `ShiftOutOfRange`.
 
 An invalid rotation amount faults with `ShiftOutOfRange`.
 
+`Int.count_ones` counts set bits in the 64-bit two's-complement value.
+
+`Int.leading_zeros` and `trailing_zeros` return 64 for zero.
+
+`Int.signum` returns -1, 0, or 1.
+
 `Bytes` implements elementwise `&`, `|`, `^`, and `~`.
 
 Both binary operands must have equal lengths.
@@ -1167,6 +1173,20 @@ It returns `NonFinite` or `OutOfRange` when no `Int` result exists.
 `Float.bits` returns the signed `Int` view of the canonical binary64 bits.
 
 `Float.from_bits` accepts the same signed bit view and canonicalizes every NaN.
+
+`Float.abs` clears the sign bit and canonicalizes NaN.
+
+`Float.min` and `max` propagate NaN.
+
+They select negative zero for a minimum and positive zero for a maximum.
+
+`Float.sqrt`, `floor`, `ceil`, and `trunc` use their binary64 operations.
+
+`Float.round` rounds to the nearest integer value. A tie rounds to the even value.
+
+`Float.is_finite` rejects infinities and NaN.
+
+`Float.is_infinite` accepts only positive and negative infinity.
 
 Ordering requires equal numeric types. Float ordering follows ordered IEEE comparison and is false when either operand is NaN. Language equality for floats is total and hash-friendly: both signed zeros are equal and all canonical NaNs are equal. Strings compare lexicographically by Unicode scalar value; bytes lexicographically by unsigned byte.
 
@@ -4713,6 +4733,10 @@ wrapping_sub(other: Int) -> Int
 wrapping_mul(other: Int) -> Int
 rotate_left(amount: Int) -> Int
 rotate_right(amount: Int) -> Int
+count_ones() -> Int
+leading_zeros() -> Int
+trailing_zeros() -> Int
+signum() -> Int
 to_float() -> Float
 ```
 
@@ -4720,6 +4744,16 @@ The core `Float` surface adds these explicit operations:
 
 ```text
 is_nan() -> Bool
+is_finite() -> Bool
+is_infinite() -> Bool
+abs() -> Float
+min(other: Float) -> Float
+max(other: Float) -> Float
+sqrt() -> Float
+floor() -> Float
+ceil() -> Float
+round() -> Float
+trunc() -> Float
 bits() -> Int
 to_int() -> Result[Int,FloatToIntError]
 fixed(digits: Int) -> String
@@ -4748,9 +4782,7 @@ NaN and infinities use their `Display` text without decimal places.
 
 A negative `digits` value faults with `InvalidPrecision`.
 
-`std/math` supplies type-specific pure integer/float `min`, `max`, and `clamp`; `abs`; checked/wrapping/saturating integer operations; `gcd`; `pow_int`; and float rounding, roots, exponentials, logarithms, and trigonometric functions with specified binary64 behavior. With no traits or overloads, these functions are explicitly typed rather than pretending to be universally generic.
-
-The distributed floating algorithms are version-pinned and bit-reproducible across conforming targets; implementations do not delegate observable semantics to an unconstrained platform `libm`. Correctly rounded basic arithmetic remains as specified in section 2.4, while transcendental accuracy bounds and special cases are published with the module version.
+`Int` and `Float` provide the numeric methods in section 6.4.
 
 `Range(start, stop, step)` rejects zero step. `Range.each`, `to_list`, `contains`, and `len` use checked arithmetic. A `for` expression traverses a range directly.
 

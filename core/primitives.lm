@@ -138,6 +138,22 @@ final class Int implements Display, Hashable, Comparable, Add
     intrinsic("int.rotate_right", self, amount)
   end
 
+  def count_ones(self): Int
+    intrinsic("int.count_ones", self)
+  end
+
+  def leading_zeros(self): Int
+    intrinsic("int.leading_zeros", self)
+  end
+
+  def trailing_zeros(self): Int
+    intrinsic("int.trailing_zeros", self)
+  end
+
+  def signum(self): Int
+    intrinsic("int.signum", self)
+  end
+
   def to_float(self): Float
     intrinsic("int.to_float", self)
   end
@@ -230,6 +246,38 @@ final class Float implements Display, Hashable, Comparable, Add
     intrinsic("float.div", self, other)
   end
 
+  def abs(self): Float
+    intrinsic("float.abs", self)
+  end
+
+  def min(self, other: Float): Float
+    intrinsic("float.min", self, other)
+  end
+
+  def max(self, other: Float): Float
+    intrinsic("float.max", self, other)
+  end
+
+  def sqrt(self): Float
+    intrinsic("float.sqrt", self)
+  end
+
+  def floor(self): Float
+    intrinsic("float.floor", self)
+  end
+
+  def ceil(self): Float
+    intrinsic("float.ceil", self)
+  end
+
+  def round(self): Float
+    intrinsic("float.round", self)
+  end
+
+  def trunc(self): Float
+    intrinsic("float.trunc", self)
+  end
+
   def __eq__(self, other: Float): Bool
     intrinsic("float.eq", self, other)
   end
@@ -256,6 +304,14 @@ final class Float implements Display, Hashable, Comparable, Add
 
   def is_nan(self): Bool
     intrinsic("float.is_nan", self)
+  end
+
+  def is_finite(self): Bool
+    intrinsic("float.is_finite", self)
+  end
+
+  def is_infinite(self): Bool
+    intrinsic("float.is_infinite", self)
   end
 
   def bits(self): Int

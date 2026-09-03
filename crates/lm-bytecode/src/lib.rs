@@ -652,6 +652,20 @@ pub enum NumericInstr {
     TextParseFloatStatus,
     TextParseFloatValue,
     FloatFixed,
+    IntCountOnes,
+    IntLeadingZeros,
+    IntTrailingZeros,
+    IntSignum,
+    FloatAbs,
+    FloatMin,
+    FloatMax,
+    FloatSqrt,
+    FloatFloor,
+    FloatCeil,
+    FloatRound,
+    FloatTrunc,
+    FloatIsFinite,
+    FloatIsInfinite,
 }
 
 impl NumericInstr {
@@ -695,6 +709,20 @@ impl NumericInstr {
             35 => NumericInstr::TextParseFloatStatus,
             36 => NumericInstr::TextParseFloatValue,
             37 => NumericInstr::FloatFixed,
+            38 => NumericInstr::IntCountOnes,
+            39 => NumericInstr::IntLeadingZeros,
+            40 => NumericInstr::IntTrailingZeros,
+            41 => NumericInstr::IntSignum,
+            42 => NumericInstr::FloatAbs,
+            43 => NumericInstr::FloatMin,
+            44 => NumericInstr::FloatMax,
+            45 => NumericInstr::FloatSqrt,
+            46 => NumericInstr::FloatFloor,
+            47 => NumericInstr::FloatCeil,
+            48 => NumericInstr::FloatRound,
+            49 => NumericInstr::FloatTrunc,
+            50 => NumericInstr::FloatIsFinite,
+            51 => NumericInstr::FloatIsInfinite,
             _ => return None,
         })
     }
@@ -1824,7 +1852,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 63;
+pub const VERSION: u16 = 64;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -5029,6 +5057,20 @@ mod tests {
             Instr::Numeric(NumericInstr::TextParseFloatStatus),
             Instr::Numeric(NumericInstr::TextParseFloatValue),
             Instr::Numeric(NumericInstr::FloatFixed),
+            Instr::Numeric(NumericInstr::IntCountOnes),
+            Instr::Numeric(NumericInstr::IntLeadingZeros),
+            Instr::Numeric(NumericInstr::IntTrailingZeros),
+            Instr::Numeric(NumericInstr::IntSignum),
+            Instr::Numeric(NumericInstr::FloatAbs),
+            Instr::Numeric(NumericInstr::FloatMin),
+            Instr::Numeric(NumericInstr::FloatMax),
+            Instr::Numeric(NumericInstr::FloatSqrt),
+            Instr::Numeric(NumericInstr::FloatFloor),
+            Instr::Numeric(NumericInstr::FloatCeil),
+            Instr::Numeric(NumericInstr::FloatRound),
+            Instr::Numeric(NumericInstr::FloatTrunc),
+            Instr::Numeric(NumericInstr::FloatIsFinite),
+            Instr::Numeric(NumericInstr::FloatIsInfinite),
             Instr::Native(NativeInstr::TextPadStart),
             Instr::Native(NativeInstr::TextPadEnd),
             Instr::Freeze,
