@@ -5093,7 +5093,19 @@ There are no finalizers. Scoped cleanup is host-managed. Raw handle ownership re
 
 ### 24.10 Time, randomness, networking, and process inputs
 
-`std/time` defines frozen `Duration` and `Instant`, checked conversion helpers, `now`, `monotonic`, and `sleep`. `std/random` provides `bytes`, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
+`std.time` defines frozen `Duration`, `Timestamp`, and `Instant` values with nanosecond precision.
+
+`Duration` stores a signed count. Unit constructors reject conversion overflow.
+
+`Timestamp` stores UTC nanoseconds from the Unix epoch. `now` performs `Clock.Now`.
+
+`Instant` stores a reading from one monotonic effect provider. `monotonic` performs `Clock.Monotonic`.
+
+Programs compare instant readings from the same provider. `elapsed_since` rejects reversed readings.
+
+`sleep` performs `Clock.Sleep`. It rejects a negative duration before it performs the operation.
+
+`std.random` provides bytes, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
 
 Core network code defines DNS, TCP, and native TLS stream operations.
 

@@ -1,0 +1,210 @@
+# Standard library: exact durations and host clock values.
+
+const NANOS_PER_MICROSECOND: Int = 1000
+const NANOS_PER_MILLISECOND: Int = 1000000
+const NANOS_PER_SECOND: Int = 1000000000
+
+enum TimeError implements Error
+  Overflow
+  NegativeDuration
+  ReversedInstant
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Overflow         then "the time value is outside the Int range"
+    in NegativeDuration then "the duration is negative"
+    in ReversedInstant  then "the earlier instant follows the later instant"
+    end
+    builder.append(text)
+  end
+end
+
+def _checked_add(left: Int, right: Int): Result[Int, TimeError]
+  if right > 0 and left > 9223372036854775807 - right
+    Err(TimeError.Overflow)
+  elsif right < 0 and left < (-9223372036854775807 - 1) - right
+    Err(TimeError.Overflow)
+  else
+    Ok(left + right)
+  end
+end
+
+def _checked_subtract(left: Int, right: Int): Result[Int, TimeError]
+  if right > 0 and left < (-9223372036854775807 - 1) + right
+    Err(TimeError.Overflow)
+  elsif right < 0 and left > 9223372036854775807 + right
+    Err(TimeError.Overflow)
+  else
+    Ok(left - right)
+  end
+end
+
+frozen class Duration implements Display, Hashable, Comparable, Add, Subtract, Negate
+  nanoseconds: Int
+
+  def init(mut self, nanoseconds: Int)
+    self.nanoseconds = nanoseconds
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_int(self.nanoseconds)
+    builder.append("ns")
+  end
+
+  def __eq__(self, other: Duration): Bool
+    self.nanoseconds == other.nanoseconds
+  end
+
+  def __hash__(self): Int
+    self.nanoseconds
+  end
+
+  def compare(self, other: Duration): Ordering
+    self.nanoseconds.compare(other.nanoseconds)
+  end
+
+  def __add__(self, other: Duration): Duration
+    Duration(self.nanoseconds + other.nanoseconds)
+  end
+
+  def __sub__(self, other: Duration): Duration
+    Duration(self.nanoseconds - other.nanoseconds)
+  end
+
+  def __neg__(self): Duration
+    Duration(-self.nanoseconds)
+  end
+
+  def is_negative(self): Bool
+    self.nanoseconds < 0
+  end
+
+  def checked_add(self, other: Duration): Result[Duration, TimeError]
+    _checked_add(self.nanoseconds, other.nanoseconds).map() { |value: Int| Duration(value) }
+  end
+
+  def checked_subtract(self, other: Duration): Result[Duration, TimeError]
+    _checked_subtract(self.nanoseconds, other.nanoseconds).map() { |value: Int| Duration(value) }
+  end
+
+  def as_microseconds(self): Int
+    self.nanoseconds / NANOS_PER_MICROSECOND
+  end
+
+  def as_milliseconds(self): Int
+    self.nanoseconds / NANOS_PER_MILLISECOND
+  end
+
+  def as_seconds(self): Int
+    self.nanoseconds / NANOS_PER_SECOND
+  end
+end
+
+frozen class Timestamp implements Hashable, Comparable
+  nanoseconds: Int
+
+  def init(mut self, nanoseconds: Int)
+    self.nanoseconds = nanoseconds
+  end
+
+  def __eq__(self, other: Timestamp): Bool
+    self.nanoseconds == other.nanoseconds
+  end
+
+  def __hash__(self): Int
+    self.nanoseconds
+  end
+
+  def compare(self, other: Timestamp): Ordering
+    self.nanoseconds.compare(other.nanoseconds)
+  end
+
+  def add(self, duration: Duration): Timestamp
+    Timestamp(self.nanoseconds + duration.nanoseconds)
+  end
+
+  def checked_add(self, duration: Duration): Result[Timestamp, TimeError]
+    _checked_add(self.nanoseconds, duration.nanoseconds).map() { |value: Int| Timestamp(value) }
+  end
+
+  def difference(self, other: Timestamp): Duration
+    Duration(self.nanoseconds - other.nanoseconds)
+  end
+
+  def checked_difference(self, other: Timestamp): Result[Duration, TimeError]
+    _checked_subtract(self.nanoseconds, other.nanoseconds).map() { |value: Int| Duration(value) }
+  end
+end
+
+frozen class Instant implements Hashable, Comparable
+  nanoseconds: Int
+
+  def init(mut self, nanoseconds: Int)
+    self.nanoseconds = nanoseconds
+  end
+
+  def __eq__(self, other: Instant): Bool
+    self.nanoseconds == other.nanoseconds
+  end
+
+  def __hash__(self): Int
+    self.nanoseconds
+  end
+
+  def compare(self, other: Instant): Ordering
+    self.nanoseconds.compare(other.nanoseconds)
+  end
+
+  def elapsed_since(self, earlier: Instant): Result[Duration, TimeError]
+    if self.nanoseconds < earlier.nanoseconds
+      Err(TimeError.ReversedInstant)
+    else
+      _checked_subtract(self.nanoseconds, earlier.nanoseconds).map() { |value: Int| Duration(value) }
+    end
+  end
+end
+
+def nanoseconds(value: Int): Duration
+  Duration(value)
+end
+
+def microseconds(value: Int): Result[Duration, TimeError]
+  if value < -9223372036854775 or value > 9223372036854775
+    Err(TimeError.Overflow)
+  else
+    Ok(Duration(value * NANOS_PER_MICROSECOND))
+  end
+end
+
+def milliseconds(value: Int): Result[Duration, TimeError]
+  if value < -9223372036854 or value > 9223372036854
+    Err(TimeError.Overflow)
+  else
+    Ok(Duration(value * NANOS_PER_MILLISECOND))
+  end
+end
+
+def seconds(value: Int): Result[Duration, TimeError]
+  if value < -9223372036 or value > 9223372036
+    Err(TimeError.Overflow)
+  else
+    Ok(Duration(value * NANOS_PER_SECOND))
+  end
+end
+
+def now(): Timestamp with Clock.Now
+  Timestamp(sys.clock.now())
+end
+
+def monotonic(): Instant with Clock.Monotonic
+  Instant(sys.clock.monotonic())
+end
+
+def sleep(duration: Duration): Result[(), TimeError] with Clock.Sleep
+  if duration.is_negative()
+    Err(TimeError.NegativeDuration)
+  else
+    sys.clock.sleep(duration.nanoseconds)
+    Ok(())
+  end
+end

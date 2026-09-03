@@ -18,6 +18,7 @@ const TLS_PATH: &str = "std.tls";
 const HTTP_PATH: &str = "std.http";
 const BASE64_PATH: &str = "std.base64";
 const JSON_PATH: &str = "std.json";
+const TIME_PATH: &str = "std.time";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
@@ -26,6 +27,7 @@ const TLS_SOURCE: &str = include_str!("../../../std/tls.lm");
 const HTTP_SOURCE: &str = include_str!("../../../std/http.lm");
 const BASE64_SOURCE: &str = include_str!("../../../std/base64.lm");
 const JSON_SOURCE: &str = include_str!("../../../std/json.lm");
+const TIME_SOURCE: &str = include_str!("../../../std/time.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
@@ -34,6 +36,7 @@ static TLS: OnceLock<CompiledModule> = OnceLock::new();
 static HTTP: OnceLock<CompiledModule> = OnceLock::new();
 static BASE64: OnceLock<CompiledModule> = OnceLock::new();
 static JSON: OnceLock<CompiledModule> = OnceLock::new();
+static TIME: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
@@ -65,6 +68,7 @@ impl StandardCatalog {
             HTTP_PATH,
             BASE64_PATH,
             JSON_PATH,
+            TIME_PATH,
         ]
     }
 
@@ -80,6 +84,7 @@ impl StandardCatalog {
             HTTP_PATH => Some(http()),
             BASE64_PATH => Some(base64()),
             JSON_PATH => Some(json()),
+            TIME_PATH => Some(time()),
             _ => None,
         }
     }
@@ -93,6 +98,7 @@ impl StandardCatalog {
         let mut needs_http = false;
         let mut needs_base64 = false;
         let mut needs_json = false;
+        let mut needs_time = false;
         for path in paths {
             match *path {
                 IO_PATH => needs_io = true,
@@ -105,6 +111,7 @@ impl StandardCatalog {
                 }
                 BASE64_PATH => needs_base64 = true,
                 JSON_PATH => needs_json = true,
+                TIME_PATH => needs_time = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
@@ -116,6 +123,7 @@ impl StandardCatalog {
             needs_http,
             needs_base64,
             needs_json,
+            needs_time,
         ))
     }
 
@@ -193,6 +201,10 @@ fn json() -> &'static CompiledModule {
     JSON.get_or_init(|| compile_bundled(JSON_PATH, "std/json.lm", JSON_SOURCE, &[]))
 }
 
+fn time() -> &'static CompiledModule {
+    TIME.get_or_init(|| compile_bundled(TIME_PATH, "std/time.lm", TIME_SOURCE, &[]))
+}
+
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
     [
@@ -203,6 +215,7 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
         TLS_PATH,
         BASE64_PATH,
         JSON_PATH,
+        TIME_PATH,
     ]
     .into_iter()
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
@@ -216,6 +229,7 @@ fn selected_modules(
     needs_http: bool,
     needs_base64: bool,
     needs_json: bool,
+    needs_time: bool,
 ) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
     if needs_io {
@@ -239,6 +253,9 @@ fn selected_modules(
     if needs_json {
         modules.push(json());
     }
+    if needs_time {
+        modules.push(time());
+    }
     modules
 }
 
@@ -251,6 +268,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
     let mut needs_http = false;
     let mut needs_base64 = false;
     let mut needs_json = false;
+    let mut needs_time = false;
     for path in uses {
         match module_for_use(path) {
             Some(IO_PATH) => needs_io = true,
@@ -263,6 +281,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
             }
             Some(BASE64_PATH) => needs_base64 = true,
             Some(JSON_PATH) => needs_json = true,
+            Some(TIME_PATH) => needs_time = true,
             _ => {}
         }
     }
@@ -274,6 +293,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
         needs_http,
         needs_base64,
         needs_json,
+        needs_time,
     )
 }
 
@@ -344,6 +364,7 @@ mod tests {
                 HTTP_PATH,
                 BASE64_PATH,
                 JSON_PATH,
+                TIME_PATH,
             ]
         );
         assert!(modules_for_uses(&[]).is_empty());
@@ -409,5 +430,11 @@ mod tests {
     fn json_source_selects_only_json() {
         let compiled = compile("use std.json.parse\nparse(\"null\")\n");
         assert_eq!(compiled.standard_modules, &[JSON_PATH]);
+    }
+
+    #[test]
+    fn time_source_selects_only_time() {
+        let compiled = compile("use std.time.seconds\nseconds(2)\n");
+        assert_eq!(compiled.standard_modules, &[TIME_PATH]);
     }
 }
