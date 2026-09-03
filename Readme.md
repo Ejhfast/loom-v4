@@ -4,7 +4,44 @@ Loom is a capability-secure programming language with lightweight processes and 
 
 See the runnable [examples](examples/). Read the [language specification](docs/language-spec.md) for the complete language definition.
 
-## Crates
+## Build
+
+The Nix shell supplies Rust and applies the project memory limit.
+
+```sh
+nix-shell --run "cargo build --workspace"
+nix-shell --run "cargo test --workspace"
+```
+
+Run an example through Cargo:
+
+```sh
+nix-shell --run "cargo run -p lm-cli -- run --show-result examples/01-basics/factorial.lm"
+```
+
+Run `nix-shell` to open an interactive build shell.
+
+## CLI
+
+The build creates `target/debug/lm`.
+
+- `lm new <name>` creates a package.
+- `lm check <file.lm>` checks one source file.
+- `lm build [path]` builds a source file or package.
+- `lm run [options] [path]` builds or loads a program and runs it.
+- `lm disasm <path>` prints decoded bytecode.
+- `lm inspect <path>` describes artifacts, snapshots, or live state.
+- `lm snapshot save` saves a snapshot.
+- `lm snapshot verify` verifies a snapshot.
+- `lm snapshot run` restores and runs a snapshot.
+
+Run `lm --help` for command options.
+
+## Organization
+
+Most implementation code is under `crates/`.
+
+### Crates
 
 - `lm-abi` defines operation, effect-group, resource, and intrinsic manifests.
 - `lm-scc` finds strongly connected components in dense graphs.
@@ -24,3 +61,12 @@ See the runnable [examples](examples/). Read the [language specification](docs/l
 - `lm-cli` provides the `lm` command-line program.
 - `lm-host` implements operating-system capabilities for the command line.
 - `lm-testkit` supports language tests and benchmarks.
+
+### Other directories
+
+- `core/` contains the core language classes and interfaces.
+- `std/` contains standard library modules.
+- `examples/` contains runnable programs with checked output.
+- `tests/` contains source-level language cases.
+- `benchmarks/` contains performance programs and results.
+- `docs/` contains the language specification.
