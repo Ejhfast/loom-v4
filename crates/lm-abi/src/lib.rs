@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 43;
+pub const ABI_VERSION: u32 = 44;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -911,9 +911,12 @@ pub const INTRINSIC_LIST_SWAP: IntrinsicSlot = 238;
 pub const INTRINSIC_BYTE_BUFFER_SET: IntrinsicSlot = 239;
 pub const INTRINSIC_BYTE_BUFFER_CAPACITY: IntrinsicSlot = 240;
 pub const INTRINSIC_BYTE_BUFFER_TRUNCATE: IntrinsicSlot = 241;
+pub const INTRINSIC_DIGEST_SHA256: IntrinsicSlot = 242;
+pub const INTRINSIC_DIGEST_CRC32: IntrinsicSlot = 243;
+pub const INTRINSIC_DIGEST_MD5: IntrinsicSlot = 244;
 
 /// Pure intrinsics in stable slot order.
-pub static INTRINSICS: [IntrinsicDef; 242] = [
+pub static INTRINSICS: [IntrinsicDef; 245] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2413,6 +2416,24 @@ pub static INTRINSICS: [IntrinsicDef; 242] = [
         name: "byte_buffer.truncate",
         params: &[AbiType::BYTE_BUFFER, AbiType::INT],
         reply: AbiType::BYTE_BUFFER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "digest.sha256",
+        params: &[AbiType::BYTES],
+        reply: AbiType::BYTES,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "digest.crc32",
+        params: &[AbiType::BYTES],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "digest.md5",
+        params: &[AbiType::BYTES],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
 ];

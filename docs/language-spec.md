@@ -5198,7 +5198,33 @@ The decoder rejects whitespace, missing padding, invalid bytes, and noncanonical
 
 The module uses ordinary Loom code over `Bytes` and integer bit operators.
 
-### 24.12 JSON
+### 24.12 Digests and UUIDs
+
+`std.digest` provides one-shot SHA-256, MD5, and CRC-32/ISO-HDLC operations over `Bytes`.
+
+```lm
+sha256(bytes: Bytes) -> Bytes
+sha256_hex(bytes: Bytes) -> String
+md5(bytes: Bytes) -> Bytes
+md5_hex(bytes: Bytes) -> String
+crc32(bytes: Bytes) -> Int
+```
+
+SHA-256 returns 32 bytes. MD5 returns 16 bytes. MD5 supports compatibility protocols, not secure hashing.
+
+CRC-32 returns its unsigned 32-bit value as a nonnegative `Int`.
+
+`std.uuid` defines immutable RFC 9562 UUID values.
+
+`parse` accepts the canonical 8-4-4-4-12 hexadecimal form. Display emits lowercase canonical text.
+
+UUID equality, hashing, and ordering use all 16 bytes.
+
+`v4` uses `Entropy.Bytes`. `v7` uses `Clock.Now` and `Entropy.Bytes`.
+
+Both generators set the RFC variant bits. They return explicit errors for unavailable entropy or invalid input.
+
+### 24.13 JSON
 
 The distribution includes a small `std/json` module.
 
@@ -5237,7 +5263,7 @@ Stringification rejects non-finite numbers.
 
 JSON uses ordinary Loom code over `String`, `List`, and `Map`.
 
-### 24.13 Typed VM utilities
+### 24.14 Typed VM utilities
 
 The standard library does not reintroduce an `Answer(Any)` decision enum or a variadic helper that would require type packs. Exact-operation elimination is already ordinary and small enough to package in user code:
 

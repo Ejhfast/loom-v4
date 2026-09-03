@@ -1135,6 +1135,12 @@ pub enum NativeInstr {
     RegexMatchText,
     /// Load the capture count, including the complete match.
     RegexMatchGroupCount,
+    /// Compute the SHA-256 digest of immutable bytes.
+    DigestSha256,
+    /// Compute the CRC-32/ISO-HDLC checksum of immutable bytes.
+    DigestCrc32,
+    /// Compute one MD5 digest for compatibility protocols.
+    DigestMd5,
 }
 
 impl Instr {
@@ -1942,7 +1948,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 67;
+pub const VERSION: u16 = 68;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2198,6 +2204,9 @@ const EXT_LIST_SWAP: u8 = 20;
 const EXT_BB_SET: u8 = 21;
 const EXT_BB_CAPACITY: u8 = 22;
 const EXT_BB_TRUNCATE: u8 = 23;
+const EXT_DIGEST_SHA256: u8 = 24;
+const EXT_DIGEST_CRC32: u8 = 25;
+const EXT_DIGEST_MD5: u8 = 26;
 
 fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
@@ -2215,6 +2224,9 @@ fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
         NativeInstr::BbSet => EXT_BB_SET,
         NativeInstr::BbCapacity => EXT_BB_CAPACITY,
         NativeInstr::BbTruncate => EXT_BB_TRUNCATE,
+        NativeInstr::DigestSha256 => EXT_DIGEST_SHA256,
+        NativeInstr::DigestCrc32 => EXT_DIGEST_CRC32,
+        NativeInstr::DigestMd5 => EXT_DIGEST_MD5,
         _ => return None,
     })
 }
@@ -3050,7 +3062,10 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             | NativeInstr::RegexMatchGroupCount
             | NativeInstr::BbSet
             | NativeInstr::BbCapacity
-            | NativeInstr::BbTruncate),
+            | NativeInstr::BbTruncate
+            | NativeInstr::DigestSha256
+            | NativeInstr::DigestCrc32
+            | NativeInstr::DigestMd5),
         ) => {
             out.push(OP_EXTENSION);
             out.push(native_extension_tag(*extended).expect("an extended instruction has one tag"));
@@ -4428,6 +4443,9 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             EXT_BB_SET => Instr::Native(NativeInstr::BbSet),
             EXT_BB_CAPACITY => Instr::Native(NativeInstr::BbCapacity),
             EXT_BB_TRUNCATE => Instr::Native(NativeInstr::BbTruncate),
+            EXT_DIGEST_SHA256 => Instr::Native(NativeInstr::DigestSha256),
+            EXT_DIGEST_CRC32 => Instr::Native(NativeInstr::DigestCrc32),
+            EXT_DIGEST_MD5 => Instr::Native(NativeInstr::DigestMd5),
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
@@ -5216,6 +5234,9 @@ mod tests {
             Instr::Native(NativeInstr::BbSet),
             Instr::Native(NativeInstr::BbCapacity),
             Instr::Native(NativeInstr::BbTruncate),
+            Instr::Native(NativeInstr::DigestSha256),
+            Instr::Native(NativeInstr::DigestCrc32),
+            Instr::Native(NativeInstr::DigestMd5),
             Instr::Native(NativeInstr::HashCombine),
             Instr::Native(NativeInstr::HashUnorderedCombine),
             Instr::Numeric(NumericInstr::IntBitAnd),

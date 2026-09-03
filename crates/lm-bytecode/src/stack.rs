@@ -173,6 +173,9 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::RegexMatchEnd)
         | Instr::Native(NativeInstr::RegexMatchText)
         | Instr::Native(NativeInstr::RegexMatchGroupCount)
+        | Instr::Native(NativeInstr::DigestSha256)
+        | Instr::Native(NativeInstr::DigestCrc32)
+        | Instr::Native(NativeInstr::DigestMd5)
         | Instr::Freeze
         | Instr::Digest { .. } => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),

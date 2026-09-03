@@ -1143,17 +1143,48 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BytesTextView) => {
+                self.bytes_text_view()?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::DigestSha256) => {
                 let reference = self.pop_obj()?;
-                let text = match self.vm.heap.get(reference) {
-                    Object::Bytes(bytes) => bytes.utf8_view().ok_or(FaultCode::BadCast)?,
+                let digest = match self.vm.heap.get(reference) {
+                    Object::Bytes(bytes) => lm_digest::sha256(bytes.as_slice()),
                     _ => return Err(BAD_TYPE),
                 };
-                let value = self.alloc(Object::Substring(text))?;
+                let value = self.alloc(Object::Bytes(SharedBytes::from(&digest)))?;
                 self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::DigestMd5) => {
+                let reference = self.pop_obj()?;
+                let digest = match self.vm.heap.get(reference) {
+                    Object::Bytes(bytes) => lm_digest::md5(bytes.as_slice()),
+                    _ => return Err(BAD_TYPE),
+                };
+                let value = self.alloc(Object::Bytes(SharedBytes::from(&digest)))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::DigestCrc32) => {
+                let reference = self.pop_obj()?;
+                let checksum = match self.vm.heap.get(reference) {
+                    Object::Bytes(bytes) => lm_digest::crc32(bytes.as_slice()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(i64::from(checksum)))?;
             }
             _ => unreachable!("the Bytes dispatcher receives one native value instruction"),
         }
         Ok(())
+    }
+
+    #[inline(never)]
+    fn bytes_text_view(&mut self) -> Result<(), FaultCode> {
+        let reference = self.pop_obj()?;
+        let text = match self.vm.heap.get(reference) {
+            Object::Bytes(bytes) => bytes.utf8_view().ok_or(FaultCode::BadCast)?,
+            _ => return Err(BAD_TYPE),
+        };
+        let value = self.alloc(Object::Substring(text))?;
+        self.push(value)
     }
 
     /// Append text to a string builder with a growth reservation.

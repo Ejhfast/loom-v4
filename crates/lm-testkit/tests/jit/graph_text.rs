@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn content_digests_match_across_engines() {
+    let source = concat!(
+        "use std.digest.crc32\n",
+        "use std.digest.md5\n",
+        "use std.digest.sha256\n",
+        "input = b\"123456789\"\n",
+        "i = 0\nchecksum = 0\nresult = b\"\"\nlegacy = b\"\"\n",
+        "while i < 1000\n",
+        "  checksum = checksum ^ crc32(input)\n",
+        "  result = sha256(input)\n",
+        "  legacy = md5(input)\n",
+        "  i = i + 1\n",
+        "end\n",
+        "(checksum, result.hex(), legacy.hex())\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
 fn byte_index_faults_match_the_interpreter() {
     for index in [-1, 4] {
         let source = format!(

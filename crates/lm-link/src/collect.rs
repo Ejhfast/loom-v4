@@ -1063,7 +1063,10 @@ fn native_edges(
         | NativeInstr::BytesCompact
         | NativeInstr::BytesHash
         | NativeInstr::HashCombine
-        | NativeInstr::HashUnorderedCombine => {}
+        | NativeInstr::HashUnorderedCombine
+        | NativeInstr::DigestSha256
+        | NativeInstr::DigestCrc32
+        | NativeInstr::DigestMd5 => {}
     }
 }
 

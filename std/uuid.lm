@@ -1,0 +1,206 @@
+# Standard library: RFC 9562 UUID values.
+
+use std.time.Timestamp
+use std.time.now
+
+enum UuidError implements Error
+  InvalidSyntax
+  InvalidRandomLength
+  InvalidTimestamp
+  Entropy(error: EntropyError)
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in InvalidSyntax
+      builder.append("the UUID text has invalid syntax")
+    in InvalidRandomLength
+      builder.append("the UUID random input has an invalid length")
+    in InvalidTimestamp
+      builder.append("the UUID timestamp is outside the supported range")
+    in Entropy(error)
+      error.append_to(builder)
+    end
+  end
+end
+
+enum UuidVariant implements Display
+  Ncs
+  Rfc4122
+  Microsoft
+  Future
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in Ncs       then builder.append("NCS")
+    in Rfc4122   then builder.append("RFC 4122")
+    in Microsoft then builder.append("Microsoft")
+    in Future    then builder.append("future")
+    end
+  end
+end
+
+def _uuid_hex_value(byte: Int): Int
+  if byte >= 48 and byte <= 57
+    byte - 48
+  elsif byte >= 65 and byte <= 70
+    byte - 55
+  elsif byte >= 97 and byte <= 102
+    byte - 87
+  else
+    -1
+  end
+end
+
+def _uuid_parse_bytes(text: Text): Result[Bytes, UuidError]
+  source = text.bytes()
+  if source.len() != 36
+    return Err(UuidError.InvalidSyntax)
+  end
+  output = ByteBuffer()
+  index = 0
+  while index < source.len()
+    if index == 8 or index == 13 or index == 18 or index == 23
+      if source.at(index) != 45
+        return Err(UuidError.InvalidSyntax)
+      end
+      index = index + 1
+    else
+      high = _uuid_hex_value(source.at(index))
+      low = _uuid_hex_value(source.at(index + 1))
+      if high < 0 or low < 0
+        return Err(UuidError.InvalidSyntax)
+      end
+      output.append(high * 16 + low)
+      index = index + 2
+    end
+  end
+  Ok(output.finish())
+end
+
+frozen class Uuid implements Display, Hashable, Comparable
+  bytes: Bytes
+
+  def init(mut self, bytes: Bytes)
+    assert(bytes.len() == 16)
+    self.bytes = bytes
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    alphabet = b"0123456789abcdef"
+    output = ByteBuffer()
+    index = 0
+    while index < 16
+      if index == 4 or index == 6 or index == 8 or index == 10
+        output.append(45)
+      end
+      byte = self.bytes.at(index)
+      output.append(alphabet.at(byte >> 4))
+      output.append(alphabet.at(byte & 15))
+      index = index + 1
+    end
+    builder.append(output.finish().text())
+  end
+
+  def __eq__(self, other: Uuid): Bool
+    self.bytes == other.bytes
+  end
+
+  def __hash__(self): Int
+    self.bytes.__hash__()
+  end
+
+  def compare(self, other: Uuid): Ordering
+    self.bytes.compare(other.bytes)
+  end
+
+  def version(self): Int
+    (self.bytes.at(6) >> 4) & 15
+  end
+
+  def variant(self): UuidVariant
+    byte = self.bytes.at(8)
+    if byte & 128 == 0
+      UuidVariant.Ncs
+    elsif byte & 192 == 128
+      UuidVariant.Rfc4122
+    elsif byte & 224 == 192
+      UuidVariant.Microsoft
+    else
+      UuidVariant.Future
+    end
+  end
+
+  def is_nil(self): Bool
+    index = 0
+    while index < 16
+      if self.bytes.at(index) != 0
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+end
+
+def parse(text: Text): Result[Uuid, UuidError]
+  _uuid_parse_bytes(text).map() { |bytes: Bytes| Uuid(bytes) }
+end
+
+def nil(): Uuid
+  Uuid(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+end
+
+def v4_from(random: Bytes): Result[Uuid, UuidError]
+  if random.len() != 16
+    return Err(UuidError.InvalidRandomLength)
+  end
+  output = ByteBuffer()
+  output.extend(random)
+  output.set(6, (output.at_or(6, 0) & 15) | 64)
+  output.set(8, (output.at_or(8, 0) & 63) | 128)
+  Ok(Uuid(output.finish()))
+end
+
+def v4(): Result[Uuid, UuidError] with Entropy.Bytes
+  case sys.entropy.bytes(16)
+  in Ok(random) then v4_from(random)
+  in Err(error) then Err(UuidError.Entropy(error))
+  end
+end
+
+def v7_from(timestamp: Timestamp, random: Bytes): Result[Uuid, UuidError]
+  if random.len() != 10
+    return Err(UuidError.InvalidRandomLength)
+  end
+  if timestamp.nanoseconds < 0
+    return Err(UuidError.InvalidTimestamp)
+  end
+  milliseconds = timestamp.nanoseconds / 1000000
+  if milliseconds > 281474976710655
+    return Err(UuidError.InvalidTimestamp)
+  end
+
+  output = ByteBuffer()
+  output.append((milliseconds >>> 40) & 255)
+  output.append((milliseconds >>> 32) & 255)
+  output.append((milliseconds >>> 24) & 255)
+  output.append((milliseconds >>> 16) & 255)
+  output.append((milliseconds >>> 8) & 255)
+  output.append(milliseconds & 255)
+  output.append((random.at(0) & 15) | 112)
+  output.append(random.at(1))
+  output.append((random.at(2) & 63) | 128)
+  index = 3
+  while index < 10
+    output.append(random.at(index))
+    index = index + 1
+  end
+  Ok(Uuid(output.finish()))
+end
+
+def v7(): Result[Uuid, UuidError] with Clock.Now, Entropy.Bytes
+  case sys.entropy.bytes(10)
+  in Ok(random) then v7_from(now(), random)
+  in Err(error) then Err(UuidError.Entropy(error))
+  end
+end

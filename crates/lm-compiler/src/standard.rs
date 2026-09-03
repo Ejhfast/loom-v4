@@ -22,6 +22,8 @@ const TIME_PATH: &str = "std.time";
 const RANDOM_PATH: &str = "std.random";
 const PATH_PATH: &str = "std.path";
 const URL_PATH: &str = "std.url";
+const DIGEST_PATH: &str = "std.digest";
+const UUID_PATH: &str = "std.uuid";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
@@ -34,6 +36,8 @@ const TIME_SOURCE: &str = include_str!("../../../std/time.lm");
 const RANDOM_SOURCE: &str = include_str!("../../../std/random.lm");
 const PATH_SOURCE: &str = include_str!("../../../std/path.lm");
 const URL_SOURCE: &str = include_str!("../../../std/url.lm");
+const DIGEST_SOURCE: &str = include_str!("../../../std/digest.lm");
+const UUID_SOURCE: &str = include_str!("../../../std/uuid.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
@@ -46,6 +50,8 @@ static TIME: OnceLock<CompiledModule> = OnceLock::new();
 static RANDOM: OnceLock<CompiledModule> = OnceLock::new();
 static PATH: OnceLock<CompiledModule> = OnceLock::new();
 static URL: OnceLock<CompiledModule> = OnceLock::new();
+static DIGEST: OnceLock<CompiledModule> = OnceLock::new();
+static UUID: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
@@ -81,6 +87,8 @@ impl StandardCatalog {
             RANDOM_PATH,
             PATH_PATH,
             URL_PATH,
+            DIGEST_PATH,
+            UUID_PATH,
         ]
     }
 
@@ -100,6 +108,8 @@ impl StandardCatalog {
             RANDOM_PATH => Some(random()),
             PATH_PATH => Some(path_module()),
             URL_PATH => Some(url_module()),
+            DIGEST_PATH => Some(digest()),
+            UUID_PATH => Some(uuid()),
             _ => None,
         }
     }
@@ -124,6 +134,11 @@ impl StandardCatalog {
                 RANDOM_PATH => needs.random = true,
                 PATH_PATH => needs.path = true,
                 URL_PATH => needs.url = true,
+                DIGEST_PATH => needs.digest = true,
+                UUID_PATH => {
+                    needs.time = true;
+                    needs.uuid = true;
+                }
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
@@ -227,6 +242,14 @@ fn url_module() -> &'static CompiledModule {
     URL.get_or_init(|| compile_bundled(URL_PATH, "std/url.lm", URL_SOURCE, &[]))
 }
 
+fn digest() -> &'static CompiledModule {
+    DIGEST.get_or_init(|| compile_bundled(DIGEST_PATH, "std/digest.lm", DIGEST_SOURCE, &[]))
+}
+
+fn uuid() -> &'static CompiledModule {
+    UUID.get_or_init(|| compile_bundled(UUID_PATH, "std/uuid.lm", UUID_SOURCE, &[time()]))
+}
+
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
     [
@@ -241,6 +264,8 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
         RANDOM_PATH,
         PATH_PATH,
         URL_PATH,
+        DIGEST_PATH,
+        UUID_PATH,
     ]
     .into_iter()
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
@@ -259,6 +284,8 @@ struct StandardNeeds {
     random: bool,
     path: bool,
     url: bool,
+    digest: bool,
+    uuid: bool,
 }
 
 fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
@@ -296,6 +323,12 @@ fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
     if needs.random {
         modules.push(random());
     }
+    if needs.digest {
+        modules.push(digest());
+    }
+    if needs.uuid {
+        modules.push(uuid());
+    }
     modules
 }
 
@@ -319,6 +352,11 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
             Some(RANDOM_PATH) => needs.random = true,
             Some(PATH_PATH) => needs.path = true,
             Some(URL_PATH) => needs.url = true,
+            Some(DIGEST_PATH) => needs.digest = true,
+            Some(UUID_PATH) => {
+                needs.time = true;
+                needs.uuid = true;
+            }
             _ => {}
         }
     }
@@ -396,6 +434,8 @@ mod tests {
                 RANDOM_PATH,
                 PATH_PATH,
                 URL_PATH,
+                DIGEST_PATH,
+                UUID_PATH,
             ]
         );
         assert!(modules_for_uses(&[]).is_empty());

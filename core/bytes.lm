@@ -213,6 +213,18 @@ def _bytes_from_hex(text: Text): Result[Bytes, HexError]
   Ok(output.finish())
 end
 
+def _digest_sha256(bytes: Bytes): Bytes
+  intrinsic("digest.sha256", bytes)
+end
+
+def _digest_crc32(bytes: Bytes): Int
+  intrinsic("digest.crc32", bytes)
+end
+
+def _digest_md5(bytes: Bytes): Bytes
+  intrinsic("digest.md5", bytes)
+end
+
 final class StringBuilder implements Copyable
   def append(mut self, text: Text): StringBuilder
     intrinsic("string_builder.append", self, text)

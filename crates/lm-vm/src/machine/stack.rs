@@ -193,7 +193,7 @@ impl Machine {
         Ok(())
     }
 
-    #[inline(never)]
+    #[inline]
     pub(super) fn int_rem(&mut self) -> Result<(), FaultCode> {
         let (at, left, right) = self.int_pair()?;
         if right == 0 {

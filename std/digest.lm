@@ -1,0 +1,22 @@
+# Standard library: cryptographic digests and checksums.
+
+def sha256(bytes: Bytes): Bytes
+  _digest_sha256(bytes)
+end
+
+def sha256_hex(bytes: Bytes): String
+  sha256(bytes).hex()
+end
+
+# MD5 supports compatibility protocols. It does not provide secure hashing.
+def md5(bytes: Bytes): Bytes
+  _digest_md5(bytes)
+end
+
+def md5_hex(bytes: Bytes): String
+  md5(bytes).hex()
+end
+
+def crc32(bytes: Bytes): Int
+  _digest_crc32(bytes)
+end
