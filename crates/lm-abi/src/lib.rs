@@ -2508,6 +2508,21 @@ pub struct OpDef {
     pub snapshot: SnapshotClass,
 }
 
+/// Draw one uniform value from the half-open range `0..span`.
+///
+/// The source must provide independent uniform `u64` values. The span
+/// must be nonzero.
+pub fn sample_uniform_below(span: u64, mut next: impl FnMut() -> u64) -> u64 {
+    assert_ne!(span, 0, "the uniform range must be nonempty");
+    let threshold = span.wrapping_neg() % span;
+    loop {
+        let value = next();
+        if value >= threshold {
+            return value % span;
+        }
+    }
+}
+
 impl OpDef {
     /// True when a pending instance of this operation is a live host
     /// attachment.
@@ -4721,5 +4736,13 @@ mod tests {
         assert_eq!(fixed_member("Io", "Write"), Some(OP_IO_WRITE));
         assert_eq!(fixed_member("Vm", "Run"), None);
         assert_eq!(fixed_member("Vm", "New"), None);
+    }
+
+    #[test]
+    fn uniform_sampling_rejects_the_biased_prefix() {
+        let mut values = [1_u64, 17].into_iter();
+        let sampled = sample_uniform_below(10, || values.next().expect("a sample remains"));
+        assert_eq!(sampled, 7);
+        assert!(values.next().is_none());
     }
 }

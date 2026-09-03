@@ -3886,7 +3886,9 @@ Rand.Int        (Int, Int) -> Int  # half-open [low, high)
 Entropy.Bytes   (Int) -> Result[Bytes, EntropyError]
 ```
 
-Range validation is ordinary deterministic checking before host entropy use.
+`Rand.Int` validates the range before sampling. Rejection sampling removes modulo bias.
+
+`Entropy.Bytes` uses the host's secure entropy source. It does not advance deterministic `Rand.Int` state.
 
 ### 23.5 Terminals and process signals
 
@@ -5113,7 +5115,13 @@ Calendar years range from 1 through 9999. UTC offsets have minute precision and 
 
 The parser rejects leap seconds. `format_rfc3339` emits the shortest exact fractional part and preserves the stored offset.
 
-`std.random` provides bytes, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
+`std.random.Random` uses SplitMix64. A seed selects one portable sequence.
+
+Its integer sampling uses rejection. It does not use biased remainder reduction.
+
+`std.random` also provides host-backed integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`.
+
+Host-backed selection uses the exact `Rand.Int` row. Secure bytes and entropy seeding use `Entropy.Bytes`.
 
 Core network code defines DNS, TCP, and native TLS stream operations.
 

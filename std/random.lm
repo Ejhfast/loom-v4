@@ -1,0 +1,131 @@
+# Standard library: deterministic and host-provided randomness.
+
+enum RandomError implements Error
+  InvalidRange
+  EmptyCollection
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in InvalidRange    then "the random range is empty"
+    in EmptyCollection then "the random collection is empty"
+    end
+    builder.append(text)
+  end
+end
+
+# Random uses SplitMix64. Each seed defines one portable sequence.
+final class Random
+  state: Int
+
+  def init(mut self, seed: Int)
+    self.state = seed
+  end
+
+  def next_bits(mut self): Int
+    self.state = self.state.wrapping_add(-7046029254386353131)
+    value = self.state
+    value = (value ^ (value >>> 30)).wrapping_mul(-4658895280553007687)
+    value = (value ^ (value >>> 27)).wrapping_mul(-7723592293110705685)
+    value ^ (value >>> 31)
+  end
+
+  def next_float(mut self): Float
+    (self.next_bits() >>> 11).to_float() / 9007199254740992.0
+  end
+
+  def boolean(mut self): Bool
+    (self.next_bits() & 1) != 0
+  end
+
+  def int(mut self, low: Int, high: Int): Result[Int, RandomError]
+    if low >= high
+      return Err(RandomError.InvalidRange)
+    end
+
+    # Wide signed ranges use rejection over all 64-bit patterns.
+    if low < 0 and high > low + 9223372036854775807
+      loop do
+        value = self.next_bits()
+        if value >= low and value < high
+          return Ok(value)
+        end
+      end
+    end
+
+    span = high - low
+    threshold = ((9223372036854775807 % span) + 1) % span
+    loop do
+      value = self.next_bits() >>> 1
+      if value >= threshold
+        return Ok(low + value % span)
+      end
+    end
+  end
+
+  def choose[T](mut self, values: List[T]): Option[T]
+    if values.is_empty()
+      return None
+    end
+    index = self.int(0, values.len()).expect("the collection range is valid")
+    Some(values.at(index))
+  end
+
+  def shuffle[T](mut self, mut values: List[T]): List[T]
+    index = values.len() - 1
+    while index > 0
+      other = self.int(0, index + 1).expect("the shuffle range is valid")
+      values.swap(index, other)
+      index = index - 1
+    end
+    values
+  end
+end
+
+def seeded(seed: Int): Random
+  Random(seed)
+end
+
+def from_entropy(): Result[Random, EntropyError] with Entropy.Bytes
+  source = sys.entropy.bytes(8)?
+  seed = 0
+  index = 0
+  while index < 8
+    seed = seed | (source.at(index) << (index * 8))
+    index = index + 1
+  end
+  Ok(Random(seed))
+end
+
+def bytes(count: Int): Result[Bytes, EntropyError] with Entropy.Bytes
+  sys.entropy.bytes(count)
+end
+
+def int(low: Int, high: Int): Result[Int, RandomError] with Rand.Int
+  if low >= high
+    Err(RandomError.InvalidRange)
+  else
+    Ok(sys.rand.int(low, high))
+  end
+end
+
+def boolean(): Bool with Rand.Int
+  sys.rand.int(0, 2) != 0
+end
+
+def choose[T](values: List[T]): Option[T] with Rand.Int
+  if values.is_empty()
+    None
+  else
+    Some(values.at(sys.rand.int(0, values.len())))
+  end
+end
+
+def shuffle[T](mut values: List[T]): List[T] with Rand.Int
+  index = values.len() - 1
+  while index > 0
+    other = sys.rand.int(0, index + 1)
+    values.swap(index, other)
+    index = index - 1
+  end
+  values
+end

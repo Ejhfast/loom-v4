@@ -1709,8 +1709,9 @@ impl RecordingHost {
                 if low >= high {
                     return HostStart::Failed("Rand.Int needs low < high".to_string());
                 }
-                let span = (high - low) as u64;
-                let value = low + (self.next_rand() % span) as i64;
+                let span = high.wrapping_sub(low) as u64;
+                let offset = lm_abi::sample_uniform_below(span, || self.next_rand());
+                let value = low.wrapping_add(offset as i64);
                 HostStart::Completed(HostValue::Int(value))
             }
             lm_abi::OP_FS_OPEN => {
