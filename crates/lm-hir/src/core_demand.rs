@@ -246,6 +246,7 @@ impl CoreDemand {
             }
             ExprKind::Continue => {}
             ExprKind::Str(_) => self.name("String"),
+            ExprKind::Regex(_) => self.name("Regex"),
             ExprKind::Char(_) => self.name("Char"),
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -635,6 +636,7 @@ impl CoreDemand {
     fn add_native_method_surface(&mut self, method: &str) {
         match method {
             "from_hex" => self.add_names(&["Bytes", "_bytes_from_hex"]),
+            "compile" => self.add_names(&["Regex", "RegexError", "Result", "_regex_compile"]),
             "value" => self.add_names(&["Result", "_result_fault_value"]),
             "source" => self.add_names(&["CodeError", "Result", "DefinitionSource", "Option"]),
             "definition" => self.add_names(&["CodeError", "Result", "DefinitionSpec"]),

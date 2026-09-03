@@ -42,6 +42,15 @@ impl Machine {
             ExtendedInstr::MapInternTextRange => {
                 self.exec_map_intern_text_range()?;
             }
+            ExtendedInstr::RegexCaptures { ty } => {
+                self.exec_regex_captures(module, envs, ty)?;
+            }
+            ExtendedInstr::RegexMatchGroup { ty } => {
+                self.exec_regex_match_group(module, envs, ty)?;
+            }
+            ExtendedInstr::RegexMatchNamed { ty } => {
+                self.exec_regex_match_named(module, envs, ty)?;
+            }
             ExtendedInstr::ListEpoch => {
                 self.exec_collection_iteration(CollectionIterationOp::ListEpoch)?;
             }
@@ -352,6 +361,34 @@ impl Machine {
                         let bytes =
                             SharedBytes::try_from_slice(bytes).map_err(|_| FaultCode::HeapLimit)?;
                         let value = self.alloc(Object::Bytes(bytes))?;
+                        self.vm.literals[cache] = value;
+                        value
+                    }
+                    _ => return Err(BAD_STATE),
+                };
+                self.push(value)?;
+            }
+            Instr::ConstRegex(idx) => {
+                let source = idx as usize;
+                let cache = module
+                    .strings
+                    .len()
+                    .checked_add(module.bytes.len())
+                    .and_then(|base| base.checked_add(source))
+                    .ok_or(BAD_STATE)?;
+                if self.vm.literals.len() <= cache {
+                    self.vm.literals.resize(cache + 1, Value::Uninit);
+                }
+                let value = match self.vm.literals[cache] {
+                    Value::Obj(reference) => Value::Obj(reference),
+                    Value::Uninit => {
+                        let regex = module
+                            .regex_literals
+                            .get(source)
+                            .and_then(Option::as_ref)
+                            .ok_or(BAD_STATE)?
+                            .clone();
+                        let value = self.alloc(Object::NativeRegex(regex))?;
                         self.vm.literals[cache] = value;
                         value
                     }

@@ -41,6 +41,9 @@ const EXIT_POLL: u32 = 26;
 const EXIT_STACK_ROLLOVER: u32 = 27;
 const EXIT_INLINE_CALL: u32 = 28;
 
+/// The helper result that represents one absent optional regex value.
+pub const REGEX_OPTION_NONE: u64 = u64::MAX;
+
 mod activation;
 mod opcode;
 mod summary;

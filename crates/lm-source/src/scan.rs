@@ -610,6 +610,9 @@ impl<'a> Scanner<'a> {
         if self.peek_byte(0) == b'"' && word == "b" {
             return self.scan_bytes(start);
         }
+        if self.peek_byte(0) == b'"' && word == "re" {
+            return self.scan_regex(start);
+        }
         let tok = match word {
             "and" => Tok::KwAnd,
             "or" => Tok::KwOr,
@@ -679,6 +682,51 @@ impl<'a> Scanner<'a> {
             _ => {}
         }
         self.push(tok, start);
+        Ok(())
+    }
+
+    /// Scan raw regular-expression source.
+    fn scan_regex(&mut self, start: usize) -> Result<(), Diagnostic> {
+        self.pos += 1;
+        let mut pattern = String::new();
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err(self.error("E0011", "unterminated regular-expression literal", start));
+            }
+            let ch = self.cur_char();
+            match ch {
+                '\n' | '\r' => {
+                    return Err(self.error(
+                        "E0011",
+                        "unterminated regular-expression literal",
+                        start,
+                    ));
+                }
+                '"' => {
+                    self.pos += 1;
+                    break;
+                }
+                '\\' => {
+                    pattern.push(ch);
+                    self.pos += 1;
+                    if self.pos >= self.bytes.len() || matches!(self.cur_char(), '\n' | '\r') {
+                        return Err(self.error(
+                            "E0011",
+                            "unterminated regular-expression literal",
+                            start,
+                        ));
+                    }
+                    let escaped = self.cur_char();
+                    pattern.push(escaped);
+                    self.pos += escaped.len_utf8();
+                }
+                _ => {
+                    pattern.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+        self.push(Tok::Regex(pattern), start);
         Ok(())
     }
 
@@ -1074,6 +1122,23 @@ mod tests {
             kinds("b\"LM\\0\\x01\\xff\""),
             vec![Tok::Bytes(vec![b'L', b'M', 0, 1, 255]), Tok::Eof]
         );
+    }
+
+    #[test]
+    fn scans_raw_regular_expression_literals() {
+        assert_eq!(
+            kinds(r##"re"\p{Greek}+\"quoted\"#{raw}""##),
+            vec![
+                Tok::Regex(r##"\p{Greek}+\"quoted\"#{raw}"##.into()),
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unterminated_regular_expression_literals() {
+        assert_eq!(scan(r#"re"abc"#).unwrap_err().code, "E0011");
+        assert_eq!(scan("re\"abc\ndef\"").unwrap_err().code, "E0011");
     }
 
     #[test]

@@ -1281,6 +1281,8 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::ChildStatus => (self.core.child_status, "ChildStatus"),
                     lm_abi::AbiCore::ExecError => (self.core.exec_error, "ExecError"),
                     lm_abi::AbiCore::UdpDatagram => (self.core.udp_datagram, "UdpDatagram"),
+                    lm_abi::AbiCore::Regex => (self.core.regex, "Regex"),
+                    lm_abi::AbiCore::RegexMatch => (self.core.regex_match, "RegexMatch"),
                 };
                 self.plain_inst(slot, name)
             }

@@ -299,6 +299,7 @@ fn token_kind(token: &Tok) -> u16 {
         Tok::Char(_) => KIND_CHAR,
         Tok::Str(_) | Tok::StrInterp(_) => KIND_STRING,
         Tok::Bytes(_) => KIND_BYTES,
+        Tok::Regex(_) => KIND_REGEX,
         Tok::Ident(_) => KIND_IDENTIFIER,
         Tok::KwAnd
         | Tok::KwOr

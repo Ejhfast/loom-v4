@@ -429,7 +429,65 @@ fn verify_structure(
     if entry_func.type_params != 0 || entry_func.effect_params != 0 {
         return Err(err(module.entry, "the entry function must not be generic"));
     }
+    verify_regex_literals(module)?;
     Ok(ctx)
+}
+
+/// Validate each regex literal once and bound the retained program table.
+fn verify_regex_literals(module: &Module) -> Result<(), VerifyError> {
+    let mut seen = HashSet::new();
+    let mut retained = 0usize;
+    for (function, instruction) in module
+        .funcs
+        .iter()
+        .enumerate()
+        .flat_map(|(function, func)| {
+            func.blocks
+                .iter()
+                .flatten()
+                .map(move |instruction| (function, instruction))
+        })
+    {
+        let Instr::ConstRegex(index) = instruction else {
+            continue;
+        };
+        if !seen.insert(*index) {
+            continue;
+        }
+        let Some(pattern) = module.strings.get(*index as usize) else {
+            return Err(err(
+                function as u32,
+                "a regular-expression source index is outside its table",
+            ));
+        };
+        let regex = lm_regex::Regex::compile(pattern).map_err(|error| {
+            let message = match error.kind() {
+                lm_regex::CompileErrorKind::Syntax => {
+                    "a regular-expression literal has invalid syntax"
+                }
+                lm_regex::CompileErrorKind::Limit => {
+                    "a regular-expression literal exceeds a verifier limit"
+                }
+            };
+            err(function as u32, message)
+        })?;
+        retained = retained
+            .checked_add(regex.memory_usage())
+            .and_then(|bytes| bytes.checked_add(regex.source().len()))
+            .ok_or_else(|| {
+                err(
+                    function as u32,
+                    "the regular-expression literal table is too large",
+                )
+            })?;
+        if retained > lm_regex::MAX_LITERAL_TABLE_BYTES {
+            return Err(err(
+                function as u32,
+                "the regular-expression literal table is too large",
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------
@@ -778,6 +836,28 @@ mod tests {
         let module = module_with(vec![vec![ConstBytes(0), Pop, ConstInt(0), Return]]);
         let error = verify_module(&module).expect_err("the byte index must reject");
         assert!(error.message.contains("byte literal index"), "{error}");
+    }
+
+    #[test]
+    fn accepts_a_valid_regular_expression_literal() {
+        let mut module = module_with(vec![vec![ConstRegex(0), Pop, ConstInt(0), Return]]);
+        module.strings[0] = "[a-z]+".to_string();
+        assert!(verify_structure_only(&module).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_invalid_regular_expression_literal() {
+        let mut module = module_with(vec![vec![ConstRegex(0), Pop, ConstInt(0), Return]]);
+        module.strings[0] = "(".to_string();
+        let error = verify_structure_only(&module).expect_err("the invalid pattern must reject");
+        assert!(error.message.contains("invalid syntax"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_regular_expression_literal_outside_its_pool() {
+        let module = module_with(vec![vec![ConstRegex(1), Pop, ConstInt(0), Return]]);
+        let error = verify_structure_only(&module).expect_err("the regex index must reject");
+        assert!(error.message.contains("source index"), "{error}");
     }
 
     #[test]

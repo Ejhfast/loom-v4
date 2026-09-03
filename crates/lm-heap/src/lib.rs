@@ -20,11 +20,12 @@ mod value_array;
 use lm_value::{ObjRef, Value, Witness};
 pub use shape::{
     dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapEntryArray, MapIndex,
-    Object, PortableCode, PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch,
-    EMPTY_MAP_ENTRY, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE,
-    MAP_ENTRY_VALUE_OFFSET, MAP_INDEX_BUILT_OFFSET, MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET,
-    MAP_INDEX_SLOTS_DATA_OFFSET, MAP_INDEX_SLOTS_LEN_OFFSET, MAP_SLOT_ENTRY_OFFSET,
-    MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, MIN_OBJECT_COST, SHAPES,
+    NativeRegexMatch, Object, PortableCode, PortableCodeKind, RegexCaptureRange, ShapeDesc,
+    SlotChangeKind, StructuralEpoch, EMPTY_MAP_ENTRY, MAP_ENTRY_KEY_OFFSET,
+    MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE, MAP_ENTRY_VALUE_OFFSET, MAP_INDEX_BUILT_OFFSET,
+    MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET, MAP_INDEX_SLOTS_DATA_OFFSET,
+    MAP_INDEX_SLOTS_LEN_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
+    MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     keyed_lookup_hash, process_lookup_hash, process_lookup_key, NativeByteBuffer,
@@ -395,6 +396,10 @@ pub const JIT_OBJECT_BYTES: u32 = 8;
 pub const JIT_OBJECT_SUBSTRING: u32 = 9;
 /// Stable tag of one graph digest.
 pub const JIT_OBJECT_DIGEST: u32 = 20;
+/// Stable tag of one compiled regular expression.
+pub const JIT_OBJECT_REGEX: u32 = 38;
+/// Stable tag of one regular-expression match.
+pub const JIT_OBJECT_REGEX_MATCH: u32 = 39;
 /// Byte offset of the string-builder data pointer.
 pub const JIT_STRING_BUILDER_DATA_OFFSET: usize =
     JIT_ENTRY_OBJECT_TAG_OFFSET + OBJECT_PAYLOAD_OFFSET + STRING_BUILDER_DATA_OFFSET;
@@ -1059,6 +1064,19 @@ impl Heap {
         let text = self.text(source)?;
         let owner = TextViewTable::is_reference(source).then_some(source);
         Some(text.try_line_view_batch(owner))
+    }
+
+    /// Make compact descriptors for bounded ranges in one text value.
+    pub fn try_text_range_view_batch(
+        &self,
+        source: ObjRef,
+        ranges: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Option<Result<Option<TextViewBatch>, std::collections::TryReserveError>> {
+        let text = self.text(source)?;
+        let owner = TextViewTable::is_reference(source).then_some(source);
+        let item_cost = MIN_OBJECT_COST + std::mem::size_of::<Value>();
+        let max_count = self.cap_bytes.saturating_sub(MIN_OBJECT_COST) / item_cost;
+        Some(text.try_range_view_batch(ranges, owner, max_count))
     }
 
     /// Allocate shared text views and their list as one heap batch.

@@ -131,6 +131,24 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Bytes(v.clone()),
             }),
+            ExprKind::Regex(pattern) => {
+                let error = lm_regex::Regex::compile(pattern).err();
+                if let Some(error) = error {
+                    let message = match error.kind() {
+                        lm_regex::CompileErrorKind::Syntax => "invalid regular-expression syntax",
+                        lm_regex::CompileErrorKind::Limit => {
+                            "the regular-expression literal exceeds a compiler limit"
+                        }
+                    };
+                    return Err(Diagnostic::new("E1067", message, expr.span));
+                }
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: Self::core_class(ctx, "Regex"),
+                    mutable: true,
+                    kind: HExprKind::Regex(pattern.clone()),
+                })
+            }
             ExprKind::Bool(v) => Ok(HExpr {
                 flow: Flow::Normal,
                 ty: BOOL,

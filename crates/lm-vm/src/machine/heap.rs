@@ -179,6 +179,9 @@ impl Machine {
         if let Some(r) = self.start_body {
             roots.push(r);
         }
+        if let Some(reference) = self.pending_regex_compile {
+            roots.push(reference);
+        }
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.vm.literals.iter().filter_map(|value| value.as_obj()));
     }

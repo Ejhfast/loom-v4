@@ -877,6 +877,10 @@ impl World {
                         visited.pop();
                         format!("DynValue({text})")
                     }
+                    Object::NativeRegex(regex) => format!("re{:?}", regex.source()),
+                    Object::NativeRegexMatch(matched) => {
+                        format!("<match {}..{}>", matched.start, matched.end)
+                    }
                 }
             }
         }

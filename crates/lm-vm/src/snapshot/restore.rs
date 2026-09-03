@@ -403,6 +403,7 @@ impl World {
                     source_code.strings.len(),
                     source_code.bytes.len(),
                     target_code.strings.len(),
+                    target_code.bytes.len(),
                 ))
             };
             let literal_map = namespace_maps
@@ -975,7 +976,7 @@ fn restore_state(
     code_map: &CodeRelocation,
     literal_map: &CodeRelocation,
     refs: &[ObjRef],
-    literal_layout: Option<(usize, usize, usize)>,
+    literal_layout: Option<(usize, usize, usize, usize)>,
     restorer: VmId,
     gate: u32,
     children: u32,
@@ -1046,7 +1047,7 @@ fn restore_state(
             }),
         );
     } else {
-        let (source_string_count, source_byte_count, target_string_count) =
+        let (source_string_count, source_byte_count, target_string_count, target_byte_count) =
             literal_layout.ok_or(RestoreFail::IncompatibleImage)?;
         for (source_index, slot) in source.literals.iter().enumerate() {
             let Some(ordinal) = slot else {
@@ -1058,10 +1059,9 @@ fn restore_state(
                 literal_map
                     .string(source_string)
                     .ok_or(RestoreFail::IncompatibleImage)? as usize
-            } else {
+            } else if source_index < source_string_count.saturating_add(source_byte_count) {
                 let source_byte = source_index
                     .checked_sub(source_string_count)
-                    .filter(|index| *index < source_byte_count)
                     .ok_or(RestoreFail::IncompatibleImage)?;
                 let source_byte =
                     u32::try_from(source_byte).map_err(|_| RestoreFail::IncompatibleImage)?;
@@ -1071,6 +1071,25 @@ fn restore_state(
                     as usize;
                 target_string_count
                     .checked_add(target_byte)
+                    .ok_or(RestoreFail::LimitExceeded)?
+            } else {
+                let source_regex = source_index
+                    .checked_sub(
+                        source_string_count
+                            .checked_add(source_byte_count)
+                            .ok_or(RestoreFail::LimitExceeded)?,
+                    )
+                    .filter(|index| *index < source_string_count)
+                    .ok_or(RestoreFail::IncompatibleImage)?;
+                let source_regex =
+                    u32::try_from(source_regex).map_err(|_| RestoreFail::IncompatibleImage)?;
+                let target_regex = literal_map
+                    .string(source_regex)
+                    .ok_or(RestoreFail::IncompatibleImage)?
+                    as usize;
+                target_string_count
+                    .checked_add(target_byte_count)
+                    .and_then(|base| base.checked_add(target_regex))
                     .ok_or(RestoreFail::LimitExceeded)?
             };
             let needed = target_index

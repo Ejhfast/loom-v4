@@ -58,7 +58,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 255;
+pub const CORE_ROLE_COUNT: usize = 257;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -392,6 +392,8 @@ pub enum Instr {
     ConstStr(u32),
     /// Allocate the module byte literal with this pool index.
     ConstBytes(u32),
+    /// Push the compiled regular expression for this string pool index.
+    ConstRegex(u32),
     /// Push the value of a local slot.
     LoadLocal(u32),
     /// Pop one value into a local slot.
@@ -913,6 +915,12 @@ pub enum ExtendedInstr {
     MapWriteGuard,
     /// Prepare one exact host operation as a selectable wait source.
     PrepareWait { op_argc: u32, reply_ty: u32 },
+    /// Search text and push an optional regular-expression match.
+    RegexCaptures { ty: u32 },
+    /// Load one optional numbered capture.
+    RegexMatchGroup { ty: u32 },
+    /// Load one optional named capture.
+    RegexMatchNamed { ty: u32 },
 }
 
 const WAIT_FIELD_BITS: u32 = 16;
@@ -1097,6 +1105,28 @@ pub enum NativeInstr {
     HashCombine,
     /// Pop two integers and push their order-independent hash mix.
     HashUnorderedCombine,
+    /// Check one dynamic regular-expression pattern.
+    RegexCompileStatus,
+    /// Compile one previously checked regular-expression pattern.
+    RegexCompileValue,
+    /// Pop a regular expression and push its source text.
+    RegexSource,
+    /// Test whether a regular expression matches text.
+    RegexIsMatch,
+    /// Count non-overlapping regular-expression matches.
+    RegexCount,
+    /// Split text at regular-expression matches.
+    RegexSplit,
+    /// Replace regular-expression matches with expanded text.
+    RegexReplaceAll,
+    /// Load the absolute start byte of a match.
+    RegexMatchStart,
+    /// Load the absolute end byte of a match.
+    RegexMatchEnd,
+    /// Copy the complete matched text.
+    RegexMatchText,
+    /// Load the capture count, including the complete match.
+    RegexMatchGroupCount,
 }
 
 impl Instr {
@@ -1904,7 +1934,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 65;
+pub const VERSION: u16 = 66;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2141,6 +2171,38 @@ const EXT_TEXT_PAD_END: u8 = 1;
 const EXT_MAP_PUT_TEXT: u8 = 2;
 const EXT_BYTES_TEXT_RANGE: u8 = 3;
 const EXT_MAP_INTERN_TEXT_RANGE: u8 = 4;
+const EXT_CONST_REGEX: u8 = 5;
+const EXT_REGEX_COMPILE_STATUS: u8 = 6;
+const EXT_REGEX_COMPILE_VALUE: u8 = 7;
+const EXT_REGEX_SOURCE: u8 = 8;
+const EXT_REGEX_IS_MATCH: u8 = 9;
+const EXT_REGEX_COUNT: u8 = 10;
+const EXT_REGEX_SPLIT: u8 = 11;
+const EXT_REGEX_REPLACE_ALL: u8 = 12;
+const EXT_REGEX_MATCH_START: u8 = 13;
+const EXT_REGEX_MATCH_END: u8 = 14;
+const EXT_REGEX_MATCH_TEXT: u8 = 15;
+const EXT_REGEX_MATCH_GROUP_COUNT: u8 = 16;
+const EXT_REGEX_CAPTURES: u8 = 17;
+const EXT_REGEX_MATCH_GROUP: u8 = 18;
+const EXT_REGEX_MATCH_NAMED: u8 = 19;
+
+fn regex_extension_tag(instr: NativeInstr) -> Option<u8> {
+    Some(match instr {
+        NativeInstr::RegexCompileStatus => EXT_REGEX_COMPILE_STATUS,
+        NativeInstr::RegexCompileValue => EXT_REGEX_COMPILE_VALUE,
+        NativeInstr::RegexSource => EXT_REGEX_SOURCE,
+        NativeInstr::RegexIsMatch => EXT_REGEX_IS_MATCH,
+        NativeInstr::RegexCount => EXT_REGEX_COUNT,
+        NativeInstr::RegexSplit => EXT_REGEX_SPLIT,
+        NativeInstr::RegexReplaceAll => EXT_REGEX_REPLACE_ALL,
+        NativeInstr::RegexMatchStart => EXT_REGEX_MATCH_START,
+        NativeInstr::RegexMatchEnd => EXT_REGEX_MATCH_END,
+        NativeInstr::RegexMatchText => EXT_REGEX_MATCH_TEXT,
+        NativeInstr::RegexMatchGroupCount => EXT_REGEX_MATCH_GROUP_COUNT,
+        _ => return None,
+    })
+}
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2753,6 +2815,11 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             out.push(OP_CONST_BYTES);
             write_u32(out, *idx);
         }
+        Instr::ConstRegex(idx) => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_CONST_REGEX);
+            write_u32(out, *idx);
+        }
         Instr::Numeric(instr) => {
             out.push(OP_NUMERIC);
             out.push(*instr as u8);
@@ -2954,6 +3021,22 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::BytesHash) => out.push(OP_BYTES_HASH),
         Instr::Native(NativeInstr::HashCombine) => out.push(OP_HASH_COMBINE),
         Instr::Native(NativeInstr::HashUnorderedCombine) => out.push(OP_HASH_UNORDERED_COMBINE),
+        Instr::Native(
+            regex @ (NativeInstr::RegexCompileStatus
+            | NativeInstr::RegexCompileValue
+            | NativeInstr::RegexSource
+            | NativeInstr::RegexIsMatch
+            | NativeInstr::RegexCount
+            | NativeInstr::RegexSplit
+            | NativeInstr::RegexReplaceAll
+            | NativeInstr::RegexMatchStart
+            | NativeInstr::RegexMatchEnd
+            | NativeInstr::RegexMatchText
+            | NativeInstr::RegexMatchGroupCount),
+        ) => {
+            out.push(OP_EXTENSION);
+            out.push(regex_extension_tag(*regex).expect("a regex instruction has one tag"));
+        }
         Instr::Native(NativeInstr::LtBytes) => out.push(OP_LT_BYTES),
         Instr::Native(NativeInstr::LeBytes) => out.push(OP_LE_BYTES),
         Instr::Native(NativeInstr::GtBytes) => out.push(OP_GT_BYTES),
@@ -3045,6 +3128,21 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             write_u32(out, op);
             write_u32(out, argc);
             write_u32(out, reply_ty);
+        }
+        ExtendedInstr::RegexCaptures { ty } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REGEX_CAPTURES);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::RegexMatchGroup { ty } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REGEX_MATCH_GROUP);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::RegexMatchNamed { ty } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REGEX_MATCH_NAMED);
+            write_u32(out, ty);
         }
         ExtendedInstr::MakeCallback { func, captures } => {
             out.push(OP_MAKE_CALLBACK);
@@ -4285,6 +4383,25 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             }),
             EXT_BYTES_TEXT_RANGE => Instr::Native(NativeInstr::BytesTextRange),
             EXT_MAP_INTERN_TEXT_RANGE => Instr::Extended(ExtendedInstr::MapInternTextRange),
+            EXT_CONST_REGEX => Instr::ConstRegex(cur.u32()?),
+            EXT_REGEX_COMPILE_STATUS => Instr::Native(NativeInstr::RegexCompileStatus),
+            EXT_REGEX_COMPILE_VALUE => Instr::Native(NativeInstr::RegexCompileValue),
+            EXT_REGEX_SOURCE => Instr::Native(NativeInstr::RegexSource),
+            EXT_REGEX_IS_MATCH => Instr::Native(NativeInstr::RegexIsMatch),
+            EXT_REGEX_COUNT => Instr::Native(NativeInstr::RegexCount),
+            EXT_REGEX_SPLIT => Instr::Native(NativeInstr::RegexSplit),
+            EXT_REGEX_REPLACE_ALL => Instr::Native(NativeInstr::RegexReplaceAll),
+            EXT_REGEX_MATCH_START => Instr::Native(NativeInstr::RegexMatchStart),
+            EXT_REGEX_MATCH_END => Instr::Native(NativeInstr::RegexMatchEnd),
+            EXT_REGEX_MATCH_TEXT => Instr::Native(NativeInstr::RegexMatchText),
+            EXT_REGEX_MATCH_GROUP_COUNT => Instr::Native(NativeInstr::RegexMatchGroupCount),
+            EXT_REGEX_CAPTURES => Instr::Extended(ExtendedInstr::RegexCaptures { ty: cur.u32()? }),
+            EXT_REGEX_MATCH_GROUP => {
+                Instr::Extended(ExtendedInstr::RegexMatchGroup { ty: cur.u32()? })
+            }
+            EXT_REGEX_MATCH_NAMED => {
+                Instr::Extended(ExtendedInstr::RegexMatchNamed { ty: cur.u32()? })
+            }
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),

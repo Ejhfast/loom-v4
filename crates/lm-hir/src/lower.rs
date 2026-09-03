@@ -1601,6 +1601,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let idx = self.m.intern_bytes(v);
                 self.emit(Instr::ConstBytes(idx));
             }
+            HExprKind::Regex(pattern) => {
+                let idx = self.m.intern_string(pattern);
+                self.emit(Instr::ConstRegex(idx));
+            }
             HExprKind::Local(slot) => self.emit(Instr::LoadLocal(*slot)),
             HExprKind::Capture(idx) => self.emit(Instr::LoadCapture(*idx)),
             HExprKind::Not(inner) => {
@@ -2494,6 +2498,42 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_FLOAT_ASINH => Instr::Numeric(lm_bytecode::NumericInstr::FloatAsinh),
             lm_abi::INTRINSIC_FLOAT_ACOSH => Instr::Numeric(lm_bytecode::NumericInstr::FloatAcosh),
             lm_abi::INTRINSIC_FLOAT_ATANH => Instr::Numeric(lm_bytecode::NumericInstr::FloatAtanh),
+            lm_abi::INTRINSIC_REGEX_COMPILE_STATUS => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexCompileStatus)
+            }
+            lm_abi::INTRINSIC_REGEX_COMPILE_VALUE => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexCompileValue)
+            }
+            lm_abi::INTRINSIC_REGEX_SOURCE => Instr::Native(lm_bytecode::NativeInstr::RegexSource),
+            lm_abi::INTRINSIC_REGEX_IS_MATCH => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexIsMatch)
+            }
+            lm_abi::INTRINSIC_REGEX_CAPTURES => extended(ExtendedInstr::RegexCaptures {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_REGEX_COUNT => Instr::Native(lm_bytecode::NativeInstr::RegexCount),
+            lm_abi::INTRINSIC_REGEX_SPLIT => Instr::Native(lm_bytecode::NativeInstr::RegexSplit),
+            lm_abi::INTRINSIC_REGEX_REPLACE_ALL => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexReplaceAll)
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_START => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexMatchStart)
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_END => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexMatchEnd)
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_TEXT => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexMatchText)
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_GROUP_COUNT => {
+                Instr::Native(lm_bytecode::NativeInstr::RegexMatchGroupCount)
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_GROUP => extended(ExtendedInstr::RegexMatchGroup {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_REGEX_MATCH_NAMED => extended(ExtendedInstr::RegexMatchNamed {
+                ty: self.m.bc_ty(reply),
+            }),
             lm_abi::INTRINSIC_FLOAT_HASH => Instr::Numeric(lm_bytecode::NumericInstr::FloatHash),
             lm_abi::INTRINSIC_FLOAT_BITS => Instr::Numeric(lm_bytecode::NumericInstr::FloatBits),
             lm_abi::INTRINSIC_FLOAT_FROM_BITS => {
@@ -2979,6 +3019,7 @@ fn instantiate_inline_expr(
         | HExprKind::Char(_)
         | HExprKind::Str(_)
         | HExprKind::Bytes(_)
+        | HExprKind::Regex(_)
         | HExprKind::Bool(_) => {}
         HExprKind::Not(inner) | HExprKind::Neg(inner) => {
             **inner = instantiate_inline_expr(inner, args, next, nodes, bodies, active)?;
@@ -3051,6 +3092,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::Char(_)
         | HExprKind::Str(_)
         | HExprKind::Bytes(_)
+        | HExprKind::Regex(_)
         | HExprKind::Bool(_)
         | HExprKind::Capture(_)
         | HExprKind::FunctionCode { .. }
@@ -3504,6 +3546,8 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::FunctionBinding
                 | NativeRepr::ClassBinding
                 | NativeRepr::DynValue
+                | NativeRepr::Regex
+                | NativeRepr::RegexMatch
         )
     ) {
         let ret = if class.type_params == 0 {
@@ -4026,6 +4070,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::ConstChar(value) => format!("ConstChar U+{value:04X}"),
         Instr::ConstStr(idx) => format!("ConstStr s{idx}"),
         Instr::ConstBytes(idx) => format!("ConstBytes b{idx}"),
+        Instr::ConstRegex(idx) => format!("ConstRegex s{idx}"),
         Instr::Numeric(instr) => format!("Numeric {instr:?}"),
         Instr::LoadLocal(slot) => format!("LoadLocal {slot}"),
         Instr::StoreLocal(slot) => format!("StoreLocal {slot}"),
@@ -4086,6 +4131,23 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::TextGt) => "TextGt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextGe) => "TextGe".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextToString) => "TextToString".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexCompileStatus) => {
+            "RegexCompileStatus".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexCompileValue) => {
+            "RegexCompileValue".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexSource) => "RegexSource".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexIsMatch) => "RegexIsMatch".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexCount) => "RegexCount".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexSplit) => "RegexSplit".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexReplaceAll) => "RegexReplaceAll".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexMatchStart) => "RegexMatchStart".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexMatchEnd) => "RegexMatchEnd".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexMatchText) => "RegexMatchText".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::RegexMatchGroupCount) => {
+            "RegexMatchGroupCount".to_string()
+        }
         Instr::Native(lm_bytecode::NativeInstr::CharCodepoint) => "CharCodepoint".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len) => "CharUtf8Len".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::EqChar) => "EqChar".to_string(),
@@ -4243,6 +4305,9 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
             format!("MapPutText ty{ty} discard {discard}")
         }
         ExtendedInstr::MapInternTextRange => "MapInternTextRange".to_string(),
+        ExtendedInstr::RegexCaptures { ty } => format!("RegexCaptures ty{ty}"),
+        ExtendedInstr::RegexMatchGroup { ty } => format!("RegexMatchGroup ty{ty}"),
+        ExtendedInstr::RegexMatchNamed { ty } => format!("RegexMatchNamed ty{ty}"),
         ExtendedInstr::ListEpoch => "ListEpoch".to_string(),
         ExtendedInstr::ListIterLen => "ListIterLen".to_string(),
         ExtendedInstr::MapEpoch => "MapEpoch".to_string(),

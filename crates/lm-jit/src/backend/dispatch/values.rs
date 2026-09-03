@@ -296,6 +296,26 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             )?;
             stack.push(value);
         }
+        Instr::ConstRegex(index) => {
+            let literal = input
+                .runtime_string_count()
+                .checked_add(input.runtime_byte_count())
+                .and_then(|base| base.checked_add(index as usize))
+                .ok_or(CompileError::Backend)?;
+            let instruction = segment.start + within as u32;
+            let value = emit_literal_load(
+                builder,
+                values,
+                literal,
+                FaultPoint {
+                    block: segment.block,
+                    instruction,
+                    prefix: prior_prefix,
+                },
+                stack,
+            )?;
+            stack.push(value);
+        }
         Instr::OpConst(operation) => {
             let value = builder.ins().iconst(types::I64, i64::from(operation));
             push_static(builder, stack, ScalarKind::Operation, value)?;

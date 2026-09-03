@@ -195,6 +195,7 @@ pub(crate) struct NamespaceRuntime {
     dispatch: std::sync::Arc<CodeTable<DispatchRow>>,
     /// Functions that verified code can construct as closures.
     closure_bodies: std::sync::Arc<std::sync::OnceLock<Vec<bool>>>,
+    regex_literals: std::sync::Arc<Vec<Option<lm_regex::Regex>>>,
     core: lm_bytecode::corepin::CoreLayout,
     pub(crate) core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     pub(crate) entry: u32,
@@ -261,6 +262,7 @@ impl NamespaceRuntime {
             bundle: self.bundle.clone(),
             dispatch: tables.dispatch.clone(),
             closure_bodies: tables.closure_bodies.clone(),
+            regex_literals: tables.regex_literals.clone(),
             core: self.core,
             core_roles: self.core_roles,
             entry: self.entry,
@@ -334,12 +336,31 @@ fn prepare_namespace(code: std::sync::Arc<lm_link::CodeNamespace>) -> NamespaceR
     let core_roles = *code.core_roles();
     let core = *code.core_layout();
     let dispatch = code.dispatch_store();
+    let mut referenced_regex = vec![false; tables.strings.len()];
+    for function in &tables.funcs {
+        for instruction in function.blocks.iter().flatten() {
+            if let lm_bytecode::Instr::ConstRegex(index) = instruction {
+                referenced_regex[*index as usize] = true;
+            }
+        }
+    }
+    let regex_literals = referenced_regex
+        .into_iter()
+        .enumerate()
+        .map(|(index, referenced)| {
+            referenced.then(|| {
+                lm_regex::Regex::compile(&tables.strings[index])
+                    .expect("the verifier accepted the regular-expression literal")
+            })
+        })
+        .collect();
     NamespaceRuntime {
         code: code.clone(),
         tables,
         bundle,
         dispatch,
         closure_bodies: code.closure_body_store(),
+        regex_literals: std::sync::Arc::new(regex_literals),
         core,
         core_roles,
         entry: code.entry(),

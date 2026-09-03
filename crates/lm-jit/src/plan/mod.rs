@@ -40,6 +40,7 @@ pub struct FunctionInput<'a> {
     guarded_interface_callees: Vec<GuardedInterfaceCallee>,
     behaviors: crate::FunctionBehaviors,
     runtime_string_count: usize,
+    runtime_byte_count: usize,
     runtime_core: lm_bytecode::corepin::CoreLayout,
 }
 
@@ -66,6 +67,7 @@ impl<'a> FunctionInput<'a> {
             guarded_interface_callees: Vec::new(),
             behaviors: crate::FunctionBehaviors::default(),
             runtime_string_count: source.strings.len(),
+            runtime_byte_count: source.bytes.len(),
             runtime_core: lm_bytecode::corepin::declared_layout(source),
         }
     }
@@ -73,6 +75,11 @@ impl<'a> FunctionInput<'a> {
     /// Supply the relocated string-table size for byte literal slots.
     pub fn set_runtime_string_count(&mut self, count: usize) {
         self.runtime_string_count = count;
+    }
+
+    /// Supply the relocated byte-table size for regular-expression slots.
+    pub fn set_runtime_byte_count(&mut self, count: usize) {
+        self.runtime_byte_count = count;
     }
 
     /// Supply the relocated core roles for runtime value dispatch.
@@ -174,6 +181,10 @@ impl<'a> FunctionInput<'a> {
         self.runtime_string_count
     }
 
+    pub(super) fn runtime_byte_count(&self) -> usize {
+        self.runtime_byte_count
+    }
+
     pub(super) fn definition(&self, function: u32) -> Option<FunctionDefinition<'a>> {
         std::iter::once(self.root)
             .chain(self.direct_callees.iter().copied())
@@ -192,6 +203,7 @@ impl<'a> FunctionInput<'a> {
             guarded_interface_callees: Vec::new(),
             behaviors: self.behaviors.clone(),
             runtime_string_count: self.runtime_string_count,
+            runtime_byte_count: self.runtime_byte_count,
             runtime_core: self.runtime_core,
         })
     }
@@ -496,6 +508,8 @@ pub(super) enum ObjectContract {
     Closure,
     Bytes,
     Digest,
+    Regex,
+    RegexMatch,
     StringBuilder,
     ByteBuffer,
 }
@@ -628,6 +642,9 @@ pub(super) enum OptionAccessKind {
     MapGet { value: ValueContract },
     MapRemove { value: ValueContract },
     MapPut { value: ValueContract, discard: bool },
+    RegexCaptures { value: ValueContract },
+    RegexMatchGroup { value: ValueContract },
+    RegexMatchNamed { value: ValueContract },
     IsType { target: OptionTarget },
     CastType { target: OptionTarget },
 }

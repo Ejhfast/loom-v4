@@ -950,6 +950,17 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesHash)
         | Instr::Native(NativeInstr::HashCombine)
         | Instr::Native(NativeInstr::HashUnorderedCombine)
+        | Instr::Native(NativeInstr::RegexCompileStatus)
+        | Instr::Native(NativeInstr::RegexCompileValue)
+        | Instr::Native(NativeInstr::RegexSource)
+        | Instr::Native(NativeInstr::RegexIsMatch)
+        | Instr::Native(NativeInstr::RegexCount)
+        | Instr::Native(NativeInstr::RegexSplit)
+        | Instr::Native(NativeInstr::RegexReplaceAll)
+        | Instr::Native(NativeInstr::RegexMatchStart)
+        | Instr::Native(NativeInstr::RegexMatchEnd)
+        | Instr::Native(NativeInstr::RegexMatchText)
+        | Instr::Native(NativeInstr::RegexMatchGroupCount)
         | Instr::Freeze
         | Instr::EqDigest
         | Instr::NeDigest
@@ -979,6 +990,12 @@ fn preflight_instr(
         Instr::ConstBytes(idx) => {
             if *idx as usize >= bytes {
                 return Err(bad("byte literal index"));
+            }
+            Ok(())
+        }
+        Instr::ConstRegex(idx) => {
+            if *idx as usize >= strings {
+                return Err(bad("regular-expression source index"));
             }
             Ok(())
         }
@@ -1132,7 +1149,10 @@ fn preflight_extended(
         | ExtendedInstr::DynPack { ty }
         | ExtendedInstr::CodeSource { ty }
         | ExtendedInstr::FaultSite { ty }
-        | ExtendedInstr::FaultTrace { ty } => {
+        | ExtendedInstr::FaultTrace { ty }
+        | ExtendedInstr::RegexCaptures { ty }
+        | ExtendedInstr::RegexMatchGroup { ty }
+        | ExtendedInstr::RegexMatchNamed { ty } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -2143,6 +2163,7 @@ impl<'a> Resolver<'a> {
             Instr::ConstFloat(..) => 0xfc,
             Instr::ConstChar(..) => 0x08,
             Instr::ConstBytes(..) => 0xfd,
+            Instr::ConstRegex(..) => 0x105,
             Instr::LoadLocal(..) => 0x04,
             Instr::StoreLocal(..) => 0x05,
             Instr::Pop => 0x06,
@@ -2278,6 +2299,17 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BytesHash) => 0xee,
             Instr::Native(NativeInstr::HashCombine) => 0xf7,
             Instr::Native(NativeInstr::HashUnorderedCombine) => 0xf8,
+            Instr::Native(NativeInstr::RegexCompileStatus) => 0x106,
+            Instr::Native(NativeInstr::RegexCompileValue) => 0x107,
+            Instr::Native(NativeInstr::RegexSource) => 0x108,
+            Instr::Native(NativeInstr::RegexIsMatch) => 0x109,
+            Instr::Native(NativeInstr::RegexCount) => 0x10a,
+            Instr::Native(NativeInstr::RegexSplit) => 0x10b,
+            Instr::Native(NativeInstr::RegexReplaceAll) => 0x10c,
+            Instr::Native(NativeInstr::RegexMatchStart) => 0x10d,
+            Instr::Native(NativeInstr::RegexMatchEnd) => 0x10e,
+            Instr::Native(NativeInstr::RegexMatchText) => 0x10f,
+            Instr::Native(NativeInstr::RegexMatchGroupCount) => 0x110,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2367,6 +2399,9 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::MapInsertHashed => 0xf5,
             ExtendedInstr::MapWriteGuard => 0xf6,
             ExtendedInstr::PrepareWait { .. } => 0x0100,
+            ExtendedInstr::RegexCaptures { .. } => 0x111,
+            ExtendedInstr::RegexMatchGroup { .. } => 0x112,
+            ExtendedInstr::RegexMatchNamed { .. } => 0x113,
         }
     }
 
@@ -2409,6 +2444,9 @@ impl<'a> Resolver<'a> {
                 let value = &self.module.bytes[*idx as usize];
                 out.extend_from_slice(&(value.len() as u32).to_le_bytes());
                 out.extend_from_slice(value);
+            }
+            Instr::ConstRegex(idx) => {
+                write_str(out, &self.module.strings[*idx as usize]);
             }
             Instr::Numeric(instr) => {
                 out.push(*instr as u8);
@@ -2647,6 +2685,17 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BytesHash)
             | Instr::Native(NativeInstr::HashCombine)
             | Instr::Native(NativeInstr::HashUnorderedCombine)
+            | Instr::Native(NativeInstr::RegexCompileStatus)
+            | Instr::Native(NativeInstr::RegexCompileValue)
+            | Instr::Native(NativeInstr::RegexSource)
+            | Instr::Native(NativeInstr::RegexIsMatch)
+            | Instr::Native(NativeInstr::RegexCount)
+            | Instr::Native(NativeInstr::RegexSplit)
+            | Instr::Native(NativeInstr::RegexReplaceAll)
+            | Instr::Native(NativeInstr::RegexMatchStart)
+            | Instr::Native(NativeInstr::RegexMatchEnd)
+            | Instr::Native(NativeInstr::RegexMatchText)
+            | Instr::Native(NativeInstr::RegexMatchGroupCount)
             | Instr::Return
             | Instr::CallArgs
             | Instr::FaultCode
@@ -2710,7 +2759,10 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::DynPack { ty }
             | ExtendedInstr::CodeSource { ty }
             | ExtendedInstr::FaultSite { ty }
-            | ExtendedInstr::FaultTrace { ty } => {
+            | ExtendedInstr::FaultTrace { ty }
+            | ExtendedInstr::RegexCaptures { ty }
+            | ExtendedInstr::RegexMatchGroup { ty }
+            | ExtendedInstr::RegexMatchNamed { ty } => {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             ExtendedInstr::MapPutText { ty, discard } => {

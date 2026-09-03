@@ -1,0 +1,2 @@
+error[E1067]: invalid regular-expression syntax
+  --> tests/ui/regex-invalid.lm:1:1

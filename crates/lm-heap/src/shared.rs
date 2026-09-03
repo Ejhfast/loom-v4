@@ -522,6 +522,26 @@ impl<'a> TextRef<'a> {
         Ok(self.view_batch(source, views))
     }
 
+    pub(crate) fn try_range_view_batch(
+        self,
+        ranges: impl IntoIterator<Item = (usize, usize)>,
+        source: Option<ObjRef>,
+        max_count: usize,
+    ) -> Result<Option<TextViewBatch>, TryReserveError> {
+        let mut views = Vec::new();
+        for (start, end) in ranges {
+            if views.len() >= max_count {
+                return Ok(None);
+            }
+            let Some(view) = self.compact_view(start, end) else {
+                return Ok(None);
+            };
+            views.try_reserve(1)?;
+            views.push(view);
+        }
+        Ok(Some(self.view_batch(source, views)))
+    }
+
     fn view_batch(self, source: Option<ObjRef>, views: Vec<TextView>) -> TextViewBatch {
         let shared_allocation = (self.root.allocation_key(), self.root.retained_capacity());
         let owner = source.map_or_else(

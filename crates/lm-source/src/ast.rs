@@ -411,6 +411,7 @@ pub enum ExprKind {
     Char(char),
     Str(String),
     Bytes(Vec<u8>),
+    Regex(String),
     /// An interpolated string literal.
     Interp(Vec<InterpPart>),
     Bool(bool),
@@ -828,6 +829,9 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
         }
         ExprKind::Bytes(v) => {
             let _ = writeln!(out, "bytes {v:?}");
+        }
+        ExprKind::Regex(v) => {
+            let _ = writeln!(out, "regex {v:?}");
         }
         ExprKind::Interp(parts) => {
             out.push_str("interp\n");

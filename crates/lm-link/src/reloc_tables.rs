@@ -579,6 +579,7 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
     match instr {
         Instr::ConstStr(idx) => Instr::ConstStr(reloc.strings[*idx as usize]),
         Instr::ConstBytes(idx) => Instr::ConstBytes(reloc.bytes[*idx as usize]),
+        Instr::ConstRegex(idx) => Instr::ConstRegex(reloc.strings[*idx as usize]),
         Instr::Call(f) => Instr::Call(reloc.funcs[*f as usize]),
         Instr::CallG { func, app } => Instr::CallG {
             func: reloc.funcs[*func as usize],
@@ -696,6 +697,17 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::TextGt)
         | Instr::Native(lm_bytecode::NativeInstr::TextGe)
         | Instr::Native(lm_bytecode::NativeInstr::TextToString)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexCompileStatus)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexCompileValue)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexSource)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexIsMatch)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexCount)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexSplit)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexReplaceAll)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexMatchStart)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexMatchEnd)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexMatchText)
+        | Instr::Native(lm_bytecode::NativeInstr::RegexMatchGroupCount)
         | Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
         | Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len)
         | Instr::Native(lm_bytecode::NativeInstr::EqChar)
@@ -849,6 +861,15 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
             ty: reloc.types[*ty as usize],
         },
         ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::RegexCaptures { ty } => ExtendedInstr::RegexCaptures {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::RegexMatchGroup { ty } => ExtendedInstr::RegexMatchGroup {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::RegexMatchNamed { ty } => ExtendedInstr::RegexMatchNamed {
             ty: reloc.types[*ty as usize],
         },
         ExtendedInstr::DynPack { ty } => ExtendedInstr::DynPack {

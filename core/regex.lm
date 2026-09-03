@@ -1,0 +1,81 @@
+# Core: bounded regular expressions and match results.
+
+enum RegexError implements Error
+  Invalid
+  LimitExceeded
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Invalid       then "the regular expression is invalid"
+    in LimitExceeded then "the regular expression exceeds a resource limit"
+    end
+    builder.append(text)
+  end
+end
+
+final class Regex
+  def source(self): String
+    intrinsic("regex.source", self)
+  end
+
+  def is_match(self, text: Text): Bool
+    intrinsic("regex.is_match", self, text)
+  end
+
+  def find(self, text: Text): Option[RegexMatch]
+    intrinsic("regex.captures", self, text)
+  end
+
+  def captures(self, text: Text): Option[RegexMatch]
+    intrinsic("regex.captures", self, text)
+  end
+
+  def count(self, text: Text): Int
+    intrinsic("regex.count", self, text)
+  end
+
+  def split(self, text: Text): List[Substring]
+    intrinsic("regex.split", self, text)
+  end
+
+  def replace_all(self, text: Text, replacement: Text): String
+    intrinsic("regex.replace_all", self, text, replacement)
+  end
+end
+
+def _regex_compile(pattern: Text): Result[Regex, RegexError]
+  status = intrinsic("regex.compile_status", pattern)
+  if status == 0
+    Ok(intrinsic("regex.compile_value", pattern))
+  elsif status == 2
+    Err(RegexError.LimitExceeded)
+  else
+    Err(RegexError.Invalid)
+  end
+end
+
+final class RegexMatch
+  def start_byte(self): Int
+    intrinsic("regex_match.start_byte", self)
+  end
+
+  def end_byte(self): Int
+    intrinsic("regex_match.end_byte", self)
+  end
+
+  def text(self): String
+    intrinsic("regex_match.text", self)
+  end
+
+  def group_count(self): Int
+    intrinsic("regex_match.group_count", self)
+  end
+
+  def group(self, index: Int): Option[Substring]
+    intrinsic("regex_match.group", self, index)
+  end
+
+  def named(self, name: Text): Option[Substring]
+    intrinsic("regex_match.named", self, name)
+  end
+end

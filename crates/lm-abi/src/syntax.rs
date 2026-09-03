@@ -5,7 +5,7 @@ use std::fmt;
 pub const MAGIC: [u8; 8] = *b"LMSYNT\0\x01";
 pub const FORMAT_VERSION: u16 = 1;
 pub const GRAMMAR_MAJOR: u16 = 1;
-pub const GRAMMAR_MINOR: u16 = 4;
+pub const GRAMMAR_MINOR: u16 = 5;
 const HEADER_SIZE: usize = 28;
 const RECORD_SIZE: usize = 20;
 
@@ -506,6 +506,7 @@ pub const KIND_SHR: u16 = 134;
 pub const KIND_USHR: u16 = 135;
 pub const KIND_TILDE: u16 = 136;
 pub const KIND_CHAR: u16 = 137;
+pub const KIND_REGEX: u16 = 138;
 pub const KIND_WHITESPACE: u16 = 500;
 pub const KIND_COMMENT: u16 = 501;
 pub const KIND_BOM: u16 = 502;
@@ -515,7 +516,7 @@ pub fn syntax_kind_class(kind: u16) -> Option<SyntaxClass> {
         KIND_MODULE | KIND_USE | KIND_INTERFACE | KIND_CLASS | KIND_ENUM | KIND_FUNCTION
         | KIND_STATEMENT | KIND_CONST => SyntaxClass::Node,
         KIND_INVALID => SyntaxClass::Invalid,
-        KIND_INT..=KIND_CHAR => SyntaxClass::Token,
+        KIND_INT..=KIND_REGEX => SyntaxClass::Token,
         KIND_WHITESPACE | KIND_COMMENT | KIND_BOM => SyntaxClass::Trivia,
         _ => return None,
     })
@@ -563,6 +564,7 @@ pub fn syntax_kind_name(kind: u16) -> Option<&'static str> {
         KIND_FLOAT => "FloatToken",
         KIND_BYTES => "BytesToken",
         KIND_CHAR => "CharacterToken",
+        KIND_REGEX => "RegexToken",
         KIND_AMP => "AmpersandToken",
         KIND_CARET => "CaretToken",
         KIND_SHL => "ShiftLeftToken",

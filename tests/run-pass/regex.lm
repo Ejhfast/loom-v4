@@ -1,0 +1,23 @@
+regex = re"(?P<word>\p{Greek}+)|([a-z]+)"
+matched = regex.captures("42 αβ y").expect("the pattern matches")
+spaces = re"\s+"
+replacement = re"(?P<left>[a-z]+)-([0-9]+)"
+dynamic_ok = Regex.compile("[a-z]+").is_ok()
+dynamic_bad = Regex.compile("(a)\\1").is_err()
+(
+  regex.source(),
+  regex.is_match("42 αβ"),
+  regex.count("a α β"),
+  matched.start_byte(),
+  matched.end_byte(),
+  matched.text(),
+  matched.group_count(),
+  matched.group(1),
+  matched.group(2),
+  matched.named("word"),
+  spaces.split("a β  c"),
+  replacement.replace_all("a-1 b-22", "${left}:$2 ($$)"),
+  re"".count("☃"),
+  dynamic_ok,
+  dynamic_bad,
+)

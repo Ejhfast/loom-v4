@@ -219,6 +219,7 @@ mod alloc;
 mod builders;
 mod lists;
 mod maps;
+mod regex;
 mod syntax;
 mod text;
 
@@ -713,10 +714,73 @@ impl NativeRuntime for MachineRuntime<'_> {
     fn float_fixed(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
         self.runtime_float_fixed(request)
     }
+
+    fn regex_compile_status(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_compile_status(request)
+    }
+
+    fn regex_compile_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_compile_value(request)
+    }
+
+    fn regex_source(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_source(request)
+    }
+
+    fn regex_is_match(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_is_match(request)
+    }
+
+    fn regex_captures(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_captures(request)
+    }
+
+    fn regex_count(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_count(request)
+    }
+
+    fn regex_split(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_split(request)
+    }
+
+    fn regex_replace_all(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_replace_all(request)
+    }
+
+    fn regex_match_start(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_match_start(request)
+    }
+
+    fn regex_match_end(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_match_end(request)
+    }
+
+    fn regex_match_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_match_text(request)
+    }
+
+    fn regex_match_group_count(
+        &mut self,
+        request: HeapOperationRequest<'_>,
+    ) -> HeapOperationResult {
+        self.runtime_regex_match_group_count(request)
+    }
+
+    fn regex_match_group(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_match_group(request)
+    }
+
+    fn regex_match_named(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
+        self.runtime_regex_match_named(request)
+    }
 }
 
 fn heap_bits(bits: u64) -> HeapOperationResult {
-    HeapOperationResult::Value { bits, heap: None }
+    HeapOperationResult::Value {
+        bits,
+        heap: None,
+        object: false,
+    }
 }
 
 fn heap_bool(value: bool) -> HeapOperationResult {

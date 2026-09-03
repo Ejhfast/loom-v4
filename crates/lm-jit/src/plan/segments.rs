@@ -102,6 +102,9 @@ pub(super) fn requires_retry_entry(instruction: &Instr) -> bool {
                     | ExtendedInstr::MapGet { .. }
                     | ExtendedInstr::MapPutText { .. }
                     | ExtendedInstr::MapRemove { .. }
+                    | ExtendedInstr::RegexCaptures { .. }
+                    | ExtendedInstr::RegexMatchGroup { .. }
+                    | ExtendedInstr::RegexMatchNamed { .. }
             )
     )
 }
@@ -1026,6 +1029,127 @@ pub(super) fn analyze_segment(
                 heap_accesses.push(HeapAccess {
                     instruction: position,
                     kind: HeapAccessKind::SealInstance { class },
+                });
+            }
+            Instr::Extended(ExtendedInstr::RegexCaptures { ty }) => {
+                let Instr::Extended(ExtendedInstr::RegexCaptures { ty: source_ty }) =
+                    source_instruction
+                else {
+                    return Err(UnsupportedReason::InvalidControlFlow);
+                };
+                regex_type(context, stack_from_end(&before.stack, 1)?)?;
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                let value_type = option_argument_type(context, source_ty)?;
+                let value = value_contract(context, value_type)?;
+                if !matches!(value.object, Some(ObjectContract::RegexMatch)) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: OptionAccessKind::RegexCaptures { value },
+                });
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Extended(
+                operation @ (ExtendedInstr::RegexMatchGroup { ty }
+                | ExtendedInstr::RegexMatchNamed { ty }),
+            ) => {
+                let source_ty = match source_instruction {
+                    Instr::Extended(ExtendedInstr::RegexMatchGroup { ty })
+                    | Instr::Extended(ExtendedInstr::RegexMatchNamed { ty }) => ty,
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                };
+                regex_match_type(context, stack_from_end(&before.stack, 1)?)?;
+                match operation {
+                    ExtendedInstr::RegexMatchGroup { .. } => {
+                        expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                    }
+                    ExtendedInstr::RegexMatchNamed { .. } => {
+                        text_type(context, stack_from_end(&before.stack, 0)?)?;
+                    }
+                    _ => return Err(UnsupportedReason::InvalidControlFlow),
+                }
+                let value_type = option_argument_type(context, source_ty)?;
+                let value = value_contract(context, value_type)?;
+                if !matches!(value.object, Some(ObjectContract::Text)) {
+                    return Err(UnsupportedReason::InvalidStack);
+                }
+                option_accesses.push(OptionAccess {
+                    instruction: position,
+                    family_type: ty,
+                    kind: match operation {
+                        ExtendedInstr::RegexMatchGroup { .. } => {
+                            OptionAccessKind::RegexMatchGroup { value }
+                        }
+                        ExtendedInstr::RegexMatchNamed { .. } => {
+                            OptionAccessKind::RegexMatchNamed { value }
+                        }
+                        _ => return Err(UnsupportedReason::InvalidControlFlow),
+                    },
+                });
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::RegexCompileStatus) => {
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::RegexCompileValue) => {
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::RegexSource) => {
+                regex_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::RegexIsMatch | NativeInstr::RegexCount) => {
+                regex_type(context, stack_from_end(&before.stack, 1)?)?;
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+            }
+            Instr::Native(NativeInstr::RegexSplit) => {
+                regex_type(context, stack_from_end(&before.stack, 1)?)?;
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(NativeInstr::RegexReplaceAll) => {
+                regex_type(context, stack_from_end(&before.stack, 2)?)?;
+                text_type(context, stack_from_end(&before.stack, 1)?)?;
+                text_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
+                });
+            }
+            Instr::Native(
+                NativeInstr::RegexMatchStart
+                | NativeInstr::RegexMatchEnd
+                | NativeInstr::RegexMatchGroupCount,
+            ) => {
+                regex_match_type(context, stack_from_end(&before.stack, 0)?)?;
+            }
+            Instr::Native(NativeInstr::RegexMatchText) => {
+                regex_match_type(context, stack_from_end(&before.stack, 0)?)?;
+                allocations.push(AllocationSite {
+                    instruction: position,
+                    stack: before.stack.clone(),
                 });
             }
             Instr::Native(NativeInstr::BytesLen) => {

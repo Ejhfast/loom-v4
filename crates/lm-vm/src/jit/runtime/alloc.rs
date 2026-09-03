@@ -55,7 +55,11 @@ impl MachineRuntime<'_> {
         request: &HeapOperationRequest<'_>,
     ) -> HeapOperationResult {
         match self.allocate_object(object, request.roots, request.allow_collection) {
-            AllocationResult::Value { bits, heap } => HeapOperationResult::Value { bits, heap },
+            AllocationResult::Value { bits, heap } => HeapOperationResult::Value {
+                bits,
+                heap,
+                object: true,
+            },
             AllocationResult::CollectionRequired => HeapOperationResult::Interpreter,
             AllocationResult::HeapLimit => HeapOperationResult::HeapLimit,
             AllocationResult::Interpreter => HeapOperationResult::Interpreter,
@@ -134,6 +138,7 @@ impl MachineRuntime<'_> {
         HeapOperationResult::Value {
             bits: object_bits(reference),
             heap: None,
+            object: false,
         }
     }
 

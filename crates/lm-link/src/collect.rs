@@ -796,6 +796,10 @@ fn instruction_edges(
     match instruction {
         Instr::ConstStr(index) => edges.push(offsets.string(*index)),
         Instr::ConstBytes(index) => edges.push(offsets.bytes(*index)),
+        Instr::ConstRegex(index) => {
+            edges.push(offsets.string(*index));
+            role_edges(module, offsets, &["Regex"], edges);
+        }
         Instr::ConstChar(_) => role_edges(module, offsets, &["Char"], edges),
         Instr::Call(function) => edges.push(offsets.func(*function)),
         Instr::CallG { func, app } => {
@@ -991,6 +995,19 @@ fn native_edges(
             role_edges(module, offsets, &["Text", "Char"], edges)
         }
         NativeInstr::TextToString => role_edges(module, offsets, &["Text"], edges),
+        NativeInstr::RegexCompileStatus => role_edges(module, offsets, &["Text"], edges),
+        NativeInstr::RegexCompileValue => role_edges(module, offsets, &["Text", "Regex"], edges),
+        NativeInstr::RegexSource
+        | NativeInstr::RegexIsMatch
+        | NativeInstr::RegexCount
+        | NativeInstr::RegexReplaceAll => role_edges(module, offsets, &["Regex", "Text"], edges),
+        NativeInstr::RegexSplit => {
+            role_edges(module, offsets, &["Regex", "Text", "Substring"], edges)
+        }
+        NativeInstr::RegexMatchStart
+        | NativeInstr::RegexMatchEnd
+        | NativeInstr::RegexMatchText
+        | NativeInstr::RegexMatchGroupCount => role_edges(module, offsets, &["RegexMatch"], edges),
         NativeInstr::BytesTextView => role_edges(module, offsets, &["Substring"], edges),
         NativeInstr::CharCodepoint
         | NativeInstr::CharUtf8Len
@@ -1176,6 +1193,14 @@ fn extended_edges(
         | ExtendedInstr::ListPop { ty }
         | ExtendedInstr::MapRemove { ty }
         | ExtendedInstr::PrepareWait { reply_ty: ty, .. } => edges.push(offsets.ty(*ty)),
+        ExtendedInstr::RegexCaptures { ty } => {
+            edges.push(offsets.ty(*ty));
+            role_edges(module, offsets, &["Regex", "RegexMatch", "Text"], edges);
+        }
+        ExtendedInstr::RegexMatchGroup { ty } | ExtendedInstr::RegexMatchNamed { ty } => {
+            edges.push(offsets.ty(*ty));
+            role_edges(module, offsets, &["RegexMatch", "Text", "Substring"], edges);
+        }
         ExtendedInstr::CodeSource { ty } => {
             edges.push(offsets.ty(*ty));
             core_role_edge(

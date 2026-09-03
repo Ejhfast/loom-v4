@@ -575,6 +575,20 @@ pub(super) struct RawNativeFunctions {
     pub(super) text_parse_float_status: RawHeapOperation,
     pub(super) text_parse_float_value: RawHeapOperation,
     pub(super) float_fixed: RawHeapOperation,
+    pub(super) regex_compile_status: RawHeapOperation,
+    pub(super) regex_compile_value: RawHeapOperation,
+    pub(super) regex_source: RawHeapOperation,
+    pub(super) regex_is_match: RawHeapOperation,
+    pub(super) regex_captures: RawHeapOperation,
+    pub(super) regex_count: RawHeapOperation,
+    pub(super) regex_split: RawHeapOperation,
+    pub(super) regex_replace_all: RawHeapOperation,
+    pub(super) regex_match_start: RawHeapOperation,
+    pub(super) regex_match_end: RawHeapOperation,
+    pub(super) regex_match_text: RawHeapOperation,
+    pub(super) regex_match_group_count: RawHeapOperation,
+    pub(super) regex_match_group: RawHeapOperation,
+    pub(super) regex_match_named: RawHeapOperation,
 }
 
 /// One immutable helper table for one runtime implementation.
@@ -692,6 +706,20 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         text_parse_float_status: text_parse_float_status::<R>,
         text_parse_float_value: text_parse_float_value::<R>,
         float_fixed: float_fixed::<R>,
+        regex_compile_status: regex_compile_status::<R>,
+        regex_compile_value: regex_compile_value::<R>,
+        regex_source: regex_source::<R>,
+        regex_is_match: regex_is_match::<R>,
+        regex_captures: regex_captures::<R>,
+        regex_count: regex_count::<R>,
+        regex_split: regex_split::<R>,
+        regex_replace_all: regex_replace_all::<R>,
+        regex_match_start: regex_match_start::<R>,
+        regex_match_end: regex_match_end::<R>,
+        regex_match_text: regex_match_text::<R>,
+        regex_match_group_count: regex_match_group_count::<R>,
+        regex_match_group: regex_match_group::<R>,
+        regex_match_named: regex_match_named::<R>,
     };
 }
 
@@ -1913,6 +1941,8 @@ pub enum HeapOperationResult {
     Value {
         bits: u64,
         heap: Option<JitHeapView>,
+        /// True when `bits` identifies one new heap object.
+        object: bool,
     },
     Fault(lm_abi::FaultCode),
     HeapLimit,
@@ -2359,6 +2389,49 @@ pub trait NativeRuntime {
 
     /// Format one float with fixed precision.
     fn float_fixed(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one regular-expression compile status.
+    fn regex_compile_status(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Compile one checked regular expression.
+    fn regex_compile_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Copy one regular-expression source.
+    fn regex_source(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Test one regular expression.
+    fn regex_is_match(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Capture the first regular-expression match.
+    fn regex_captures(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Count regular-expression matches.
+    fn regex_count(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Split text with one regular expression.
+    fn regex_split(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Replace all regular-expression matches.
+    fn regex_replace_all(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one match start byte.
+    fn regex_match_start(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one match end byte.
+    fn regex_match_end(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Copy one complete match.
+    fn regex_match_text(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Return one match group count.
+    fn regex_match_group_count(&mut self, request: HeapOperationRequest<'_>)
+        -> HeapOperationResult;
+
+    /// Read one numbered match group.
+    fn regex_match_group(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Read one named match group.
+    fn regex_match_named(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 }
 
 /// One checked list-growth result.
@@ -3418,6 +3491,20 @@ heap_operation_entry!(bytes_is_utf8, bytes_is_utf8);
 heap_operation_entry!(text_parse_float_status, text_parse_float_status);
 heap_operation_entry!(text_parse_float_value, text_parse_float_value);
 heap_operation_entry!(float_fixed, float_fixed);
+heap_operation_entry!(regex_compile_status, regex_compile_status);
+heap_operation_entry!(regex_compile_value, regex_compile_value);
+heap_operation_entry!(regex_source, regex_source);
+heap_operation_entry!(regex_is_match, regex_is_match);
+heap_operation_entry!(regex_captures, regex_captures);
+heap_operation_entry!(regex_count, regex_count);
+heap_operation_entry!(regex_split, regex_split);
+heap_operation_entry!(regex_replace_all, regex_replace_all);
+heap_operation_entry!(regex_match_start, regex_match_start);
+heap_operation_entry!(regex_match_end, regex_match_end);
+heap_operation_entry!(regex_match_text, regex_match_text);
+heap_operation_entry!(regex_match_group_count, regex_match_group_count);
+heap_operation_entry!(regex_match_group, regex_match_group);
+heap_operation_entry!(regex_match_named, regex_match_named);
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn heap_operation<R: NativeRuntime>(
@@ -3463,12 +3550,14 @@ fn finish_heap_operation(
     response: HeapOperationResult,
 ) -> u32 {
     match response {
-        HeapOperationResult::Value { bits, heap } => {
-            let slot_count = (bits as u32 as usize).saturating_add(1);
+        HeapOperationResult::Value { bits, heap, object } => {
             // SAFETY: The checked caller provides one writable result word.
             unsafe {
                 result.write(bits);
-                (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
+                if object {
+                    let slot_count = (bits as u32 as usize).saturating_add(1);
+                    (*activation).heap_slot_count = (*activation).heap_slot_count.max(slot_count);
+                }
                 if let Some(heap) = heap {
                     update_heap_view(activation, heap);
                 }

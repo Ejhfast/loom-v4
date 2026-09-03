@@ -52,7 +52,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// The container carries closed types, environments, heaps, machines,
 /// code, bindings, resources, waits, effects, and execution traces.
 /// Admission accepts only this exact format version.
-pub const FORMAT_VERSION: u32 = 35;
+pub const FORMAT_VERSION: u32 = 36;
 
 /// The section kinds, in canonical order.
 ///

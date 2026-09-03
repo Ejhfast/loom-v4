@@ -1617,6 +1617,7 @@ fn relocate_snapshot_code(
                 source_runtime.strings.len(),
                 source_runtime.bytes.len(),
                 target.strings.len(),
+                target.bytes.len(),
             )?;
             let needed = target_index
                 .checked_add(1)
@@ -1689,14 +1690,29 @@ fn relocate_literal_index(
     source_strings: usize,
     source_bytes: usize,
     target_strings: usize,
+    target_bytes: usize,
 ) -> Result<usize, SnapshotFail> {
     if source < source_strings {
         let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
         return Ok(relocate_index(map.string(source), "literal string")? as usize);
     }
+    if source < source_strings.saturating_add(source_bytes) {
+        let source = source
+            .checked_sub(source_strings)
+            .ok_or(SnapshotFail::LimitExceeded)?;
+        let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
+        let target = relocate_index(map.bytes(source), "literal bytes")? as usize;
+        return target_strings
+            .checked_add(target)
+            .ok_or(SnapshotFail::LimitExceeded);
+    }
     let source = source
-        .checked_sub(source_strings)
-        .filter(|source| *source < source_bytes)
+        .checked_sub(
+            source_strings
+                .checked_add(source_bytes)
+                .ok_or(SnapshotFail::LimitExceeded)?,
+        )
+        .filter(|source| *source < source_strings)
         .ok_or_else(|| {
             SnapshotFail::Fault(
                 FaultCode::MalformedState,
@@ -1704,9 +1720,10 @@ fn relocate_literal_index(
             )
         })?;
     let source = u32::try_from(source).map_err(|_| SnapshotFail::LimitExceeded)?;
-    let target = relocate_index(map.bytes(source), "literal bytes")? as usize;
+    let target = relocate_index(map.string(source), "literal regular expression")? as usize;
     target_strings
-        .checked_add(target)
+        .checked_add(target_bytes)
+        .and_then(|base| base.checked_add(target))
         .ok_or(SnapshotFail::LimitExceeded)
 }
 
@@ -1785,7 +1802,9 @@ fn relocate_object_code(map: &CodeRelocation, object: &mut Object) -> Result<(),
         | Object::NativeChild { .. }
         | Object::NativeUdpSocket { .. }
         | Object::NativeHostResource { .. }
-        | Object::DynValue { .. } => {}
+        | Object::DynValue { .. }
+        | Object::NativeRegex(_)
+        | Object::NativeRegexMatch(_) => {}
     }
     Ok(())
 }

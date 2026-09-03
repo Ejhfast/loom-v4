@@ -220,6 +220,46 @@ impl<'o> FnChecker<'o> {
                 }
             }
         }
+        // `Regex.compile(pattern)` is one fixed core class method.
+        if name == "compile" {
+            if let ExprKind::Name(class_name) = &recv.kind {
+                let core_regex = ctx.core_types.get("Regex").copied();
+                if class_name == "Regex"
+                    && self.lookup_slot(class_name).is_none()
+                    && ctx.lookup_type(class_name, &self.env) == core_regex
+                {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`Regex.compile` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    if args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("`Regex.compile` expects 1 argument, found {}", args.len()),
+                            span,
+                        ));
+                    }
+                    let func = ctx.core_func_index["_regex_compile"];
+                    let sig = ctx.sigs[func as usize].clone();
+                    let args = arrange_args(args, &["pattern"], "Regex.compile")?;
+                    let pattern = self.check_expr(ctx, args[0], sig.params[0])?;
+                    return Ok(HExpr {
+                        flow: Flow::Normal,
+                        ty: sig.ret,
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func,
+                            targs: Vec::new(),
+                            rowargs: Vec::new(),
+                            args: vec![pattern],
+                        },
+                    });
+                }
+            }
+        }
         // A call into a `use`-bound module: `matrix.det(x)` or the
         // constructor `matrix.Matrix(2, 3)`. The materialized import
         // carries the qualified key, so the ordinary call path

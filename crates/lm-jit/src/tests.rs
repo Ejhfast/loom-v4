@@ -808,6 +808,20 @@ impl NativeRuntime for TestRuntime {
         text_parse_float_status,
         text_parse_float_value,
         float_fixed,
+        regex_compile_status,
+        regex_compile_value,
+        regex_source,
+        regex_is_match,
+        regex_captures,
+        regex_count,
+        regex_split,
+        regex_replace_all,
+        regex_match_start,
+        regex_match_end,
+        regex_match_text,
+        regex_match_group_count,
+        regex_match_group,
+        regex_match_named,
     );
 
     fn values_equal(

@@ -288,10 +288,14 @@ pub struct CoreLayout {
     pub child: Option<u32>,
     pub udp_datagram: Option<u32>,
     pub udp_socket: Option<u32>,
+    /// The core method table of compiled regular expressions.
+    pub regex: Option<u32>,
+    /// The core method table of regular-expression matches.
+    pub regex_match: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 255] = [
+pub const PINNED_LABELS: [&str; 257] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -547,6 +551,8 @@ pub const PINNED_LABELS: [&str; 255] = [
     "BranchError.ResourceActive",
     "BranchError.BranchLimitExceeded",
     "RestoreError.IncompatibleImage",
+    "Regex",
+    "RegexMatch",
 ];
 
 /// The core role of immediate integer values.
@@ -798,6 +804,10 @@ pub const ROLE_BRANCH_ERROR: usize = 251;
 pub const ROLE_BRANCH_RESOURCE_ACTIVE: usize = 252;
 pub const ROLE_BRANCH_LIMIT_EXCEEDED: usize = 253;
 pub const ROLE_RESTORE_INCOMPATIBLE_IMAGE: usize = 254;
+/// The core role of compiled regular expressions.
+pub const ROLE_REGEX: usize = 255;
+/// The core role of regular-expression matches.
+pub const ROLE_REGEX_MATCH: usize = 256;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1104,6 +1114,8 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Child" => &mut layout.child,
         "UdpDatagram" => &mut layout.udp_datagram,
         "UdpSocket" => &mut layout.udp_socket,
+        "Regex" => &mut layout.regex,
+        "RegexMatch" => &mut layout.regex_match,
         _ => unreachable!("only known labels enter the map"),
     }
 }

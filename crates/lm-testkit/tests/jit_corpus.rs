@@ -105,6 +105,7 @@ fn compile_function(
     let mut input =
         lm_jit::FunctionInput::new(function, runtime, unit.module(), code.bundle(), local);
     input.set_runtime_string_count(code.tables().strings.len());
+    input.set_runtime_byte_count(code.tables().bytes.len());
     input.set_runtime_core_roles(code.core_roles());
     input.set_class_relocation(relocation.classes());
 

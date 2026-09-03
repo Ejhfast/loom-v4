@@ -820,6 +820,10 @@ pub struct Machine {
     ///
     /// Snapshots exclude this process-local cache.
     pub(crate) native_resolved_calls: lm_jit::NativeResolvedCallCache,
+    /// Compiled result retained between the paired regex instructions.
+    ///
+    /// Snapshots exclude this process-local cache.
+    pub(crate) pending_regex_compile: Option<ObjRef>,
 }
 
 /// Clock-free execution counters for one machine.
@@ -916,6 +920,8 @@ mod execution;
 mod heap;
 pub(crate) use heap::BorrowedStringKey;
 mod interpreter;
+mod regex;
+pub(crate) use regex::{build_regex_match, regex_group_text};
 mod stack;
 mod state;
 mod syntax;

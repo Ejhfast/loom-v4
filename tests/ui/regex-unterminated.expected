@@ -1,0 +1,2 @@
+error[E0011]: unterminated regular-expression literal
+  --> tests/ui/regex-unterminated.lm:1:1

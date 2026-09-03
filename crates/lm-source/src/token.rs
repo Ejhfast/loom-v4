@@ -27,6 +27,8 @@ pub enum Tok {
     StrInterp(Vec<StrPiece>),
     /// Immutable byte literal after escape processing.
     Bytes(Vec<u8>),
+    /// Raw regular-expression source.
+    Regex(String),
     /// Identifier that is not a keyword.
     Ident(String),
 
@@ -126,6 +128,7 @@ impl fmt::Display for Tok {
             Tok::Char(v) => return write!(f, "character literal `{v:?}`"),
             Tok::Str(_) | Tok::StrInterp(_) => return write!(f, "string literal"),
             Tok::Bytes(_) => return write!(f, "byte string literal"),
+            Tok::Regex(_) => return write!(f, "regular-expression literal"),
             Tok::Ident(name) => return write!(f, "`{name}`"),
             Tok::KwAnd => "`and`",
             Tok::KwOr => "`or`",

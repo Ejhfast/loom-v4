@@ -125,6 +125,22 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeRegex(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_REGEX];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeRegexMatch(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_REGEX_MATCH];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 Object::NativeTcpStream { .. } => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_TCP_STREAM];
                     if class == lm_bytecode::NO_ROLE {
@@ -358,6 +374,7 @@ impl Machine {
             native_return_depth: None,
             native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
             native_resolved_calls: lm_jit::NativeResolvedCallCache::default(),
+            pending_regex_compile: None,
         }
     }
 

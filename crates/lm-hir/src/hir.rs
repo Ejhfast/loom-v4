@@ -223,6 +223,8 @@ pub enum NativeRepr {
     FunctionBinding,
     ClassBinding,
     DynValue,
+    Regex,
+    RegexMatch,
 }
 
 /// One checked class with its full field layout.
@@ -544,6 +546,7 @@ pub enum HExprKind {
     Char(char),
     Str(String),
     Bytes(Vec<u8>),
+    Regex(String),
     Bool(bool),
     Local(u32),
     /// One captured value of the enclosing closure.
@@ -775,6 +778,7 @@ impl HExpr {
             | HExprKind::Char(_)
             | HExprKind::Str(_)
             | HExprKind::Bytes(_)
+            | HExprKind::Regex(_)
             | HExprKind::Bool(_)
             | HExprKind::Local(_)
             | HExprKind::Capture(_)

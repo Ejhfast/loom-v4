@@ -1842,7 +1842,8 @@ impl Admit<'_> {
             .module
             .strings
             .len()
-            .saturating_add(self.module.bytes.len());
+            .saturating_add(self.module.bytes.len())
+            .saturating_add(self.module.strings.len());
         if m.literals.len() > literal_count {
             return fail(
                 ImageReason::Reference,
@@ -1861,12 +1862,31 @@ impl Admit<'_> {
                 Object::Str(text) if idx < self.module.strings.len() => {
                     text.as_str() == self.module.strings[idx]
                 }
-                Object::Bytes(bytes) if idx >= self.module.strings.len() => {
+                Object::Bytes(bytes)
+                    if idx >= self.module.strings.len()
+                        && idx
+                            < self
+                                .module
+                                .strings
+                                .len()
+                                .saturating_add(self.module.bytes.len()) =>
+                {
                     let byte_index = idx - self.module.strings.len();
                     self.module
                         .bytes
                         .get(byte_index)
                         .is_some_and(|value| bytes.as_slice() == value)
+                }
+                Object::NativeRegex(regex) => {
+                    let regex_index = idx
+                        .checked_sub(
+                            self.module
+                                .strings
+                                .len()
+                                .saturating_add(self.module.bytes.len()),
+                        )
+                        .filter(|index| *index < self.module.strings.len());
+                    regex_index.is_some_and(|index| regex.source() == self.module.strings[index])
                 }
                 _ => false,
             };

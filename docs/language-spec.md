@@ -182,6 +182,20 @@ Their `\xNN` escapes accept every byte from `00` through `ff`.
 
 Byte strings do not interpolate expressions.
 
+Raw regular-expression literals start with `re"` and end at the next unescaped double quote:
+
+```lm
+re"[a-z]+"
+re"(?P<word>\p{Greek}+)"
+re"a\"b"
+```
+
+The scanner copies every character between the delimiters without Loom escape processing.
+
+A backslash and its next character remain in the regular-expression source.
+
+Regular-expression literals do not interpolate expressions and cannot contain a line break.
+
 Version 0.2 reserves triple-quoted strings.
 
 ### 2.6 Punctuation and operators
@@ -4781,6 +4795,78 @@ Core values provide pinned formatting implementations.
 
 User classes format through an explicit `Display` conformance.
 
+#### 24.6.1 Regular expressions
+
+`Regex` is a final core class with an immutable compiled representation.
+
+A `re"..."` literal is checked during compilation and compiled once for each loaded code namespace.
+
+The syntax supports concatenation, alternation, repetition, character classes, captures, anchors, and Unicode properties.
+
+The syntax does not support backreferences, look-around assertions, or conditional expressions.
+
+Matching uses Unicode UTF-8 mode and leftmost-first choice.
+
+All reported positions are half-open UTF-8 byte offsets.
+
+Empty matches occur only at UTF-8 boundaries.
+
+The implementation uses finite automata and does not use recursive backtracking during a search.
+
+A pattern contains at most 65,536 UTF-8 bytes, 64 syntax levels, and 128 capture slots.
+
+The capture limit includes the complete match.
+
+Compiled automata and lazy caches have fixed memory limits.
+
+A verified module retains at most 64 MiB of compiled literal data.
+
+The compiler rejects an invalid or excessive literal.
+
+Dynamic compilation reports the same conditions through `RegexError`.
+
+The core surface follows.
+
+```text
+Regex.compile(pattern: Text) -> Result[Regex, RegexError]
+source(self) -> String
+is_match(self, text: Text) -> Bool
+find(self, text: Text) -> Option[RegexMatch]
+captures(self, text: Text) -> Option[RegexMatch]
+count(self, text: Text) -> Int
+split(self, text: Text) -> List[Substring]
+replace_all(self, text: Text, replacement: Text) -> String
+
+start_byte(self) -> Int
+end_byte(self) -> Int
+text(self) -> String
+group_count(self) -> Int
+group(self, index: Int) -> Option[Substring]
+named(self, name: Text) -> Option[Substring]
+```
+
+`find` and `captures` return the first match with its captures.
+
+Capture index zero contains the complete match.
+
+`group_count` includes capture index zero.
+
+An absent optional capture gives `None`.
+
+`split` returns shared text views between non-overlapping matches.
+
+Replacement text accepts `$1`, `$name`, `${name}`, and `$$` references.
+
+An absent or unknown capture contributes empty text.
+
+A replacement contains at most 4,096 literal and capture parts.
+
+`replace_all` faults with `HeapLimit` when its bounded result cannot fit.
+
+`RegexError.Invalid` reports invalid syntax.
+
+`RegexError.LimitExceeded` reports a fixed compilation limit.
+
 ### 24.7 Numeric and range utilities
 
 The core `Int` surface adds these explicit operations:
@@ -5081,7 +5167,7 @@ The compiler test harness has UI diagnostics, compile-pass, run-pass, run-fail, 
 
 ### 24.16 Deliberate omissions
 
-The minimal library does not include an iterator trait hierarchy, async/await, regex engine, database client, GUI, or locale framework.
+The minimal library does not include an iterator trait hierarchy, async/await, database client, GUI, or locale framework.
 
 It also omits HTTP/2, HTTP/3, TLS servers, automatic redirects, cookies, proxies, and decompression.
 
@@ -5447,15 +5533,16 @@ else_body       = [ separators ], block ;
 
 pattern         = "_"
                 | IDENT
-                | literal
+                | pattern_literal
                 | tuple_pattern
                 | qualified_name, "(", [ pattern, { ",", pattern } ], ")" ;
 tuple_pattern   = "(", pattern, ( ",", [ pattern, { ",", pattern } ] | { ",", pattern } ), ")" ;
+pattern_literal = [ "-" ], INT | CHAR | STRING | "true" | "false" | "()" ;
 
 return_expr     = "return", [ expression ] ;
 break_expr      = "break", [ expression ] ;
 
-literal         = INT | FLOAT | CHAR | STRING | BYTES
+literal         = INT | FLOAT | CHAR | STRING | BYTES | REGEX
                 | "true" | "false" | "()" ;
 ```
 

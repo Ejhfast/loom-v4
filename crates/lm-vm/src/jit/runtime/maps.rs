@@ -109,6 +109,7 @@ impl MachineRuntime<'_> {
             bits: object_bits(reference),
             heap: (reference.slot & lm_heap::JIT_PAGE_MASK == 0)
                 .then(|| self.machine.vm.heap.jit_view()),
+            object: true,
         }
     }
 

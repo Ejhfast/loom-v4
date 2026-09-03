@@ -147,6 +147,7 @@ impl MachineRuntime<'_> {
         HeapOperationResult::Value {
             bits: object_bits(reference),
             heap: Some(self.machine.vm.heap.jit_view()),
+            object: true,
         }
     }
 

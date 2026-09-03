@@ -436,6 +436,28 @@ pub struct PortableCode {
     pub origin: Option<[u8; 32]>,
 }
 
+/// One capture range relative to the complete matched text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegexCaptureRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One immutable regular-expression match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeRegexMatch {
+    /// A copy of the complete match.
+    pub text: SharedText,
+    /// The complete match start in the searched text.
+    pub start: u32,
+    /// The complete match end in the searched text.
+    pub end: u32,
+    /// Capture ranges relative to `text`.
+    pub groups: Box<[Option<RegexCaptureRange>]>,
+    /// Named capture indices.
+    pub names: Box<[(String, u32)]>,
+}
+
 /// The payload of one heap object.
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C, u32)]
@@ -575,6 +597,10 @@ pub enum Object {
     NativeHostResource { kind: [u8; 32], resource: u64 },
     /// One value with its closed static type. Born frozen.
     DynValue { value: Value, ty: u32 },
+    /// One compiled regular expression. Born frozen.
+    NativeRegex(lm_regex::Regex),
+    /// One immutable regular-expression match. Born frozen.
+    NativeRegexMatch(Box<NativeRegexMatch>),
 }
 
 /// How a boundary transfer treats one shape.
@@ -989,9 +1015,29 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_REGEX: ShapeDesc = ShapeDesc {
+    name: "Regex",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_REGEX_MATCH: ShapeDesc = ShapeDesc {
+    name: "RegexMatch",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 38] = [
+pub const SHAPES: [&ShapeDesc; 40] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -1030,6 +1076,8 @@ pub const SHAPES: [&ShapeDesc; 38] = [
     &SHAPE_CHILD,
     &SHAPE_UDP_SOCKET,
     &SHAPE_DYN_REF,
+    &SHAPE_REGEX,
+    &SHAPE_REGEX_MATCH,
 ];
 
 impl Object {
@@ -1237,6 +1285,10 @@ impl Object {
                 },
                 ty: *ty,
             },
+            Object::NativeRegex(regex) => Object::NativeRegex(regex.clone()),
+            Object::NativeRegexMatch(matched) => {
+                Object::NativeRegexMatch(Box::new((**matched).clone()))
+            }
         })
     }
 
@@ -1283,6 +1335,8 @@ impl Object {
             Object::NativeChild { .. } => 35,
             Object::NativeUdpSocket { .. } => 36,
             Object::NativeDynRef { .. } => 37,
+            Object::NativeRegex(_) => 38,
+            Object::NativeRegexMatch(_) => 39,
         }
     }
 
@@ -1342,6 +1396,25 @@ impl Object {
                 Object::NativeSnapshot(image) => image.len(),
                 Object::NativeSnapshotRef { .. } => VALUE_COST,
                 Object::DynValue { .. } => VALUE_COST,
+                Object::NativeRegex(regex) => {
+                    regex.memory_usage().saturating_add(regex.source().len())
+                }
+                Object::NativeRegexMatch(matched) => matched
+                    .text
+                    .retained_capacity()
+                    .saturating_add(
+                        matched
+                            .groups
+                            .len()
+                            .saturating_mul(std::mem::size_of::<Option<RegexCaptureRange>>()),
+                    )
+                    .saturating_add(
+                        matched
+                            .names
+                            .iter()
+                            .map(|(name, _)| name.len().saturating_add(4))
+                            .sum::<usize>(),
+                    ),
             }
     }
 
@@ -1413,6 +1486,7 @@ impl Object {
             | Object::NativeChild { .. }
             | Object::NativeUdpSocket { .. }
             | Object::NativeHostResource { .. } => {}
+            Object::NativeRegex(_) | Object::NativeRegexMatch(_) => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
             Object::NativeSlotChange { target, .. } => visit(target),
@@ -1468,6 +1542,10 @@ impl Object {
             Object::NativeSnapshotRef { image } => Object::NativeSnapshotRef { image: *image },
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeCode(code) => Object::NativeCode(Box::new((**code).clone())),
+            Object::NativeRegex(regex) => Object::NativeRegex(regex.clone()),
+            Object::NativeRegexMatch(matched) => {
+                Object::NativeRegexMatch(Box::new((**matched).clone()))
+            }
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
             },
@@ -1563,6 +1641,7 @@ impl Object {
             | Object::NativeHandle { .. }
             | Object::NativeSnapshot(_)
             | Object::NativeSnapshotRef { .. } => return None,
+            Object::NativeRegex(_) | Object::NativeRegexMatch(_) => return None,
             Object::NativeCode(_) => return None,
             Object::Bytes(_)
             | Object::NativeFileHandle { .. }
@@ -1812,6 +1891,14 @@ mod tests {
                 vm: 2,
                 generation: 1,
             },
+            Object::NativeRegex(lm_regex::Regex::compile("a").expect("the pattern is valid")),
+            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+                text: "a".into(),
+                start: 0,
+                end: 1,
+                groups: vec![Some(RegexCaptureRange { start: 0, end: 1 })].into(),
+                names: vec![("whole".to_string(), 0)].into(),
+            })),
         ]
     }
 
@@ -2023,6 +2110,14 @@ mod tests {
                 vm: 0,
                 generation: 0,
             },
+            Object::NativeRegex(lm_regex::Regex::compile("a").expect("the pattern is valid")),
+            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+                text: "a".into(),
+                start: 0,
+                end: 1,
+                groups: vec![Some(RegexCaptureRange { start: 0, end: 1 })].into(),
+                names: vec![("whole".to_string(), 0)].into(),
+            })),
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -2163,6 +2258,8 @@ mod tests {
                 "PipeWriter",
                 "Child",
                 "UdpSocket",
+                "Regex",
+                "RegexMatch",
             ]
         );
         // A builder holds a private mutable buffer.

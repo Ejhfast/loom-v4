@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 41;
+pub const ABI_VERSION: u32 = 42;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -224,6 +224,8 @@ pub enum AbiCore {
     ChildStatus,
     ExecError,
     UdpDatagram,
+    Regex,
+    RegexMatch,
 }
 
 impl AbiCore {
@@ -276,6 +278,8 @@ impl AbiCore {
             AbiCore::ChildStatus => "ChildStatus",
             AbiCore::ExecError => "ExecError",
             AbiCore::UdpDatagram => "UdpDatagram",
+            AbiCore::Regex => "Regex",
+            AbiCore::RegexMatch => "RegexMatch",
         }
     }
 }
@@ -412,6 +416,8 @@ impl AbiType {
     pub const CHILD_STATUS: AbiType = AbiType::Core(AbiCore::ChildStatus);
     pub const EXEC_ERROR: AbiType = AbiType::Core(AbiCore::ExecError);
     pub const UDP_DATAGRAM: AbiType = AbiType::Core(AbiCore::UdpDatagram);
+    pub const REGEX: AbiType = AbiType::Core(AbiCore::Regex);
+    pub const REGEX_MATCH: AbiType = AbiType::Core(AbiCore::RegexMatch);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
@@ -427,6 +433,10 @@ impl AbiType {
 
     pub const LIST_STR: AbiType = AbiType::List(&AbiType::STR);
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
+    pub const OPTION_REGEX_MATCH: AbiType =
+        AbiType::Apply(AbiConstructor::Option, &[AbiType::REGEX_MATCH]);
+    pub const OPTION_SUBSTRING: AbiType =
+        AbiType::Apply(AbiConstructor::Option, &[AbiType::SUBSTRING]);
     pub const LIST_SYNTAX_ELEMENT: AbiType = AbiType::List(&AbiType::SYNTAX_ELEMENT);
     pub const RESULT_OPTION_STR_IO_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
@@ -641,7 +651,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 27;
+pub const INTRINSIC_ABI_VERSION: u32 = 28;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -880,9 +890,23 @@ pub const INTRINSIC_FLOAT_TANH: IntrinsicSlot = 220;
 pub const INTRINSIC_FLOAT_ASINH: IntrinsicSlot = 221;
 pub const INTRINSIC_FLOAT_ACOSH: IntrinsicSlot = 222;
 pub const INTRINSIC_FLOAT_ATANH: IntrinsicSlot = 223;
+pub const INTRINSIC_REGEX_COMPILE_STATUS: IntrinsicSlot = 224;
+pub const INTRINSIC_REGEX_COMPILE_VALUE: IntrinsicSlot = 225;
+pub const INTRINSIC_REGEX_SOURCE: IntrinsicSlot = 226;
+pub const INTRINSIC_REGEX_IS_MATCH: IntrinsicSlot = 227;
+pub const INTRINSIC_REGEX_CAPTURES: IntrinsicSlot = 228;
+pub const INTRINSIC_REGEX_COUNT: IntrinsicSlot = 229;
+pub const INTRINSIC_REGEX_SPLIT: IntrinsicSlot = 230;
+pub const INTRINSIC_REGEX_REPLACE_ALL: IntrinsicSlot = 231;
+pub const INTRINSIC_REGEX_MATCH_START: IntrinsicSlot = 232;
+pub const INTRINSIC_REGEX_MATCH_END: IntrinsicSlot = 233;
+pub const INTRINSIC_REGEX_MATCH_TEXT: IntrinsicSlot = 234;
+pub const INTRINSIC_REGEX_MATCH_GROUP_COUNT: IntrinsicSlot = 235;
+pub const INTRINSIC_REGEX_MATCH_GROUP: IntrinsicSlot = 236;
+pub const INTRINSIC_REGEX_MATCH_NAMED: IntrinsicSlot = 237;
 
 /// Pure intrinsics in stable slot order.
-pub static INTRINSICS: [IntrinsicDef; 224] = [
+pub static INTRINSICS: [IntrinsicDef; 238] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2274,6 +2298,90 @@ pub static INTRINSICS: [IntrinsicDef; 224] = [
         name: "float.atanh",
         params: &[AbiType::FLOAT],
         reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.compile_status",
+        params: &[AbiType::TEXT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.compile_value",
+        params: &[AbiType::TEXT],
+        reply: AbiType::REGEX,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.source",
+        params: &[AbiType::REGEX],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.is_match",
+        params: &[AbiType::REGEX, AbiType::TEXT],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.captures",
+        params: &[AbiType::REGEX, AbiType::TEXT],
+        reply: AbiType::OPTION_REGEX_MATCH,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.count",
+        params: &[AbiType::REGEX, AbiType::TEXT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.split",
+        params: &[AbiType::REGEX, AbiType::TEXT],
+        reply: AbiType::LIST_SUBSTRING,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex.replace_all",
+        params: &[AbiType::REGEX, AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.start_byte",
+        params: &[AbiType::REGEX_MATCH],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.end_byte",
+        params: &[AbiType::REGEX_MATCH],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.text",
+        params: &[AbiType::REGEX_MATCH],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.group_count",
+        params: &[AbiType::REGEX_MATCH],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.group",
+        params: &[AbiType::REGEX_MATCH, AbiType::INT],
+        reply: AbiType::OPTION_SUBSTRING,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "regex_match.named",
+        params: &[AbiType::REGEX_MATCH, AbiType::TEXT],
+        reply: AbiType::OPTION_SUBSTRING,
         semantic_revision: 1,
     },
 ];

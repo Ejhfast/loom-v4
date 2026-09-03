@@ -118,6 +118,7 @@ pub fn instruction_treatment(instruction: &Instr) -> InstructionTreatment {
         | Instr::ConstChar(_)
         | Instr::ConstStr(_)
         | Instr::ConstBytes(_)
+        | Instr::ConstRegex(_)
         | Instr::LoadLocal(_)
         | Instr::StoreLocal(_)
         | Instr::Pop
@@ -349,6 +350,13 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
                 .with_replay()
                 .with_fault_stack(FaultStack::Pop(4))
         }
+        ExtendedInstr::RegexCaptures { .. }
+        | ExtendedInstr::RegexMatchGroup { .. }
+        | ExtendedInstr::RegexMatchNamed { .. } => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
         ExtendedInstr::MapProbe => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(3)),
@@ -516,6 +524,46 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
                 .with_replay()
                 .with_fault_stack(FaultStack::Before)
+        }
+        NativeInstr::RegexCompileStatus => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
+        NativeInstr::RegexIsMatch
+        | NativeInstr::RegexCount
+        | NativeInstr::RegexMatchStart
+        | NativeInstr::RegexMatchEnd
+        | NativeInstr::RegexMatchGroupCount => {
+            dedicated(Helper)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(
+                    if matches!(
+                        operation,
+                        NativeInstr::RegexMatchStart
+                            | NativeInstr::RegexMatchEnd
+                            | NativeInstr::RegexMatchGroupCount
+                    ) {
+                        1
+                    } else {
+                        2
+                    },
+                ))
+        }
+        NativeInstr::RegexCompileValue | NativeInstr::RegexSource | NativeInstr::RegexMatchText => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(1))
+        }
+        NativeInstr::RegexSplit => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(2))
+        }
+        NativeInstr::RegexReplaceAll => {
+            InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
+                .with_replay()
+                .with_fault_stack(FaultStack::Pop(3))
         }
         NativeInstr::SbBuild
         | NativeInstr::SbFinish

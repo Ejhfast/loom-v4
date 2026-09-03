@@ -659,6 +659,8 @@ pub(super) fn emit_value_contract(
         ObjectContract::Closure => JIT_OBJECT_CLOSURE,
         ObjectContract::Bytes => JIT_OBJECT_BYTES,
         ObjectContract::Digest => JIT_OBJECT_DIGEST,
+        ObjectContract::Regex => JIT_OBJECT_REGEX,
+        ObjectContract::RegexMatch => JIT_OBJECT_REGEX_MATCH,
         ObjectContract::StringBuilder => JIT_OBJECT_STRING_BUILDER,
         ObjectContract::ByteBuffer => JIT_OBJECT_BYTE_BUFFER,
     };

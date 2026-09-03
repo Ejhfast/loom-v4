@@ -54,6 +54,7 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::ConstChar(_)
         | Instr::ConstStr(_)
         | Instr::ConstBytes(_)
+        | Instr::ConstRegex(_)
         | Instr::LoadLocal(_)
         | Instr::LoadCapture(_)
         | Instr::New(_)
@@ -122,6 +123,9 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::GeBytes)
         | Instr::Native(NativeInstr::HashCombine)
         | Instr::Native(NativeInstr::HashUnorderedCombine)
+        | Instr::Native(NativeInstr::RegexIsMatch)
+        | Instr::Native(NativeInstr::RegexCount)
+        | Instr::Native(NativeInstr::RegexSplit)
         | Instr::Native(NativeInstr::SbAppendChar) => (2, 1),
         Instr::Neg
         | Instr::Not
@@ -161,6 +165,13 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::SbByteLen)
         | Instr::Native(NativeInstr::SbFinish)
         | Instr::Native(NativeInstr::BbFinish)
+        | Instr::Native(NativeInstr::RegexCompileStatus)
+        | Instr::Native(NativeInstr::RegexCompileValue)
+        | Instr::Native(NativeInstr::RegexSource)
+        | Instr::Native(NativeInstr::RegexMatchStart)
+        | Instr::Native(NativeInstr::RegexMatchEnd)
+        | Instr::Native(NativeInstr::RegexMatchText)
+        | Instr::Native(NativeInstr::RegexMatchGroupCount)
         | Instr::Freeze
         | Instr::Digest { .. } => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),
@@ -179,6 +190,7 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::TextSlice)
         | Instr::Native(NativeInstr::TextSliceBytes)
         | Instr::Native(NativeInstr::TextReplace)
+        | Instr::Native(NativeInstr::RegexReplaceAll)
         | Instr::Native(NativeInstr::BbFindFrom) => (3, 1),
         Instr::MapPut { discard: true, .. } => (3, 0),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
@@ -321,6 +333,9 @@ fn extended_stack_effect(
         | ExtendedInstr::AsCallback => (1, 1),
         ExtendedInstr::ListGet { .. }
         | ExtendedInstr::MapGet { .. }
+        | ExtendedInstr::RegexCaptures { .. }
+        | ExtendedInstr::RegexMatchGroup { .. }
+        | ExtendedInstr::RegexMatchNamed { .. }
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapIterLen
         | ExtendedInstr::MapKeyAt

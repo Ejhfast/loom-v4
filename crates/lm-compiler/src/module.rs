@@ -946,6 +946,7 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::Char(_)
         | HExprKind::Str(_)
         | HExprKind::Bytes(_)
+        | HExprKind::Regex(_)
         | HExprKind::Bool(_)
         | HExprKind::Local(_)
         | HExprKind::Capture(_)

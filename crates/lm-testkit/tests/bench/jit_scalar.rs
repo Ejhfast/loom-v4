@@ -67,6 +67,25 @@ fn bench_jit_float_math() {
 
 #[test]
 #[ignore]
+fn bench_jit_regex_match() {
+    report_jit_representative(
+        "jit_regex_match",
+        concat!(
+            "pattern = re\"^(?:[A-Za-z_][A-Za-z0-9_]*::){3}[A-Za-z_][A-Za-z0-9_]*$\"\n",
+            "text = \"alpha_1::beta2::gamma_3::delta4\"\n",
+            "index = 0\nmatched = 0\n",
+            "while index < 1000000\n",
+            "  if pattern.is_match(text)\n",
+            "    matched = matched + 1\n",
+            "  end\n",
+            "  index = index + 1\n",
+            "end\nmatched\n",
+        ),
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_jit_inline_leaf_scheduler() {
     report_jit_representative(
         "jit_inline_leaf_scheduler",

@@ -35,8 +35,9 @@ use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
-    CodeHandleKind, FaultSite, MapEntry, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
-    PortableCode, PortableCodeKind, SlotChangeKind, StructuralEpoch,
+    CodeHandleKind, FaultSite, MapEntry, MapIndex, NativeByteBuffer, NativeRegexMatch,
+    NativeStringBuilder, Object, PortableCode, PortableCodeKind, RegexCaptureRange, SlotChangeKind,
+    StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
@@ -731,6 +732,28 @@ fn encode_object(out: &mut Out, object: &Object) {
         Object::NativeHostResource { kind, resource } => {
             out.hash(kind);
             out.u64(*resource);
+        }
+        Object::NativeRegex(regex) => out.str(regex.source()),
+        Object::NativeRegexMatch(matched) => {
+            out.str(&matched.text);
+            out.leb(u64::from(matched.start));
+            out.leb(u64::from(matched.end));
+            out.leb(matched.groups.len() as u64);
+            for group in &matched.groups {
+                match group {
+                    Some(group) => {
+                        out.u8(1);
+                        out.leb(u64::from(group.start));
+                        out.leb(u64::from(group.end));
+                    }
+                    None => out.u8(0),
+                }
+            }
+            out.leb(matched.names.len() as u64);
+            for (name, index) in &matched.names {
+                out.str(name);
+                out.leb(u64::from(*index));
+            }
         }
     }
 }
@@ -2435,6 +2458,108 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             kind: cur.hash()?,
             resource: cur.u64()?,
         },
+        38 => {
+            let source = cur.str(lm_regex::MAX_PATTERN_BYTES as u32)?;
+            let regex = lm_regex::Regex::compile(&source).map_err(|_| {
+                ImageError::new(
+                    ImageReason::Layout,
+                    "a stored regular expression is invalid",
+                )
+            })?;
+            cur.budget
+                .charge(regex.memory_usage(), "regular-expression program")?;
+            Object::NativeRegex(regex)
+        }
+        39 => {
+            let text = cur.str(limits.max_string_bytes)?;
+            let start = u32::try_from(cur.leb()?)
+                .map_err(|_| ImageError::new(ImageReason::Layout, "a match start is too large"))?;
+            let end = u32::try_from(cur.leb()?)
+                .map_err(|_| ImageError::new(ImageReason::Layout, "a match end is too large"))?;
+            if start > end {
+                return err(ImageReason::Layout, "a match range is reversed");
+            }
+            if usize::try_from(end - start).ok() != Some(text.len()) {
+                return err(
+                    ImageReason::Layout,
+                    "a match range does not describe its stored text",
+                );
+            }
+            let count = cur.count(lm_regex::MAX_CAPTURES as u64, "capture")?;
+            if count == 0 {
+                return err(ImageReason::Layout, "a match has no complete capture");
+            }
+            let mut groups = cur.vector(count, "capture range")?;
+            for _ in 0..count {
+                let group = match cur.u8()? {
+                    0 => None,
+                    1 => {
+                        let group_start = u32::try_from(cur.leb()?).map_err(|_| {
+                            ImageError::new(ImageReason::Layout, "a capture start is too large")
+                        })?;
+                        let group_end = u32::try_from(cur.leb()?).map_err(|_| {
+                            ImageError::new(ImageReason::Layout, "a capture end is too large")
+                        })?;
+                        if group_start > group_end
+                            || group_end as usize > text.len()
+                            || !text.is_char_boundary(group_start as usize)
+                            || !text.is_char_boundary(group_end as usize)
+                        {
+                            return err(ImageReason::Layout, "a capture range is invalid");
+                        }
+                        Some(RegexCaptureRange {
+                            start: group_start,
+                            end: group_end,
+                        })
+                    }
+                    _ => return err(ImageReason::Layout, "a capture flag is invalid"),
+                };
+                groups.push(group);
+            }
+            let complete_end = u32::try_from(text.len())
+                .map_err(|_| ImageError::new(ImageReason::Layout, "matched text is too large"))?;
+            if groups.first().copied().flatten()
+                != Some(RegexCaptureRange {
+                    start: 0,
+                    end: complete_end,
+                })
+            {
+                return err(
+                    ImageReason::Layout,
+                    "the complete capture does not describe the stored text",
+                );
+            }
+            let names_count = cur.count(count as u64, "capture name")?;
+            let mut names = cur.vector(names_count, "capture name")?;
+            let mut previous_index = None;
+            for _ in 0..names_count {
+                let name = cur.str(lm_regex::MAX_PATTERN_BYTES as u32)?;
+                let index = u32::try_from(cur.leb()?).map_err(|_| {
+                    ImageError::new(ImageReason::Layout, "a capture index is too large")
+                })?;
+                if index as usize >= count {
+                    return err(ImageReason::Layout, "a capture name has an invalid index");
+                }
+                if name.is_empty()
+                    || previous_index.is_some_and(|previous| index <= previous)
+                    || names.iter().any(|(previous, _)| previous == &name)
+                {
+                    return err(
+                        ImageReason::Layout,
+                        "capture names are not in canonical group order",
+                    );
+                }
+                previous_index = Some(index);
+                names.push((name, index));
+            }
+            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+                text: text.into(),
+                start,
+                end,
+                groups: groups.into_boxed_slice(),
+                names: names.into_boxed_slice(),
+            }))
+        }
         other => {
             return err(
                 ImageReason::Layout,

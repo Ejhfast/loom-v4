@@ -4,6 +4,7 @@ use super::*;
 
 mod allocation;
 mod collections;
+mod regex;
 mod runtime;
 mod scalar;
 mod values;
@@ -118,6 +119,7 @@ pub(super) fn emit_segment_body(
                 Instr::ConstChar(value) => values::emit(&mut emission)?,
                 Instr::ConstStr(index) => values::emit(&mut emission)?,
                 Instr::ConstBytes(index) => values::emit(&mut emission)?,
+                Instr::ConstRegex(index) => values::emit(&mut emission)?,
                 Instr::OpConst(operation) => values::emit(&mut emission)?,
                 Instr::LoadLocal(slot) => values::emit(&mut emission)?,
                 Instr::StoreLocal(slot) => values::emit(&mut emission)?,
@@ -147,6 +149,11 @@ pub(super) fn emit_segment_body(
                 Instr::Extended(ExtendedInstr::MapInternTextRange) => {
                     collections::emit(&mut emission)?
                 }
+                Instr::Extended(
+                    ExtendedInstr::RegexCaptures { .. }
+                    | ExtendedInstr::RegexMatchGroup { .. }
+                    | ExtendedInstr::RegexMatchNamed { .. },
+                ) => regex::emit(&mut emission)?,
                 Instr::MapPut { discard, .. } => collections::emit(&mut emission)?,
                 Instr::ListAt => collections::emit(&mut emission)?,
                 Instr::Extended(ExtendedInstr::ListSet) => collections::emit(&mut emission)?,
@@ -235,6 +242,19 @@ pub(super) fn emit_segment_body(
                 Instr::Native(NativeInstr::TextAtByte) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::TextAt) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::TextIsBoundary) => runtime::emit(&mut emission)?,
+                Instr::Native(
+                    NativeInstr::RegexCompileStatus
+                    | NativeInstr::RegexCompileValue
+                    | NativeInstr::RegexSource
+                    | NativeInstr::RegexIsMatch
+                    | NativeInstr::RegexCount
+                    | NativeInstr::RegexSplit
+                    | NativeInstr::RegexReplaceAll
+                    | NativeInstr::RegexMatchStart
+                    | NativeInstr::RegexMatchEnd
+                    | NativeInstr::RegexMatchText
+                    | NativeInstr::RegexMatchGroupCount,
+                ) => regex::emit(&mut emission)?,
                 Instr::Extended(
                     ExtendedInstr::SyntaxTreeRoot
                     | ExtendedInstr::SyntaxKind

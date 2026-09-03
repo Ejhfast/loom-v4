@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -439,6 +448,7 @@ name = "lm-heap"
 version = "0.1.0"
 dependencies = [
  "lm-abi",
+ "lm-regex",
  "lm-value",
 ]
 
@@ -448,6 +458,7 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-regex",
  "lm-source",
  "lm-types",
 ]
@@ -516,6 +527,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lm-regex"
+version = "0.1.0"
+dependencies = [
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "lm-scc"
 version = "0.1.0"
 
@@ -541,6 +560,7 @@ dependencies = [
  "lm-link",
  "lm-math",
  "lm-proc",
+ "lm-regex",
  "lm-source",
  "lm-types",
  "lm-value",
@@ -566,6 +586,7 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-regex",
 ]
 
 [[package]]
@@ -579,6 +600,7 @@ dependencies = [
  "lm-jit",
  "lm-link",
  "lm-math",
+ "lm-regex",
  "lm-value",
  "lm-verify",
 ]
@@ -597,6 +619,12 @@ checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mimalloc"
@@ -691,6 +719,23 @@ dependencies = [
  "rustc-hash",
  "smallvec",
 ]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "region"

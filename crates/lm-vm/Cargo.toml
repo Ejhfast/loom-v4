@@ -12,5 +12,6 @@ lm-heap = { path = "../lm-heap" }
 lm-jit = { path = "../lm-jit" }
 lm-link = { path = "../lm-link" }
 lm-math = { path = "../lm-math" }
+lm-regex = { path = "../lm-regex" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }

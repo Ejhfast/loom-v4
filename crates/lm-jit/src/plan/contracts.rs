@@ -83,6 +83,19 @@ pub(super) fn virtual_receiver(
                         context.runtime_core.byte_buffer,
                     )
                 }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.regex == Some(*class) =>
+                {
+                    object(lm_heap::JIT_OBJECT_REGEX, context.runtime_core.regex)
+                }
+                Some(BcType::Class(class) | BcType::Inst(class, _))
+                    if source_core.regex_match == Some(*class) =>
+                {
+                    object(
+                        lm_heap::JIT_OBJECT_REGEX_MATCH,
+                        context.runtime_core.regex_match,
+                    )
+                }
                 Some(BcType::Class(class) | BcType::Inst(class, _)) => {
                     Ok(VirtualReceiver::Instance {
                         class: relocate_class(*class, context.class_relocation)?,
@@ -261,6 +274,40 @@ pub(super) fn text_type(
     }
 }
 
+pub(super) fn regex_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    if matches!(
+        value_contract(context, ty)?.object,
+        Some(ObjectContract::Regex)
+    ) {
+        Ok(())
+    } else {
+        Err(UnsupportedReason::InvalidStack)
+    }
+}
+
+pub(super) fn regex_match_type(
+    context: &SegmentAnalysisContext<'_>,
+    receiver: ScalarKind,
+) -> Result<(), UnsupportedReason> {
+    let ScalarKind::Object(ty) = receiver else {
+        return Err(UnsupportedReason::InvalidStack);
+    };
+    if matches!(
+        value_contract(context, ty)?.object,
+        Some(ObjectContract::RegexMatch)
+    ) {
+        Ok(())
+    } else {
+        Err(UnsupportedReason::InvalidStack)
+    }
+}
+
 pub(super) fn string_builder_type(
     context: &SegmentAnalysisContext<'_>,
     receiver: ScalarKind,
@@ -351,6 +398,12 @@ pub(super) fn value_contract(
         }
         Some(BcType::Class(class) | BcType::Inst(class, _)) if core.byte_buffer == Some(*class) => {
             Some(ObjectContract::ByteBuffer)
+        }
+        Some(BcType::Class(class) | BcType::Inst(class, _)) if core.regex == Some(*class) => {
+            Some(ObjectContract::Regex)
+        }
+        Some(BcType::Class(class) | BcType::Inst(class, _)) if core.regex_match == Some(*class) => {
+            Some(ObjectContract::RegexMatch)
         }
         Some(BcType::Class(class) | BcType::Inst(class, _))
             if matches!(kind, ScalarKind::Object(_)) =>

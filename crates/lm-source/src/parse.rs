@@ -1940,6 +1940,16 @@ impl Parser<'_> {
                     _ => unreachable!(),
                 }
             }
+            Tok::Regex(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Regex(v) => Ok(Expr {
+                        kind: ExprKind::Regex(v),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
             Tok::KwTrue => {
                 let token = self.next();
                 Ok(Expr {
@@ -2454,6 +2464,10 @@ impl Parser<'_> {
             Tok::StrInterp(_) => {
                 Err(self.error("E1041", "an interpolated string is not a valid pattern"))
             }
+            Tok::Regex(_) => Err(self.error(
+                "E1041",
+                "a regular-expression literal is not a valid pattern",
+            )),
             Tok::Char(_) => {
                 let token = self.next();
                 match token.tok {

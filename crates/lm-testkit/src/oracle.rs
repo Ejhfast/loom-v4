@@ -44,6 +44,17 @@ enum OKind {
     Sb(Option<String>),
     Bb(Option<Vec<u8>>),
     Bytes(Vec<u8>),
+    Regex(lm_regex::Regex),
+    RegexMatch(ORegexMatch),
+}
+
+#[derive(Clone)]
+struct ORegexMatch {
+    text: Rc<String>,
+    start: usize,
+    end: usize,
+    groups: Vec<Option<lm_regex::ByteRange>>,
+    names: Vec<(String, usize)>,
 }
 
 /// Why evaluation left the normal path.
@@ -406,10 +417,59 @@ impl<'m> Oracle<'m> {
         }
     }
 
+    fn as_regex(&self, value: &OV) -> Result<lm_regex::Regex, Stop> {
+        let object = self.as_obj(value)?;
+        let regex = match &object.borrow().kind {
+            OKind::Regex(regex) => regex.clone(),
+            _ => return Err(Stop::Limit("expected a Regex value")),
+        };
+        Ok(regex)
+    }
+
+    fn as_regex_match(&self, value: &OV) -> Result<ORegexMatch, Stop> {
+        let object = self.as_obj(value)?;
+        let matched = match &object.borrow().kind {
+            OKind::RegexMatch(matched) => matched.clone(),
+            _ => return Err(Stop::Limit("expected a RegexMatch value")),
+        };
+        Ok(matched)
+    }
+
+    fn regex_match_value(&self, regex: &lm_regex::Regex, text: &str) -> Option<OV> {
+        let captures = regex.captures(text)?;
+        let complete = captures.complete();
+        let matched = Rc::new(text[complete.start..complete.end].to_string());
+        let groups = captures
+            .groups()
+            .iter()
+            .map(|group| {
+                group.map(|range| lm_regex::ByteRange {
+                    start: range.start - complete.start,
+                    end: range.end - complete.start,
+                })
+            })
+            .collect();
+        let names = regex
+            .capture_names()
+            .map(|(index, name)| (name.to_string(), index))
+            .collect();
+        Some(self.alloc(OKind::RegexMatch(ORegexMatch {
+            text: matched,
+            start: complete.start,
+            end: complete.end,
+            groups,
+            names,
+        })))
+    }
+
     fn alloc(&self, kind: OKind) -> OV {
         let frozen = matches!(
             kind,
-            OKind::Tuple(_) | OKind::Closure { .. } | OKind::Bytes(_)
+            OKind::Tuple(_)
+                | OKind::Closure { .. }
+                | OKind::Bytes(_)
+                | OKind::Regex(_)
+                | OKind::RegexMatch(_)
         );
         OV::Obj(Rc::new(RefCell::new(OObj { frozen, kind })))
     }
@@ -456,7 +516,9 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::ClassDef
                 | NativeRepr::FunctionBinding
                 | NativeRepr::ClassBinding
-                | NativeRepr::DynValue,
+                | NativeRepr::DynValue
+                | NativeRepr::Regex
+                | NativeRepr::RegexMatch,
             ) => return Err(Stop::Limit("this native class has no direct constructor")),
             None => {}
         }
@@ -502,6 +564,11 @@ impl<'m> Oracle<'m> {
             HExprKind::Char(value) => Ok(OV::Char(*value)),
             HExprKind::Str(v) => Ok(OV::Str(Rc::new(v.clone()))),
             HExprKind::Bytes(v) => Ok(self.alloc(OKind::Bytes(v.clone()))),
+            HExprKind::Regex(pattern) => {
+                let regex = lm_regex::Regex::compile(pattern)
+                    .map_err(|_| Stop::Limit("checked regex literal did not compile"))?;
+                Ok(self.alloc(OKind::Regex(regex)))
+            }
             HExprKind::Local(slot) => frame.get(*slot),
             HExprKind::Capture(idx) => Ok(frame.captures[*idx as usize].clone()),
             HExprKind::Not(inner) => match self.eval(inner, frame, depth)? {
@@ -829,6 +896,8 @@ impl<'m> Oracle<'m> {
                 OKind::Sb(_) => NativeRepr::StringBuilder,
                 OKind::Bb(_) => NativeRepr::ByteBuffer,
                 OKind::Bytes(_) => NativeRepr::Bytes,
+                OKind::Regex(_) => NativeRepr::Regex,
+                OKind::RegexMatch(_) => NativeRepr::RegexMatch,
                 OKind::Instance { .. } | OKind::Closure { .. } => return None,
             },
         };
@@ -1410,6 +1479,104 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_FLOAT_FROM_BITS => Ok(OV::Float(lm_value::canonical_float_bits(
                 self.as_int(&values[0])? as u64,
             ))),
+            lm_abi::INTRINSIC_REGEX_COMPILE_STATUS => {
+                let status = match lm_regex::Regex::compile(self.as_text(&values[0])?) {
+                    Ok(_) => 0,
+                    Err(error) if error.kind() == lm_regex::CompileErrorKind::Limit => 2,
+                    Err(_) => 1,
+                };
+                Ok(OV::Int(status))
+            }
+            lm_abi::INTRINSIC_REGEX_COMPILE_VALUE => {
+                let regex = lm_regex::Regex::compile(self.as_text(&values[0])?)
+                    .map_err(|_| Stop::Limit("invalid regex compile value"))?;
+                Ok(self.alloc(OKind::Regex(regex)))
+            }
+            lm_abi::INTRINSIC_REGEX_SOURCE => {
+                let regex = self.as_regex(&values[0])?;
+                Ok(OV::Str(Rc::new(regex.source().to_string())))
+            }
+            lm_abi::INTRINSIC_REGEX_IS_MATCH => {
+                let regex = self.as_regex(&values[0])?;
+                Ok(OV::Bool(regex.is_match(self.as_text(&values[1])?)))
+            }
+            lm_abi::INTRINSIC_REGEX_CAPTURES => {
+                let regex = self.as_regex(&values[0])?;
+                let matched = self.regex_match_value(&regex, self.as_text(&values[1])?);
+                Ok(self.option_value(matched))
+            }
+            lm_abi::INTRINSIC_REGEX_COUNT => {
+                let regex = self.as_regex(&values[0])?;
+                let count = regex.count(self.as_text(&values[1])?);
+                let count = i64::try_from(count).map_err(|_| Stop::Fault("IntegerOverflow"))?;
+                Ok(OV::Int(count))
+            }
+            lm_abi::INTRINSIC_REGEX_SPLIT => {
+                let regex = self.as_regex(&values[0])?;
+                let text = self.as_text(&values[1])?;
+                let pieces = regex
+                    .split_range_iter(text)
+                    .map(|range| {
+                        text.get(range.start..range.end)
+                            .map(|piece| OV::Substring(Rc::new(piece.to_string())))
+                            .ok_or(Stop::Limit("invalid regex split range"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.alloc(OKind::List(pieces)))
+            }
+            lm_abi::INTRINSIC_REGEX_REPLACE_ALL => {
+                let regex = self.as_regex(&values[0])?;
+                let output = regex
+                    .replace_all(
+                        self.as_text(&values[1])?,
+                        self.as_text(&values[2])?,
+                        64 << 20,
+                    )
+                    .map_err(|_| Stop::Fault("HeapLimit"))?;
+                Ok(OV::Str(Rc::new(output)))
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_START | lm_abi::INTRINSIC_REGEX_MATCH_END => {
+                let matched = self.as_regex_match(&values[0])?;
+                let position = if intrinsic == lm_abi::INTRINSIC_REGEX_MATCH_START {
+                    matched.start
+                } else {
+                    matched.end
+                };
+                let position =
+                    i64::try_from(position).map_err(|_| Stop::Fault("IntegerOverflow"))?;
+                Ok(OV::Int(position))
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_TEXT => {
+                let matched = self.as_regex_match(&values[0])?;
+                Ok(OV::Str(matched.text))
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_GROUP_COUNT => {
+                let matched = self.as_regex_match(&values[0])?;
+                let count = i64::try_from(matched.groups.len())
+                    .map_err(|_| Stop::Fault("IntegerOverflow"))?;
+                Ok(OV::Int(count))
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_GROUP => {
+                let matched = self.as_regex_match(&values[0])?;
+                let index = usize::try_from(self.as_int(&values[1])?).ok();
+                let group = index
+                    .and_then(|index| matched.groups.get(index).copied().flatten())
+                    .and_then(|range| matched.text.get(range.start..range.end))
+                    .map(|text| OV::Substring(Rc::new(text.to_string())));
+                Ok(self.option_value(group))
+            }
+            lm_abi::INTRINSIC_REGEX_MATCH_NAMED => {
+                let matched = self.as_regex_match(&values[0])?;
+                let name = self.as_text(&values[1])?;
+                let group = matched
+                    .names
+                    .iter()
+                    .find_map(|(candidate, index)| (candidate == name).then_some(*index))
+                    .and_then(|index| matched.groups.get(index).copied().flatten())
+                    .and_then(|range| matched.text.get(range.start..range.end))
+                    .map(|text| OV::Substring(Rc::new(text.to_string())));
+                Ok(self.option_value(group))
+            }
             lm_abi::INTRINSIC_FLOAT_TO_INT_STATUS => {
                 let value = self.as_float(&values[0])?;
                 Ok(OV::Int(if !value.is_finite() {
@@ -2492,7 +2659,11 @@ impl<'m> Oracle<'m> {
                     }
                 }
                 OKind::Closure { captures, .. } => captures.iter().for_each(&mut push),
-                OKind::Sb(_) | OKind::Bb(_) | OKind::Bytes(_) => {}
+                OKind::Sb(_)
+                | OKind::Bb(_)
+                | OKind::Bytes(_)
+                | OKind::Regex(_)
+                | OKind::RegexMatch(_) => {}
             }
         }
     }
@@ -2612,6 +2783,10 @@ impl<'m> Oracle<'m> {
                     }
                     OKind::Bb(None) => "<finished ByteBuffer>".to_string(),
                     OKind::Bytes(bytes) => format!("<Bytes len {}>", bytes.len()),
+                    OKind::Regex(regex) => format!("<Regex {:?}>", regex.source()),
+                    OKind::RegexMatch(matched) => {
+                        format!("<RegexMatch {}..{}>", matched.start, matched.end)
+                    }
                 }
             }
         }

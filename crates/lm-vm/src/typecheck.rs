@@ -180,6 +180,8 @@ enum Kind {
     ClassBinding,
     SlotChange,
     DynValue,
+    Regex,
+    RegexMatch,
 }
 
 enum Node {
@@ -358,6 +360,10 @@ fn resolve(
                 Node::Heap(Kind::SlotChange)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE] == *class {
                 Node::Heap(Kind::DynValue)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_REGEX] == *class {
+                Node::Heap(Kind::Regex)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_REGEX_MATCH] == *class {
+                Node::Heap(Kind::RegexMatch)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -464,6 +470,8 @@ fn kind_of(object: &Object) -> Kind {
         },
         Object::NativeSlotChange { .. } => Kind::SlotChange,
         Object::DynValue { .. } => Kind::DynValue,
+        Object::NativeRegex(_) => Kind::Regex,
+        Object::NativeRegexMatch(_) => Kind::RegexMatch,
     }
 }
 

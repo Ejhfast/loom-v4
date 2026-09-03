@@ -925,7 +925,7 @@ fn inspect_dumps_the_checkpoint_container() {
     assert!(out.status.success(), "{}", stderr(&out));
     let dump = stdout(&out);
     assert!(dump.starts_with("container "), "{dump}");
-    assert!(dump.contains("format 35 abi "), "{dump}");
+    assert!(dump.contains("format 36 abi "), "{dump}");
     assert!(dump.contains("artifact 0 bytes "), "{dump}");
     assert!(dump.contains("machine 0 state asked"), "{dump}");
     assert!(dump.contains("pending Clock.Now"), "{dump}");

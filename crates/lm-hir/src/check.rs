@@ -70,12 +70,14 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/bytes.lm"),
     "\n",
+    include_str!("../../../core/regex.lm"),
+    "\n",
     include_str!("../../../core/collections.lm"),
     "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 140] = [
+pub const PRELUDE_TYPES: [&str; 143] = [
     "Option",
     "Result",
     "Ordering",
@@ -200,6 +202,9 @@ pub const PRELUDE_TYPES: [&str; 140] = [
     "Bytes",
     "StringBuilder",
     "ByteBuffer",
+    "Regex",
+    "RegexMatch",
+    "RegexError",
     "List",
     "Map",
     "Set",
@@ -285,6 +290,8 @@ pub(crate) fn core_native_repr(name: &str) -> Option<NativeRepr> {
         "FunctionBinding" => Some(NativeRepr::FunctionBinding),
         "ClassBinding" => Some(NativeRepr::ClassBinding),
         "DynValue" => Some(NativeRepr::DynValue),
+        "Regex" => Some(NativeRepr::Regex),
+        "RegexMatch" => Some(NativeRepr::RegexMatch),
         name => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
     }
 }
@@ -1065,6 +1072,8 @@ impl Ctx {
                         | NativeRepr::Substring
                         | NativeRepr::Char
                         | NativeRepr::Bytes
+                        | NativeRepr::Regex
+                        | NativeRepr::RegexMatch
                 )
             )
     }

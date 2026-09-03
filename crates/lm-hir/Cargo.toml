@@ -9,3 +9,4 @@ lm-abi = { path = "../lm-abi" }
 lm-source = { path = "../lm-source" }
 lm-types = { path = "../lm-types" }
 lm-bytecode = { path = "../lm-bytecode" }
+lm-regex = { path = "../lm-regex" }

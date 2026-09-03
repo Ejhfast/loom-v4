@@ -133,6 +133,8 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::ChildStatus => "ChildStatus",
                     lm_abi::AbiCore::ExecError => "ExecError",
                     lm_abi::AbiCore::UdpDatagram => "UdpDatagram",
+                    lm_abi::AbiCore::Regex => "Regex",
+                    lm_abi::AbiCore::RegexMatch => "RegexMatch",
                 };
                 Self::core_class(ctx, name)
             }

@@ -359,6 +359,13 @@ fn payload(object: &Object) -> String {
         Object::DynValue { value, ty } => {
             format!("dynamic type {ty} value {}", show(*value))
         }
+        Object::NativeRegex(regex) => format!("regular expression {:?}", regex.source()),
+        Object::NativeRegexMatch(matched) => {
+            format!(
+                "match {}..{} {:?}",
+                matched.start, matched.end, matched.text
+            )
+        }
         Object::NativeSlotChange {
             image,
             generation,

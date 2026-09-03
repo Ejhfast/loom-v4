@@ -1022,6 +1022,8 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_SIGNAL_STREAM, "SignalStream"),
         (lm_bytecode::corepin::ROLE_CHILD, "Child"),
         (lm_bytecode::corepin::ROLE_UDP_SOCKET, "UdpSocket"),
+        (lm_bytecode::corepin::ROLE_REGEX, "Regex"),
+        (lm_bytecode::corepin::ROLE_REGEX_MATCH, "RegexMatch"),
         (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
         (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
         (lm_bytecode::corepin::ROLE_CLASS_CODE, "ClassCode"),

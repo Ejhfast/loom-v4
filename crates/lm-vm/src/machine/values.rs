@@ -69,6 +69,19 @@ impl Machine {
                 };
                 self.push(Value::Int(hash as i64))
             }
+            Instr::Native(
+                lm_bytecode::NativeInstr::RegexCompileStatus
+                | lm_bytecode::NativeInstr::RegexCompileValue
+                | lm_bytecode::NativeInstr::RegexSource
+                | lm_bytecode::NativeInstr::RegexIsMatch
+                | lm_bytecode::NativeInstr::RegexCount
+                | lm_bytecode::NativeInstr::RegexSplit
+                | lm_bytecode::NativeInstr::RegexReplaceAll
+                | lm_bytecode::NativeInstr::RegexMatchStart
+                | lm_bytecode::NativeInstr::RegexMatchEnd
+                | lm_bytecode::NativeInstr::RegexMatchText
+                | lm_bytecode::NativeInstr::RegexMatchGroupCount,
+            ) => self.exec_regex_native(instr),
             Instr::Native(_) => self.exec_bytes_builder_instr(instr),
             _ => unreachable!("the native dispatcher receives one native instruction"),
         }

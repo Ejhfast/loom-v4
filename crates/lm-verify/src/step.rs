@@ -154,6 +154,15 @@ pub(crate) fn step(
             }
             push(state, ctx.intern(BcType::Bytes))?;
         }
+        Instr::ConstRegex(index) => {
+            if module.strings.get(*index as usize).is_none() {
+                return Err(fail(
+                    "a regular-expression source index is outside its table".to_string(),
+                ));
+            }
+            let ty = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            push(state, ty)?;
+        }
         Instr::Numeric(instruction) => {
             use lm_bytecode::NumericInstr;
             let float = ctx.intern(BcType::Float);
@@ -535,6 +544,120 @@ pub(crate) fn step(
             pop_expect(state, value)?;
             pop_expect(state, value)?;
             push(state, TY_BOOL)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexCompileStatus) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexCompileValue) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            push(state, regex)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexSource) => {
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            pop_expect(state, regex)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::RegexIsMatch | lm_bytecode::NativeInstr::RegexCount,
+        ) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, regex)?;
+            let result = if matches!(instr, Instr::Native(lm_bytecode::NativeInstr::RegexIsMatch)) {
+                TY_BOOL
+            } else {
+                TY_INT
+            };
+            push(state, result)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexSplit) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, regex)?;
+            let piece = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            push(state, ctx.intern(BcType::List(piece)))?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexReplaceAll) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, text)?;
+            pop_expect(state, regex)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::RegexMatchStart
+            | lm_bytecode::NativeInstr::RegexMatchEnd
+            | lm_bytecode::NativeInstr::RegexMatchGroupCount,
+        ) => {
+            let matched = ctx
+                .plain_inst(ctx.core.regex_match, "RegexMatch")
+                .map_err(&fail)?;
+            pop_expect(state, matched)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::RegexMatchText) => {
+            let matched = ctx
+                .plain_inst(ctx.core.regex_match, "RegexMatch")
+                .map_err(&fail)?;
+            pop_expect(state, matched)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Extended(ExtendedInstr::RegexCaptures { ty }) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            let regex = ctx.plain_inst(ctx.core.regex, "Regex").map_err(&fail)?;
+            let matched = ctx
+                .plain_inst(ctx.core.regex_match, "RegexMatch")
+                .map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, regex)?;
+            if ctx.option_arg(*ty) != Some(matched) {
+                return Err(fail(
+                    "regex captures must return Option[RegexMatch]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::RegexMatchGroup { ty }) => {
+            let matched = ctx
+                .plain_inst(ctx.core.regex_match, "RegexMatch")
+                .map_err(&fail)?;
+            let substring = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, matched)?;
+            if ctx.option_arg(*ty) != Some(substring) {
+                return Err(fail(
+                    "regex groups must return Option[Substring]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::RegexMatchNamed { ty }) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            let matched = ctx
+                .plain_inst(ctx.core.regex_match, "RegexMatch")
+                .map_err(&fail)?;
+            let substring = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, matched)?;
+            if ctx.option_arg(*ty) != Some(substring) {
+                return Err(fail(
+                    "named regex groups must return Option[Substring]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
         }
         Instr::EqValue | Instr::NeValue => {
             // Structural equality reads two related enum values. The
