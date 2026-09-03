@@ -19,6 +19,38 @@ fn bench_jit_hot_scalar_loop() {
 
 #[test]
 #[ignore]
+fn bench_jit_numeric_protocol_dispatch() {
+    println!(
+        "LOOM_JIT_PROGRAM\tcase\tinterpreter_ms\tauto_ms\tnative_ms\tauto_speedup\tnative_speedup\tauto_coverage\tnative_coverage\tauto_compiles\tauto_demotions\tauto_unsupported\tnative_unsupported\tauto_interpreter_exits\tnative_interpreter_exits\tauto_env_exits\tnative_env_exits\tnative_env_fallbacks"
+    );
+    report_jit_representative(
+        "jit_concrete_number_loop",
+        concat!(
+            "def sum(limit: Int, start: Int, step: Int): Int\n",
+            "  index = 0\n  total = start\n",
+            "  while index < limit\n",
+            "    total = total + step\n",
+            "    index = index + 1\n",
+            "  end\n  total\nend\n",
+            "sum(5000000, 0, 1)\n",
+        ),
+    );
+    report_jit_representative(
+        "jit_generic_number_loop",
+        concat!(
+            "def sum[T: Number](limit: Int, start: T, step: T): T\n",
+            "  index = 0\n  total = start\n",
+            "  while index < limit\n",
+            "    total = total + step\n",
+            "    index = index + 1\n",
+            "  end\n  total\nend\n",
+            "sum[Int](5000000, 0, 1)\n",
+        ),
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_jit_inline_leaf_scheduler() {
     report_jit_representative(
         "jit_inline_leaf_scheduler",

@@ -422,6 +422,55 @@ fn interface_calls_preserve_scheduler_retirement_counts() {
 }
 
 #[test]
+fn primitive_numeric_interface_calls_inline_with_exact_fuel() {
+    let source = concat!(
+        "def calculate[T: Number](left: T, right: T): T\n",
+        "  (left + right) * right - left / right\n",
+        "end\n",
+        "integer = calculate[Int](8, 2)\n",
+        "float = calculate[Float](8.0, 2.0)\n",
+        "if integer == 16 then float == 16.0 else false end\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-numeric-interface.lm", source)
+        .expect("the numeric interface case compiles");
+    for fuel in 0..=64 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert!(metrics.compiled_inlined_call_sites >= 4, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
+fn guarded_numeric_inlining_preserves_custom_conformances() {
+    let source = concat!(
+        "final class Count implements Add\n",
+        "  value: Int\n",
+        "  def init(mut self, value: Int)\n    self.value = value\n  end\n",
+        "  def __add__(self, other: Count): Count\n",
+        "    Count(self.value + other.value)\n",
+        "  end\n",
+        "end\n",
+        "def combine[T: Add](left: T, right: T): T\n  left + right\nend\n",
+        "combine[Count](Count(4), Count(5)).value\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-custom-add.lm", source)
+        .expect("the custom numeric conformance compiles");
+    let (interpreted, _, interpreted_dump) =
+        run_artifact(&artifact, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(9)));
+    assert!(metrics.compiled_inlined_call_sites >= 1, "{metrics:?}");
+}
+
+#[test]
 fn generic_virtual_calls_preserve_exact_type_environments() {
     let source = concat!(
         "class Box[T]\n",

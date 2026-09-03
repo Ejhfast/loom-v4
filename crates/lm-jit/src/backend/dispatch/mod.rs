@@ -594,7 +594,9 @@ pub(super) fn emit_segment_body(
                     &stack,
                 )?
             }
-            SegmentExit::InterfaceCall { .. } => {
+            SegmentExit::InterfaceCall {
+                interface, method, ..
+            } => {
                 let receiver_value = stack
                     .get(
                         stack
@@ -609,18 +611,46 @@ pub(super) fn emit_segment_body(
                     instruction: call_instruction,
                     prefix: 0,
                 };
-                let receiver =
-                    emit_interface_receiver_key(builder, values, receiver_value, point, &stack)?;
-                emit_resolved_call_lookup(
-                    builder,
-                    values,
-                    input.root.function,
-                    point,
-                    receiver,
-                    receiver_value,
-                    EXIT_INTERFACE_CALL,
-                    &stack,
-                )?
+                match (
+                    plan.guarded_interface_inlines.get(&(interface, method)),
+                    values.guarded_interface_caches.iter().find(|cache| {
+                        cache.block == segment.block && cache.instruction == call_instruction
+                    }),
+                ) {
+                    (Some(candidates), Some(cache)) => emit_guarded_interface_call(
+                        builder,
+                        values,
+                        input,
+                        &stack,
+                        receiver_value,
+                        candidates,
+                        *cache,
+                        contract,
+                        segment.boundary_stack.len(),
+                        point,
+                        successor_blocks[0],
+                        plan,
+                    )?,
+                    _ => {
+                        let receiver = emit_interface_receiver_key(
+                            builder,
+                            values,
+                            receiver_value,
+                            point,
+                            &stack,
+                        )?;
+                        emit_resolved_call_lookup(
+                            builder,
+                            values,
+                            input.root.function,
+                            point,
+                            receiver,
+                            receiver_value,
+                            EXIT_INTERFACE_CALL,
+                            &stack,
+                        )?
+                    }
+                }
             }
             SegmentExit::SlotCall {
                 slot,
@@ -848,4 +878,168 @@ pub(super) fn emit_segment_body(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_guarded_interface_call(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    input: &FunctionInput<'_>,
+    stack: &[NativeValue],
+    receiver: NativeValue,
+    candidates: &[GuardedInterfaceInline],
+    cache: GuardedInterfaceCache,
+    contract: &CallContract,
+    boundary_len: usize,
+    point: FaultPoint,
+    successor: ir::Block,
+    plan: &RegionPlan,
+) -> Result<NativeCallTarget, CompileError> {
+    let argument_start = stack
+        .len()
+        .checked_sub(contract.params.len())
+        .ok_or(CompileError::Backend)?;
+    let zero = builder.ins().iconst(types::I32, 0);
+    let mut selection = zero;
+    let mut candidate_blocks = Vec::with_capacity(candidates.len());
+    for (index, candidate) in candidates.iter().enumerate() {
+        let inline = plan
+            .inline_functions
+            .get(&candidate.function)
+            .ok_or(CompileError::Backend)?;
+        let definition = input
+            .definition(candidate.function)
+            .ok_or(CompileError::Backend)?;
+        if definition.runtime.params.len() != contract.params.len()
+            || inline.plan.local_kinds.len() < contract.params.len()
+            || inline.plan.local_kinds.first().copied() != Some(candidate.receiver)
+        {
+            return Err(CompileError::Backend);
+        }
+        let expected_tags = inline.plan.local_kinds[..contract.params.len()]
+            .iter()
+            .copied()
+            .map(value_tag)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CompileError::Backend)?;
+        let mut matches = None;
+        for (value, tag) in stack[argument_start..].iter().zip(expected_tags) {
+            let test = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, value.tag, tag as u64 as i64);
+            matches = Some(match matches {
+                Some(prior) => builder.ins().band(prior, test),
+                None => test,
+            });
+        }
+        let matches = matches.ok_or(CompileError::Backend)?;
+        let candidate_id =
+            i64::try_from(index.saturating_add(1)).map_err(|_| CompileError::Backend)?;
+        let candidate_id = builder.ins().iconst(types::I32, candidate_id);
+        selection = builder.ins().select(matches, candidate_id, selection);
+        candidate_blocks.push(builder.create_block());
+    }
+
+    let dispatch = builder.create_block();
+    let resolve = builder.create_block();
+    let fallback = builder.create_block();
+    builder.append_block_param(fallback, types::I32);
+    builder.append_block_param(fallback, types::I32);
+    builder.append_block_param(fallback, values.pointer_type);
+    builder.append_block_param(fallback, values.pointer_type);
+    let cached = builder.use_var(cache.selection);
+    let selected = builder.ins().icmp_imm(IntCC::NotEqual, selection, 0);
+    let same = builder.ins().icmp(IntCC::Equal, cached, selection);
+    let hit = builder.ins().band(selected, same);
+    builder.ins().brif(hit, dispatch, &[], resolve, &[]);
+
+    builder.switch_to_block(resolve);
+    let receiver_key = emit_interface_receiver_key(builder, values, receiver, point, stack)?;
+    let target = emit_resolved_call_lookup(
+        builder,
+        values,
+        input.root.function,
+        point,
+        receiver_key,
+        receiver,
+        EXIT_INTERFACE_CALL,
+        stack,
+    )?;
+    let mut resolved_selection = zero;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let candidate_id =
+            i64::try_from(index.saturating_add(1)).map_err(|_| CompileError::Backend)?;
+        let selected_candidate = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, selection, candidate_id);
+        let selected_target =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, target.function, i64::from(candidate.function));
+        let matches = builder.ins().band(selected_candidate, selected_target);
+        let candidate_id = builder.ins().iconst(types::I32, candidate_id);
+        resolved_selection = builder
+            .ins()
+            .select(matches, candidate_id, resolved_selection);
+    }
+    builder.def_var(cache.selection, resolved_selection);
+    let resolved = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, resolved_selection, 0);
+    builder.ins().brif(
+        resolved,
+        dispatch,
+        &[],
+        fallback,
+        &[
+            target.function.into(),
+            target.environment.into(),
+            target.capture_data.into(),
+            target.capture_len.into(),
+        ],
+    );
+
+    builder.switch_to_block(dispatch);
+    let mut switch = Switch::new();
+    for (index, block) in candidate_blocks.iter().copied().enumerate() {
+        switch.set_entry(index.saturating_add(1) as u128, block);
+    }
+    switch.emit(builder, selection, resolve);
+
+    for (candidate, block) in candidates.iter().zip(candidate_blocks) {
+        builder.switch_to_block(block);
+        let inline = plan
+            .inline_functions
+            .get(&candidate.function)
+            .ok_or(CompileError::Backend)?;
+        let definition = input
+            .definition(candidate.function)
+            .ok_or(CompileError::Backend)?;
+        let mut inline_stack = stack.to_vec();
+        emit_inline_call(
+            builder,
+            values,
+            input,
+            &mut inline_stack,
+            InlineCallEmission {
+                definition,
+                inline,
+                contract,
+                boundary_len,
+                block: point.block,
+                instruction: point.instruction,
+                successor,
+            },
+        )?;
+    }
+
+    builder.switch_to_block(fallback);
+    let fields = builder.block_params(fallback);
+    Ok(NativeCallTarget {
+        function: fields[0],
+        environment: fields[1],
+        capture_data: fields[2],
+        capture_len: fields[3],
+        fault: None,
+    })
 }

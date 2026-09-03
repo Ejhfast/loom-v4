@@ -37,6 +37,7 @@ pub(super) struct FunctionDefinition<'a> {
 pub struct FunctionInput<'a> {
     pub(super) root: FunctionDefinition<'a>,
     direct_callees: Vec<FunctionDefinition<'a>>,
+    guarded_interface_callees: Vec<GuardedInterfaceCallee>,
     behaviors: crate::FunctionBehaviors,
     runtime_string_count: usize,
     runtime_core: lm_bytecode::corepin::CoreLayout,
@@ -62,6 +63,7 @@ impl<'a> FunctionInput<'a> {
                 class_relocation: None,
             },
             direct_callees: Vec::new(),
+            guarded_interface_callees: Vec::new(),
             behaviors: crate::FunctionBehaviors::default(),
             runtime_string_count: source.strings.len(),
             runtime_core: lm_bytecode::corepin::declared_layout(source),
@@ -135,6 +137,39 @@ impl<'a> FunctionInput<'a> {
         }
     }
 
+    /// Add one guarded interface target and its class relocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_relocated_guarded_interface_callee(
+        &mut self,
+        interface: u32,
+        method: u32,
+        receiver: ScalarKind,
+        function: u32,
+        runtime: &'a Func,
+        source: &'a Module,
+        bundle: &'a Arc<lm_abi::AbiBundle>,
+        source_function: u32,
+        classes: &'a [u32],
+    ) {
+        self.add_relocated_direct_callee(
+            function,
+            runtime,
+            source,
+            bundle,
+            source_function,
+            classes,
+        );
+        let candidate = GuardedInterfaceCallee {
+            interface,
+            method,
+            receiver,
+            function,
+        };
+        if !self.guarded_interface_callees.contains(&candidate) {
+            self.guarded_interface_callees.push(candidate);
+        }
+    }
+
     pub(super) fn runtime_string_count(&self) -> usize {
         self.runtime_string_count
     }
@@ -154,11 +189,20 @@ impl<'a> FunctionInput<'a> {
         Some(FunctionInput {
             root,
             direct_callees: Vec::new(),
+            guarded_interface_callees: Vec::new(),
             behaviors: self.behaviors.clone(),
             runtime_string_count: self.runtime_string_count,
             runtime_core: self.runtime_core,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuardedInterfaceCallee {
+    interface: u32,
+    method: u32,
+    receiver: ScalarKind,
+    function: u32,
 }
 
 /// Clock-free native compilation counters.
@@ -691,6 +735,18 @@ pub(super) struct InlineFunctionPlan {
     pub(super) max_path_cost: u32,
 }
 
+/// One interface target selected by immediate value tags.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GuardedInterfaceInline {
+    pub(super) receiver: ScalarKind,
+    pub(super) function: u32,
+}
+
+struct InlineSelection {
+    functions: HashMap<u32, InlineFunctionPlan>,
+    interfaces: HashMap<(u32, u32), Vec<GuardedInterfaceInline>>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RegionPlan {
     pub(super) local_kinds: Vec<ScalarKind>,
@@ -707,6 +763,7 @@ pub(super) struct RegionPlan {
     pub(super) segments: Vec<Segment>,
     pub(super) entries: std::collections::HashMap<(u32, u32), usize>,
     pub(super) inline_functions: HashMap<u32, InlineFunctionPlan>,
+    pub(super) guarded_interface_inlines: HashMap<(u32, u32), Vec<GuardedInterfaceInline>>,
     pub(super) call_sites: usize,
     pub(super) inlined_call_sites: usize,
     pub(super) heap_read_sites: usize,
@@ -1160,22 +1217,28 @@ impl RegionPlan {
         let max_roots = root_local_count
             .checked_add(max_stack)
             .ok_or(UnsupportedReason::RegionLimit)?;
-        let inline_functions = if select_inlines {
+        let inline_selection = if select_inlines {
             select_inline_functions(input, &mut segments)?
         } else {
-            HashMap::new()
+            InlineSelection {
+                functions: HashMap::new(),
+                interfaces: HashMap::new(),
+            }
         };
+        let inline_functions = inline_selection.functions;
+        let guarded_interface_inlines = inline_selection.interfaces;
         let inlined_call_sites = segments
             .iter()
-            .filter(|segment| {
-                matches!(
-                    segment.exit,
-                    SegmentExit::Call {
-                        target,
-                        app: None,
-                        ..
-                    } if inline_functions.contains_key(&target)
-                )
+            .filter(|segment| match segment.exit {
+                SegmentExit::Call {
+                    target, app: None, ..
+                } => inline_functions.contains_key(&target),
+                SegmentExit::InterfaceCall {
+                    interface, method, ..
+                } => guarded_interface_inlines
+                    .get(&(interface, method))
+                    .is_some_and(|targets| !targets.is_empty()),
+                _ => false,
             })
             .count();
         Ok(RegionPlan {
@@ -1191,6 +1254,7 @@ impl RegionPlan {
             segments,
             entries,
             inline_functions,
+            guarded_interface_inlines,
             call_sites,
             inlined_call_sites,
             heap_read_sites,
@@ -1216,12 +1280,13 @@ impl RegionPlan {
 fn select_inline_functions(
     input: &FunctionInput<'_>,
     segments: &mut [Segment],
-) -> Result<HashMap<u32, InlineFunctionPlan>, UnsupportedReason> {
+) -> Result<InlineSelection, UnsupportedReason> {
     const MAX_INLINE_INSTRUCTIONS: usize = 32;
     const MAX_INLINE_SEGMENTS: usize = 12;
     const MAX_INLINE_BUDGET: usize = 96;
 
     let mut plans = HashMap::new();
+    let mut interface_plans = HashMap::<(u32, u32), Vec<GuardedInterfaceInline>>::new();
     let mut expanded = 0usize;
     let call_counts = segments.iter().fold(HashMap::new(), |mut counts, segment| {
         if let SegmentExit::Call {
@@ -1232,6 +1297,25 @@ fn select_inline_functions(
         }
         counts
     });
+    let mut call_counts = call_counts;
+    for candidate in &input.guarded_interface_callees {
+        let count = segments
+            .iter()
+            .filter(|segment| {
+                matches!(
+                    segment.exit,
+                    SegmentExit::InterfaceCall {
+                        interface,
+                        method,
+                        ..
+                    } if interface == candidate.interface && method == candidate.method
+                )
+            })
+            .count();
+        if count != 0 {
+            *call_counts.entry(candidate.function).or_insert(0) += count;
+        }
+    }
     for segment in segments.iter_mut() {
         let SegmentExit::Call {
             target, app: None, ..
@@ -1243,82 +1327,159 @@ fn select_inline_functions(
             ensure_inline_replay(segment);
             continue;
         }
-        let behavior = input.behavior(target);
-        if behavior.may_suspend_or_perform()
-            || behavior.may_collect()
-            || behavior.may_mutate()
-            || behavior.has_dynamic_call()
-        {
+        if let Some((plan, cost)) = make_inline_function_plan(
+            input,
+            target,
+            call_counts.get(&target).copied().unwrap_or(1),
+            expanded,
+            MAX_INLINE_INSTRUCTIONS,
+            MAX_INLINE_SEGMENTS,
+            MAX_INLINE_BUDGET,
+        )? {
+            expanded = expanded.saturating_add(cost);
+            plans.insert(target, plan);
+            ensure_inline_replay(segment);
+        }
+    }
+    for candidate in &input.guarded_interface_callees {
+        let key = (candidate.interface, candidate.method);
+        if !segments.iter().any(|segment| {
+            matches!(
+                segment.exit,
+                SegmentExit::InterfaceCall {
+                    interface,
+                    method,
+                    ..
+                } if (interface, method) == key
+            )
+        }) {
             continue;
         }
-        let Some(definition) = input.definition(target) else {
-            continue;
-        };
-        let instruction_count = definition
+        if let std::collections::hash_map::Entry::Vacant(entry) = plans.entry(candidate.function) {
+            let Some((plan, cost)) = make_inline_function_plan(
+                input,
+                candidate.function,
+                call_counts.get(&candidate.function).copied().unwrap_or(1),
+                expanded,
+                MAX_INLINE_INSTRUCTIONS,
+                MAX_INLINE_SEGMENTS,
+                MAX_INLINE_BUDGET,
+            )?
+            else {
+                continue;
+            };
+            expanded = expanded.saturating_add(cost);
+            entry.insert(plan);
+        }
+        let targets = interface_plans.entry(key).or_default();
+        if !targets.iter().any(|target| {
+            target.receiver == candidate.receiver && target.function == candidate.function
+        }) {
+            targets.push(GuardedInterfaceInline {
+                receiver: candidate.receiver,
+                function: candidate.function,
+            });
+        }
+        for segment in segments.iter_mut() {
+            if matches!(
+                segment.exit,
+                SegmentExit::InterfaceCall {
+                    interface,
+                    method,
+                    ..
+                } if (interface, method) == key
+            ) {
+                ensure_inline_replay(segment);
+            }
+        }
+    }
+    Ok(InlineSelection {
+        functions: plans,
+        interfaces: interface_plans,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_inline_function_plan(
+    input: &FunctionInput<'_>,
+    target: u32,
+    call_count: usize,
+    expanded: usize,
+    max_instructions: usize,
+    max_segments: usize,
+    max_budget: usize,
+) -> Result<Option<(InlineFunctionPlan, usize)>, UnsupportedReason> {
+    let behavior = input.behavior(target);
+    if behavior.may_suspend_or_perform()
+        || behavior.may_collect()
+        || behavior.may_mutate()
+        || behavior.has_dynamic_call()
+    {
+        return Ok(None);
+    }
+    let Some(definition) = input.definition(target) else {
+        return Ok(None);
+    };
+    let instruction_count = definition
+        .runtime
+        .blocks
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    let expanded_instructions = instruction_count.saturating_mul(call_count);
+    if instruction_count == 0
+        || instruction_count > max_instructions
+        || definition.runtime.type_params != 0
+        || definition.runtime.effect_params != 0
+        || !definition.runtime.captures.is_empty()
+        || definition
             .runtime
             .blocks
             .iter()
-            .map(Vec::len)
-            .sum::<usize>();
-        let expanded_instructions =
-            instruction_count.saturating_mul(call_counts.get(&target).copied().unwrap_or(1));
-        if instruction_count == 0
-            || instruction_count > MAX_INLINE_INSTRUCTIONS
-            || definition.runtime.type_params != 0
-            || definition.runtime.effect_params != 0
-            || !definition.runtime.captures.is_empty()
-            || definition
-                .runtime
-                .blocks
-                .iter()
-                .flatten()
-                .any(|instruction| {
-                    !matches!(
-                        crate::instruction_treatment(instruction).class(),
-                        crate::TreatmentClass::Inline | crate::TreatmentClass::Guarded
-                    )
-                })
-            || expanded.saturating_add(expanded_instructions) > MAX_INLINE_BUDGET
-        {
-            continue;
-        }
-        let Some(child) = input.child(target) else {
-            continue;
-        };
-        let Ok(mut plan) = RegionPlan::for_function_mode(&child, false) else {
-            continue;
-        };
-        if plan.segments.len() > MAX_INLINE_SEGMENTS
-            || plan.call_sites != 0
-            || plan.heap_write_sites != 0
-            || plan.allocation_sites != 0
-            || plan.effect_sites != 0
-            || plan.interpreter_sites != 0
-            || plan.type_resolution_sites != 0
-            || plan.virtual_constructor.is_some()
-            || !plan.scalar_instances.is_empty()
-        {
-            continue;
-        }
-        let Some(max_path_cost) = acyclic_max_path_cost(&plan) else {
-            continue;
-        };
-        for segment in &mut plan.segments {
-            segment.live_in.fill(true);
-        }
-        plan.cached_list_data.fill(false);
-        plan.preloaded_list_data.fill(false);
-        expanded += expanded_instructions;
-        plans.insert(
-            target,
-            InlineFunctionPlan {
-                plan: Box::new(plan),
-                max_path_cost,
-            },
-        );
-        ensure_inline_replay(segment);
+            .flatten()
+            .any(|instruction| {
+                !matches!(
+                    crate::instruction_treatment(instruction).class(),
+                    crate::TreatmentClass::Inline | crate::TreatmentClass::Guarded
+                )
+            })
+        || expanded.saturating_add(expanded_instructions) > max_budget
+    {
+        return Ok(None);
     }
-    Ok(plans)
+    let Some(child) = input.child(target) else {
+        return Ok(None);
+    };
+    let Ok(mut plan) = RegionPlan::for_function_mode(&child, false) else {
+        return Ok(None);
+    };
+    if plan.segments.len() > max_segments
+        || plan.call_sites != 0
+        || plan.heap_write_sites != 0
+        || plan.allocation_sites != 0
+        || plan.effect_sites != 0
+        || plan.interpreter_sites != 0
+        || plan.type_resolution_sites != 0
+        || plan.virtual_constructor.is_some()
+        || !plan.scalar_instances.is_empty()
+    {
+        return Ok(None);
+    }
+    let Some(max_path_cost) = acyclic_max_path_cost(&plan) else {
+        return Ok(None);
+    };
+    for segment in &mut plan.segments {
+        segment.live_in.fill(true);
+    }
+    plan.cached_list_data.fill(false);
+    plan.preloaded_list_data.fill(false);
+    Ok(Some((
+        InlineFunctionPlan {
+            plan: Box::new(plan),
+            max_path_cost,
+        },
+        expanded_instructions,
+    )))
 }
 
 fn ensure_inline_replay(segment: &mut Segment) {

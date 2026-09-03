@@ -53,6 +53,15 @@ struct NativeEffectContinuation {
     reply_kind: ScalarKind,
 }
 
+fn interface_selector(module: &NamespaceRuntime, interface: u32, method: u32) -> Option<u32> {
+    let contract = module.interfaces.get(interface as usize)?;
+    let requirement = contract.methods.get(method as usize)?;
+    module
+        .selectors
+        .get(requirement.selector as usize)
+        .map(|_| requirement.selector)
+}
+
 #[derive(Default)]
 struct CanonicalStack {
     frames: Vec<Frame>,
@@ -479,6 +488,71 @@ impl JitEngine {
                     }
                 }
                 callee_index += 1;
+            }
+            let dispatch = context.module.dispatch_store();
+            let mut guarded = Vec::new();
+            for instruction in runtime.blocks.iter().flatten() {
+                let lm_bytecode::Instr::CallInterface { site, .. } = instruction else {
+                    continue;
+                };
+                let (interface, method) = lm_bytecode::unpack_interface_call_site(*site);
+                let Some(selector) = interface_selector(context.module, interface, method) else {
+                    continue;
+                };
+                for (role, receiver) in [
+                    (lm_bytecode::corepin::ROLE_UNIT, ScalarKind::Unit),
+                    (lm_bytecode::corepin::ROLE_BOOL, ScalarKind::Bool),
+                    (lm_bytecode::corepin::ROLE_INT, ScalarKind::Int),
+                    (lm_bytecode::corepin::ROLE_FLOAT, ScalarKind::Float),
+                    (lm_bytecode::corepin::ROLE_CHAR, ScalarKind::Char),
+                ] {
+                    let class = context.module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE
+                        || context
+                            .module
+                            .classes
+                            .get(class as usize)
+                            .is_none_or(|class| !class.is_final)
+                    {
+                        continue;
+                    }
+                    let Some(target) = dispatch
+                        .get(class as usize)
+                        .and_then(|row| row.method(selector))
+                    else {
+                        continue;
+                    };
+                    let candidate = (interface, method, receiver, target);
+                    if !guarded.contains(&candidate) {
+                        guarded.push(candidate);
+                    }
+                }
+            }
+            for (interface, method, receiver, target) in guarded {
+                let Some(target_runtime) = context.module.funcs.get(target as usize) else {
+                    continue;
+                };
+                let Ok((target_unit, target_local)) =
+                    context.module.code_namespace().function_unit(target)
+                else {
+                    continue;
+                };
+                let Some(target_relocation) =
+                    context.module.code_namespace().relocation(target_unit.id())
+                else {
+                    continue;
+                };
+                input.add_relocated_guarded_interface_callee(
+                    interface,
+                    method,
+                    receiver,
+                    target,
+                    target_runtime,
+                    target_unit.module(),
+                    context.module.bundle(),
+                    target_local,
+                    target_relocation.classes(),
+                );
             }
             Ok(input)
         }) {

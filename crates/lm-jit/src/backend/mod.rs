@@ -11,9 +11,9 @@ use crate::activation::{
 };
 use crate::plan::{
     bypasses_fuel_check, is_root_kind, transfer_virtual_instruction, CallContract,
-    FunctionDefinition, HeapAccessKind, InlineFunctionPlan, ObjectContract, OptionAccessKind,
-    OptionTarget, RegionPlan, ScalarFieldSource, ScalarReplacement, Segment, SegmentExit,
-    UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
+    FunctionDefinition, GuardedInterfaceInline, HeapAccessKind, InlineFunctionPlan, ObjectContract,
+    OptionAccessKind, OptionTarget, RegionPlan, ScalarFieldSource, ScalarReplacement, Segment,
+    SegmentExit, UnsupportedReason, ValueCallTarget, ValueContract, VirtualReceiver,
 };
 use crate::{
     CallValueSite, CompiledRegion, FunctionInput, GenericVirtualCallSite, InterfaceCallSite,
@@ -339,6 +339,7 @@ struct NativeValues<'a> {
     dirty_locals: Option<&'a [bool]>,
     local_tags: &'a [Option<Variable>],
     local_heap_caches: &'a [Option<LocalHeapCache>],
+    guarded_interface_caches: &'a [GuardedInterfaceCache],
     scalar_instances: &'a [ScalarInstanceValues],
     stack: &'a [Variable],
     stack_tags: &'a [Option<Variable>],
@@ -405,6 +406,13 @@ struct LocalHeapCache {
     actual_class: Variable,
     list_data: Option<Variable>,
     preloaded_list_data: bool,
+}
+
+#[derive(Clone, Copy)]
+struct GuardedInterfaceCache {
+    block: u32,
+    instruction: u32,
+    selection: Variable,
 }
 
 /// This compile-time map associates emitted references with their source local.
@@ -1183,6 +1191,29 @@ fn emit_region(
             Some(cache)
         })
         .collect();
+    let guarded_interface_caches = plan
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let SegmentExit::InterfaceCall {
+                interface, method, ..
+            } = segment.exit
+            else {
+                return None;
+            };
+            plan.guarded_interface_inlines
+                .contains_key(&(interface, method))
+                .then(|| {
+                    let selection = builder.declare_var(types::I32);
+                    builder.def_var(selection, zero_i32);
+                    GuardedInterfaceCache {
+                        block: segment.block,
+                        instruction: segment.end.saturating_sub(1),
+                        selection,
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
     let scalar_instances = plan
         .scalar_instances
         .iter()
@@ -1261,6 +1292,7 @@ fn emit_region(
         dirty_locals: None,
         local_tags: &local_tags,
         local_heap_caches: &local_heap_caches,
+        guarded_interface_caches: &guarded_interface_caches,
         scalar_instances: &scalar_instances,
         stack: &stack,
         stack_tags: &stack_tags,

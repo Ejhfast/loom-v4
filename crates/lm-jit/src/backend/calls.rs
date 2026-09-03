@@ -1605,6 +1605,7 @@ pub(super) fn emit_inline_call(
         dirty_locals: None,
         local_tags: &local_tags,
         local_heap_caches: &local_heap_caches,
+        guarded_interface_caches: &[],
         scalar_instances: &scalar_instances,
         stack: &child_stack,
         stack_tags: &child_stack_tags,
