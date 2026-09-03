@@ -700,6 +700,47 @@ interface Error: Display
 end
 ```
 
+Core also defines composable arithmetic interfaces.
+
+```lm
+interface Add
+  def __add__(self, other: Self): Self
+end
+
+interface Subtract
+  def __sub__(self, other: Self): Self
+end
+
+interface Multiply
+  def __mul__(self, other: Self): Self
+end
+
+interface Divide
+  def __div__(self, other: Self): Self
+end
+
+interface Negate
+  def __neg__(self): Self
+end
+
+interface Number: Add, Subtract, Multiply, Divide, Comparable
+  def min(self, other: Self): Self
+  def max(self, other: Self): Self
+end
+
+interface SignedNumber: Number, Negate
+  def abs(self): Self
+end
+```
+
+`Number` defines shared operations. Each conforming type defines overflow, division, ordering, and exceptional-value behavior.
+
+`SignedNumber` adds negation and absolute value. It does not define a common representation.
+
+`Int` and `Float` implement `SignedNumber`.
+
+`Display`, `Hashable`, and `Copyable` remain independent capabilities.
+
 `hash_of` returns the stable semantic hash of a `Hashable` value.
 
 `hash_combine` combines one field hash with an ordered seed.
@@ -1045,6 +1086,10 @@ Each core method body names one pure intrinsic manifest entry. Static resolution
 Any class may declare the arithmetic, bitwise, and ordering hooks.
 
 The operator reads the hook from the class of the left operand.
+
+For a type parameter, the operator reads the hook from its declared interface bounds.
+
+The checker rejects the operator when no unique bound supplies the hook.
 
 The call takes the ordinary method path:
 
@@ -4760,7 +4805,7 @@ fixed(digits: Int) -> String
 Float.from_bits(bits: Int) -> Float
 ```
 
-`Float` implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
+`Float` implements `Display`, `Hashable`, and `SignedNumber`.
 
 Display uses the shortest decimal text that round-trips through binary64 parsing.
 

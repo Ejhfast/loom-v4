@@ -99,6 +99,38 @@ impl<'o> FnChecker<'o> {
         )
     }
 
+    /// Check one operator through an interface bound on its receiver.
+    pub(super) fn bound_operator_call(
+        &mut self,
+        ctx: &mut Ctx,
+        recv: HExpr,
+        bound: (
+            InterfaceUse,
+            u32,
+            u32,
+            std::rc::Rc<crate::check::InterfaceMethodSig>,
+        ),
+        hook: &str,
+        operands: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let (application, interface, method, requirement) = bound;
+        self.check_interface_method_call(
+            ctx,
+            recv,
+            application,
+            interface,
+            method,
+            requirement,
+            hook,
+            span,
+            &[],
+            operands,
+            None,
+            span,
+        )
+    }
+
     /// Select one native equality intrinsic and its right operand type.
     fn native_equality(
         ctx: &mut Ctx,
@@ -239,6 +271,18 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     );
                 }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, l.ty, "__add__", left.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        l,
+                        (application, interface, method, requirement),
+                        "__add__",
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
                 if l.ty == STRING {
                     let r = self.check_expr(ctx, right, STRING)?;
                     return Ok(Self::primitive_operator(
@@ -282,6 +326,18 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     );
                 }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, l.ty, name, left.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        l,
+                        (application, interface, method, requirement),
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
                 let l = self.expect_compatible(ctx, INT, l, left.span)?;
                 let r = self.check_expr(ctx, right, INT)?;
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
@@ -314,6 +370,18 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     );
                 }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, l.ty, name, left.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        l,
+                        (application, interface, method, requirement),
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
                 let l = self.expect_compatible(ctx, INT, l, left.span)?;
                 let r = self.check_expr(ctx, right, INT)?;
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
@@ -334,6 +402,18 @@ impl<'o> FnChecker<'o> {
                         class,
                         cargs,
                         found,
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, l.ty, name, left.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        l,
+                        (application, interface, method, requirement),
                         name,
                         std::slice::from_ref(right),
                         left.span,

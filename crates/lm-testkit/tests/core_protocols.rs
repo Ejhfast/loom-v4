@@ -1,6 +1,6 @@
 //! Core protocol tests.
 
-use lm_testkit::run_allowed;
+use lm_testkit::{compile_module_text, compile_verifier_fixture_text, run_allowed};
 use lm_vm::{RecordingHost, VmConfig, World};
 
 fn run(source: &str) -> Result<String, String> {
@@ -55,6 +55,98 @@ slice = values.slice_view(0, 2)
     assert_eq!(
         run(source).unwrap(),
         "Done((\"[1, 2, 3]\", 1, 3, true, true, true, true, 99, \"Some(4)\", \"Some(None)\", true, (2, 1, 2), \"Ok(5)\", \"[1, 2]\", true, true))"
+    );
+}
+
+#[test]
+fn numeric_protocols_share_contracts_without_changing_concrete_lowering() {
+    let source = r#"
+def calculate[T: Number](left: T, right: T): T
+  (left + right) * right - left / right
+end
+
+def magnitude[T: SignedNumber](value: T): T
+  value.abs()
+end
+
+def negate[T: SignedNumber](value: T): T
+  -value
+end
+
+def concrete(left: Int, right: Int): Int
+  (left + right) * right - left / right
+end
+
+(
+  calculate[Int](8, 2),
+  calculate[Float](8.0, 2.0),
+  magnitude[Int](-5),
+  magnitude[Float](-5.5),
+  negate[Int](5),
+  negate[Float](5.5),
+  concrete(8, 2)
+)
+"#;
+    assert_eq!(run(source).unwrap(), "Done((16, 16, 5, 5.5, -5, -5.5, 16))");
+
+    let module = compile_module_text("numeric-protocols.lm", source).expect("the program compiles");
+    let calculate = module
+        .funcs
+        .iter()
+        .find(|function| function.name == "calculate")
+        .expect("calculate exists");
+    assert_eq!(
+        calculate
+            .blocks
+            .iter()
+            .flatten()
+            .filter(|instruction| matches!(instruction, lm_bytecode::Instr::CallInterface { .. }))
+            .count(),
+        4
+    );
+    let negate = module
+        .funcs
+        .iter()
+        .find(|function| function.name == "negate")
+        .expect("negate exists");
+    assert_eq!(
+        negate
+            .blocks
+            .iter()
+            .flatten()
+            .filter(|instruction| matches!(instruction, lm_bytecode::Instr::CallInterface { .. }))
+            .count(),
+        1
+    );
+
+    let linked = compile_verifier_fixture_text("numeric-protocols.lm", source)
+        .expect("the linked program compiles");
+    let concrete = linked
+        .funcs
+        .iter()
+        .find(|function| function.name == "concrete")
+        .expect("concrete exists");
+    assert!(concrete
+        .blocks
+        .iter()
+        .flatten()
+        .all(|instruction| !matches!(instruction, lm_bytecode::Instr::CallInterface { .. })));
+    assert_eq!(
+        concrete
+            .blocks
+            .iter()
+            .flatten()
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    lm_bytecode::Instr::Add
+                        | lm_bytecode::Instr::Sub
+                        | lm_bytecode::Instr::Mul
+                        | lm_bytecode::Instr::Div
+                )
+            })
+            .count(),
+        4
     );
 }
 

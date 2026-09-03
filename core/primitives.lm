@@ -24,6 +24,31 @@ interface Add
   def __add__(self, other: Self): Self
 end
 
+interface Subtract
+  def __sub__(self, other: Self): Self
+end
+
+interface Multiply
+  def __mul__(self, other: Self): Self
+end
+
+interface Divide
+  def __div__(self, other: Self): Self
+end
+
+interface Negate
+  def __neg__(self): Self
+end
+
+interface Number: Add, Subtract, Multiply, Divide, Comparable
+  def min(self, other: Self): Self
+  def max(self, other: Self): Self
+end
+
+interface SignedNumber: Number, Negate
+  def abs(self): Self
+end
+
 interface Error: Display
 end
 
@@ -41,7 +66,7 @@ def hash_combine(seed: Int, value: Int): Int
   intrinsic("hash.combine", seed, value)
 end
 
-final class Int implements Display, Hashable, Comparable, Add
+final class Int implements Display, Hashable, SignedNumber
   def append_to(self, mut builder: StringBuilder)
     builder.append_int(self)
   end
@@ -221,7 +246,7 @@ final class Int implements Display, Hashable, Comparable, Add
   end
 end
 
-final class Float implements Display, Hashable, Comparable, Add
+final class Float implements Display, Hashable, SignedNumber
   def append_to(self, mut builder: StringBuilder)
     builder.append_float(self)
   end

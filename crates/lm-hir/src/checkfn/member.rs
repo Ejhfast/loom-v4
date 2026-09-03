@@ -493,7 +493,7 @@ impl<'o> FnChecker<'o> {
 
     /// Check one generic or monomorphic interface method call.
     #[allow(clippy::too_many_arguments)]
-    fn check_interface_method_call(
+    pub(super) fn check_interface_method_call(
         &mut self,
         ctx: &mut Ctx,
         recv: HExpr,

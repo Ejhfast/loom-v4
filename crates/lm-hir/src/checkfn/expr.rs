@@ -269,6 +269,18 @@ impl<'o> FnChecker<'o> {
                         expr.span,
                     );
                 }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, value.ty, "__neg__", expr.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        value,
+                        (application, interface, method, requirement),
+                        "__neg__",
+                        &[],
+                        expr.span,
+                    );
+                }
                 let value = self.expect_compatible(ctx, INT, value, inner.span)?;
                 Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![value]))
             }
@@ -283,6 +295,18 @@ impl<'o> FnChecker<'o> {
                         class,
                         cargs,
                         found,
+                        "__invert__",
+                        &[],
+                        expr.span,
+                    );
+                }
+                if let Some((application, interface, method, requirement)) =
+                    ctx.bound_method(&self.env, value.ty, "__invert__", expr.span)?
+                {
+                    return self.bound_operator_call(
+                        ctx,
+                        value,
+                        (application, interface, method, requirement),
                         "__invert__",
                         &[],
                         expr.span,
